@@ -22,6 +22,10 @@ import { CLISubprocessError } from '../../../../safety/sandbox/subprocess/errors
  * - `RATE_LIMITED` — subscription rate limit hit
  * - `CONTEXT_TOO_LONG` — conversation exceeds model context window
  *
+ * The code the HTTP providers give a caller's abort:
+ * - `REQUEST_ABORTED` — the call was cancelled through its abort signal;
+ *   `isRetryableError()` never counts it as retryable
+ *
  * Claude-specific:
  * - `SCHEMA_PARSE_FAILED` — `--json-schema` response did not parse
  * - `EMBEDDINGS_NOT_SUPPORTED` — Claude Code CLI does not support embeddings
@@ -36,6 +40,7 @@ export type ClaudeCodeErrorCode =
   | 'CRASHED'
   | 'RATE_LIMITED'
   | 'CONTEXT_TOO_LONG'
+  | 'REQUEST_ABORTED'
   | 'SCHEMA_PARSE_FAILED'
   | 'EMBEDDINGS_NOT_SUPPORTED'
   | 'UNKNOWN';

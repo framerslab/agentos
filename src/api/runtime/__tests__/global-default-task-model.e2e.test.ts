@@ -176,7 +176,7 @@ describe('global default model and non-text tasks', () => {
     const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
     expect(String(url)).toContain('/images/edits');
     expect(result.provider).toBe('openai');
-    expect(result.model).toBe('gpt-image-1');
+    expect(result.model).toBe('gpt-image-2.5-sunburst');
   });
 
   describe('generateImage without a provider or model', () => {
@@ -205,7 +205,7 @@ describe('global default model and non-text tasks', () => {
       expect(String(url)).toBe('https://api.openai.com/v1/images/generations');
       expect((init as { headers: Record<string, string> }).headers.Authorization).toBe('Bearer sk-global-generate');
       expect(result.provider).toBe('openai');
-      expect(result.model).toBe('gpt-image-1');
+      expect(result.model).toBe('gpt-image-2.5-flare');
     });
 
     it.each(['openai/gpt-4o', 'openrouter:openai/gpt-4o'])(

@@ -434,16 +434,55 @@ export interface TranscriptEvent {
 }
 
 /**
+ * Payload of the `'usage'` event a {@link StreamingSTTSession} emits for each
+ * provider connection it opens, so a host can meter or settle the audio of
+ * each connection on its own. A session that opens a new connection, to roll
+ * over a provider's session limit or to recover from a dropped one, reports
+ * that connection under its own `connectionIndex`; a connection that replaces
+ * a dropped one keeps the dropped connection's rollover clocks, so the next
+ * rollover and its approval come at the same time as without the drop.
+ *
+ * @example
+ * ```typescript
+ * sttSession.on('usage', (usage: StreamingSTTUsageEvent) => {
+ *   if (usage.final) meter.settle(usage.connectionIndex, usage.audioSeconds);
+ * });
+ * ```
+ */
+export interface StreamingSTTUsageEvent {
+  /** Provider that received the audio (its `IStreamingSTT.providerId`). */
+  providerId: string;
+
+  /** Model the connection transcribed with, when the provider names one. */
+  model?: string;
+
+  /**
+   * 1-based index of the provider connection within the session, in the
+   * order the connections opened.
+   */
+  connectionIndex: number;
+
+  /** Seconds of audio sent on this connection so far. */
+  audioSeconds: number;
+
+  /** `true` on the connection's last report, sent once it has closed. */
+  final: boolean;
+}
+
+/**
  * An active streaming speech-to-text session. Audio frames are pushed in
  * and transcript events flow out via EventEmitter.
  *
  * ## Events emitted
  *
- * | Event          | Payload               | Description                        |
- * |----------------|-----------------------|------------------------------------|
- * | `'transcript'` | {@link TranscriptEvent} | Interim or final hypothesis.     |
- * | `'error'`      | `Error`               | Unrecoverable provider error.      |
- * | `'close'`      | *(none)*              | Session has been fully terminated. |
+ * | Event            | Payload                         | Description                                          |
+ * |------------------|---------------------------------|------------------------------------------------------|
+ * | `'transcript'`   | {@link TranscriptEvent}         | Interim or final hypothesis.                         |
+ * | `'speech_start'` | *(none)*                        | Speech began (providers with voice-activity events). |
+ * | `'speech_end'`   | *(none)*                        | Speech ended (providers with voice-activity events). |
+ * | `'usage'`        | {@link StreamingSTTUsageEvent}  | Audio sent on one provider connection (providers that meter per connection). |
+ * | `'error'`        | `Error`                         | Unrecoverable provider error.                        |
+ * | `'close'`        | *(none)*                        | Session has been fully terminated.                   |
  *
  * See `IStreamingSTT.startSession()` for the factory method that creates these sessions.
  */

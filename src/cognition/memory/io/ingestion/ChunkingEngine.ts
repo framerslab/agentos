@@ -133,9 +133,9 @@ function cosineSimilarity(a: number[], b: number[]): number {
  * breaking at word boundaries so no word is split mid-token.
  *
  * @param content     - Full text to split.
- * @param chunkSize   - Target character count per chunk.
+ * @param chunkSize   - Maximum character count per chunk.
  * @param chunkOverlap - Number of trailing characters from the previous chunk
- *                       prepended to the next chunk.
+ *                       included inside the next chunk's `chunkSize` limit.
  * @param startIndex  - The `DocumentChunk.index` to assign to the first
  *                      produced chunk.  Useful when merging partial results.
  * @param baseMetadata - Extra metadata fields merged into every produced chunk.
@@ -150,6 +150,7 @@ function fixedChunks(
 ): DocumentChunk[] {
   const chunks: DocumentChunk[] = [];
   let pos = 0;
+  let lastEnd = 0;
   let chunkIndex = startIndex;
 
   while (pos < content.length) {
@@ -175,8 +176,10 @@ function fixedChunks(
       end--;
     }
 
-    // Edge case: no whitespace found in the whole window — hard-cut.
-    if (end === pos) {
+    // Edge cases: no whitespace in the window, or none past the last cut,
+    // where the walk would find that cut's whitespace again: hard-cut, so
+    // every turn moves on.
+    if (end <= lastEnd) {
       end = pos + chunkSize;
     }
 
@@ -189,9 +192,11 @@ function fixedChunks(
       });
     }
 
-    // Advance position, stepping back by `chunkOverlap` characters.
-    pos = end - chunkOverlap;
-    if (pos <= 0) pos = end; // Guard against infinite loop on tiny content.
+    lastEnd = end;
+    // Advance, stepping back by `chunkOverlap` characters, and always past
+    // this window's start, so the loop ends on every input.
+    const next = end - chunkOverlap;
+    pos = next > pos ? next : end;
   }
 
   return chunks;
@@ -229,6 +234,10 @@ export class ChunkingEngine {
   async chunk(content: string, options: ChunkOptions): Promise<DocumentChunk[]> {
     const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
     const chunkOverlap = options.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP;
+
+    if (!(chunkSize >= 1)) {
+      throw new RangeError(`chunkSize must be at least 1, got ${chunkSize}`);
+    }
 
     switch (options.strategy) {
       case 'fixed':

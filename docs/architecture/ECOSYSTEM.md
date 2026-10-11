@@ -180,7 +180,7 @@ npm install wunderland
 | Resource | Link |
 |----------|------|
 | Documentation | [agentos.sh/docs](https://agentos.sh/docs) |
-| API Reference | [docs.agentos.sh/api](https://docs.agentos.sh/api/) |
+| API Reference | [docs.agentos.sh/api](https://docs.agentos.sh/api) |
 | npm | [@framers/agentos](https://www.npmjs.com/package/@framers/agentos) |
 | Discord | [Join Community](https://wilds.ai/discord) |
 | Twitter | [@framerslab](https://twitter.com/framerslab) |

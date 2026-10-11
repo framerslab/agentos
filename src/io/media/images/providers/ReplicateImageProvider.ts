@@ -82,6 +82,17 @@ function normalizeReplicateOutput(output: unknown): GeneratedImage[] {
   return images;
 }
 
+/**
+ * Replicate's img2img default: Stable Diffusion XL, pinned to a version.
+ * Replicate runs a model by its name alone only when it is an official model;
+ * "for all other models, the specific version is required" (the `version`
+ * field of POST /v1/predictions in https://api.replicate.com/openapi.json),
+ * and stability-ai/sdxl is not in the official collection. This is its
+ * current version on https://replicate.com/stability-ai/sdxl/versions (read
+ * 2026-10-10).
+ */
+const SDXL_IMG2IMG = 'stability-ai/sdxl:7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc';
+
 export class ReplicateImageProvider implements IImageProvider {
   public readonly providerId = 'replicate';
   public isInitialized = false;
@@ -320,7 +331,7 @@ export class ReplicateImageProvider implements IImageProvider {
     const hasInpaintingMask = !!request.mask;
     const defaultModel = hasInpaintingMask
       ? 'black-forest-labs/flux-fill-pro'  // Flux Fill Pro for production inpainting.
-      : 'stability-ai/sdxl';              // SDXL supports generic img2img via image input.
+      : SDXL_IMG2IMG;                     // SDXL supports generic img2img via image input.
 
     if (hasInpaintingMask) {
       input.mask = `data:image/png;base64,${request.mask!.toString('base64')}`;
@@ -339,6 +350,13 @@ export class ReplicateImageProvider implements IImageProvider {
     }
 
     const model = request.modelId || defaultModel;
+
+    // SDXL takes the edit strength as prompt_strength and has no `strength`
+    // input. A prompt_strength the caller put in providerOptions.input wins.
+    if (model.startsWith('stability-ai/sdxl') && input.strength !== undefined) {
+      if (input.prompt_strength === undefined) input.prompt_strength = input.strength;
+      delete input.strength;
+    }
 
     // Kontext editing models (flux-kontext-pro/-max/-dev) take input_image
     // (singular) and 422 on the SDXL-style image/strength fields. Re-map the

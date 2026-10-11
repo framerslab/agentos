@@ -33,7 +33,8 @@ import type {
   GeneratedImage,
   ImageGenerationResult,
 } from '../io/media/images/IImageProvider.js';
-import { knownProviderPrefixOf, resolveModelOption, resolveMediaProvider } from './model.js';
+import { knownProviderPrefixOf, modelIsNamed, resolveModelOption, resolveMediaProvider } from './model.js';
+import { OPENAI_IMAGE_EDIT_MODEL } from '../io/media/images/providers/OpenAIImageProvider.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 
@@ -44,8 +45,9 @@ import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/
 const STYLE_TRANSFER_PROVIDER_PRIORITY: Array<{ envKey: string; providerId: string; modelId: string }> = [
   { envKey: 'REPLICATE_API_TOKEN', providerId: 'replicate', modelId: 'black-forest-labs/flux-redux-dev' },
   { envKey: 'FAL_API_KEY', providerId: 'fal', modelId: 'fal-ai/flux/dev' },
-  { envKey: 'STABILITY_API_KEY', providerId: 'stability', modelId: 'stable-image-core' },
-  { envKey: 'OPENAI_API_KEY', providerId: 'openai', modelId: 'gpt-image-1' },
+  // The edit runs on Stability's SD3 route, whose `model` takes the sd3.5 names only.
+  { envKey: 'STABILITY_API_KEY', providerId: 'stability', modelId: 'sd3.5-medium' },
+  { envKey: 'OPENAI_API_KEY', providerId: 'openai', modelId: OPENAI_IMAGE_EDIT_MODEL },
 ];
 
 // ---------------------------------------------------------------------------
@@ -85,7 +87,7 @@ export interface TransferStyleOptions {
   /**
    * API key for the provider, instead of its environment variable. The call
    * must name the provider, with `provider` or a provider-prefixed `model`
-   * (`openai:gpt-image-1`); a key with neither is refused.
+   * (`openai:gpt-image-2.5-sunburst`); a key with neither is refused.
    */
   apiKey?: string;
   /** Base URL for the provider, instead of its default or its environment variable. */
@@ -149,17 +151,21 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
       let modelId: string;
 
       // The provider the call names: `provider`, or the prefix of `model`
-      // (`openai:gpt-image-1`). A key belongs to one vendor, so a call with a
+      // (`openai:gpt-image-2.5-sunburst`). A key belongs to one vendor, so a call with a
       // key must name its provider: otherwise the key would go to whichever
       // provider the environment selects.
       const namedProvider = opts.provider ?? knownProviderPrefixOf(opts.model);
       if (opts.apiKey && !namedProvider) {
         throw new Error(
-          'transferStyle: an apiKey needs `provider`, or a model with a provider prefix such as "openai:gpt-image-1"; it is not sent to a provider chosen from the environment.',
+          'transferStyle: an apiKey needs `provider`, or a model with a provider prefix such as "openai:gpt-image-2.5-sunburst"; it is not sent to a provider chosen from the environment.',
         );
       }
+      // Whether a model is chosen for the edit: named by the call or by the
+      // global default, or taken from the list above.
+      let modelChosen = true;
       if (namedProvider) {
         ({ providerId, modelId } = resolveModelOption(opts, 'image'));
+        modelChosen = modelIsNamed(opts, 'image');
       } else {
         // Auto-detect best available style transfer provider
         const match = STYLE_TRANSFER_PROVIDER_PRIORITY.find(
@@ -179,13 +185,20 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
         baseUrl: opts.baseUrl,
       });
       span?.setAttribute('llm.provider', resolved.providerId);
-      span?.setAttribute('llm.model', resolved.modelId);
 
       const provider = createImageProvider(resolved.providerId);
+      // With a provider named and no model, `resolved.modelId` is the
+      // provider's text-to-image default. The edit below then gets an empty
+      // id, which every provider reads as its own edit default (OpenAI
+      // `gpt-image-2.5-sunburst`, Stability `sd3.5-medium`). A provider that
+      // cannot edit generates, and keeps its text-to-image default.
+      const operationModelId =
+        modelChosen || typeof provider.editImage !== 'function' ? resolved.modelId : '';
+      if (operationModelId) span?.setAttribute('llm.model', operationModelId);
       await provider.initialize({
         apiKey: resolved.apiKey,
         baseURL: resolved.baseUrl,
-        defaultModelId: resolved.modelId,
+        defaultModelId: operationModelId || undefined,
       });
 
       // Convert style reference to data URL for Flux Redux
@@ -194,10 +207,10 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
 
       let result: ImageGenerationResult;
 
-      if (resolved.providerId === 'replicate' && resolved.modelId.includes('flux-redux')) {
+      if (resolved.providerId === 'replicate' && operationModelId.includes('flux-redux')) {
         // Flux Redux: style reference is the primary image input
         result = await provider.generateImage({
-          modelId: resolved.modelId,
+          modelId: operationModelId,
           prompt: opts.prompt,
           size: opts.size,
           seed: opts.seed,
@@ -209,7 +222,7 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
         // Providers with editImage: use img2img
         const imageBuffer = await imageToBuffer(opts.image);
         result = await provider.editImage({
-          modelId: resolved.modelId,
+          modelId: operationModelId,
           image: imageBuffer,
           prompt: opts.prompt,
           strength: opts.strength ?? 0.7,
@@ -221,7 +234,7 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
       } else {
         // Fallback: generate with style description in prompt
         result = await provider.generateImage({
-          modelId: resolved.modelId,
+          modelId: operationModelId,
           prompt: `${opts.prompt}. Apply the visual style and aesthetic of the reference.`,
           size: opts.size,
           seed: opts.seed,

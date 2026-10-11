@@ -25,8 +25,8 @@ export type { InstallCheckResult } from '../../../../safety/sandbox/subprocess/t
  *
  * Extends {@link CLISubprocessBridge} to implement:
  * - Flag assembly: `--bare`, `-p`, `--system-prompt`, `--json-schema`, `--max-turns`
- * - Error classification: auth, rate-limit, timeout, ENOENT, EACCES, context length
- * - Stream event parsing: `content_block_delta`, `result`, `error`, `system` events
+ * - Error classification: caller abort, timeout, auth, rate-limit, context length, ENOENT, EACCES
+ * - Stream event parsing: `content_block_delta` (nested under `stream_event` or at the top level), `result`, `error`, `system` events
  * - Auth check: uses `--bare --max-turns 1` for lightweight health ping
  */
 export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
@@ -79,9 +79,13 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
   protected parseStreamEvent(raw: any): StreamEvent | null {
     if (!raw || typeof raw !== 'object') return null;
 
-    /* Text delta from content block */
-    if (raw.type === 'content_block_delta' && raw.delta?.type === 'text_delta') {
-      return { type: 'text_delta', text: raw.delta.text };
+    /* Text delta from content block. With --include-partial-messages, which
+     * buildArgs passes, Claude Code wraps each Messages API stream event as
+     * { type: 'stream_event', event } (SDKPartialAssistantMessage in
+     * @anthropic-ai/claude-agent-sdk 0.3.296); a top-level delta is read too. */
+    const streamed = raw.type === 'stream_event' ? raw.event : raw;
+    if (streamed?.type === 'content_block_delta' && streamed.delta?.type === 'text_delta') {
+      return { type: 'text_delta', text: streamed.delta.text };
     }
 
     /* Assistant message with text content */
@@ -89,8 +93,12 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
       return { type: 'text_delta', text: raw.message.content };
     }
 
-    /* Final result */
+    /* Final result. Claude Code flags a failed turn (an API error, the turn
+     * limit) with is_error. `result` is the CLI's own result text, '' when it
+     * wrote none, as the bridge read it before 0.13.41; the failure's message
+     * ({@link errorResultMessage}) goes in `error`. */
     if (raw.type === 'result') {
+      const isError = raw.is_error === true;
       return {
         type: 'result',
         result: raw.result ?? '',
@@ -98,6 +106,7 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
         usage: raw.usage
           ? { input_tokens: raw.usage.input_tokens ?? 0, output_tokens: raw.usage.output_tokens ?? 0 }
           : undefined,
+        ...(isError ? { isError: true, error: this.errorResultMessage(raw) } : {}),
       };
     }
 
@@ -114,11 +123,48 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     return null;
   }
 
+  /**
+   * The message of a result Claude Code flags as an error. A turn that ended
+   * on an API error carries the error's text in `result`. The error subtypes
+   * (error_during_execution, error_max_turns, error_max_budget_usd,
+   * error_max_structured_output_retries) carry no result and list their
+   * detail in `errors` (SDKResultError in @anthropic-ai/claude-agent-sdk
+   * 0.3.296), which follows the subtype: `error_max_turns: <errors>`. Each
+   * entry is trimmed and a blank one left out before the join, as the SDK's
+   * own reader of the result does (Query.readMessages in its sdk.mjs): an
+   * entry can carry the CLI's stderr text, line break included.
+   */
+  private errorResultMessage(raw: any): string {
+    if (raw.result) return raw.result;
+    const errors: string[] = Array.isArray(raw.errors)
+      ? raw.errors
+          .filter((error: unknown): error is string => typeof error === 'string')
+          .map((error: string) => error.trim())
+          .filter((error: string) => error !== '')
+      : [];
+    return [raw.subtype, errors.join('; ')].filter(Boolean).join(': ') || 'Unknown error';
+  }
+
   /* ---- Error classification ------------------------------------- */
 
   protected classifyError(error: any): ClaudeCodeProviderError {
     const stderr: string = error.stderr ?? '';
+    /* The CLI's wording varies in case ("Authentication failed"), so stderr is matched lowercased. */
+    const text = String(stderr).toLowerCase();
     const exitCode = error.exitCode;
+
+    /* Cancelled by the caller. execa sets isCanceled when the abortSignal it
+     * was given as cancelSignal fires; the signal that then ends the process
+     * sets isTerminated too, so this is checked before the timeout. */
+    if (error.isCanceled) {
+      return new ClaudeCodeProviderError(
+        'Claude Code CLI call aborted by the caller.',
+        'REQUEST_ABORTED',
+        'The call was cancelled through its abort signal. Send it again if it is still needed.',
+        false,
+        { exitCode, stderr },
+      );
+    }
 
     /* Timeout */
     if (error.timedOut || error.isTerminated) {
@@ -132,7 +178,7 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     }
 
     /* Auth errors */
-    if (stderr.includes('not logged in') || stderr.includes('authentication') || stderr.includes('unauthorized')) {
+    if (text.includes('not logged in') || text.includes('authentication') || text.includes('unauthorized')) {
       return new ClaudeCodeProviderError(
         'Claude Code is installed but not logged in.',
         'NOT_AUTHENTICATED',
@@ -143,7 +189,7 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     }
 
     /* Rate limit */
-    if (stderr.includes('rate limit') || stderr.includes('too many requests') || stderr.includes('429')) {
+    if (text.includes('rate limit') || text.includes('too many requests') || text.includes('429')) {
       return new ClaudeCodeProviderError(
         'Claude Code subscription rate limit reached.',
         'RATE_LIMITED',
@@ -154,7 +200,7 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     }
 
     /* Context too long */
-    if (stderr.includes('context') && (stderr.includes('too long') || stderr.includes('token limit'))) {
+    if (text.includes('context') && (text.includes('too long') || text.includes('token limit'))) {
       return new ClaudeCodeProviderError(
         'Conversation exceeds model context window.',
         'CONTEXT_TOO_LONG',

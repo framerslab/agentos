@@ -114,6 +114,31 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  browser:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install browsers
+        run: pnpm exec playwright install --with-deps chromium webkit
+
+      - name: Browser tests
+        run: pnpm run test:browser
+
   # Fast targeted gate for the batch-1 hardening test set: fails in minutes
   # without waiting on the coverage matrix. The full suite above is
   # failure-gating too (44-red burn-down completed 2026-07-20).

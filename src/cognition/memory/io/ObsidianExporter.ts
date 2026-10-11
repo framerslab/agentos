@@ -22,9 +22,9 @@
  * @module memory/io/ObsidianExporter
  */
 
-import matter from 'gray-matter';
 import type { ExportOptions } from './facade/types.js';
 import { MarkdownExporter } from './MarkdownExporter.js';
+import { writeFrontMatter } from '../../../core/utils/frontMatter.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -129,7 +129,8 @@ export class ObsidianExporter extends MarkdownExporter {
 
     const body = trace.content + tagLine + wikiLinks;
 
-    return matter.stringify(body, {
+    // The body is written as it is and never read for front matter of its own.
+    return writeFrontMatter(body, {
       id: trace.id,
       type: trace.type,
       scope: trace.scope,

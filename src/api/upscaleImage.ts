@@ -20,7 +20,7 @@ import type {
   ImageGenerationResult,
   ImageProviderOptionBag,
 } from '../io/media/images/IImageProvider.js';
-import { resolveModelOption, resolveMediaProvider } from './model.js';
+import { modelIsNamed, resolveModelOption, resolveMediaProvider } from './model.js';
 import { attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
@@ -48,8 +48,9 @@ export interface UpscaleImageOptions {
    */
   provider?: string;
   /**
-   * Model identifier.  Most upscale providers use a fixed model so this is
-   * usually left unset.
+   * Model identifier, usually left unset: the provider's own upscale default
+   * then applies (Replicate `nightmareai/real-esrgan`), not its text-to-image
+   * default.
    */
   model?: string;
   /**
@@ -131,22 +132,30 @@ export async function upscaleImage(opts: UpscaleImageOptions): Promise<UpscaleIm
   try {
     return await withAgentOSSpan('agentos.api.upscale_image', async (span) => {
       const { providerId, modelId } = resolveModelOption(opts, 'image');
+      // Whether a model is named, by the call or the global default. Without one, the provider's own
+      // default for upscales applies, not the text-to-image default that
+      // `resolveModelOption` gives a named provider: Replicate would otherwise
+      // run every upscale on black-forest-labs/flux-1.1-pro instead of
+      // nightmareai/real-esrgan.
+      const modelChosen = modelIsNamed(opts, 'image');
       const resolved = resolveMediaProvider(providerId, modelId, {
         apiKey: opts.apiKey,
         baseUrl: opts.baseUrl,
       });
+      // An empty model id asks the provider for its own default for the operation.
+      const operationModelId = modelChosen ? resolved.modelId : '';
       metricProviderId = resolved.providerId;
-      metricModelId = resolved.modelId;
+      metricModelId = operationModelId || undefined;
 
       span?.setAttribute('llm.provider', resolved.providerId);
-      span?.setAttribute('llm.model', resolved.modelId);
+      if (operationModelId) span?.setAttribute('llm.model', operationModelId);
       span?.setAttribute('agentos.api.upscale_factor', opts.scale ?? 2);
 
       const provider = createImageProvider(resolved.providerId);
       await provider.initialize({
         apiKey: resolved.apiKey,
         baseURL: resolved.baseUrl,
-        defaultModelId: resolved.modelId,
+        defaultModelId: operationModelId || undefined,
       });
 
       // Guard: the provider must implement upscaleImage.
@@ -157,7 +166,7 @@ export async function upscaleImage(opts: UpscaleImageOptions): Promise<UpscaleIm
       const imageBuffer = await imageToBuffer(opts.image);
 
       const result = await provider.upscaleImage({
-        modelId: resolved.modelId,
+        modelId: operationModelId,
         image: imageBuffer,
         scale: opts.scale,
         width: opts.width,
@@ -166,6 +175,8 @@ export async function upscaleImage(opts: UpscaleImageOptions): Promise<UpscaleIm
       });
 
       metricUsage = result.usage;
+      metricModelId = result.modelId || metricModelId;
+      if (result.modelId) span?.setAttribute('llm.model', result.modelId);
       span?.setAttribute('agentos.api.images_count', result.images.length);
       attachUsageAttributes(span, {
         totalCostUSD: result.usage?.totalCostUSD,

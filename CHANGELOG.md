@@ -1,3 +1,121 @@
+## [0.13.49](https://github.com/framerslab/agentos/compare/v0.13.48...v0.13.49) (2026-10-11)
+
+### fix
+
+* **memory:** the fixed cut moves on at every turn (#298) ([c3090c5](https://github.com/framerslab/agentos/commit/c3090c5d0e99afce927174b1a80d8119b771d6c9))
+
+## [0.13.48](https://github.com/framerslab/agentos/compare/v0.13.47...v0.13.48) (2026-10-11)
+
+### fix
+
+* **sandbox:** a CLI run that fails while the stream's consumer waits is no unhandled rejection (#296) ([babc568](https://github.com/framerslab/agentos/commit/babc56830afaf6ef7b30a775a11869884174520d))
+
+## [0.13.47](https://github.com/framerslab/agentos/compare/v0.13.46...v0.13.47) (2026-10-11)
+
+### fix
+
+* **memory:** review follow-ups for front matter read as data (#293) ([a4ee306](https://github.com/framerslab/agentos/commit/a4ee306910cacd22fb03885c60c5e93c9aac9273))
+
+## [0.13.46](https://github.com/framerslab/agentos/compare/v0.13.45...v0.13.46) (2026-10-11)
+
+### feat
+
+* **hearing:** audio pieces in the page, by packet copy or decoded to 16 kHz mono (#285) ([ba2b7d9](https://github.com/framerslab/agentos/commit/ba2b7d9a53a5001883535fcb0d3f26fb26ffd617))
+
+## [0.13.45](https://github.com/framerslab/agentos/compare/v0.13.44...v0.13.45) (2026-10-11)
+
+### fix
+
+* **providers:** CLI bridges read the current stream shapes, end the child on early close, and keep error causes (#289) ([371f88e](https://github.com/framerslab/agentos/commit/371f88e03f5411bd6adb5d13696cd87d02eb0d45))
+
+## [0.13.44](https://github.com/framerslab/agentos/compare/v0.13.43...v0.13.44) (2026-10-11)
+
+### docs
+
+* twelfth round of audit follow-ups (the docs-alignment routes, the manifest paths) (#288) ([65268a8](https://github.com/framerslab/agentos/commit/65268a8a4c063ed2a976817d25d63fa4ef99dabb))
+
+### fix
+
+* **memory:** guardedFetch counts the body on the wire and reads the network's NAT64 prefixes (#287) ([984997f](https://github.com/framerslab/agentos/commit/984997f8ccb5891690431aa6a3047f81aab7f939))
+
+### test
+
+* **vision:** the model check runs the layout tier through process with its tier named (#286) ([7886ac2](https://github.com/framerslab/agentos/commit/7886ac2706d107469e866086fa124de216dcdfd2))
+
+## [0.13.43](https://github.com/framerslab/agentos/compare/v0.13.42...v0.13.43) (2026-10-11)
+
+### fix
+
+* **images:** the inline size limit counts characters outside ASCII, which Node decodes by their low byte (#284) ([26acf47](https://github.com/framerslab/agentos/commit/26acf47141226d3acb5c0635c1292971f8be65f3))
+
+## [0.13.42](https://github.com/framerslab/agentos/compare/v0.13.41...v0.13.42) (2026-10-11)
+
+### feat
+
+* **hearing:** a batch transcription job: pieces in order, retries, merged seams (#262) ([9d6eb3c](https://github.com/framerslab/agentos/commit/9d6eb3c689faffec423a057391051fc860019429))
+* **storage:** add a browser key-value store, an outbox and list reconciliation (#275) ([91377cf](https://github.com/framerslab/agentos/commit/91377cf2b4ba03f81fdac34283cb2e44d2d01d76))
+
+## [0.13.41](https://github.com/framerslab/agentos/compare/v0.13.40...v0.13.41) (2026-10-11)
+
+### fix
+
+* **providers:** health checks draw one key, CLI bridges classify errors by case and abort, stream results carry is_error (#277) ([e888fa8](https://github.com/framerslab/agentos/commit/e888fa8e74c0ebcd6b317415fcde61ad616ed3e6))
+
+## [0.13.40](https://github.com/framerslab/agentos/compare/v0.13.39...v0.13.40) (2026-10-11)
+
+### feat
+
+* **auth:** OAuth for a web server: a redirect flow, sealed secrets and a sealed token store (#242) ([59a20d1](https://github.com/framerslab/agentos/commit/59a20d146ab771785db76e704bc0bd0cd8a002e4))
+* **voice-pipeline:** build a speech-to-text chain from provider entries (#176) ([29046f2](https://github.com/framerslab/agentos/commit/29046f2ab257b61ab77437d91b4b2e02519fc682))
+
+### fix
+
+* **images:** a local A1111 edit reports the checkpoint the server rendered with (#279) ([3744044](https://github.com/framerslab/agentos/commit/37440440170ae8c95eab72d0199adee61152aa7e))
+* **images:** the untrusted image fetch closes six gaps a security review found (#278) ([b99ecbc](https://github.com/framerslab/agentos/commit/b99ecbcc5c4a9b56f5cb6749ae754bb02747a463))
+* **memory:** the guarded fetch's deadline covers decoding, and a network refusal names no resolver detail (#280) ([7d8bc9e](https://github.com/framerslab/agentos/commit/7d8bc9e7c4e968805360d4d4d2ea4b243466c5be))
+
+### docs
+
+* eleventh round of audit follow-ups (two pages published, the agent() and gmi() guides aligned) (#264) ([d4d3c6d](https://github.com/framerslab/agentos/commit/d4d3c6dcb7e59df3030e60210e70d48c7a05ebb7))
+
+## [0.13.39](https://github.com/framerslab/agentos/compare/v0.13.38...v0.13.39) (2026-10-11)
+
+### feat
+
+* **voice:** phraseHeard, a given sentence found in a transcript's first lines (#244) ([973f118](https://github.com/framerslab/agentos/commit/973f118e8000210b149185579c1c83c68593ea7d))
+
+### fix
+
+* **images:** OpenAI image calls default to GPT Image 2.5, off the models OpenAI retires on 23 October and 1 December (#273) ([971161d](https://github.com/framerslab/agentos/commit/971161da8cd07d825af9fe3a639b39ba3cb0f832))
+
+## [0.13.38](https://github.com/framerslab/agentos/compare/v0.13.37...v0.13.38) (2026-10-11)
+
+### feat
+
+* **voice-pipeline:** add an OpenAI Realtime transcription provider with item-keyed transcripts and connection rollover (#200) ([c253939](https://github.com/framerslab/agentos/commit/c2539394937e27ef58aa462e17e62c968262ed6c))
+
+## [0.13.37](https://github.com/framerslab/agentos/compare/v0.13.36...v0.13.37) (2026-10-10)
+
+### fix
+
+* **images:** edit, upscale and variation calls use the provider's own default model, and OpenAI variations go through the edits endpoint (#261) ([08005cf](https://github.com/framerslab/agentos/commit/08005cf405caab44dec5713468dcab535ef7efaf))
+
+## [0.13.36](https://github.com/framerslab/agentos/compare/v0.13.35...v0.13.36) (2026-10-10)
+
+### fix
+
+* **memory:** read and write front matter as data, never as code (#265) ([af3801b](https://github.com/framerslab/agentos/commit/af3801b41a70b2c6974be39a144180e1a22bfc56))
+
+## [0.13.35](https://github.com/framerslab/agentos/compare/v0.13.34...v0.13.35) (2026-10-10)
+
+### feat
+
+* **memory:** a guarded fetch, and UrlLoader over any loader source (#249) ([a531e02](https://github.com/framerslab/agentos/commit/a531e026cda9230ecce7fae00cbcaf1da40b1092))
+
+### ci
+
+* **links:** the online link check takes github.com's 429 and 503 as reachable (#259) ([90ca3c7](https://github.com/framerslab/agentos/commit/90ca3c79b3bb34c1f71b68fb069b7fc4aa3a3ff9))
+
 ## [0.13.34](https://github.com/framerslab/agentos/compare/v0.13.33...v0.13.34) (2026-10-10)
 
 ### feat

@@ -1,6 +1,7 @@
 /**
- * @fileoverview The library's browser entry: what a page may import. Nothing here reaches a Node module, a package
- * or the DOM; a test walks its import graph.
+ * @fileoverview The library's browser entry: what a page may import. Nothing here reaches a Node module or a
+ * package; a test walks its import graph. Nothing here reaches the DOM either, but for IndexedDB, which the
+ * key-value store reaches only when it is opened.
  * @module agentos/cognition/library/browser
  */
 
@@ -14,3 +15,5 @@ export {
   type LexicalIndexJSON,
   type LexicalSearchOptions,
 } from '../rag/search/LexicalIndex.js';
+// A page's storage: the key-value store, the outbox and the comparison of a server's list with the device's cache.
+export * from '../../core/storage/browser/index.js';

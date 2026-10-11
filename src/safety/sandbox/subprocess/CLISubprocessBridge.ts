@@ -224,6 +224,13 @@ export abstract class CLISubprocessBridge {
    * Spawns the binary with `--output-format stream-json` and yields
    * {@link StreamEvent}s parsed from newline-delimited JSON on stdout.
    *
+   * Read to its end, the stream awaits the process's exit and throws on a
+   * failed one. A consumer that stops reading before the end (a `break` in
+   * its `for await`, or `return()`) ends the process instead: it is killed.
+   * The run's outcome is handled from the moment the process starts, so a
+   * failure while the consumer is busy between two events, or after it has
+   * stopped reading, is no unhandled rejection in the host.
+   *
    * @param options — bridge options
    * @yields typed stream events (text_delta, result, error, system)
    * @throws {CLISubprocessError} on subprocess failure (via {@link classifyError})
@@ -243,8 +250,22 @@ export abstract class CLISubprocessBridge {
     } catch (error: any) {
       throw this.classifyError(error);
     }
+    /* execa settles the run once the process has exited and its stdout has
+     * ended. Node ends stdout on the tick after the read that empties it, so a
+     * run that has already exited can fail while this generator waits at a
+     * yield for a consumer still busy with an event of that last read, or
+     * after the consumer has stopped reading. A rejection nothing handles then
+     * is raised by Node as an uncaught exception by default, so the outcome is
+     * handled from the start; the await below still throws a failure.
+     * Promise.resolve returns execa's run itself (a native Promise) and takes
+     * any other value as the await below does. */
+    Promise.resolve(subprocess).catch(() => undefined);
 
     let buffer = '';
+    /* Set once stdout has been read to its end and the run is awaited below.
+     * A consumer that stops reading early (a break in its for await, or
+     * return()) closes this generator at a yield, before that point. */
+    let readToEnd = false;
 
     try {
       for await (const chunk of subprocess.stdout as AsyncIterable<Buffer | string>) {
@@ -273,10 +294,16 @@ export abstract class CLISubprocessBridge {
         } catch { /* ignore */ }
       }
 
+      readToEnd = true;
       /* Ensure non-zero exits after stdout drains still surface as errors. */
       await subprocess;
     } catch (error: any) {
       throw this.classifyError(error);
+    } finally {
+      /* Left before the run was awaited: nothing reads the process any more.
+       * End it (execa's kill: SIGTERM, then SIGKILL if it outlives the force
+       * delay). Its outcome is handled from the start, above. */
+      if (!readToEnd) subprocess.kill();
     }
   }
 }

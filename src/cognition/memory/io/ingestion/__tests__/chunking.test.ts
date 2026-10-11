@@ -19,6 +19,8 @@
  * @module memory/ingestion/__tests__/chunking.test
  */
 
+import { Buffer } from 'node:buffer';
+import * as vm from 'node:vm';
 import { describe, it, expect } from 'vitest';
 import { ChunkingEngine } from '../ChunkingEngine.js';
 
@@ -51,6 +53,131 @@ function buildWordyString(n: number): string {
   }
   return parts.join('').slice(0, n);
 }
+
+describe('ChunkingEngine fixed cut progress', () => {
+  const prose = buildWordyString(2_700);
+  const unbrokenRun = Buffer.from(
+    Array.from({ length: 975 }, (_, index) => index % 256),
+  ).toString('base64');
+  const longContent = `${prose}${unbrokenRun} ${prose}`;
+
+  it('finishes fixed cuts around a long base64 run', async () => {
+    const engine = new ChunkingEngine();
+    const run = () => engine.chunk(longContent, {
+      strategy: 'fixed',
+      chunkSize: 1_200,
+      chunkOverlap: 150,
+    });
+    // These strategies cut synchronously, so the VM timeout bounds the loop.
+    const chunks = await (vm.runInNewContext('run()', { run }, { timeout: 1_000 }) as ReturnType<typeof run>);
+
+    expect(chunks.length).toBeLessThan(20);
+    for (const chunk of chunks) {
+      expect(chunk.content.length).toBeLessThanOrEqual(1_200);
+    }
+    expect(chunks.some((chunk) => chunk.content.includes(unbrokenRun.slice(0, 100)))).toBe(true);
+    expect(chunks.some((chunk) => chunk.content.includes(unbrokenRun.slice(-100)))).toBe(true);
+    expect(chunks[0].content.startsWith('abcdefgh')).toBe(true);
+    expect(chunks[chunks.length - 1].content.endsWith('abcdefgh')).toBe(true);
+  });
+
+  it('finishes hierarchical cuts around a long base64 run', async () => {
+    const engine = new ChunkingEngine();
+    const run = () => engine.chunk(`# Notes\n\n${longContent}`, {
+      strategy: 'hierarchical',
+      chunkSize: 1_200,
+      chunkOverlap: 150,
+    });
+    const chunks = await (vm.runInNewContext('run()', { run }, { timeout: 1_000 }) as ReturnType<typeof run>);
+
+    expect(chunks.length).toBeLessThan(20);
+    for (const chunk of chunks) {
+      expect(chunk.content.length).toBeLessThanOrEqual(1_200);
+      expect(chunk.heading).toBe('Notes');
+    }
+    expect(chunks.some((chunk) => chunk.content.includes(unbrokenRun.slice(0, 100)))).toBe(true);
+    expect(chunks.some((chunk) => chunk.content.includes(unbrokenRun.slice(-100)))).toBe(true);
+    expect(chunks[0].content.startsWith('abcdefgh')).toBe(true);
+    expect(chunks[chunks.length - 1].content.endsWith('abcdefgh')).toBe(true);
+  });
+
+  it('finishes fixed cuts over long rows without spaces', async () => {
+    const engine = new ChunkingEngine();
+    const content = `${'y'.repeat(1_051)}\n`.repeat(20);
+    const run = () => engine.chunk(content, {
+      strategy: 'fixed',
+      chunkSize: 1_200,
+      chunkOverlap: 150,
+    });
+    const chunks = await (vm.runInNewContext('run()', { run }, { timeout: 1_000 }) as ReturnType<typeof run>);
+
+    expect(chunks.length).toBeGreaterThan(0);
+    for (const chunk of chunks) {
+      expect(chunk.content.length).toBeLessThanOrEqual(1_200);
+    }
+  });
+
+  it('finishes when overlap equals chunk size and rejects zero chunk size', async () => {
+    const engine = new ChunkingEngine();
+    const content = buildWordyString(1_000);
+    const run = () => engine.chunk(content, {
+      strategy: 'fixed',
+      chunkSize: 100,
+      chunkOverlap: 100,
+    });
+    const chunks = await (vm.runInNewContext('run()', { run }, { timeout: 1_000 }) as ReturnType<typeof run>);
+
+    expect(chunks.length).toBeGreaterThan(0);
+    for (const chunk of chunks) {
+      expect(chunk.content.length).toBeLessThanOrEqual(100);
+    }
+
+    const runWithZeroSize = () => engine.chunk(content, {
+      strategy: 'fixed',
+      chunkSize: 0,
+      chunkOverlap: 0,
+    });
+    const result = vm.runInNewContext(
+      'run()', { run: runWithZeroSize }, { timeout: 1_000 },
+    ) as ReturnType<typeof runWithZeroSize>;
+    await expect(result).rejects.toThrow(RangeError);
+    await expect(result).rejects.toThrow('chunkSize');
+  });
+
+  it('rejects zero chunk size for a single semantic sentence', async () => {
+    const engine = new ChunkingEngine();
+    const run = () => engine.chunk('One sentence.', {
+      strategy: 'semantic',
+      chunkSize: 0,
+      embedFn: async (texts) => texts.map(() => [1, 0]),
+    });
+    const result = vm.runInNewContext(
+      'run()', { run }, { timeout: 1_000 },
+    ) as ReturnType<typeof run>;
+
+    await expect(result).rejects.toThrow(RangeError);
+    await expect(result).rejects.toThrow('chunkSize must be at least 1, got 0');
+  });
+
+  it('preserves eight prose cuts with whole-word ends and 50-character overlap', async () => {
+    const engine = new ChunkingEngine();
+    const run = () => engine.chunk(buildWordyString(1_998), {
+      strategy: 'fixed',
+      chunkSize: 300,
+      chunkOverlap: 50,
+    });
+    const chunks = await (vm.runInNewContext('run()', { run }, { timeout: 1_000 }) as ReturnType<typeof run>);
+
+    expect(chunks).toHaveLength(8);
+    for (const chunk of chunks) {
+      expect(chunk.content).toMatch(/(?:^|\s)abcdefgh$/);
+      expect(chunk.content.length).toBeLessThanOrEqual(300);
+    }
+    for (let index = 1; index < chunks.length; index++) {
+      expect(chunks[index].content.startsWith(chunks[index - 1].content.slice(-50))).toBe(true);
+    }
+  });
+});
 
 // ---------------------------------------------------------------------------
 // ChunkingEngine — fixed strategy

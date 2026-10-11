@@ -8,6 +8,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { getProviderPriority } from './provider-priority.js';
+import { OPENAI_IMAGE_GENERATION_MODEL } from '../../io/media/images/providers/OpenAIImageProvider.js';
 
 /**
  * Default model identifiers for a given provider, keyed by task type.
@@ -40,7 +41,7 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
   },
   openai: {
     text: 'gpt-4o',
-    image: 'gpt-image-1',
+    image: OPENAI_IMAGE_GENERATION_MODEL,
     embedding: 'text-embedding-3-small',
     cheap: 'gpt-4o-mini',
   },

@@ -72,6 +72,22 @@ type A1111Txt2ImgResponse = {
   info: string;
 };
 
+/**
+ * The checkpoint an A1111 response says it rendered with: `sd_model_name` in
+ * its `info`, which is a JSON string (stable-diffusion-webui,
+ * `modules/processing.py`, `Processed.js`). `undefined` when the response
+ * carries none.
+ */
+function renderedCheckpoint(info: unknown): string | undefined {
+  if (typeof info !== 'string') return undefined;
+  try {
+    const name = (JSON.parse(info) as { sd_model_name?: unknown } | null)?.sd_model_name;
+    return typeof name === 'string' && name.trim() ? name.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Shape returned by A1111 `POST /sdapi/v1/extra-single-image`. */
 type A1111ExtraSingleImageResponse = {
   image: string;
@@ -304,7 +320,9 @@ export class StableDiffusionLocalProvider implements IImageProvider {
 
     return {
       created: Math.floor(Date.now() / 1000),
-      modelId: request.modelId ?? this.defaultModelId ?? 'unknown',
+      // With no model named the server renders with the checkpoint it has
+      // loaded, which need not be the first one it lists.
+      modelId: request.modelId || renderedCheckpoint(data.info) || this.defaultModelId || 'unknown',
       providerId: this.providerId,
       images,
       usage: {
@@ -334,7 +352,7 @@ export class StableDiffusionLocalProvider implements IImageProvider {
       '1': {
         class_type: 'CheckpointLoaderSimple',
         inputs: {
-          ckpt_name: request.modelId ?? this.defaultModelId ?? 'v1-5-pruned-emaonly.safetensors',
+          ckpt_name: request.modelId || this.defaultModelId || 'v1-5-pruned-emaonly.safetensors',
         },
       },
       '2': {
@@ -433,7 +451,7 @@ export class StableDiffusionLocalProvider implements IImageProvider {
 
     return {
       created: Math.floor(Date.now() / 1000),
-      modelId: request.modelId ?? this.defaultModelId ?? 'unknown',
+      modelId: request.modelId || this.defaultModelId || 'unknown',
       providerId: this.providerId,
       images,
       usage: {
@@ -521,7 +539,9 @@ export class StableDiffusionLocalProvider implements IImageProvider {
 
     return {
       created: Math.floor(Date.now() / 1000),
-      modelId: request.modelId ?? this.defaultModelId ?? 'unknown',
+      // With no model named the server renders with the checkpoint it has
+      // loaded, which need not be the first one it lists.
+      modelId: request.modelId || renderedCheckpoint(data.info) || this.defaultModelId || 'unknown',
       providerId: this.providerId,
       images,
       usage: { totalImages: images.length, totalCostUSD: 0 },

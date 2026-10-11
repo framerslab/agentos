@@ -28,9 +28,9 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import matter from 'gray-matter';
 import type { ExportOptions } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
+import { writeFrontMatter } from '../../../core/utils/frontMatter.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -108,8 +108,9 @@ export class MarkdownExporter {
       tags = [];
     }
 
-    // gray-matter's `stringify` method generates the YAML block for us.
-    return matter.stringify(trace.content, {
+    // gray-matter writes the YAML block. The trace's content is written as it
+    // is and never read for front matter of its own.
+    return writeFrontMatter(trace.content, {
       id: trace.id,
       type: trace.type,
       scope: trace.scope,

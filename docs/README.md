@@ -88,6 +88,8 @@
 - [**Platform Support**](./architecture/PLATFORM_SUPPORT.md) — Supported environments and requirements
 - [**Observability (OpenTelemetry)**](./observability/OBSERVABILITY.md) — Tracing, metrics, and log correlation/export (opt-in)
 - [**Logging (Pino + OpenTelemetry)**](./observability/LOGGING.md) — Structured logs, trace correlation, and OTEL LogRecord export (opt-in)
+- [**API Key Rotation**](./KEY_ROTATION.md): comma-separated keys per provider, which providers rotate them, and which rest a key after a quota error
+- [**CLI Error Codes**](./features/CLI_ERROR_CODES.md): the codes a CLI subprocess bridge raises, and when the Claude Code and Gemini CLI providers raise each one
 
 ### Ecosystem
 

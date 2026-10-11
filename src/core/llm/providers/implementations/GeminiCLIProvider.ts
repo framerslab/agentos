@@ -290,12 +290,7 @@ export class GeminiCLIProvider implements IProvider {
     const result = await this.bridge.executeWithSystemPrompt(bridgeOpts);
 
     if (result.isError) {
-      throw new GeminiCLIProviderError(
-        `Gemini CLI returned an error: ${result.result}`,
-        'CRASHED',
-        'Try running "gemini -p test" manually to diagnose.',
-        true,
-      );
+      throw this.errorResultError(result.result);
     }
 
     /* Try parsing tool calls from XML markers */
@@ -316,6 +311,14 @@ export class GeminiCLIProvider implements IProvider {
     return this.buildTextResponse(result.result, result, undefined, undefined, modelId);
   }
 
+  /**
+   * Stream a completion by spawning `gemini -p --output-format stream-json`.
+   *
+   * The final chunk is yielded once the bridge's stream has ended, which is
+   * after the CLI has exited: a non-zero exit after the result line ends the
+   * stream with the bridge's classified error, and a result with
+   * `status: 'error'` ends it with an error chunk.
+   */
   async *generateCompletionStream(
     modelId: string,
     messages: ChatMessage[],
@@ -340,10 +343,18 @@ export class GeminiCLIProvider implements IProvider {
     let accumulatedText = '';
     const responseId = `gc-${Date.now()}`;
     let finalUsage: ModelUsage | undefined;
-    let emittedFinal = false;
+    /* The chunk that ends the stream. It is held while the bridge's stream is
+     * read to its end, where the bridge awaits the CLI's exit, so a failed
+     * exit after the result line still reaches the catch below. */
+    let finalChunk: ModelCompletionResponse | undefined;
+    /* Set when the CLI reports a failure in its own output (an error event or
+     * an error result), which says more than the exit code that follows. */
+    let cliReportedError = false;
 
     try {
       for await (const event of this.bridge.streamWithSystemPrompt(bridgeOpts)) {
+        /* Once the ending is known the rest of the stream is only drained. */
+        if (finalChunk) continue;
         switch (event.type) {
           case 'text_delta':
             accumulatedText += event.text;
@@ -368,62 +379,74 @@ export class GeminiCLIProvider implements IProvider {
               ? { promptTokens: usage.input_tokens, completionTokens: usage.output_tokens, totalTokens: usage.input_tokens + usage.output_tokens, costUSD: 0 }
               : { totalTokens: 0, costUSD: 0 };
 
+            /* A failed run the CLI reports in its result: the error
+             * generateCompletion() throws for it */
+            if (event.isError) {
+              /* The bridge carries the failure's message in `error`. */
+              const error = this.errorResultError(event.error ?? event.result);
+              cliReportedError = true;
+              finalChunk = this.buildStreamErrorResponse(error.message, modelId, responseId, finalUsage, error.code, error);
+              break;
+            }
+
             const finalText = event.result || accumulatedText;
 
             /* Try parsing tool calls from final text */
             if (hasTools) {
               const toolCalls = parseToolCallsFromText(finalText);
               if (toolCalls) {
-                emittedFinal = true;
-                yield this.buildToolCallResponse(
+                finalChunk = this.buildToolCallResponse(
                   toolCalls,
                   { sessionId: event.sessionId, usage: event.usage },
                   responseId,
                   finalUsage,
                   modelId,
                 );
-                return;
+                break;
               }
             }
 
-            emittedFinal = true;
-            yield this.buildTextResponse(
+            finalChunk = this.buildTextResponse(
               finalText,
               { sessionId: event.sessionId, usage: event.usage },
               responseId,
               finalUsage,
               modelId,
             );
-            return;
+            break;
           }
 
           case 'error':
-            emittedFinal = true;
-            yield this.buildStreamErrorResponse(
+            cliReportedError = true;
+            finalChunk = this.buildStreamErrorResponse(
               `Gemini CLI stream error: ${event.error}`,
               modelId,
               responseId,
               finalUsage,
             );
-            return;
+            break;
         }
       }
     } catch (error: any) {
-      emittedFinal = true;
-      yield this.buildStreamErrorResponse(
-        error?.message ?? 'Gemini CLI stream failed.',
-        modelId,
-        responseId,
-        finalUsage,
-        error?.code,
-        error,
-      );
-      return;
+      /* A failed run (a non-zero exit, a timeout, an abort) ends the stream
+       * with the bridge's classified error, unless the CLI already reported
+       * the failure itself. */
+      if (!cliReportedError) {
+        finalChunk = this.buildStreamErrorResponse(
+          error?.message ?? 'Gemini CLI stream failed.',
+          modelId,
+          responseId,
+          finalUsage,
+          error?.code,
+          error,
+          /* The caller's abort ends the stream with type 'abort', as the
+           * abortSignal contract in IProvider asks of a streaming provider. */
+          error?.code === 'REQUEST_ABORTED' ? 'abort' : undefined,
+        );
+      }
     }
 
-    if (!emittedFinal) {
-      yield this.buildTextResponse(accumulatedText, {}, responseId, finalUsage, modelId);
-    }
+    yield finalChunk ?? this.buildTextResponse(accumulatedText, {}, responseId, finalUsage, modelId);
   }
 
   /* ---- Embeddings (not supported) -------------------------------- */
@@ -642,6 +665,19 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
     };
   }
 
+  /**
+   * The error a result flagged as an error stands for: generateCompletion()
+   * throws it, and a stream ends with it.
+   */
+  private errorResultError(message: string): GeminiCLIProviderError {
+    return new GeminiCLIProviderError(
+      `Gemini CLI returned an error: ${message}`,
+      'CRASHED',
+      'Try running "gemini -p test" manually to diagnose.',
+      true,
+    );
+  }
+
   private buildStreamErrorResponse(
     message: string,
     modelId: string,
@@ -649,6 +685,7 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
     usage?: ModelUsage,
     code?: string | number,
     details?: unknown,
+    type?: string,
   ): ModelCompletionResponse {
     return {
       id: responseId,
@@ -659,6 +696,7 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
       usage,
       error: {
         message,
+        ...(type === undefined ? {} : { type }),
         ...(code === undefined ? {} : { code }),
         ...(details === undefined ? {} : { details }),
       },

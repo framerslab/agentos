@@ -223,6 +223,31 @@ describe('MarkdownLoader', () => {
     expect(doc.metadata.title).toBe('FM Title');
   });
 
+  it('evaluates no front matter marked as JavaScript, and reads no data from it', async () => {
+    // Evaluated, the block would set this global and give the title 'evaluated'.
+    const mark = '__agentosLoaderFrontMatterEvaluated';
+    const md = [
+      '---js',
+      `{ title: (globalThis.${mark} = true) && 'evaluated' }`,
+      '---',
+      '# Notes',
+      '',
+      'The review moved to Thursday.',
+      '',
+    ].join('\n');
+
+    try {
+      const doc = await new MarkdownLoader().load(Buffer.from(md, 'utf8'));
+
+      expect(Reflect.get(globalThis, mark)).toBeUndefined();
+      // The block gives no data, so the title is the first heading's.
+      expect(doc.metadata.title).toBe('Notes');
+      expect(doc.content).toBe('# Notes\n\nThe review moved to Thursday.\n');
+    } finally {
+      Reflect.deleteProperty(globalThis, mark);
+    }
+  });
+
   it('includes word count in metadata', async () => {
     const filePath = path.join(tmpDir, 'words.md');
     const md = '# Hello\n\nOne two three four five.\n';

@@ -75,6 +75,8 @@ and is left untouched on disk.
 SOUL.md is markdown with YAML frontmatter. The frontmatter holds structured
 config (HEXACO scores, voice, mood, hard limits) that maps to existing AgentOS
 persona machinery. The body is prose placed at the head of the system prompt.
+The frontmatter is read as data: a block marked as JavaScript (`---js`) gives
+no fields and is never evaluated.
 
 ```markdown
 ---
@@ -211,7 +213,11 @@ The renderer writes the name, id (as `agentId`), description (as `role`), HEXACO
 traits, voice, mood defaults, reasoning-trace limits, hard limits, avatar and
 metadata to the frontmatter, and `baseSystemPrompt` as the body. Other fields
 (model defaults, metaprompts, sentiment tracking, tools, contextual elements) are
-not written.
+not written. A persona with none of the written fields has no frontmatter to
+write; when its prompt opens with three dashes that a fourth does not follow,
+which the loader would read as the start of a frontmatter block, the renderer
+puts an empty frontmatter block (two lines of `---`) in front of it, so that the
+loader reads the whole prompt as the body.
 
 ## Cross-Framework Compatibility
 

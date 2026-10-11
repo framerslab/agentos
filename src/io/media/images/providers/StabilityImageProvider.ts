@@ -117,6 +117,24 @@ function appendIfDefined(
   formData.append(key, String(value));
 }
 
+/**
+ * The model of an image-to-image edit when the request names none: the SD3
+ * route's `model` takes sd3.5-large, sd3.5-large-turbo and sd3.5-medium, and
+ * routes the older sd3-* names to them.
+ */
+const SD3_EDIT_MODEL = 'sd3.5-medium';
+
+/** The model id reported for an inpaint, whose endpoint takes no model. */
+const INPAINT_MODEL_ID = 'stable-image-inpaint';
+
+/** The model id reported for an upscale by the fast upscaler, whose endpoint takes no model. */
+const UPSCALE_MODEL_ID = 'stable-image-upscale-fast';
+
+/** Whether a model id is one the SD3 route takes. */
+function isSd3Model(modelId: string | undefined): modelId is string {
+  return typeof modelId === 'string' && /^sd3/i.test(modelId);
+}
+
 export class StabilityImageProvider implements IImageProvider {
   public readonly providerId = 'stability';
   public isInitialized = false;
@@ -278,21 +296,23 @@ export class StabilityImageProvider implements IImageProvider {
   }
 
   /**
-   * Edits an image using the Stability AI image-to-image endpoint.
+   * Edits an image with Stability AI, on the endpoint the request needs
+   * (Stability's API specification, https://api.stability.ai/v2alpha/openapi):
+   * - without a mask, image-to-image: `/v2beta/stable-image/generate/sd3`
+   *   with `mode=image-to-image`, `image` and `strength`. The route takes the
+   *   SD3 models only, and its `image` and `strength` are valid in that mode
+   *   only;
+   * - with a mask, inpainting: `/v2beta/stable-image/edit/inpaint` with
+   *   `image` and `mask` (white is repainted, black kept). It takes no model
+   *   and no strength.
    *
-   * Routes to different endpoints depending on the edit mode:
-   * - `'img2img'` (default) — `/v2beta/stable-image/generate/sd3` with `image` and `strength`.
-   * - `'inpaint'` — same endpoint but additionally includes `mask_image`.
-   * - `'outpaint'` — currently treated identically to `img2img` (provider
-   *   does not expose a dedicated outpainting endpoint in the v2beta surface).
+   * The request's `mode` is not read: `'outpaint'` runs as image-to-image.
    *
    * @param request - Edit request containing the source image, prompt, and optional mask.
    * @returns Generation result with the edited image(s).
    *
    * @throws {Error} When the provider is not initialised.
    * @throws {Error} When the Stability API returns an HTTP error status.
-   *
-   * @see https://platform.stability.ai/docs/api-reference#tag/Generate/paths/~1v2beta~1stable-image~1generate~1sd3/post
    */
   async editImage(request: ImageEditRequest): Promise<ImageGenerationResult> {
     if (!this.isInitialized) {
@@ -313,20 +333,6 @@ export class StabilityImageProvider implements IImageProvider {
       'image.png'
     );
     formData.append('prompt', request.prompt);
-
-    // Strength controls how much the output deviates from the source.
-    // Stability uses 0–1 with 0 meaning "keep original".
-    appendIfDefined(formData, 'strength', request.strength ?? providerOptions?.strength ?? 0.75);
-
-    // When a mask is provided the request is an inpainting operation.
-    if (request.mask) {
-      formData.append(
-        'mask_image',
-        new Blob([bufferToBlobPart(request.mask)], { type: 'image/png' }),
-        'mask.png'
-      );
-    }
-
     appendIfDefined(
       formData,
       'negative_prompt',
@@ -338,14 +344,34 @@ export class StabilityImageProvider implements IImageProvider {
       'output_format',
       normalizeOutputFormat(providerOptions?.outputFormat)
     );
-    appendIfDefined(formData, 'cfg_scale', providerOptions?.cfgScale);
-    appendIfDefined(formData, 'steps', providerOptions?.steps);
+    appendIfDefined(formData, 'style_preset', providerOptions?.stylePreset);
 
-    const model = request.modelId || this.defaultModelId || 'sd3-medium';
-    appendIfDefined(formData, 'model', model);
+    let endpoint: string;
+    let model: string;
+    if (request.mask) {
+      // Inpainting has an endpoint of its own, which takes the mask as `mask`
+      // and no model, mode or strength.
+      formData.append(
+        'mask',
+        new Blob([bufferToBlobPart(request.mask)], { type: 'image/png' }),
+        'mask.png'
+      );
+      endpoint = '/v2beta/stable-image/edit/inpaint';
+      model = INPAINT_MODEL_ID;
+    } else {
+      // Strength controls how much the output deviates from the source:
+      // 0 keeps the original, 1 is as if no image were passed.
+      formData.append('mode', 'image-to-image');
+      appendIfDefined(formData, 'strength', request.strength ?? providerOptions?.strength ?? 0.75);
+      appendIfDefined(formData, 'cfg_scale', providerOptions?.cfgScale);
+      // The provider's default model serves text-to-image (stable-image-core
+      // unless configured), which this route refuses; only an SD3 default applies.
+      model = request.modelId || (isSd3Model(this.defaultModelId) ? this.defaultModelId : SD3_EDIT_MODEL);
+      formData.append('model', model);
+      endpoint = '/v2beta/stable-image/generate/sd3';
+    }
 
-    // Use the SD3 endpoint which supports image + strength natively.
-    const response = await fetch(`${this.config.baseURL}/v2beta/stable-image/generate/sd3`, {
+    const response = await fetch(`${this.config.baseURL}${endpoint}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.keyPool.next()}`,
@@ -371,18 +397,19 @@ export class StabilityImageProvider implements IImageProvider {
   }
 
   /**
-   * Upscales an image using the Stability AI upscale endpoint.
+   * Upscales an image with Stability AI's fast upscaler,
+   * `/v2beta/stable-image/upscale/fast`, which takes the image alone and
+   * returns it at four times its resolution. The request's `scale`, `width`
+   * and `height` are not used: no Stability upscaler takes a target size,
+   * and the conservative and creative upscalers require a prompt, which an
+   * upscale request does not carry (Stability's API specification,
+   * https://api.stability.ai/v2alpha/openapi).
    *
-   * Uses `/v2beta/stable-image/upscale/conservative` which takes an image
-   * and a target width to produce a higher-resolution version.
-   *
-   * @param request - Upscale request with the source image and desired dimensions.
+   * @param request - Upscale request with the source image.
    * @returns Generation result with the upscaled image.
    *
    * @throws {Error} When the provider is not initialised.
    * @throws {Error} When the Stability API returns an HTTP error status.
-   *
-   * @see https://platform.stability.ai/docs/api-reference#tag/Upscale
    */
   async upscaleImage(request: ImageUpscaleRequest): Promise<ImageGenerationResult> {
     if (!this.isInitialized) {
@@ -401,11 +428,6 @@ export class StabilityImageProvider implements IImageProvider {
       'image.png'
     );
 
-    // Stability's upscale endpoint accepts a target `width`.
-    // Derive from explicit width, or scale factor applied to a default 512px base.
-    const targetWidth = request.width ?? (request.scale ? 512 * request.scale : 2048);
-    appendIfDefined(formData, 'width', targetWidth);
-    if (request.height) appendIfDefined(formData, 'height', request.height);
     appendIfDefined(
       formData,
       'output_format',
@@ -413,7 +435,7 @@ export class StabilityImageProvider implements IImageProvider {
     );
 
     const response = await fetch(
-      `${this.config.baseURL}/v2beta/stable-image/upscale/conservative`,
+      `${this.config.baseURL}/v2beta/stable-image/upscale/fast`,
       {
         method: 'POST',
         headers: {
@@ -433,7 +455,7 @@ export class StabilityImageProvider implements IImageProvider {
 
     return {
       created: Math.floor(Date.now() / 1000),
-      modelId: 'stable-image-upscale',
+      modelId: UPSCALE_MODEL_ID,
       providerId: this.providerId,
       images,
       usage: { totalImages: images.length },

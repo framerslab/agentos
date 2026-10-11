@@ -14,9 +14,9 @@
 
 import { sha256 } from '../core/util/crossPlatformCrypto.js';
 import { v4 as uuidv4 } from 'uuid';
-import matter from 'gray-matter';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
+import { readFrontMatter, type FrontMatterFile } from '../../../core/utils/frontMatter.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -164,9 +164,10 @@ export class MarkdownImporter {
       return;
     }
 
-    let parsed: matter.GrayMatterFile<string>;
+    // Read as data: a block marked as JavaScript is dropped, never evaluated.
+    let parsed: FrontMatterFile;
     try {
-      parsed = matter(raw);
+      parsed = readFrontMatter(raw);
     } catch (err) {
       result.errors.push(`Cannot parse front-matter in ${filePath}: ${String(err)}`);
       return;

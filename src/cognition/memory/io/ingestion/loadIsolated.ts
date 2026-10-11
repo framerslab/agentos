@@ -18,13 +18,19 @@
  * every decoded byte of a stream). {@link IsolatedLoadOptions.maxExternalMb}
  * bounds that memory: every 20 ms the worker's `external_memory` is read with
  * `worker.getHeapStatistics()`, and the worker is ended once it passes the
- * bound. The check reads between allocations, so one allocation can pass the
- * bound before the worker is ended. Without `maxExternalMb`, nothing bounds the
- * worker's memory outside its heap.
+ * bound. The check reads between allocations, on a timer on the caller's
+ * thread: what the worker allocates between two checks can pass the bound
+ * before the worker is ended, and a read that ends between two checks is
+ * answered whatever it held at its peak. Without `maxExternalMb`, nothing
+ * bounds the worker's memory outside its heap.
  *
- * The worker's entry is `isolatedLoadWorker.js`, compiled beside this module,
- * which finds it from its own URL. The worker starts with none of the caller's
- * command-line options; `NODE_OPTIONS` from the environment applies to it.
+ * The worker is a thread of the caller's process: it bounds a read's memory
+ * and time, and it is not a sandbox for code. Its entry is
+ * `isolatedLoadWorker.js`, compiled beside this module, which finds it from
+ * its own URL. It is started with an empty `execArgv` in place of the Node
+ * options it would inherit from the caller's thread, and `NODE_OPTIONS` from
+ * the environment applies to it. V8's options are the whole process's, so a
+ * `--max-old-space-size` the process was started with overrides the heap cap.
  *
  * @module memory/ingestion/loadIsolated
  */
@@ -65,7 +71,10 @@ export type IsolatedLoadKind = 'pdf' | 'docx' | 'text' | 'markdown';
 
 /** Options of {@link loadIsolated}. */
 export interface IsolatedLoadOptions {
-  /** The worker's old generation, in MiB (`resourceLimits.maxOldGenerationSizeMb`). Default 256. */
+  /**
+   * The worker's old generation, in MiB (`resourceLimits.maxOldGenerationSizeMb`). Default 256. A
+   * `--max-old-space-size` the process was started with, on its command line or in `NODE_OPTIONS`, overrides it.
+   */
   maxHeapMb?: number;
   /** How long the read may take from the worker's start, in milliseconds, at most 2,147,483,647. Default 30,000. */
   timeoutMs?: number;
@@ -317,9 +326,10 @@ export async function loadIsolated(
     workerData: request,
     transferList: [copy.buffer],
     resourceLimits: { maxOldGenerationSizeMb: maxHeapMb },
-    // None of the caller's command-line options, which a worker otherwise inherits: an `--input-type` given with
+    // In place of the Node options a worker inherits from the caller's thread: an `--input-type` given with
     // `node -e` refuses a file as the worker's entry (ERR_INPUT_TYPE_NOT_ALLOWED), and the caller's `--require`
-    // and `--import` preloads would load inside the capped heap. NODE_OPTIONS still applies.
+    // and `--import` preloads would load inside the capped heap. NODE_OPTIONS still applies, and V8's options
+    // (`--max-old-space-size` among them) are the whole process's, so they hold for the worker whatever this says.
     execArgv: [],
   });
   return awaitRead(worker, maxHeapMb, timeoutMs, maxExternalMb);

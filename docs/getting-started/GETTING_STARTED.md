@@ -111,13 +111,15 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export GEMINI_API_KEY=AIza...
 export OPENROUTER_API_KEY=sk-or-...
 
-# Key rotation — comma-separated keys rotate automatically with quota detection
+# Key rotation: each request draws a key from a comma-separated list
 export OPENAI_API_KEY=sk-key1,sk-key2,sk-key3
 
 # Local providers (no key required, just a running server)
 export OLLAMA_BASE_URL=http://localhost:11434
 export STABLE_DIFFUSION_LOCAL_BASE_URL=http://localhost:7860
 ```
+
+[API Key Rotation](../KEY_ROTATION.md) lists the providers that rotate a key list and the ones that rest a key after a quota error. Among the LLM providers, Anthropic, Gemini and OpenRouter rest a key; the OpenAI provider rotates its keys and rests none.
 
 ### Inline API Keys
 

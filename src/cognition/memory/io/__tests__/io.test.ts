@@ -11,6 +11,10 @@
  * 7. SQLite export (verify file copied / created)
  * 8. SQLite import (export brain A, import into brain B, verify data merged)
  * 9. ChatGPT import (mock conversations.json, verify traces created)
+ * 10. CSV import (create a .csv file, import, verify traces in DB)
+ * 11. Trace files read and written as data (content that opens with a
+ *     front-matter block comes back whole from an export and an import; a
+ *     block marked as JavaScript is never evaluated)
  *
  * @module memory/io/__tests__/io.test
  */
@@ -1000,5 +1004,142 @@ describe('CsvImporter', () => {
 
     expect(first.imported).toBe(1);
     expect(second.skipped).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. Trace files read and written as data
+// ---------------------------------------------------------------------------
+
+describe('trace files read and written as data', () => {
+  /** A global the block below would set if it were evaluated. */
+  const EVALUATED = '__agentosTraceFrontMatterEvaluated';
+
+  /** A front-matter block marked as JavaScript. Evaluated, it would set the global and give the type `semantic`. */
+  const MARKED_BLOCK = `---js\n{ type: (globalThis.${EVALUATED} = true) && 'semantic' }\n---\n`;
+
+  /** The columns of a trace that a Markdown file carries. */
+  interface FileBackedRow {
+    id: string;
+    type: string;
+    scope: string;
+    content: string;
+    strength: number;
+    tags: string;
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(globalThis, EVALUATED);
+  });
+
+  it('MarkdownExporter and MarkdownImporter keep content that opens with a front-matter block', async () => {
+    const dashes = '---\nA rule opens this note.\n---\nThe review moved to Thursday.';
+    const marked = `${MARKED_BLOCK}The review moved to Thursday, as agreed.`;
+
+    const source = await openBrain();
+    const dashesId = await seedTrace(source, {
+      id: 'mt_opens_with_dashes',
+      content: dashes,
+      type: 'semantic',
+      scope: 'user',
+      strength: 0.6,
+      tags: ['notes'],
+    });
+    const markedId = await seedTrace(source, {
+      id: 'mt_opens_with_marked_block',
+      content: marked,
+      type: 'episodic',
+      scope: 'user',
+      strength: 0.4,
+      tags: ['notes'],
+    });
+
+    const outDir = tempDir();
+    await new MarkdownExporter(source).export(outDir);
+    expect(Reflect.get(globalThis, EVALUATED)).toBeUndefined();
+
+    // Each file is the trace's own front matter, then the content as it was stored.
+    const dashesFile = fs.readFileSync(path.join(outDir, 'user', 'semantic', `${dashesId}.md`), 'utf8');
+    expect(dashesFile.startsWith(`---\nid: ${dashesId}\n`)).toBe(true);
+    expect(dashesFile.endsWith(`\n---\n${dashes}\n`)).toBe(true);
+    const markedFile = fs.readFileSync(path.join(outDir, 'user', 'episodic', `${markedId}.md`), 'utf8');
+    expect(markedFile.startsWith(`---\nid: ${markedId}\n`)).toBe(true);
+    expect(markedFile.endsWith(`\n---\n${marked}\n`)).toBe(true);
+
+    const target = await openBrain();
+    const result = await new MarkdownImporter(target).import(outDir);
+    expect(Reflect.get(globalThis, EVALUATED)).toBeUndefined();
+    expect(result.errors).toHaveLength(0);
+    expect(result.imported).toBe(2);
+
+    // The fields come from each trace's own front matter, and the content comes back whole.
+    const rows = await target.all<FileBackedRow>(
+      'SELECT id, type, scope, content, strength, tags FROM memory_traces ORDER BY id',
+    );
+    expect(rows).toEqual([
+      { id: dashesId, type: 'semantic', scope: 'user', content: dashes, strength: 0.6, tags: '["notes"]' },
+      { id: markedId, type: 'episodic', scope: 'user', content: marked, strength: 0.4, tags: '["notes"]' },
+    ]);
+  });
+
+  it('MarkdownImporter evaluates no front matter marked as JavaScript, and reads no fields from it', async () => {
+    const dir = tempDir();
+    const noteDir = path.join(dir, 'user', 'episodic');
+    fs.mkdirSync(noteDir, { recursive: true });
+    fs.writeFileSync(path.join(noteDir, 'marked.md'), `${MARKED_BLOCK}The review moved to Thursday.\n`, 'utf8');
+
+    const brain = await openBrain();
+    const result = await new MarkdownImporter(brain).import(dir);
+    expect(Reflect.get(globalThis, EVALUATED)).toBeUndefined();
+    expect(result.errors).toHaveLength(0);
+    expect(result.imported).toBe(1);
+
+    // The block gives no fields, so the trace takes the importer's defaults and the text after the block.
+    const row = await brain.get<Pick<FileBackedRow, 'type' | 'scope' | 'content' | 'strength' | 'tags'>>(
+      'SELECT type, scope, content, strength, tags FROM memory_traces',
+    );
+    expect(row).toEqual({
+      type: 'episodic',
+      scope: 'user',
+      content: 'The review moved to Thursday.',
+      strength: 1,
+      tags: '[]',
+    });
+  });
+
+  it('ObsidianExporter and ObsidianImporter keep content that opens with a front-matter block', async () => {
+    const marked = `${MARKED_BLOCK}The review moved to Thursday.`;
+
+    const source = await openBrain();
+    const id = await seedTrace(source, {
+      id: 'mt_obsidian_marked_block',
+      content: marked,
+      type: 'episodic',
+      scope: 'user',
+      strength: 0.4,
+      tags: ['notes'],
+    });
+
+    const outDir = tempDir();
+    await new ObsidianExporter(source).export(outDir);
+    expect(Reflect.get(globalThis, EVALUATED)).toBeUndefined();
+
+    // The trace's own front matter, then the content as it was stored, then its tags.
+    const file = fs.readFileSync(path.join(outDir, 'user', 'episodic', `${id}.md`), 'utf8');
+    expect(file.startsWith(`---\nid: ${id}\n`)).toBe(true);
+    expect(file.endsWith(`\n---\n${marked}\n\n#notes\n`)).toBe(true);
+
+    const target = await openBrain();
+    const result = await new ObsidianImporter(target).import(outDir);
+    expect(Reflect.get(globalThis, EVALUATED)).toBeUndefined();
+    expect(result.errors).toHaveLength(0);
+    expect(result.imported).toBe(1);
+
+    const rows = await target.all<FileBackedRow>(
+      'SELECT id, type, scope, content, strength, tags FROM memory_traces',
+    );
+    expect(rows).toEqual([
+      { id, type: 'episodic', scope: 'user', content: `${marked}\n\n#notes`, strength: 0.4, tags: '["notes"]' },
+    ]);
   });
 });

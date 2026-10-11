@@ -1,5 +1,5 @@
 /** @fileoverview Parse/serialize wiki pages (gray-matter) and render the index.md catalog. */
-import matter from 'gray-matter';
+import { readFrontMatter, writeFrontMatter } from '../../../../core/utils/frontMatter.js';
 import { type WikiPage, type WikiPageType, isWikiPageType } from './types.js';
 
 const WIKILINK_RE = /\[\[\s*([^\]]+?)\s*\]\]/g;
@@ -18,11 +18,16 @@ export function extractWikiLinks(body: string): string[] {
   return out;
 }
 
-/** Parse a page file's content into a WikiPage. `id` is the caller-known relative id. */
+/**
+ * Parse a page file's content into a WikiPage. `id` is the caller-known relative id.
+ * The front matter is read as data: a block marked as JavaScript is dropped, never evaluated.
+ * Blank lines between the front matter and the body are dropped, and the body's first line
+ * keeps its indentation.
+ */
 export function parsePage(id: string, raw: string): WikiPage {
-  const { data, content } = matter(raw);
+  const { data, content } = readFrontMatter(raw);
   const type: WikiPageType = isWikiPageType(data.type) ? data.type : inferTypeFromId(id);
-  const body = content.replace(/^\s+/, '');
+  const body = content.replace(/^(?:[ \t]*\r?\n)+/, '');
   return {
     id,
     type,
@@ -34,9 +39,12 @@ export function parsePage(id: string, raw: string): WikiPage {
   };
 }
 
-/** Serialize a WikiPage back to markdown with YAML frontmatter. */
+/**
+ * Serialize a WikiPage back to markdown with YAML frontmatter. The body is written as it is and
+ * never read, so one that opens with a line of dashes keeps every line.
+ */
 export function serializePage(page: WikiPage): string {
-  return matter.stringify(page.body.endsWith('\n') ? page.body : page.body + '\n', {
+  return writeFrontMatter(page.body.endsWith('\n') ? page.body : page.body + '\n', {
     id: page.id,
     type: page.type,
     summary: page.summary,

@@ -316,12 +316,7 @@ export class ClaudeCodeProvider implements IProvider {
     const result = await this.bridge.execute(bridgeOpts);
 
     if (result.isError) {
-      throw new ClaudeCodeProviderError(
-        `Claude Code returned an error: ${result.result}`,
-        'CRASHED',
-        'Try running "claude --bare -p test" manually to diagnose.',
-        true,
-      );
+      throw this.errorResultError(result.result);
     }
 
     /* Parse tool call response if tools were requested */
@@ -350,6 +345,11 @@ export class ClaudeCodeProvider implements IProvider {
    * Text-only turns get full token-by-token streaming. Tool-calling turns
    * stream progress events for UX feedback, then yield a single final
    * response with parsed tool calls.
+   *
+   * The final chunk is yielded once the bridge's stream has ended, which is
+   * after the CLI has exited: a non-zero exit after the result line ends the
+   * stream with the bridge's classified error, and a result flagged
+   * `is_error` ends it with an error chunk.
    */
   async *generateCompletionStream(
     modelId: string,
@@ -376,10 +376,18 @@ export class ClaudeCodeProvider implements IProvider {
     let accumulatedText = '';
     const responseId = `cc-${Date.now()}`;
     let finalUsage: ModelUsage | undefined;
-    let emittedFinal = false;
+    /* The chunk that ends the stream. It is held while the bridge's stream is
+     * read to its end, where the bridge awaits the CLI's exit, so a failed
+     * exit after the result line still reaches the catch below. */
+    let finalChunk: ModelCompletionResponse | undefined;
+    /* Set when the CLI reports a failure in its own output (an error event or
+     * an is_error result), which says more than the exit code that follows. */
+    let cliReportedError = false;
 
     try {
       for await (const event of this.bridge.stream(bridgeOpts)) {
+        /* Once the ending is known the rest of the stream is only drained. */
+        if (finalChunk) continue;
         switch (event.type) {
           case 'text_delta':
             accumulatedText += event.text;
@@ -404,6 +412,15 @@ export class ClaudeCodeProvider implements IProvider {
               ? { promptTokens: usage.input_tokens, completionTokens: usage.output_tokens, totalTokens: usage.input_tokens + usage.output_tokens, costUSD: 0 }
               : { totalTokens: 0, costUSD: 0 };
 
+            /* A failed turn: the error generateCompletion() throws for it */
+            if (event.isError) {
+              /* The bridge carries the failure's message in `error`. */
+              const error = this.errorResultError(event.error ?? event.result);
+              cliReportedError = true;
+              finalChunk = this.buildStreamErrorResponse(error.message, modelId, responseId, finalUsage, error.code, error);
+              break;
+            }
+
             const finalText = event.result || accumulatedText;
 
             /* Try parsing as tool call response */
@@ -411,57 +428,59 @@ export class ClaudeCodeProvider implements IProvider {
               try {
                 const parsed = JSON.parse(finalText);
                 if (parsed.response_type === 'tool_calls' && Array.isArray(parsed.tool_calls)) {
-                  emittedFinal = true;
-                  yield this.buildToolCallResponse(
+                  finalChunk = this.buildToolCallResponse(
                     parsed.tool_calls,
                     { sessionId: event.sessionId, usage: event.usage },
                     responseId,
                     finalUsage,
                     modelId,
                   );
-                  return;
+                  break;
                 }
               } catch { /* fall through to text */ }
             }
 
-            emittedFinal = true;
-            yield this.buildTextResponse(
+            finalChunk = this.buildTextResponse(
               finalText,
               { sessionId: event.sessionId, usage: event.usage },
               responseId,
               finalUsage,
               modelId,
             );
-            return;
+            break;
           }
 
           case 'error':
-            emittedFinal = true;
-            yield this.buildStreamErrorResponse(
+            cliReportedError = true;
+            finalChunk = this.buildStreamErrorResponse(
               `Claude Code stream error: ${event.error}`,
               modelId,
               responseId,
               finalUsage,
             );
-            return;
+            break;
         }
       }
     } catch (error: any) {
-      emittedFinal = true;
-      yield this.buildStreamErrorResponse(
-        error?.message ?? 'Claude Code stream failed.',
-        modelId,
-        responseId,
-        finalUsage,
-        error?.code,
-        error,
-      );
-      return;
+      /* A failed run (a non-zero exit, a timeout, an abort) ends the stream
+       * with the bridge's classified error, unless the CLI already reported
+       * the failure itself. */
+      if (!cliReportedError) {
+        finalChunk = this.buildStreamErrorResponse(
+          error?.message ?? 'Claude Code stream failed.',
+          modelId,
+          responseId,
+          finalUsage,
+          error?.code,
+          error,
+          /* The caller's abort ends the stream with type 'abort', as the
+           * abortSignal contract in IProvider asks of a streaming provider. */
+          error?.code === 'REQUEST_ABORTED' ? 'abort' : undefined,
+        );
+      }
     }
 
-    if (!emittedFinal) {
-      yield this.buildTextResponse(accumulatedText, {}, responseId, finalUsage, modelId);
-    }
+    yield finalChunk ?? this.buildTextResponse(accumulatedText, {}, responseId, finalUsage, modelId);
   }
 
   /* ---- Embeddings (not supported) -------------------------------- */
@@ -706,6 +725,19 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
     };
   }
 
+  /**
+   * The error a result flagged `is_error` stands for: generateCompletion()
+   * throws it, and a stream ends with it.
+   */
+  private errorResultError(message: string): ClaudeCodeProviderError {
+    return new ClaudeCodeProviderError(
+      `Claude Code returned an error: ${message}`,
+      'CRASHED',
+      'Try running "claude --bare -p test" manually to diagnose.',
+      true,
+    );
+  }
+
   /** Build a terminal streaming error chunk instead of throwing mid-stream. */
   private buildStreamErrorResponse(
     message: string,
@@ -714,6 +746,7 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
     usage?: ModelUsage,
     code?: string | number,
     details?: unknown,
+    type?: string,
   ): ModelCompletionResponse {
     return {
       id: responseId,
@@ -724,6 +757,7 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
       usage,
       error: {
         message,
+        ...(type === undefined ? {} : { type }),
         ...(code === undefined ? {} : { code }),
         ...(details === undefined ? {} : { details }),
       },

@@ -23,6 +23,7 @@
  * **STT (Speech-to-Text):**
  * - {@link DeepgramStreamingSTT} — WebSocket streaming via Deepgram Nova-2. Lowest latency.
  * - {@link ElevenLabsStreamingSTT} — Chunked REST via ElevenLabs Scribe. Uses same key as TTS.
+ * - {@link OpenAIRealtimeTranscriptionSTT}: WebSocket streaming via OpenAI's Realtime API in transcription mode, keyed by item id, with a connection rollover for long sessions.
  *
  * **TTS (Text-to-Speech):**
  * - {@link ElevenLabsStreamingTTS} — WebSocket streaming via ElevenLabs. High quality voices.
@@ -129,6 +130,11 @@ export {
   type DeepgramStreamingSTTConfig,
   ElevenLabsStreamingSTT,
   type ElevenLabsStreamingSTTConfig,
+  OpenAIRealtimeTranscriptionSTT,
+  type OpenAIRealtimeTranscriptionSTTConfig,
+  type OpenAIRealtimeTranscriptionRollover,
+  type OpenAIRealtimeRolloverRequest,
+  type OpenAIRealtimeTurnDetection,
   ElevenLabsStreamingTTS,
   type ElevenLabsStreamingTTSConfig,
   DeepgramAuraStreamingTTS,
@@ -180,6 +186,7 @@ export { AudioRingBuffer, type AudioRingBufferOptions } from './AudioRingBuffer.
 export { InputSilenceWatch, inputLevelDb, type InputSilenceWatchOptions } from './inputLevel.js';
 export {
   TranscriptDedupe,
+  normalizeTranscriptText,
   type TranscriptObservation,
   type DedupeResult,
 } from './TranscriptDedupe.js';
@@ -194,6 +201,7 @@ export {
   type LedgerItem,
   type TranscriptLedgerOptions,
 } from './transcriptLedger.js';
+export { phraseHeard, type HeardLine, type PhraseHeardOptions, type PhraseHeardResult } from './phraseHeard.js';
 export {
   VoiceMetricsReporter,
   type VoiceMetricEvent,
@@ -201,7 +209,17 @@ export {
 } from './VoiceMetricsReporter.js';
 export {
   createVoiceProvidersFromEnv,
+  createSttChainFromEnv,
   NoVoiceProvidersAvailableError,
   type VoiceProviderEnvConfig,
   type VoiceProviderBundle,
+  type SttProviderEnvConfig,
+  type SttProviderBundle,
+  createSttChain,
+  sttEntryPricePerMinute,
+  parseSttEntry,
+  STT_CHAIN_VENDORS,
+  type SttChainEntryOptions,
+  type SttChainVendor,
+  type SttEntry,
 } from './env-constructor.js';
