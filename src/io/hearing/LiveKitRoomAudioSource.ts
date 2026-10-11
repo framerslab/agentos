@@ -196,8 +196,11 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
   private rtc: LiveKitRtcModule | undefined;
   private reader: LiveKitAudioStreamReaderLike | undefined;
   private readingTrack: LiveKitTrackLike | undefined;
+  /** The track whose stream ended last; it is not reopened unless subscribed again. */
+  private endedTrack: LiveKitTrackLike | undefined;
   private nextTimestamp = 0;
   private isClosed = false;
+  private started = false;
   private listening = false;
   private wake: (() => void) | undefined;
 
@@ -218,8 +221,25 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
     return this.isClosed;
   }
 
+  /**
+   * The source's frames, for its one reader. Leaving a `for await` loop early
+   * (the iterator's `return()`) closes the source.
+   *
+   * @throws {Error} When called a second time: two readers would split one
+   *   stream's frames between them.
+   */
   [Symbol.asyncIterator](): AsyncIterator<AudioFrame> {
-    return { next: () => this.next() };
+    if (this.started) {
+      throw new Error('LiveKitRoomAudioSource: a source has one reader; iterate it once');
+    }
+    this.started = true;
+    return {
+      next: () => this.next(),
+      return: async () => {
+        this.close();
+        return { done: true, value: undefined };
+      },
+    };
   }
 
   /** Stops reading: cancels the stream, ends the iteration and leaves the room's events. Idempotent. */
@@ -253,8 +273,9 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
       const result = await reader.read();
       if (this.isClosed) return { done: true, value: undefined };
       if (result.done || !result.value) {
-        this.close();
-        return { done: true, value: undefined };
+        // The track went away (unpublished, unsubscribed or ended): wait for its successor.
+        this.detach(reader);
+        continue;
       }
       return { done: false, value: this.toFrame(result.value) };
     }
@@ -281,7 +302,7 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
     if (!participant) return undefined;
     for (const publication of participant.trackPublications.values()) {
       const track = publication.track;
-      if (!isMicrophone(publication, rtc) || !track) continue;
+      if (!isMicrophone(publication, rtc) || !track || track === this.endedTrack) continue;
       const stream = new rtc.AudioStream(track, {
         sampleRate: this.options.sampleRate,
         numChannels: 1,
@@ -292,6 +313,18 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
       return this.reader;
     }
     return undefined;
+  }
+
+  private detach(reader: LiveKitAudioStreamReaderLike): void {
+    if (this.reader !== reader) return;
+    this.endedTrack = this.readingTrack;
+    this.reader = undefined;
+    this.readingTrack = undefined;
+    try {
+      reader.releaseLock();
+    } catch {
+      // A reader of a finished stream may refuse to release; nothing is held.
+    }
   }
 
   private waitForTrack(): Promise<void> {
@@ -313,6 +346,7 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
   ): void => {
     if (participant.identity !== this.options.participantIdentity) return;
     if (!this.rtc || !isMicrophone(publication, this.rtc)) return;
+    if (track === this.endedTrack) this.endedTrack = undefined;
     this.wakeUp();
   };
 
