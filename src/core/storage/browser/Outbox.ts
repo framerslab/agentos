@@ -55,17 +55,20 @@ const lastFlush = new WeakMap<KeyValueStore, Map<string, Promise<void>>>();
 
 /**
  * An outbox over a key-value store. Its entries are the store's values under the prefix, so two outboxes made over
- * the same store object and prefix are one outbox: they hold the same entries, and their flushes take turns.
+ * the same store object and prefix are one outbox: they hold the same entries, and their flushes take turns. Turns
+ * are kept per store object, and `namespaced` makes a new one at each call: make the outboxes of one prefix over one
+ * namespaced store, since outboxes over two hold the same entries and take no turns, as two tabs do.
  *
  * An entry is sent until the server confirms it, so the server can see one twice: a confirmation lost on the way, or
  * the page open in two tabs, whose flushes take no turns with each other. Between two tabs the order can break too:
  * one tab can send an earlier change after the other has sent a later one, and a retry in one tab puts back a change
  * the other has already sent, which is then sent again after the later one. Make every change safe to apply twice
- * and out of order (an entry's `createdAt` lets the server tell an older change from a newer one), or let one tab
- * flush at a time.
+ * and out of order, or let one tab flush at a time.
  *
  * Entries are ordered by the clock's time when they were held, then by the order they were held in on this page;
- * a clock that is set back puts a later change first.
+ * a clock that is set back puts a later change first. An entry's `createdAt` is that time, so it cannot order every
+ * change for the server: two tabs can hold changes in the same millisecond, and a clock set back gives a later change
+ * an earlier time. A server that must refuse a stale change compares a version it assigns itself.
  */
 export class Outbox {
   private readonly prefix: string;
@@ -103,7 +106,10 @@ export class Outbox {
     return entries;
   }
 
-  /** True when a change about `subject` is held. */
+  /**
+   * True when a change about `subject` is held. Each call reads every held change, so for many subjects read
+   * `pending()` once and take the subjects from it.
+   */
   async waitingFor(subject: string): Promise<boolean> {
     return (await this.pending()).some((entry) => entry.subject === subject);
   }

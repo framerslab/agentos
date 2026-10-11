@@ -1,6 +1,7 @@
 /**
  * @fileoverview A key-value store for a page: values are structured-cloneable, keys are listed and removed by
- * prefix. `namespaced` scopes one to a prefix, so two users of one browser never read each other's keys.
+ * prefix. `namespaced` scopes one to a prefix, which keeps two users of one browser apart when neither's prefix
+ * begins with the other's.
  * @module agentos/core/storage/browser/KeyValueStore
  */
 
@@ -55,7 +56,11 @@ export class MemoryKeyValueStore implements KeyValueStore {
   }
 }
 
-/** A store whose keys all begin with `prefix`; its own keys are answered without it. */
+/**
+ * A store whose keys all begin with `prefix`; its own keys are answered without it. Two namespaces stay apart only
+ * when neither prefix begins with the other, so end each with a character no id holds: the keys under `anna` are
+ * among those under `ann`, while `ann/` and `anna/` never meet. Each call makes a new store object.
+ */
 export function namespaced(store: KeyValueStore, prefix: string): KeyValueStore {
   return {
     get memoryOnly() {
