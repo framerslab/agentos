@@ -31,7 +31,7 @@ export type { InstallCheckResult } from '../../../../safety/sandbox/subprocess/t
  * Extends {@link CLISubprocessBridge} to implement:
  * - Flag assembly: `-p`, `--output-format`, `-m`
  * - System prompt via temp file + `GEMINI_SYSTEM_MD` env var
- * - Error classification: auth, rate-limit, timeout, quota errors
+ * - Error classification: caller abort, timeout, auth, rate-limit and quota errors
  * - Stream event parsing: Gemini's stream-json format
  */
 export class GeminiCLIBridge extends CLISubprocessBridge {
@@ -172,7 +172,22 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
 
   protected classifyError(error: any): GeminiCLIProviderError {
     const stderr: string = error.stderr ?? '';
+    /* The CLI's wording varies in case ("Authentication failed"), so stderr is matched lowercased. */
+    const text = String(stderr).toLowerCase();
     const exitCode = error.exitCode;
+
+    /* Cancelled by the caller. execa sets isCanceled when the abortSignal it
+     * was given as cancelSignal fires; the signal that then ends the process
+     * sets isTerminated too, so this is checked before the timeout. */
+    if (error.isCanceled) {
+      return new GeminiCLIProviderError(
+        'Gemini CLI call aborted by the caller.',
+        'REQUEST_ABORTED',
+        'The call was cancelled through its abort signal. Send it again if it is still needed.',
+        false,
+        { exitCode, stderr },
+      );
+    }
 
     /* Timeout */
     if (error.timedOut || error.isTerminated) {
@@ -186,7 +201,7 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
     }
 
     /* Auth errors */
-    if (stderr.includes('not logged in') || stderr.includes('authentication') || stderr.includes('unauthorized') || stderr.includes('sign in')) {
+    if (text.includes('not logged in') || text.includes('authentication') || text.includes('unauthorized') || text.includes('sign in')) {
       return new GeminiCLIProviderError(
         'Gemini CLI is installed but not logged in.',
         'NOT_AUTHENTICATED',
@@ -197,7 +212,7 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
     }
 
     /* Rate limit / quota */
-    if (stderr.includes('rate limit') || stderr.includes('quota') || stderr.includes('too many requests') || stderr.includes('429') || stderr.includes('RESOURCE_EXHAUSTED')) {
+    if (text.includes('rate limit') || text.includes('quota') || text.includes('too many requests') || text.includes('429') || text.includes('resource_exhausted')) {
       return new GeminiCLIProviderError(
         'Gemini CLI rate limit or quota reached.',
         'RATE_LIMITED',
@@ -208,7 +223,7 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
     }
 
     /* Context too long */
-    if (stderr.includes('context') && (stderr.includes('too long') || stderr.includes('token limit') || stderr.includes('exceeds'))) {
+    if (text.includes('context') && (text.includes('too long') || text.includes('token limit') || text.includes('exceeds'))) {
       return new GeminiCLIProviderError(
         'Conversation exceeds model context window.',
         'CONTEXT_TOO_LONG',

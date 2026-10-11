@@ -12,6 +12,10 @@ import { CLISubprocessError } from '../../../../safety/sandbox/subprocess/errors
  * All recognized error codes for the Gemini CLI provider.
  * Combines generic CLI error codes with Gemini-specific ones.
  *
+ * The code the HTTP providers give a caller's abort:
+ * - `REQUEST_ABORTED` — the call was cancelled through its abort signal;
+ *   `isRetryableError()` never counts it as retryable
+ *
  * Gemini-specific:
  * - `TOOL_PARSE_FAILED` — XML tool_call regex didn't match expected format
  * - `EMBEDDINGS_NOT_SUPPORTED` — Gemini CLI does not support embeddings
@@ -25,6 +29,7 @@ export type GeminiCLIErrorCode =
   | 'CRASHED'
   | 'RATE_LIMITED'
   | 'CONTEXT_TOO_LONG'
+  | 'REQUEST_ABORTED'
   | 'TOOL_PARSE_FAILED'
   | 'EMBEDDINGS_NOT_SUPPORTED'
   | 'UNKNOWN';

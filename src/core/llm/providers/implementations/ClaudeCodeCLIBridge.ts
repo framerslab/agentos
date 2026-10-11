@@ -25,7 +25,7 @@ export type { InstallCheckResult } from '../../../../safety/sandbox/subprocess/t
  *
  * Extends {@link CLISubprocessBridge} to implement:
  * - Flag assembly: `--bare`, `-p`, `--system-prompt`, `--json-schema`, `--max-turns`
- * - Error classification: auth, rate-limit, timeout, ENOENT, EACCES, context length
+ * - Error classification: caller abort, timeout, auth, rate-limit, context length, ENOENT, EACCES
  * - Stream event parsing: `content_block_delta`, `result`, `error`, `system` events
  * - Auth check: uses `--bare --max-turns 1` for lightweight health ping
  */
@@ -118,7 +118,22 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
 
   protected classifyError(error: any): ClaudeCodeProviderError {
     const stderr: string = error.stderr ?? '';
+    /* The CLI's wording varies in case ("Authentication failed"), so stderr is matched lowercased. */
+    const text = String(stderr).toLowerCase();
     const exitCode = error.exitCode;
+
+    /* Cancelled by the caller. execa sets isCanceled when the abortSignal it
+     * was given as cancelSignal fires; the signal that then ends the process
+     * sets isTerminated too, so this is checked before the timeout. */
+    if (error.isCanceled) {
+      return new ClaudeCodeProviderError(
+        'Claude Code CLI call aborted by the caller.',
+        'REQUEST_ABORTED',
+        'The call was cancelled through its abort signal. Send it again if it is still needed.',
+        false,
+        { exitCode, stderr },
+      );
+    }
 
     /* Timeout */
     if (error.timedOut || error.isTerminated) {
@@ -132,7 +147,7 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     }
 
     /* Auth errors */
-    if (stderr.includes('not logged in') || stderr.includes('authentication') || stderr.includes('unauthorized')) {
+    if (text.includes('not logged in') || text.includes('authentication') || text.includes('unauthorized')) {
       return new ClaudeCodeProviderError(
         'Claude Code is installed but not logged in.',
         'NOT_AUTHENTICATED',
@@ -143,7 +158,7 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     }
 
     /* Rate limit */
-    if (stderr.includes('rate limit') || stderr.includes('too many requests') || stderr.includes('429')) {
+    if (text.includes('rate limit') || text.includes('too many requests') || text.includes('429')) {
       return new ClaudeCodeProviderError(
         'Claude Code subscription rate limit reached.',
         'RATE_LIMITED',
@@ -154,7 +169,7 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     }
 
     /* Context too long */
-    if (stderr.includes('context') && (stderr.includes('too long') || stderr.includes('token limit'))) {
+    if (text.includes('context') && (text.includes('too long') || text.includes('token limit'))) {
       return new ClaudeCodeProviderError(
         'Conversation exceeds model context window.',
         'CONTEXT_TOO_LONG',
