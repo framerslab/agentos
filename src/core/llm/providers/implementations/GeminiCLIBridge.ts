@@ -175,9 +175,12 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
       };
     }
 
-    /* Error event */
+    /* Error event. The CLI gives each a severity; after a warning (a loop it
+     * stopped, a blocked agent step) the run goes on to its result, so a
+     * warning passes on as a system event and does not end the stream. */
     if (raw.type === 'error') {
-      return { type: 'error', error: raw.error?.message ?? raw.message ?? 'Unknown error' };
+      const message = raw.error?.message ?? raw.message ?? 'Unknown error';
+      return raw.severity === 'warning' ? { type: 'system', message } : { type: 'error', error: message };
     }
 
     /* System events */
