@@ -57,8 +57,12 @@ const lastFlush = new WeakMap<KeyValueStore, Map<string, Promise<void>>>();
  * An outbox over a key-value store. Its entries are the store's values under the prefix, so two outboxes made over
  * the same store object and prefix are one outbox: they hold the same entries, and their flushes take turns.
  *
- * An entry is sent until the server confirms it, so the server can see one twice (a confirmation lost on the way,
- * or the page open in two tabs, which take no turns with each other): make every change safe to apply again.
+ * An entry is sent until the server confirms it, so the server can see one twice: a confirmation lost on the way, or
+ * the page open in two tabs, whose flushes take no turns with each other. Between two tabs the order can break too:
+ * one tab can send an earlier change after the other has sent a later one, and a retry in one tab puts back a change
+ * the other has already sent, which is then sent again after the later one. Make every change safe to apply twice
+ * and out of order (an entry's `createdAt` lets the server tell an older change from a newer one), or let one tab
+ * flush at a time.
  *
  * Entries are ordered by the clock's time when they were held, then by the order they were held in on this page;
  * a clock that is set back puts a later change first.
