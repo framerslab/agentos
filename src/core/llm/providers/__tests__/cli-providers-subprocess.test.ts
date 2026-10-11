@@ -165,6 +165,16 @@ const WEATHER_TOOL = {
   },
 };
 
+/** get_weather as streamText() takes it. */
+const STREAM_TEXT_TOOLS = {
+  get_weather: { description: WEATHER_TOOL.function.description, parameters: WEATHER_TOOL.function.parameters },
+};
+
+/** The text of each text part of a streamText() stream, in order. */
+function textPartsOf(parts: StreamPart[]): string[] {
+  return parts.flatMap((part) => (part.type === 'text' ? [part.text] : []));
+}
+
 /** The stream-json lines each CLI writes for the cases below. */
 interface StreamFixture {
   /** A reply of "Hello", ending with the CLI's success result. */
@@ -967,7 +977,10 @@ describe('ClaudeCodeProvider: a non-streaming call whose result Claude Code flag
  * streamText() and the StreamingReconstructor build a reply's text from the
  * chunks' responseTextDelta alone (the step loop of src/api/streamText.ts,
  * applyChunk in src/core/llm/streaming/StreamingReconstructor.ts), so a text
- * reply reaches them only through a text delta.
+ * reply reaches them only through a text delta. Whether Claude Code writes
+ * text deltas of its own before the reply in such a run (text the model
+ * writes before it, or whitespace) the SDK's types do not say; the cases
+ * below hold the provider to a reply that reaches the consumer once either way.
  */
 describe('ClaudeCodeProvider: a reply Claude Code returns as structured output', () => {
   const cases = [
@@ -1043,45 +1056,90 @@ describe('ClaudeCodeProvider: a reply Claude Code returns as structured output',
   });
 
   const textReply = { response_type: 'text', text: 'It is sunny in Paris.' };
+  /** A text delta as Claude Code writes it with --include-partial-messages. */
+  const textDelta = (text: string) => ({
+    type: 'stream_event',
+    event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    parent_tool_use_id: null,
+    session_id: 's1',
+  });
 
-  it.each([
-    { name: 'that came only in structured_output', lines: [resultLine(textReply)] },
-    {
-      // The reply's text streamed as deltas, and the same reply in structured_output.
-      name: 'that the CLI also wrote as text deltas, once',
-      lines: [
-        {
-          type: 'stream_event',
-          event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: textReply.text } },
-          parent_tool_use_id: null,
-          session_id: 's1',
-        },
-        resultLine(textReply),
-      ],
-    },
-  ])('streamText() with tools resolves a text reply $name', async ({ lines }) => {
+  /**
+   * streamText() with get_weather on the claude-code-cli provider, over a CLI
+   * that writes `lines` and exits 0: the stream's parts, its text, and the
+   * arguments of each run of the CLI.
+   */
+  async function streamTextWithTool(lines: unknown[]) {
     const runs: string[][] = [];
     stubCli('claude', (args) => {
       runs.push(args);
       return cliRun(lines, 0);
     });
-
     const result = streamText({
       provider: 'claude-code-cli',
       model: 'claude-sonnet-4-6',
       prompt: 'What is the weather in Paris?',
-      tools: {
-        get_weather: { description: WEATHER_TOOL.function.description, parameters: WEATHER_TOOL.function.parameters },
-      },
+      tools: STREAM_TEXT_TOOLS,
     });
     const parts: StreamPart[] = [];
     for await (const part of result.fullStream) parts.push(part);
+    return { runs, parts, text: await result.text };
+  }
+
+  it.each([
+    { name: 'that came only in structured_output', lines: [resultLine(textReply)], texts: [textReply.text] },
+    {
+      // The reply's text streamed as deltas, and the same reply in structured_output.
+      name: 'that the CLI also wrote as text deltas, once',
+      lines: [textDelta(textReply.text), resultLine(textReply)],
+      texts: [textReply.text],
+    },
+    {
+      // No one delta is the reply, and together they hold it.
+      name: 'that the CLI also wrote in two text deltas, once',
+      lines: [textDelta('It is sunny '), textDelta('in Paris.'), resultLine(textReply)],
+      texts: ['It is sunny ', 'in Paris.'],
+    },
+    {
+      name: 'that the CLI also wrote as text deltas after other text, once',
+      lines: [textDelta('Let me check the weather. '), textDelta(textReply.text), resultLine(textReply)],
+      texts: ['Let me check the weather. ', textReply.text],
+    },
+    {
+      // Text deltas that are not the reply, which came only in structured_output.
+      name: 'after a text delta of whitespace',
+      lines: [textDelta('\n\n'), resultLine(textReply)],
+      texts: ['\n\n', textReply.text],
+    },
+    {
+      name: 'after a text delta the model wrote before it',
+      lines: [textDelta('Let me check the weather. '), resultLine(textReply)],
+      texts: ['Let me check the weather. ', textReply.text],
+    },
+  ])('streamText() with tools resolves a text reply $name', async ({ lines, texts }) => {
+    const { runs, parts, text } = await streamTextWithTool(lines);
 
     // streamText() ran the CLI once, with the schema: the case under test was reached.
     expect(runs).toHaveLength(1);
     expect(runs[0]).toContain('--json-schema');
-    expect(parts.flatMap((part) => (part.type === 'text' ? [part.text] : []))).toEqual([textReply.text]);
-    expect(await result.text).toBe(textReply.text);
+    expect(textPartsOf(parts)).toEqual(texts);
+    expect(text).toBe(texts.join(''));
+  });
+
+  it('streamText() with tools passes on a tool call in structured_output after a text delta, with no text of its own', async () => {
+    const { runs, parts, text } = await streamTextWithTool([
+      textDelta('Let me check the weather. '),
+      // The first case's reply: get_weather for Paris.
+      resultLine(cases[0].structured),
+    ]);
+
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toContain('--json-schema');
+    expect(textPartsOf(parts)).toEqual(['Let me check the weather. ']);
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([
+      { type: 'tool-call', toolName: 'get_weather', args: { city: 'Paris' } },
+    ]);
+    expect(text).toBe('Let me check the weather. ');
   });
 
   it("ends with the abort chunk (error.type 'abort') when the caller aborts while the consumer holds the reply's text delta", async () => {
