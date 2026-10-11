@@ -96,6 +96,14 @@ describe('LiveKitStreamTransport', () => {
     transport.close();
   });
 
+  it('refuses to send a control message when the room has no local participant', async () => {
+    const room = new FakeRoom();
+    Object.defineProperty(room, 'localParticipant', { value: undefined });
+    const { transport } = open(room);
+    await expect(transport.sendControl({ type: 'agent_thinking' })).rejects.toThrow(/no local participant/);
+    transport.close();
+  });
+
   it('emits a JSON message the participant sends on its topic, and ignores other senders', async () => {
     const room = new FakeRoom();
     const { transport, messages } = open(room);
@@ -127,6 +135,25 @@ describe('LiveKitStreamTransport', () => {
     ]);
     expect(transport.state).toBe('open');
     transport.close();
+  });
+
+  it('writes an error as a console warning when nothing listens for it, and stays open', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const room = new FakeRoom();
+      room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+      const transport = new LiveKitStreamTransport({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
+      room.textHandlers.get('agentos.voice')!({ readAll: async () => 'not json' }, { identity: 'user-1' });
+      await settle();
+      expect(warn).toHaveBeenCalledWith(
+        '[livekit-stream-transport] error (no listener attached):',
+        expect.stringContaining('failed to parse inbound text message as JSON')
+      );
+      expect(transport.state).toBe('open');
+      transport.close();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('refuses to send audio', async () => {
@@ -180,6 +207,30 @@ describe('LiveKitStreamTransport', () => {
     await settle();
     expect(closes()).toBe(1);
     expect(transport.state).toBe('closed');
+  });
+
+  it("reports a missing @livekit/rtc-node as 'error', then closes", async () => {
+    vi.doMock('@livekit/rtc-node', () => {
+      throw new Error("Cannot find package '@livekit/rtc-node'");
+    });
+    try {
+      const room = new FakeRoom();
+      room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+      // No rtc module is given, so the transport's audio source imports the peer at its first read.
+      const transport = new LiveKitStreamTransport({ room, participantIdentity: 'user-1', sampleRate: 24_000 });
+      const events: string[] = [];
+      transport.on('error', (err: Error) => events.push(`error: ${err.message}`));
+      transport.on('close', () => events.push('close'));
+      await vi.waitFor(() => expect(transport.state).toBe('closed'), { timeout: 10_000 });
+      expect(events).toEqual([
+        'error: @livekit/rtc-node is required for the LiveKit room audio source and transport. Install it: npm install @livekit/rtc-node',
+        'close',
+      ]);
+      expect(room.textHandlers.size).toBe(0);
+      expect(room.listenerCount('trackSubscribed')).toBe(0);
+    } finally {
+      vi.doUnmock('@livekit/rtc-node');
+    }
   });
 
   it('throws when its topic is already taken', () => {
