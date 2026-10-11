@@ -11,9 +11,13 @@ const { execaMock } = vi.hoisted(() => ({ execaMock: vi.fn() }));
 vi.mock('execa', () => ({ execa: execaMock }));
 
 import type { IProvider, ModelCompletionOptions, ModelCompletionResponse } from '../IProvider';
+import { ClaudeCodeCLIBridge } from '../implementations/ClaudeCodeCLIBridge';
 import { ClaudeCodeProvider } from '../implementations/ClaudeCodeProvider';
+import { GeminiCLIBridge } from '../implementations/GeminiCLIBridge';
 import { GeminiCLIProvider } from '../implementations/GeminiCLIProvider';
 import { isRetryableError } from '../../../../api/generateText';
+import type { CLISubprocessBridge } from '../../../../safety/sandbox/subprocess/CLISubprocessBridge';
+import type { StreamEvent } from '../../../../safety/sandbox/subprocess/types';
 
 /** The fields of an execa 10 failure that the bridges read. */
 interface ExecaFailure {
@@ -486,5 +490,53 @@ describe('ClaudeCodeProvider: an error result with no result text', () => {
         message: 'Claude Code returned an error: error_during_execution: Request timed out; Retries used up',
       },
     });
+  });
+});
+
+/**
+ * StreamEvent is exported (@framers/agentos/sandbox/subprocess), so a host can
+ * read a bridge's stream itself. Before 0.13.41 an error result's `result` was
+ * the CLI's own result text, '' when it wrote none. 0.13.41 put the failure's
+ * message there, which a host that does not read `isError` takes for a reply;
+ * `result` keeps the CLI's own text, and the message has a field of its own.
+ */
+describe('A direct consumer of a CLI bridge: a result the CLI flags as an error', () => {
+  it.each<{ name: string; binary: string; create: () => CLISubprocessBridge; line: unknown; expected: object }>([
+    {
+      name: 'GeminiCLIBridge, the result the CLI writes before a failed exit',
+      binary: 'gemini',
+      create: () => new GeminiCLIBridge(),
+      line: {
+        type: 'result',
+        timestamp: '2026-10-10T12:00:00.000Z',
+        status: 'error',
+        error: { type: 'FatalAuthenticationError', message: 'Request had invalid authentication credentials.' },
+      },
+      expected: { type: 'result', result: '', isError: true, error: 'Request had invalid authentication credentials.' },
+    },
+    {
+      name: 'ClaudeCodeCLIBridge, an error subtype with no result text',
+      binary: 'claude',
+      create: () => new ClaudeCodeCLIBridge(),
+      line: { type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: 2, errors: ['Reached the turn limit'], session_id: 's1' },
+      expected: { type: 'result', result: '', isError: true, error: 'error_max_turns: Reached the turn limit' },
+    },
+    {
+      name: 'ClaudeCodeCLIBridge, an API error whose result text is the error',
+      binary: 'claude',
+      create: () => new ClaudeCodeCLIBridge(),
+      line: { type: 'result', subtype: 'success', is_error: true, result: 'API Error: 401 invalid x-api-key', session_id: 's1' },
+      expected: { type: 'result', result: 'API Error: 401 invalid x-api-key', isError: true, error: 'API Error: 401 invalid x-api-key' },
+    },
+  ])('$name: result as before 0.13.41, the message in error', async ({ binary, create, line, expected }) => {
+    stubCli(binary, () => cliRun([line], 1));
+    const events: StreamEvent[] = [];
+    const reading = (async () => {
+      for await (const event of create().stream({ prompt: 'Hello' })) events.push(event);
+    })();
+
+    await expect(reading).rejects.toMatchObject({ code: 'CRASHED' });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject(expected);
   });
 });
