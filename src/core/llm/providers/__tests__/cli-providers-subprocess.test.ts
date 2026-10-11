@@ -6,6 +6,7 @@
  * process), `exitCode`, `signal` and `stderr`.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Readable } from 'node:stream';
 
 const { execaMock } = vi.hoisted(() => ({ execaMock: vi.fn() }));
 vi.mock('execa', () => ({ execa: execaMock }));
@@ -454,6 +455,70 @@ describe.each(STREAM_PROVIDERS)('$name: a consumer that stops reading the stream
       expect(run.subprocess.kill).toHaveBeenCalled();
       expect(chunks).toHaveLength(1);
       expect(chunks[0].isFinal).toBe(false);
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+});
+
+/**
+ * A run the CLI ended before the bridge read its last output, as execa 10
+ * settles it. Node's stream for the pipe then holds the rest of the output and
+ * its end, and emits 'end' on the tick after the read that empties it; execa
+ * settles the run once the process has exited and its stdio streams have
+ * finished (waitForSubprocessResult in lib/resolve/wait-subprocess.js, which
+ * waits on lib/resolve/stdio.js and lib/resolve/wait-stream.js). Here stdout
+ * is a Readable that holds the CLI's lines and their end, and the run settles
+ * with `exitCode` when it emits 'end'. As in unobservedRun, the run is a plain
+ * object, so only the code under test can handle its rejection.
+ */
+function exitedRun(lines: unknown[], exitCode: number) {
+  const stdout = new Readable({ read() {} });
+  stdout.push(lines.map((line) => `${JSON.stringify(line)}\n`).join(''));
+  stdout.push(null);
+  const outcome = new Promise<unknown>((resolve, reject) => {
+    stdout.once('end', () =>
+      exitCode === 0
+        ? resolve({ failed: false, exitCode: 0, stdout: '', stderr: '' })
+        : reject(execaError({ exitCode })),
+    );
+  });
+  return {
+    then: (onFulfilled?: any, onRejected?: any) => outcome.then(onFulfilled, onRejected),
+    catch: (onRejected?: any) => outcome.catch(onRejected),
+    finally: (onFinally?: any) => outcome.finally(onFinally),
+    stdout,
+    kill: vi.fn(),
+  };
+}
+
+describe.each(STREAM_PROVIDERS)('$name: a consumer that waits on each chunk', ({ binary, model, create, fixture }) => {
+  it('ends with the classified failed exit, which is no unhandled rejection while the consumer waits', async () => {
+    // The CLI wrote its reply and its result line and exited 1 before the
+    // bridge read its stdout.
+    stubCli(binary, () => exitedRun(fixture.hello, 1));
+    const provider = create();
+    await provider.initialize({});
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+
+    try {
+      const chunks: ModelCompletionResponse[] = [];
+      for await (const chunk of provider.generateCompletionStream(model, HELLO, {})) {
+        chunks.push(chunk);
+        // A consumer that hands each chunk on and waits for the write: the
+        // microtasks of the turn run out while the stream waits at its yield.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      // While a test listens for unhandledRejection, Vitest leaves such a
+      // rejection to it (runtime/moduleRunner/errorCatcher.ts in vitest 5.0.3),
+      // so this listener is where it shows.
+      expect(unhandled).not.toHaveBeenCalled();
+      const finals = chunks.filter((chunk) => chunk.isFinal);
+      expect(finals).toHaveLength(1);
+      expect(finals[0].choices).toEqual([]);
+      expect(finals[0].error).toMatchObject({ code: 'CRASHED' });
     } finally {
       process.off('unhandledRejection', unhandled);
     }
