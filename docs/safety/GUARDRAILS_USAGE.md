@@ -100,13 +100,13 @@ class CostCeilingGuardrail implements IGuardrailService {
   config = { evaluateStreamingChunks: true };
 
   private readonly maxTokens = 1000;
-  // One count per response stream
-  private readonly tokenCounts = new Map<string, number>();
+  // Characters per response stream, and when each stream was last seen
+  private readonly streams = new Map<string, { chars: number; seenAt: number }>();
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
     // The stream's final chunk ends its count
     if (chunk.isFinal) {
-      this.tokenCounts.delete(chunk.streamId);
+      this.streams.delete(chunk.streamId);
       return null;
     }
 
@@ -115,12 +115,24 @@ class CostCeilingGuardrail implements IGuardrailService {
       return null;
     }
 
+    const now = Date.now();
+    let stream = this.streams.get(chunk.streamId);
+    if (!stream) {
+      // A stream that ended without a final chunk left its entry: drop the ones idle for ten minutes
+      for (const [id, idle] of this.streams) {
+        if (now - idle.seenAt > 600_000) this.streams.delete(id);
+      }
+      stream = { chars: 0, seenAt: now };
+      this.streams.set(chunk.streamId, stream);
+    }
+    stream.chars += chunk.textDelta.length;
+    stream.seenAt = now;
+
     // Estimate tokens (rough: 1 token ≈ 4 chars)
-    const tokensUsed = (this.tokenCounts.get(chunk.streamId) ?? 0) + Math.ceil(chunk.textDelta.length / 4);
-    this.tokenCounts.set(chunk.streamId, tokensUsed);
+    const tokensUsed = Math.ceil(stream.chars / 4);
 
     if (tokensUsed > this.maxTokens) {
-      this.tokenCounts.delete(chunk.streamId);
+      this.streams.delete(chunk.streamId);
       // "Change mind" - stop generating mid-stream
       return {
         action: GuardrailAction.BLOCK,
@@ -135,7 +147,7 @@ class CostCeilingGuardrail implements IGuardrailService {
 }
 ```
 
-The guardrail keeps its count per `streamId`, so each response is measured on its own, and the stream's final chunk, which every output guardrail is called for, ends the count. It sets no `maxStreamingEvaluations`: once a stream reaches that limit, the dispatcher passes its remaining chunks on without calling the guardrail, and the count would stop short of the budget.
+The guardrail counts characters per `streamId`, so each response is measured on its own, and the stream's final chunk, which every output guardrail is called for, ends the count. A stream can end without a final chunk (another guardrail blocked it, or it failed), so an entry left idle for ten minutes is dropped when the next stream starts. It sets no `maxStreamingEvaluations`: once a stream reaches that limit, the dispatcher stops calling the guardrail on the stream's text deltas (it still calls it on the final chunk), and the count would stop short of the budget.
 
 ### Example 2: Real-Time PII Redaction
 
@@ -216,22 +228,31 @@ class ContentPolicyGuardrail implements IGuardrailService {
     // ... more patterns
   ];
 
-  // The text each response stream has produced so far
-  private readonly streamedText = new Map<string, string>();
+  // The text each response stream has produced so far, kept as Example 1 keeps its counts
+  private readonly streams = new Map<string, { text: string; seenAt: number }>();
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
     if (chunk.isFinal) {
-      this.streamedText.delete(chunk.streamId);
+      this.streams.delete(chunk.streamId);
       return null;
     }
 
     if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA && chunk.textDelta) {
-      const text = (this.streamedText.get(chunk.streamId) ?? '') + chunk.textDelta;
-      this.streamedText.set(chunk.streamId, text);
+      const now = Date.now();
+      let stream = this.streams.get(chunk.streamId);
+      if (!stream) {
+        for (const [id, idle] of this.streams) {
+          if (now - idle.seenAt > 600_000) this.streams.delete(id);
+        }
+        stream = { text: '', seenAt: now };
+        this.streams.set(chunk.streamId, stream);
+      }
+      stream.text += chunk.textDelta;
+      stream.seenAt = now;
 
       for (const pattern of this.prohibitedPatterns) {
-        if (pattern.test(text)) {
-          this.streamedText.delete(chunk.streamId);
+        if (pattern.test(stream.text)) {
+          this.streams.delete(chunk.streamId);
           return {
             action: GuardrailAction.BLOCK,
             reason: 'Response contains content that violates our usage policy.',
