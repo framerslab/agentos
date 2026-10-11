@@ -17,6 +17,7 @@ import { ClaudeCodeProvider } from '../implementations/ClaudeCodeProvider';
 import { GeminiCLIBridge } from '../implementations/GeminiCLIBridge';
 import { GeminiCLIProvider } from '../implementations/GeminiCLIProvider';
 import { isRetryableError } from '../../../../api/generateText';
+import { streamText, type StreamPart } from '../../../../api/streamText';
 import type { CLISubprocessBridge } from '../../../../safety/sandbox/subprocess/CLISubprocessBridge';
 import type { StreamEvent } from '../../../../safety/sandbox/subprocess/types';
 
@@ -962,6 +963,11 @@ describe('ClaudeCodeProvider: a non-streaming call whose result Claude Code flag
  * CLI as --json-schema, sdk.mjs). Such a turn ends with no trailing assistant
  * message (the note on end-turn tool sessions in sdk.d.ts), and the SDK does
  * not say what the CLI writes in `result` then; here it is empty.
+ *
+ * streamText() and the StreamingReconstructor build a reply's text from the
+ * chunks' responseTextDelta alone (the step loop of src/api/streamText.ts,
+ * applyChunk in src/core/llm/streaming/StreamingReconstructor.ts), so a text
+ * reply reaches them only through a text delta.
  */
 describe('ClaudeCodeProvider: a reply Claude Code returns as structured output', () => {
   const cases = [
@@ -979,11 +985,13 @@ describe('ClaudeCodeProvider: a reply Claude Code returns as structured output',
           ],
         },
       },
+      deltas: [],
     },
     {
       name: 'a text reply',
       structured: { response_type: 'text', text: 'It is sunny in Paris.' },
       expected: { finishReason: 'stop', message: { content: 'It is sunny in Paris.' } },
+      deltas: ['It is sunny in Paris.'],
     },
   ];
   const resultLine = (structured: object) => ({
@@ -1012,7 +1020,7 @@ describe('ClaudeCodeProvider: a reply Claude Code returns as structured output',
     expect(runs[0]).toContain('--json-schema');
   });
 
-  it.each(cases)('generateCompletionStream() ends with $name', async ({ structured, expected }) => {
+  it.each(cases)('generateCompletionStream() ends with $name', async ({ structured, expected, deltas }) => {
     const runs: string[][] = [];
     stubCli('claude', (args) => {
       runs.push(args);
@@ -1028,7 +1036,51 @@ describe('ClaudeCodeProvider: a reply Claude Code returns as structured output',
 
     expect(final.error).toBeUndefined();
     expect(final.choices[0]).toMatchObject(expected);
+    // A text reply goes out as one text delta before the final chunk; a tool call with none.
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual(deltas);
     expect(runs).toHaveLength(1);
     expect(runs[0]).toContain('--json-schema');
+  });
+
+  const textReply = { response_type: 'text', text: 'It is sunny in Paris.' };
+
+  it.each([
+    { name: 'that came only in structured_output', lines: [resultLine(textReply)] },
+    {
+      // The reply's text streamed as deltas, and the same reply in structured_output.
+      name: 'that the CLI also wrote as text deltas, once',
+      lines: [
+        {
+          type: 'stream_event',
+          event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: textReply.text } },
+          parent_tool_use_id: null,
+          session_id: 's1',
+        },
+        resultLine(textReply),
+      ],
+    },
+  ])('streamText() with tools resolves a text reply $name', async ({ lines }) => {
+    const runs: string[][] = [];
+    stubCli('claude', (args) => {
+      runs.push(args);
+      return cliRun(lines, 0);
+    });
+
+    const result = streamText({
+      provider: 'claude-code-cli',
+      model: 'claude-sonnet-4-6',
+      prompt: 'What is the weather in Paris?',
+      tools: {
+        get_weather: { description: WEATHER_TOOL.function.description, parameters: WEATHER_TOOL.function.parameters },
+      },
+    });
+    const parts: StreamPart[] = [];
+    for await (const part of result.fullStream) parts.push(part);
+
+    // streamText() ran the CLI once, with the schema: the case under test was reached.
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toContain('--json-schema');
+    expect(parts.flatMap((part) => (part.type === 'text' ? [part.text] : []))).toEqual([textReply.text]);
+    expect(await result.text).toBe(textReply.text);
   });
 });
