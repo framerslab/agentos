@@ -280,4 +280,9 @@ describe('createSttChain from entries', () => {
     expect(sttEntryPricePerMinute('openai:constructor')).toBeUndefined();
     expect(sttEntryPricePerMinute('deepgram:nova-3')).toBeUndefined();
   });
+
+  it('refuses to price an entry parseSttEntry refuses, a device entry among them', () => {
+    expect(() => sttEntryPricePerMinute('device:moonshine-auto')).toThrow(RangeError);
+    expect(() => sttEntryPricePerMinute('openai')).toThrow(RangeError);
+  });
 });

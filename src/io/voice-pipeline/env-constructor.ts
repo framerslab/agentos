@@ -344,7 +344,14 @@ export interface SttChainEntryOptions {
   elevenlabs?: Omit<ElevenLabsStreamingSTTConfig, 'model' | 'priority'>;
 }
 
-/** US dollars a minute of an entry's audio, from the providers' price rows; `undefined` when there is no row. */
+/**
+ * US dollars a minute of an entry's audio, from the providers' price rows;
+ * `undefined` when there is no row.
+ *
+ * @throws {RangeError} For an entry {@link parseSttEntry} refuses: another
+ *   shape, or a vendor outside `STT_CHAIN_VENDORS`, such as
+ *   `device:moonshine-auto`.
+ */
 export function sttEntryPricePerMinute(entry: string): number | undefined {
   const { vendor, model } = parseSttEntry(entry);
   const price = vendor === 'openai' ? openAITranscriptionPricing(model) : undefined;

@@ -179,7 +179,7 @@ sttEntryPricePerMinute('deepgram:nova-3'); // undefined: no price row
 | `deepgram` | [`DeepgramStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/DeepgramStreamingSTT.ts) | `options.deepgram` |
 | `elevenlabs` | [`ElevenLabsStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/ElevenLabsStreamingSTT.ts) | `options.elevenlabs` |
 
-**Prices.** `sttEntryPricePerMinute(entry)` gives the US dollars a minute of an entry's audio from the providers' price rows, and `undefined` for an entry with no row; Deepgram and ElevenLabs entries have none. OpenAI's rows are `OPENAI_TRANSCRIPTION_PRICING` in [`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), from [OpenAI's pricing page](https://developers.openai.com/api/docs/pricing) as read on 8 October 2026:
+**Prices.** `sttEntryPricePerMinute(entry)` gives the US dollars a minute of an entry's audio from the providers' price rows, and `undefined` for an entry with no row; Deepgram and ElevenLabs entries have none. Like `createSttChain`, it throws a `RangeError` for an entry `parseSttEntry` refuses, such as `device:moonshine-auto` (a vendor outside `STT_CHAIN_VENDORS`) or `openai` (no model). OpenAI's rows are `OPENAI_TRANSCRIPTION_PRICING` in [`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), from [OpenAI's pricing page](https://developers.openai.com/api/docs/pricing) as read on 8 October 2026:
 
 | Model | US dollars a minute |
 |---|---|
