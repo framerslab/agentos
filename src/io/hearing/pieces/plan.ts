@@ -15,8 +15,8 @@ export interface PiecePlan {
 export function planPieces(seconds: number, options: { pieceSeconds: number; overlapSeconds: number }): PiecePlan[] {
   const { pieceSeconds, overlapSeconds } = options;
   if (!Number.isFinite(seconds) || seconds <= 0) throw new RangeError('planPieces: the length must be a positive number of seconds');
-  if (pieceSeconds < 10) throw new RangeError('planPieces: a piece is 10 seconds or more');
-  if (overlapSeconds < 0 || overlapSeconds >= pieceSeconds) throw new RangeError('planPieces: the overlap is shorter than a piece');
+  if (!Number.isFinite(pieceSeconds) || pieceSeconds < 10) throw new RangeError('planPieces: a piece must be finite and 10 seconds or more');
+  if (!Number.isFinite(overlapSeconds) || overlapSeconds < 0 || overlapSeconds >= pieceSeconds) throw new RangeError('planPieces: the overlap must be finite, nonnegative and shorter than a piece');
   const step = pieceSeconds - overlapSeconds;
   const pieces: PiecePlan[] = [];
   for (let start = 0, index = 0; start < seconds; start += step, index += 1) {

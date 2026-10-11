@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { EncodedPacketSink, Input, InputAudioTrack } from 'mediabunny';
+import { describe, expect, it, vi } from 'vitest';
 import { encodeFloat32ToWav } from '../../../speech/audio.js';
 import { pieceSeconds, readAudioInfo, UnreadableAudioError } from '../read.js';
 import { readWavPcm, wavHeaderSeconds } from '../wav.js';
@@ -26,6 +27,71 @@ function floatWav(): Uint8Array {
 }
 
 describe('audio readers on a server', () => {
+  it('refuses PCM requiring conversion when its decoder is unavailable', async () => {
+    const canDecode = vi.spyOn(InputAudioTrack.prototype, 'canDecode').mockResolvedValue(false);
+    try {
+      expect(await readAudioInfo(await pcmFile('wav', 1))).toMatchObject({ path: null, reason: 'cannot_decode' });
+      expect(await readAudioInfo(await packetFile('wav', 1))).toMatchObject({ path: 'copy' });
+    } finally {
+      canDecode.mockRestore();
+    }
+  });
+
+  it.each([readAudioInfo, pieceSeconds])('disposes reader inputs after success and failure (%#)', async (read) => {
+    const bytes = await packetFile('wav', 1);
+    const dispose = vi.spyOn(Input.prototype, 'dispose');
+    try {
+      await read(bytes);
+      expect(dispose).toHaveBeenCalledTimes(1);
+      await expect(read(new Uint8Array([1, 2, 3, 4]))).rejects.toBeInstanceOf(UnreadableAudioError);
+      expect(dispose).toHaveBeenCalledTimes(2);
+      const noTrack = vi.spyOn(Input.prototype, 'getPrimaryAudioTrack').mockResolvedValueOnce(null);
+      try {
+        if (read === readAudioInfo) {
+          expect(await read(bytes)).toMatchObject({ path: null, reason: 'no_audio' });
+        } else {
+          await expect(read(bytes)).rejects.toMatchObject({ reason: 'no_audio' });
+        }
+        expect(dispose).toHaveBeenCalledTimes(3);
+        expect(new Set(dispose.mock.contexts).size).toBe(3);
+      } finally {
+        noTrack.mockRestore();
+      }
+    } finally {
+      dispose.mockRestore();
+    }
+  });
+
+  it('aborts inspection during the packet scan and disposes the input', async () => {
+    const bytes = await packetFile('m4a', 1);
+    const controller = new AbortController();
+    const reason = new Error('stop inspecting');
+    const packets = EncodedPacketSink.prototype.packets;
+    let seen = 0;
+    let closed = false;
+    const scan = vi.spyOn(EncodedPacketSink.prototype, 'packets').mockImplementation(async function* (this: EncodedPacketSink, ...args) {
+      try {
+        for await (const packet of packets.call(this, ...args)) {
+          seen += 1;
+          controller.abort(reason);
+          yield packet;
+        }
+      } finally {
+        closed = true;
+      }
+    });
+    const dispose = vi.spyOn(Input.prototype, 'dispose');
+    try {
+      await expect(readAudioInfo(bytes, controller.signal)).rejects.toBe(reason);
+      expect(seen).toBe(1);
+      expect(closed).toBe(true);
+      expect(dispose).toHaveBeenCalledTimes(1);
+    } finally {
+      scan.mockRestore();
+      dispose.mockRestore();
+    }
+  });
+
   it('reads 300 seconds from M4A, WebM, MP3 and WAV without a decoder', async () => {
     for (const container of ['m4a', 'webm', 'mp3', 'wav'] as const) {
       const bytes = await packetFile(container);

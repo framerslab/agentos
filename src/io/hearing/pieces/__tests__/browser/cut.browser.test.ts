@@ -1,4 +1,4 @@
-import { ALL_FORMATS, AudioSample, AudioSampleSink, BufferSource, EncodedPacketSink, Input } from 'mediabunny';
+import { ALL_FORMATS, AudioSample, AudioSampleSink, BufferSource, EncodedPacketSink, Input, InputAudioTrack } from 'mediabunny';
 import { describe, expect, it, vi } from 'vitest';
 import { cutPieces, readAudioInfo, readWavPcm, type AudioPiece } from '../../index.js';
 import { ac3File, alacFile, flacFile, packetFile, pcmFile } from './fixtures.js';
@@ -125,6 +125,140 @@ describe('cutting recordings in a browser', () => {
       expect(copied).toHaveLength(1);
       expect(copied[0]).toMatchObject({ fileName: `piece-0.${container}`, mimeType, startMs: 0 });
       expect(Math.abs((await readAudioInfo(copied[0]!.data)).seconds - 12)).toBeLessThan(0.1);
+    }
+  });
+
+  it.each(['m4a', 'webm', 'mp3', 'wav'] as const)('preserves every packet when copying a whole %s recording', async (container) => {
+    const bytes = await packetFile(container, 12);
+    const copied = await collect(bytes);
+    expect(copied).toHaveLength(1);
+    expect((await readAudioInfo(copied[0]!.data)).seconds).toBeCloseTo((await readAudioInfo(bytes)).seconds, 6);
+    const counts: number[] = [];
+    for (const data of [bytes, copied[0]!.data]) {
+      const input = new Input({ formats: ALL_FORMATS, source: new BufferSource(data) });
+      try {
+        const track = (await input.getPrimaryAudioTrack())!;
+        let count = 0;
+        for await (const packet of new EncodedPacketSink(track).packets()) {
+          expect(packet.data.byteLength).toBeGreaterThan(0);
+          count += 1;
+        }
+        counts.push(count);
+      } finally {
+        input.dispose();
+      }
+    }
+    expect(counts[1]).toBe(counts[0]);
+  });
+
+  it('copies the final packet of a multi-piece recording', async () => {
+    const bytes = await packetFile('m4a', 12);
+    const pieces: AudioPiece[] = [];
+    for await (const piece of cutPieces(bytes, { ...options, pieceSeconds: 10, overlapSeconds: 1 })) pieces.push(piece);
+    expect(pieces).toHaveLength(2);
+    const input = new Input({ formats: ALL_FORMATS, source: new BufferSource(bytes) });
+    try {
+      const track = (await input.getPrimaryAudioTrack())!;
+      const first = (await new EncodedPacketSink(track).getPacket(pieces[1]!.startMs / 1_000))!;
+      const seconds = (await readAudioInfo(pieces[1]!.data)).seconds;
+      expect(first.timestamp + seconds).toBeCloseTo(await track.computeDuration(), 6);
+    } finally {
+      input.dispose();
+    }
+  });
+
+  it('replans after early quiet cuts without extending pieces or losing the tail, including on resume', async () => {
+    const bytes = await pcmFile('wav', 32);
+    const cutOptions = { ...options, pieceSeconds: 10, overlapSeconds: 1, quietSeconds: 8 };
+    const pieces: AudioPiece[] = [];
+    for await (const piece of cutPieces(bytes, cutOptions)) pieces.push(piece);
+    expect(pieces.length).toBeGreaterThan(3);
+    expect(pieces[0]!.durationMs).toBeLessThan(3_000);
+    for (const [index, piece] of pieces.entries()) {
+      expect(piece.durationMs).toBeLessThanOrEqual(index === pieces.length - 1 ? 11_000 : 10_000);
+      expect(Math.abs(readWavPcm(piece.data).samples[0]!.length / 16 - piece.durationMs)).toBeLessThanOrEqual(1);
+      if (index > 0) expect(piece.startMs).toBe(pieces[index - 1]!.startMs + pieces[index - 1]!.durationMs - 1_000);
+    }
+    const last = pieces[pieces.length - 1]!;
+    expect(last.startMs + last.durationMs).toBe(32_000);
+    const resumed: AudioPiece[] = [];
+    for await (const piece of cutPieces(bytes, { ...cutOptions, fromIndex: 2 })) resumed.push(piece);
+    expect(resumed).toEqual(pieces.slice(2));
+  });
+
+  it('refuses PCM cutting when conversion has no decoder', async () => {
+    const bytes = await pcmFile('wav', 1);
+    const canDecode = vi.spyOn(InputAudioTrack.prototype, 'canDecode').mockResolvedValue(false);
+    const samples = vi.spyOn(AudioSampleSink.prototype, 'samples');
+    try {
+      expect(await readAudioInfo(bytes)).toMatchObject({ path: null, reason: 'cannot_decode' });
+      await expect(cutPieces(bytes, options).next()).rejects.toMatchObject({ reason: 'cannot_decode' });
+      expect(samples).not.toHaveBeenCalled();
+    } finally {
+      canDecode.mockRestore();
+      samples.mockRestore();
+    }
+  });
+
+  it.each(['complete', 'return', 'error', 'abort'] as const)('disposes both cutting inputs on %s', async (ending) => {
+    const bytes = await packetFile('wav', 12);
+    const dispose = vi.spyOn(Input.prototype, 'dispose');
+    const controller = new AbortController();
+    const pieces = cutPieces(bytes, { ...options, pieceSeconds: 10, overlapSeconds: 1, maxBytes: ending === 'error' ? 1 : options.maxBytes, signal: controller.signal });
+    try {
+      if (ending === 'error') {
+        await expect(pieces.next()).rejects.toBeInstanceOf(RangeError);
+      } else {
+        expect((await pieces.next()).done).toBe(false);
+        expect(dispose).toHaveBeenCalledTimes(1);
+        if (ending === 'return') await pieces.return(undefined);
+        else if (ending === 'abort') {
+          const reason = new Error('stop cutting');
+          controller.abort(reason);
+          await expect(pieces.next()).rejects.toBe(reason);
+        } else {
+          for await (const piece of pieces) expect(piece.data.length).toBeGreaterThan(0);
+        }
+      }
+      expect(dispose).toHaveBeenCalledTimes(2);
+      expect(new Set(dispose.mock.contexts).size).toBe(2);
+    } finally {
+      await pieces.return(undefined);
+      dispose.mockRestore();
+    }
+  });
+
+  it('does not inspect a recording when cutting was already aborted', async () => {
+    const controller = new AbortController();
+    const reason = new Error('stop before inspection');
+    controller.abort(reason);
+    const format = vi.spyOn(Input.prototype, 'getFormat');
+    try {
+      await expect(cutPieces(new Uint8Array([1, 2, 3, 4]), { ...options, signal: controller.signal }).next()).rejects.toBe(reason);
+      expect(format).not.toHaveBeenCalled();
+    } finally {
+      format.mockRestore();
+    }
+  });
+
+  it('passes cancellation through to the inspection packet scan', async () => {
+    const bytes = await packetFile('m4a', 1);
+    const controller = new AbortController();
+    const reason = new Error('stop scanning');
+    const packets = EncodedPacketSink.prototype.packets;
+    let seen = 0;
+    const scan = vi.spyOn(EncodedPacketSink.prototype, 'packets').mockImplementation(async function* (this: EncodedPacketSink, ...args) {
+      for await (const packet of packets.call(this, ...args)) {
+        seen += 1;
+        controller.abort(reason);
+        yield packet;
+      }
+    });
+    try {
+      await expect(cutPieces(bytes, { ...options, signal: controller.signal }).next()).rejects.toBe(reason);
+      expect(seen).toBe(1);
+    } finally {
+      scan.mockRestore();
     }
   });
 

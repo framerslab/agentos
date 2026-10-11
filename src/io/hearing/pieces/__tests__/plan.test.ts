@@ -32,9 +32,11 @@ describe('planPieces', () => {
     for (const seconds of [0, -1, NaN, Infinity, -Infinity]) {
       expect(() => planPieces(seconds, options)).toThrow(RangeError);
     }
-    for (const overlapSeconds of [-1, 300, 301]) {
+    for (const overlapSeconds of [-1, 300, 301, NaN, Infinity, -Infinity]) {
       expect(() => planPieces(1_000, { ...options, overlapSeconds })).toThrow(RangeError);
     }
-    expect(() => planPieces(100, { pieceSeconds: 9, overlapSeconds: 3 })).toThrow(RangeError);
+    for (const pieceSeconds of [9, NaN, Infinity, -Infinity]) {
+      expect(() => planPieces(100, { ...options, pieceSeconds })).toThrow(RangeError);
+    }
   });
 });

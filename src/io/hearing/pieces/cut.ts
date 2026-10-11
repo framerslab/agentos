@@ -98,7 +98,7 @@ async function quietestBefore(track: InputAudioTrack, from: number, to: number):
 }
 
 /** One piece by packet copy. */
-async function copyPiece(track: InputAudioTrack, codec: keyof typeof COPY_TARGETS | 'pcm-s16', start: number, end: number): Promise<Uint8Array> {
+async function copyPiece(track: InputAudioTrack, codec: keyof typeof COPY_TARGETS | 'pcm-s16', start: number, end: number, isLast: boolean): Promise<Uint8Array> {
   const extension = codec === 'pcm-s16' ? 'wav' : COPY_TARGETS[codec].extension;
   const output = outputFor(extension);
   const source = new EncodedAudioPacketSource(codec);
@@ -106,7 +106,7 @@ async function copyPiece(track: InputAudioTrack, codec: keyof typeof COPY_TARGET
   await output.start();
   const sink = new EncodedPacketSink(track);
   const first = await sink.getPacket(start);
-  const last = await sink.getPacket(end, { metadataOnly: true });
+  const last = isLast ? undefined : await sink.getPacket(end, { metadataOnly: true });
   const decoderConfig = (await track.getDecoderConfig()) ?? undefined;
   let sent = false;
   if (first !== null) {
@@ -167,30 +167,39 @@ async function decodePiece(track: InputAudioTrack, start: number, end: number): 
 
 /** Cuts a recording; yields its pieces in order. */
 export async function* cutPieces(file: Blob | Uint8Array, options: CutOptions): AsyncGenerator<AudioPiece> {
-  const info: AudioInfo = await readAudioInfo(file);
+  const info: AudioInfo = await readAudioInfo(file, options.signal);
+  options.signal?.throwIfAborted();
   if (info.path === null) throw new UnreadableAudioError(info.reason ?? 'unsupported_codec');
+  // Validate the options before opening the cutting input. Quiet cuts are planned from their actual starts below.
+  planPieces(info.seconds, options);
   const input = new Input({ formats: ALL_FORMATS, source: file instanceof Uint8Array ? new BufferSource(file) : new BlobSource(file) });
-  const track = (await input.getPrimaryAudioTrack())!;
-  const quiet = options.quietSeconds ?? 10;
-  const plan = planPieces(info.seconds, options);
-  let start = 0;
-  for (const planned of plan) {
-    options.signal?.throwIfAborted();
-    let end = planned.end;
-    if (info.path === 'decode' && end < info.seconds) end = await quietestBefore(track, Math.max(start + options.overlapSeconds + 1, end - quiet), end);
-    if (planned.index >= (options.fromIndex ?? 0)) {
-      const data = info.path === 'copy' ? await copyPiece(track, info.codec as keyof typeof COPY_TARGETS | 'pcm-s16', start, end) : await decodePiece(track, start, end);
-      if (data.length > options.maxBytes) throw new RangeError(`piece ${planned.index} is ${data.length} bytes, past ${options.maxBytes}`);
-      const extension = info.path === 'decode' || info.codec === 'pcm-s16' ? 'wav' : COPY_TARGETS[info.codec as keyof typeof COPY_TARGETS].extension;
-      yield {
-        index: planned.index,
-        startMs: Math.round(start * 1000),
-        durationMs: Math.round((end - start) * 1000),
-        data,
-        mimeType: extension === 'wav' ? 'audio/wav' : COPY_TARGETS[info.codec as keyof typeof COPY_TARGETS].mimeType,
-        fileName: `piece-${planned.index}.${extension}`,
-      };
+  try {
+    const track = (await input.getPrimaryAudioTrack())!;
+    const quiet = options.quietSeconds ?? 10;
+    let start = 0;
+    for (let index = 0; start < info.seconds; index += 1) {
+      options.signal?.throwIfAborted();
+      let end = Math.min(info.seconds, start + options.pieceSeconds);
+      // Keep the planner's one-second tail allowance.
+      if (info.seconds - end <= 1) end = info.seconds;
+      if (info.path === 'decode' && end < info.seconds) end = await quietestBefore(track, Math.max(start + options.overlapSeconds + 1, end - quiet), end);
+      if (index >= (options.fromIndex ?? 0)) {
+        const data = info.path === 'copy' ? await copyPiece(track, info.codec as keyof typeof COPY_TARGETS | 'pcm-s16', start, end, end >= info.seconds) : await decodePiece(track, start, end);
+        if (data.length > options.maxBytes) throw new RangeError(`piece ${index} is ${data.length} bytes, past ${options.maxBytes}`);
+        const extension = info.path === 'decode' || info.codec === 'pcm-s16' ? 'wav' : COPY_TARGETS[info.codec as keyof typeof COPY_TARGETS].extension;
+        yield {
+          index,
+          startMs: Math.round(start * 1000),
+          durationMs: Math.round((end - start) * 1000),
+          data,
+          mimeType: extension === 'wav' ? 'audio/wav' : COPY_TARGETS[info.codec as keyof typeof COPY_TARGETS].mimeType,
+          fileName: `piece-${index}.${extension}`,
+        };
+      }
+      if (end >= info.seconds) break;
+      start = Math.max(0, end - options.overlapSeconds);
     }
-    start = Math.max(0, end - options.overlapSeconds);
+  } finally {
+    input.dispose();
   }
 }
