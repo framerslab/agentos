@@ -362,3 +362,63 @@ describe('GeminiCLIProvider: the stream-json the current Gemini CLI writes', () 
     expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
   });
 });
+
+/**
+ * A run whose outcome only the code under test can observe. vi.fn() attaches
+ * handlers of its own to a Promise its implementation returns (the
+ * settledResults record, @vitest/spy 5.0.3 src/index.ts), which would hide a
+ * rejection the bridge leaves unhandled. The run is therefore a plain object
+ * with the outcome's then, catch and finally bound to it, which the bridge
+ * awaits as it awaits execa's subprocess. The CLI writes `lines` and runs on
+ * until `exit` ends it; a non-zero code rejects the outcome as execa does.
+ */
+function unobservedRun(lines: unknown[]) {
+  let settle!: (code: number) => void;
+  const outcome = new Promise<unknown>((resolve, reject) => {
+    settle = (code) =>
+      code === 0
+        ? resolve({ failed: false, exitCode: 0, stdout: '', stderr: '' })
+        : reject(execaError({ exitCode: code }));
+  });
+  const subprocess = {
+    then: (onFulfilled?: any, onRejected?: any) => outcome.then(onFulfilled, onRejected),
+    catch: (onRejected?: any) => outcome.catch(onRejected),
+    finally: (onFinally?: any) => outcome.finally(onFinally),
+    stdout: (async function* () {
+      for (const line of lines) yield Buffer.from(`${JSON.stringify(line)}\n`);
+    })(),
+    kill: vi.fn(),
+  };
+  return { subprocess, exit: (code: number) => settle(code) };
+}
+
+describe.each(STREAM_PROVIDERS)('$name: a consumer that stops reading the stream early', ({ binary, model, create, fixture }) => {
+  it('ends the CLI, and a non-zero exit that follows is no unhandled rejection', async () => {
+    // The CLI has written the first piece of its reply and has more to write.
+    const run = unobservedRun([fixture.hello[0], fixture.hello[0]]);
+    stubCli(binary, () => run.subprocess);
+    const provider = create();
+    await provider.initialize({});
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+
+    try {
+      const chunks: ModelCompletionResponse[] = [];
+      for await (const chunk of provider.generateCompletionStream(model, HELLO, {})) {
+        chunks.push(chunk);
+        break;
+      }
+      run.exit(1);
+      // Node reports a rejection nothing handles once the microtasks of the turn have run.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0].isFinal).toBe(false);
+      expect(run.subprocess.kill).toHaveBeenCalled();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+});
