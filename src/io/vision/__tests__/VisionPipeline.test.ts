@@ -372,6 +372,36 @@ describe('VisionPipeline', () => {
       expect(promptOf()).toMatch(/^Transcribe/);
     });
 
+    it('keeps the text a local tier read when the cloud transcription comes back empty', async () => {
+      mockGenerateText.mockResolvedValueOnce({ ...cloudVisionResult(), text: '  \n' });
+      const pipeline = createFullPipeline();
+
+      const result = await pipeline.process(testImage(), {
+        tiers: ['handwriting', 'cloud-vision'],
+        forceCategory: 'handwritten',
+        cloudTask: 'transcribe',
+      });
+
+      // Both tiers ran; the empty cloud answer has no confidence, so TrOCR's text stands.
+      expect(result.tiers).toEqual(['handwriting', 'cloud-vision']);
+      const [handwriting, cloud] = result.tierResults;
+      expect(cloud).toMatchObject({ tier: 'cloud-vision', text: '  \n', confidence: 0 });
+      expect(handwriting.text.trim()).not.toBe('');
+      expect(result.text).toBe(handwriting.text);
+      expect(result.confidence).toBe(handwriting.confidence);
+    });
+
+    it('gives empty text when the cloud tier alone finds none', async () => {
+      mockGenerateText.mockResolvedValueOnce({ ...cloudVisionResult(), text: '' });
+      const pipeline = createFullPipeline();
+
+      const result = await pipeline.process(testImage(), { tiers: ['cloud-vision'], cloudTask: 'transcribe' });
+
+      expect(result.tiers).toEqual(['cloud-vision']);
+      expect(result.text).toBe('');
+      expect(result.confidence).toBe(0);
+    });
+
     it('refuses a cloudTask it does not know, before any tier runs', async () => {
       const pipeline = createFullPipeline();
 

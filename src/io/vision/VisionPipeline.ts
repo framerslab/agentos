@@ -319,7 +319,8 @@ export class VisionPipeline {
    * @param options.cloudTask - What the cloud tier asks for: `'describe'`
    *   (default), a description of the image with its text, or
    *   `'transcribe'`, the text alone as written. Its confidence is 0.95 either
-   *   way, so its text wins over every local tier that ran.
+   *   way, so its text wins over every local tier that ran; an answer with no
+   *   text in it has confidence 0, and a local tier's text stands.
    * @returns Aggregated vision result with text, confidence, embeddings, etc.
    *
    * @throws {Error} If all configured tiers fail to produce a result.
@@ -1102,11 +1103,15 @@ export class VisionPipeline {
       }],
     });
 
+    // An answer with no text in it, which the transcription prompt asks for
+    // when the image shows none, has no confidence: at 0.95 it would replace
+    // the text a local tier did read.
+    const text = typeof result.text === 'string' ? result.text : '';
     return {
       tier: 'cloud-vision',
       provider: this._config.cloudProvider,
-      text: result.text,
-      confidence: CLOUD_VISION_CONFIDENCE,
+      text,
+      confidence: text.trim() === '' ? 0 : CLOUD_VISION_CONFIDENCE,
       durationMs: Date.now() - start,
     };
   }
