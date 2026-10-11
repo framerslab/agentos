@@ -114,7 +114,9 @@ export class Outbox {
    *
    * One flush runs at a time for a store and prefix: a flush asked for while another runs starts when that one has
    * ended, and reads the entries then. A send that never settles therefore holds every later flush: give the
-   * request a deadline.
+   * request a deadline. For the same reason a send never waits for a flush of its own outbox (the same store object
+   * and prefix): that flush starts only when the one running the send has ended, so the two would wait for each
+   * other for ever. A send returns, and the next flush sends the rest.
    *
    * @returns How many entries this flush confirmed, how many it dropped, and how many the store holds when it ends, a
    * change held while it ran among them.
