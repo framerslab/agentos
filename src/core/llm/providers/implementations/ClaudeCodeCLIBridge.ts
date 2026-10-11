@@ -26,7 +26,7 @@ export type { InstallCheckResult } from '../../../../safety/sandbox/subprocess/t
  * Extends {@link CLISubprocessBridge} to implement:
  * - Flag assembly: `--bare`, `-p`, `--system-prompt`, `--json-schema`, `--max-turns`
  * - Error classification: caller abort, timeout, auth, rate-limit, context length, ENOENT, EACCES
- * - Stream event parsing: `content_block_delta`, `result`, `error`, `system` events
+ * - Stream event parsing: `content_block_delta` (nested under `stream_event` or at the top level), `result`, `error`, `system` events
  * - Auth check: uses `--bare --max-turns 1` for lightweight health ping
  */
 export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
@@ -79,9 +79,13 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
   protected parseStreamEvent(raw: any): StreamEvent | null {
     if (!raw || typeof raw !== 'object') return null;
 
-    /* Text delta from content block */
-    if (raw.type === 'content_block_delta' && raw.delta?.type === 'text_delta') {
-      return { type: 'text_delta', text: raw.delta.text };
+    /* Text delta from content block. With --include-partial-messages, which
+     * buildArgs passes, Claude Code wraps each Messages API stream event as
+     * { type: 'stream_event', event } (SDKPartialAssistantMessage in
+     * @anthropic-ai/claude-agent-sdk 0.3.296); a top-level delta is read too. */
+    const streamed = raw.type === 'stream_event' ? raw.event : raw;
+    if (streamed?.type === 'content_block_delta' && streamed.delta?.type === 'text_delta') {
+      return { type: 'text_delta', text: streamed.delta.text };
     }
 
     /* Assistant message with text content */
