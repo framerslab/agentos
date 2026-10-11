@@ -354,6 +354,15 @@ export class ClaudeCodeProvider implements IProvider {
    * after the CLI has exited: a non-zero exit after the result line ends the
    * stream with the bridge's classified error, and a result flagged
    * `is_error` ends it with an error chunk.
+   *
+   * A text reply that comes only in the result's structured output, which no
+   * text delta carried, is yielded as one text delta just before the final
+   * chunk built from it, so a consumer that builds the reply from the deltas
+   * (streamText(), the StreamingReconstructor) reads it. The delta goes out
+   * only once the run has ended with that reply, so a run that fails after
+   * its result line still ends with its error chunk alone. A caller who
+   * aborts while the consumer holds the delta gets the abort chunk in place
+   * of the reply's final chunk.
    */
   async *generateCompletionStream(
     modelId: string,
@@ -387,6 +396,10 @@ export class ClaudeCodeProvider implements IProvider {
     /* Set when the CLI reports a failure in its own output (an error event or
      * an is_error result), which says more than the exit code that follows. */
     let cliReportedError = false;
+    /* A text reply that came only in the result's structured output, and the
+     * final chunk built from it: no text delta carried it, so it goes out as
+     * one after the loop, if that chunk still ends the stream. */
+    let structuredText: { text: string; finalChunk: ModelCompletionResponse } | undefined;
 
     try {
       for await (const event of this.bridge.stream(bridgeOpts)) {
@@ -395,19 +408,7 @@ export class ClaudeCodeProvider implements IProvider {
         switch (event.type) {
           case 'text_delta':
             accumulatedText += event.text;
-            yield {
-              id: responseId,
-              object: 'chat.completion.chunk',
-              created: Date.now(),
-              modelId,
-              choices: [{
-                index: 0,
-                message: { role: 'assistant', content: accumulatedText },
-                finishReason: null,
-              }],
-              responseTextDelta: event.text,
-              isFinal: false,
-            };
+            yield this.buildTextDeltaChunk(event.text, accumulatedText, modelId, responseId);
             break;
 
           case 'result': {
@@ -454,6 +455,10 @@ export class ClaudeCodeProvider implements IProvider {
                     finalUsage,
                     modelId,
                   );
+                  /* A stream that already gave text deltas gets no second copy. */
+                  if (accumulatedText === '' && parsed.text !== '') {
+                    structuredText = { text: parsed.text, finalChunk };
+                  }
                   break;
                 }
               } catch { /* fall through to text */ }
@@ -495,6 +500,31 @@ export class ClaudeCodeProvider implements IProvider {
           /* The caller's abort ends the stream with type 'abort', as the
            * abortSignal contract in IProvider asks of a streaming provider. */
           error?.code === 'REQUEST_ABORTED' ? 'abort' : undefined,
+        );
+      }
+    }
+
+    /* streamText() and the StreamingReconstructor build a reply's text from
+     * the deltas alone. The delta goes out once the run is known to have
+     * ended with this reply: a run that failed or was aborted after its
+     * result line ends with its error chunk alone, as a stream with no reply
+     * text does. */
+    if (structuredText && finalChunk === structuredText.finalChunk) {
+      yield this.buildTextDeltaChunk(structuredText.text, structuredText.text, modelId, responseId);
+      /* The bridge's stream has ended, so it no longer sees the caller's
+       * signal. An abort while the consumer held the delta still comes before
+       * the final chunk, and ends the stream as the bridge ends a run the
+       * caller aborted before the stream's end. */
+      if (options.abortSignal?.aborted) {
+        const error = ClaudeCodeProviderError.requestAborted();
+        finalChunk = this.buildStreamErrorResponse(
+          error.message,
+          modelId,
+          responseId,
+          finalUsage,
+          error.code,
+          error,
+          'abort',
         );
       }
     }
@@ -684,6 +714,31 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
   }
 
   /* ---- Private: response builders ------------------------------- */
+
+  /**
+   * Build a streaming chunk for a piece of the reply's text: `delta` is the
+   * new text, and `message.content` the reply's text so far.
+   */
+  private buildTextDeltaChunk(
+    delta: string,
+    textSoFar: string,
+    modelId: string,
+    responseId: string,
+  ): ModelCompletionResponse {
+    return {
+      id: responseId,
+      object: 'chat.completion.chunk',
+      created: Date.now(),
+      modelId,
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: textSoFar },
+        finishReason: null,
+      }],
+      responseTextDelta: delta,
+      isFinal: false,
+    };
+  }
 
   /** Build a text-only ModelCompletionResponse. */
   private buildTextResponse(

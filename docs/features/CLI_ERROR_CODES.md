@@ -142,7 +142,7 @@ The two providers' code types add codes of their own ([`ClaudeCodeProviderError.
 
 | Code | Provider | Raised when |
 |------|----------|-------------|
-| `REQUEST_ABORTED` | Both | A call is cancelled through its `abortSignal`: `classifyError()` returns it, with `recoverable: false`, for a run execa marks `isCanceled`, and `stream()` hands it the same for a call aborted after the CLI exited but before the consumer had read the stream to its end. It is the code the HTTP providers give a caller's abort, and `isRetryableError()` never counts it as retryable |
+| `REQUEST_ABORTED` | Both | A call is cancelled through its `abortSignal`: `classifyError()` returns it, with `recoverable: false`, for a run execa marks `isCanceled`, and `stream()` hands it the same for a call aborted after the CLI exited but before the consumer had read the stream to its end. The Claude Code provider's stream ends with it too for a call aborted while the consumer holds the text delta it gives a reply that came only in `structured_output`. It is the code the HTTP providers give a caller's abort, and `isRetryableError()` never counts it as retryable |
 | `EMBEDDINGS_NOT_SUPPORTED` | Both | `generateEmbeddings()` is called: neither provider serves embeddings |
 | `UNKNOWN` | Both | A completion is requested while the provider is not initialized |
 | `SCHEMA_PARSE_FAILED` | Claude Code | Never. The provider reads the reply from the result's `structured_output` when Claude Code returns one, and from the result text when it does not. `generateCompletion()` retries a reply that does not parse as the tool-call shape once without the schema and returns it as text; the streaming path returns such a reply as text |

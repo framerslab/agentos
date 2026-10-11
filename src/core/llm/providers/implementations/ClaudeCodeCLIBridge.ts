@@ -204,13 +204,7 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
      * was given as cancelSignal fires; the signal that then ends the process
      * sets isTerminated too, so this is checked before the timeout. */
     if (error.isCanceled) {
-      return new ClaudeCodeProviderError(
-        'Claude Code CLI call aborted by the caller.',
-        'REQUEST_ABORTED',
-        'The call was cancelled through its abort signal. Send it again if it is still needed.',
-        false,
-        { exitCode, stderr },
-      );
+      return ClaudeCodeProviderError.requestAborted({ exitCode, stderr });
     }
 
     /* Timeout */
