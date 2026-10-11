@@ -816,3 +816,40 @@ describe.each(STREAM_PROVIDERS)('$name: a consumer slower than the timeout', ({ 
     expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hello' } }] });
   });
 });
+
+/**
+ * The session id of a Gemini CLI stream, which a direct reader of the bridge
+ * gets on the result event. The current CLI writes the id on the init event
+ * that opens the stream (InitEvent in packages/core/src/output/types.ts at
+ * 9b6e0265, written by packages/cli/src/nonInteractiveCli.ts), and its
+ * result event has no such field (ResultEvent).
+ */
+describe('GeminiCLIBridge: the session id of a stream', () => {
+  const at = '2026-10-10T12:00:00.000Z';
+
+  it.each<{ name: string; lines: unknown[] }>([
+    {
+      name: 'written on the init event, when the result carries none',
+      lines: [
+        { type: 'init', timestamp: at, session_id: 'g1', model: 'gemini-3.5-flash' },
+        { type: 'message', timestamp: at, role: 'user', content: 'Hello' },
+        { type: 'message', timestamp: at, role: 'assistant', content: 'Hi there', delta: true },
+        { type: 'result', timestamp: at, status: 'success' },
+      ],
+    },
+    {
+      name: 'written on a result line that carries one',
+      lines: [
+        { type: 'message', timestamp: at, role: 'assistant', content: 'Hi there', delta: true },
+        { type: 'result', timestamp: at, status: 'success', session_id: 'g1' },
+      ],
+    },
+  ])('ends with a result that carries the id $name', async ({ lines }) => {
+    stubCli('gemini', () => cliRun(lines, 0));
+    const events: StreamEvent[] = [];
+    for await (const event of new GeminiCLIBridge().stream({ prompt: 'Hello' })) events.push(event);
+
+    expect(events.map((event) => event.type)).toEqual(['text_delta', 'result']);
+    expect(events[1]).toMatchObject({ type: 'result', sessionId: 'g1' });
+  });
+});
