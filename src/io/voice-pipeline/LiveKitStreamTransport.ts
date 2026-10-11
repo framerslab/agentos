@@ -16,8 +16,9 @@
  * `'agentos.voice'`): `sendControl()` sends a JSON {@link ServerTextMessage}
  * to the participant, and a JSON {@link ClientTextMessage} the participant
  * sends on the topic is emitted as `'message'`; another sender's stream on
- * the topic is closed unread. A message that is not JSON emits `'error'` and
- * the transport stays open.
+ * the topic is closed unread. A message that is not JSON, or a text stream of
+ * the participant's that fails while it is read, emits `'error'`, and the
+ * transport stays open.
  *
  * ### Audio (outbound)
  * This transport does not publish audio: `sendAudio()` rejects. It carries
@@ -91,10 +92,13 @@ function closeTextReader(reader: LiveKitTextStreamReaderLike): void {
  *
  * | Event       | Payload                   | Description                                   |
  * |-------------|---------------------------|-----------------------------------------------|
- * | `'audio'`   | {@link AudioFrame}        | The participant's audio, mono Float32.        |
+ * | `'audio'`   | `AudioFrame`              | The participant's audio, mono Float32.        |
  * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic. |
  * | `'close'`   | *(none)*                  | The transport closed (or the room disconnected). |
- * | `'error'`   | `Error`                   | A message that is not JSON, or a failure to read audio. |
+ * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, or a failure to read audio (the peer missing among them). |
+ *
+ * With no `'error'` listener, an error is written as a console warning
+ * instead, since an `'error'` that nothing listens for would throw.
  *
  * @example
  * ```typescript

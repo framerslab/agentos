@@ -15,13 +15,16 @@ import type {
   LiveKitTextStreamHandler,
 } from '../LiveKitRoomAudioSource.js';
 
-/** rtc-node's `TrackKind.KIND_AUDIO` and `KIND_VIDEO`. */
+/** rtc-node's `TrackKind.KIND_AUDIO`. */
 export const KIND_AUDIO = 1;
+/** rtc-node's `TrackKind.KIND_VIDEO`. */
 export const KIND_VIDEO = 2;
 
-/** rtc-node's `TrackSource.SOURCE_CAMERA`, `SOURCE_MICROPHONE` and `SOURCE_SCREENSHARE_AUDIO`. */
+/** rtc-node's `TrackSource.SOURCE_CAMERA`. */
 export const SOURCE_CAMERA = 1;
+/** rtc-node's `TrackSource.SOURCE_MICROPHONE`. */
 export const SOURCE_MICROPHONE = 2;
+/** rtc-node's `TrackSource.SOURCE_SCREENSHARE_AUDIO`. */
 export const SOURCE_SCREENSHARE_AUDIO = 4;
 
 /** A remote track, known by its SID. */

@@ -3,8 +3,8 @@
  *
  * LiveKit for the hearing layer and the voice pipeline: transcripts written
  * into a LiveKit room as LiveKit's own transcription text streams, a room
- * participant's audio as {@link AudioFrame}s, and an {@link IStreamTransport}
- * over a room. The transcription output takes the host's connected
+ * participant's audio as `AudioFrame`s, and an `IStreamTransport` over a
+ * room. The transcription output takes the host's connected
  * `@livekit/rtc-node` `Room`, described by a structural type. The audio source
  * and the transport are Node only and run on the optional peer
  * `@livekit/rtc-node`, loaded on first use or passed in by the host, so this
