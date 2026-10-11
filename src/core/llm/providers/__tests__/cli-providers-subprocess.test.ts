@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { execaMock } = vi.hoisted(() => ({ execaMock: vi.fn() }));
 vi.mock('execa', () => ({ execa: execaMock }));
 
-import type { IProvider } from '../IProvider';
+import type { IProvider, ModelCompletionOptions, ModelCompletionResponse } from '../IProvider';
 import { ClaudeCodeProvider } from '../implementations/ClaudeCodeProvider';
 import { GeminiCLIProvider } from '../implementations/GeminiCLIProvider';
 import { isRetryableError } from '../../../../api/generateText';
@@ -110,4 +110,150 @@ describe.each(PROVIDERS)('$name: a failed run, as the bridge classifies it', ({ 
     expect(error).toMatchObject({ code: 'REQUEST_ABORTED', recoverable: false });
     expect(isRetryableError(error)).toBe(false);
   });
+});
+
+/**
+ * A run as execa 10 returns it: a native promise for the outcome, with the
+ * child's stdout beside it. The CLI writes `lines` to stdout and then exits
+ * with `exitCode`; a non-zero exit rejects the promise as execa does.
+ */
+function cliRun(lines: unknown[], exitCode: number, stderr = '') {
+  const outcome: Promise<unknown> =
+    exitCode === 0
+      ? Promise.resolve({ failed: false, exitCode: 0, stdout: '', stderr })
+      : Promise.reject(execaError({ exitCode, stderr }));
+  // The stream under test reports the outcome by awaiting it; the stub does
+  // not fail a test with an unhandled rejection of its own.
+  outcome.catch(() => undefined);
+  return Object.assign(outcome, {
+    stdout: (async function* () {
+      for (const line of lines) yield Buffer.from(`${JSON.stringify(line)}\n`);
+    })(),
+    kill: vi.fn(),
+  });
+}
+
+const WEATHER_TOOL = {
+  type: 'function',
+  function: {
+    name: 'get_weather',
+    description: 'The weather in a city',
+    parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+  },
+};
+
+/** The stream-json lines each CLI writes for the cases below. */
+interface StreamFixture {
+  /** A reply of "Hello", ending with the CLI's success result. */
+  hello: unknown[];
+  /** A reply that calls get_weather for Paris, ending with the success result. */
+  toolCall: unknown[];
+  /** A result line the CLI flags as an error, and the message it carries. */
+  errorResult: unknown;
+  errorMessage: string;
+}
+
+const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixture }> = [
+  {
+    ...PROVIDERS[0],
+    fixture: {
+      hello: [
+        { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello' } },
+        { type: 'result', subtype: 'success', is_error: false, result: 'Hello', session_id: 's1' },
+      ],
+      toolCall: [
+        {
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: 's1',
+          result: JSON.stringify({
+            response_type: 'tool_calls',
+            tool_calls: [{ id: 'call_1', name: 'get_weather', arguments: { city: 'Paris' } }],
+          }),
+        },
+      ],
+      // Claude Code reports an API failure as a result with is_error set and
+      // the failure as its result text.
+      errorResult: { type: 'result', subtype: 'success', is_error: true, result: 'API Error: 401 invalid x-api-key', session_id: 's1' },
+      errorMessage: 'API Error: 401 invalid x-api-key',
+    },
+  },
+  {
+    ...PROVIDERS[1],
+    fixture: {
+      hello: [
+        { type: 'text', text: 'Hello' },
+        { type: 'result', status: 'success' },
+      ],
+      toolCall: [
+        { type: 'text', text: '<tool_call id="call_1" name="get_weather">{"city":"Paris"}</tool_call>' },
+        { type: 'result', status: 'success' },
+      ],
+      // The result the Gemini CLI writes before it exits non-zero
+      // (packages/cli/src/utils/errors.ts, handleError, in google-gemini/gemini-cli).
+      errorResult: {
+        type: 'result',
+        status: 'error',
+        error: { type: 'FatalAuthenticationError', message: 'Request had invalid authentication credentials.' },
+      },
+      errorMessage: 'Request had invalid authentication credentials.',
+    },
+  },
+];
+
+describe.each(STREAM_PROVIDERS)('$name: how a stream ends', ({ binary, model, create, fixture }) => {
+  async function streamOf(
+    lines: unknown[],
+    exitCode: number,
+    { options = {}, stderr = '' }: { options?: ModelCompletionOptions; stderr?: string } = {},
+  ): Promise<ModelCompletionResponse[]> {
+    stubCli(binary, () => cliRun(lines, exitCode, stderr));
+    const provider = create();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream(model, HELLO, options)) chunks.push(chunk);
+    return chunks;
+  }
+
+  it('passes the reply on once the CLI has exited cleanly', async () => {
+    const finals = (await streamOf(fixture.hello, 0)).filter((chunk) => chunk.isFinal);
+
+    expect(finals).toHaveLength(1);
+    expect(finals[0].error).toBeUndefined();
+    expect(finals[0].choices[0]).toMatchObject({ finishReason: 'stop', message: { content: 'Hello' } });
+  });
+
+  it('passes a tool call on once the CLI has exited cleanly', async () => {
+    const chunks = await streamOf(fixture.toolCall, 0, { options: { tools: [WEATHER_TOOL] } });
+    const final = chunks[chunks.length - 1];
+
+    expect(final.error).toBeUndefined();
+    expect(final.choices[0].finishReason).toBe('tool_calls');
+    expect(final.choices[0].message.tool_calls?.[0]?.function).toMatchObject({
+      name: 'get_weather',
+      arguments: JSON.stringify({ city: 'Paris' }),
+    });
+  });
+
+  it('ends with the classified exit failure when the CLI exits non-zero after its result line', async () => {
+    const finals = (await streamOf(fixture.hello, 1, { stderr: 'Fatal: the session store went away' })).filter(
+      (chunk) => chunk.isFinal,
+    );
+
+    expect(finals).toHaveLength(1);
+    expect(finals[0].choices).toEqual([]);
+    expect(finals[0].error).toMatchObject({ code: 'CRASHED' });
+  });
+
+  it.each([0, 1])(
+    'ends with an error carrying the message of a result the CLI flags as an error (exit code %i)',
+    async (exitCode) => {
+      const finals = (await streamOf([fixture.errorResult], exitCode)).filter((chunk) => chunk.isFinal);
+
+      expect(finals).toHaveLength(1);
+      expect(finals[0].choices).toEqual([]);
+      expect(finals[0].error).toMatchObject({ code: 'CRASHED', message: expect.stringContaining(fixture.errorMessage) });
+    },
+  );
 });
