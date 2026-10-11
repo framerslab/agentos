@@ -447,10 +447,13 @@ describe.each(STREAM_PROVIDERS)('$name: a consumer that stops reading the stream
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
+      // While a test listens for unhandledRejection, Vitest leaves such a
+      // rejection to it (runtime/moduleRunner/errorCatcher.ts in vitest 5.0.3),
+      // so this listener is where it shows.
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(run.subprocess.kill).toHaveBeenCalled();
       expect(chunks).toHaveLength(1);
       expect(chunks[0].isFinal).toBe(false);
-      expect(run.subprocess.kill).toHaveBeenCalled();
-      expect(unhandled).not.toHaveBeenCalled();
     } finally {
       process.off('unhandledRejection', unhandled);
     }
