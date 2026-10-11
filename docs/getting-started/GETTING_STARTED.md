@@ -195,7 +195,7 @@ The three levels below build on this picture:
 |---|---|---|
 | 1 | `generateText()` / `streamText()` | a model call, and with `tools`, a tool loop of up to `maxSteps` model calls (one by default, five on the prompt-emulated tool path); no sessions, no memory |
 | 2 | `agent()` | the tool-calling loop (up to 5 steps by default), sessions with their own message history, memory hooks |
-| 3 | `agency()` | multiple agents under a coordination strategy; optional human approvals and, with `emergent.enabled` on `hierarchical`, specialists the manager spawns at run time |
+| 3 | `agency()` | multiple agents under a coordination strategy; optional human approvals and, with `emergent.enabled` on `hierarchical` (or with `adaptive: true`, which puts a hierarchical manager over the strategy), specialists the manager spawns at run time |
 
 The full runtime runs guardrails, retrieval, human approval and channels. Of these, `agency()` applies human approval alone: it reports its guardrails as not enforced, adds no retrieved context and wires no channels (with `channels` set, its `connect()` rejects), and with `voice.enabled` its `listen()` takes JSON text over a local WebSocket, not audio. [API paths](../API_PATHS.md) lists what each surface does with each option.
 
