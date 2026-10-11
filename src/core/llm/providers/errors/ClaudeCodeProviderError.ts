@@ -78,4 +78,23 @@ export class ClaudeCodeProviderError extends CLISubprocessError {
 
     Object.setPrototypeOf(this, ClaudeCodeProviderError.prototype);
   }
+
+  /**
+   * The error a result Claude Code flags as an error stands for, `CRASHED`
+   * with the failure's message. ClaudeCodeProvider throws it from
+   * generateCompletion() and ends a stream with it, and ClaudeCodeCLIBridge
+   * throws it from execute() when the CLI exits non-zero after such a result.
+   *
+   * @param message — the failure's message, as the bridge reads it from the result
+   * @param details — optional context, such as the run's exit code and stderr
+   */
+  static fromErrorResult(message: string, details?: unknown): ClaudeCodeProviderError {
+    return new ClaudeCodeProviderError(
+      `Claude Code returned an error: ${message}`,
+      'CRASHED',
+      'Try running "claude --bare -p test" manually to diagnose.',
+      true,
+      details,
+    );
+  }
 }

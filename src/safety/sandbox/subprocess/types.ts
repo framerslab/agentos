@@ -45,6 +45,12 @@ export interface BridgeResult {
   usage?: { input_tokens: number; output_tokens: number };
   /** Whether the CLI reported an error. */
   isError: boolean;
+  /**
+   * The failure's message, set beside `isError` by a bridge that reads one
+   * from its CLI's result (ClaudeCodeCLIBridge). `result` keeps the CLI's own
+   * result text.
+   */
+  error?: string;
   /** Wall-clock duration of the subprocess in ms. */
   durationMs: number;
 }

@@ -164,6 +164,20 @@ export abstract class CLISubprocessBridge {
   }
 
   /**
+   * Classify a failed run whose JSON result on stdout the CLI flagged as a
+   * failure ({@link parseJsonResult} returned `isError`). Default: the run is
+   * classified as any failed run is, by {@link classifyError}. Override to
+   * report the failure the result names; ClaudeCodeCLIBridge does.
+   *
+   * @param _result — the run's JSON result, as {@link parseJsonResult} read it
+   * @param error — the raw error from execa
+   * @returns a CLISubprocessError (or subclass) for the failed run
+   */
+  protected classifyErrorResult(_result: BridgeResult, error: any): CLISubprocessError {
+    return this.classifyError(error);
+  }
+
+  /**
    * Build args and stdin for the lightweight authentication check.
    * Override for CLI-specific flags (e.g. Claude needs --bare --max-turns 1).
    */
@@ -224,9 +238,13 @@ export abstract class CLISubprocessBridge {
    * Spawns the binary with `--output-format json`, pipes prompt via stdin,
    * and returns the parsed result.
    *
+   * A failed run whose stdout holds a JSON result the CLI flagged as a
+   * failure is classified by {@link classifyErrorResult}, unless the caller
+   * cancelled it; any other failed run by {@link classifyError}.
+   *
    * @param options — bridge options (prompt, system prompt, model, etc.)
    * @returns parsed result with text, session ID, usage, and timing
-   * @throws {CLISubprocessError} on subprocess failure (via {@link classifyError})
+   * @throws {CLISubprocessError} on subprocess failure (via {@link classifyErrorResult} or {@link classifyError})
    */
   async execute(options: BridgeOptions): Promise<BridgeResult> {
     const args = this.buildArgs(options, 'json');
@@ -244,6 +262,16 @@ export abstract class CLISubprocessBridge {
       const durationMs = Date.now() - startMs;
       return this.parseJsonResult(result.stdout, durationMs);
     } catch (error: any) {
+      /* A CLI can write its JSON result, flag it as a failure and then exit
+       * non-zero. The result says what failed, which the exit code and stderr
+       * need not: Claude Code's own SDK replaces the process's exit error
+       * with the error result's text unless the run was aborted
+       * (Query.readMessages in @anthropic-ai/claude-agent-sdk 0.3.296). A
+       * call the caller cancelled stays an abort. */
+      if (!error?.isCanceled && typeof error?.stdout === 'string' && error.stdout.trim() !== '') {
+        const reported = this.parseJsonResult(error.stdout, Date.now() - startMs);
+        if (reported.isError) throw this.classifyErrorResult(reported, error);
+      }
       throw this.classifyError(error);
     }
   }

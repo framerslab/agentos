@@ -14,7 +14,7 @@
 
 import { CLISubprocessBridge } from '../../../../safety/sandbox/subprocess/CLISubprocessBridge';
 import { ClaudeCodeProviderError } from '../errors/ClaudeCodeProviderError';
-import type { BridgeOptions, StreamEvent, OutputFormat } from '../../../../safety/sandbox/subprocess/types';
+import type { BridgeOptions, BridgeResult, StreamEvent, OutputFormat } from '../../../../safety/sandbox/subprocess/types';
 
 /* Re-export shared types for backwards compatibility with ClaudeCodeProvider imports */
 export type { BridgeOptions as CLIBridgeOptions, BridgeResult as CLIBridgeResult, StreamEvent } from '../../../../safety/sandbox/subprocess/types';
@@ -63,6 +63,35 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     }
 
     return args;
+  }
+
+  /* ---- JSON result ---------------------------------------------- */
+
+  /**
+   * Claude Code's JSON result, read as the base class reads it, with the
+   * failure's message ({@link errorResultMessage}) in `error` when the CLI
+   * flags the result as an error. `result` keeps what the base reading gives.
+   */
+  protected parseJsonResult(stdout: string, durationMs: number): BridgeResult {
+    const result = super.parseJsonResult(stdout, durationMs);
+    if (!result.isError) return result;
+    /* isError is only set from a JSON object, so stdout parses. */
+    return { ...result, error: this.errorResultMessage(JSON.parse(stdout.trim())) };
+  }
+
+  /**
+   * A run that exits non-zero after a result Claude Code flags as an error
+   * ends with the error that result stands for, as a result flagged at exit
+   * 0 does in the provider: `CRASHED` with the failure's message, and the
+   * exit code and stderr in `details`. The SDK reads a run the same way: its
+   * Query.readMessages replaces the process's exit error with the error
+   * result's text (@anthropic-ai/claude-agent-sdk 0.3.296, sdk.mjs).
+   */
+  protected classifyErrorResult(result: BridgeResult, error: any): ClaudeCodeProviderError {
+    return ClaudeCodeProviderError.fromErrorResult(result.error ?? result.result, {
+      exitCode: error.exitCode,
+      stderr: error.stderr ?? '',
+    });
   }
 
   /* ---- Auth check override -------------------------------------- */
