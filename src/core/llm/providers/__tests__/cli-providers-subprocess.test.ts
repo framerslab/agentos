@@ -882,3 +882,82 @@ describe('ClaudeCodeProvider: a non-streaming call whose result Claude Code flag
     });
   });
 });
+
+/**
+ * With --json-schema, which ClaudeCodeProvider passes when tools are present,
+ * Claude Code returns the reply that matches the schema in the result's
+ * structured_output (SDKResultSuccess in @anthropic-ai/claude-agent-sdk
+ * 0.3.296, sdk.d.ts; the SDK hands its own json_schema output format to the
+ * CLI as --json-schema, sdk.mjs). Such a turn ends with no trailing assistant
+ * message (the note on end-turn tool sessions in sdk.d.ts), and the SDK does
+ * not say what the CLI writes in `result` then; here it is empty.
+ */
+describe('ClaudeCodeProvider: a reply Claude Code returns as structured output', () => {
+  const cases = [
+    {
+      name: 'a tool call',
+      structured: {
+        response_type: 'tool_calls',
+        tool_calls: [{ id: 'call_1', name: 'get_weather', arguments: { city: 'Paris' } }],
+      },
+      expected: {
+        finishReason: 'tool_calls',
+        message: {
+          tool_calls: [
+            { id: 'call_1', type: 'function', function: { name: 'get_weather', arguments: JSON.stringify({ city: 'Paris' }) } },
+          ],
+        },
+      },
+    },
+    {
+      name: 'a text reply',
+      structured: { response_type: 'text', text: 'It is sunny in Paris.' },
+      expected: { finishReason: 'stop', message: { content: 'It is sunny in Paris.' } },
+    },
+  ];
+  const resultLine = (structured: object) => ({
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    result: '',
+    structured_output: structured,
+    session_id: 's1',
+    usage: { input_tokens: 12, output_tokens: 3 },
+  });
+
+  it.each(cases)('generateCompletion() returns $name from one run with the schema', async ({ structured, expected }) => {
+    const runs: string[][] = [];
+    stubCli('claude', (args) => {
+      runs.push(args);
+      return Promise.resolve({ failed: false, exitCode: 0, stdout: JSON.stringify(resultLine(structured)), stderr: '' });
+    });
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+
+    const response = await provider.generateCompletion('claude-sonnet-4-6', HELLO, { tools: [WEATHER_TOOL] });
+
+    expect(response.choices[0]).toMatchObject(expected);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toContain('--json-schema');
+  });
+
+  it.each(cases)('generateCompletionStream() ends with $name', async ({ structured, expected }) => {
+    const runs: string[][] = [];
+    stubCli('claude', (args) => {
+      runs.push(args);
+      return cliRun([resultLine(structured)], 0);
+    });
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', HELLO, { tools: [WEATHER_TOOL] })) {
+      chunks.push(chunk);
+    }
+    const final = chunks[chunks.length - 1];
+
+    expect(final.error).toBeUndefined();
+    expect(final.choices[0]).toMatchObject(expected);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toContain('--json-schema');
+  });
+});
