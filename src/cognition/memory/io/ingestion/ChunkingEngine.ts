@@ -148,10 +148,6 @@ function fixedChunks(
   startIndex: number = 0,
   baseMetadata?: Record<string, unknown>,
 ): DocumentChunk[] {
-  if (!(chunkSize >= 1)) {
-    throw new RangeError(`chunkSize must be at least 1, got ${chunkSize}`);
-  }
-
   const chunks: DocumentChunk[] = [];
   let pos = 0;
   let lastEnd = 0;
@@ -238,6 +234,10 @@ export class ChunkingEngine {
   async chunk(content: string, options: ChunkOptions): Promise<DocumentChunk[]> {
     const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
     const chunkOverlap = options.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP;
+
+    if (!(chunkSize >= 1)) {
+      throw new RangeError(`chunkSize must be at least 1, got ${chunkSize}`);
+    }
 
     switch (options.strategy) {
       case 'fixed':

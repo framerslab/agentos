@@ -144,6 +144,21 @@ describe('ChunkingEngine fixed cut progress', () => {
     await expect(result).rejects.toThrow('chunkSize');
   });
 
+  it('rejects zero chunk size for a single semantic sentence', async () => {
+    const engine = new ChunkingEngine();
+    const run = () => engine.chunk('One sentence.', {
+      strategy: 'semantic',
+      chunkSize: 0,
+      embedFn: async (texts) => texts.map(() => [1, 0]),
+    });
+    const result = vm.runInNewContext(
+      'run()', { run }, { timeout: 1_000 },
+    ) as ReturnType<typeof run>;
+
+    await expect(result).rejects.toThrow(RangeError);
+    await expect(result).rejects.toThrow('chunkSize must be at least 1, got 0');
+  });
+
   it('preserves eight prose cuts with whole-word ends and 50-character overlap', async () => {
     const engine = new ChunkingEngine();
     const run = () => engine.chunk(buildWordyString(1_998), {
