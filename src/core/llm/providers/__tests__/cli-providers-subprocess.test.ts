@@ -3,7 +3,7 @@
  * subprocess stubbed where the bridges spawn it (execa). A failed run is
  * stubbed with the fields execa 10 sets on its error (lib/return/result.js):
  * `failed`, `timedOut`, `isCanceled`, `isTerminated` (a signal ended the
- * process), `exitCode`, `signal` and `stderr`.
+ * process), `exitCode`, `signal`, `stdout` and `stderr`.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Readable } from 'node:stream';
@@ -24,18 +24,34 @@ import type { StreamEvent } from '../../../../safety/sandbox/subprocess/types';
 interface ExecaFailure {
   exitCode?: number;
   signal?: string;
+  stdout?: string;
   stderr?: string;
   timedOut?: boolean;
+  /** The run's `timeout` in milliseconds, which execa names in the message of a timed-out run. */
+  timeout?: number;
   isCanceled?: boolean;
 }
 
-/** An error shaped as execa 10 rejects with when a run fails. */
-function execaError({ exitCode, signal, stderr = '', timedOut = false, isCanceled = false }: ExecaFailure): Error {
-  const message = isCanceled
-    ? 'Command was canceled'
-    : signal !== undefined
-      ? `Command was killed with ${signal}`
-      : `Command failed with exit code ${exitCode}`;
+/**
+ * An error shaped as execa 10 rejects with when a run fails. Its message
+ * starts as execa's does (getErrorPrefix in lib/return/message.js).
+ */
+function execaError({
+  exitCode,
+  signal,
+  stdout = '',
+  stderr = '',
+  timedOut = false,
+  timeout,
+  isCanceled = false,
+}: ExecaFailure): Error {
+  const message = timedOut
+    ? `Command timed out after ${timeout} milliseconds`
+    : isCanceled
+      ? 'Command was canceled'
+      : signal !== undefined
+        ? `Command was killed with ${signal}`
+        : `Command failed with exit code ${exitCode}`;
   return Object.assign(new Error(message), {
     failed: true,
     timedOut,
@@ -43,6 +59,7 @@ function execaError({ exitCode, signal, stderr = '', timedOut = false, isCancele
     isTerminated: signal !== undefined,
     exitCode,
     signal,
+    stdout,
     stderr,
   });
 }
@@ -151,6 +168,8 @@ const WEATHER_TOOL = {
 interface StreamFixture {
   /** A reply of "Hello", ending with the CLI's success result. */
   hello: unknown[];
+  /** A reply of `text` in one piece, as the CLI writes it now, ending with the CLI's success result. */
+  reply: (text: string) => unknown[];
   /** A reply that calls get_weather for Paris, ending with the success result. */
   toolCall: unknown[];
   /** A result line the CLI flags as an error, and the message it carries. */
@@ -168,6 +187,18 @@ const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixt
       hello: [
         { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello' } },
         { type: 'result', subtype: 'success', is_error: false, result: 'Hello', session_id: 's1' },
+      ],
+      // With --include-partial-messages, which the bridge passes, each delta
+      // comes wrapped as a stream_event (SDKPartialAssistantMessage in
+      // @anthropic-ai/claude-agent-sdk 0.3.296, sdk.d.ts).
+      reply: (text) => [
+        {
+          type: 'stream_event',
+          event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+          parent_tool_use_id: null,
+          session_id: 's1',
+        },
+        { type: 'result', subtype: 'success', is_error: false, result: text, session_id: 's1' },
       ],
       toolCall: [
         {
@@ -199,6 +230,12 @@ const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixt
       hello: [
         { type: 'text', text: 'Hello' },
         { type: 'result', status: 'success' },
+      ],
+      // MessageEvent and ResultEvent in packages/core/src/output/types.ts
+      // (google-gemini/gemini-cli at 9b6e0265).
+      reply: (text) => [
+        { type: 'message', timestamp: '2026-10-10T12:00:00.000Z', role: 'assistant', content: text, delta: true },
+        { type: 'result', timestamp: '2026-10-10T12:00:00.000Z', status: 'success' },
       ],
       toolCall: [
         { type: 'text', text: '<tool_call id="call_1" name="get_weather">{"city":"Paris"}</tool_call>' },
@@ -684,5 +721,42 @@ describe('ClaudeCodeProvider: the stream-json Claude Code writes with partial me
     expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual(['Hi ', 'there']);
     expect(final.error).toBeUndefined();
     expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
+  });
+});
+
+/**
+ * A run that writes `lines` and exits 0, its stdout read in two pieces: the
+ * second starts two bytes into the first `character` the lines carry. A pipe
+ * hands over what the CLI has written so far, wherever a character's bytes
+ * end, and the child's stdout gives Buffers: execa 10 sets no encoding on it,
+ * and decodes its own copy of the output, `result.stdout`, through one
+ * StringDecoder for the whole stream (lib/transform/encoding-transform.js).
+ */
+function splitRun(lines: unknown[], character: string) {
+  const bytes = Buffer.from(lines.map((line) => `${JSON.stringify(line)}\n`).join(''));
+  const at = bytes.indexOf(Buffer.from(character)) + 2;
+  return Object.assign(Promise.resolve({ failed: false, exitCode: 0, stdout: '', stderr: '' }), {
+    stdout: (async function* () {
+      yield bytes.subarray(0, at);
+      yield bytes.subarray(at);
+    })(),
+    kill: vi.fn(),
+  });
+}
+
+describe.each(STREAM_PROVIDERS)('$name: a character whose bytes two reads of stdout split', ({ binary, model, create, fixture }) => {
+  it('passes the character on whole, in the text delta and in the reply', async () => {
+    // U+1F600 takes four bytes in UTF-8, and the first read ends after two of them.
+    const reply = 'Hi \u{1F600}';
+    stubCli(binary, () => splitRun(fixture.reply(reply), '\u{1F600}'));
+    const provider = create();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream(model, HELLO, {})) chunks.push(chunk);
+    const final = chunks[chunks.length - 1];
+
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual([reply]);
+    expect(final.error).toBeUndefined();
+    expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: reply } }] });
   });
 });
