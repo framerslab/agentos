@@ -35,6 +35,9 @@ import type { AudioFrame } from '../voice-pipeline/types.js';
 /** The optional peer this module runs on. */
 const RTC_NODE = '@livekit/rtc-node';
 
+/** The largest sample rate: rtc-node passes the rate to its native stream as a 32-bit unsigned integer. */
+const MAX_SAMPLE_RATE = 2 ** 32 - 1;
+
 // ---------------------------------------------------------------------------
 // The parts of @livekit/rtc-node this module uses
 // ---------------------------------------------------------------------------
@@ -167,8 +170,9 @@ export interface LiveKitRoomAudioSourceOptions {
   /** Identity of the participant whose audio is read. */
   participantIdentity: string;
   /**
-   * Sample rate of the frames yielded; LiveKit resamples to it. Match the
-   * consumer: 24000 for OpenAI Realtime transcription, 16000 for Deepgram.
+   * Sample rate of the frames yielded, a whole number of samples per second;
+   * LiveKit resamples to it. Match the consumer: 24000 for OpenAI Realtime
+   * transcription, 16000 for Deepgram.
    */
   sampleRate: number;
   /**
@@ -209,20 +213,24 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
   private readonly waiters = new Set<() => void>();
 
   /**
-   * @throws {RangeError} When `sampleRate` is not a positive number, or when
-   *   `frameSizeMs` is not a whole number of milliseconds that holds at least
-   *   one sample at `sampleRate`.
+   * @throws {RangeError} When `sampleRate` is not a whole number of samples
+   *   per second from 1 to 4294967295 (rtc-node passes the rate to its native
+   *   stream as a 32-bit unsigned integer), or when `frameSizeMs` is not a
+   *   whole number of milliseconds that holds at least one sample at
+   *   `sampleRate`.
    */
   constructor(private readonly options: LiveKitRoomAudioSourceOptions) {
-    if (!(options.sampleRate > 0)) {
-      throw new RangeError('LiveKitRoomAudioSource: sampleRate must be a positive number of samples per second');
+    const { sampleRate, frameSizeMs } = options;
+    if (!(Number.isInteger(sampleRate) && sampleRate > 0 && sampleRate <= MAX_SAMPLE_RATE)) {
+      throw new RangeError(
+        'LiveKitRoomAudioSource: sampleRate must be a whole number of samples per second, from 1 to 4294967295'
+      );
     }
-    const { frameSizeMs } = options;
     // rtc-node's native stream cuts frames of sampleRate * frameSizeMs / 1000
     // samples, rounded down, and a frame of no samples never ends that loop.
     if (
       frameSizeMs !== undefined &&
-      !(Number.isInteger(frameSizeMs) && frameSizeMs > 0 && options.sampleRate * frameSizeMs >= 1000)
+      !(Number.isInteger(frameSizeMs) && frameSizeMs > 0 && sampleRate * frameSizeMs >= 1000)
     ) {
       throw new RangeError(
         'LiveKitRoomAudioSource: frameSizeMs must be a whole number of milliseconds that holds at least one sample at sampleRate'

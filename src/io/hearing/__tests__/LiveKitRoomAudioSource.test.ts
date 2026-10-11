@@ -171,11 +171,15 @@ describe('LiveKitRoomAudioSource: the stream and the frames', () => {
     expect(room.listenerCount('disconnected')).toBe(0);
   });
 
-  it('refuses a sample rate that is not positive', () => {
+  it('refuses a sample rate that is not a whole number from 1 to 4294967295', () => {
     const room = new FakeRoom();
-    expect(
-      () => new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate: 0, rtc: fakeRtc() })
-    ).toThrow(RangeError);
+    const source = (sampleRate: number) => () =>
+      new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate, rtc: fakeRtc() });
+    for (const sampleRate of [0, -24_000, 24_000.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 32]) {
+      expect(source(sampleRate)).toThrow(RangeError);
+    }
+    expect(source(2 ** 32 - 1)).not.toThrow();
+    expect(source(16_000)).not.toThrow();
   });
 
   it('refuses a frame size that is not a whole number of milliseconds holding at least one sample', () => {

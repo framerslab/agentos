@@ -56,7 +56,10 @@ export interface LiveKitStreamTransportOptions {
   room: LiveKitRoomLike;
   /** Identity of the participant the agent hears and answers. */
   participantIdentity: string;
-  /** Sample rate of the inbound frames; match the STT (24000 for OpenAI Realtime transcription). */
+  /**
+   * Sample rate of the inbound frames, a whole number of samples per second;
+   * match the STT (24000 for OpenAI Realtime transcription).
+   */
   sampleRate: number;
   /** Text stream topic of the control messages. @defaultValue 'agentos.voice' */
   topic?: string;
