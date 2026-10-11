@@ -4,7 +4,7 @@
 
 ## CLISubprocessError Class
 
-A bridge subclass builds the error in its `classifyError()` method, and the bridge's `execute()` and `stream()` throw what that method returns. The class is tied to no binary: `binaryName` is a constructor argument, so a bridge for `ffmpeg` or `git` uses the same class.
+A bridge subclass builds the error in its `classifyError()` method, and the bridge's `execute()` and `stream()` throw what that method returns. For a failed run whose stdout holds a JSON result the CLI flags as an error, `execute()` throws what `classifyErrorResult()` returns instead; its default returns `classifyError()`'s error. The class is tied to no binary: `binaryName` is a constructor argument, so a bridge for `ffmpeg` or `git` uses the same class.
 
 ### Class Structure
 
@@ -73,7 +73,7 @@ The table lists where the built-in bridges and providers raise each code and the
 | `VERSION_OUTDATED` | Nothing | Not set |
 | `SPAWN_FAILED` | `classifyError()` on `EACCES` | `false` |
 | `TIMEOUT` | `classifyError()` on a timeout, or on a signal other than the caller's abort | `true` |
-| `CRASHED` | `classifyError()` for every other failure; provider `generateCompletion()` and `generateCompletionStream()` on an error result | `true` |
+| `CRASHED` | `classifyError()` for every other failure; provider `generateCompletion()` and `generateCompletionStream()` on an error result; the Claude Code bridge's `execute()` on an error result followed by a non-zero exit | `true` |
 | `RATE_LIMITED` | `classifyError()` on stderr text | `true` |
 | `PERMISSION_DENIED` | Nothing | Not set |
 | `CONTEXT_TOO_LONG` | `classifyError()` on stderr text | `false` |
@@ -108,7 +108,7 @@ No AgentOS code raises it. The constant and both providers' code types declare i
 
 `classifyError()` returns it when [execa](https://github.com/sindresorhus/execa), which runs the process, marks the failed run `timedOut` or `isTerminated`:
 
-- `timedOut` means the run passed its `timeout`, a field of the `BridgeOptions` given to `execute()` or `stream()` (120000 ms when unset). The two providers pass their `requestTimeout` config value, also 120000 ms by default.
+- `timedOut` means the run passed its `timeout`, a field of the `BridgeOptions` given to `execute()` or `stream()` (120000 ms when unset). The two providers pass their `requestTimeout` config value, also 120000 ms by default. The timeout measures the CLI: execa runs it until the process has exited and its stdout has ended, and `stream()` reads stdout as the CLI writes it, so a consumer that takes its time over the events does not make a run that ended in time a timeout.
 - `isTerminated` is true whenever a signal ended the process ([`result.js`](https://github.com/sindresorhus/execa/blob/v10.0.1/lib/return/result.js) in execa 10.0.1), so a process killed from outside carries this code. A call cancelled through `abortSignal` is ended by a signal too, but execa also marks it `isCanceled`, and the bridges report it as `REQUEST_ABORTED` ([Codes Outside CLI_ERROR](#codes-outside-cli_error)).
 
 To allow more time, pass a larger `timeout` to a bridge you call yourself, or set `requestTimeout` in the config the provider is initialized with. `generateText()` and the other helpers initialize the provider with a key and a base URL only, so their CLI calls run on the default.
@@ -117,7 +117,10 @@ To allow more time, pass a larger `timeout` to a bridge you call yourself, or se
 
 - `classifyError()` returns it for every failure the earlier checks do not match, a non-zero exit code among them. Its `guidance` ends with the last 500 characters of stderr.
 - The providers' `generateCompletion()` throws it when the CLI exits normally and its JSON result carries `is_error: true`.
-- The providers' `generateCompletionStream()` ends with it when the CLI flags its `stream-json` result as an error: `is_error: true` from Claude Code, `status: 'error'` from the Gemini CLI. The message is `Claude Code returned an error:` or `Gemini CLI returned an error:` followed by the CLI's own message for the failure. A Claude Code error subtype (`error_during_execution`, `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`) has no result text, and its message is the subtype followed by the entries of its `errors` list, each trimmed, the blank ones left out, joined with `; `: `Claude Code returned an error: error_max_turns: <errors>`.
+- The Claude Code bridge's `execute()` throws it when Claude Code exits non-zero after a JSON result it flags as an error, unless the caller cancelled the call: the result says what failed, and Claude Code's own SDK reports such a run by the result too. `details` holds the exit code and stderr. A bridge reads a failed run's stdout this way through its `classifyErrorResult()`, whose default classifies the run with `classifyError()`; the Gemini CLI writes its failure in JSON mode to stderr, and its bridge keeps the default.
+- The providers' `generateCompletionStream()` ends with it when the CLI flags its `stream-json` result as an error: `is_error: true` from Claude Code, `status: 'error'` from the Gemini CLI.
+
+The message is `Claude Code returned an error:` or `Gemini CLI returned an error:` followed by the CLI's own message for the failure. A Claude Code error subtype (`error_during_execution`, `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`) has no result text, and its message is the subtype followed by the entries of its `errors` list, each trimmed, the blank ones left out, joined with `; `: `Claude Code returned an error: error_max_turns: <errors>`, or the subtype alone when the list is empty.
 
 ### RATE_LIMITED
 
@@ -142,7 +145,7 @@ The two providers' code types add codes of their own ([`ClaudeCodeProviderError.
 | `REQUEST_ABORTED` | Both | A call is cancelled through its `abortSignal`: `classifyError()` returns it, with `recoverable: false`, for a run execa marks `isCanceled`. It is the code the HTTP providers give a caller's abort, and `isRetryableError()` never counts it as retryable |
 | `EMBEDDINGS_NOT_SUPPORTED` | Both | `generateEmbeddings()` is called: neither provider serves embeddings |
 | `UNKNOWN` | Both | A completion is requested while the provider is not initialized |
-| `SCHEMA_PARSE_FAILED` | Claude Code | Never. `generateCompletion()` retries a reply that does not parse as the tool-call shape once without the schema and returns it as text; the streaming path returns such a reply as text |
+| `SCHEMA_PARSE_FAILED` | Claude Code | Never. The provider reads the reply from the result's `structured_output` when Claude Code returns one, and from the result text when it does not. `generateCompletion()` retries a reply that does not parse as the tool-call shape once without the schema and returns it as text; the streaming path returns such a reply as text |
 | `TOOL_PARSE_FAILED` | Gemini CLI | Never. The type declares it and nothing raises it |
 
 ## Custom Error Codes
@@ -173,7 +176,7 @@ new CLISubprocessError(
 
 ## What AgentOS Does with These Errors
 
-- **Bridge.** `execute()` and `stream()` throw the error `classifyError()` returns. `stream()` read to its end awaits the CLI's exit and throws on a failed one. When its consumer stops reading first (a `break` in `for await`, or `return()`), it kills the process. It handles the run's outcome from the moment the process starts, so a run that fails while the consumer is busy between two events, or after it has stopped reading, raises nothing in the host; a consumer that reads on to the end gets the failure there. A result the CLI flags as an error reaches a direct reader of `stream()` as a `StreamEvent` with `isError: true` and the failure's message in `error`; its `result` is the CLI's own result text, `''` when it wrote none.
+- **Bridge.** `execute()` and `stream()` throw the error `classifyError()` returns, except that `execute()` hands a failed run whose stdout holds a JSON result the CLI flags as an error to `classifyErrorResult()` ([`CRASHED`](#crashed)). `stream()` reads stdout as the CLI writes it, decoded as one UTF-8 stream, and its events wait in a queue until the consumer takes them. Read to its end, it awaits the CLI's exit and throws on a failed one. When its consumer stops reading first (a `break` in `for await`, or `return()`), it stops reading stdout and kills the process. It handles the run's outcome from the moment the process starts, so a run that fails while the consumer is busy between two events, or after it has stopped reading, raises nothing in the host; a consumer that reads on to the end gets the failure there. A result the CLI flags as an error reaches a direct reader of `stream()` as a `StreamEvent` with `isError: true` and the failure's message in `error`; its `result` is the CLI's own result text, `''` when it wrote none. `execute()` returns such a result at exit 0 with `isError: true` and, from the Claude Code bridge, the message in `error`.
 - **Provider, non-streaming.** `generateCompletion()` lets the bridge's error through.
 - **Provider, streaming.** `generateCompletionStream()` reads the bridge's stream to its end, where the bridge awaits the CLI's exit, and yields its final chunk after that. It does not throw when the bridge fails or when the CLI reports an error in its output. Either way the stream ends with a final chunk that carries an `error`:
   - When the bridge throws, the `error` holds the error's message, its `code` and, as `details`, the error object. A non-zero exit after the CLI's result line ends the stream this way, in place of the reply. A call cancelled through `abortSignal` ends it this way too, with `type: 'abort'` beside the `REQUEST_ABORTED` code: the chunk the `abortSignal` contract of `IProvider` asks a streaming provider for, which the completion gateway and `streamText()` read as the caller's own stop.
