@@ -90,8 +90,8 @@ AgentOS exports an [`OpenAIOAuthFlow`](https://github.com/framerslab/agentos/blo
 - **Binary**: `gemini` (install: `npm install -g @google/gemini-cli`)
 - **Auth**: User logs in via Google account by running `gemini` in terminal
 - **System prompt**: Temp file + `GEMINI_SYSTEM_MD` env var (no `--system-prompt` flag)
-- **Tool calling**: XML prompt-based with `<tool_call>` markers (no `--json-schema` support)
-- **Streaming**: `--output-format stream-json`; the reply's text arrives as `message` events (`role: 'assistant'`, `delta: true`) and the token counts in the `result` event's `stats`. The session id comes on the `init` event that opens the stream, and the bridge gives it to the result, which carries none. An `error` event of `severity: 'warning'` does not end the stream
+- **Tool calling**: XML prompt-based with `<tool_call>` markers (no `--json-schema` support); the provider reads the tool calls from the whole reply once it has ended
+- **Streaming**: `--output-format stream-json`; the reply's text arrives as `message` events (`role: 'assistant'`, `delta: true`) and the token counts in the `result` event's `stats`. The session id comes on the `init` event that opens the stream, and the bridge gives it to the result, which carries none. An `error` event of `severity: 'warning'` does not end the stream. With tools, the reply's text streams without its `<tool_call>` blocks, which arrive as the final chunk's tool calls alone: text from a `<` that may open a block is held back until the block's closing tag shows whether it is one, and text still held when the reply ends goes out as one text delta just before the final chunk
 - **Key flags**: `-p` (headless), `-m` (model selection)
 - **Models**: gemini-3.5-flash (default), gemini-3.1-pro-preview, gemini-3.5-flash-lite, gemini-2.5-flash-lite. The CLI answers gemini-2.5-flash with gemini-3.5-flash and returns 404 for gemini-2.5-pro.
 - **Cost**: $0 per token (Google account — free tier: 60 req/min, 1000 req/day; higher with AI Pro/Ultra)

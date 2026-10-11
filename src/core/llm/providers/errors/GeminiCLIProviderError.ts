@@ -58,4 +58,22 @@ export class GeminiCLIProviderError extends CLISubprocessError {
 
     Object.setPrototypeOf(this, GeminiCLIProviderError.prototype);
   }
+
+  /**
+   * The error of a call the caller cancelled through its abort signal,
+   * `REQUEST_ABORTED`. GeminiCLIBridge classifies a run execa marks
+   * `isCanceled` as it, and GeminiCLIProvider ends a stream with it when the
+   * caller aborts after the run has ended but before the stream's final chunk.
+   *
+   * @param details — optional context, such as the run's exit code and stderr
+   */
+  static requestAborted(details?: unknown): GeminiCLIProviderError {
+    return new GeminiCLIProviderError(
+      'Gemini CLI call aborted by the caller.',
+      'REQUEST_ABORTED',
+      'The call was cancelled through its abort signal. Send it again if it is still needed.',
+      false,
+      details,
+    );
+  }
 }

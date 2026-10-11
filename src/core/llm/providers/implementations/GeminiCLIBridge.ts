@@ -225,13 +225,7 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
      * was given as cancelSignal fires; the signal that then ends the process
      * sets isTerminated too, so this is checked before the timeout. */
     if (error.isCanceled) {
-      return new GeminiCLIProviderError(
-        'Gemini CLI call aborted by the caller.',
-        'REQUEST_ABORTED',
-        'The call was cancelled through its abort signal. Send it again if it is still needed.',
-        false,
-        { exitCode, stderr },
-      );
+      return GeminiCLIProviderError.requestAborted({ exitCode, stderr });
     }
 
     /* Timeout */
