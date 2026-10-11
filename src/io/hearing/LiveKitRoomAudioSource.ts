@@ -205,7 +205,8 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
   private isClosed = false;
   private started = false;
   private listening = false;
-  private wake: (() => void) | undefined;
+  /** The reads waiting for a track; a subscription or the end wakes every one of them. */
+  private readonly waiters = new Set<() => void>();
 
   /**
    * @throws {RangeError} When `sampleRate` is not a positive number, or when
@@ -242,7 +243,8 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
 
   /**
    * The source's frames, for its one reader. Leaving a `for await` loop early
-   * (the iterator's `return()`) closes the source.
+   * (the iterator's `return()`) closes the source. Calls of `next()` that
+   * overlap each settle, with a frame of their own or, once it ends, done.
    *
    * @throws {Error} When called a second time: two readers would split one
    *   stream's frames between them.
@@ -348,14 +350,15 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
 
   private waitForTrack(): Promise<void> {
     return new Promise<void>((resolve) => {
-      this.wake = resolve;
+      this.waiters.add(resolve);
     });
   }
 
+  /** Wakes every read waiting for a track: each looks for one again, or ends once the source is closed. */
   private wakeUp(): void {
-    const wake = this.wake;
-    this.wake = undefined;
-    wake?.();
+    const waiters = [...this.waiters];
+    this.waiters.clear();
+    for (const wake of waiters) wake();
   }
 
   private readonly onTrackSubscribed = (

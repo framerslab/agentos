@@ -10,6 +10,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import type * as Rtc from '@livekit/rtc-node';
+import type { AudioFrame } from '../../voice-pipeline/types.js';
 import {
   LiveKitRoomAudioSource,
   loadLiveKitRtc,
@@ -307,6 +308,49 @@ describe('LiveKitRoomAudioSource: following the participant, and the end', () =>
     room.emit('disconnected', 'CLIENT_INITIATED');
     expect(await pending).toEqual({ done: true, value: undefined });
     expect(source.closed).toBe(true);
+  });
+
+  it('ends every read that waits for a track when it closes', async () => {
+    const room = new FakeRoom();
+    const source = new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
+    const frames = source[Symbol.asyncIterator]();
+    const settled: Array<IteratorResult<AudioFrame>> = [];
+    void frames.next().then((result) => settled.push(result));
+    void frames.next().then((result) => settled.push(result));
+    await settle();
+    expect(settled).toEqual([]);
+    source.close();
+    await settle();
+    expect(settled).toEqual([
+      { done: true, value: undefined },
+      { done: true, value: undefined },
+    ]);
+  });
+
+  it('gives each read that waits for a track a frame of its own once the track is subscribed', async () => {
+    const room = new FakeRoom();
+    const source = new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
+    const frames = source[Symbol.asyncIterator]();
+    let first: IteratorResult<AudioFrame> | undefined;
+    let second: IteratorResult<AudioFrame> | undefined;
+    void frames.next().then((result) => (first = result));
+    void frames.next().then((result) => (second = result));
+    await settle();
+    const participant = room.addParticipant('user-1');
+    const publication = new FakePublication(undefined);
+    participant.trackPublications.set('PUB_LATE', publication);
+    room.subscribe(participant, publication, new FakeTrack('TR_LATE'));
+    await settle();
+    // Both reads share the one stream the subscription opened.
+    expect(FakeAudioStream.opened.map((stream) => stream.track.sid)).toEqual(['TR_LATE']);
+    FakeAudioStream.opened[0].push(rtcFrame([16384]));
+    await settle();
+    expect(first && Array.from(first.value.samples)).toEqual([0.5]);
+    expect(second).toBeUndefined();
+    FakeAudioStream.opened[0].push(rtcFrame([-16384]));
+    await settle();
+    expect(second && Array.from(second.value.samples)).toEqual([-0.5]);
+    source.close();
   });
 
   it('closes when a for-await loop leaves early, and has one reader', async () => {
