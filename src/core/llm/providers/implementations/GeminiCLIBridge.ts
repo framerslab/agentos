@@ -128,6 +128,17 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
   protected parseStreamEvent(raw: any): StreamEvent | null {
     if (!raw || typeof raw !== 'object') return null;
 
+    /* Reply text as the Gemini CLI writes it: a message event for each piece,
+     * { type: 'message', role: 'assistant', content, delta: true }
+     * (packages/cli/src/nonInteractiveCli.ts in google-gemini/gemini-cli).
+     * The CLI also echoes the prompt as a message with role 'user', which is
+     * not reply text. */
+    if (raw.type === 'message') {
+      return raw.role === 'assistant' && typeof raw.content === 'string'
+        ? { type: 'text_delta', text: raw.content }
+        : null;
+    }
+
     /* Text delta */
     if (raw.type === 'content_block_delta' && raw.delta?.type === 'text_delta') {
       return { type: 'text_delta', text: raw.delta.text };
@@ -146,17 +157,19 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
     /* Final result. The Gemini CLI reports a failure as a result with
      * status 'error' and an `error` object ({ type, message }), then exits
      * non-zero; an `is_error` flag is read as well. The failure's message is
-     * then the result text. */
+     * then the result text. The CLI's result carries no text of its own (the
+     * reply came as message events) and its token counts in `stats`. */
     if (raw.type === 'result') {
       const isError = raw.is_error === true || raw.status === 'error';
+      const tokens = raw.usage ?? raw.stats;
       return {
         type: 'result',
         result: isError
           ? raw.error?.message || raw.result || raw.response || raw.error?.type || 'Unknown error'
           : raw.result ?? raw.response ?? '',
         sessionId: raw.session_id,
-        usage: raw.usage
-          ? { input_tokens: raw.usage.input_tokens ?? 0, output_tokens: raw.usage.output_tokens ?? 0 }
+        usage: tokens
+          ? { input_tokens: tokens.input_tokens ?? 0, output_tokens: tokens.output_tokens ?? 0 }
           : undefined,
         ...(isError ? { isError: true } : {}),
       };
