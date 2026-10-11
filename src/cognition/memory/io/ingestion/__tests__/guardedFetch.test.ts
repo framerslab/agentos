@@ -26,6 +26,17 @@ const PAGE = `<html><head><title>Review</title></head><body>${'<p>The quarterly 
 /** The cap a read is held to. */
 const CAP = 2_097_152;
 
+/**
+ * `data` gzipped with a file name of `nameBytes` bytes in the header: as long
+ * as that on the wire, and no longer once decoded.
+ */
+function gzipWithFileName(data: string, nameBytes: number): Buffer {
+  const plain = gzipSync(data);
+  const header = Buffer.from(plain.subarray(0, 10));
+  header[3] |= 0x08;
+  return Buffer.concat([header, Buffer.alloc(nameBytes, 0x61), Buffer.from([0]), plain.subarray(10)]);
+}
+
 /** What `/big` sends before it stops sending. */
 const BIG_BYTES = 3 * 1024 * 1024;
 
@@ -67,6 +78,13 @@ function answer(request: IncomingMessage, response: ServerResponse): void {
   } else if (path === '/gzip') {
     response.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip' });
     response.end(gzipSync(PAGE));
+  } else if (path === '/gzip-padded') {
+    // A short page that is five kilobytes on the wire, sent in two writes
+    // with no content-length to give the size away.
+    const body = gzipWithFileName('<p>short</p>', 5000);
+    response.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip' });
+    response.write(body.subarray(0, 2500));
+    response.end(body.subarray(2500));
   } else if (path === '/upgrade') {
     // A protocol switch, written by hand: Node's own response cannot send a 101.
     request.socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
@@ -255,6 +273,57 @@ describe('guardedFetch', () => {
     const underThePage = Buffer.byteLength(PAGE) - 1;
     expect(gzipSync(PAGE).length).toBeLessThan(underThePage);
     expect(await reasonOf(guardedFetch(at('/gzip'), reach({ maxBytes: underThePage })))).toBe('size');
+  });
+
+  it('counts the bytes on the wire too: a body that decodes to little is refused once it arrives past the cap', async () => {
+    expect(await reasonOf(guardedFetch(at('/gzip-padded'), reach({ maxBytes: 3000 })))).toBe('size');
+    const read = await guardedFetch(at('/gzip-padded'), reach({ maxBytes: 6000 }));
+    expect(read.body.toString('utf8')).toBe('<p>short</p>');
+  });
+
+  describe('an IPv6 address under a NAT64 prefix of this network', () => {
+    /** A DNS64 network with the prefix 2600:1f14:abcd::/96: its resolver writes IPv4 addresses into IPv6 ones. */
+    const dns64 = (address: string) => async (host: string) =>
+      host === 'ipv4only.arpa'
+        ? [
+            { address: '192.0.0.170', family: 4 },
+            { address: '2600:1f14:abcd::c000:aa', family: 6 },
+          ]
+        : [{ address, family: 6 }];
+
+    it('is refused when it carries a private IPv4 address, though it looks public', async () => {
+      const before = connections;
+      // 10.0.0.1 under the prefix: public by its own range, private by what it carries.
+      expect(isPublicAddress('2600:1f14:abcd::a00:1')).toBe(true);
+      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: dns64('2600:1f14:abcd::a00:1') })))).toBe('address');
+      expect(connections).toBe(before);
+    });
+
+    it('passes the address check when it carries a public IPv4 address', async () => {
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        // 8.8.8.8 under the prefix: the check passes, and the connection is the next step.
+        expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: dns64('2600:1f14:abcd::808:808') })))).toBe('network');
+        expect(connect).toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
+    });
+
+    it('is refused when the network will not say what its prefixes are', async () => {
+      const before = connections;
+      const resolve = async (host: string) => {
+        if (host === 'ipv4only.arpa') throw Object.assign(new Error('temporary failure in name resolution'), { code: 'EAI_AGAIN' });
+        return [{ address: '2606:4700:4700::1111', family: 6 }];
+      };
+      await expect(guardedFetch(at('/page'), reach({ resolve }))).rejects.toMatchObject({
+        reason: 'network',
+        message: expect.stringContaining("NAT64 prefixes could not be read"),
+      });
+      expect(connections).toBe(before);
+    });
   });
 
   it.each(['deadline', 'caller'] as const)('ends held decoding on %s abort after the connection closes', async (source) => {

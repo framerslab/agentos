@@ -7,8 +7,10 @@
  * that was checked, on a connection of its own, so a second lookup cannot
  * point it elsewhere; at most `maxRedirects` redirects, each checked the same
  * way; `http:` and `https:` on their default ports; the body read as a stream
- * under a cap, counted after decoding; one deadline over the whole read; the
- * content types the caller accepts.
+ * under a cap, counted as it arrives and again after decoding; one deadline
+ * over the whole read; the content types the caller accepts. An IPv6 address
+ * is also checked for an IPv4 one it carries under a NAT64 prefix of this
+ * network (RFC 7050), not only under the well-known one.
  *
  * @module memory/ingestion/guardedFetch
  */
@@ -20,7 +22,7 @@ import { isIP, type LookupFunction } from 'node:net';
 import { pipeline, type Readable } from 'node:stream';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 
-import { isPublicNetworkAddress } from '../../../../io/media/images/networkAddress.js';
+import { isPublicNetworkAddress, nat64PrefixesFrom, type Nat64Prefix } from '../../../../io/media/images/networkAddress.js';
 
 /**
  * Why a fetch was refused or stopped:
@@ -31,9 +33,10 @@ import { isPublicNetworkAddress } from '../../../../io/media/images/networkAddre
  * - `'redirects'`: more redirects than `maxRedirects`.
  * - `'status'`: an answer other than 2xx, a redirect without an address, or a protocol upgrade.
  * - `'type'`: a media type the caller does not accept, or a body in a coding the request did not ask for.
- * - `'size'`: a body past `maxBytes`, counted after decoding.
+ * - `'size'`: a body past `maxBytes`, as it arrives or after decoding.
  * - `'deadline'`: the read took longer than `deadlineMs`.
- * - `'network'`: the host has no address, or the lookup, the connection or the read failed.
+ * - `'network'`: the host has no address, the lookup, the connection or the read failed, or the
+ *   network's NAT64 prefixes could not be read for a host with an IPv6 address.
  */
 export type GuardedFetchReason =
   | 'address'
@@ -65,7 +68,7 @@ export class GuardedFetchError extends Error {
 
 /** What the caller allows a {@link guardedFetch}. */
 export interface GuardedFetchOptions {
-  /** The most bytes the body may hold, counted after a gzip, deflate or br coding is decoded. */
+  /** The most bytes the body may hold, counted as they arrive and again after a gzip, deflate or br coding is decoded. */
   maxBytes: number;
   /** How long the whole read may take in milliseconds: the lookups, every redirect and the body. */
   deadlineMs: number;
@@ -207,8 +210,45 @@ async function checkedAddress(
       throw new GuardedFetchError('address', `${host} resolves to an address that is not public`);
     }
   }
+  // A public-looking IPv6 address can carry a private IPv4 one under a NAT64
+  // prefix of this network, which a DNS64 resolver writes into the answer
+  // for a name with IPv4 addresses only. The prefixes are asked for only
+  // when such an address comes up.
+  const overIPv6 = answers.filter((answer) => !allowed.has(answer.address) && isIP(answer.address) === 6);
+  if (overIPv6.length > 0) {
+    const nat64Prefixes = await nat64PrefixesOf(resolve, signal);
+    if (nat64Prefixes === undefined) {
+      throw new GuardedFetchError('network', `the network's NAT64 prefixes could not be read, so the IPv6 address of ${host} cannot be cleared`);
+    }
+    if (overIPv6.some((answer) => !isPublicNetworkAddress(answer.address, { nat64Prefixes }))) {
+      throw new GuardedFetchError('address', `${host} resolves to an address that is not public`);
+    }
+  }
   const first = answers[0];
   return { address: first.address, family: isIP(first.address) === 6 ? 6 : 4 };
+}
+
+/**
+ * The NAT64 prefixes of the network, as `resolve` reveals them (RFC 7050):
+ * the IPv6 addresses it gives for `ipv4only.arpa`, a name with IPv4
+ * addresses only, were made by a DNS64 resolver from those prefixes, and a
+ * network without DNS64 gives none. `undefined` when the lookup failed for
+ * another reason: the prefixes are then not known, and no IPv6 address can
+ * be cleared. The image fetch (`untrustedImageFetch.ts`) asks the same
+ * question of its own resolver.
+ */
+async function nat64PrefixesOf(
+  resolve: NonNullable<GuardedFetchOptions['resolve']>,
+  signal: AbortSignal,
+): Promise<Nat64Prefix[] | undefined> {
+  let answers: Array<{ address: string; family: number }>;
+  try {
+    answers = await untilAborted(resolve('ipv4only.arpa'), signal);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOTFOUND' ? [] : undefined;
+  }
+  return nat64PrefixesFrom(answers.map((answer) => answer.address).filter((address) => isIP(address) === 6));
 }
 
 /**
@@ -275,12 +315,18 @@ function requestOnce(
 
 /**
  * Reads the body of `response`, decoded, and refuses it once it passes
- * `maxBytes` counted after decoding, so a small compressed body that inflates
- * past the cap stops there. A decoder is joined to the response by
- * `pipeline`, so an error ends both. The signal destroys both streams even
- * when the connection has already closed and only decoding remains.
+ * `maxBytes`, counted as it arrives and again after decoding: a small
+ * compressed body that inflates past the cap stops there, and so does a
+ * large one that decodes to little, which would otherwise be read until the
+ * deadline. A decoder is joined to the response by `pipeline`, so an error
+ * ends both. The signal destroys both streams even when the connection has
+ * already closed and only decoding remains.
  */
 async function readBody(response: http.IncomingMessage, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
+  if (Number(response.headers['content-length']) > maxBytes) {
+    response.destroy();
+    throw new GuardedFetchError('size', `the body passes ${maxBytes} bytes`, response.statusCode);
+  }
   const coding = String(response.headers['content-encoding'] ?? '').trim().toLowerCase();
   let body: Readable = response;
   if (coding !== '' && coding !== 'identity') {
@@ -296,6 +342,11 @@ async function readBody(response: http.IncomingMessage, maxBytes: number, signal
       response.destroy();
       throw new GuardedFetchError('type', `a body in the ${coding} coding is not read`, response.statusCode);
     }
+    let encoded = 0;
+    response.on('data', (chunk: Buffer) => {
+      encoded += chunk.length;
+      if (encoded > maxBytes) decoder.destroy(new GuardedFetchError('size', `the body passes ${maxBytes} bytes`, response.statusCode));
+    });
     pipeline(response, decoder, () => {});
     body = decoder;
   }
@@ -347,7 +398,8 @@ function failureOf(error: unknown, callerSignal: AbortSignal | undefined, deadli
  * connection of its own; a redirect is followed only to an address that
  * passes the same checks, at most `maxRedirects` times. The answer must be a
  * 2xx of a type in `accept`, and its body, decoded from gzip, deflate or br,
- * is refused once it passes `maxBytes`. The whole read stops at `deadlineMs`.
+ * is refused once it passes `maxBytes` on the wire or decoded. The whole read
+ * stops at `deadlineMs`.
  *
  * @example
  * ```ts
