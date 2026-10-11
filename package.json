@@ -766,6 +766,7 @@
   "peerDependencies": {
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
     "@livekit/rtc-node": "^1.1.0",
+    "@moonshine-ai/moonshine-wasm": "^0.1.5",
     "graphology": ">=0.25.0",
     "graphology-communities-louvain": ">=2.0.0",
     "graphology-types": ">=0.24.0",
@@ -782,6 +783,9 @@
       "optional": true
     },
     "@livekit/rtc-node": {
+      "optional": true
+    },
+    "@moonshine-ai/moonshine-wasm": {
       "optional": true
     },
     "graphology": {
