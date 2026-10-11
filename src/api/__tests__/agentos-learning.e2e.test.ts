@@ -135,4 +135,14 @@ describe('the full runtime with the learning flag on', () => {
     await expect(boot({ learning: true, gmiManagerConfig: { personaLoaderConfig: {}, learningLayer: createLearningLayer() } })).rejects.toThrow(/gmiManagerConfig\.learningLayer/);
     await expect(boot({ learning: { mode: 'sideways' } })).rejects.toThrow(/learning\.mode: unknown mode 'sideways'/);
   });
+
+  it("has no learner on a turn of tenant B's user 42 on the session tenant A's user 42 opened, nor on the turns after it", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    booted = await boot({ learning: true });
+    await send(booted, { userId: '42', organizationId: 'A', sessionId: 'shared', selectedPersonaId: 'tutor' });
+    await send(booted, { userId: '42', organizationId: 'B', sessionId: 'shared', selectedPersonaId: 'tutor' });
+    await send(booted, { userId: '42', organizationId: 'A', sessionId: 'shared', selectedPersonaId: 'tutor' });
+    const manifest = await booted.getLearningLayer()!.manifest();
+    expect(manifest.turns).toEqual({ prepared: 3, bound: 1, none: { other_namespace: 2 } });
+  });
 });
