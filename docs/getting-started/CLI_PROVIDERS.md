@@ -26,7 +26,7 @@ execa → local CLI binary                   ← user's authenticated CLI (claud
 
 The generalized subprocess bridge lives at `src/safety/sandbox/subprocess/`:
 
-- **[`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts)** — abstract base class (template method pattern). Owns process lifecycle: spawn, stdin pipe, NDJSON line splitting, timeout, abort signal. Subclasses implement `buildArgs()`, `classifyError()`, `parseStreamEvent()`.
+- **[`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts)** — abstract base class (template method pattern). Owns process lifecycle: spawn, stdin pipe, NDJSON line splitting, timeout, abort signal, and ending the process when the consumer of `stream()` stops reading before the end. Subclasses implement `buildArgs()`, `classifyError()`, `parseStreamEvent()`.
 - **[`CLISubprocessError`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/errors.ts)** — generic error with open string codes, `guidance` (user-facing fix instructions), and `recoverable` flag. Works for any binary, not just LLM CLIs.
 - **[`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts)** — PATH scanner that discovers installed CLIs. It loads 54 bundled descriptors from the JSON files in `registry/` (LLM CLIs such as `claude`, `gemini` and `ollama`, dev tools, runtimes, package managers, cloud CLIs, databases, media and networking tools), and `register()` adds more.
 
@@ -79,7 +79,7 @@ AgentOS exports an [`OpenAIOAuthFlow`](https://github.com/framerslab/agentos/blo
 - **Auth**: User logs into Claude Code separately by running `claude` in terminal
 - **System prompt**: `--system-prompt` flag (direct)
 - **Tool calling**: tool schemas written into the system prompt; when tools are present, `--json-schema` constrains the reply to text or tool calls (a reply that does not parse as that shape is retried once without the schema and returned as text)
-- **Streaming**: `--output-format stream-json` with `--verbose --include-partial-messages`
+- **Streaming**: `--output-format stream-json` with `--verbose --include-partial-messages`; the reply's text arrives as `stream_event` lines that wrap the Messages API's `content_block_delta` events, and the `result` line closes the turn
 - **Key flags**: `--bare` (skip plugins/hooks), `--max-turns 1` (single completion)
 - **Models**: claude-opus-5-5, claude-fable-5-1, claude-fable-5, claude-sonnet-5-5, claude-sonnet-5, claude-sonnet-4-6 (default), claude-haiku-4-5-20251001
 - **Cost**: $0 per token (subscription)
@@ -91,7 +91,7 @@ AgentOS exports an [`OpenAIOAuthFlow`](https://github.com/framerslab/agentos/blo
 - **Auth**: User logs in via Google account by running `gemini` in terminal
 - **System prompt**: Temp file + `GEMINI_SYSTEM_MD` env var (no `--system-prompt` flag)
 - **Tool calling**: XML prompt-based with `<tool_call>` markers (no `--json-schema` support)
-- **Streaming**: `--output-format stream-json`
+- **Streaming**: `--output-format stream-json`; the reply's text arrives as `message` events (`role: 'assistant'`, `delta: true`) and the token counts in the `result` event's `stats`. An `error` event of `severity: 'warning'` does not end the stream
 - **Key flags**: `-p` (headless), `-m` (model selection)
 - **Models**: gemini-3.5-flash (default), gemini-3.1-pro-preview, gemini-3.5-flash-lite, gemini-2.5-flash-lite. The CLI answers gemini-2.5-flash with gemini-3.5-flash and returns 404 for gemini-2.5-pro.
 - **Cost**: $0 per token (Google account — free tier: 60 req/min, 1000 req/day; higher with AI Pro/Ultra)

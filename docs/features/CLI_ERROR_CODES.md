@@ -117,7 +117,7 @@ To allow more time, pass a larger `timeout` to a bridge you call yourself, or se
 
 - `classifyError()` returns it for every failure the earlier checks do not match, a non-zero exit code among them. Its `guidance` ends with the last 500 characters of stderr.
 - The providers' `generateCompletion()` throws it when the CLI exits normally and its JSON result carries `is_error: true`.
-- The providers' `generateCompletionStream()` ends with it when the CLI flags its `stream-json` result as an error: `is_error: true` from Claude Code, `status: 'error'` from the Gemini CLI. The message is `Claude Code returned an error:` or `Gemini CLI returned an error:` followed by the CLI's own message for the failure.
+- The providers' `generateCompletionStream()` ends with it when the CLI flags its `stream-json` result as an error: `is_error: true` from Claude Code, `status: 'error'` from the Gemini CLI. The message is `Claude Code returned an error:` or `Gemini CLI returned an error:` followed by the CLI's own message for the failure. A Claude Code error subtype (`error_during_execution`, `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`) has no result text, and its message is the subtype followed by the entries of its `errors` list, joined with `; `: `Claude Code returned an error: error_max_turns: <errors>`.
 
 ### RATE_LIMITED
 
@@ -173,12 +173,12 @@ new CLISubprocessError(
 
 ## What AgentOS Does with These Errors
 
-- **Bridge.** `execute()` and `stream()` throw the error `classifyError()` returns.
+- **Bridge.** `execute()` and `stream()` throw the error `classifyError()` returns. `stream()` read to its end awaits the CLI's exit and throws on a failed one. When its consumer stops reading first (a `break` in `for await`, or `return()`), it kills the process and handles the run's outcome itself, so a failed exit after that raises nothing in the host. A result the CLI flags as an error reaches a direct reader of `stream()` as a `StreamEvent` with `isError: true` and the failure's message in `error`; its `result` is the CLI's own result text, `''` when it wrote none.
 - **Provider, non-streaming.** `generateCompletion()` lets the bridge's error through.
 - **Provider, streaming.** `generateCompletionStream()` reads the bridge's stream to its end, where the bridge awaits the CLI's exit, and yields its final chunk after that. It does not throw when the bridge fails or when the CLI reports an error in its output. Either way the stream ends with a final chunk that carries an `error`:
   - When the bridge throws, the `error` holds the error's message, its `code` and, as `details`, the error object. A non-zero exit after the CLI's result line ends the stream this way, in place of the reply. A call cancelled through `abortSignal` ends it this way too, with `type: 'abort'` beside the `REQUEST_ABORTED` code: the chunk the `abortSignal` contract of `IProvider` asks a streaming provider for, which the completion gateway and `streamText()` read as the caller's own stop.
   - When the CLI flags its result as an error, the `error` holds the [`CRASHED`](#crashed) error `generateCompletion()` throws for an error result: its message, its `code` and, as `details`, the error object.
-  - When the CLI writes an error event into its `stream-json` output, the `error` holds only a message: `Claude Code stream error:` or `Gemini CLI stream error:` followed by the event's message. It has no `code` and no `details`.
+  - When the CLI writes an error event into its `stream-json` output, the `error` holds only a message: `Claude Code stream error:` or `Gemini CLI stream error:` followed by the event's message. It has no `code` and no `details`. An error event the Gemini CLI marks `severity: 'warning'` does not end the stream: the CLI goes on to its result after one, and the bridge passes it on as a `system` event.
 
   When the CLI reports the failure in its output, as an error result or an error event, a non-zero exit that follows does not replace that error.
 - **Initialization through the helpers.** `generateText()`, `streamText()` and the helpers built on them create the provider with [`createProviderManager()`](https://github.com/framerslab/agentos/blob/master/src/api/model.ts). When the provider's `initialize()` throws, that function throws a `ProviderInitializationError` whose `cause` is the `CLISubprocessError`.
