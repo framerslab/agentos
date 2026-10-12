@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { hashWorkerToken, workerTokenMatches } from '../signing.js';
 import type {
   DispatchInput,
@@ -70,14 +71,17 @@ export class MockMeetingBotProvider implements IMeetingBotProvider {
   }
 
   parseEvent(ctx: ProviderEventContext): ProviderParseResult {
-    const raw = JSON.parse(typeof ctx.body === 'string' ? ctx.body : ctx.body.toString('utf8')) as {
+    const body = typeof ctx.body === 'string' ? ctx.body : ctx.body.toString('utf8');
+    const raw = JSON.parse(body) as {
       runId: string;
       type: ProviderEventType;
       at: number;
       data?: NormalizedMeetingEvent['data'];
     };
+    // the report's run, type and time, then a digest of the whole report: a repeated report keeps its id, and two reports of one type at one time do not share one
+    const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
     return {
-      events: [{ eventId: `mock:${raw.runId}:${raw.type}:${raw.at}`, runId: raw.runId, type: raw.type, at: raw.at, data: raw.data }],
+      events: [{ eventId: `mock:${raw.runId}:${raw.type}:${raw.at}:${digest}`, runId: raw.runId, type: raw.type, at: raw.at, data: raw.data }],
       rawData: raw,
     };
   }

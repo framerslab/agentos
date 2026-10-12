@@ -25,12 +25,14 @@ describe('MockMeetingBotProvider', () => {
     expect(p.verifyEvent(bad, r).valid).toBe(false);
     expect(p.verifyEvent(good, undefined).valid).toBe(false);
   });
-  it('parses the normalised event with a stable id', () => {
+  it('parses the normalised event with a stable id, and gives another report of the same type and time another id', () => {
     const p = new MockMeetingBotProvider();
     const ctx = mockEventContext('r1', 'chat_message', { text: 'hello', sender: 'Sam' }, 5, 'tok');
     const parsed = p.parseEvent(ctx);
-    expect(parsed.events).toEqual([{ eventId: 'mock:r1:chat_message:5', runId: 'r1', type: 'chat_message', at: 5, data: { text: 'hello', sender: 'Sam' } }]);
+    expect(parsed.events).toEqual([{ eventId: expect.stringMatching(/^mock:r1:chat_message:5:[0-9a-f]{12}$/), runId: 'r1', type: 'chat_message', at: 5, data: { text: 'hello', sender: 'Sam' } }]);
     expect(p.parseEvent(ctx).events[0].eventId).toBe(parsed.events[0].eventId);
+    const other = p.parseEvent(mockEventContext('r1', 'chat_message', { text: 'goodbye', sender: 'Sam' }, 5, 'tok'));
+    expect(other.events[0].eventId).not.toBe(parsed.events[0].eventId);
   });
   it('records commands per run', async () => {
     const p = new MockMeetingBotProvider();
