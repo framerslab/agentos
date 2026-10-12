@@ -1097,7 +1097,10 @@ export class AnthropicProvider implements IProvider {
       try {
         event = JSON.parse(rawEvent) as AnthropicStreamEvent;
       } catch {
-        console.warn('AnthropicProvider: Could not parse SSE event JSON:', rawEvent);
+        console.warn('AnthropicProvider: Could not parse SSE event JSON:', {
+          eventBytes: new TextEncoder().encode(rawEvent).byteLength,
+          error: 'Invalid stream JSON.',
+        });
         continue;
       }
 
@@ -1308,7 +1311,10 @@ export class AnthropicProvider implements IProvider {
           event = JSON.parse(rawEvent) as AnthropicStreamEvent;
         } catch {
           // Malformed JSON — skip this event
-          console.warn('AnthropicProvider: Could not parse SSE event JSON:', rawEvent);
+          console.warn('AnthropicProvider: Could not parse SSE event JSON:', {
+            eventBytes: new TextEncoder().encode(rawEvent).byteLength,
+            error: 'Invalid stream JSON.',
+          });
           continue;
         }
 

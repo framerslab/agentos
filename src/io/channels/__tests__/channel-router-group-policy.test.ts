@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, it, expect, vi } from 'vitest';
 import { ChannelRouter } from '../ChannelRouter.js';
 import type { ChannelMessage, ChannelPlatform } from '../types.js';
@@ -44,6 +45,31 @@ function makeRouter() {
 }
 
 describe('ChannelRouter group policy enforcement', () => {
+  it.each(['plivo', 'whatsapp', 'signal'] as const)('hashes %s conversation IDs in handler errors', async (platform) => {
+    const phone = '+15555550123';
+    const router = new ChannelRouter();
+    router.addBinding({
+      bindingId: 'b1', seedId: 'seed-1', ownerUserId: 'owner-1',
+      platform, channelId: phone, conversationType: 'direct',
+      isActive: true, autoBroadcast: false,
+    });
+    router.onMessage(() => { throw Object.assign(new TypeError('Handler failed'), { phone }); });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await router.routeInboundMessage(groupMessage({
+        platform, conversationId: phone, conversationType: 'direct', sender: { id: phone },
+      }));
+      const digest = createHash('sha256').update(phone).digest('hex').slice(0, 8);
+      expect(error).toHaveBeenCalledExactlyOnceWith(
+        `[ChannelRouter] Handler error for ${platform}:${digest}:`,
+        { name: 'TypeError', message: 'Handler failed' },
+      );
+      expect(JSON.stringify(error.mock.calls)).not.toContain(phone);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it('drops unmentioned group messages under mention activation', async () => {
     const { router, seen } = makeRouter();
     await router.routeInboundMessage(groupMessage());

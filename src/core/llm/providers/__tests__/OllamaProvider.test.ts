@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { postMock, getMock, createMock } = vi.hoisted(() => {
@@ -40,6 +41,49 @@ describe('OllamaProvider multimodal message mapping', () => {
         eval_count: 3,
       },
     });
+  });
+
+  it.each(['\n', ''])('buffers a JSON response split across chunks with terminator %j', async (terminator) => {
+    const provider = new OllamaProvider();
+    await provider.initialize({ baseURL: 'http://localhost:11434' });
+    const content = 'sentinel-words-7731-é';
+    const bytes = Buffer.from(JSON.stringify({
+      model: 'llava', created_at: '2026-01-01T00:00:00Z',
+      message: { role: 'assistant', content }, done: true,
+    }) + terminator);
+    const split = bytes.indexOf(Buffer.from('é')) + 1;
+    postMock.mockResolvedValueOnce({ data: Readable.from([bytes.subarray(0, split), bytes.subarray(split)]) });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const events = [];
+      for await (const event of provider.generateCompletionStream('llava', [{ role: 'user', content: 'hello' }], {})) events.push(event);
+      expect(events).toHaveLength(1);
+      expect(events[0].responseTextDelta).toBe(content);
+      expect(events[0].isFinal).toBe(true);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('logs only the byte length and a fixed diagnostic for malformed stream JSON', async () => {
+    const provider = new OllamaProvider();
+    await provider.initialize({ baseURL: 'http://localhost:11434' });
+    const raw = 'sentinel-words-7731-é';
+    postMock.mockResolvedValueOnce({ data: Readable.from([Buffer.from(raw + '\n')]) });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const events = [];
+      for await (const event of provider.generateCompletionStream('llava', [], {})) events.push(event);
+      expect(events).toEqual([]);
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        'OllamaProvider: Could not parse stream chunk JSON:',
+        { eventBytes: Buffer.byteLength(raw), error: 'Invalid stream JSON.' },
+      );
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('sentinel-words-7731');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('preserves inline base64 image inputs for vision-capable Ollama chat models', async () => {

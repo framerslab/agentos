@@ -345,14 +345,18 @@ export class AgentPoolAgent extends AgentCore implements IAgent {
           ...(this.poolConfig.routingConfig?.selectionCompletionOptions || {}),
         }
       );
-      chosenAgentId = this.parseLLMResponseForRouting(routingLlmResponse, availableSubAgents.map(a => a.id));
+      chosenAgentId = this.parseLLMResponseForRouting(routingLlmResponse, availableSubAgents.map(a => a.id), userInput?.length ?? 0);
     } catch (error: any) {
       console.error(`AgentPoolAgent '${this.name}': LLM call for routing failed: ${error.message}`, error);
       return this.handleInternalAgentError(new AgentCoreError(`Failed to determine the best sub-agent for your request due to an internal routing error.`, 'POOL_ROUTING_LLM_ERROR', error), conversationContext, true);
     }
 
     if (!chosenAgentId) {
-      console.warn(`AgentPoolAgent '${this.name}': LLM failed to choose a sub-agent for routing. Input: "${userInput}". LLM response: ${routingLlmResponse.choices[0]?.message.content}`);
+      console.warn(`AgentPoolAgent '${this.name}': LLM failed to choose a sub-agent for routing.`, {
+        candidateNames: availableSubAgents.map((agent) => agent.name),
+        inputLength: userInput?.length ?? 0,
+        outcome: 'no_agent_selected',
+      });
       // Fallback: could try a default agent or ask user for more clarification.
       return this.textOutput("I'm having a bit of trouble determining the best way to handle your request. Could you please provide more specific details or rephrase your query?", false);
     }
@@ -506,7 +510,7 @@ export class AgentPoolAgent extends AgentCore implements IAgent {
                 ...(this.poolConfig.routingConfig?.selectionCompletionOptions || {}),
               }
             );
-            const chosenAgentId = this.parseLLMResponseForRouting(routingLlmResponse, availableSubAgents.map(a => a.id));
+            const chosenAgentId = this.parseLLMResponseForRouting(routingLlmResponse, availableSubAgents.map(a => a.id), userInput?.length ?? 0);
             if (chosenAgentId) {
                 delegatedAgent = this.subAgents.get(chosenAgentId) || delegatedAgent;
             } else {
@@ -610,9 +614,10 @@ Respond with only the Agent ID. If unsure or no agent is a good fit, respond wit
    * @private
    * @param {ModelCompletionResponse} llmResponse - The response from the routing LLM call.
    * @param {string[]} validAgentIds - An array of valid sub-agent IDs for validation.
+   * @param inputLength - Length of the input being routed, for diagnostics.
    * @returns {string | null} The chosen agent ID, or `null` if parsing fails or "NONE" is returned.
    */
-  private parseLLMResponseForRouting(llmResponse: ModelCompletionResponse, validAgentIds: string[]): string | null {
+  private parseLLMResponseForRouting(llmResponse: ModelCompletionResponse, validAgentIds: string[], inputLength = 0): string | null {
     const choice = llmResponse.choices?.[0];
     const textContent = this.extractTextFromMessageContent(choice?.message?.content) || choice?.text?.trim();
 
@@ -620,6 +625,11 @@ Respond with only the Agent ID. If unsure or no agent is a good fit, respond wit
       // Remove potential quotes or markdown code blocks around the ID
       const cleanedText = textContent.replace(/^[`"']|[`"']$/g, '').replace(/^`{3}.*?`{3}$/s, '').trim();
       if (cleanedText.toUpperCase() === "NONE") {
+        console.warn(`AgentPoolAgent '${this.name}': Routing LLM answered NONE.`, {
+          candidateNames: validAgentIds.map((id) => this.subAgents.get(id)?.name ?? id),
+          inputLength,
+          outcome: 'none',
+        });
         return null;
       }
       if (validAgentIds.includes(cleanedText)) {
@@ -629,9 +639,17 @@ Respond with only the Agent ID. If unsure or no agent is a good fit, respond wit
       for (const id of validAgentIds) {
           if (cleanedText.includes(id)) return id;
       }
-      console.warn(`AgentPoolAgent '${this.name}': Routing LLM returned text ('${textContent}') that is not a valid agent ID and not "NONE".`);
+      console.warn(`AgentPoolAgent '${this.name}': Routing LLM named an unknown sub-agent.`, {
+        candidateNames: validAgentIds.map((id) => this.subAgents.get(id)?.name ?? id),
+        inputLength,
+        outcome: 'unknown_agent',
+      });
     } else {
-      console.warn(`AgentPoolAgent '${this.name}': Routing LLM returned no parsable text content.`);
+      console.warn(`AgentPoolAgent '${this.name}': Routing LLM returned no parsable text content.`, {
+        candidateNames: validAgentIds.map((id) => this.subAgents.get(id)?.name ?? id),
+        inputLength,
+        outcome: 'empty_response',
+      });
     }
     return null;
   }

@@ -975,7 +975,10 @@ export class GMIManager {
    */
   public async processUserFeedback(userId: string, sessionId: string, personaId: string, feedbackData: any): Promise<void> {
     this.ensureInitialized();
-    console.log(`GMIManager (ID: ${this.managerId}): Received feedback for User: ${userId}, Session: ${sessionId}, Persona: ${personaId}`, feedbackData);
+    console.log(`GMIManager (ID: ${this.managerId}): Received feedback for User: ${userId}, Session: ${sessionId}, Persona: ${personaId}`, {
+      fields: feedbackData && typeof feedbackData === 'object' ? Object.keys(feedbackData) : [],
+      textLength: typeof feedbackData?.text === 'string' ? feedbackData.text.length : 0,
+    });
 
     const gmiInstanceId = this.gmiSessionMap.get(sessionId);
     const gmi = gmiInstanceId ? this.activeGMIs.get(gmiInstanceId) : undefined;

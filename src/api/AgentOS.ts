@@ -2614,8 +2614,8 @@ export class AgentOS implements IAgentOS {
     // E.g., await this.authService.validateUserExists(userId);
 
     console.log(
-      `AgentOS.receiveFeedback: UserID '${userId}', SessionID '${sessionId}', PersonaID '${personaId}'. Payload:`,
-      JSON.stringify(feedbackPayload).substring(0, 200) + '...'
+      `AgentOS.receiveFeedback: UserID '${userId}', SessionID '${sessionId}', PersonaID '${personaId}'. Feedback metadata:`,
+      { fields: Object.keys(feedbackPayload), textLength: feedbackPayload.text?.length ?? 0 }
     );
 
     try {

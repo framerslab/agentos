@@ -7,6 +7,7 @@
  * @implements {IProvider}
  */
 
+import { createHash } from 'node:crypto';
 import axios, { AxiosInstance, AxiosError, ResponseType } from 'axios';
 import {
   IProvider,
@@ -1013,12 +1014,18 @@ export class OpenRouterProvider implements IProvider {
           let apiChunk: OpenRouterChatCompletionAPIResponse;
           try {
             apiChunk = JSON.parse(jsonData) as OpenRouterChatCompletionAPIResponse;
-          } catch (error: unknown) {
-            console.warn('OpenRouterProvider: Failed to parse stream chunk JSON, skipping chunk. Data:', jsonData, 'Error:', error);
+          } catch {
+            console.warn('OpenRouterProvider: Failed to parse stream chunk JSON, skipping chunk:', {
+              eventBytes: new TextEncoder().encode(jsonData).byteLength,
+              error: 'Invalid stream JSON.',
+            });
             continue;
           }
           if (!apiChunk || typeof apiChunk !== 'object') {
-            console.warn('OpenRouterProvider: Stream chunk is not a JSON object, skipping chunk. Data:', jsonData);
+            console.warn('OpenRouterProvider: Stream chunk is not a JSON object, skipping chunk:', {
+              eventBytes: new TextEncoder().encode(jsonData).byteLength,
+              error: 'Expected a JSON object.',
+            });
             continue;
           }
 
@@ -1141,8 +1148,11 @@ export class OpenRouterProvider implements IProvider {
           let mapped: ModelCompletionResponse;
           try {
             mapped = this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
-          } catch (error: unknown) {
-            console.warn('OpenRouterProvider: Failed to map stream chunk, skipping chunk. Data:', jsonData, 'Error:', this.describeError(error));
+          } catch {
+            console.warn('OpenRouterProvider: Failed to map stream chunk, skipping chunk:', {
+              eventBytes: new TextEncoder().encode(jsonData).byteLength,
+              error: 'Invalid stream event shape.',
+            });
             continue;
           }
           if (mapped.responseTextDelta && yieldedText.length < yieldedTextCap) {
@@ -1580,6 +1590,7 @@ export class OpenRouterProvider implements IProvider {
         // logic (e.g. isRetryableError, which greps for \b402\b) can route on it
         // even when the OR API body provides a friendlier description.
         const decoratedMessage = this.redactSecrets(statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage);
+        const requestBody = body ? JSON.stringify(body) : undefined;
         lastError = new OpenRouterProviderError(
           decoratedMessage,
           isContextWindowRejection(errorType, statusCode, errorMessage) ? CONTEXT_WINDOW_EXCEEDED_CODE : 'API_REQUEST_FAILED',
@@ -1587,7 +1598,9 @@ export class OpenRouterProvider implements IProvider {
           errorType,
           {
             requestEndpoint: endpoint,
-            requestBodyPreview: body ? JSON.stringify(body).substring(0, 200) + '...' : undefined,
+            modelId: body?.model,
+            requestBodyBytes: requestBody === undefined ? undefined : new TextEncoder().encode(requestBody).byteLength,
+            requestBodySha256: requestBody === undefined ? undefined : createHash('sha256').update(requestBody).digest('hex'),
             responseData: this.redactResponseData(errorData),
             // Not the AxiosError itself: its config and request carry the
             // Authorization header, so logging or serializing the details

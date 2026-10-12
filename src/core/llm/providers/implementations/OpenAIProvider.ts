@@ -1249,8 +1249,11 @@ export class OpenAIProvider implements IProvider {
       try {
         const apiChunk = JSON.parse(data) as OpenAIAPITypes.ChatCompletionStreamResponse;
         mapped = this.mapApiToStreamChunkResponse(apiChunk, accumulatedToolCalls);
-      } catch (error: unknown) {
-        console.warn('OpenAIProvider: Failed to parse stream chunk JSON:', data, error);
+      } catch {
+        console.warn('OpenAIProvider: Failed to parse stream chunk JSON:', {
+          eventBytes: new TextEncoder().encode(data).byteLength,
+          error: 'Invalid stream JSON.',
+        });
         continue;
       }
       yield mapped;
@@ -1360,8 +1363,11 @@ export class OpenAIProvider implements IProvider {
       let event: OpenAIAPITypes.ResponsesStreamEvent;
       try {
         event = JSON.parse(data) as OpenAIAPITypes.ResponsesStreamEvent;
-      } catch (error: unknown) {
-        console.warn('OpenAIProvider: Failed to parse /responses stream event JSON:', data, error);
+      } catch {
+        console.warn('OpenAIProvider: Failed to parse /responses stream event JSON:', {
+          eventBytes: new TextEncoder().encode(data).byteLength,
+          error: 'Invalid stream JSON.',
+        });
         continue;
       }
 
@@ -2741,7 +2747,10 @@ export class OpenAIProvider implements IProvider {
         // Sometimes the final [DONE] is not prefixed by "data: ".
         if (!sawData) {
           if (trailing === '[DONE]') yield '[DONE]';
-          else console.warn('OpenAIProvider: Trailing stream data not processed:', buffer);
+          else console.warn('OpenAIProvider: Trailing stream data not processed:', {
+            eventBytes: new TextEncoder().encode(buffer).byteLength,
+            error: 'Unrecognized stream framing.',
+          });
         }
       }
 
