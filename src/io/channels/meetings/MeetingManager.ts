@@ -8,7 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { ITranscriptInputSink, TranscriptTurn } from '../../voice-pipeline/types.js';
-import type { DispatchResult, IMeetingBotProvider, ProviderEventContext } from './IMeetingBotProvider.js';
+import type { DispatchResult, IMeetingBotProvider, ProviderCommand, ProviderEventContext } from './IMeetingBotProvider.js';
 import type { MeetingRoom, MeetingRoomHandle } from './MeetingRoom.js';
 import { MeetingTranscriptSink } from './MeetingTranscriptSink.js';
 import { hashWorkerToken, mintWorkerToken } from './signing.js';
@@ -824,17 +824,29 @@ export class MeetingManager {
 
   // ── Ends ──
 
-  /** Tells the bot to leave, arms the kill, and moves the run to `leaving`. */
+  /** Tells the bot to leave, arms the kill, and moves the run to `leaving`. The kill is armed first, so a leave the bot never receives still ends in the kill. */
   private async leave(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<boolean> {
     if (!canTransition(run.state, 'leaving') && run.state !== 'purging') return false;
-    const provider = this.providers.get(run.providerName);
     if (run.state !== 'purging') {
       const moved = await this.stores.runs.update(run.runId, { state: 'leaving', reason }, run.state);
       if (!moved) return false;
     }
-    await provider?.command(run.runId, { name: 'leave', reason });
     this.leaveAt.set(run.runId, this.now());
+    await this.sendCommand(run, { name: 'leave', reason });
     return true;
+  }
+
+  /**
+   * Sends a command on the way out (suspend, leave, kill) to the run's bot. A command that fails, its worker unreachable
+   * for a moment, is logged and not thrown: the kill armed before it, and the end recorded after the kill, cover a bot
+   * that never received it.
+   */
+  private async sendCommand(run: MeetingRunRecord, command: ProviderCommand): Promise<void> {
+    try {
+      await this.providers.get(run.providerName)?.command(run.runId, command);
+    } catch (err) {
+      this.config.logger?.warn(`[MeetingManager] ${command.name} to the bot of ${run.runId} failed: ${String(err)}`);
+    }
   }
 
   /** A run that ends before it joined (a failed revalidation, no capacity, a cancel): never billed. */
@@ -935,7 +947,6 @@ export class MeetingManager {
 
   /** (a) the fence; (b) the purge, each step retried until it resolves; (c) the content-free record. */
   private async purge(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<void> {
-    const provider = this.providers.get(run.providerName);
     if (run.state !== 'purging') {
       const fenced = await this.stores.runs.update(run.runId, { state: 'purging', reason }, PURGEABLE_STATES);
       if (!fenced) return;
@@ -949,9 +960,10 @@ export class MeetingManager {
         await this.stores.jobs.cancel(run.runId);
         await this.stores.jobs.remove(run.runId);
       } else if (fenced.leftAt === undefined) {
-        await provider?.command(run.runId, { name: 'suspendCapture' });
-        await provider?.command(run.runId, { name: 'leave', reason });
+        // the kill is armed first, so a suspend or a leave the bot never receives still ends in the kill
         this.leaveAt.set(run.runId, this.now());
+        await this.sendCommand(run, { name: 'suspendCapture' });
+        await this.sendCommand(run, { name: 'leave', reason });
       }
     }
     await this.continuePurge(run.runId);
@@ -1015,7 +1027,8 @@ export class MeetingManager {
         const commandedLeaveAt = this.leaveAt.get(run.runId);
         if (commandedLeaveAt !== undefined && now - commandedLeaveAt > this.killAfterMs) {
           this.leaveAt.delete(run.runId);
-          await provider?.command(run.runId, { name: 'kill' });
+          // the end is recorded whether or not the kill reaches the bot: the cleanup that follows deletes its room
+          await this.sendCommand(run, { name: 'kill' });
           await this.crash(run, now, undefined);
           continue;
         }

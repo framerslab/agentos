@@ -396,4 +396,27 @@ describe('a step that fails, or a race, on the way out', () => {
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stopped_by_owner', botName: '' });
     expect(h.rooms.deleted).toContain(`bot-${runId}`);
   });
+  it('a purge whose commands do not reach the bot still kills it after the wait and ends with its room deleted', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    const command = vi.spyOn(h.provider, 'command').mockRejectedValue(new Error('worker unreachable'));
+    expect(await h.manager.purgeRun(runId, 'stopped_by_owner')).toBe(true);
+    expect((await h.stores.runs.get(runId))?.state).toBe('purging');
+    h.clock.advance(30_001);
+    await h.manager.tick();
+    expect(command).toHaveBeenLastCalledWith(runId, { name: 'kill' });
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stopped_by_owner', botName: '' });
+    expect(h.rooms.deleted).toContain(`bot-${runId}`);
+  });
+  it('a leave whose command does not reach the bot is followed by the kill', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    vi.spyOn(h.provider, 'command').mockRejectedValueOnce(new Error('worker unreachable'));
+    expect(await h.manager.leaveBot(runId)).toBe(true);
+    h.clock.advance(30_001);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'kill' });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stopped_by_owner' });
+  });
 });
