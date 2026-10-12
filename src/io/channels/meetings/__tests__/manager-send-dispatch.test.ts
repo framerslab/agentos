@@ -140,6 +140,26 @@ describe('sendBot', () => {
     expect(again.ok && again.repeated && again.run.runId === (first.ok ? first.run.runId : '')).toBe(true);
     expect(await h.manager.sendBot({ ...h.request, idempotencyKey: 'k2' })).toMatchObject({ ok: false, reason: 'platform_paused' });
   });
+  it('leaves no run waiting without its job: reconcile gives a send whose job could not be stored its job, and ends a run a cancel left without one', async () => {
+    const h = harness();
+    vi.spyOn(h.stores.jobs, 'schedule').mockRejectedValueOnce(new Error('job store unavailable'));
+    await expect(h.manager.sendBot(h.request)).rejects.toThrow('job store unavailable');
+    const [stored] = await h.stores.runs.list({});
+    expect(await h.stores.jobs.get(stored.runId)).toBeUndefined();
+    const again = await h.manager.sendBot(h.request);
+    expect(again.ok && again.repeated && again.run.runId === stored.runId).toBe(true);
+    // a cancel that stopped after it removed the job: the run still waits, with the cancel's reason on it
+    const later = await h.manager.sendBot({ ...h.request, idempotencyKey: 'k2', joinAt: h.clock.now() + 3_600_000 });
+    const laterId = later.ok ? later.run.runId : '';
+    await h.stores.runs.update(laterId, { reason: 'stopped_by_owner' }, 'scheduled');
+    await h.stores.jobs.remove(laterId);
+    await h.manager.tick(); // the pass's reconcile gives the first run its job and ends the second
+    await h.manager.tick(); // the job is due: the run is dispatched
+    expect(h.provider.dispatched.has(stored.runId)).toBe(true);
+    expect((await h.stores.runs.get(stored.runId))?.state).toBe('dispatching');
+    expect(await h.stores.runs.get(laterId)).toMatchObject({ state: 'failed', reason: 'stopped_by_owner' });
+    expect(h.provider.dispatched.has(laterId)).toBe(false);
+  });
 });
 
 describe('dispatch and the interlock', () => {

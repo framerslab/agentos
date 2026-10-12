@@ -274,7 +274,9 @@ export class MeetingManager {
    * Sends a bot: answers the run an earlier send by the same owner with the same idempotency key made, checks the link
    * against the platform, reserves the run's time, stores the run and schedules its dispatch (now, or at `joinAt`). A
    * reservation that covers less than `minReservationSeconds` is released and the send refused. A limit the request
-   * leaves out, or gives as `undefined`, takes its default.
+   * leaves out, or gives as `undefined`, takes its default. A send whose job store fails after the run is stored rejects
+   * with that error; {@link MeetingManager.reconcile} then gives the run its job, so a send repeated with the same key
+   * answers a run that is dispatched.
    *
    * @throws RangeError when `joinAt` or a limit the request gives is not a finite number (a limit must also be zero or more); nothing is reserved.
    */
@@ -1081,7 +1083,12 @@ export class MeetingManager {
 
   // ── Reconcile ──
 
-  /** Compares dispatched jobs with the providers' usage: a run whose container is gone is ended as crashed; an unfinished purge is resumed. */
+  /**
+   * Compares dispatched jobs with the providers' usage: a run whose container is gone is ended as crashed; an unfinished
+   * purge is resumed. A run still waiting for its dispatch whose job is missing (a send whose job could not be stored)
+   * is given its job again, and one a cancel left without its job (the cancel's reason is on the run) is ended, so
+   * neither waits for ever holding its reservation.
+   */
   async reconcile(): Promise<void> {
     const now = this.now();
     const byProvider = new Map<string, string[]>();
@@ -1118,6 +1125,13 @@ export class MeetingManager {
           await this.crash(run, now, u.seconds || undefined);
         }
       }
+    }
+    // only a job is ever dispatched: a waiting run without one would hold its reservation for ever. A run whose end has
+    // begun (cleanupPending) is the limits pass's to finish.
+    for (const run of await this.stores.runs.list({ states: ['requested', 'scheduled'], limit: Number.MAX_SAFE_INTEGER })) {
+      if (run.cleanupPending || (await this.stores.jobs.get(run.runId))) continue;
+      if (run.reason !== undefined) await this.fail(run, run.reason);
+      else await this.stores.jobs.schedule({ runId: run.runId, dispatchAt: run.joinAt });
     }
   }
 
