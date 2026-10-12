@@ -535,6 +535,20 @@ describe('GeminiCLIProvider: tool-call markup in the reply, through streamText()
     expect(text).toBe(pieces.join(''));
   });
 
+  it('streams a block whose body is not JSON as text once its closing tag arrives, with no tool call', async () => {
+    // parseToolCallsFromText() skips a block whose body JSON.parse rejects, so the reply holds no tool call.
+    const block = '<tool_call id="call_1" name="get_weather">{city: Paris}</tool_call>';
+    const { prompted, parts, text } = await streamTextOver(
+      ['Here: ', '<tool_call id="call_1" name="get_weather">', '{city: Paris}', '</tool_call>', ' Done.'],
+      { tools: true },
+    );
+
+    expect(prompted).toEqual([true]);
+    expect(textPartsOf(parts)).toEqual(['Here: ', block, ' Done.']);
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([]);
+    expect(text).toBe(`Here: ${block} Done.`);
+  });
+
   it('streams a reply with no tools as it arrives, markup and all', async () => {
     const pieces = ['Here is one: ', '<tool_call id="call_1" name="get_weather">', '{"city": "Paris"}</tool_call>'];
     const { prompted, parts, text } = await streamTextOver(pieces, { tools: false });
