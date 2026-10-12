@@ -222,13 +222,17 @@ describe('memory exports write only inside the export folder', () => {
     const first = path.join(folder, 'mt_first.md');
     const aliases = [path.join(folder, 'mt_near.md'), path.join(folder, 'mt_far.md')];
     const realOpen = fsp.open.bind(fsp);
-    const open = vi
-      .spyOn(fsp, 'open')
-      .mockImplementation((file, flags, mode) => realOpen(aliases.includes(String(file)) ? first : file, flags, mode));
+    // The opens of the two names, kept here: a spy's restore clears its record of calls.
+    const redirected: string[] = [];
+    const open = vi.spyOn(fsp, 'open').mockImplementation((file, flags, mode) => {
+      if (!aliases.includes(String(file))) return realOpen(file, flags, mode);
+      redirected.push(String(file));
+      return realOpen(first, flags, mode);
+    });
 
     const result = await memory.export(exportDir, { format: 'markdown' }).finally(() => open.mockRestore());
 
-    for (const alias of aliases) expect(open).toHaveBeenCalledWith(alias, expect.any(Number));
+    expect(redirected.sort()).toEqual([...aliases].sort());
     expect(result.refused).toEqual([
       { id: 'mt_near', field: 'path', problem: 'collision' },
       { id: 'mt_far', field: 'path', problem: 'collision' },
