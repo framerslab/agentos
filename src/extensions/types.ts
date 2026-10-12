@@ -413,3 +413,10 @@ export const EXTENSION_KIND_STREAMING_TTS = 'streaming-tts-provider';
 export const EXTENSION_KIND_DIARIZATION = 'diarization-provider';
 export const EXTENSION_KIND_ENDPOINT_DETECTOR = 'endpoint-detector';
 export const EXTENSION_KIND_BARGEIN_HANDLER = 'bargein-handler';
+
+/** Extension kind for meeting-participant providers: a bot that joins a call as a listener. */
+export const EXTENSION_KIND_MEETING_PROVIDER = 'meeting-provider';
+/** A meeting provider payload that a host registers on its MeetingManager. */
+export type MeetingProviderDescriptor = ExtensionDescriptor<import('../io/channels/meetings/IMeetingBotProvider.js').IMeetingBotProvider> & {
+  kind: typeof EXTENSION_KIND_MEETING_PROVIDER;
+};

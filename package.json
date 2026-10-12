@@ -280,6 +280,11 @@
       "default": "./dist/io/channels/telephony/index.js",
       "types": "./dist/io/channels/telephony/index.d.ts"
     },
+    "./io/channels/meetings": {
+      "import": "./dist/io/channels/meetings/index.js",
+      "default": "./dist/io/channels/meetings/index.js",
+      "types": "./dist/io/channels/meetings/index.d.ts"
+    },
     "./io/speech": {
       "import": "./dist/io/speech/index.js",
       "default": "./dist/io/speech/index.js",
