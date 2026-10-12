@@ -122,7 +122,7 @@ describe('Stability edits', () => {
 
   it('keeps a raw image whose content type carries a parameter', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(
-      async () => new Response(PNG, { status: 200, headers: { 'Content-Type': 'image/png; charset=binary' } }),
+      async () => new Response(new Uint8Array(PNG), { status: 200, headers: { 'Content-Type': 'image/png; charset=binary' } }),
     );
 
     const result = await (await provider()).editImage({ modelId: '', image: PNG, prompt: 'x' });
