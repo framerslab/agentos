@@ -94,9 +94,13 @@ export function styleTransferImageTypes(
  * @param provider - The provider's name.
  * @param model - The model the call named.
  * @param models - The models it runs, the default first.
+ * @param custom - What a custom base URL takes instead, as the provider has it.
  */
-export function styleTransferModelError(provider: string, model: string, models: readonly string[]): Error {
-  return new Error(
-    `${provider}'s style transfer runs on ${models.join(', ')} (${models[0]} by default); ${model} is not one of them. A custom baseUrl takes any model name.`,
-  );
+export function styleTransferModelError(
+  provider: string,
+  model: string,
+  models: readonly string[],
+  custom = 'A custom baseUrl takes any model name.',
+): Error {
+  return new Error(`${provider}'s style transfer runs on ${models.join(', ')} (${models[0]} by default); ${model} is not one of them. ${custom}`);
 }

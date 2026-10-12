@@ -532,7 +532,7 @@ export class ReplicateImageProvider implements IImageProvider {
       );
     }
     if (REPLICATE_STYLE_TRANSFER_MODELS.includes(modelId) || this.hasCustomEndpoint()) return modelId;
-    throw styleTransferModelError('Replicate', modelId, REPLICATE_STYLE_TRANSFER_MODELS);
+    throw styleTransferModelError('Replicate', modelId, REPLICATE_STYLE_TRANSFER_MODELS, 'A custom baseUrl takes another "owner/name" model.');
   }
 
   /**
@@ -665,8 +665,15 @@ export class ReplicateImageProvider implements IImageProvider {
       { providerId: this.providerId, modelId: 'black-forest-labs/flux-1.1-pro-ultra', displayName: 'Flux 1.1 Pro Ultra', description: 'Ultra-high resolution' },
       { providerId: this.providerId, modelId: 'bytedance/sdxl-lightning-4step', displayName: 'SDXL Lightning', description: '4-step fast SDXL' },
       { providerId: this.providerId, modelId: 'stability-ai/sdxl', displayName: 'SDXL', description: 'Classic Stable Diffusion XL' },
-      // Style transfer
-      { providerId: this.providerId, modelId: 'black-forest-labs/flux-redux-dev', displayName: 'Flux Redux Dev', description: 'Image-guided style transfer' },
+      // Style transfer: the FLUX.2 models, which take the source and the style reference
+      ...REPLICATE_STYLE_TRANSFER_MODELS.map((modelId) => ({
+        providerId: this.providerId,
+        modelId,
+        displayName: `FLUX.2 ${modelId.slice('black-forest-labs/flux-2-'.length)}`,
+        description: 'Generation and editing from several reference images; transferStyle runs on it',
+      })),
+      // Variation of a reference image
+      { providerId: this.providerId, modelId: 'black-forest-labs/flux-redux-dev', displayName: 'Flux Redux Dev', description: 'A variation of one reference image, steered by the prompt' },
       // ControlNet
       { providerId: this.providerId, modelId: 'black-forest-labs/flux-canny-dev', displayName: 'Flux Canny', description: 'Edge-guided generation' },
       { providerId: this.providerId, modelId: 'black-forest-labs/flux-depth-dev', displayName: 'Flux Depth', description: 'Depth-guided generation' },

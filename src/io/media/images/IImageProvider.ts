@@ -383,9 +383,11 @@ export interface IImageProvider {
    * The model a style transfer runs on for `modelId` (an empty string for
    * the provider's default), decided by an initialised provider from its own
    * configuration, without a request. Throws for a model its style transfer
-   * cannot run. A provider whose base URL is not its own takes a named model
-   * as given: a custom endpoint may serve any name. A provider defines this
-   * exactly when it defines {@link transferStyle}.
+   * cannot run. A provider whose base URL is not its own may take a model
+   * outside its list, by its own rule: OpenAI and Fal any name, Replicate
+   * any `owner/name` (never a pinned version), Stability none, since its
+   * endpoint takes no model. A provider defines this exactly when it
+   * defines {@link transferStyle}.
    */
   styleTransferModel?(modelId: string): string;
 }

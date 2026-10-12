@@ -13,7 +13,7 @@ import { deflateSync } from 'node:zlib';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { transferStyle, type TransferStyleOptions } from '../transferStyle.js';
-import { clearDefaultProvider } from '../runtime/global-default.js';
+import { clearDefaultProvider, setDefaultProvider } from '../runtime/global-default.js';
 import { registerImageProviderFactory, unregisterImageProviderFactory } from '../../io/media/images/index.js';
 import { ReplicateImageProvider } from '../../io/media/images/providers/ReplicateImageProvider.js';
 import { bufferToBlobPart } from '../../io/media/images/blobPart.js';
@@ -143,6 +143,7 @@ const PROVIDER_ENV = [
   'STABILITY_API_KEY',
   'OPENAI_API_KEY',
   'REPLICATE_BASE_URL',
+  'FAL_BASE_URL',
   'STABILITY_BASE_URL',
   'OPENAI_BASE_URL',
   'STABLE_DIFFUSION_LOCAL_BASE_URL',
@@ -192,6 +193,11 @@ async function partOf(value: FormDataEntryValue | null): Promise<{ type: string;
 }
 
 const json = (value: unknown, status = 200): Answer => ({ status, body: JSON.stringify(value) });
+
+/** Each provider's base URL, from its own variable, on the server: a call that names no provider may not pass `baseUrl`. */
+function pointEveryProviderAtTheServer(): void {
+  for (const name of ['REPLICATE_BASE_URL', 'FAL_BASE_URL', 'STABILITY_BASE_URL', 'OPENAI_BASE_URL']) vi.stubEnv(name, origin);
+}
 
 /** Answers for each provider's style transfer, every request succeeding at once. */
 function answerEveryProvider(): void {
@@ -371,9 +377,10 @@ describe('transferStyle against the providers', () => {
       [['OPENAI_API_KEY'], 'openai'],
     ])('with %j set, %s serves', async (keys, expected) => {
       for (const key of keys) vi.stubEnv(key, `${key.toLowerCase()}-from-env`);
+      pointEveryProviderAtTheServer();
       answerEveryProvider();
 
-      const result = await transferStyle({ ...style, baseUrl: origin });
+      const result = await transferStyle(style);
 
       expect(result.provider).toBe(expected);
       expect(firstRequest[expected](received[0].path)).toBe(true);
@@ -381,10 +388,11 @@ describe('transferStyle against the providers', () => {
 
     it('passes over a provider whose factory is not registered', async () => {
       for (const key of ['REPLICATE_API_TOKEN', 'FAL_API_KEY', 'STABILITY_API_KEY', 'OPENAI_API_KEY']) vi.stubEnv(key, 'from-env');
+      pointEveryProviderAtTheServer();
       answerEveryProvider();
       unregisterImageProviderFactory('replicate');
       try {
-        const result = await transferStyle({ ...style, baseUrl: origin });
+        const result = await transferStyle(style);
         expect(result.provider).toBe('fal');
       } finally {
         registerImageProviderFactory('replicate', () => new ReplicateImageProvider());
@@ -393,6 +401,84 @@ describe('transferStyle against the providers', () => {
 
     it('fails when no style transfer provider has a key', async () => {
       await expect(transferStyle(style)).rejects.toThrow('No style transfer provider configured.');
+      expect(received).toEqual([]);
+    });
+
+    it('refuses a baseUrl, which would reach the provider the environment picks with its key', async () => {
+      vi.stubEnv('REPLICATE_API_TOKEN', 'r8-from-env');
+      answerEveryProvider();
+
+      await expect(transferStyle({ ...style, baseUrl: origin })).rejects.toThrow('a baseUrl needs `provider`');
+      expect(received).toEqual([]);
+    });
+  });
+
+  describe('with a global default provider', () => {
+    it('uses its key and base URL for the provider it names, and not its model', async () => {
+      routes['POST /v1/images/edits'] = () => json({ created: 1, data: [{ b64_json: 'b3V0' }] });
+      setDefaultProvider({ provider: 'openai', model: 'gpt-image-2.5-flare', apiKey: 'sk-global', baseUrl: `${origin}/v1` });
+
+      const result = await transferStyle({ provider: 'openai', image: SOURCE, styleReference: STYLE_JPEG, prompt: 'x' });
+
+      expect(received).toHaveLength(1);
+      expect(received[0].headers.authorization).toBe('Bearer sk-global');
+      expect((await formOf(received[0])).get('model')).toBe('gpt-image-2.5-sunburst');
+      expect(result.model).toBe('gpt-image-2.5-sunburst');
+    });
+
+    it('lends nothing to another provider', async () => {
+      setDefaultProvider({ provider: 'openai', apiKey: 'sk-global', baseUrl: `${origin}/v1` });
+
+      await expect(
+        transferStyle({ provider: 'replicate', image: SOURCE, styleReference: STYLE_JPEG, prompt: 'x' }),
+      ).rejects.toThrow('No API key for replicate');
+      expect(received).toEqual([]);
+    });
+  });
+
+  describe('the provider and the model', () => {
+    it('lets a provider prefix on the model win over provider', async () => {
+      routes['POST /models/black-forest-labs/flux-2-pro/predictions'] = () =>
+        json({ id: 'p5', status: 'succeeded', output: ['https://replicate.delivery/out.png'] }, 201);
+
+      const result = await transferStyle({
+        provider: 'openai',
+        model: 'replicate:black-forest-labs/flux-2-pro',
+        apiKey: 'r8-key',
+        baseUrl: origin,
+        image: SOURCE,
+        styleReference: STYLE_JPEG,
+        prompt: 'x',
+      });
+
+      expect(result.provider).toBe('replicate');
+      expect(received.map((request) => request.path)).toEqual(['/models/black-forest-labs/flux-2-pro/predictions']);
+    });
+
+    it('gives a Fal FLUX.2 model named without /edit its edit endpoint', async () => {
+      routes['POST /fal-ai/flux-2-max/edit'] = () =>
+        json({ request_id: 'r3', status_url: `${origin}/queue/r3/status`, response_url: `${origin}/queue/r3` });
+      routes['GET /queue/r3/status'] = () => json({ status: 'COMPLETED' });
+      routes['GET /queue/r3'] = () => json({ images: [{ url: 'https://fal.media/max.jpg' }], seed: 1 });
+
+      const result = await transferStyle({
+        provider: 'fal',
+        model: 'fal-ai/flux-2-max',
+        apiKey: 'fal-key',
+        image: SOURCE,
+        styleReference: STYLE_JPEG,
+        prompt: 'x',
+        baseUrl: origin,
+      });
+
+      expect(result.model).toBe('fal-ai/flux-2-max/edit');
+      expect(received[0].path).toBe('/fal-ai/flux-2-max/edit');
+    });
+
+    it('refuses a provider with no two-image call before looking for its key', async () => {
+      await expect(transferStyle({ provider: 'bfl', image: SOURCE, styleReference: STYLE_JPEG, prompt: 'x' })).rejects.toThrow(
+        'bfl has no style transfer that sends both images',
+      );
       expect(received).toEqual([]);
     });
   });
@@ -415,6 +501,9 @@ describe('transferStyle against the providers', () => {
       await expect(
         transferStyle({ model: 'stability:sd3.5-large', apiKey: 'sk-stab', ...images(), prompt: 'x' }),
       ).rejects.toThrow("Stability's style transfer endpoint takes no model");
+      await expect(
+        transferStyle({ model: 'replicate:black-forest-labs/flux-2-pro:0123abcd', apiKey: 'r8-key', ...images(), prompt: 'x' }),
+      ).rejects.toThrow('a pinned version is not taken');
       expect(received).toEqual([]);
     });
 
@@ -469,9 +558,14 @@ describe('transferStyle against the providers', () => {
       expect(received).toEqual([]);
     });
 
-    it('a Stability request over 10 MiB and an OpenAI prompt over 32,000 characters', async () => {
+    it('a Stability request over 10 MiB, in one image or across both, and an OpenAI prompt over 32,000 characters', async () => {
       const large = Buffer.concat([SOURCE, Buffer.alloc(10 * 1024 * 1024)]);
       await expect(transferStyle(on('stability', { image: large }))).rejects.toThrow('Stability takes a request of up to 10 MiB');
+      const half = Buffer.concat([SOURCE, Buffer.alloc(6 * 1024 * 1024)]);
+      const halfStyle = Buffer.concat([STYLE_JPEG, Buffer.alloc(6 * 1024 * 1024)]);
+      await expect(transferStyle(on('stability', { image: half, styleReference: halfStyle }))).rejects.toThrow(
+        'Stability takes a request of up to 10 MiB',
+      );
       await expect(transferStyle(on('openai', { prompt: 'a'.repeat(32_000) }))).rejects.toThrow(
         "OpenAI's edits take a prompt of at most 32,000 characters",
       );
@@ -479,7 +573,43 @@ describe('transferStyle against the providers', () => {
     });
   });
 
+  it('sends Stability its composition fidelity and change strength, and refuses them out of range', async () => {
+    routes['POST /v2beta/stable-image/control/style-transfer'] = () => json({ image: 'c3R5bGVk', seed: 1 });
+    const call = (stability: Record<string, number>) =>
+      transferStyle({
+        provider: 'stability',
+        apiKey: 'sk-stab',
+        baseUrl: origin,
+        image: SOURCE,
+        styleReference: STYLE_JPEG,
+        prompt: 'x',
+        providerOptions: { stability },
+      });
+
+    await call({ compositionFidelity: 0.95, changeStrength: 0.4 });
+    const form = await formOf(received[0]);
+    expect(form.get('composition_fidelity')).toBe('0.95');
+    expect(form.get('change_strength')).toBe('0.4');
+
+    await expect(call({ changeStrength: 0.05 })).rejects.toThrow("Stability's style transfer takes changeStrength from 0.1 to 1; it is 0.05.");
+    await expect(call({ compositionFidelity: 1.5 })).rejects.toThrow('takes compositionFidelity from 0 to 1; it is 1.5.');
+    expect(received).toHaveLength(1);
+  });
+
   describe('fails on an answer without an image', () => {
+    it('a Replicate prediction that fails when created, and one whose poll ends failed', async () => {
+      const replicate = () =>
+        transferStyle({ provider: 'replicate', apiKey: 'r8-key', baseUrl: origin, image: SOURCE, styleReference: STYLE_JPEG, prompt: 'x' });
+      routes['POST /models/black-forest-labs/flux-2-pro/predictions'] = () =>
+        json({ id: 'p3', status: 'failed', error: 'NSFW content detected' }, 201);
+      await expect(replicate()).rejects.toThrow('Replicate style transfer failed: NSFW content detected');
+
+      routes['POST /models/black-forest-labs/flux-2-pro/predictions'] = () =>
+        json({ id: 'p4', status: 'processing', urls: { get: `${origin}/predictions/p4` } }, 201);
+      routes['GET /predictions/p4'] = () => json({ id: 'p4', status: 'failed', error: 'out of memory' });
+      await expect(replicate()).rejects.toThrow('Replicate style transfer failed: out of memory');
+    });
+
     it('a Replicate prediction canceled with output', async () => {
       routes['POST /models/black-forest-labs/flux-2-pro/predictions'] = () =>
         json({ id: 'p2', status: 'canceled', output: ['https://replicate.delivery/partial.png'] }, 201);
@@ -495,11 +625,14 @@ describe('transferStyle against the providers', () => {
       ).rejects.toThrow('OpenAI style transfer returned no image.');
     });
 
-    it('a Fal failure, with its detail read at the response URL', async () => {
+    it('a Fal failure as Fal reports it: a completed status that carries its error', async () => {
+      // Fal's queue status is IN_QUEUE, IN_PROGRESS or COMPLETED; a failed
+      // request completes with `error` and `error_type`
+      // (https://fal.ai/docs/documentation/model-apis/inference/queue).
       routes['POST /fal-ai/flux-2-pro/edit'] = () =>
         json({ request_id: 'r2', status_url: `${origin}/queue/r2/status`, response_url: `${origin}/queue/r2` });
-      routes['GET /queue/r2/status'] = () => json({ status: 'FAILED' });
-      routes['GET /queue/r2'] = () => json({ detail: 'image could not be read' }, 422);
+      routes['GET /queue/r2/status'] = () => json({ status: 'COMPLETED', error: 'image could not be read', error_type: 'image_load_error' });
+      routes['GET /queue/r2'] = () => json({ detail: 'image could not be read', error_type: 'image_load_error' }, 422);
       await expect(
         transferStyle({ provider: 'fal', apiKey: 'fal-key', baseUrl: origin, image: SOURCE, styleReference: STYLE_JPEG, prompt: 'x' }),
       ).rejects.toThrow('image could not be read');

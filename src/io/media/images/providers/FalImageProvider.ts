@@ -151,8 +151,12 @@ interface FalSubmitResponse {
  * @internal
  */
 interface FalStatusResponse {
-  /** Current status: 'IN_QUEUE', 'IN_PROGRESS', 'COMPLETED', 'FAILED'. */
+  /** Current status: 'IN_QUEUE', 'IN_PROGRESS' or 'COMPLETED'; a failed request completes, with `error`. */
   status: string;
+  /** A human-readable error, present only when the request failed (with status COMPLETED). */
+  error?: string;
+  /** The error's machine-readable type, present with `error`. */
+  error_type?: string;
 }
 
 /**
@@ -556,7 +560,9 @@ export class FalImageProvider implements IImageProvider {
    * which takes both as `image_urls`, the source first, with an instruction
    * that names them by index. FLUX.2 takes no strength and no negative
    * prompt: `strength` picks the instruction (see `styleTransfer.ts`).
-   * `image_size` is left `auto` and `output_format` at Fal's default, JPEG.
+   * `image_size` and `output_format` are left at the endpoint's defaults:
+   * `auto` and JPEG on pro, max and flex; on `fal-ai/flux-2/edit`, PNG and
+   * a size the schema does not state (Fal's OpenAPI schema of each).
    * Both images must be JPEG, PNG or WebP.
    *
    * @param request - The source, the reference and the prompt.
@@ -624,6 +630,13 @@ export class FalImageProvider implements IImageProvider {
       { providerId: this.providerId, modelId: 'fal-ai/flux-pro/v1.1-ultra', displayName: 'Flux Pro 1.1 Ultra (Fal)', description: 'Ultra-high resolution' },
       { providerId: this.providerId, modelId: 'fal-ai/flux-lora', displayName: 'Flux LoRA (Fal)', description: 'LoRA fine-tuned generation' },
       { providerId: this.providerId, modelId: 'fal-ai/flux-realism', displayName: 'Flux Realism (Fal)', description: 'Photorealistic output' },
+      // Style transfer: the FLUX.2 edit endpoints, which take the source and the style reference
+      ...FAL_STYLE_TRANSFER_MODELS.map((modelId) => ({
+        providerId: this.providerId,
+        modelId,
+        displayName: `${modelId.replace(/^fal-ai\//, '').replace(/\/edit$/, '')} edit (Fal)`,
+        description: 'Editing from several input images; transferStyle runs on it',
+      })),
     ];
   }
 
@@ -698,6 +711,14 @@ export class FalImageProvider implements IImageProvider {
       const data = (await response.json()) as FalStatusResponse;
 
       if (data.status === 'COMPLETED') {
+        // A failed request completes too, with `error` and `error_type`
+        // ("present only if the request failed (only when COMPLETED)",
+        // https://fal.ai/docs/documentation/model-apis/inference/queue).
+        if (typeof data.error === 'string' && data.error) {
+          throw new Error(
+            `Fal.ai request ${requestId} failed: ${data.error}${typeof data.error_type === 'string' ? ` (${data.error_type})` : ''}`,
+          );
+        }
         return;
       }
 

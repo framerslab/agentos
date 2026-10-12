@@ -88,7 +88,11 @@ export interface TransferStyleOptions {
   strength?: number;
   /** Provider override. Auto-detects from env vars if omitted. */
   provider?: string;
-  /** Model override. Each provider runs the models its style transfer lists; a custom `baseUrl` takes any name. */
+  /**
+   * Model override. Each provider runs the models its style transfer lists.
+   * With a custom `baseUrl`, OpenAI and Fal take any name and Replicate any
+   * `owner/name`; Stability's endpoint takes no model.
+   */
   model?: string;
   /** Output size (e.g. `'1024x1024'`). Sent to OpenAI only. */
   size?: string;
@@ -106,7 +110,12 @@ export interface TransferStyleOptions {
    * (`openai:gpt-image-2.5-sunburst`); a key with neither is refused.
    */
   apiKey?: string;
-  /** Base URL for the provider, instead of its default or its environment variable. */
+  /**
+   * Base URL for the provider, instead of its default or its environment
+   * variable. Like `apiKey`, it needs `provider` or a provider-prefixed `model`:
+   * it is not sent to a provider chosen from the environment, with that
+   * provider's key.
+   */
   baseUrl?: string;
   /** Usage ledger configuration. */
   usageLedger?: AgentOSUsageLedgerOptions;
@@ -184,6 +193,13 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
           'transferStyle: an apiKey needs `provider`, or a model with a provider prefix such as "openai:gpt-image-2.5-sunburst"; it is not sent to a provider chosen from the environment.',
         );
       }
+      // A base URL belongs to one vendor too: with no provider named it would
+      // receive whichever provider the environment selects, with its key.
+      if (opts.baseUrl && !namedProvider) {
+        throw new Error(
+          'transferStyle: a baseUrl needs `provider`, or a model with a provider prefix such as "openai:gpt-image-2.5-sunburst"; it is not sent to a provider chosen from the environment, with that provider\'s key.',
+        );
+      }
 
       // The provider, and the model the call names ('' for the provider's
       // style-transfer default). The global default's model is not used: it
@@ -211,18 +227,19 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
         callModel = opts.model ?? match.modelId;
       }
 
+      // A provider with no two-image call is refused before its key or base
+      // URL is looked for: the refusal does not depend on its credentials.
+      const provider = createImageProvider(providerId);
+      if (typeof provider.transferStyle !== 'function' || typeof provider.styleTransferModel !== 'function') {
+        throw new Error(
+          `transferStyle: ${providerId} has no style transfer that sends both images. Use replicate, fal, stability or openai; variateImage makes a variation of the reference, and editImage changes the source by prompt.`,
+        );
+      }
       const resolved = resolveMediaProvider(providerId, callModel, {
         apiKey: opts.apiKey,
         baseUrl: opts.baseUrl,
       });
       span?.setAttribute('llm.provider', resolved.providerId);
-
-      const provider = createImageProvider(resolved.providerId);
-      if (typeof provider.transferStyle !== 'function' || typeof provider.styleTransferModel !== 'function') {
-        throw new Error(
-          `transferStyle: ${resolved.providerId} has no style transfer that sends both images. Use replicate, fal, stability or openai; variateImage makes a variation of the reference, and editImage changes the source by prompt.`,
-        );
-      }
       // initialize makes no request, and the model is checked before either
       // image is read or fetched.
       await provider.initialize({ apiKey: resolved.apiKey, baseURL: resolved.baseUrl });

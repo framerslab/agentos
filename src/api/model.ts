@@ -61,6 +61,7 @@ const ENV_URL_MAP: Record<string, string> = {
   requesty: 'REQUESTY_BASE_URL',
   stability: 'STABILITY_BASE_URL',
   replicate: 'REPLICATE_BASE_URL',
+  fal: 'FAL_BASE_URL',
   ollama: 'OLLAMA_BASE_URL',
   'stable-diffusion-local': 'STABLE_DIFFUSION_LOCAL_BASE_URL',
 };
