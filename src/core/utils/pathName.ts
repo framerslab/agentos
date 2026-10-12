@@ -22,9 +22,10 @@ export const MAX_PATH_NAME_BYTES = 200;
 /**
  * Why a name was refused:
  * - `'empty'`: the name is empty.
- * - `'character'`: it holds a slash, a backslash, a colon or a control character (U+0000 to U+001F, or U+007F), a
- *   NUL byte among them. A slash or a backslash separates folders, and on Windows a colon names a drive
- *   (`C:name`) or a file's stream (`name:stream`).
+ * - `'character'`: it holds a slash, a backslash, a colon, one of `"`, `*`, `<`, `>`, `?` and `|`, or a control
+ *   character (U+0000 to U+001F, or U+007F), a NUL byte among them. A slash or a backslash separates folders; on
+ *   Windows a colon names a drive (`C:name`) or a file's stream (`name:stream`), and Windows refuses the other six
+ *   in a name.
  * - `'dot'`: it starts with a dot, so it is `.`, `..` or a hidden name.
  * - `'edge'`: it starts or ends with a space, or ends with a dot. Windows drops those from a name, so the name
  *   would be another's (`notes.` is `notes` there).
@@ -41,14 +42,18 @@ const BACKSLASH = 0x5c;
 /** The colon's code: on Windows it names a drive (`C:name`) or a file's stream (`name:stream`). */
 const COLON = 0x3a;
 
+/** The codes of `"`, `*`, `<`, `>`, `?` and `|`, which Windows refuses in a name. */
+const WINDOWS_RESERVED = new Set([0x22, 0x2a, 0x3c, 0x3e, 0x3f, 0x7c]);
+
 const utf8 = new TextEncoder();
 
 /**
  * True when the character whose UTF-16 code is `code` may appear neither in a name nor anywhere in a path whose
- * names are joined with `/`: a backslash, a colon or a control character (U+0000 to U+001F, or U+007F).
+ * names are joined with `/`: a backslash, a colon, one of `"`, `*`, `<`, `>`, `?` and `|`, or a control character
+ * (U+0000 to U+001F, or U+007F).
  */
 export function isRefusedPathCharacter(code: number): boolean {
-  return code <= 0x1f || code === 0x7f || code === BACKSLASH || code === COLON;
+  return code <= 0x1f || code === 0x7f || code === BACKSLASH || code === COLON || WINDOWS_RESERVED.has(code);
 }
 
 /**

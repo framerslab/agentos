@@ -524,9 +524,9 @@ export interface ExportResult {
    * The traces the export left out, each with its id and the reason; its length is how many. A Markdown or
    * Obsidian export names a trace's folders after its scope and type and its file after its id, so it leaves out
    * a trace whose scope, type or id is not a safe file or folder name: an empty one, one that holds a slash, a
-   * backslash, a colon or a control character, one that starts with a dot, starts or ends with a space or ends
-   * with a dot, or one longer than 200 bytes in UTF-8. Every other trace is written. A JSON or SQLite export
-   * writes every trace into its one file and leaves none out.
+   * backslash, a colon, one of `"`, `*`, `<`, `>`, `?` and `|`, or a control character, one that starts with a
+   * dot, starts or ends with a space or ends with a dot, or one longer than 200 bytes in UTF-8. Every other trace
+   * is written. A JSON or SQLite export writes every trace into its one file and leaves none out.
    */
   refused: RefusedExportTrace[];
 }

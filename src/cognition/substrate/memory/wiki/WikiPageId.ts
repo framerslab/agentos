@@ -19,8 +19,9 @@ const CATALOG_ID = 'index';
  * - `'empty'`: the id is an empty string.
  * - `'length'`: the id is longer than {@link MAX_WIKI_PAGE_ID_LENGTH} characters, or a name in it holds more than
  *   200 bytes in UTF-8, the most a name built from data may hold (`MAX_PATH_NAME_BYTES` in `core/utils/pathName`).
- * - `'character'`: the id holds a backslash, a colon or a control character (U+0000 to U+001F, or U+007F), a NUL
- *   byte among them. On Windows a backslash separates folders and a colon names a drive or a file's stream.
+ * - `'character'`: the id holds a backslash, a colon, one of `"`, `*`, `<`, `>`, `?` and `|`, or a control
+ *   character (U+0000 to U+001F, or U+007F), a NUL byte among them. On Windows a backslash separates folders, a
+ *   colon names a drive or a file's stream, and the other six are refused in a name.
  * - `'segment'`: a name between slashes is empty: the id starts or ends with `/`, or holds `//`.
  * - `'dot'`: a name starts with a dot, `.` and `..` among them.
  * - `'edge'`: a name starts or ends with a space, or ends with a dot. Windows drops those from a name, so the
@@ -47,7 +48,7 @@ const RULE_BROKEN: Record<WikiPageIdProblem, string> = {
   length:
     `a page id is at most ${MAX_WIKI_PAGE_ID_LENGTH} characters, ` +
     `and each name in it at most ${MAX_PATH_NAME_BYTES} bytes in UTF-8`,
-  character: 'a page id holds no backslash, no colon and no control character',
+  character: 'a page id holds no backslash, no colon, none of " * < > ? | and no control character',
   segment: 'a page id is names joined by single slashes, with no slash at its start or end',
   dot: 'no name in a page id starts with a dot',
   edge: 'no name in a page id starts or ends with a space or ends with a dot',
@@ -105,10 +106,10 @@ function problemOf(id: unknown): WikiPageIdProblem | null {
  * True when `id` has the wiki's id form: the page's path under `memory/` without `.md`, one or more names
  * joined by `/` (`entities/johnny` is `memory/entities/johnny.md`). No name is empty or starts with a dot,
  * so `.` and `..` are never names, and no name starts or ends with a space or ends with a dot, which
- * Windows drops from a name; the id holds no backslash, no colon and no control character, a NUL
- * byte among them; it is at most {@link MAX_WIKI_PAGE_ID_LENGTH} characters, and each name in it at most 200
- * bytes in UTF-8; and it is not `index` in any case, the catalog's own id. Every id the store lists, and every
- * id the default clusterer of `attachMemoryWiki` makes, has this form.
+ * Windows drops from a name; the id holds no backslash, no colon, none of `"`, `*`, `<`, `>`, `?` and `|`,
+ * and no control character, a NUL byte among them; it is at most {@link MAX_WIKI_PAGE_ID_LENGTH} characters,
+ * and each name in it at most 200 bytes in UTF-8; and it is not `index` in any case, the catalog's own id.
+ * Every id the store lists, and every id the default clusterer of `attachMemoryWiki` makes, has this form.
  */
 export function isWikiPageId(id: unknown): id is string {
   return problemOf(id) === null;

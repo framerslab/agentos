@@ -608,7 +608,7 @@ createdAt: 1711234567890
 User prefers TypeScript over Python
 ```
 
-A trace's scope and type name its folders and its id names its file, so each must be a safe file or folder name: not empty; no slash, backslash, colon or control character; not starting with a dot; not starting or ending with a space, or ending with a dot; at most 200 bytes in UTF-8. The ids, scopes and types AgentOS makes all are. A trace imported or added with any other value is left out of the export, and `export()` lists it in `refused` with the field and the reason; every other trace is written, and no file is written outside the export folder:
+A trace's scope and type name its folders and its id names its file, so each must be a safe file or folder name: not empty; no slash, backslash or colon, none of `"`, `*`, `<`, `>`, `?` and `|`, and no control character; not starting with a dot; not starting or ending with a space, or ending with a dot; at most 200 bytes in UTF-8. The ids, scopes and types AgentOS makes all are. A trace imported or added with any other value is left out of the export, and `export()` lists it in `refused` with the field and the reason; every other trace is written, and no file is written outside the export folder:
 
 ```ts
 const { refused } = await mem.export('./memory-export', { format: 'markdown' });

@@ -71,18 +71,21 @@ A page's id is its path under `memory/` without `.md`, with `/` between folders:
 `entities/johnny` is `memory/entities/johnny.md`. An id is one or more names joined
 by `/`. No name is empty or starts with a dot, so `.` and `..` are never names, and
 no name starts or ends with a space or ends with a dot, which Windows drops from a
-name; the id holds no backslash, no colon and no control character, a NUL byte among
-them; it is at most 512 characters, and each name in it at most 200 bytes in UTF-8,
-so a page's file name, with `.md`, stays under the 255 bytes Linux allows in a name;
-and it is not `index`, in any case, which names the catalog. The store checks every
-id against this rule, and checks that the path the id names lies inside `memory/`,
+name; the id holds no backslash, no colon, none of `"`, `*`, `<`, `>`, `?` and `|`,
+which Windows refuses in a name, and no control character, a NUL byte among them; it
+is at most 512 characters, and each name in it at most 200 bytes in UTF-8, so a
+page's file name, with `.md`, stays under the 255 bytes Linux allows in a name; and it
+is not `index`, in any case, which names the catalog. The store checks every id
+against this rule, and checks that the path the id names lies inside `memory/`,
 before it reads or writes anything. `readPage` and `writePage` throw an
 `InvalidWikiPageIdError` for any other id, `read_memory_page` answers one with an
 error result whose `details.code` is `INVALID_WIKI_PAGE_ID`, and a compile skips a
 cluster assignment whose page id is refused and reports it in the result's
-`conflicts`. A compile also reports there a page the store fails to write, with the
-reason, and goes on with the other pages. `isWikiPageId` tells whether an id has
-this form. A file whose path makes no valid id, such as any file in a folder whose
+`conflicts`. A compile also reports there a page the file system refuses for its
+path, such as a name too long or a file where a folder must be, and goes on with the
+other pages; any other failed write, such as on a full disk, stops the compile, and
+the next compile takes up the same traces again. `isWikiPageId` tells whether an id
+has this form. A file whose path makes no valid id, such as any file in a folder whose
 name starts with a dot (`.meta/`, `.store/`), is not a page: the store does not list
 or index it.
 

@@ -887,7 +887,10 @@ export class Memory {
   /**
    * Compile recent (non-wiki) traces into the markdown wiki, then re-index.
    * Reads the wiki's watermark, folds every trace created since into pages, and
-   * advances the watermark. No-op when no wiki is attached.
+   * advances the watermark. No-op when no wiki is attached. A batch whose
+   * compile rejects, such as on a page write that fails for want of disk space
+   * or permission, leaves the watermark where it was, so the next compile
+   * starts from that batch again.
    *
    * @param opts.reason - What triggered this compile (telemetry + compiler hint).
    */
@@ -923,7 +926,9 @@ export class Memory {
       if (traces.length < BATCH) break;
     }
 
-    if (aggregate.pagesWritten.length > 0) {
+    // A page reported in conflicts may still be on disk (its file written before the catalog failed), so the
+    // index runs after any compile that wrote or reported a page; it re-embeds only pages whose text changed.
+    if (aggregate.pagesWritten.length > 0 || aggregate.conflicts.length > 0) {
       await this._wiki.store.index();
     }
     return aggregate;

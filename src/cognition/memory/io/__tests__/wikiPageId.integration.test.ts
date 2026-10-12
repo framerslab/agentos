@@ -197,7 +197,7 @@ describe('a compile goes on past a page the file system will not take', () => {
       expect(result.conflicts).toEqual(
         expect.arrayContaining([
           { pageId: longId, note: expect.stringContaining('refused') },
-          { pageId: 'blocked/page', note: expect.stringContaining('not written') },
+          { pageId: 'blocked/page', note: expect.stringContaining('write failed') },
         ]),
       );
       // The long id is refused before its merge prompt; the blocked page is merged, then its write fails.
@@ -209,6 +209,40 @@ describe('a compile goes on past a page the file system will not take', () => {
       // The watermark moved past the batch, so the next compile does not run into the same pages.
       expect(await memory.compileWiki({ reason: 'explicit' })).toEqual({ pagesWritten: [], tracesConsumed: 0, conflicts: [] });
       expect(prompts).toHaveLength(2);
+    } finally {
+      await memory.close();
+    }
+  });
+
+  it('indexes a page whose file was written before the catalog failed', async () => {
+    const memory = await Memory.createSqlite(path.join(root, 'memory.sqlite'), {
+      graph: false,
+      selfImprove: false,
+      decay: false,
+    });
+    try {
+      // A folder where the catalog, index.md, goes: the page's file is written, then refreshing the catalog fails.
+      fs.rmSync(path.join(memoryDir, 'index.md'));
+      fs.mkdirSync(path.join(memoryDir, 'index.md'));
+      await attachMemoryWiki({
+        memory,
+        memoryDir,
+        agentId: 'a1',
+        llm: async () => 'Merged facts.',
+        chunk: (t) => [{ text: t }],
+        now: () => '2026-10-12T00:00:00.000Z',
+        cluster: async (traces) => [{ pageId: 'concepts/kept', traceIds: traces.map((t) => t.id) }],
+      });
+      await memory.remember('Kept fact.');
+
+      const result = await memory.compileWiki({ reason: 'explicit' });
+
+      expect(result.pagesWritten).toEqual([]);
+      expect(result.conflicts).toEqual([{ pageId: 'concepts/kept', note: expect.stringContaining('write failed') }]);
+      expect(fs.readFileSync(path.join(memoryDir, 'concepts', 'kept.md'), 'utf8')).toContain('Merged facts.');
+      // The page on disk is indexed all the same.
+      const traces = await memory.recentTraces(0, { limit: 50 });
+      expect(traces.some((t) => t.tags.includes('page:concepts/kept') && t.content.includes('Merged facts.'))).toBe(true);
     } finally {
       await memory.close();
     }

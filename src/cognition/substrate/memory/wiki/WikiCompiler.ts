@@ -31,6 +31,19 @@ export interface WikiCompilerOptions {
   now?: () => string;
 }
 
+/**
+ * The codes of file system errors that come from the paths a page write uses, so writing the same page fails the
+ * same way on every compile: a name the file system will not take (`ENAMETOOLONG`, `EINVAL`), a file where a folder
+ * must be (`ENOTDIR`, `EEXIST`), a folder where a file must be (`EISDIR`), or a loop of links (`ELOOP`).
+ */
+const PAGE_PATH_ERRORS: ReadonlySet<string> = new Set(['ENAMETOOLONG', 'EINVAL', 'ENOTDIR', 'EEXIST', 'EISDIR', 'ELOOP']);
+
+/** True for an error that writing the same page would raise again (see {@link PAGE_PATH_ERRORS}). */
+function isPagePathError(err: unknown): err is Error {
+  const code = err instanceof Error ? (err as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && PAGE_PATH_ERRORS.has(code);
+}
+
 const MERGE_PROMPT = (currentBody: string, facts: string[]): string =>
   `You maintain a knowledge wiki page. Here is the CURRENT page, which may include human edits:\n\n` +
   `---\n${currentBody || '(empty page)'}\n---\n\n` +
@@ -44,9 +57,11 @@ export class WikiCompiler {
   /**
    * Fold traces into the pages the cluster step assigns them to. An assignment whose page id the wiki
    * refuses (see `isWikiPageId`) is not read, merged or written: it is reported in `conflicts`, with the
-   * reason as its note, and the other assignments go on. So is an assignment whose page the store fails to
-   * write, such as one whose path the file system refuses: its note says why, its traces are not counted as
-   * consumed, and the other assignments go on.
+   * reason as its note, and the other assignments go on. An assignment whose page the file system refuses
+   * for its path, such as a name too long or a file where a folder must be, is reported there too: writing
+   * it would fail the same way on every compile. Its traces are not counted as consumed. Any other failed
+   * write, such as a full disk or a missing permission, rejects the compile, so a caller that keeps a
+   * watermark compiles the same traces again.
    */
   async compile(input: {
     traces: TraceLike[];
@@ -92,10 +107,10 @@ export class WikiCompiler {
           links: extractWikiLinks(mergedBody),
         });
       } catch (err) {
-        // One page that cannot be written does not stop the compile, which would then fail on the same
-        // batch every time it runs.
-        const reason = err instanceof Error ? err.message : String(err);
-        result.conflicts.push({ pageId: a.pageId, note: `not written: ${reason}` });
+        // A page the file system refuses for its path would stop every later compile at the same batch, so it is
+        // reported and the compile goes on. Any other failure may pass, so it stops the compile.
+        if (!isPagePathError(err)) throw err;
+        result.conflicts.push({ pageId: a.pageId, note: `write failed: ${err.message}` });
         continue;
       }
       result.pagesWritten.push(a.pageId);

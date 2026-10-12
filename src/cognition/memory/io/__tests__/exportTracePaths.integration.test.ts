@@ -62,7 +62,8 @@ describe('memory exports write only inside the export folder', () => {
       });
       opened.push(memory);
 
-      // Each refused trace would, by its id or scope, name a file one or two levels above the export folder.
+      // The first three would, by their id or scope, name a file one or two levels above the export folder; the
+      // next two hold a character no name may hold.
       const source = path.join(workspace, 'in.json');
       fs.writeFileSync(
         source,
@@ -72,23 +73,25 @@ describe('memory exports write only inside the export folder', () => {
             { id: '../../../../outside', content: 'An id that names the file two levels up.' },
             { id: 'mt_scoped', scope: '../../elsewhere', content: 'A scope that leads two levels up.' },
             { id: 'mt_typed', type: 'semantic\\..', content: 'A type with a backslash.' },
+            { id: 'mt_asked?', content: 'An id with a character Windows refuses in a name.' },
             { id: 'mt_kept', type: 'semantic', scope: 'user', content: 'A trace with safe names.' },
           ],
         }),
       );
       const imported = await memory.importFrom(source, { format: 'json' });
-      expect(imported).toMatchObject({ imported: 5, errors: [] });
+      expect(imported).toMatchObject({ imported: 6, errors: [] });
 
       const before = entriesOutsideExport();
       const result = await memory.export(exportDir, { format });
 
-      expect(result.refused).toHaveLength(4);
+      expect(result.refused).toHaveLength(5);
       expect(result.refused).toEqual(
         expect.arrayContaining([
           { id: '../../../escaped', field: 'id', problem: 'character' },
           { id: '../../../../outside', field: 'id', problem: 'character' },
           { id: 'mt_scoped', field: 'scope', problem: 'character' },
           { id: 'mt_typed', field: 'type', problem: 'character' },
+          { id: 'mt_asked?', field: 'id', problem: 'character' },
         ]),
       );
 

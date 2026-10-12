@@ -70,6 +70,7 @@ describe('wiki page id rule', () => {
     ['another drive on Windows', 'D:notes', 'character'],
     ['the same drive on Windows', 'C:page', 'character'],
     ['a file stream on Windows', 'page:stream', 'character'],
+    ['a question mark, which Windows refuses in a name', 'concepts/why?', 'character'],
     ['an empty string', '', 'empty'],
     ['a NUL byte', 'page\u0000.txt', 'character'],
     ['a line break', 'a\nb', 'character'],
