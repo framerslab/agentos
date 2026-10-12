@@ -3,7 +3,7 @@
  * A multimodal turn as message parts, and a turn's content as text with no
  * image data.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { multimodalTurnParts, turnContentText } from '../turnContent';
 
@@ -62,14 +62,27 @@ describe('multimodalTurnParts', () => {
     expect(turnContentText({ text: 'Look', vision: [{ type: 'image_url', data: 'x', description: 'A map' }] })).toBe('Look\nA map\n[image]');
   });
 
-  it('sends a transcription as text, and refuses audio data, which no chat provider here takes', () => {
+  it('sends a transcription as text, and audio data, which no chat provider here takes, as a note without the data', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     expect(multimodalTurnParts('Notes:', undefined, { type: 'transcription', data: 'Buy milk.' })).toEqual([
       { type: 'text', text: 'Notes:' },
       { type: 'text', text: 'Buy milk.' },
     ]);
-    expect(() => multimodalTurnParts('x', undefined, { type: 'base64', data: 'AAAA', mimeType: 'audio/wav' })).toThrow(
-      "pass it with type 'transcription'",
-    );
+    const clip = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEA';
+    const parts = multimodalTurnParts('What did I say?', undefined, { type: 'base64', data: clip, mimeType: 'audio/wav' });
+    expect(parts).toEqual([
+      { type: 'text', text: 'What did I say?' },
+      { type: 'text', text: '[An audio clip (audio/wav) came with this message. It was not transcribed, so what it says is not available.]' },
+    ]);
+    expect(JSON.stringify(parts)).not.toContain(clip);
+    expect(multimodalTurnParts(null, undefined, { type: 'audio_url', data: 'https://audio.example.org/memo.mp3' })).toEqual([
+      { type: 'text', text: '[An audio clip came with this message at https://audio.example.org/memo.mp3. It was not transcribed, so what it says is not available.]' },
+    ]);
+    // A data URL is the clip's data, so it stays out as base64 does.
+    expect(JSON.stringify(multimodalTurnParts(null, undefined, { type: 'audio_url', data: `data:audio/wav;base64,${clip}` }))).not.toContain(clip);
+    // One warning a process, however many turns carry audio.
+    expect(warn.mock.calls.filter(([message]) => String(message).includes("pass it with type 'transcription'"))).toHaveLength(1);
+    warn.mockRestore();
   });
 });
 

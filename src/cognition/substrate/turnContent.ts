@@ -34,32 +34,50 @@ function imageUrlOf(vision: VisionInputData): string | undefined {
   return `data:${mimeType};base64,${data}`;
 }
 
+let warnedUntranscribedAudio = false;
+
 /**
- * A multimodal turn's inputs as message parts: the text, then one image part
- * per vision input, each after its description as text when it has one, and
- * an audio transcription as text. A provider then gets the images as images,
- * and prompt construction keeps the parts whole.
+ * The text that stands for audio a turn carries as data (`audio_url` or
+ * `base64`), which no chat provider behind a turn takes: a note that a clip
+ * came with the message and was not transcribed, with the address of an
+ * http(s) clip and none of the clip's data. Warns once a process.
+ */
+function untranscribedAudioText(audio: AudioInputData): string {
+  if (!warnedUntranscribedAudio) {
+    warnedUntranscribedAudio = true;
+    console.warn(
+      `[agentos] A turn's audio input of type '${audio.type}' reached the model as a note that it was not transcribed: ` +
+        "no chat provider behind a turn takes audio. Transcribe it and pass it with type 'transcription'.",
+    );
+  }
+  const kind = audio.mimeType ? ` (${audio.mimeType})` : '';
+  const where = audio.type === 'audio_url' && typeof audio.data === 'string' && /^https?:\/\//i.test(audio.data) ? ` at ${audio.data}` : '';
+  return `[An audio clip${kind} came with this message${where}. It was not transcribed, so what it says is not available.]`;
+}
+
+/**
+ * A multimodal turn's inputs as message parts: the text, then the audio as
+ * text (its transcription, or a note that it was not transcribed when it
+ * comes as data), then one image part per vision input, each after its
+ * description as text when it has one. A provider then gets the images as
+ * images, and prompt construction keeps the parts whole.
  *
  * @param text - The turn's text, when it has one.
  * @param vision - The turn's vision inputs.
  * @param audio - The turn's audio input.
- * @throws {Error} For audio data (`audio_url` or `base64`): no chat provider
- *   behind the turn takes audio, so it is refused rather than sent as text.
- *   Transcribe it first and pass `type: 'transcription'`.
  */
 export function multimodalTurnParts(
   text: string | null | undefined,
   vision: readonly VisionInputData[] | undefined,
   audio: AudioInputData | undefined,
 ): TurnContentPart[] {
-  if (audio && audio.type !== 'transcription') {
-    throw new Error(
-      `A turn's audio input of type '${audio.type}' cannot be sent to a chat model: transcribe it and pass it with type 'transcription'.`,
-    );
-  }
   const parts: TurnContentPart[] = [];
   if (text) parts.push({ type: 'text', text });
-  if (audio?.type === 'transcription' && audio.data) parts.push({ type: 'text', text: audio.data });
+  if (audio?.type === 'transcription') {
+    if (audio.data) parts.push({ type: 'text', text: audio.data });
+  } else if (audio) {
+    parts.push({ type: 'text', text: untranscribedAudioText(audio) });
+  }
   for (const input of vision ?? []) {
     const url = imageUrlOf(input);
     if (!url) continue;

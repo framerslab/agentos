@@ -336,6 +336,28 @@ describe('AgentOSOrchestrator (API layer)', () => {
       expect(JSON.stringify(stored)).not.toContain(jpeg);
     });
 
+    it('runs a turn whose audio comes as data, with a note in its place and none of its data', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const clip = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEA';
+      const input: AgentOSInput = {
+        userId: 'test-user',
+        sessionId: 'test-session-4',
+        selectedPersonaId: 'persona-1',
+        textInput: 'Summarize my memo.',
+        audioInput: { type: 'base64', data: clip, mimeType: 'audio/wav' },
+      };
+
+      await orchestrator.orchestrateTurn(input);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(capturedGMIInput?.content).toEqual([
+        { type: 'text', text: 'Summarize my memo.' },
+        { type: 'text', text: '[An audio clip (audio/wav) came with this message. It was not transcribed, so what it says is not available.]' },
+      ]);
+      expect(JSON.stringify(capturedGMIInput)).not.toContain(clip);
+      warn.mockRestore();
+    });
+
     it('includes gmiId in metadata', async () => {
       const input: AgentOSInput = {
         userId: 'test-user',
