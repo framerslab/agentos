@@ -48,6 +48,25 @@ describe('ReconnectingSTT', () => {
     ]);
     session.close();
   });
+  it('starts the ring again after an overflow gap, so a second replay stays contiguous', async () => {
+    const { stt, sessions } = scripted();
+    const session = await new ReconnectingSTT(stt, { minReplayMs: 0, queueCapacityMs: 2_000 }).startSession();
+    const got: Array<[string, number | undefined, number | undefined]> = [];
+    session.on('transcript', (event: TranscriptEvent) => got.push([event.text, event.startMs, event.endMs]));
+    for (let t = 0; t < 1_000; t += 20) session.pushAudio(frame(t));
+    sessions[0].emit('error', new Error('connection lost'));
+    for (let t = 1_000; t < 4_000; t += 20) session.pushAudio(frame(t));
+    await vi.waitFor(() => expect(sessions[1].frames.length).toBe(150));
+    for (let t = 4_000; t < 4_500; t += 20) session.pushAudio(frame(t));
+    sessions[1].emit('error', new Error('connection lost again'));
+    await vi.waitFor(() => expect(sessions[2].frames.length).toBe(125));
+    expect(sessions[2].frames.map((f) => f.timestamp)).toEqual(Array.from({ length: 125 }, (_, i) => 2_000 + i * 20));
+    expect(session).toMatchObject({ droppedFrames: 50 });
+    sessions[2].emit('transcript', final('second replay', 0, 500));
+    sessions[2].emit('transcript', final('live again', 2_000, 2_500));
+    expect(got).toEqual([['second replay', 2_000, 2_500], ['live again', 4_000, 4_500]]);
+    session.close();
+  });
   it('flush waits for a reconnect and drains the replacement after replay and queued audio', async () => {
     const { stt, sessions } = scripted();
     const session = await new ReconnectingSTT(stt, { minReplayMs: 0 }).startSession();

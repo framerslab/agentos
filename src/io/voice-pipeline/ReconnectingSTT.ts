@@ -259,6 +259,9 @@ export class ReconnectingSTT implements IStreamingSTT {
       flushed = false;
       attach(next, generation, offsetMs, replayedMs, droppedQueuedMs);
       if (replayedMs > 0) for (const f of replay) next.pushAudio(f);
+      // After a gap the ring's old span and the retained queue are not contiguous;
+      // keep only the audio a later replay can place on one timeline.
+      if (droppedQueuedMs > 0) ring.clear();
       for (const f of queue.splice(0)) {
         ring.push(f);
         next.pushAudio(f);
