@@ -24,7 +24,7 @@ import {
 | `streamText()` | Stream text in real-time | `for await (const d of streamText({...}).textStream) {}` |
 | `generateObject()` | Extract structured JSON (Zod) | `await generateObject({ schema: z.object({...}), prompt: '...' })` |
 | `generateImage()` | Generate images (with character consistency) | `await generateImage({ provider: 'openai', prompt: '...' })` |
-| `transferStyle()` | Style transfer between images | `await transferStyle({ image: src, styleReference: ref, prompt: '...' })` |
+| `transferStyle()` | Restyle an image after a reference image, sending the provider both | `await transferStyle({ image: src, styleReference: ref, prompt: '...' })` |
 | `generateVideo()` | Generate video from text/image | `await generateVideo({ prompt: '...' })` |
 | `generateMusic()` | Generate music | `await generateMusic({ prompt: '...' })` |
 | `performOCR()` | Extract text from images | `await performOCR({ imagePath: './doc.png' })` |

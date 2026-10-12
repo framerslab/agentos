@@ -104,7 +104,7 @@ export class PolicyAwareImageRouter {
    * capabilities are included. Known capabilities:
    * - `'character-consistency'` — Replicate (Pulid, IP-Adapter), Fal (IP-Adapter), SD-Local (ControlNet)
    * - `'controlnet'` — Replicate (Canny, Depth), SD-Local (ControlNet extensions)
-   * - `'style-transfer'` — Replicate (Flux Redux)
+   * - `'style-transfer'` — Replicate and Fal (FLUX.2), Stability (its style-transfer endpoint), OpenAI (two-image edits): the providers whose `transferStyle` sends both images
    *
    * @param policyTier - Content policy tier.
    * @param capabilities - Optional required capabilities to filter the chain.
@@ -134,10 +134,10 @@ export class PolicyAwareImageRouter {
 /** Known capabilities per image provider. */
 const PROVIDER_CAPABILITIES: Record<string, Set<string>> = {
   replicate: new Set(['character-consistency', 'controlnet', 'style-transfer']),
-  fal: new Set(['character-consistency']),
+  fal: new Set(['character-consistency', 'style-transfer']),
   'stable-diffusion-local': new Set(['character-consistency', 'controlnet']),
-  openai: new Set([]),
-  stability: new Set([]),
+  openai: new Set(['style-transfer']),
+  stability: new Set(['style-transfer']),
   openrouter: new Set([]),
   bfl: new Set([]),
 };

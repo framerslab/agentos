@@ -2,14 +2,21 @@
  * @file transferStyle.ts
  * Provider-agnostic style transfer for the AgentOS high-level API.
  *
- * Applies the visual aesthetic of a reference image to a source image,
- * guided by a text prompt. Internally routes to the best available
- * provider for style transfer:
+ * Restyles a source image after a style reference, guided by a text prompt,
+ * and sends the provider both images. Four providers have a call that takes
+ * both:
  *
- * - **Replicate** (preferred): Flux Redux — purpose-built for image-guided generation
- * - **Fal**: Flux Dev img2img with style reference in prompt
- * - **Stability**: img2img with strength control
- * - **OpenAI**: editImage with descriptive prompt
+ * - **Replicate**: FLUX.2 (`black-forest-labs/flux-2-pro` by default), the
+ *   two images as `input_images` with an instruction that names them
+ * - **Fal**: FLUX.2's edit endpoints (`fal-ai/flux-2-pro/edit` by default),
+ *   the two images as `image_urls`
+ * - **Stability**: its style-transfer endpoint, the source as `init_image`
+ *   and the reference as `style_image`
+ * - **OpenAI**: the edits endpoint with two `image[]` parts
+ *   (`gpt-image-2.5-sunburst` by default)
+ *
+ * Any other provider is refused: `variateImage` makes a variation of the
+ * reference, and `editImage` changes the source by prompt.
  *
  * @module agentos/api/transferStyle
  *
@@ -33,20 +40,27 @@ import type {
   GeneratedImage,
   ImageGenerationResult,
 } from '../io/media/images/IImageProvider.js';
-import { knownProviderPrefixOf, modelIsNamed, resolveModelOption, resolveMediaProvider } from './model.js';
+import { knownProviderPrefixOf, resolveModelOption, resolveMediaProvider } from './model.js';
 import { OPENAI_IMAGE_EDIT_MODEL } from '../io/media/images/providers/OpenAIImageProvider.js';
+import { REPLICATE_STYLE_TRANSFER_MODELS } from '../io/media/images/providers/ReplicateImageProvider.js';
+import { FAL_STYLE_TRANSFER_MODELS } from '../io/media/images/providers/FalImageProvider.js';
+import { STABILITY_STYLE_TRANSFER_MODEL } from '../io/media/images/providers/StabilityImageProvider.js';
+import { STYLE_TRANSFER_DEFAULT_STRENGTH } from '../io/media/images/styleTransfer.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 
 // ---------------------------------------------------------------------------
-// Provider detection — ordered by style transfer capability
+// Provider detection
 // ---------------------------------------------------------------------------
 
+/**
+ * The providers a call that names none is sent to: the first whose key is
+ * set and that has a factory, each on its style-transfer default.
+ */
 const STYLE_TRANSFER_PROVIDER_PRIORITY: Array<{ envKey: string; providerId: string; modelId: string }> = [
-  { envKey: 'REPLICATE_API_TOKEN', providerId: 'replicate', modelId: 'black-forest-labs/flux-redux-dev' },
-  { envKey: 'FAL_API_KEY', providerId: 'fal', modelId: 'fal-ai/flux/dev' },
-  // The edit runs on Stability's SD3 route, whose `model` takes the sd3.5 names only.
-  { envKey: 'STABILITY_API_KEY', providerId: 'stability', modelId: 'sd3.5-medium' },
+  { envKey: 'REPLICATE_API_TOKEN', providerId: 'replicate', modelId: REPLICATE_STYLE_TRANSFER_MODELS[0] },
+  { envKey: 'FAL_API_KEY', providerId: 'fal', modelId: FAL_STYLE_TRANSFER_MODELS[0] },
+  { envKey: 'STABILITY_API_KEY', providerId: 'stability', modelId: STABILITY_STYLE_TRANSFER_MODEL },
   { envKey: 'OPENAI_API_KEY', providerId: 'openai', modelId: OPENAI_IMAGE_EDIT_MODEL },
 ];
 
@@ -58,27 +72,29 @@ const STYLE_TRANSFER_PROVIDER_PRIORITY: Array<{ envKey: string; providerId: stri
  * Options for a {@link transferStyle} call.
  */
 export interface TransferStyleOptions {
-  /** Source image to transform (Buffer, file path, URL, or data URI). */
+  /** Source image to restyle (Buffer, file path, URL, or data URI): its subject and composition are kept. */
   image: string | Buffer;
-  /** Reference image whose visual aesthetic to apply. */
+  /** Reference image whose style is applied (Buffer, file path, URL, or data URI). */
   styleReference: string | Buffer;
-  /** Text prompt guiding the transfer direction. */
+  /** Text guiding the result. It may be empty: Stability takes none, and the editing models get an instruction. */
   prompt: string;
   /**
-   * Transfer strength. Controls how much of the reference style to apply.
-   * `0.0` = source unchanged, `1.0` = fully adopts reference style.
+   * How much of the reference's style to apply, from 0 to 1. On Stability it
+   * is `style_strength`, where 0 leaves the source as it is. OpenAI and the
+   * FLUX.2 models take no strength: below 0.5 they are told to restyle
+   * lightly, from 0.5 fully, so 0 still restyles there.
    * @default 0.7
    */
   strength?: number;
   /** Provider override. Auto-detects from env vars if omitted. */
   provider?: string;
-  /** Model override. Provider-specific. */
+  /** Model override. Each provider runs the models its style transfer lists; a custom `baseUrl` takes any name. */
   model?: string;
-  /** Output size (e.g. `'1024x1024'`). */
+  /** Output size (e.g. `'1024x1024'`). Sent to OpenAI only. */
   size?: string;
-  /** Negative prompt describing content to avoid. */
+  /** Negative prompt describing content to avoid. Sent to Stability only. */
   negativePrompt?: string;
-  /** Seed for reproducible output. */
+  /** Seed for reproducible output. OpenAI takes none. */
   seed?: number;
   /** Policy tier for provider routing. */
   policyTier?: 'safe' | 'standard' | 'mature' | 'private-adult';
@@ -115,18 +131,20 @@ export interface TransferStyleResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Transfers the visual aesthetic of a reference image onto a source image.
+ * Restyles a source image after a style reference, sending the provider both.
  *
- * Routes to the best available provider:
- * - **Replicate** (Flux Redux): purpose-built for image-guided style transfer
- * - **Fal** (Flux Dev): img2img with style guidance
- * - **Stability** (img2img): strength-controlled transformation
- * - **OpenAI** (edit): prompt-guided editing
+ * With no provider named, the first provider whose key is set serves:
+ * Replicate (`REPLICATE_API_TOKEN`), Fal (`FAL_API_KEY`), Stability
+ * (`STABILITY_API_KEY`), then OpenAI (`OPENAI_API_KEY`). A named provider
+ * without a style transfer that takes both images is refused, and so is a
+ * model its style transfer does not run, both before either image is read.
  *
  * @param opts - Style transfer options.
  * @returns Promise resolving to the transfer result with styled image(s).
  *
- * @throws {Error} When no style transfer provider is available.
+ * @throws {Error} When the arguments are refused, no style transfer provider
+ *   is configured, the provider or model cannot run one, an image or option
+ *   is refused, or the provider fails.
  *
  * @example
  * ```typescript
@@ -146,9 +164,15 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
 
   try {
     return await withAgentOSSpan('agentos.api.transfer_style', async (span) => {
-      // Resolve provider
-      let providerId: string;
-      let modelId: string;
+      if (typeof opts.prompt !== 'string') {
+        throw new Error('transferStyle: prompt must be a string (it may be empty).');
+      }
+      if (
+        opts.strength !== undefined &&
+        !(typeof opts.strength === 'number' && Number.isFinite(opts.strength) && opts.strength >= 0 && opts.strength <= 1)
+      ) {
+        throw new Error(`transferStyle: strength must be a number from 0 to 1; it is ${String(opts.strength)}.`);
+      }
 
       // The provider the call names: `provider`, or the prefix of `model`
       // (`openai:gpt-image-2.5-sunburst`). A key belongs to one vendor, so a call with a
@@ -160,14 +184,21 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
           'transferStyle: an apiKey needs `provider`, or a model with a provider prefix such as "openai:gpt-image-2.5-sunburst"; it is not sent to a provider chosen from the environment.',
         );
       }
-      // Whether a model is chosen for the edit: named by the call or by the
-      // global default, or taken from the list above.
-      let modelChosen = true;
+
+      // The provider, and the model the call names ('' for the provider's
+      // style-transfer default). The global default's model is not used: it
+      // is a generation default.
+      let providerId: string;
+      let callModel = '';
       if (namedProvider) {
-        ({ providerId, modelId } = resolveModelOption(opts, 'image'));
-        modelChosen = modelIsNamed(opts, 'image');
+        if (opts.model) {
+          // resolveModelOption's rules: a known `provider:` prefix wins over
+          // `provider`, and `provider` over another provider's slash path.
+          ({ providerId, modelId: callModel } = resolveModelOption(opts, 'image'));
+        } else {
+          providerId = namedProvider;
+        }
       } else {
-        // Auto-detect best available style transfer provider
         const match = STYLE_TRANSFER_PROVIDER_PRIORITY.find(
           (p) => process.env[p.envKey] && hasImageProviderFactory(p.providerId),
         );
@@ -177,71 +208,41 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
           );
         }
         providerId = match.providerId;
-        modelId = opts.model ?? match.modelId;
+        callModel = opts.model ?? match.modelId;
       }
 
-      const resolved = resolveMediaProvider(providerId, modelId, {
+      const resolved = resolveMediaProvider(providerId, callModel, {
         apiKey: opts.apiKey,
         baseUrl: opts.baseUrl,
       });
       span?.setAttribute('llm.provider', resolved.providerId);
 
       const provider = createImageProvider(resolved.providerId);
-      // With a provider named and no model, `resolved.modelId` is the
-      // provider's text-to-image default. The edit below then gets an empty
-      // id, which every provider reads as its own edit default (OpenAI
-      // `gpt-image-2.5-sunburst`, Stability `sd3.5-medium`). A provider that
-      // cannot edit generates, and keeps its text-to-image default.
-      const operationModelId =
-        modelChosen || typeof provider.editImage !== 'function' ? resolved.modelId : '';
-      if (operationModelId) span?.setAttribute('llm.model', operationModelId);
-      await provider.initialize({
-        apiKey: resolved.apiKey,
-        baseURL: resolved.baseUrl,
-        defaultModelId: operationModelId || undefined,
-      });
-
-      // Convert style reference to data URL for Flux Redux
-      const styleBuffer = await imageToBuffer(opts.styleReference);
-      const styleDataUrl = `data:image/png;base64,${styleBuffer.toString('base64')}`;
-
-      let result: ImageGenerationResult;
-
-      if (resolved.providerId === 'replicate' && operationModelId.includes('flux-redux')) {
-        // Flux Redux: style reference is the primary image input
-        result = await provider.generateImage({
-          modelId: operationModelId,
-          prompt: opts.prompt,
-          size: opts.size,
-          seed: opts.seed,
-          negativePrompt: opts.negativePrompt,
-          referenceImageUrl: styleDataUrl,
-          providerOptions: opts.providerOptions,
-        });
-      } else if (typeof provider.editImage === 'function') {
-        // Providers with editImage: use img2img
-        const imageBuffer = await imageToBuffer(opts.image);
-        result = await provider.editImage({
-          modelId: operationModelId,
-          image: imageBuffer,
-          prompt: opts.prompt,
-          strength: opts.strength ?? 0.7,
-          size: opts.size,
-          seed: opts.seed,
-          negativePrompt: opts.negativePrompt,
-          providerOptions: opts.providerOptions,
-        });
-      } else {
-        // Fallback: generate with style description in prompt
-        result = await provider.generateImage({
-          modelId: operationModelId,
-          prompt: `${opts.prompt}. Apply the visual style and aesthetic of the reference.`,
-          size: opts.size,
-          seed: opts.seed,
-          negativePrompt: opts.negativePrompt,
-          providerOptions: opts.providerOptions,
-        });
+      if (typeof provider.transferStyle !== 'function' || typeof provider.styleTransferModel !== 'function') {
+        throw new Error(
+          `transferStyle: ${resolved.providerId} has no style transfer that sends both images. Use replicate, fal, stability or openai; variateImage makes a variation of the reference, and editImage changes the source by prompt.`,
+        );
       }
+      // initialize makes no request, and the model is checked before either
+      // image is read or fetched.
+      await provider.initialize({ apiKey: resolved.apiKey, baseURL: resolved.baseUrl });
+      const model = provider.styleTransferModel(callModel);
+      span?.setAttribute('llm.model', model);
+
+      const image = await imageToBuffer(opts.image);
+      const styleImage = await imageToBuffer(opts.styleReference);
+
+      const result = await provider.transferStyle({
+        modelId: model,
+        image,
+        styleImage,
+        prompt: opts.prompt,
+        strength: opts.strength ?? STYLE_TRANSFER_DEFAULT_STRENGTH,
+        negativePrompt: opts.negativePrompt,
+        size: opts.size,
+        seed: opts.seed,
+        providerOptions: opts.providerOptions,
+      });
 
       metricUsage = result.usage;
 
