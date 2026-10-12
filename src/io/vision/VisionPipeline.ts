@@ -1094,6 +1094,10 @@ export class VisionPipeline {
       model: this._config.cloudModel,
       apiKey: this._config.cloudApiKey,
       baseUrl: this._config.cloudBaseUrl,
+      // The image goes to the configured provider alone unless the caller
+      // listed others: generateText's default chain would send it to every
+      // vendor with a key in the environment.
+      fallbackProviders: this._config.cloudFallbackProviders ?? [],
       messages: [{
         role: 'user',
         content: [
@@ -1103,13 +1107,20 @@ export class VisionPipeline {
       }],
     });
 
-    // An answer with no text in it, which the transcription prompt asks for
-    // when the image shows none, has no confidence: at 0.95 it would replace
-    // the text a local tier did read.
+    // The provider and model that answered, which a fallback entry changes.
+    const provider = result.provider || this._config.cloudProvider;
     const text = typeof result.text === 'string' ? result.text : '';
+    // Any image has a description, so an empty one means the model read
+    // nothing: the tier failed, and is reported so. A transcription of an
+    // image with no text in it is empty, as its prompt asks, and has no
+    // confidence: at 0.95 it would replace the text a local tier did read.
+    if (task === 'describe' && text.trim() === '') {
+      throw new Error(`VisionPipeline: the cloud model (${provider}) returned no description of the image.`);
+    }
     return {
       tier: 'cloud-vision',
-      provider: this._config.cloudProvider,
+      provider,
+      ...(result.model ? { model: result.model } : {}),
       text,
       confidence: text.trim() === '' ? 0 : CLOUD_VISION_CONFIDENCE,
       durationMs: Date.now() - start,

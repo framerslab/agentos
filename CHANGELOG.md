@@ -1,3 +1,10 @@
+## [0.13.69](https://github.com/framerslab/agentos/compare/v0.13.68...v0.13.69) (2026-10-12)
+
+### fix
+
+* **gateway:** onFallback reports the most recent error, as the walkers do (#348) ([c1b4847](https://github.com/framerslab/agentos/commit/c1b4847dbf1ff9f80835286133f9ef62ab70d176))
+* **gemini:** read data URLs in linear time, send https images for Gemini to fetch, and read every block as a content filter (#342) ([ad4df66](https://github.com/framerslab/agentos/commit/ad4df6646d9dc0f3209de01af1ff0941d1349f1f))
+
 ## [0.13.68](https://github.com/framerslab/agentos/compare/v0.13.67...v0.13.68) (2026-10-12)
 
 ### fix

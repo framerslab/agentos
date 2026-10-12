@@ -69,6 +69,22 @@ describe('resolveProvider', () => {
     delete process.env.OPENAI_API_KEY;
     expect(() => resolveProvider('openai', 'gpt-4o')).toThrow('No API key');
   });
+
+  it('serves anthropic through OpenRouter with no Anthropic key, but not when a base URL was given', () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'sk-or-test';
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    expect(resolveProvider('anthropic', 'claude-opus-5-5')).toMatchObject({
+      providerId: 'openrouter',
+      modelId: 'anthropic/claude-opus-5-5',
+    });
+    // A gateway the caller named: OpenRouter in its place would drop it.
+    expect(() => resolveProvider('anthropic', 'claude-opus-5-5', { baseUrl: 'https://llm-gw.example/anthropic' })).toThrow(
+      'No API key for anthropic',
+    );
+    vi.restoreAllMocks();
+  });
 });
 
 describe('resolveModelOption with a key or base URL of its own', () => {

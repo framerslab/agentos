@@ -1232,6 +1232,44 @@ describe('VisionPipeline cloud vision request', () => {
     expect(request.messages[0].content[1]).toEqual({ type: 'image_url', image_url: { url: 'https://example.com/scan.png' } });
   });
 
+  it('sends no fallback chain unless cloudFallbackProviders lists one', async () => {
+    await createFullPipeline().process(JPEG, { tiers: ['cloud-vision'] });
+    await createFullPipeline({ cloudFallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-5-5' }] }).process(JPEG, {
+      tiers: ['cloud-vision'],
+    });
+
+    // An empty chain: generateText's default would send the image to every
+    // vendor with a key in the environment.
+    expect(mockGenerateText.mock.calls[0][0].fallbackProviders).toEqual([]);
+    expect(mockGenerateText.mock.calls[1][0].fallbackProviders).toEqual([{ provider: 'anthropic', model: 'claude-opus-5-5' }]);
+  });
+
+  it('reports the provider and the model that answered', async () => {
+    mockGenerateText.mockResolvedValueOnce({ ...cloudVisionResult(), provider: 'anthropic', model: 'claude-opus-5-5' });
+    const pipeline = createFullPipeline({ cloudFallbackProviders: [{ provider: 'anthropic' }] });
+
+    const result = await pipeline.process(JPEG, { tiers: ['cloud-vision'] });
+
+    expect(result.tierResults[0]).toMatchObject({ tier: 'cloud-vision', provider: 'anthropic', model: 'claude-opus-5-5' });
+  });
+
+  it('reports an empty description as a failed tier, and fails a cloud-only scan with it', async () => {
+    mockGenerateText.mockResolvedValueOnce({ ...cloudVisionResult(), text: ' ' });
+    // A low-confidence local read, so the progressive pipeline asks the cloud tier.
+    mockPaddleOcrInstance.recognize.mockResolvedValue(lowConfidencePaddleResult());
+    const progressive = await createFullPipeline({ handwriting: false, documentAI: false, embedding: false }).process(JPEG);
+
+    expect(progressive.tiers).toEqual(['ocr']);
+    expect(progressive.failedTiers).toEqual([
+      { tier: 'cloud-vision', error: 'VisionPipeline: the cloud model (openai) returned no description of the image.' },
+    ]);
+
+    mockGenerateText.mockResolvedValueOnce({ ...cloudVisionResult(), text: '' });
+    await expect(createFullPipeline({ strategy: 'cloud-only', embedding: false }).process(JPEG)).rejects.toThrow(
+      'returned no description of the image',
+    );
+  });
+
   it('createVisionPipeline carries the cloud key and base URL into the pipeline', async () => {
     const pipeline = await createVisionPipeline({
       strategy: 'cloud-only',
@@ -1292,6 +1330,62 @@ describe('createVisionPipeline cloud provider detection', () => {
     process.env.GOOGLE_API_KEY = 'google-key';
 
     expect(await cloudRequest()).toMatchObject({ provider: 'gemini', apiKey: 'google-key' });
+  });
+
+  /** A cloud-only pipeline with the given cloud options and no local tiers. */
+  const cloudOnly = (config: Partial<VisionPipelineConfig>) =>
+    createVisionPipeline({ strategy: 'cloud-only', ocr: 'none', handwriting: false, documentAI: false, embedding: false, ...config });
+
+  it('refuses a cloud key or base URL that names no provider, which detection would hand to another', async () => {
+    process.env.OPENAI_API_KEY = 'sk-env-openai';
+
+    await expect(cloudOnly({ cloudApiKey: 'sk-ant-for-anthropic' })).rejects.toThrow('cloudApiKey and cloudBaseUrl need cloudProvider');
+    await expect(cloudOnly({ cloudBaseUrl: 'https://gateway.example' })).rejects.toThrow('need cloudProvider');
+    expect(mockGenerateText).not.toHaveBeenCalled();
+  });
+
+  it('takes the provider a cloudModel prefix names, and refuses a key when it differs from cloudProvider', async () => {
+    process.env.OPENAI_API_KEY = 'sk-env-openai';
+
+    const pipeline = await cloudOnly({ cloudModel: 'anthropic:claude-opus-5-5', cloudApiKey: 'sk-ant-tenant' });
+    await pipeline.process(Buffer.from([0xff, 0xd8, 0xff, 0xdb]));
+    expect(mockGenerateText.mock.calls[0][0]).toMatchObject({ provider: 'anthropic', apiKey: 'sk-ant-tenant' });
+
+    await expect(
+      cloudOnly({ cloudProvider: 'openai', cloudModel: 'anthropic:claude-opus-5-5', cloudApiKey: 'sk-openai-tenant' }),
+    ).rejects.toThrow("names provider 'anthropic', not cloudProvider 'openai'");
+  });
+
+  it('sends a model whose prefix named its provider without the prefix, an ollama one included', async () => {
+    const image = Buffer.from([0xff, 0xd8, 0xff, 0xdb]);
+    await (await cloudOnly({ cloudModel: 'ollama:llava' })).process(image);
+    await (await cloudOnly({ cloudModel: 'anthropic:claude-opus-5-5' })).process(image);
+    // A tag of a model sent to ollama itself keeps its colon.
+    await (await cloudOnly({ cloudProvider: 'ollama', cloudModel: 'llava:7b' })).process(image);
+
+    expect(mockGenerateText.mock.calls.map(([request]) => [request.provider, request.model])).toEqual([
+      ['ollama', 'llava'],
+      ['anthropic', 'claude-opus-5-5'],
+      ['ollama', 'llava:7b'],
+    ]);
+  });
+
+  it('passes a GOOGLE_API_KEY alone as the key when gemini is named, as detection does', async () => {
+    process.env.GOOGLE_API_KEY = 'google-key';
+    const image = Buffer.from([0xff, 0xd8, 0xff, 0xdb]);
+    await (await cloudOnly({ cloudModel: 'gemini:gemini-2.5-flash' })).process(image);
+    await (await cloudOnly({ cloudProvider: 'gemini' })).process(image);
+    // A key the caller gives, or GEMINI_API_KEY, which the provider reads itself, is not replaced.
+    await (await cloudOnly({ cloudProvider: 'gemini', cloudApiKey: 'gemini-tenant' })).process(image);
+    process.env.GEMINI_API_KEY = 'gemini-env';
+    await (await cloudOnly({ cloudProvider: 'gemini' })).process(image);
+
+    expect(mockGenerateText.mock.calls.map(([request]) => [request.provider, request.model, request.apiKey])).toEqual([
+      ['gemini', 'gemini-2.5-flash', 'google-key'],
+      ['gemini', undefined, 'google-key'],
+      ['gemini', undefined, 'gemini-tenant'],
+      ['gemini', undefined, undefined],
+    ]);
   });
 });
 
