@@ -121,6 +121,15 @@ describe('InMemoryOutbox', () => {
     expect(rows[0]).toMatchObject({ type: 'bot:done', payload: '{"billedSeconds":0}', purged: false });
     expect((await o.listByRun('r2')).map((d) => d.id)).toEqual(['d3']);
   });
+  it('a purge empties the content deliveries of the run and leaves a content-free one as it was', async () => {
+    const o = new InMemoryOutbox();
+    await o.enqueue({ id: 'd1', runId: 'r1', destinationRef: 'hook-1', eventId: 'e1', type: 'bot:transcript', payload: '{"text":"x"}' }, 0);
+    await o.enqueue({ id: 'd2', runId: 'r1', destinationRef: 'hook-1', eventId: 'e2', type: 'bot:done', payload: '{"billedSeconds":90}' }, 0);
+    await o.purgeContent('r1');
+    const rows = await o.listByRun('r1');
+    expect(rows.find((d) => d.id === 'd1')).toMatchObject({ type: 'bot:purged', payload: '', purged: true });
+    expect(rows.find((d) => d.id === 'd2')).toMatchObject({ type: 'bot:done', payload: '{"billedSeconds":90}', purged: false, state: 'pending' });
+  });
 });
 
 describe('InMemoryRunStore', () => {

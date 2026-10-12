@@ -241,7 +241,8 @@ export class InMemoryOutbox implements IOutbox {
   async purgeContent(runId: string): Promise<void> {
     this.purgedRuns.add(runId);
     for (const d of this.deliveries.values()) {
-      if (d.runId !== runId) continue; // delivered rows too: a replay after the purge must send nothing of the content
+      // delivered rows too: a replay after the purge must send nothing of the content; a content-free delivery (`bot:done`) stays as it is
+      if (d.runId !== runId || !CONTENT_EVENT_TYPES.has(d.type)) continue;
       d.payload = '';
       d.type = 'bot:purged';
       d.purged = true;

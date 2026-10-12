@@ -168,7 +168,12 @@ export interface IOutbox {
   markFailed(id: string, now: number): Promise<void>;
   /** Makes a delivery pending again, due at `now`, with its attempts counted afresh (a manual replay). */
   replay(id: string, now: number): Promise<void>;
-  /** Empties the payload of every delivery of the run, delivered ones included, so a replay after a purge sends the content-free `bot:purged`. From then on the run takes no content delivery (see `enqueue`). */
+  /**
+   * Empties every content delivery of the run (a type in `CONTENT_EVENT_TYPES`), delivered ones included, so a replay
+   * after a purge sends the content-free `bot:purged` in its place. A delivery of any other type (`bot:done`,
+   * `bot:left` and the rest) carries no content and keeps its type and payload. From then on the run takes no content
+   * delivery (see `enqueue`).
+   */
   purgeContent(runId: string): Promise<void>;
   /** Every delivery of the run, whatever its state. */
   listByRun(runId: string): Promise<OutboxDelivery[]>;
