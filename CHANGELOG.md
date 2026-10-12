@@ -1,3 +1,14 @@
+## [0.13.59](https://github.com/framerslab/agentos/compare/v0.13.58...v0.13.59) (2026-10-12)
+
+### fix
+
+* **images:** transferStyle sends the source and the style reference (#322) ([32761ce](https://github.com/framerslab/agentos/commit/32761ce1cf07bdd697544f67e8ec39aa1a92bcfb))
+
+### docs
+
+* **providers:** a Gemini CLI tool-call block whose body is not JSON streams as text (#320) ([76c0fe7](https://github.com/framerslab/agentos/commit/76c0fe7916574e27a02ca4f23f110a69f1395a4c))
+* thirteenth round of audit follow-ups (diagram alt texts, the PII page, HITL gaps) (#319) ([01dfe54](https://github.com/framerslab/agentos/commit/01dfe54b0c449a95ed259a7eb512a60e7e68901c))
+
 ## [0.13.58](https://github.com/framerslab/agentos/compare/v0.13.57...v0.13.58) (2026-10-12)
 
 ### fix
