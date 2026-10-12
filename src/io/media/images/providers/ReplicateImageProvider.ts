@@ -292,22 +292,9 @@ export class ReplicateImageProvider implements IImageProvider {
       prediction = await this.createModelPrediction(owner, name, input, waitSeconds);
     }
 
-    if (
-      prediction.status
-      && !['succeeded', 'failed', 'canceled'].includes(prediction.status)
-      && prediction.urls?.get
-    ) {
-      prediction = await this.pollPrediction(prediction.urls.get, 60_000, 1_000);
-    }
+    prediction = await this.finishedPrediction(prediction, 'image generation');
 
-    if (prediction.status === 'failed') {
-      throw new Error(`Replicate image generation failed: ${prediction.error ?? 'unknown error'}`);
-    }
-    if (prediction.status === 'canceled') {
-      throw new Error('Replicate image generation was canceled.');
-    }
-
-    const images = normalizeReplicateOutput(prediction.output);
+    const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
     if (images.length === 0) {
       throw new Error('Replicate returned no image output.');
     }
@@ -455,19 +442,9 @@ export class ReplicateImageProvider implements IImageProvider {
       prediction = await this.createModelPrediction(owner, name, input, waitSeconds);
     }
 
-    if (
-      prediction.status
-      && !['succeeded', 'failed', 'canceled'].includes(prediction.status)
-      && prediction.urls?.get
-    ) {
-      prediction = await this.pollPrediction(prediction.urls.get, 60_000, 1_000);
-    }
+    prediction = await this.finishedPrediction(prediction, 'image edit');
 
-    if (prediction.status === 'failed') {
-      throw new Error(`Replicate image edit failed: ${prediction.error ?? 'unknown error'}`);
-    }
-
-    const images = normalizeReplicateOutput(prediction.output);
+    const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
     if (images.length === 0) {
       throw new Error('Replicate edit returned no image output.');
     }
@@ -516,21 +493,9 @@ export class ReplicateImageProvider implements IImageProvider {
     };
 
     const waitSeconds = providerOptions?.wait ?? 60;
-    let prediction = await this.createPrediction(body, waitSeconds);
+    const prediction = await this.finishedPrediction(await this.createPrediction(body, waitSeconds), 'image upscale');
 
-    if (
-      prediction.status
-      && !['succeeded', 'failed', 'canceled'].includes(prediction.status)
-      && prediction.urls?.get
-    ) {
-      prediction = await this.pollPrediction(prediction.urls.get, 60_000, 1_000);
-    }
-
-    if (prediction.status === 'failed') {
-      throw new Error(`Replicate image upscale failed: ${prediction.error ?? 'unknown error'}`);
-    }
-
-    const images = normalizeReplicateOutput(prediction.output);
+    const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
     if (images.length === 0) {
       throw new Error('Replicate upscale returned no image output.');
     }

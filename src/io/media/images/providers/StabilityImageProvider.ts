@@ -14,7 +14,7 @@ import {
   type StabilityImageProviderOptions,
 } from '../IImageProvider.js';
 import { bufferToBlobPart } from '../imageToBuffer.js';
-import { imageFilePart } from '../blobPart.js';
+import { IMAGE_PART_TYPES, imageFilePart, imagePartType } from '../blobPart.js';
 import { styleTransferImageTypes } from '../styleTransfer.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
 
@@ -352,12 +352,10 @@ export class StabilityImageProvider implements IImageProvider {
 
     const formData = new FormData();
 
-    // Source image — sent as a Blob so the multipart encoder assigns a filename.
-    formData.append(
-      'image',
-      new Blob([bufferToBlobPart(request.image)], { type: 'image/png' }),
-      'image.png'
-    );
+    // Source image — sent as a Blob of its own type (a JPEG or WebP as one,
+    // anything else as PNG) so the multipart encoder assigns a filename.
+    const source = imageFilePart(request.image, imagePartType(request.image) ?? IMAGE_PART_TYPES['image/png'], 'image');
+    formData.append('image', source.blob, source.filename);
     formData.append('prompt', request.prompt);
     appendIfDefined(
       formData,
@@ -411,7 +409,10 @@ export class StabilityImageProvider implements IImageProvider {
       throw new Error(`Stability image edit failed (${response.status}): ${errorText}`);
     }
 
-    const images = await this.parseStabilityResponse(response, providerOptions);
+    const images = (await this.parseStabilityResponse(response, providerOptions)).filter((image) => image.base64);
+    if (images.length === 0) {
+      throw new Error('Stability returned no image data.');
+    }
 
     return {
       created: Math.floor(Date.now() / 1000),
@@ -448,11 +449,8 @@ export class StabilityImageProvider implements IImageProvider {
     );
 
     const formData = new FormData();
-    formData.append(
-      'image',
-      new Blob([bufferToBlobPart(request.image)], { type: 'image/png' }),
-      'image.png'
-    );
+    const source = imageFilePart(request.image, imagePartType(request.image) ?? IMAGE_PART_TYPES['image/png'], 'image');
+    formData.append('image', source.blob, source.filename);
 
     appendIfDefined(
       formData,
@@ -477,7 +475,10 @@ export class StabilityImageProvider implements IImageProvider {
       throw new Error(`Stability image upscale failed (${response.status}): ${errorText}`);
     }
 
-    const images = await this.parseStabilityResponse(response, providerOptions);
+    const images = (await this.parseStabilityResponse(response, providerOptions)).filter((image) => image.base64);
+    if (images.length === 0) {
+      throw new Error('Stability returned no image data.');
+    }
 
     return {
       created: Math.floor(Date.now() / 1000),
