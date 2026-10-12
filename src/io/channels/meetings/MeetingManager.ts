@@ -68,7 +68,7 @@ export interface MeetingManagerConfig {
   noticeConfirmMs?: number;
   /** How often the stop monitor reports. Default 10000. */
   monitorHeartbeatMs?: number;
-  /** How many heartbeats the stop monitor may miss before it counts as unhealthy. Default 3. */
+  /** How many heartbeats the stop monitor may miss before it counts as unhealthy: it does once this many heartbeat intervals pass without one (30 seconds with the defaults). Default 3. */
   monitorMissedBeats?: number;
   /** How long a suspended capture waits for the stop monitor to recover before the run leaves with `stop_monitor_failed`. Default 30000. */
   monitorRecoverMs?: number;
@@ -649,7 +649,7 @@ export class MeetingManager {
       && run.noticePostedAt !== undefined
       && run.monitorSeenAt !== undefined
       && run.monitorSeenAt >= run.noticePostedAt
-      && this.now() - run.monitorSeenAt <= this.monitorHeartbeatMs * this.monitorMissedBeats
+      && this.now() - run.monitorSeenAt < this.monitorHeartbeatMs * this.monitorMissedBeats
       && !this.suspendedAt.has(run.runId);
   }
 
@@ -657,7 +657,7 @@ export class MeetingManager {
   private async startCaptureIfReady(run: MeetingRunRecord): Promise<void> {
     if (run.state !== 'in_call' || run.noticePostedAt === undefined || run.monitorSeenAt === undefined) return;
     if (run.monitorSeenAt < run.noticePostedAt) return; // a heartbeat from before the notice proves nothing about the chat being watched now
-    if (this.now() - run.monitorSeenAt > this.monitorHeartbeatMs * this.monitorMissedBeats) return;
+    if (this.now() - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats) return;
     if (run.captureStartedAt !== undefined && !this.suspendedAt.has(run.runId)) return; // already capturing
     const provider = this.providers.get(run.providerName);
     if (!provider) return;
@@ -966,7 +966,8 @@ export class MeetingManager {
         continue;
       }
       if (run.state === 'in_call') {
-        const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt > this.monitorHeartbeatMs * this.monitorMissedBeats;
+        // quiet once monitorMissedBeats intervals have passed since the last heartbeat, the boundary captureReady and startCaptureIfReady use
+        const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats;
         if (monitorStale) {
           const suspended = this.suspendedAt.get(run.runId);
           if (suspended === undefined) {
