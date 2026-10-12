@@ -1,0 +1,120 @@
+import { describe, it, expect } from 'vitest';
+import { FakeClock, InMemoryEventStore, InMemoryJobStore, InMemoryOutbox, InMemoryRunStore, InMemoryTranscriptStore } from '../stores/memory.js';
+import { FencedError } from '../stores/types.js';
+
+describe('InMemoryJobStore', () => {
+  it('leases a due job to one taker only, and renews or expires the lease', async () => {
+    const jobs = new InMemoryJobStore();
+    await jobs.schedule({ runId: 'r1', dispatchAt: 100 });
+    expect(await jobs.lease('m1', 50, 1000)).toBeUndefined(); // not due
+    const a = await jobs.lease('m1', 100, 1000);
+    const b = await jobs.lease('m2', 100, 1000);
+    expect(a?.runId).toBe('r1');
+    expect(b).toBeUndefined();
+    expect(await jobs.renew('r1', 'm2', 500, 1000)).toBe(false);
+    expect(await jobs.renew('r1', 'm1', 500, 1000)).toBe(true);
+    expect(await jobs.lease('m2', 1400, 1000)).toBeUndefined(); // lease runs to 1500
+    expect((await jobs.lease('m2', 1501, 1000))?.leaseHolder).toBe('m2'); // expired: taken over
+  });
+  it('cancels a job that has not dispatched, and reports one that has', async () => {
+    const jobs = new InMemoryJobStore();
+    await jobs.schedule({ runId: 'r1', dispatchAt: 0 });
+    await jobs.schedule({ runId: 'r2', dispatchAt: 0 });
+    await jobs.lease('m1', 0, 1000);
+    expect(await jobs.markDispatched('r1', 'w1')).toEqual({ cancelled: false });
+    expect(await jobs.cancel('r1')).toBe('already_dispatched');
+    expect(await jobs.cancel('r2')).toBe('cancelled');
+    expect(await jobs.cancel('r9')).toBe('missing');
+    expect(await jobs.lease('m1', 0, 1000)).toBeUndefined(); // r2 cancelled, r1 leased
+  });
+  it('a cancel during a live lease is learned at markDispatched, and a release moves the due time', async () => {
+    const jobs = new InMemoryJobStore();
+    await jobs.schedule({ runId: 'r1', dispatchAt: 0 });
+    await jobs.lease('m1', 0, 1000);
+    expect(await jobs.cancel('r1')).toBe('cancelled');
+    expect(await jobs.markDispatched('r1', 'w1')).toEqual({ cancelled: true });
+    await jobs.schedule({ runId: 'r2', dispatchAt: 0 });
+    await jobs.lease('m1', 0, 1000);
+    await jobs.release('r2', 15_000);
+    expect(await jobs.lease('m1', 14_999, 1000)).toBeUndefined();
+    expect((await jobs.lease('m1', 15_000, 1000))?.runId).toBe('r2');
+  });
+});
+
+describe('InMemoryTranscriptStore', () => {
+  it('appends in order, refuses after the fence, and purges the turns but keeps the fence', async () => {
+    const t = new InMemoryTranscriptStore();
+    await t.append({ runId: 'r1', seq: 1, turnId: 'r1:1', at: 1, text: 'one' });
+    await t.append({ runId: 'r1', seq: 2, turnId: 'r1:2', at: 2, text: 'two' });
+    expect((await t.read('r1', 1)).map((x) => x.text)).toEqual(['two']);
+    await t.fence('r1');
+    await expect(t.append({ runId: 'r1', seq: 3, turnId: 'r1:3', at: 3, text: 'late' })).rejects.toBeInstanceOf(FencedError);
+    await t.purge('r1');
+    expect(await t.read('r1', 0)).toEqual([]);
+    expect(await t.isFenced('r1')).toBe(true);
+  });
+});
+
+describe('InMemoryEventStore', () => {
+  it('numbers events per run, drops a repeated id, purges payloads of content events only, and stores nothing of a content event behind the fence', async () => {
+    const e = new InMemoryEventStore();
+    expect(await e.append({ eventId: 'a', runId: 'r1', type: 'bot:in_call', at: 1 })).toEqual({ inserted: true, seq: 1 });
+    expect(await e.append({ eventId: 'b', runId: 'r1', type: 'bot:chat_message', at: 2, data: { text: 'hi' } })).toEqual({ inserted: true, seq: 2 });
+    expect(await e.append({ eventId: 'a', runId: 'r1', type: 'bot:in_call', at: 1 })).toEqual({ inserted: false, seq: 1 });
+    await e.fence('r1');
+    await e.purgePayloads('r1');
+    expect(await e.append({ eventId: 'c', runId: 'r1', type: 'bot:chat_message', at: 3, data: { text: 'late' } })).toEqual({ inserted: true, seq: 3 });
+    const all = await e.read('r1', 0);
+    expect(all[1]).toMatchObject({ type: 'bot:chat_message', purged: true });
+    expect(all[1].data).toBeUndefined();
+    expect(all[2]).toMatchObject({ type: 'bot:chat_message', purged: true });
+    expect(all[2].data).toBeUndefined();
+    expect(all[0].purged).toBeUndefined();
+  });
+});
+
+describe('InMemoryOutbox', () => {
+  it('backs off and gives up after a day, and a purge empties the payload', async () => {
+    const clock = new FakeClock(0);
+    const o = new InMemoryOutbox();
+    await o.enqueue({ id: 'd1', runId: 'r1', destinationRef: 'hook-1', eventId: 'e1', type: 'bot:transcript', payload: '{"text":"x"}' }, clock.now());
+    expect((await o.due(0)).map((d) => d.id)).toEqual(['d1']);
+    await o.markFailed('d1', 0);
+    expect(await o.due(4_999)).toEqual([]);
+    expect((await o.due(5_000)).length).toBe(1);
+    await o.enqueue({ id: 'd2', runId: 'r1', destinationRef: 'hook-1', eventId: 'e2', type: 'bot:chat_message', payload: '{"text":"y"}' }, clock.now());
+    await o.markDelivered('d2');
+    await o.purgeContent('r1');
+    const rows = await o.listByRun('r1');
+    for (const d of rows) {
+      expect(d.payload).toBe('');
+      expect(d.type).toBe('bot:purged');
+      expect(d.purged).toBe(true);
+    }
+    expect(rows.find((d) => d.id === 'd2')?.state).toBe('delivered');
+    for (let i = 0; i < 20; i++) await o.markFailed('d1', 86_400_000 + i);
+    expect((await o.listByRun('r1')).find((d) => d.id === 'd1')?.state).toBe('dead');
+  });
+  it('after a purge refuses a content delivery for the run and takes a content-free one', async () => {
+    const o = new InMemoryOutbox();
+    await o.purgeContent('r1');
+    await o.enqueue({ id: 'd1', runId: 'r1', destinationRef: 'hook-1', eventId: 'e1', type: 'bot:transcript', payload: '{"text":"late"}' }, 0);
+    await o.enqueue({ id: 'd2', runId: 'r1', destinationRef: 'hook-1', eventId: 'e2', type: 'bot:done', payload: '{"billedSeconds":0}' }, 0);
+    await o.enqueue({ id: 'd3', runId: 'r2', destinationRef: 'hook-1', eventId: 'e3', type: 'bot:transcript', payload: '{"text":"another run"}' }, 0);
+    const rows = await o.listByRun('r1');
+    expect(rows.map((d) => d.id)).toEqual(['d2']);
+    expect(rows[0]).toMatchObject({ type: 'bot:done', payload: '{"billedSeconds":0}', purged: false });
+    expect((await o.listByRun('r2')).map((d) => d.id)).toEqual(['d3']);
+  });
+});
+
+describe('InMemoryRunStore', () => {
+  it('updates only from the expected state', async () => {
+    const r = new InMemoryRunStore();
+    await r.insert({ runId: 'r1', ownerRef: 'a', providerName: 'mock', platform: 'google_meet', state: 'requested', keep: 'none', meetingUrl: 'u', botName: 'b', notice: { text: 'n', version: '1', lateArrivalText: 's' }, stopPhrase: 'stop', limits: { waitingRoomMs: 1, aloneMs: 1, totalMs: 1 }, requestedAt: 0, joinAt: 0, billedSeconds: 0, idempotencyKey: 'k' });
+    expect(await r.update('r1', { state: 'joining' }, 'scheduled')).toBeUndefined();
+    expect((await r.update('r1', { state: 'dispatching' }, ['requested', 'scheduled']))?.state).toBe('dispatching');
+    expect((await r.findByIdempotencyKey('a', 'k'))?.runId).toBe('r1');
+    expect(await r.findByIdempotencyKey('b', 'k')).toBeUndefined();
+  });
+});
