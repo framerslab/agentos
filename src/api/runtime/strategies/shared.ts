@@ -313,8 +313,8 @@ export interface BeforeAgentGate {
   decision: ApprovalDecision | null;
   /**
    * The input the agent receives when it runs: the strategy's input, with the
-   * approver's instructions appended when the approval carries them. It is
-   * the text the post-approval check read.
+   * approver's instructions appended when the approval carries them. The
+   * post-approval check read it, and the strategy's input on its own.
    */
   input: string;
 }
@@ -375,8 +375,11 @@ export async function checkBeforeAgent(
  *
  * After an approval, the post-approval check reads that input, the
  * instructions included, so instructions the check blocks turn the approval
- * into a rejection exactly as a blocked input does. The strategy sends the
- * returned `input`, the text the check read.
+ * into a rejection exactly as a blocked input does. It also reads the
+ * strategy's input on its own, as it does for an approval without
+ * instructions, so the instructions hide nothing at the end of that input
+ * from a check that matches only there. The strategy sends the returned
+ * `input`, the text the check read.
  *
  * @param name - The agent's declared name in the roster.
  * @param context - The input the strategy passes the agent.
@@ -449,13 +452,18 @@ async function runBeforeAgentGate(
   const input = appliesInstructions ? withApprovalInstructions(context, decision) : context;
 
   // --- Post-approval guardrail override ---
-  // Even after HITL approves, run guardrails as a final safety net.
+  // Even after HITL approves, run guardrails as a final safety net. With
+  // instructions appended, the check reads the strategy's input on its own
+  // beside the input the agent is sent: two code-safety patterns match a
+  // statement only at the end of the text they read (an unconditional
+  // `DELETE FROM <table>`, `rm -rf .`), and with the instructions after it
+  // such a statement no longer ends the text.
   if (decision.approved && agencyConfig.hitl?.guardrailOverride !== false) {
     const { runPostApprovalGuardrails } = await import('../../agency.js');
     const postGuardrails = agencyConfig.hitl?.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'];
     const overrideResult = await runPostApprovalGuardrails(
       `agent:${name}`,
-      { input },
+      input === context ? { input } : { input: context, sent: input },
       postGuardrails,
       agencyConfig.on,
     );

@@ -287,10 +287,11 @@ export interface HitlConfig {
    * {@link postApprovalGuardrails} over the tool call's name and arguments,
    * the agent's name and input, or the final text. These are fixed pattern
    * checks inside `agency()`, not guardrail packs. The agent's input is
-   * checked as the strategy passes it, with the approval's
-   * `modifications.instructions` appended under the sequential, parallel and
-   * hierarchical strategies, which send them, so instructions a check blocks
-   * override the approval. The final text is checked before the approval's
+   * checked as the strategy passes it and, under the sequential, parallel and
+   * hierarchical strategies, which append the approval's
+   * `modifications.instructions`, as the agent receives it, instructions
+   * included, so instructions a check blocks override the approval. The
+   * final text is checked before the approval's
    * `modifications.output` replaces it, so the replacement is not checked. If
    * a check matches, the approval is overridden: the tool call is skipped,
    * the agent does not run, or the final output is rejected. A

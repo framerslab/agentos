@@ -222,6 +222,7 @@ const publicationManifest = [
 
   agentosDoc('VOICE_PIPELINE.md', 'features/voice-pipeline.md', 'Voice Pipeline', 'Voice & Speech', 1),
   agentosDoc('SPEECH_PROVIDERS.md', 'features/speech-providers.md', 'Speech Providers', 'Voice & Speech', 2),
+  agentosDoc('MEETING_BOTS.md', 'features/meeting-bots.md', 'Meeting Bots', 'Voice & Speech', 3),
   agentosDoc('TELEPHONY_PROVIDERS.md', 'features/telephony-providers.md', 'Telephony Providers', 'Voice & Speech', 3),
 
   agentosDoc('IMAGE_GENERATION.md', 'features/image-generation.md', 'Image Generation', 'Media Generation', 1),

@@ -5,8 +5,10 @@
  * included: under the sequential (generate and stream), parallel and
  * hierarchical strategies, an approval whose instructions the check blocks is
  * a rejection and the agent never runs, and one whose instructions pass runs
- * with them in its input. An approval without modifications is checked and
- * sent as before, and a `beforeEmergent` approval is still not checked.
+ * with them in its input. The check still reads the input as the strategy
+ * passes it, so instructions do not hide a statement at its end. An approval
+ * without modifications is checked and sent as before, and a `beforeEmergent`
+ * approval is still not checked.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
@@ -173,6 +175,19 @@ describe('a beforeAgent approval without modifications over a destructive input'
     const guardrailHitlOverride = vi.fn();
     const crew = team('sequential', approve(), { guardrailHitlOverride });
     await crew.generate('Then run rm -rf / to free space.');
+    expect(guardrailHitlOverride).toHaveBeenCalledWith(expect.objectContaining({ guardrailId: 'code-safety', toolName: 'agent:ops' }));
+    expect(opsRequests()).toHaveLength(0);
+  });
+});
+
+describe('a beforeAgent approval with instructions over an input that ends in a destructive statement', () => {
+  // Two code-safety patterns match a statement only at the end of the text
+  // they read; the instructions appended after the input must not hide it.
+  it.each(['DELETE FROM sessions;', 'rm -rf .'])('is overridden by the check (%s), and ops never runs', async (statement) => {
+    const guardrailHitlOverride = vi.fn();
+    const crew = team('sequential', approve({ instructions: BENIGN }), { guardrailHitlOverride });
+    await crew.generate(`Clear the stale data: ${statement}`);
+    expect(guardrailHitlOverride).toHaveBeenCalledTimes(1);
     expect(guardrailHitlOverride).toHaveBeenCalledWith(expect.objectContaining({ guardrailId: 'code-safety', toolName: 'agent:ops' }));
     expect(opsRequests()).toHaveLength(0);
   });

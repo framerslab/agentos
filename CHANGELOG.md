@@ -1,3 +1,9 @@
+## [0.13.81](https://github.com/framerslab/agentos/compare/v0.13.80...v0.13.81) (2026-10-12)
+
+### fix
+
+* **agency:** the post-approval check also reads the agent's input without the approval's instructions (#360) ([b382c69](https://github.com/framerslab/agentos/commit/b382c6988ecfc76a0ae3877ffa023c9929c761de))
+
 ## [0.13.80](https://github.com/framerslab/agentos/compare/v0.13.79...v0.13.80) (2026-10-12)
 
 ### feat
