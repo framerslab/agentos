@@ -127,7 +127,7 @@ The pilot revises the planning counts, and 0b fixes the final ones (Section 4.9)
 | G1, guard | Callback accuracy | T2, 180 per arm | none | must not be WORSE |
 | G2, guard | Confabulation rate on false premises, B − C (lower is better) | T2, 72 per arm | none | must not be WORSE |
 
-If T1 cannot run as designed and becomes report-only, G1 becomes the memory endpoint, with a sizing margin of +10 points and a non-inferiority margin of −10 points.
+If T1 cannot run as designed and becomes report-only, G1 takes R1's place as the memory endpoint: it becomes a primary endpoint in the decision rules and in the family of ten tests (Section 4.6), with a sizing margin of +10 points and a non-inferiority margin of −10 points.
 
 All tests are one-sided, on each endpoint's measure as the table orients it, so that a positive value favours the candidate (P1 and G2 read B − C). BETTER: the lower confidence bound of the measure is above 0, or above 0.5 for a pair score. NON-INFERIOR: the lower bound is above the non-inferiority margin, a bound on the measure as the table orients it: −5 points for R1, −5 points for P1 (a violation rate at most 5 points above B's), and 0.42 for a pair score. WORSE: the unadjusted two-sided 95% upper bound is below 0, or below 0.5 for a pair score. The margins size the study, and the verdicts read the bounds. A BETTER verdict on a judged endpoint also requires each judge's own mean to sit on the candidate's side.
 
@@ -231,7 +231,7 @@ The study calls its vendors with keys of its own, on prepaid balances, with vend
 
 ### 5.3 Materials and data
 
-The main set has twelve persona cards. Eleven have at least two HEXACO traits above 0.7 or below 0.3, every trait appears at least once above 0.7 and at least once below 0.3 across the set, and one card is a control with every trait between 0.45 and 0.55. Each card carries ten checkable persona facts and three style rules a counter can check, and its six HEXACO values are recorded and not rendered into the prompt. Two more cards serve calibration only, and a neutral card with every trait at 0.5 serves T1. A model client with no repository access writes the cards, the scripts and the fixed contexts from a brief; the writers of the sentiment scripts never see the sentiment lexicon, and no script is edited after any firing result. No real user conversation goes to any vendor. 0a hashes the materials, and they stay private.
+The main set has twelve persona cards. Eleven have at least two HEXACO traits above 0.7 or below 0.3, every trait appears at least once above 0.7 and at least once below 0.3 across the set, and one card is a control with every trait between 0.45 and 0.55. Each card carries ten checkable persona facts and three style rules a counter can check, and its six HEXACO values are recorded and not rendered into the prompt. Two more cards serve calibration only, and a neutral card with every trait at 0.5 serves T1. A model client with no repository access writes the cards, the scripts and the fixed contexts from a brief; the writers of the sentiment scripts never see the sentiment lexicon, and no script is edited after any firing result. No conversation from the reference product's users goes to any vendor. T1 sends the vendors the histories of its two datasets, and LongMemEval-S draws its histories' sessions from simulated chats and from ShareGPT and UltraChat, publicly released chat data [2]. 0a hashes the materials, and they stay private.
 
 ### 5.4 Budget and sample size
 
