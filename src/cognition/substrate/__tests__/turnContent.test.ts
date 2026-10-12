@@ -46,6 +46,22 @@ describe('multimodalTurnParts', () => {
     ]);
   });
 
+  it("keeps each vision input's description, as text before its image", () => {
+    const parts = multimodalTurnParts('Which is newer?', [
+      { type: 'image_url', data: 'https://images.example.org/a.jpg', description: 'Front of the 2019 model' },
+      { type: 'image_url', data: 'https://images.example.org/b.jpg' },
+    ], undefined);
+
+    expect(parts).toEqual([
+      { type: 'text', text: 'Which is newer?' },
+      { type: 'text', text: 'Front of the 2019 model' },
+      { type: 'image_url', image_url: { url: 'https://images.example.org/a.jpg' } },
+      { type: 'image_url', image_url: { url: 'https://images.example.org/b.jpg' } },
+    ]);
+    expect(turnContentText(parts)).toBe('Which is newer?\nFront of the 2019 model\n[image]\n[image]');
+    expect(turnContentText({ text: 'Look', vision: [{ type: 'image_url', data: 'x', description: 'A map' }] })).toBe('Look\nA map\n[image]');
+  });
+
   it('sends a transcription as text, and refuses audio data, which no chat provider here takes', () => {
     expect(multimodalTurnParts('Notes:', undefined, { type: 'transcription', data: 'Buy milk.' })).toEqual([
       { type: 'text', text: 'Notes:' },

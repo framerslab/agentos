@@ -36,8 +36,9 @@ function imageUrlOf(vision: VisionInputData): string | undefined {
 
 /**
  * A multimodal turn's inputs as message parts: the text, then one image part
- * per vision input, and an audio transcription as text. A provider then gets
- * the images as images, and prompt construction keeps the parts whole.
+ * per vision input, each after its description as text when it has one, and
+ * an audio transcription as text. A provider then gets the images as images,
+ * and prompt construction keeps the parts whole.
  *
  * @param text - The turn's text, when it has one.
  * @param vision - The turn's vision inputs.
@@ -61,7 +62,10 @@ export function multimodalTurnParts(
   if (audio?.type === 'transcription' && audio.data) parts.push({ type: 'text', text: audio.data });
   for (const input of vision ?? []) {
     const url = imageUrlOf(input);
-    if (url) parts.push({ type: 'image_url', image_url: { url } });
+    if (!url) continue;
+    // A caption the caller gave, which the pixels may not carry.
+    if (input.description) parts.push({ type: 'text', text: input.description });
+    parts.push({ type: 'image_url', image_url: { url } });
   }
   return parts;
 }
@@ -89,7 +93,12 @@ export function turnContentText(content: GMITurnInput['content']): string {
     const legacy = content as { text?: unknown; vision?: unknown; audio?: { type?: unknown; data?: unknown } };
     const pieces = [typeof legacy.text === 'string' ? legacy.text : ''];
     if (legacy.audio?.type === 'transcription' && typeof legacy.audio.data === 'string') pieces.push(legacy.audio.data);
-    if (Array.isArray(legacy.vision)) pieces.push(...legacy.vision.map(() => '[image]'));
+    if (Array.isArray(legacy.vision)) {
+      for (const input of legacy.vision as Array<{ description?: unknown }>) {
+        if (typeof input?.description === 'string' && input.description) pieces.push(input.description);
+        pieces.push('[image]');
+      }
+    }
     return pieces.filter(Boolean).join('\n');
   }
   try {
