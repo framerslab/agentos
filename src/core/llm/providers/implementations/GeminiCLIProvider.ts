@@ -434,14 +434,15 @@ export class GeminiCLIProvider implements IProvider {
    * stream with the bridge's classified error, and a result with
    * `status: 'error'` ends it with an error chunk.
    *
-   * With tools, the reply's text streams without its tool-call blocks, which
-   * reach the consumer as the final chunk's tool calls alone: the text from a
-   * '<' that may open a block is held back until the block's closing tag
-   * shows whether it is one. Text still held when the run ends with its reply
-   * is no block, and is yielded as one text delta just before the final
-   * chunk; a run that fails ends with its error chunk alone. A caller who
-   * aborts while the consumer holds that delta gets the abort chunk in place
-   * of the reply's final chunk.
+   * With tools, the reply's text streams without the tool-call blocks the
+   * provider reads as tool calls, which reach the consumer as the final
+   * chunk's tool calls alone (a block whose body is not JSON is no tool call,
+   * and streams as text): the text from a '<' that may open a block is held
+   * back until the block's closing tag shows whether it is one. Text still
+   * held when the run ends with its reply is no block, and is yielded as one
+   * text delta just before the final chunk; a run that fails ends with its
+   * error chunk alone. A caller who aborts while the consumer holds that
+   * delta gets the abort chunk in place of the reply's final chunk.
    */
   async *generateCompletionStream(
     modelId: string,
