@@ -1084,8 +1084,8 @@ Return ONLY the JSON object: no markdown fences, no commentary.`;
  * @param modelId - Model identifier to use for the planning call.
  * @param userMessages - The user-supplied messages that describe the task.
  * @param toolNames - Names of available tools (informational context for the planner).
- * @param config - Optional planning configuration overrides, and the call's abort signal, which the planning request
- *   is handed as it is handed `requestTimeout`.
+ * @param config - Optional planning configuration overrides, and the call's abort signal and `customModelParams`,
+ *   which the planning request is handed as it is handed `requestTimeout`.
  * @param totalUsage - Mutable usage aggregator: the planning call's tokens are added here.
  * @param spend - The run's spend budget, the provider the planning call is sent to, and what to call the call in the
  *   budget's records: the planning call is checked against the budget before it is made and recorded after it.
@@ -1098,7 +1098,7 @@ export async function createPlan(
   modelId: string,
   userMessages: Array<Record<string, unknown>>,
   toolNames: string[],
-  config: (PlanningConfig & { abortSignal?: AbortSignal }) | undefined,
+  config: (PlanningConfig & { abortSignal?: AbortSignal; customModelParams?: Record<string, unknown> }) | undefined,
   totalUsage: TokenUsage,
   spend?: { budget: SpendBudget; providerId: string; what: string },
 ): Promise<Plan | undefined> {
@@ -1137,6 +1137,8 @@ export async function createPlan(
     // call's planning sub-call must not auto-cache behind the caller's back.
     ...(config?.cache !== undefined ? { cache: config.cache } : {}),
     ...(config?.thinking === false ? { thinking: false } : {}),
+    // Provider-specific request fields (e.g. OpenRouter routing preferences) apply to the planning call too.
+    ...(config?.customModelParams !== undefined ? { customModelParams: config.customModelParams } : {}),
   });
 
   spend?.budget.record(costOfUsageUSD(spend.providerId, modelId, response.usage), response.usage?.totalTokens ?? 0, spend.what);
@@ -2296,6 +2298,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               : {}),
             ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
             ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+            ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
           },
           totalUsage,
           budget ? { budget, providerId: resolved.providerId, what: 'generate_text.plan' } : undefined,

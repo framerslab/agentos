@@ -277,4 +277,27 @@ describe('generateText planning and the transcript delta', () => {
       { role: 'assistant', content: 'Done.' },
     ]);
   });
+
+  // -----------------------------------------------------------------------
+  // 4. customModelParams reach the planning call
+  // -----------------------------------------------------------------------
+  it('sends the caller customModelParams with the planning call', async () => {
+    const customModelParams = { provider: { data_collection: 'deny', order: ['Fireworks'] } };
+
+    hoisted.generateCompletion.mockResolvedValueOnce(
+      makePlanResponse([{ description: 'Answer', tool: null, reasoning: 'Direct' }]),
+    );
+    hoisted.generateCompletion.mockResolvedValueOnce(makeTextResponse('Done.'));
+
+    await generateText({
+      model: 'openai:gpt-4.1-mini',
+      prompt: 'Plan then answer.',
+      planning: true,
+      customModelParams,
+    });
+
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
+    expect(hoisted.generateCompletion.mock.calls[0][2].customModelParams).toEqual(customModelParams);
+    expect(hoisted.generateCompletion.mock.calls[1][2].customModelParams).toEqual(customModelParams);
+  });
 });
