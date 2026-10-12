@@ -22,6 +22,8 @@ const COLON = 0x3a;
  *   byte among them. On Windows a backslash separates folders and a colon names a drive or a file's stream.
  * - `'segment'`: a name between slashes is empty: the id starts or ends with `/`, or holds `//`.
  * - `'dot'`: a name starts with a dot, `.` and `..` among them.
+ * - `'edge'`: a name starts or ends with a space, or ends with a dot. Windows drops those from a name, so the
+ *   name would be another's (`entities./x` is `entities/x` there).
  * - `'reserved'`: the id is `index` in any case, which names the catalog, `index.md` (on a filesystem that
  *   ignores case, `INDEX.md` is the same file).
  * - `'outside'`: the page's file would not be inside the memory folder.
@@ -33,6 +35,7 @@ export type WikiPageIdProblem =
   | 'character'
   | 'segment'
   | 'dot'
+  | 'edge'
   | 'reserved'
   | 'outside';
 
@@ -44,6 +47,7 @@ const RULE_BROKEN: Record<WikiPageIdProblem, string> = {
   character: 'a page id holds no backslash, no colon and no control character',
   segment: 'a page id is names joined by single slashes, with no slash at its start or end',
   dot: 'no name in a page id starts with a dot',
+  edge: 'no name in a page id starts or ends with a space or ends with a dot',
   reserved: 'the id index, in any case, names the catalog, index.md, which is not a page',
   outside: "the page's file would be outside the memory folder",
 };
@@ -87,6 +91,7 @@ function problemOf(id: unknown): WikiPageIdProblem | null {
   for (const name of id.split('/')) {
     if (name.length === 0) return 'segment';
     if (name.startsWith('.')) return 'dot';
+    if (name.startsWith(' ') || name.endsWith(' ') || name.endsWith('.')) return 'edge';
   }
   return id.toLowerCase() === CATALOG_ID ? 'reserved' : null;
 }
@@ -94,7 +99,8 @@ function problemOf(id: unknown): WikiPageIdProblem | null {
 /**
  * True when `id` has the wiki's id form: the page's path under `memory/` without `.md`, one or more names
  * joined by `/` (`entities/johnny` is `memory/entities/johnny.md`). No name is empty or starts with a dot,
- * so `.` and `..` are never names; the id holds no backslash, no colon and no control character, a NUL
+ * so `.` and `..` are never names, and no name starts or ends with a space or ends with a dot, which
+ * Windows drops from a name; the id holds no backslash, no colon and no control character, a NUL
  * byte among them; it is at most {@link MAX_WIKI_PAGE_ID_LENGTH} characters; and it is not `index` in any
  * case, the catalog's own id. Every id the store lists, and every id the default clusterer of
  * `attachMemoryWiki` makes, has this form.
