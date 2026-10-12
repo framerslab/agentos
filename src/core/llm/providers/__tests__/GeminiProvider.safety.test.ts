@@ -4,7 +4,7 @@ const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
 import { GeminiProvider } from '../implementations/GeminiProvider';
-import { isContentPolicyRefusal } from '../../../../api/generateText';
+import { isContentPolicyRefusal, usageOfError } from '../../../../api/generateText';
 
 /** A one-event Gemini SSE stream (`?alt=sse` framing: `data: {json}\n\n`). */
 function geminiSseResponse(obj: unknown): Response {
@@ -103,6 +103,8 @@ describe('GeminiProvider — every block Google reports surfaces as a content-po
     expect((caught as { code?: string }).code).toBe('content_filter');
     expect((caught as Error).message).toContain('blockReason: PROHIBITED_CONTENT');
     expect(isContentPolicyRefusal(caught)).toBe(true);
+    // The tokens Gemini billed for the blocked request stay on the error.
+    expect(usageOfError(caught)).toMatchObject({ promptTokens: 5, completionTokens: 0, totalTokens: 5 });
   });
 
   it.each(['BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII', 'IMAGE_SAFETY', 'IMAGE_PROHIBITED_CONTENT', 'IMAGE_RECITATION'])(
@@ -149,5 +151,6 @@ describe('GeminiProvider — every block Google reports surfaces as a content-po
 
     expect((caught as { code?: string }).code).toBe('content_filter');
     expect((caught as Error).message).toContain('blockReason: OTHER');
+    expect(usageOfError(caught)).toMatchObject({ promptTokens: 5, totalTokens: 5 });
   });
 });

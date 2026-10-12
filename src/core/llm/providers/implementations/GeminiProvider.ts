@@ -1090,7 +1090,7 @@ export class GeminiProvider implements IProvider {
       // instead of silently yielding an empty success chunk. The catch below
       // re-throws content_filter so it propagates.
       if (!accumulatedContent && !hasToolCalls) {
-        const blocked = this.contentFilterBlock(promptBlockReason, lastFinishReason);
+        const blocked = this.contentFilterBlock(promptBlockReason, lastFinishReason, lastUsage ? usage : undefined);
         if (blocked) throw blocked;
       }
 
@@ -1680,7 +1680,11 @@ export class GeminiProvider implements IProvider {
     // fallback could never fire, and an empty answer read as an image with no
     // text.
     if (!fullText && !hasToolCalls) {
-      const blocked = this.contentFilterBlock(apiResponse.promptFeedback?.blockReason, candidate?.finishReason ?? null);
+      const blocked = this.contentFilterBlock(
+        apiResponse.promptFeedback?.blockReason,
+        candidate?.finishReason ?? null,
+        apiResponse.usageMetadata ? usage : undefined,
+      );
       if (blocked) throw blocked;
     }
 
@@ -1710,19 +1714,32 @@ export class GeminiProvider implements IProvider {
    * filters stopped: a prompt block reason (any value, since a blocked prompt
    * gets no candidates), or a finish reason in
    * `CONTENT_FILTER_FINISH_REASONS`. `undefined` when neither applies.
-   * The message names the reason.
+   * The message names the reason. The usage Gemini reported for the request
+   * goes on the error as `details.usage`, where the fallback chain and the
+   * completion gateway read a failed attempt's tokens.
    */
-  private contentFilterBlock(blockReason: string | undefined, finishReason: string | null): GeminiProviderError | undefined {
+  private contentFilterBlock(
+    blockReason: string | undefined,
+    finishReason: string | null,
+    usage: ModelUsage | undefined,
+  ): GeminiProviderError | undefined {
+    const details = usage ? { usage } : undefined;
     if (blockReason) {
       return new GeminiProviderError(
         `Gemini blocked the prompt (blockReason: ${blockReason}); no content returned.`,
         'content_filter',
+        undefined,
+        undefined,
+        details,
       );
     }
     if (this.mapFinishReason(finishReason) === 'content_filter') {
       return new GeminiProviderError(
         `Gemini blocked the response (finishReason: ${finishReason ?? 'unknown'}); no content returned.`,
         'content_filter',
+        undefined,
+        undefined,
+        details,
       );
     }
     return undefined;
