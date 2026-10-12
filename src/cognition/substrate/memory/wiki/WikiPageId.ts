@@ -4,6 +4,9 @@ import * as path from 'node:path';
 /** The most characters a wiki page id may hold. */
 export const MAX_WIKI_PAGE_ID_LENGTH = 512;
 
+/** The id of the catalog file, `index.md`, which the store writes itself and never lists as a page. */
+const CATALOG_ID = 'index';
+
 /**
  * Why a wiki page id was refused:
  * - `'type'`: the id is not a string.
@@ -12,9 +15,18 @@ export const MAX_WIKI_PAGE_ID_LENGTH = 512;
  * - `'character'`: the id holds a backslash or a control character (U+0000 to U+001F, or U+007F), a NUL byte among them.
  * - `'segment'`: a name between slashes is empty: the id starts or ends with `/`, or holds `//`.
  * - `'dot'`: a name starts with a dot, `.` and `..` among them.
+ * - `'reserved'`: the id is `index`, which names the catalog, `index.md`.
  * - `'outside'`: the page's file would not be inside the memory folder.
  */
-export type WikiPageIdProblem = 'type' | 'empty' | 'length' | 'character' | 'segment' | 'dot' | 'outside';
+export type WikiPageIdProblem =
+  | 'type'
+  | 'empty'
+  | 'length'
+  | 'character'
+  | 'segment'
+  | 'dot'
+  | 'reserved'
+  | 'outside';
 
 /** The part of the rule each problem breaks, as the error message words it. */
 const RULE_BROKEN: Record<WikiPageIdProblem, string> = {
@@ -24,6 +36,7 @@ const RULE_BROKEN: Record<WikiPageIdProblem, string> = {
   character: 'a page id holds no backslash and no control character',
   segment: 'a page id is names joined by single slashes, with no slash at its start or end',
   dot: 'no name in a page id starts with a dot',
+  reserved: 'the id index names the catalog, index.md, which is not a page',
   outside: "the page's file would be outside the memory folder",
 };
 
@@ -68,15 +81,15 @@ function problemOf(id: unknown): WikiPageIdProblem | null {
     if (name.length === 0) return 'segment';
     if (name.startsWith('.')) return 'dot';
   }
-  return null;
+  return id === CATALOG_ID ? 'reserved' : null;
 }
 
 /**
  * True when `id` has the wiki's id form: the page's path under `memory/` without `.md`, one or more names
  * joined by `/` (`entities/johnny` is `memory/entities/johnny.md`). No name is empty or starts with a dot,
  * so `.` and `..` are never names; the id holds no backslash and no control character, a NUL byte among
- * them; and it is at most {@link MAX_WIKI_PAGE_ID_LENGTH} characters. Every id the store lists, and every
- * id the default clusterer of `attachMemoryWiki` makes, has this form.
+ * them; it is at most {@link MAX_WIKI_PAGE_ID_LENGTH} characters; and it is not `index`, the catalog's own
+ * id. Every id the store lists, and every id the default clusterer of `attachMemoryWiki` makes, has this form.
  */
 export function isWikiPageId(id: unknown): id is string {
   return problemOf(id) === null;
