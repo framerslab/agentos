@@ -236,6 +236,26 @@ describe('dispatch and the interlock', () => {
     await h.report(runId, 'joining', {}, 5);
     expect(h.seen.filter((e) => e.type === 'bot:joining').length).toBe(1);
   });
+  it('stores each report once, as the event it becomes: the event store holds what the handlers received, under the same numbers', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 1 });
+    await h.report(runId, 'notice_posted');
+    await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1);
+    await h.report(runId, 'capture_started', {}, h.clock.now() + 1);
+    await h.report(runId, 'participant_joined', { participantRef: 'p2', participantCount: 2 });
+    await h.report(runId, 'participant_joined', { participantRef: 'p2', participantCount: 2 }); // the same report again
+    await h.report(runId, 'chat_message', { text: 'hello', sender: 'Sam' });
+    await h.report(runId, 'usage', { seconds: 60 });
+    await h.report(runId, 'crashed', { seconds: 70 });
+    const stored = await h.stores.events.read(runId, 0);
+    expect(stored.map((e) => [e.seq, e.type])).toEqual(h.seen.map((e) => [e.seq, e.type]));
+    expect(stored.map((e) => e.type)).toEqual(['bot:requested', 'bot:dispatching', 'bot:joining', 'bot:in_call', 'bot:notice_posted', 'bot:capture_started', 'bot:participant_joined', 'bot:chat_message', 'bot:usage', 'bot:left', 'bot:done']);
+    expect(h.provider.commands.get(runId)?.filter((c) => c.name === 'postChat')).toHaveLength(1);
+  });
   it('re-posts the short notice to a late arrival and ends a run that never confirms its notice', async () => {
     const h = harness();
     const r = await h.manager.sendBot(h.request);

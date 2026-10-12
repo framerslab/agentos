@@ -105,6 +105,15 @@ export interface MeetingManagerEvent {
 /** Receives each event once; a handler that throws or rejects is logged and the others still run. */
 export type MeetingManagerEventHandler = (event: MeetingManagerEvent) => void | Promise<void>;
 
+/** An event as the manager stored it in its run's sequence, which its delivery carries. */
+interface StoredEvent {
+  id: string;
+  type: MeetingEventType;
+  at: number;
+  seq: number;
+  data?: Record<string, unknown>;
+}
+
 /** Thrown by a provider's `dispatch` when no worker has a slot. */
 export class NoCapacityError extends Error {
   /** @param message - Why no worker took the run. */
@@ -244,13 +253,24 @@ export class MeetingManager {
   private async emit(type: MeetingEventType, run: MeetingRunRecord, data?: Record<string, unknown>, eventId?: string, at?: number): Promise<void> {
     const time = at ?? this.now();
     const id = eventId ?? (ONCE_EVENTS.has(type) ? `${run.runId}:${type}` : `${run.runId}:${type}:${time}:${randomUUID().slice(0, 8)}`);
-    const { inserted, seq } = await this.stores.events.append({ eventId: id, runId: run.runId, type, at: time, data });
-    if (!inserted) return;
+    await this.deliver(await this.storeEvent({ id, type, at: time, data }, run.runId), run);
+  }
+
+  /** Stores the event in its run's sequence; undefined when an event with its id is stored already, which is then delivered no second time. */
+  private async storeEvent(event: Omit<StoredEvent, 'seq'>, runId: string): Promise<StoredEvent | undefined> {
+    const { inserted, seq } = await this.stores.events.append({ eventId: event.id, runId, type: event.type, at: event.at, data: event.data });
+    return inserted ? { ...event, seq } : undefined;
+  }
+
+  /** Delivers a stored event, with the run as it stands: a delivery to each of the owner's destinations, then every handler. */
+  private async deliver(stored: StoredEvent | undefined, run: MeetingRunRecord): Promise<void> {
+    if (!stored) return;
+    const { id, type, at, seq, data } = stored;
     const event: MeetingManagerEvent = { type, runId: run.runId, run, seq, data };
     if (this.config.destinationsFor) {
-      const payload = JSON.stringify({ id, type, runId: run.runId, at: time, seq, data });
+      const payload = JSON.stringify({ id, type, runId: run.runId, at, seq, data });
       for (const destinationRef of await this.config.destinationsFor(run.ownerRef)) {
-        await this.stores.outbox.enqueue({ id: `${id}@${destinationRef}`, runId: run.runId, destinationRef, eventId: id, type, payload }, time);
+        await this.stores.outbox.enqueue({ id: `${id}@${destinationRef}`, runId: run.runId, destinationRef, eventId: id, type, payload }, at);
       }
     }
     for (const h of this.handlers) {
@@ -560,21 +580,21 @@ export class MeetingManager {
     return { accepted: true, applied };
   }
 
-  private typeOf(event: NormalizedMeetingEvent): MeetingEventType | undefined {
+  /**
+   * The event a report is, whatever the run's state, for a report that is one: stored before the report is applied, it
+   * is the report's record. A state report has none (the move it makes emits its event), and a heartbeat,
+   * capture_started, done and crashed emit nothing of their own.
+   */
+  private ownEvent(event: NormalizedMeetingEvent): { type: MeetingEventType; data: Record<string, unknown> } | undefined {
     switch (event.type) {
-      case 'joining': return 'bot:joining';
-      case 'waiting_room': return 'bot:waiting_room';
-      case 'in_call': return 'bot:in_call';
-      case 'notice_posted': return 'bot:notice_posted';
-      case 'participant_joined': return 'bot:participant_joined';
-      case 'participant_left': return 'bot:participant_left';
-      case 'chat_message': return 'bot:chat_message';
-      case 'stop_command': return 'bot:stop_command';
-      case 'capture_suspended': return 'bot:capture_suspended';
-      case 'usage': return 'bot:usage';
-      case 'left': return 'bot:left';
-      case 'error': return 'bot:error';
-      default: return undefined; // heartbeats, capture_started, done and crashed are applied without an event of their own
+      case 'participant_joined': return { type: 'bot:participant_joined', data: { participantRef: event.data?.participantRef } };
+      case 'participant_left': return { type: 'bot:participant_left', data: { participantRef: event.data?.participantRef } };
+      case 'chat_message': return { type: 'bot:chat_message', data: { text: event.data?.text, sender: event.data?.sender } };
+      case 'stop_command': return { type: 'bot:stop_command', data: { sender: event.data?.sender } };
+      case 'capture_suspended': return { type: 'bot:capture_suspended', data: {} };
+      case 'usage': return { type: 'bot:usage', data: { seconds: event.data?.seconds ?? 0 } };
+      case 'error': return { type: 'bot:error', data: { message: event.data?.message } };
+      default: return undefined;
     }
   }
 
@@ -588,11 +608,14 @@ export class MeetingManager {
       await this.emit('bot:error', run, { message: 'capture_started outside the capture interlock' }, `${event.eventId}#interlock`, event.at);
       return false;
     }
-    if (event.type !== 'monitor_heartbeat') {
-      // heartbeats are not stored: a repeated one is harmless, and 360 rows an hour would be noise
-      const dedup = await this.stores.events.append({ eventId: event.eventId, runId: run.runId, type: this.typeOf(event) ?? 'bot:usage', at: event.at, data: event.data });
-      if (!dedup.inserted) return false;
-    }
+    // One row per report, the event the destinations and the handlers receive. A report that is an event of its own is
+    // stored as that event before anything is applied, and the row is its record: a repeated one is stored nowhere and
+    // changes nothing. A state report stores the event of the move it makes, and a repeated one moves nothing; a
+    // heartbeat (360 rows an hour would be noise), capture_started, done and crashed store nothing, and applying one
+    // twice changes nothing.
+    const own = this.ownEvent(event);
+    const stored = own ? await this.storeEvent({ id: `${event.eventId}#${own.type}`, type: own.type, at: event.at, data: own.data }, run.runId) : undefined;
+    if (own && !stored) return false;
     switch (event.type) {
       case 'joining':
         await this.move(run, 'joining', {}, 'bot:joining', undefined, event);
@@ -619,11 +642,11 @@ export class MeetingManager {
         if (run.captureStartedAt === undefined) await this.stores.runs.update(run.runId, { captureStartedAt: event.at }, 'in_call');
         return true;
       case 'capture_suspended':
-        await this.emitFrom(run, 'bot:capture_suspended', {}, event);
+        await this.deliver(stored, run);
         return true;
       case 'participant_joined': {
         const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) })) ?? run;
-        await this.emitFrom(updated, 'bot:participant_joined', { participantRef: event.data?.participantRef }, event);
+        await this.deliver(stored, updated);
         const provider = this.providers.get(run.providerName);
         if (updated.state === 'in_call' && provider?.capabilities.postsChat && !fenced) {
           await provider.command(run.runId, { name: 'postChat', text: run.notice.lateArrivalText });
@@ -632,23 +655,22 @@ export class MeetingManager {
       }
       case 'participant_left': {
         const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) })) ?? run;
-        await this.emitFrom(updated, 'bot:participant_left', { participantRef: event.data?.participantRef }, event);
+        await this.deliver(stored, updated);
         return true;
       }
       case 'chat_message': {
-        await this.emitFrom(run, 'bot:chat_message', { text: event.data?.text, sender: event.data?.sender }, event);
+        await this.deliver(stored, run);
         if (!fenced && this.isStopPhrase(run, event.data?.text)) await this.purge(run, 'stopped_by_participant');
         return true;
       }
       case 'stop_command':
-        await this.emitFrom(run, 'bot:stop_command', { sender: event.data?.sender }, event);
+        await this.deliver(stored, run);
         if (!fenced) await this.purge(run, 'stopped_by_participant');
         return true;
       case 'usage': {
-        const seconds = event.data?.seconds ?? 0;
         const updated = await this.stores.runs.update(run.runId, { lastUsageAt: event.at });
-        if (run.reservationId && run.captureStartedAt !== undefined) await this.stores.entitlement.meter(run.reservationId, seconds);
-        await this.emitFrom(updated ?? run, 'bot:usage', { seconds }, event);
+        if (run.reservationId && run.captureStartedAt !== undefined) await this.stores.entitlement.meter(run.reservationId, event.data?.seconds ?? 0);
+        await this.deliver(stored, updated ?? run);
         return true;
       }
       case 'left': {
@@ -670,7 +692,7 @@ export class MeetingManager {
         await this.crash(run, event.at, event.data?.seconds);
         return true;
       case 'error':
-        await this.emitFrom(run, 'bot:error', { message: event.data?.message }, event);
+        await this.deliver(stored, run);
         return true;
     }
   }
@@ -817,9 +839,9 @@ export class MeetingManager {
   // ── Ends ──
 
   /**
-   * Moves the run to `leaving`, arms the kill and tells the bot to leave. The kill's deadline is armed on the run before
-   * the command goes, so a bot that does not leave is killed by whichever manager runs the limits, after a restart too,
-   * and a leave command that never reached the bot is followed by the kill.
+   * Moves the run to `leaving` (a run behind the fence stays `purging`), arms the kill and tells the bot to leave. The
+   * kill's deadline is armed on the run before the command goes, so a bot that does not leave is killed by whichever
+   * manager runs the limits, after a restart too, and a leave command that never reached the bot is followed by the kill.
    */
   private async leave(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<boolean> {
     if (!canTransition(run.state, 'leaving') && run.state !== 'purging') return false;
