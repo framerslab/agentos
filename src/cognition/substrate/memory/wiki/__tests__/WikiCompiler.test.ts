@@ -29,6 +29,33 @@ describe('WikiCompiler', () => {
     expect(res.pagesWritten).toEqual([]);
   });
 
+  it('never hands a store an id without the wiki id form, and reports the assignment', async () => {
+    const store = fakeStore();
+    const prompts: string[] = [];
+    const compiler = new WikiCompiler({
+      store: store as any,
+      llm: async (prompt: string) => {
+        prompts.push(prompt);
+        return 'merged';
+      },
+      cluster: async () => [
+        { pageId: '../outside', traceIds: ['t1'] },
+        { pageId: 'concepts/notes', traceIds: ['t2'] },
+      ],
+    });
+    const res = await compiler.compile({
+      traces: [
+        { id: 't1', content: 'first', tags: [], entities: [] },
+        { id: 't2', content: 'second', tags: [], entities: [] },
+      ] as any,
+      reason: 'explicit',
+    });
+    expect(res.pagesWritten).toEqual(['concepts/notes']);
+    expect(res.conflicts).toEqual([{ pageId: '../outside', note: expect.stringContaining('refused') }]);
+    expect([...store.pages.keys()]).toEqual(['concepts/notes']);
+    expect(prompts).toHaveLength(1);
+  });
+
   it('merges a new fact into an existing page, preserving prior body', async () => {
     const store = fakeStore([
       { id: 'entities/johnny', type: 'entity', summary: 'Founder.', updated: '', sources: ['t0'], body: 'Founder of Frame.', links: ['Frame'] },

@@ -28,6 +28,22 @@ describe('ReadMemoryPageTool', () => {
     expect(res.error).toContain('No memory page');
   });
 
+  it('refuses an id without the wiki id form and never asks the port for it', async () => {
+    const asked: string[] = [];
+    const tool = new ReadMemoryPageTool({
+      readPage: async (id) => {
+        asked.push(id);
+        return page;
+      },
+    });
+    const res = await tool.execute({ id: '../entities/johnny' }, {} as any);
+    expect(res).toMatchObject({ success: false, details: { code: 'INVALID_WIKI_PAGE_ID', problem: 'dot' } });
+    expect(res.output).toBeUndefined();
+    const typed = await tool.execute({ id: 42 } as any, {} as any);
+    expect(typed).toMatchObject({ success: false, details: { code: 'INVALID_WIKI_PAGE_ID', problem: 'type' } });
+    expect(asked).toEqual([]);
+  });
+
   it('exposes ITool identity fields', () => {
     const tool = new ReadMemoryPageTool({ readPage: async () => null });
     expect(tool.name).toBe('read_memory_page');
