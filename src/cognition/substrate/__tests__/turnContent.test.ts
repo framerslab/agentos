@@ -1,0 +1,77 @@
+/**
+ * @file turnContent.test.ts
+ * A multimodal turn as message parts, and a turn's content as text with no
+ * image data.
+ */
+import { describe, expect, it } from 'vitest';
+
+import { multimodalTurnParts, turnContentText } from '../turnContent';
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]).toString('base64');
+
+describe('multimodalTurnParts', () => {
+  it('puts the text first, then an image part per vision input, typed by its MIME type or its bytes', () => {
+    expect(
+      multimodalTurnParts(
+        'Compare these.',
+        [
+          { type: 'base64', data: PNG },
+          { type: 'base64', data: 'aGVsbG8=', mimeType: 'image/webp' },
+          { type: 'image_url', data: 'https://images.example.org/a.jpg' },
+        ],
+        undefined,
+      ),
+    ).toEqual([
+      { type: 'text', text: 'Compare these.' },
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${PNG}` } },
+      { type: 'image_url', image_url: { url: 'data:image/webp;base64,aGVsbG8=' } },
+      { type: 'image_url', image_url: { url: 'https://images.example.org/a.jpg' } },
+    ]);
+  });
+
+  it('reads base64 bytes it does not recognise as JPEG, takes a url field, and skips an input with no data', () => {
+    expect(
+      multimodalTurnParts(
+        null,
+        [
+          { type: 'base64', data: 'aGVsbG8=' },
+          { type: 'image_url', url: 'https://images.example.org/b.png' } as never,
+          { type: 'image_url', data: '' },
+        ],
+        undefined,
+      ),
+    ).toEqual([
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,aGVsbG8=' } },
+      { type: 'image_url', image_url: { url: 'https://images.example.org/b.png' } },
+    ]);
+  });
+
+  it('sends a transcription as text, and refuses audio data, which no chat provider here takes', () => {
+    expect(multimodalTurnParts('Notes:', undefined, { type: 'transcription', data: 'Buy milk.' })).toEqual([
+      { type: 'text', text: 'Notes:' },
+      { type: 'text', text: 'Buy milk.' },
+    ]);
+    expect(() => multimodalTurnParts('x', undefined, { type: 'base64', data: 'AAAA', mimeType: 'audio/wav' })).toThrow(
+      "pass it with type 'transcription'",
+    );
+  });
+});
+
+describe('turnContentText', () => {
+  it('reads parts as their text, with [image] for each image and no image data', () => {
+    const text = turnContentText([
+      { type: 'text', text: 'What is this?' },
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${PNG}` } },
+    ]);
+    expect(text).toBe('What is this?\n[image]');
+    expect(text).not.toContain(PNG);
+  });
+
+  it('reads the earlier { text, vision, audio } object the same way, and anything else as JSON', () => {
+    expect(turnContentText({ text: 'Look', vision: [{ type: 'base64', data: PNG }] })).toBe('Look\n[image]');
+    expect(turnContentText('plain')).toBe('plain');
+    expect(turnContentText({ toolCallId: 'c1', toolName: 't', output: { ok: true } })).toBe(
+      '{"toolCallId":"c1","toolName":"t","output":{"ok":true}}',
+    );
+  });
+});

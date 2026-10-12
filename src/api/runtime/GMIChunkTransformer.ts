@@ -39,6 +39,7 @@ import { uuidv4 } from '../../core/utils/uuid.js';
 import type { ITurnPlanner, TurnPlan } from '../../orchestration/turn-planner/TurnPlanner';
 import { CapabilityContextAssembler } from '../../cognition/discovery/CapabilityContextAssembler.js';
 import { filterCapabilityDiscoveryResultByDisabledSkills } from './selfImprovementRuntime.js';
+import { multimodalTurnParts } from '../../cognition/substrate/turnContent';
 
 /**
  * Minimal stream context shape needed by the transformer.
@@ -448,13 +449,15 @@ export class GMIChunkTransformer {
     let type: GMIInteractionType;
     let content: GMITurnInput['content'];
 
-    if ((input.visionInputs && input.visionInputs.length > 0) || input.audioInput) {
+    // Message parts, which prompt construction keeps whole: the provider gets
+    // each image as an image part, not the inputs as JSON text.
+    const parts =
+      (input.visionInputs && input.visionInputs.length > 0) || input.audioInput
+        ? multimodalTurnParts(input.textInput, input.visionInputs, input.audioInput)
+        : [];
+    if (parts.length > 0) {
       type = GMIInteractionType.MULTIMODAL_CONTENT;
-      const multiModalContent: { text?: string | null; vision?: any[]; audio?: any } = {};
-      if (input.textInput) multiModalContent.text = input.textInput;
-      if (input.visionInputs) multiModalContent.vision = input.visionInputs;
-      if (input.audioInput) multiModalContent.audio = input.audioInput;
-      content = multiModalContent;
+      content = parts;
     } else if (input.textInput) {
       type = GMIInteractionType.TEXT;
       content = input.textInput;

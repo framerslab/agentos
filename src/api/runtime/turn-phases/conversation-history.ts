@@ -7,6 +7,7 @@ import type { ConversationContext } from '../../../core/conversation/Conversatio
 import { MessageRole } from '../../../core/conversation/ConversationMessage';
 import { GMIInteractionType, type GMITurnInput } from '../../../cognition/substrate/IGMI';
 import type { RollingSummaryCompactionConfig, RollingSummaryCompactionResult } from '../../../core/conversation/RollingSummaryCompactor';
+import { turnContentText } from '../../../cognition/substrate/turnContent';
 
 export interface ConversationHistoryPhaseInput {
   conversationContext: ConversationContext | undefined;
@@ -46,7 +47,7 @@ export function assembleConversationHistory(input: ConversationHistoryPhaseInput
       input.gmiInput.type === GMIInteractionType.TEXT && typeof input.gmiInput.content === 'string'
         ? input.gmiInput.content.trim()
         : input.gmiInput.type === GMIInteractionType.MULTIMODAL_CONTENT
-          ? JSON.stringify(input.gmiInput.content).trim()
+          ? turnContentText(input.gmiInput.content).trim()
           : '';
     if (content && inbound && content === inbound) {
       historyForPrompt = historyForPrompt.slice(0, -1);

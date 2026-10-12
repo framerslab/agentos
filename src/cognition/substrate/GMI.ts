@@ -73,6 +73,7 @@ import { MetapromptExecutor } from './MetapromptExecutor';
 import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedback';
 import { resolveReasoningTraceLimits, type ReasoningTraceLimits } from './reasoningTraceLimits';
 import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
+import { turnContentText } from './turnContent';
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
@@ -758,16 +759,9 @@ export class GMI implements IGMI {
   }
 
   private stringifyTurnContent(content: GMITurnInput['content']): string | null {
-    if (typeof content === 'string') {
-      const trimmed = content.trim();
-      return trimmed ? trimmed : null;
-    }
-    try {
-      const serialized = JSON.stringify(content);
-      return serialized && serialized !== 'null' ? serialized : null;
-    } catch {
-      return null;
-    }
+    // As text, with no image data: memory keeps what was said, not base64.
+    const text = turnContentText(content).trim();
+    return text && text !== 'null' ? text : null;
   }
 
   private getConversationIdForTurn(turnInput: GMITurnInput): string | undefined {

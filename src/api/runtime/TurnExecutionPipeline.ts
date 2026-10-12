@@ -60,6 +60,7 @@ import type {
   AgentOSLongTermMemoryRecallConfig,
   AgentOSTenantRoutingConfig,
 } from '../types/OrchestratorConfig';
+import { turnContentText } from '../../cognition/substrate/turnContent';
 
 /**
  * Minimal stream context shape, matching the ActiveStreamContext used by
@@ -295,7 +296,7 @@ export class TurnExecutionPipeline {
         gmiInput.type === GMIInteractionType.TEXT && typeof gmiInput.content === 'string'
           ? gmiInput.content
           : gmiInput.type === GMIInteractionType.MULTIMODAL_CONTENT
-            ? JSON.stringify(gmiInput.content)
+            ? turnContentText(gmiInput.content)
             : '';
       try {
         turnPlan = await this.dependencies.turnPlanner.planTurn({
@@ -425,9 +426,10 @@ export class TurnExecutionPipeline {
             metadata: { agentPersonaId: currentPersonaId, source: 'agentos_input' },
           });
         } else if (gmiInput.type === GMIInteractionType.MULTIMODAL_CONTENT) {
+          // Stored as its text: the conversation store keeps no image data.
           conversationContext.addMessage({
             role: MessageRole.USER,
-            content: JSON.stringify(gmiInput.content),
+            content: turnContentText(gmiInput.content),
             name: input.userId,
             metadata: { agentPersonaId: currentPersonaId, source: 'agentos_input_multimodal' },
           });

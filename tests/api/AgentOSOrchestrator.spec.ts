@@ -305,6 +305,37 @@ describe('AgentOSOrchestrator (API layer)', () => {
       expect(capturedGMIInput?.metadata?.taskHint).toBe('user_multimodal_query');
     });
 
+    it('sends vision inputs as image parts, and stores the turn as text with no image data', async () => {
+      // The first bytes of a JPEG, as base64.
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]).toString('base64');
+      const input: AgentOSInput = {
+        userId: 'test-user',
+        sessionId: 'test-session-3',
+        selectedPersonaId: 'persona-1',
+        textInput: 'What does this receipt say?',
+        visionInputs: [
+          { type: 'base64', data: jpeg },
+          { type: 'image_url', data: 'https://images.example.org/receipt.png' },
+        ],
+      };
+
+      await orchestrator.orchestrateTurn(input);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Message parts, which prompt construction sends whole: the model sees the images.
+      expect(capturedGMIInput?.content).toEqual([
+        { type: 'text', text: 'What does this receipt say?' },
+        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpeg}` } },
+        { type: 'image_url', image_url: { url: 'https://images.example.org/receipt.png' } },
+      ]);
+      const stored = vi
+        .mocked(mockConversationContext.addMessage)
+        .mock.calls.map(([message]) => message)
+        .find((message) => (message as { metadata?: { source?: string } }).metadata?.source === 'agentos_input_multimodal');
+      expect(stored).toMatchObject({ content: 'What does this receipt say?\n[image]\n[image]' });
+      expect(JSON.stringify(stored)).not.toContain(jpeg);
+    });
+
     it('includes gmiId in metadata', async () => {
       const input: AgentOSInput = {
         userId: 'test-user',
