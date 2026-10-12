@@ -51,6 +51,7 @@ import { reply, script } from '../../../api/__tests__/helpers/stubProviders';
 import { createConversationMessage, MessageRole } from '../../../core/conversation/ConversationMessage';
 import type { IModelRouter, ModelRouteParams } from '../../../core/llm/routing/IModelRouter';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry';
+import { providerHealthKey } from '../../../api/runtime/providerHealthKey.js';
 import { GMIErrorCode } from '../../../core/utils/errors';
 import { GMIInteractionType, GMIOutputChunkType, type GMIOutputChunk } from '../IGMI';
 import { createScriptedGmi, runTurn, textTurn } from './helpers/scriptedGmi';
@@ -191,8 +192,12 @@ describe('GMI turn through the real completion gateway', () => {
     const primary = script('anthropic', k, { replies: [reply.text('Should not run.')] });
     script('openai', fb, { replies: [reply.text('From the fallback.')] });
     vi.stubEnv('OPENAI_API_KEY', fb);
-    // A rejected key opens the provider's circuit at once.
-    globalLLMProviderHealth.recordFailure('anthropic', Object.assign(new Error('invalid x-api-key'), { httpStatus: 401 }));
+    // A rejected key opens its circuit at once: the circuit of this key, which
+    // the gateway's own key has apart from the provider's.
+    globalLLMProviderHealth.recordFailure(
+      providerHealthKey('anthropic', { apiKey: k }),
+      Object.assign(new Error('invalid x-api-key'), { httpStatus: 401 }),
+    );
     const { gmi, promptEngine } = await createScriptedGmi({
       gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [{ provider: 'openai', model: 'stub-model' }] }),
       persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-x' },

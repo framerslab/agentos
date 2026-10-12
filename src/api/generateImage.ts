@@ -341,6 +341,15 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
             'No image provider configured. Call setDefaultProvider() with an image-capable provider, or set OPENAI_API_KEY, STABILITY_API_KEY, REPLICATE_API_TOKEN, BFL_API_KEY, FAL_API_KEY, OPENROUTER_API_KEY, or STABLE_DIFFUSION_LOCAL_BASE_URL.',
           );
         }
+        // The call's own key or base URL goes only to a provider it names, or
+        // the global default names: here the first provider was detected
+        // from the environment, and the key would go to it.
+        if ((opts.apiKey !== undefined || opts.baseUrl !== undefined) && providerChain[0] !== defaultImage?.providerId) {
+          throw new Error(
+            "generateImage: an apiKey or baseUrl needs provider (or a model such as 'openai:gpt-image-2.5-flare'): " +
+              `without one, the provider is detected from the environment (${providerChain[0]}) and the key would go to it.`,
+          );
+        }
         ({ providerId, modelId } =
           defaultImage && providerChain[0] === defaultImage.providerId
             ? defaultImage

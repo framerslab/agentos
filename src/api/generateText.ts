@@ -13,6 +13,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { resolveModelOption, resolveProvider, createProviderManager, knownProviderPrefixOf } from './model.js';
+import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import {
@@ -2071,6 +2072,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
   let metricStatus: 'ok' | 'error' = 'ok';
   let metricUsage: TokenUsage | undefined;
   let metricProviderId: string | undefined;
+  /** The id this attempt's health is recorded under: see providerHealthKey. */
+  let healthProviderId: string | undefined;
   let metricModelId: string | undefined;
   // What this attempt did that a failover must not repeat. Written inside
   // the span callback and read by the fallback walk below, so it lives on an
@@ -2158,6 +2161,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       });
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
+      // The call's own key or base URL has a health record of its own.
+      const healthId = providerHealthKey(resolved.providerId, opts);
+      healthProviderId = healthId;
 
       // ── Provider health circuit-breaker ──────────────────────────────
       // If the resolved primary has tripped its breaker (e.g. a recent
@@ -2170,8 +2176,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // when a provider is considered open. This check runs BEFORE
       // `createProviderManager` so we don't spend the SDK init cost
       // on a known-bad provider either.
-      if (globalLLMProviderHealth.isOpen(resolved.providerId)) {
-        const stats = globalLLMProviderHealth.getStats(resolved.providerId);
+      if (globalLLMProviderHealth.isOpen(healthId)) {
+        const stats = globalLLMProviderHealth.getStats(healthId);
         throw new LLMProviderCircuitOpenError(
           resolved.providerId,
           stats?.cooldownRemainingMs ?? 0,
@@ -3044,8 +3050,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // The primary attempt succeeded: let the registry know so its
     // failure streak resets. Safe to call on a never-failed provider;
     // the registry no-ops in that case.
-    if (metricProviderId) {
-      globalLLMProviderHealth.recordSuccess(metricProviderId);
+    if (healthProviderId) {
+      globalLLMProviderHealth.recordSuccess(healthProviderId);
     }
     return {
       ...successResult,
@@ -3069,8 +3075,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // different provider than the caller asked for. A call the caller
     // stopped (its spend budget's refusal, a hook's stop, an abort) says
     // nothing about the provider and is not recorded.
-    if (metricProviderId && !(error instanceof LLMProviderCircuitOpenError) && !aborted && !isCallerStop(error)) {
-      globalLLMProviderHealth.recordFailure(metricProviderId, error);
+    if (healthProviderId && !(error instanceof LLMProviderCircuitOpenError) && !aborted && !isCallerStop(error)) {
+      globalLLMProviderHealth.recordFailure(healthProviderId, error);
     }
     // The failed attempt is billed for its completed steps and for a step
     // the provider ended with usage attached (a refused turn). It is metered

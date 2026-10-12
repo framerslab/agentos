@@ -7,6 +7,8 @@
  * an {@link AIModelProviderManager} ready for use by {@link generateText} and
  * {@link streamText}.
  */
+import { createHash } from 'node:crypto';
+
 import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderManager.js';
 import { PROVIDER_DEFAULTS, autoDetectProvider } from './runtime/provider-defaults.js';
 import { getDefaultProvider } from './runtime/global-default.js';
@@ -146,6 +148,38 @@ export function parseModelString(model: string): ParsedModel {
     providerId: model.slice(0, colonIdx),
     modelId: model.slice(colonIdx + 1),
   };
+}
+
+/**
+ * Refuses a call whose own `apiKey` or `baseUrl` would reach a provider the
+ * call did not name for it:
+ *
+ * - a `provider:` model prefix that names another provider than `provider`,
+ *   since the prefix wins (`provider: 'openai', model: 'replicate:...'`
+ *   would send the OpenAI key to Replicate);
+ * - for an image task, a provider left to auto-detection, which picks the
+ *   first image vendor with a key in the environment.
+ *
+ * A call with neither field, and a provider the global default names, pass.
+ *
+ * @throws {Error} Naming the provider the credentials would have gone to.
+ */
+function refuseMisdirectedCredentials(opts: ModelOption, task: TaskType): void {
+  const inline = opts as { apiKey?: unknown; baseUrl?: unknown };
+  if (typeof inline.apiKey !== 'string' && typeof inline.baseUrl !== 'string') return;
+  const prefixed = opts.provider === 'ollama' ? undefined : knownProviderPrefixOf(opts.model);
+  if (opts.provider && prefixed && prefixed !== opts.provider) {
+    throw new Error(
+      `Model '${opts.model}' names provider '${prefixed}', not '${opts.provider}': the apiKey or baseUrl ` +
+        `given for one would go to the other. Name one provider.`,
+    );
+  }
+  if (task === 'image' && !routedProviderOf(opts)) {
+    throw new Error(
+      "An apiKey or baseUrl for an image call needs provider (or a model such as 'openai:gpt-image-2.5-flare'): " +
+        'without one, the provider is detected from the environment and the key would go to it.',
+    );
+  }
 }
 
 /**
@@ -346,6 +380,7 @@ export interface ModelOption {
  */
 export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): ParsedModel {
   opts = withGlobalDefault(opts, task);
+  refuseMisdirectedCredentials(opts, task);
 
   // 1. Explicit model string (backwards compat and direct override)
   if (opts.model) {
@@ -510,14 +545,29 @@ function globalModelForTask(
 
 /**
  * Process-scoped cache of initialised {@link AIModelProviderManager}
- * instances, keyed by `providerId + apiKey + baseUrl`. Every LLM call
- * inside agentos goes through `createProviderManager`, and without
- * memoisation each call allocates a fresh manager (four init log lines
- * per call) and repeats provider listing. Cache key includes the key
- * + base URL so a config swap picks up a new manager, but identical
- * configs reuse the same one for the life of the process.
+ * instances, keyed by the provider id and a digest of the key and base URL.
+ * Every LLM call inside agentos goes through `createProviderManager`, and
+ * without memoisation each call allocates a fresh manager (four init log
+ * lines per call) and repeats provider listing. The key and base URL are in
+ * the cache key so a config swap picks up a new manager, and identical
+ * configs reuse the same one; at most
+ * {@link MAX_CACHED_PROVIDER_MANAGERS} are kept, the least recently used
+ * dropped first.
  */
 const managerCache = new Map<string, Promise<AIModelProviderManager>>();
+
+/**
+ * The most managers {@link createProviderManager} keeps. A service that
+ * passes each user's own key would otherwise keep one initialized manager
+ * per key for the life of the process; past this many, the one used least
+ * recently is dropped (a call that still holds it finishes with it).
+ */
+export const MAX_CACHED_PROVIDER_MANAGERS = 64;
+
+/** The number of managers cached now, for tests. @internal */
+export function cachedProviderManagerCount(): number {
+  return managerCache.size;
+}
 
 /**
  * Thrown by {@link createProviderManager} when the requested provider did not
@@ -563,8 +613,10 @@ function httpStatusOf(error: unknown): number | undefined {
   return undefined;
 }
 
+/** The cache key: the provider, and a digest of its key and base URL, so the map holds no key. */
 function buildCacheKey(resolved: ResolvedProvider): string {
-  return `${resolved.providerId}::${resolved.apiKey ?? ''}::${resolved.baseUrl ?? ''}`;
+  const digest = createHash('sha256').update(`${resolved.apiKey ?? ''}\n${resolved.baseUrl ?? ''}`).digest('hex');
+  return `${resolved.providerId}::${digest}`;
 }
 
 /**
@@ -592,7 +644,12 @@ export async function createProviderManager(
 ): Promise<AIModelProviderManager> {
   const key = buildCacheKey(resolved);
   const cached = managerCache.get(key);
-  if (cached) return cached;
+  if (cached) {
+    // Most recently used last: the map's order is the eviction order.
+    managerCache.delete(key);
+    managerCache.set(key, cached);
+    return cached;
+  }
 
   const pending = (async () => {
     const manager = new AIModelProviderManager();
@@ -630,7 +687,14 @@ export async function createProviderManager(
 
   // Drop from cache if init rejected so the next call retries cleanly
   // instead of surfacing the stale rejection forever.
-  pending.catch(() => managerCache.delete(key));
+  pending.catch(() => {
+    if (managerCache.get(key) === pending) managerCache.delete(key);
+  });
   managerCache.set(key, pending);
+  while (managerCache.size > MAX_CACHED_PROVIDER_MANAGERS) {
+    const oldest = managerCache.keys().next().value;
+    if (oldest === undefined) break;
+    managerCache.delete(oldest);
+  }
   return pending;
 }

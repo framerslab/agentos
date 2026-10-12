@@ -291,3 +291,41 @@ describe('an image operation with a provider and no model', () => {
     expect(JSON.parse(String(fetchSpy.mock.calls[0][1]?.body)).version).toBe(pinned);
   });
 });
+
+describe("an image operation's own key goes only to a provider the call names", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('refuses a key with no provider, which detection would hand to the first image vendor in the environment', async () => {
+    vi.stubEnv('REPLICATE_API_TOKEN', 'r8-env-token');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => replicateDone());
+    const tenantKey = { apiKey: 'sk-tenant-openai' };
+
+    await expect(generateImage({ ...tenantKey, prompt: 'A lighthouse at dusk.' })).rejects.toThrow(
+      'an apiKey or baseUrl needs provider',
+    );
+    await expect(editImage({ ...tenantKey, image: TINY_PNG, prompt: 'Add a hat.' })).rejects.toThrow('needs provider');
+    await expect(upscaleImage({ ...tenantKey, image: TINY_PNG })).rejects.toThrow('needs provider');
+    await expect(variateImage({ ...tenantKey, image: TINY_PNG })).rejects.toThrow('needs provider');
+    // A model with no provider prefix is still left to detection.
+    await expect(editImage({ ...tenantKey, model: 'gpt-image-2.5-sunburst', image: TINY_PNG, prompt: 'x' })).rejects.toThrow(
+      'needs provider',
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses a key whose provider and model prefix differ, since the prefix would take the key", async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => replicateDone());
+
+    await expect(
+      upscaleImage({ provider: 'openai', model: 'replicate:nightmareai/real-esrgan', apiKey: 'sk-openai-key', image: TINY_PNG }),
+    ).rejects.toThrow("names provider 'replicate', not 'openai'");
+    await expect(
+      editImage({ provider: 'openai', model: 'stability:sd3', apiKey: 'sk-openai-key', image: TINY_PNG, prompt: 'x' }),
+    ).rejects.toThrow("names provider 'stability', not 'openai'");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});

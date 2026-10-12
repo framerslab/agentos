@@ -17,6 +17,7 @@ import type { IModelRouter, ModelRouteParams } from '../../core/llm/routing/IMod
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
 import { resolveModelOption, resolveProvider, createProviderManager } from '../model.js';
+import { providerHealthKey } from './providerHealthKey.js';
 import {
   advanceFallbackWalk,
   buildPolicyAwareFallbackChain,
@@ -99,6 +100,12 @@ export interface CompletionResolution {
   /** Same strings as ModelTargetInfo.toolSupport.format. */
   toolFormat: 'openai_functions' | 'anthropic_tools' | 'google_function_calling';
   providerManager: AIModelProviderManager;
+  /**
+   * The id the hop's health is recorded under: for the first hop on the
+   * route's own key or base URL, the provider id with a digest of them (see
+   * `providerHealthKey`). Absent means the provider id.
+   */
+  healthId?: string;
   /** Per-hop effort, cache and output budget from `fallbackHopOverrides`; merged over the caller's options. */
   optionOverrides: Partial<ModelCompletionOptions>;
   /** The hop list fixed by the route's first `resolve()`; later calls walk it. */
@@ -246,8 +253,8 @@ function toolNamesOf(tools: CompletionRoute['tools']): string[] {
 }
 
 /** The error a hop with an open circuit fails with, worded as streamText words it. */
-function circuitOpenError(providerId: string): Error {
-  const stats = globalLLMProviderHealth.getStats(providerId);
+function circuitOpenError(providerId: string, healthId: string = providerId): Error {
+  const stats = globalLLMProviderHealth.getStats(healthId);
   return Object.assign(
     new Error(`[503] Provider '${providerId}' circuit open; cooldown ${stats?.cooldownRemainingMs ?? 0}ms`),
     { name: 'LLMProviderCircuitOpenError', httpStatus: 503 },
@@ -640,15 +647,19 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         walk = gate.state;
       }
       // Set once credentials resolve: the provider that serves the hop (resolveProvider
-      // may serve anthropic through openrouter), whose circuit and health are the hop's.
+      // may serve anthropic through openrouter), and the id its circuit and health
+      // are kept under (the route's own key and base URL have one of their own).
       let servingProviderId: string | undefined;
+      let healthId: string | undefined;
       try {
         const parsed = hop === 0 && h.model ? { providerId: h.provider, modelId: h.model } : resolveModelOption({ provider: h.provider, model: h.model }, 'text');
         const resolved = hop === 0
           ? resolveProvider(parsed.providerId, parsed.modelId, { apiKey: route.apiKey, baseUrl: route.baseUrl })
           : resolveProvider(parsed.providerId, parsed.modelId);
         servingProviderId = resolved.providerId;
-        if (globalLLMProviderHealth.isOpen(resolved.providerId)) throw circuitOpenError(resolved.providerId);
+        const hopHealthId = hop === 0 ? providerHealthKey(resolved.providerId, route) : resolved.providerId;
+        healthId = hopHealthId;
+        if (globalLLMProviderHealth.isOpen(hopHealthId)) throw circuitOpenError(resolved.providerId, hopHealthId);
         const providerManager = await createProviderManager(resolved);
         const info = await providerManager.getModelInfo(resolved.modelId, resolved.providerId);
         const overrides = h.entry ? fallbackHopOverrides(route.callOptions ?? {}, h.entry) : undefined;
@@ -660,6 +671,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           capabilities: [...(info?.capabilities ?? [])],
           toolFormat: toolFormatFor(resolved.providerId),
           providerManager,
+          healthId: hopHealthId,
           optionOverrides: overrides
             ? (definedOnly({ maxTokens: overrides.maxTokens, effort: overrides.effort, cache: overrides.cache }) as Partial<ModelCompletionOptions>)
             : {},
@@ -679,8 +691,8 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         // As in streamText: a configuration error (no credentials, unknown model)
         // says nothing about the provider's health, and an open circuit is the
         // registry's own verdict; neither is recorded.
-        if (servingProviderId && lastError.name !== 'LLMProviderCircuitOpenError') {
-          globalLLMProviderHealth.recordFailure(servingProviderId, lastError);
+        if (healthId && lastError.name !== 'LLMProviderCircuitOpenError') {
+          globalLLMProviderHealth.recordFailure(healthId, lastError);
         }
         route.onHopFailure?.({ providerId: servingProviderId ?? h.provider, hop, error: lastError });
         // The primary's configuration error (no credentials, unknown provider) is the caller's to see.
@@ -754,7 +766,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         const provider = resolution.providerManager.getProvider(resolution.providerId);
         if (!provider) {
           const error = Object.assign(new Error(`Provider '${resolution.providerId}' is not available.`), { name: 'ProviderInitializationError' });
-          globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+          globalLLMProviderHealth.recordFailure((resolution.healthId ?? resolution.providerId), error);
           finish(failed(error, undefined));
           return;
         }
@@ -768,7 +780,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
             // hop and says nothing about the provider's health (as in streamText).
             const aborted = chunk.error.type === 'abort';
             const error = errorFromChunk(chunk.error);
-            if (!aborted) globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+            if (!aborted) globalLLMProviderHealth.recordFailure((resolution.healthId ?? resolution.providerId), error);
             if (!delivered) {
               const usage = billedUsage(buffer, error, chunk.usage);
               finish(aborted ? failed(error, usage, false) : failed(error, usage));
@@ -799,11 +811,11 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           yield* buffer.splice(0);
         }
         completed = true;
-        globalLLMProviderHealth.recordSuccess(resolution.providerId);
+        globalLLMProviderHealth.recordSuccess(resolution.healthId ?? resolution.providerId);
         finish({ kind: 'delivered' });
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+        globalLLMProviderHealth.recordFailure((resolution.healthId ?? resolution.providerId), error);
         if (!delivered) {
           finish(failed(error, billedUsage(buffer, error)));
           return;
