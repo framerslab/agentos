@@ -668,8 +668,9 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           ...(hop === 0 && pendingSkips.length > 0 ? { pendingSkips } : {}),
         };
         if (hop > 0) {
-          // The error that moved the turn off the previous hop: the one it failed with, else the one it could not start with.
-          const cause = (failure instanceof Error ? failure : undefined) ?? lastError ?? new Error('the previous hop failed');
+          // The most recent error, as the walkers report it: a hop that could not
+          // start on the way here, else the one the previous hop failed with.
+          const cause = lastError ?? (failure instanceof Error ? failure : undefined) ?? new Error('the previous hop failed');
           route.onFallback?.({ from: after?.providerId ?? chain[0].provider, to: resolved.providerId, hop, error: cause });
         }
         return resolution;

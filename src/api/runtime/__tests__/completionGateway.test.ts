@@ -250,6 +250,18 @@ describe('CompletionGateway.resolve: the walk', () => {
     expect(seen).toEqual([['anthropic', '[503] the first model is overloaded']]);
   });
 
+  it('onFallback receives the most recent error: a hop that could not start on the way', async () => {
+    failInit.add('anthropic');
+    const seen: Array<[string, string]> = [];
+    const gateway = createCompletionGateway({ fallbackProviders: chain(['anthropic', 'claude-x'], ['openrouter', 'x/y']) });
+    const route = { providerId: 'openai', modelId: 'gpt-4o', messages: [], onFallback: ({ to, error }: { to: string; error: Error }) => seen.push([to, error.message]) };
+    const first = await gateway.resolve(route);
+    await gateway.resolve(route, first!, new Error('[503] the first model is overloaded'));
+    expect(seen).toHaveLength(1);
+    expect(seen[0][0]).toBe('openrouter');
+    expect(seen[0][1]).toContain('invalid key');
+  });
+
   it("after refusals, a refill and the policy chain's Claude legs are passed over; after outages every leg runs", async () => {
     vi.stubEnv('OPENROUTER_API_KEY', 'or-key');
     vi.stubEnv('ANTHROPIC_API_KEY', 'an-key');
