@@ -173,7 +173,10 @@ export class InMemoryTranscriptStore implements ITranscriptStore {
   }
 }
 
-/** Events in memory, numbered per run and deduplicated by id: for tests, single-process hosts and runs that are not kept. */
+/**
+ * Events in memory, numbered per run and deduplicated by id: for tests, single-process hosts and runs that are not kept.
+ * Events are copied in and out, payloads included, so a caller never holds a stored event.
+ */
 export class InMemoryEventStore implements IEventStore {
   private readonly byRun = new Map<string, MeetingEvent[]>();
   private readonly byId = new Map<string, MeetingEvent>();
@@ -183,7 +186,7 @@ export class InMemoryEventStore implements IEventStore {
     if (existing) return { inserted: false, seq: existing.seq };
     const list = this.byRun.get(event.runId) ?? [];
     const behindFence = this.fenced.has(event.runId) && CONTENT_EVENT_TYPES.has(event.type);
-    const stored: MeetingEvent = behindFence ? { ...event, data: undefined, purged: true, seq: list.length + 1 } : { ...event, seq: list.length + 1 };
+    const stored: MeetingEvent = behindFence ? { ...event, data: undefined, purged: true, seq: list.length + 1 } : { ...structuredClone(event), seq: list.length + 1 };
     list.push(stored);
     this.byRun.set(event.runId, list);
     this.byId.set(event.eventId, stored);
@@ -193,7 +196,7 @@ export class InMemoryEventStore implements IEventStore {
     this.fenced.add(runId);
   }
   async read(runId: string, fromSeq: number, limit = 500): Promise<MeetingEvent[]> {
-    return (this.byRun.get(runId) ?? []).filter((e) => e.seq > fromSeq).slice(0, limit).map((e) => ({ ...e }));
+    return (this.byRun.get(runId) ?? []).filter((e) => e.seq > fromSeq).slice(0, limit).map((e) => structuredClone(e));
   }
   async purgePayloads(runId: string): Promise<void> {
     for (const e of this.byRun.get(runId) ?? []) {

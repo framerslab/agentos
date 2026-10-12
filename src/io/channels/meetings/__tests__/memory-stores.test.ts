@@ -86,6 +86,16 @@ describe('InMemoryEventStore', () => {
     expect(all[2].data).toBeUndefined();
     expect(all[0].purged).toBeUndefined();
   });
+  it('keeps its own copy of a payload: neither the appended object nor one a read answered changes the stored event', async () => {
+    const e = new InMemoryEventStore();
+    const data = { text: 'hi' };
+    await e.append({ eventId: 'a', runId: 'r1', type: 'bot:chat_message', at: 1, data });
+    data.text = 'changed after the append';
+    const [first] = await e.read('r1', 0);
+    expect(first.data).toEqual({ text: 'hi' });
+    if (first.data) first.data.text = 'changed by a reader';
+    expect((await e.read('r1', 0))[0].data).toEqual({ text: 'hi' });
+  });
 });
 
 describe('InMemoryOutbox', () => {
