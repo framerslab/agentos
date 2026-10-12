@@ -11,7 +11,7 @@
 3. [upscaleImage() API](#upscaleimage-api)
 4. [variateImage() API](#variateimage-api)
 5. [Provider Matrix](#provider-matrix)
-6. [Img2Img (Style Transfer)](#img2img-style-transfer)
+6. [Img2Img (a style from the prompt)](#img2img-a-style-from-the-prompt)
 7. [Inpainting](#inpainting)
 8. [Outpainting](#outpainting)
 9. [Upscaling](#upscaling)
@@ -199,9 +199,9 @@ A local server running ComfyUI serves text-to-image only; edits and upscales go 
 
 ---
 
-## Img2Img (Style Transfer)
+## Img2Img (a style from the prompt)
 
-Transform the style of an image while preserving its composition:
+Restyle an image by describing the style in the prompt, keeping its composition. To take the style from a reference image instead, use [`transferStyle()`](./STYLE_TRANSFER.md), which sends the provider both images.
 
 ```typescript
 import { editImage } from '@framers/agentos';

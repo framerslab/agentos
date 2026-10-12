@@ -4,8 +4,8 @@
  * provider's own default for that operation, not on the provider's
  * text-to-image default.
  *
- * Drives editImage, upscaleImage and variateImage through the real provider
- * classes; only fetch is stubbed.
+ * Drives editImage, upscaleImage, variateImage and transferStyle through the
+ * real provider classes; only fetch is stubbed.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -98,10 +98,15 @@ describe('an image operation with a provider and no model', () => {
       expect((init?.body as FormData).get('model')).toBe('gpt-image-2.5-sunburst');
     }
     expect(fetchSpy).toHaveBeenCalledTimes(3);
+    // The edit sends one image; each style transfer sends the source and the reference.
+    expect((fetchSpy.mock.calls[0][1]?.body as FormData).getAll('image')).toHaveLength(1);
+    for (const [, init] of fetchSpy.mock.calls.slice(1)) {
+      expect((init?.body as FormData).getAll('image[]')).toHaveLength(2);
+    }
     for (const result of [edited, named, found]) expect(result.model).toBe('gpt-image-2.5-sunburst');
   });
 
-  it('transfers a style on Stability with an SD3 model, the provider named or found in the environment', async () => {
+  it('transfers a style on the Stability style-transfer endpoint, the provider named or found in the environment', async () => {
     for (const name of ['REPLICATE_API_TOKEN', 'FAL_API_KEY', 'OPENAI_API_KEY']) vi.stubEnv(name, '');
     vi.stubEnv('STABILITY_API_KEY', 'sk-stab-env');
     const fetchSpy = vi
@@ -112,16 +117,17 @@ describe('an image operation with a provider and no model', () => {
     const named = await transferStyle({ provider: 'stability', apiKey: 'sk-stab', ...style });
     const found = await transferStyle(style);
 
-    // The edit goes to the SD3 route, whose `model` takes the sd3.5 names
-    // only: neither stable-image-core nor the SDXL text-to-image default.
+    // The style-transfer endpoint takes the source and the reference, and no
+    // model: the result reports the endpoint's id.
     for (const [url, init] of fetchSpy.mock.calls) {
-      expect(String(url)).toMatch(/\/v2beta\/stable-image\/generate\/sd3$/);
+      expect(String(url)).toMatch(/\/v2beta\/stable-image\/control\/style-transfer$/);
       const form = init?.body as FormData;
-      expect(form.get('mode')).toBe('image-to-image');
-      expect(form.get('model')).toBe('sd3.5-medium');
+      expect(form.get('init_image')).toBeInstanceOf(Blob);
+      expect(form.get('style_image')).toBeInstanceOf(Blob);
+      expect(form.has('model')).toBe(false);
     }
     expect(fetchSpy).toHaveBeenCalledTimes(2);
-    for (const result of [named, found]) expect(result.model).toBe('sd3.5-medium');
+    for (const result of [named, found]) expect(result.model).toBe('stable-image-style-transfer');
   });
 
   it('upscales on Replicate with real-esrgan, not its text-to-image model', async () => {

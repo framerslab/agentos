@@ -7,12 +7,23 @@ import {
   type ImageGenerationRequest,
   type ImageGenerationResult,
   type ImageEditRequest,
+  type ImageStyleTransferRequest,
   type ImageVariateRequest,
   type ImageModelInfo,
   type OpenAIImageProviderOptions,
 } from '../IImageProvider.js';
 import { bufferToBlobPart } from '../imageToBuffer.js';
+import { imageFilePart } from '../blobPart.js';
+import {
+  ORDINAL_IMAGE_NAMES,
+  styleTransferImageTypes,
+  styleTransferModelError,
+  styleTransferPrompt,
+} from '../styleTransfer.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
+
+/** OpenAI's API, the provider's base URL unless one is configured. */
+const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 
 /**
  * OpenAI's model for making an image from a prompt: "our fastest model for
@@ -33,6 +44,30 @@ export const OPENAI_IMAGE_GENERATION_MODEL = 'gpt-image-2.5-flare';
  * Edits, variations and style transfer use it.
  */
 export const OPENAI_IMAGE_EDIT_MODEL = 'gpt-image-2.5-sunburst';
+
+/**
+ * The models OpenAI's style transfer runs on, Sunburst first as the default:
+ * the GPT Image models, for which the edits endpoint takes "up to 16 images"
+ * (openai-node 7.32.0, `src/resources/images.ts`, `ImageEditParamsBase.image`).
+ */
+export const OPENAI_STYLE_TRANSFER_MODELS: readonly string[] = [
+  OPENAI_IMAGE_EDIT_MODEL,
+  'gpt-image-2.5-sunburst-2026-09-08',
+  'gpt-image-2.5-flare',
+  'gpt-image-2.5-flare-2026-09-08',
+  'gpt-image-2',
+  'gpt-image-2-2026-04-21',
+  'gpt-image-1.5',
+  'gpt-image-1',
+  'gpt-image-1-mini',
+  'chatgpt-image-latest',
+];
+
+/** "each image should be a `png`, `webp`, or `jpg` file less than 50MB" (openai-node 7.32.0). */
+const OPENAI_EDIT_IMAGE_BYTES = 50_000_000;
+
+/** "The maximum length is 32000 characters for the GPT image models" (openai-node 7.32.0). */
+const OPENAI_EDIT_PROMPT_CHARACTERS = 32_000;
 
 /**
  * The quality a GPT Image model is sent for `quality`. The GPT Image models
@@ -86,7 +121,7 @@ export class OpenAIImageProvider implements IImageProvider {
       baseURL:
         typeof config.baseURL === 'string' && config.baseURL.trim()
           ? config.baseURL.trim()
-          : 'https://api.openai.com/v1',
+          : OPENAI_BASE_URL,
       defaultModelId:
         typeof config.defaultModelId === 'string' && config.defaultModelId.trim()
           ? config.defaultModelId.trim()
@@ -231,6 +266,99 @@ export class OpenAIImageProvider implements IImageProvider {
     if (typeof request.n === 'number') formData.append('n', String(request.n));
     if (request.size) formData.append('size', request.size);
 
+    return this.postEdit(formData, model, 'OpenAI image edit');
+  }
+
+  /**
+   * The model a style transfer runs on for `modelId`, or a refusal. An empty
+   * id takes the configured default when it is one of
+   * {@link OPENAI_STYLE_TRANSFER_MODELS}, else Sunburst. A named model must be
+   * one of them, unless the provider's base URL is not OpenAI's: a custom
+   * endpoint may serve any name.
+   *
+   * @param modelId - The model the call names, or an empty string.
+   * @throws {Error} For a model the style transfer does not run.
+   */
+  styleTransferModel(modelId: string): string {
+    if (!modelId) {
+      return this.defaultModelId && OPENAI_STYLE_TRANSFER_MODELS.includes(this.defaultModelId)
+        ? this.defaultModelId
+        : OPENAI_IMAGE_EDIT_MODEL;
+    }
+    if (OPENAI_STYLE_TRANSFER_MODELS.includes(modelId) || this.hasCustomEndpoint()) return modelId;
+    throw styleTransferModelError('OpenAI', modelId, OPENAI_STYLE_TRANSFER_MODELS);
+  }
+
+  /**
+   * Restyles an image after a style reference through `/v1/images/edits`,
+   * which takes "up to 16 images" for the GPT Image models (openai-node,
+   * `src/resources/images.ts`): the source and the reference go as two
+   * `image[]` parts, the source first, with an instruction that names them.
+   *
+   * The endpoint has no strength, seed or negative prompt: `strength` picks
+   * the instruction (see `styleTransfer.ts`), and the others are not sent.
+   * Before the request, the images are checked to be PNG, WebP or JPEG files
+   * under 50 MB each, and the prompt as sent to be at most 32,000 characters.
+   *
+   * @param request - The source, the reference and the prompt.
+   * @returns Generation result with the restyled image(s).
+   *
+   * @throws {Error} When the provider is not initialised, the model, an image
+   *   or the prompt is refused, the API returns an HTTP error status, or the
+   *   answer holds no image.
+   */
+  async transferStyle(request: ImageStyleTransferRequest): Promise<ImageGenerationResult> {
+    if (!this.isInitialized) {
+      throw new Error('OpenAI image provider is not initialized.');
+    }
+    const model = this.styleTransferModel(request.modelId);
+    const types = styleTransferImageTypes(
+      'OpenAI',
+      ['image/png', 'image/webp', 'image/jpeg'],
+      request.image,
+      request.styleImage,
+    );
+    for (const [bytes, which] of [[request.image, 'source'], [request.styleImage, 'style reference']] as const) {
+      if (bytes.length >= OPENAI_EDIT_IMAGE_BYTES) {
+        throw new Error(`OpenAI's edits take images under 50 MB; the ${which} is ${bytes.length} bytes.`);
+      }
+    }
+    const prompt = styleTransferPrompt(request.prompt, request.strength, ORDINAL_IMAGE_NAMES);
+    if (prompt.length > OPENAI_EDIT_PROMPT_CHARACTERS) {
+      throw new Error(
+        `OpenAI's edits take a prompt of at most 32,000 characters; with the style transfer instruction it is ${prompt.length}.`,
+      );
+    }
+
+    const formData = new FormData();
+    const source = imageFilePart(request.image, types.image, 'image');
+    const style = imageFilePart(request.styleImage, types.style, 'style');
+    formData.append('image[]', source.blob, source.filename);
+    formData.append('image[]', style.blob, style.filename);
+    formData.append('prompt', prompt);
+    formData.append('model', model);
+    if (request.size) formData.append('size', request.size);
+
+    const result = await this.postEdit(formData, model, 'OpenAI style transfer');
+    const images = result.images.filter((image) => image.base64 || image.url);
+    if (images.length === 0) throw new Error('OpenAI style transfer returned no image.');
+    return { ...result, images, usage: { totalImages: images.length } };
+  }
+
+  /** Whether the provider's base URL is not OpenAI's own. */
+  private hasCustomEndpoint(): boolean {
+    const baseURL = this.config?.baseURL;
+    return typeof baseURL === 'string' && baseURL.replace(/\/+$/, '') !== OPENAI_BASE_URL;
+  }
+
+  /**
+   * Sends a multipart request to `/v1/images/edits` and reads its images.
+   *
+   * @param formData - The edit's fields and image parts.
+   * @param model - The model the request names, reported in the result.
+   * @param what - The operation's name, for the error of a failed request.
+   */
+  private async postEdit(formData: FormData, model: string, what: string): Promise<ImageGenerationResult> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.keyPool.next()}`,
       // Content-Type is NOT set manually — the browser/Node runtime sets the
@@ -246,7 +374,7 @@ export class OpenAIImageProvider implements IImageProvider {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`OpenAI image edit failed (${response.status}): ${errorText}`);
+      throw new Error(`${what} failed (${response.status}): ${errorText}`);
     }
 
     const json = (await response.json()) as OpenAIImageResponse;
