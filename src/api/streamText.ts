@@ -520,8 +520,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       });
       recordedProviderId = resolved.providerId;
       recordedModelId = resolved.modelId;
-      // The call's own key or base URL has a health record of its own.
-      const healthId = providerHealthKey(resolved.providerId, opts);
+      // A key or base URL of the call's own, when it differs from the
+      // provider's, has a health record of its own.
+      const healthId = providerHealthKey(
+        resolved,
+        opts.apiKey !== undefined || opts.baseUrl !== undefined ? () => resolveProvider(providerId, modelId) : undefined,
+      );
       healthProviderId = healthId;
       // Resolve the eagerly-exposed routing Promises so callers
       // logging telemetry don't have to wait for the stream to drain.

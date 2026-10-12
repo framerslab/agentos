@@ -2161,8 +2161,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       });
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
-      // The call's own key or base URL has a health record of its own.
-      const healthId = providerHealthKey(resolved.providerId, opts);
+      // A key or base URL of the call's own, when it differs from the
+      // provider's, has a health record of its own.
+      const healthId = providerHealthKey(
+        resolved,
+        opts.apiKey !== undefined || opts.baseUrl !== undefined ? () => resolveProvider(providerId, modelId) : undefined,
+      );
       healthProviderId = healthId;
 
       // ── Provider health circuit-breaker ──────────────────────────────

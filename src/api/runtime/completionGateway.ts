@@ -101,9 +101,10 @@ export interface CompletionResolution {
   toolFormat: 'openai_functions' | 'anthropic_tools' | 'google_function_calling';
   providerManager: AIModelProviderManager;
   /**
-   * The id the hop's health is recorded under: for the first hop on the
-   * route's own key or base URL, the provider id with a digest of them (see
-   * `providerHealthKey`). Absent means the provider id.
+   * The id the hop's health is recorded under: for the first hop on a key or
+   * base URL of the route's own that differs from the provider's, the
+   * provider id with a digest of them (see `providerHealthKey`). Absent
+   * means the provider id.
    */
   healthId?: string;
   /** Per-hop effort, cache and output budget from `fallbackHopOverrides`; merged over the caller's options. */
@@ -657,7 +658,11 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           ? resolveProvider(parsed.providerId, parsed.modelId, { apiKey: route.apiKey, baseUrl: route.baseUrl })
           : resolveProvider(parsed.providerId, parsed.modelId);
         servingProviderId = resolved.providerId;
-        const hopHealthId = hop === 0 ? providerHealthKey(resolved.providerId, route) : resolved.providerId;
+        const ownCredentials = hop === 0 && (route.apiKey !== undefined || route.baseUrl !== undefined);
+        const hopHealthId = providerHealthKey(
+          resolved,
+          ownCredentials ? () => resolveProvider(parsed.providerId, parsed.modelId) : undefined,
+        );
         healthId = hopHealthId;
         if (globalLLMProviderHealth.isOpen(hopHealthId)) throw circuitOpenError(resolved.providerId, hopHealthId);
         const providerManager = await createProviderManager(resolved);

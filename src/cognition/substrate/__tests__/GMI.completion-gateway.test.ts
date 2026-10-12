@@ -195,7 +195,10 @@ describe('GMI turn through the real completion gateway', () => {
     // A rejected key opens its circuit at once: the circuit of this key, which
     // the gateway's own key has apart from the provider's.
     globalLLMProviderHealth.recordFailure(
-      providerHealthKey('anthropic', { apiKey: k }),
+      // No ANTHROPIC_API_KEY here: the gateway's key is the route's own.
+      providerHealthKey({ providerId: 'anthropic', apiKey: k }, () => {
+        throw new Error('no shared key');
+      }),
       Object.assign(new Error('invalid x-api-key'), { httpStatus: 401 }),
     );
     const { gmi, promptEngine } = await createScriptedGmi({
