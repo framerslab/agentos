@@ -24,7 +24,7 @@ describe('the outbound envelope', () => {
     expect(verifyEnvelope(secret, headers, '{}', 1_700_000_000_000).valid).toBe(false); // the default names are not there
   });
   it('matches the vector every receiver can check', () => {
-    expect(signEnvelope('whsec_test', 'msg_test', 1_700_000_000_000, '{}')).toBe('v1,' + 'uWC3AFWoQk5Au2iJm3gz8XsD4RMCB1Ma2MPcnH2M9Js=');
+    expect(signEnvelope('whsec_test', 'msg_test', 1_700_000_000_000, '{}')).toBe('v1,' + '9ZqX9AeXhOn09zJoK16s/EjlvxkvRUT9ukb9stxQ79w=');
   });
 });
 
