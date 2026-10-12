@@ -1656,7 +1656,7 @@ export type ServerTextMessage =
 // Section 12 -- Listening: transcript turns and where they go
 // ============================================================================
 
-/** A transcript turn a listen session wrote. `turnId` is `<runId>:<seq>`, assigned by the session in arrival order. */
+/** A transcript turn a listen session wrote. `turnId` is `<runId>:<seq>`, assigned by the sink in arrival order. */
 export interface TranscriptTurn {
   /** The run the turn belongs to. */
   runId: string;
@@ -1676,14 +1676,21 @@ export interface TranscriptTurn {
   endMs?: number;
 }
 
-/** Where a listen session's turns go. A slow sink pauses the transport; one that throws ends the session with `sink_failed`. */
+/** An unnumbered final; the sink allocates its run's next sequence. */
+export type TranscriptInput = Omit<TranscriptTurn, 'seq' | 'turnId'>;
+
+/** Where already numbered turns go; retained for callers that supply their own ids. */
 export interface ITranscriptSink {
-  /**
-   * Writes one turn. Turns come one at a time, in arrival order: the next is
-   * written only after this one resolves.
-   *
-   * @param turn - The turn to write.
-   * @returns Resolves once the turn is written.
-   */
+  /** Writes one numbered turn, resolving when persistence completes. */
   append(turn: TranscriptTurn): Promise<void>;
+}
+
+/** A listen session's sink. Turn ids are assigned by the sink in arrival order across sessions of one run. */
+export interface ITranscriptInputSink extends ITranscriptSink {
+  /**
+   * Allocates the run's next sequence and writes the final. A slow sink pauses
+   * the transport; a thrown error ends the session with sink_failed.
+   * @returns The stored turn, or undefined when a fence or terminal run drops it.
+   */
+  appendNext(turn: TranscriptInput): Promise<TranscriptTurn | undefined>;
 }

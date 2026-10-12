@@ -1,3 +1,4 @@
+import type { TranscriptInput } from '../../../voice-pipeline/types.js';
 import { CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
 import {
   DuplicateIdempotencyKeyError,
@@ -5,6 +6,8 @@ import {
   nextAttemptAt,
   OUTBOX_GIVE_UP_MS,
   type IClock,
+  type IEntitlementHook,
+  type ReserveResult,
   type IEventStore,
   type IJobStore,
   type IOutbox,
@@ -41,6 +44,10 @@ export class FakeClock implements IClock {
 
 /** Runs in memory, for tests and single-process hosts. Rows are copied in and out, so a caller never holds the stored row. */
 export class InMemoryRunStore implements IRunStore {
+  async forget(runId: string): Promise<void> {
+    this.runs.delete(runId);
+  }
+
   private readonly runs = new Map<string, MeetingRunRecord>();
   async insert(run: MeetingRunRecord): Promise<void> {
     if (this.runs.has(run.runId)) throw new Error(`run ${run.runId} exists`);
@@ -72,12 +79,12 @@ export class InMemoryRunStore implements IRunStore {
     const out: MeetingRunRecord[] = [];
     for (const r of this.runs.values()) {
       if (filter.ownerRef !== undefined && r.ownerRef !== filter.ownerRef) continue;
-      if (filter.states && !filter.states.includes(r.state)) continue;
+      if (filter.states?.length && !filter.states.includes(r.state)) continue;
       if (filter.since !== undefined && r.requestedAt < filter.since) continue;
       out.push(structuredClone(r));
     }
-    out.sort((a, b) => b.requestedAt - a.requestedAt);
-    return filter.limit ? out.slice(0, filter.limit) : out;
+    out.sort((a, b) => b.requestedAt - a.requestedAt || a.runId.localeCompare(b.runId));
+    return out.slice(0, filter.limit ?? 500);
   }
   async findByIdempotencyKey(ownerRef: string, key: string): Promise<MeetingRunRecord | undefined> {
     for (const r of this.runs.values()) if (r.ownerRef === ownerRef && r.idempotencyKey === key) return structuredClone(r);
@@ -87,9 +94,15 @@ export class InMemoryRunStore implements IRunStore {
 
 /** Dispatch jobs in memory, for tests and single-process hosts: its leases hold within one process. */
 export class InMemoryJobStore implements IJobStore {
+  async forget(runId: string): Promise<void> {
+    this.jobs.delete(runId);
+  }
+
   private readonly jobs = new Map<string, MeetingJob>();
   async schedule(job: { runId: string; dispatchAt: number }): Promise<void> {
-    this.jobs.set(job.runId, { runId: job.runId, dispatchAt: job.dispatchAt, dispatched: false, cancelled: false });
+    const existing = this.jobs.get(job.runId);
+    if (existing) existing.dispatchAt = job.dispatchAt;
+    else this.jobs.set(job.runId, { ...job, dispatched: false, cancelled: false });
   }
   async lease(holder: string, now: number, ttlMs: number): Promise<MeetingJob | undefined> {
     // no await between the read and the write below, so two takers in one process never hold one job
@@ -146,13 +159,34 @@ export class InMemoryJobStore implements IJobStore {
 
 /** Transcript turns in memory: for tests, single-process hosts and runs that are not kept. */
 export class InMemoryTranscriptStore implements ITranscriptStore {
+  async forget(runId: string): Promise<void> {
+    this.turns.delete(runId);
+    this.fenced.delete(runId);
+    this.lastSeq.delete(runId);
+  }
+
   private readonly turns = new Map<string, TranscriptTurn[]>();
+  private readonly lastSeq = new Map<string, number>();
   private readonly fenced = new Set<string>();
   async append(turn: TranscriptTurn): Promise<void> {
     if (this.fenced.has(turn.runId)) throw new FencedError(turn.runId);
     const list = this.turns.get(turn.runId) ?? [];
+    if (list.some((t) => t.seq === turn.seq)) return;
     list.push({ ...turn });
+    list.sort((a, b) => a.seq - b.seq);
+    this.lastSeq.set(turn.runId, Math.max(this.lastSeq.get(turn.runId) ?? 0, turn.seq));
     this.turns.set(turn.runId, list);
+  }
+  async appendNext(input: TranscriptInput): Promise<TranscriptTurn> {
+    if (this.fenced.has(input.runId)) throw new FencedError(input.runId);
+    const seq = (this.lastSeq.get(input.runId) ?? 0) + 1;
+    const turn: TranscriptTurn = { ...input, seq, turnId: `${input.runId}:${seq}` };
+    // No await between allocation and insertion: all sinks in this process share this counter.
+    this.lastSeq.set(input.runId, seq);
+    const list = this.turns.get(input.runId) ?? [];
+    list.push({ ...turn });
+    this.turns.set(input.runId, list);
+    return { ...turn };
   }
   async read(runId: string, fromSeq: number, limit = 500): Promise<TranscriptTurn[]> {
     return (this.turns.get(runId) ?? []).filter((t) => t.seq > fromSeq).slice(0, limit).map((t) => ({ ...t }));
@@ -166,10 +200,9 @@ export class InMemoryTranscriptStore implements ITranscriptStore {
   async purge(runId: string): Promise<void> {
     this.turns.delete(runId);
   }
-  /** Forgets a run whole, its turns and its fence, to free the memory of a run that is over. The manager does not call it: it removes a run's turns with `purge`, which keeps the fence. */
+  /** Alias for whole-run eviction after the retention grace. */
   async drop(runId: string): Promise<void> {
-    this.turns.delete(runId);
-    this.fenced.delete(runId);
+    await this.forget(runId);
   }
 }
 
@@ -178,6 +211,12 @@ export class InMemoryTranscriptStore implements ITranscriptStore {
  * Events are copied in and out, payloads included, so a caller never holds a stored event.
  */
 export class InMemoryEventStore implements IEventStore {
+  async forget(runId: string): Promise<void> {
+    for (const event of this.byRun.get(runId) ?? []) this.byId.delete(event.eventId);
+    this.byRun.delete(runId);
+    this.fenced.delete(runId);
+  }
+
   private readonly byRun = new Map<string, MeetingEvent[]>();
   private readonly byId = new Map<string, MeetingEvent>();
   private readonly fenced = new Set<string>();
@@ -210,16 +249,22 @@ export class InMemoryEventStore implements IEventStore {
 
 /** Outbound deliveries in memory, for tests and single-process hosts. */
 export class InMemoryOutbox implements IOutbox {
+  async forget(runId: string): Promise<void> {
+    for (const [id, delivery] of this.deliveries) if (delivery.runId === runId) this.deliveries.delete(id);
+    this.purgedRuns.delete(runId);
+  }
+
   private readonly deliveries = new Map<string, OutboxDelivery>();
   /** The runs whose content was purged: the outbox's fence. */
   private readonly purgedRuns = new Set<string>();
   async enqueue(d: Pick<OutboxDelivery, 'id' | 'runId' | 'destinationRef' | 'eventId' | 'type' | 'payload'>, now: number): Promise<void> {
     // behind the purge nothing a person said or did is taken for delivery
     if (this.purgedRuns.has(d.runId) && CONTENT_EVENT_TYPES.has(d.type)) return;
+    if (this.deliveries.has(d.id)) return;
     this.deliveries.set(d.id, { ...d, attempts: 0, nextAt: now, state: 'pending', purged: false });
   }
   async due(now: number, limit = 100): Promise<OutboxDelivery[]> {
-    return [...this.deliveries.values()].filter((d) => d.state === 'pending' && d.nextAt <= now).slice(0, limit).map((d) => ({ ...d }));
+    return [...this.deliveries.values()].filter((d) => d.state === 'pending' && d.nextAt <= now).sort((a, b) => a.nextAt - b.nextAt || a.id.localeCompare(b.id)).slice(0, limit).map((d) => ({ ...d }));
   }
   async markDelivered(id: string): Promise<void> {
     const d = this.deliveries.get(id);
@@ -252,6 +297,46 @@ export class InMemoryOutbox implements IOutbox {
     }
   }
   async listByRun(runId: string): Promise<OutboxDelivery[]> {
-    return [...this.deliveries.values()].filter((d) => d.runId === runId).map((d) => ({ ...d }));
+    return [...this.deliveries.values()].filter((d) => d.runId === runId).sort((a, b) => a.nextAt - b.nextAt || a.id.localeCompare(b.id)).map((d) => ({ ...d }));
+  }
+}
+
+/** Reservations in memory for tests and single-process hosts; no external billing policy is applied. */
+export class InMemoryEntitlementHook implements IEntitlementHook {
+  private readonly reservations = new Map<string, { runId: string; maxSeconds: number; metered: number; settled?: number; released: boolean }>();
+  /** @param maxSeconds - The most one reservation covers, in seconds; four hours when absent. */
+  constructor(private readonly maxSeconds = 14_400) {}
+  async reserve(input: Parameters<IEntitlementHook['reserve']>[0]): Promise<ReserveResult> {
+    const id = `reservation:${input.runId}`;
+    const existing = this.reservations.get(id);
+    if (existing) return { ok: true, reservationId: id, maxSeconds: existing.maxSeconds };
+    const maxSeconds = Math.min(input.maxSeconds, this.maxSeconds);
+    if (maxSeconds <= 0) return { ok: false, reason: 'allowance', message: 'no seconds available' };
+    this.reservations.set(id, { runId: input.runId, maxSeconds, metered: 0, released: false });
+    return { ok: true, reservationId: id, maxSeconds };
+  }
+  async revalidate(id: string): Promise<boolean> {
+    const r = this.reservations.get(id);
+    return !!r && !r.released && r.settled === undefined;
+  }
+  async meter(id: string, seconds: number): Promise<void> {
+    const r = this.reservations.get(id);
+    if (r && !r.released && r.settled === undefined) r.metered = Math.max(r.metered, seconds);
+  }
+  async settle(id: string, billedSeconds: number): Promise<void> {
+    const r = this.reservations.get(id);
+    if (r && !r.released && r.settled === undefined) r.settled = billedSeconds;
+  }
+  async release(id: string): Promise<void> {
+    const r = this.reservations.get(id);
+    if (r && r.settled === undefined) r.released = true;
+  }
+  /** A copied reservation, for inspection by a single-process host. */
+  get(id: string): { runId: string; maxSeconds: number; metered: number; settled?: number; released: boolean } | undefined {
+    const r = this.reservations.get(id);
+    return r ? { ...r } : undefined;
+  }
+  async forget(runId: string): Promise<void> {
+    for (const [id, r] of this.reservations) if (r.runId === runId) this.reservations.delete(id);
   }
 }
