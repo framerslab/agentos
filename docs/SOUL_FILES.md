@@ -67,6 +67,20 @@ The LLM folds new conversation into pages when memory consolidates: a
 and `agent.memory.compileWiki()` triggers it mid-session. Merges integrate new facts
 rather than clobbering human edits. The runtime does not version the pages.
 
+A page's id is its path under `memory/` without `.md`, with `/` between folders:
+`entities/johnny` is `memory/entities/johnny.md`. An id is one or more names joined
+by `/`. No name is empty or starts with a dot, so `.` and `..` are never names; the
+id holds no backslash and no control character, a NUL byte among them; and it is at
+most 512 characters. The store checks every id against this rule, and checks that
+the resolved file is inside `memory/`, before it reads or writes anything.
+`readPage` and `writePage` throw an `InvalidWikiPageIdError` for any other id,
+`read_memory_page` answers one with an error result whose `details.code` is
+`INVALID_WIKI_PAGE_ID`, and a compile skips a cluster assignment whose page id is
+refused and reports it in the result's `conflicts`. `isWikiPageId` tells whether an
+id has this form. A file whose path makes no valid id, such as any file in a folder
+whose name starts with a dot (`.meta/`, `.store/`), is not a page: the store does
+not list or index it.
+
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
 and is left untouched on disk.
 
