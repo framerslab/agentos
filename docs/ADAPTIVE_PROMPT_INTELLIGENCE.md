@@ -43,7 +43,7 @@ const support = agent({
 });
 ```
 
-`agent()` without `runtime: 'gmi'` and `agency()` create no GMI ([GMIs](./GMI.md)), so none of this runs on their sessions.
+`agent()` without `runtime: 'gmi'` creates no GMI ([GMIs](./GMI.md)), so none of this runs on its sessions. Under `agency()`, a roster member is a GMI only when its config sets `runtime: 'gmi'` or the roster holds an agent built that way, and the strategies call its `generate()` or `stream()`, which run the `'light'` profile: no sentiment tracking and no metaprompts ([Multi-agent work](./GMI.md#multi-agent-work)).
 
 ## What's actually adaptive
 
@@ -626,7 +626,7 @@ The executor checks triggers at the end of a turn, after the regular completion 
 ## Further reading
 
 - [Generalized Mind Instances (GMIs)](/architecture/gmi) for the coordinator class that owns this whole loop.
-- [HEXACO Personality](/features/hexaco-personality) for the trait model the drift mechanism mutates.
+- [HEXACO Personality](/features/hexaco-personality) for the trait model that `adapt_personality` changes and the drift mechanism computes proposals for.
 - [Cognitive Memory](/features/cognitive-memory) for the eight mechanisms that read the trait values the memory manager is configured with.
 - [Emergent Capabilities](/features/emergent-capabilities) for the runtime layer that exposes `adapt_personality` and the rest of the emergent tools.
 - [Human-in-the-Loop (HITL)](/features/human-in-the-loop) for adding approval gates around emergent mutations like trait adjustments.
@@ -645,7 +645,7 @@ The executor checks triggers at the end of a turn, after the regular completion 
 
 ### Personality structure
 
-- Ashton, M. C., & Lee, K. (2007). [*Empirical, theoretical, and practical advantages of the HEXACO model of personality structure.*](https://doi.org/10.1177/1088868306294907) *Personality and Social Psychology Review*, 11(2), 150-166. The six-factor model both the `AdaptPersonalityTool` and `PersonaDriftMechanism` mutate.
+- Ashton, M. C., & Lee, K. (2007). [*Empirical, theoretical, and practical advantages of the HEXACO model of personality structure.*](https://doi.org/10.1177/1088868306294907) *Personality and Social Psychology Review*, 11(2), 150-166. The six-factor model whose traits the `AdaptPersonalityTool` changes and the `PersonaDriftMechanism` computes proposals for.
 
 ### Agent self-improvement and reflection
 

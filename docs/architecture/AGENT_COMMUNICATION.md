@@ -53,19 +53,19 @@ const targetAgentId = this.routingConfig.enableLoadBalancing
 | **Exactly-once** | No | No transaction support |
 | **Message persistence** | Limited | In-memory history of the last 100 messages per agent (`maxHistoryPerAgent`) |
 
-Nothing retries on its own. `retryDelivery(messageId)` re-sends a failed delivery from the target's history when the host calls it; a `publishToTopic()` message is not kept in the history, so it cannot be re-sent. The `routingConfig.maxRetries` check (default 3) reads the retry count on the message's stored status, and a re-send that fails stores a new failed status whose count is 0, so the check stops a retry only when `maxRetries` is 0. A host that wants a limit counts its own retries. `acknowledgeMessage(messageId, agentId)` marks a delivered message `acknowledged`. The bus does not read `defaultTtlMs`, `retryDelayMs` or `enableRoleRouting` from its routing config, nor `expiresAt` or `requiresAck` on a message: messages do not expire.
+Nothing retries on its own. `retryDelivery(messageId)` re-sends a failed delivery from the target's history when the host calls it; a `publishToTopic()` message is not kept in the history, so it cannot be re-sent. The `routingConfig.maxRetries` check (default 3) reads the retry count on the message's stored status, which `retryDelivery()` raises by one before it re-sends, and a re-send that fails stores a new failed status whose count is 0. So the check refuses a retry when `maxRetries` is 0 or less, or when `maxRetries` re-sends of the message have started since its last delivery attempt finished; it never refuses re-sends made one after another, each awaited. A host that wants a limit counts its own retries. `acknowledgeMessage(messageId, agentId)` marks a delivered message `acknowledged`. The bus does not read `defaultTtlMs`, `retryDelayMs` or `enableRoleRouting` from its routing config, nor `expiresAt` or `requiresAck` on a message: messages do not expire.
 
 ### Priority System
 
 Four-tier priority: `low` < `normal` < `high` < `urgent`
 
 - Used for subscription filtering (`minPriority` option)
-- Messages delivered FIFO regardless of priority (no reordering)
+- Priority does not change delivery order: each send runs its handlers when it is called, and there is no queue to reorder
 - Default: `'normal'` if not specified
 
 ### Message Ordering
 
-- **Per-agent FIFO**: Strict ordering per subscription
+- **No per-agent queue**: each send runs the matching handlers when it is called, with no queue or lock per agent. A host that awaits each send before the next gets its messages handled in send order; sends that overlap interleave, so a handler can receive a later message before it has finished an earlier one, and the sends can complete out of order
 - **No global ordering**: Independent delivery per agent
 - **Threading**: Optional `threadId` and `inReplyTo` fields for conversation tracking
 

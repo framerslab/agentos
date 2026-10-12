@@ -186,7 +186,7 @@ flowchart TB
         I2["IngestRouter<br/><i>kind classifier</i>"]:::process
         I3["Memory store + archive + graph"]:::data
         I4["ConsolidationLoop<br/><i>Memory facade: prune, merge, strengthen,<br/>compact, re-index; derive needs an LLM invoker,<br/>which the facade does not pass</i>"]:::process
-        I5["ConsolidationPipeline<br/><i>CognitiveMemoryManager: decay sweep; replay,<br/>schemas and conflicts with a graph; spaced repetition;<br/>the 8 mechanisms' hooks only with cognitiveMechanisms</i>"]:::process
+        I5["ConsolidationPipeline<br/><i>CognitiveMemoryManager: decay sweep; replay and<br/>conflicts with a graph; schemas with a graph and an<br/>LLM invoker; spaced repetition; temporal gist, source<br/>decay and emotion regulation with cognitiveMechanisms</i>"]:::process
         I1 --> I2 --> I3
         I3 -. consolidate or memory_reflect .-> I4
         I3 -. hourly timer by default .-> I5
