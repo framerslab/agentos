@@ -16,6 +16,7 @@ import { transferStyle, type TransferStyleOptions } from '../transferStyle.js';
 import { clearDefaultProvider } from '../runtime/global-default.js';
 import { registerImageProviderFactory, unregisterImageProviderFactory } from '../../io/media/images/index.js';
 import { ReplicateImageProvider } from '../../io/media/images/providers/ReplicateImageProvider.js';
+import { bufferToBlobPart } from '../../io/media/images/blobPart.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -174,7 +175,9 @@ afterEach(() => {
 
 /** A multipart request's form, read with the platform's parser. */
 function formOf(request: Received): Promise<FormData> {
-  return new Response(request.body, { headers: { 'content-type': String(request.headers['content-type']) } }).formData();
+  return new Response(bufferToBlobPart(request.body), {
+    headers: { 'content-type': String(request.headers['content-type']) },
+  }).formData();
 }
 
 /** A JSON request's body. */
@@ -353,7 +356,15 @@ describe('transferStyle against the providers', () => {
   describe('with no provider named', () => {
     const style: TransferStyleOptions = { image: SOURCE, styleReference: STYLE_JPEG, prompt: 'Restyle it.' };
 
-    it.each([
+    /** How each provider's first request begins. */
+    const firstRequest: Record<string, (path: string) => boolean> = {
+      replicate: (path) => path.startsWith('/models/'),
+      fal: (path) => path.startsWith('/fal-ai/'),
+      stability: (path) => path.startsWith('/v2beta/'),
+      openai: (path) => path === '/images/edits',
+    };
+
+    it.each<[string[], string]>([
       [['REPLICATE_API_TOKEN', 'FAL_API_KEY', 'STABILITY_API_KEY', 'OPENAI_API_KEY'], 'replicate'],
       [['FAL_API_KEY', 'STABILITY_API_KEY', 'OPENAI_API_KEY'], 'fal'],
       [['STABILITY_API_KEY', 'OPENAI_API_KEY'], 'stability'],
@@ -365,15 +376,7 @@ describe('transferStyle against the providers', () => {
       const result = await transferStyle({ ...style, baseUrl: origin });
 
       expect(result.provider).toBe(expected);
-      const first = received[0].path;
-      expect(
-        {
-          replicate: first.startsWith('/models/'),
-          fal: first.startsWith('/fal-ai/'),
-          stability: first.startsWith('/v2beta/'),
-          openai: first === '/images/edits',
-        }[expected as string],
-      ).toBe(true);
+      expect(firstRequest[expected](received[0].path)).toBe(true);
     });
 
     it('passes over a provider whose factory is not registered', async () => {
