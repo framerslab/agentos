@@ -152,6 +152,8 @@ const { text: local } = await generateText({
 
 All high-level functions support `apiKey`: `generateText`, [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts), `generateObject`, [`streamObject`](https://github.com/framerslab/agentos/blob/master/src/api/streamObject.ts), `generateImage`, `generateVideo`, `generateMusic`, `generateSFX`, `embedText`, [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), and [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts). `performOCR` accepts `apiKey` but does not pass it on: its cloud tier reads the provider's environment variable.
 
+A key or base URL a call passes goes to the provider the call names, and two calls that would send it elsewhere are refused before any request: a `model` whose `provider:` prefix names another provider than `provider` (the prefix wins, so the key would go to it), and an image call (`generateImage`, `editImage`, `upscaleImage`, `variateImage`, `transferStyle`) that names no provider, whose provider detection would pick from the environment. A call's own key also has its own health record: a tenant's revoked key opens the provider's breaker for the calls on that key, and calls on other keys go on. AgentOS keeps an initialized provider manager per key for reuse, at most 64, dropping the one used least recently.
+
 ---
 
 ## Core Concepts

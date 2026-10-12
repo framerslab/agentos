@@ -766,7 +766,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         const provider = resolution.providerManager.getProvider(resolution.providerId);
         if (!provider) {
           const error = Object.assign(new Error(`Provider '${resolution.providerId}' is not available.`), { name: 'ProviderInitializationError' });
-          globalLLMProviderHealth.recordFailure((resolution.healthId ?? resolution.providerId), error);
+          globalLLMProviderHealth.recordFailure(resolution.healthId ?? resolution.providerId, error);
           finish(failed(error, undefined));
           return;
         }
@@ -780,7 +780,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
             // hop and says nothing about the provider's health (as in streamText).
             const aborted = chunk.error.type === 'abort';
             const error = errorFromChunk(chunk.error);
-            if (!aborted) globalLLMProviderHealth.recordFailure((resolution.healthId ?? resolution.providerId), error);
+            if (!aborted) globalLLMProviderHealth.recordFailure(resolution.healthId ?? resolution.providerId, error);
             if (!delivered) {
               const usage = billedUsage(buffer, error, chunk.usage);
               finish(aborted ? failed(error, usage, false) : failed(error, usage));
@@ -815,7 +815,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         finish({ kind: 'delivered' });
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        globalLLMProviderHealth.recordFailure((resolution.healthId ?? resolution.providerId), error);
+        globalLLMProviderHealth.recordFailure(resolution.healthId ?? resolution.providerId, error);
         if (!delivered) {
           finish(failed(error, billedUsage(buffer, error)));
           return;
