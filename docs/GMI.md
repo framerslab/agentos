@@ -16,7 +16,7 @@ GMIs serve the full runtime's sessions, and, with `runtime: 'gmi'` (or [`gmi()`]
 | Sentiment tracking and metaprompts | Yes | With `cognition: 'full'` or a `CognitionConfig` that turns them on | No |
 | Long-term memory | A cognitive memory manager, when `gmiManagerConfig.cognitiveMemoryFactory` supplies one | A cognitive memory manager built from `memory`, one per agent; or a `memoryProvider` you pass in | A `memoryProvider` you pass in |
 | Guardrails, RAG, HITL, channels, emergent tools | Run by the runtime | Accepted without being applied, with a warning; `voice`, `avatar`, `channels` and `budget` throw | `agent()` accepts them without applying them and logs a warning ([capability contract](https://github.com/framerslab/agentos/blob/master/src/api/runtime/capabilityContract.ts)); `agency()` applies HITL approvals and, on `hierarchical`, emergent specialists at the agency level, reports its guardrail ids as not enforced, adds no RAG context and wires no channels ([Agencies](./AGENCIES.md)) |
-| Output | A stream of `AgentOSResponse` chunks | `GenerateTextResult` and `StreamTextResult`, as `agent()` returns them | `GenerateTextResult` from `generate()` and `send()`, a `StreamTextResult` (`textStream`, `fullStream`) from `stream()`; `agency().stream()` returns an `AgencyStreamResult` |
+| Output | A stream of `AgentOSResponse` chunks | `GenerateTextResult` and `StreamTextResult`, as `agent()` returns them | `agent()`: a `GenerateTextResult` from `generate()` and `send()`, a `StreamTextResult` (`textStream`, `fullStream`) from `stream()`. `agency()`: a result with `text`, `agentCalls` and `usage` from `generate()` and `send()`, an `AgencyStreamResult` from `stream()` |
 
 ## What a GMI adds over a plain agent
 
