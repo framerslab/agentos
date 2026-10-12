@@ -978,7 +978,10 @@ export class GeminiProvider implements IProvider {
           chunk = JSON.parse(rawData) as GeminiResponse;
         } catch {
           // Malformed JSON — skip
-          console.warn('GeminiProvider: Could not parse SSE event JSON:', rawData);
+          console.warn('GeminiProvider: Could not parse SSE event JSON:', {
+            eventBytes: new TextEncoder().encode(rawData).byteLength,
+            error: 'Invalid stream JSON.',
+          });
           continue;
         }
 

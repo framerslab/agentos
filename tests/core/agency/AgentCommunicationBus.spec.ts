@@ -569,4 +569,81 @@ describe('AgentCommunicationBus', () => {
       expect(bus.getStatistics().activeSubscriptions).toBe(1);
     });
   });
+
+  describe('retryDelivery', () => {
+    const question = {
+      type: 'question' as const,
+      fromAgentId: 'agent-2',
+      content: 'What is the status?',
+      priority: 'normal' as const,
+    };
+
+    /** Subscribes `agentId` with a handler that throws on every message, so every delivery fails. */
+    function subscribeFailingHandler(target: AgentCommunicationBus, agentId: string) {
+      const handler = vi.fn(() => {
+        throw new Error('handler unavailable');
+      });
+      target.subscribe(agentId, handler);
+      return handler;
+    }
+
+    it('refuses the retry after maxRetries failed retries and counts them on the status', async () => {
+      const retrying = new AgentCommunicationBus({ routingConfig: { maxRetries: 2 } });
+      const handler = subscribeFailingHandler(retrying, 'agent-1');
+
+      const sent = await retrying.sendToAgent('agent-1', question);
+      expect(sent).toMatchObject({ status: 'failed', failureReason: 'Delivery failed', retryCount: 0 });
+
+      // Each call returns the message's stored status, and the next retry
+      // raises the count on that same object, so read each count as its call
+      // returns.
+      const firstCount = (await retrying.retryDelivery(sent.messageId)).retryCount;
+      const secondCount = (await retrying.retryDelivery(sent.messageId)).retryCount;
+
+      await expect(retrying.retryDelivery(sent.messageId)).rejects.toThrow(
+        `Max retries exceeded for message ${sent.messageId}`,
+      );
+      // The send and two retries reached the handler; the refused retry sent nothing.
+      expect(handler).toHaveBeenCalledTimes(3);
+      expect([firstCount, secondCount]).toEqual([1, 2]);
+      expect(await retrying.getDeliveryStatus(sent.messageId)).toMatchObject({
+        status: 'failed',
+        retryCount: 2,
+      });
+    });
+
+    it('keeps the retry count on the status of a retry that delivers', async () => {
+      const retrying = new AgentCommunicationBus({ routingConfig: { maxRetries: 2 } });
+      let handlerUp = false;
+      retrying.subscribe('agent-1', () => {
+        if (!handlerUp) throw new Error('handler unavailable');
+      });
+
+      const sent = await retrying.sendToAgent('agent-1', question);
+      handlerUp = true;
+      const delivered = await retrying.retryDelivery(sent.messageId);
+
+      expect(delivered).toMatchObject({ status: 'delivered', retryCount: 1 });
+      expect(await retrying.getDeliveryStatus(sent.messageId)).toMatchObject({
+        status: 'delivered',
+        retryCount: 1,
+      });
+    });
+
+    it('refuses every retry when maxRetries is 0', async () => {
+      const retrying = new AgentCommunicationBus({ routingConfig: { maxRetries: 0 } });
+      const handler = subscribeFailingHandler(retrying, 'agent-1');
+
+      const sent = await retrying.sendToAgent('agent-1', question);
+
+      await expect(retrying.retryDelivery(sent.messageId)).rejects.toThrow(
+        `Max retries exceeded for message ${sent.messageId}`,
+      );
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(await retrying.getDeliveryStatus(sent.messageId)).toMatchObject({
+        status: 'failed',
+        retryCount: 0,
+      });
+    });
+  });
 });

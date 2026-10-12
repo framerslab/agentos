@@ -1,3 +1,4 @@
+import type { TranscriptInput } from '../../../voice-pipeline/types.js';
 import type { MeetingEvent, MeetingEventType, MeetingPlatform, MeetingRunRecord, MeetingRunState, TranscriptTurn } from '../types.js';
 
 /** Thrown by a store that refuses content for a run behind the fence. */
@@ -25,16 +26,22 @@ export class DuplicateIdempotencyKeyError extends Error {
 export interface RunFilter {
   /** Only this owner's runs. */
   ownerRef?: string;
-  /** Only runs in one of these states. */
+  /** Only runs in one of these states; an empty array applies no state filter. */
   states?: readonly MeetingRunState[];
   /** Only runs requested at or after this time, in milliseconds. */
   since?: number;
-  /** At most this many runs. */
+  /** At most this many runs; default 500, zero returns no rows. */
   limit?: number;
 }
 
-/** The run's row. An implementation seals `meetingUrl` at rest. */
+/**
+ * The run's row. An implementation keeps every field of it, the manager's timers (`leaveCommandedAt`,
+ * `captureSuspendedAt`, `aloneSince`) among them: the manager keeps nothing about a run in process. An implementation
+ * seals `meetingUrl` at rest.
+ */
 export interface IRunStore {
+  /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
+  forget?(runId: string): Promise<void>;
   /**
    * Adds a new run. A run id that exists is an error, and so is an idempotency key the owner already used: that insert
    * stores nothing and rejects with {@link DuplicateIdempotencyKeyError}, so of two sends racing with one key only one run
@@ -43,11 +50,11 @@ export interface IRunStore {
   insert(run: MeetingRunRecord): Promise<void>;
   /** The run, or undefined when there is none. */
   get(runId: string): Promise<MeetingRunRecord | undefined>;
-  /** Applies the patch when the run is in one of `expectState` (any state when absent); returns the row after, or undefined when the state did not match. */
+  /** Atomically re-reads the row, checks `expectState` and applies the patch; undefined on a mismatch. Postgres holds the shared run anchor and sets the content fence for a purge in the same transaction. In-memory comparison and update have no await between them. */
   update(runId: string, patch: Partial<MeetingRunRecord>, expectState?: MeetingRunState | readonly MeetingRunState[]): Promise<MeetingRunRecord | undefined>;
   /** Rewrites the whole row (the content-free form at the end of a purge). */
   replace(run: MeetingRunRecord): Promise<void>;
-  /** The runs the filter selects, newest first. */
+  /** The runs the filter selects, requestedAt descending, then runId ascending. Default limit 500; states: [] applies no state filter. */
   list(filter: RunFilter): Promise<MeetingRunRecord[]>;
   /** The run an owner sent with this idempotency key, if there is one (there is at most one: see `insert`). */
   findByIdempotencyKey(ownerRef: string, key: string): Promise<MeetingRunRecord | undefined>;
@@ -73,7 +80,9 @@ export interface MeetingJob {
 
 /** Delayed dispatch with leases. `lease` is atomic: two takers never hold one job. */
 export interface IJobStore {
-  /** Adds the run's job, due at `dispatchAt`. */
+  /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
+  forget?(runId: string): Promise<void>;
+  /** Adds the run's job, due at `dispatchAt`; for an existing job moves only dispatchAt, preserving the lease, worker, dispatched and cancelled fields. */
   schedule(job: { runId: string; dispatchAt: number }): Promise<void>;
   /** The next due, uncancelled, undispatched job whose lease is absent or expired, leased to `holder` until `now + ttlMs`. */
   lease(holder: string, now: number, ttlMs: number): Promise<MeetingJob | undefined>;
@@ -102,8 +111,12 @@ export interface IJobStore {
 
 /** A run's transcript turns. Behind the fence it refuses new turns; a purge removes the turns and keeps the fence. */
 export interface ITranscriptStore {
-  /** Adds a turn; rejects with {@link FencedError} once the run is fenced. */
+  /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
+  forget?(runId: string): Promise<void>;
+  /** Adds an already numbered turn; a repeated (runId, seq) keeps the first copy. Rejects with {@link FencedError} once fenced. */
   append(turn: TranscriptTurn): Promise<void>;
+  /** Assigns the next seq and turnId for this run and stores the turn atomically, under the same anchor as the fence. Continues after the largest stored or allocated seq across sink instances. Optional for existing store implementers; required by MeetingTranscriptSink, which checks it at construction. */
+  appendNext?(turn: TranscriptInput): Promise<TranscriptTurn>;
   /** The run's turns after `fromSeq`, in order, at most `limit` of them. */
   read(runId: string, fromSeq: number, limit?: number): Promise<TranscriptTurn[]>;
   /** The fence: from now on the run takes no new turn. */
@@ -116,6 +129,8 @@ export interface ITranscriptStore {
 
 /** A run's events: stable ids, a sequence number per run, and payloads a purge removes. */
 export interface IEventStore {
+  /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
+  forget?(runId: string): Promise<void>;
   /** Inserts with the next sequence number of the run; a repeated `eventId` is not inserted and answers the existing sequence. Behind the fence a content event is stored without its payload, marked `purged`. */
   append(event: Omit<MeetingEvent, 'seq'>): Promise<{ inserted: boolean; seq: number }>;
   /** The run's events after `fromSeq`, in sequence order, at most `limit` of them. */
@@ -154,13 +169,15 @@ export interface OutboxDelivery {
 
 /** Outbound deliveries: retried with backoff for a day, replayable, content-free after a purge. */
 export interface IOutbox {
+  /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
+  forget?(runId: string): Promise<void>;
   /**
-   * Adds a pending delivery, due at `now`. After `purgeContent` for the run, a delivery of a content event (a type in
+   * Adds a pending delivery, due at `now`; a repeated id preserves the first delivery and its retry state. After `purgeContent` for the run, a delivery of a content event (a type in
    * `CONTENT_EVENT_TYPES`) is not stored: the purge is the outbox's fence. A delivery of any other type (`bot:left`,
    * `bot:purged`, `bot:done` and the rest) is stored.
    */
   enqueue(delivery: Pick<OutboxDelivery, 'id' | 'runId' | 'destinationRef' | 'eventId' | 'type' | 'payload'>, now: number): Promise<void>;
-  /** The pending deliveries due at `now`, at most `limit` of them. */
+  /** Pending deliveries due at now, ordered by nextAt then id ascending; default limit 100. */
   due(now: number, limit?: number): Promise<OutboxDelivery[]>;
   /** Records that the destination took the delivery. */
   markDelivered(id: string): Promise<void>;
@@ -175,7 +192,7 @@ export interface IOutbox {
    * delivery (see `enqueue`).
    */
   purgeContent(runId: string): Promise<void>;
-  /** Every delivery of the run, whatever its state. */
+  /** Every delivery of the run, whatever its state, ordered by nextAt then id ascending. */
   listByRun(runId: string): Promise<OutboxDelivery[]>;
 }
 
@@ -190,6 +207,8 @@ export type ReserveResult =
  * repeated call after a success changes nothing.
  */
 export interface IEntitlementHook {
+  /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
+  forget?(runId: string): Promise<void>;
   /** Reserves at most `maxSeconds` for a run about to be made; the answer's `maxSeconds` is what it covers, and the run's limit is cut to it. A refusal sends no bot. */
   reserve(input: { ownerRef: string; runId: string; platform: MeetingPlatform; maxSeconds: number }): Promise<ReserveResult>;
   /** A scheduled run, at dispatch: still paid, still has the hours. */

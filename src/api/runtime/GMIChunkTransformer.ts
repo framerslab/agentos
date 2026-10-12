@@ -394,8 +394,7 @@ export class GMIChunkTransformer {
         break;
       default:
         console.warn(
-          `AgentOSOrchestrator: Unhandled GMIOutputChunkType '${gmiChunk.type}' on stream ${agentOSStreamId}. Content:`,
-          gmiChunk.content,
+          `AgentOSOrchestrator: Unhandled GMIOutputChunkType '${gmiChunk.type}'.`,
         );
     }
   }

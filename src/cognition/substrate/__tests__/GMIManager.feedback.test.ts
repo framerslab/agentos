@@ -84,6 +84,23 @@ describe('GMIManager.processUserFeedback', () => {
     await harness.gmi.shutdown();
   });
 
+  it('logs feedback fields and text length without feedback content', async () => {
+    const sentinel = 'sentinel-words-7731';
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await harness.manager.processUserFeedback('user-1', 'session-1', persona.id, {
+        text: sentinel, correctedContent: sentinel,
+      });
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining('User: user-1, Session: session-1'),
+        { fields: ['text', 'correctedContent'], textLength: sentinel.length },
+      );
+      expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it.each([
     {
       label: 'a positive rating label',

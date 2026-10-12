@@ -36,6 +36,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import type {
+  AudioFrame,
   IStreamTransport,
   EncodedAudioChunk,
   ClientTextMessage,
@@ -69,6 +70,8 @@ export interface LiveKitStreamTransportOptions {
    * least one sample at `sampleRate`; rtc-node's default when omitted.
    */
   frameSizeMs?: number;
+  /** While the consumer has asked for a pause, frames are held up to this much audio; beyond it the oldest are dropped and a `gap` is emitted on resume. Default 2000. */
+  bufferMs?: number;
   /** The `@livekit/rtc-node` module the host imports; imported on first use when omitted. */
   rtc?: LiveKitRtcModule;
 }
@@ -93,6 +96,7 @@ function closeTextReader(reader: LiveKitTextStreamReaderLike): void {
  * | Event       | Payload                   | Description                                   |
  * |-------------|---------------------------|-----------------------------------------------|
  * | `'audio'`   | `AudioFrame`              | The participant's audio, mono Float32.        |
+ * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames. |
  * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic. |
  * | `'close'`   | *(none)*                  | The transport closed (or the room disconnected). |
  * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, or a failure to read audio (the peer missing among them). |
@@ -116,6 +120,11 @@ export class LiveKitStreamTransport extends EventEmitter implements IStreamTrans
   private _state: 'connecting' | 'open' | 'closing' | 'closed' = 'open';
   private readonly topic: string;
   private readonly source: LiveKitRoomAudioSource;
+  private paused = false;
+  private readonly held: AudioFrame[] = [];
+  private heldMs = 0;
+  private droppedMs = 0;
+  private readonly bufferMs: number;
   /** The participant's text streams being read; {@link close} closes them. */
   private readonly readers = new Set<LiveKitTextStreamReaderLike>();
 
@@ -128,6 +137,19 @@ export class LiveKitStreamTransport extends EventEmitter implements IStreamTrans
   constructor(private readonly options: LiveKitStreamTransportOptions) {
     super();
     this.topic = options.topic ?? LIVEKIT_TRANSPORT_DEFAULT_TOPIC;
+    this.bufferMs = options.bufferMs ?? 2_000;
+    this.on('pause', () => {
+      this.paused = true;
+    });
+    this.on('resume', () => {
+      this.paused = false;
+      if (this.droppedMs > 0) {
+        this.emit('gap', { droppedMs: this.droppedMs, reason: 'paused' });
+        this.droppedMs = 0;
+      }
+      for (const f of this.held.splice(0)) this.emit('audio', f);
+      this.heldMs = 0;
+    });
     // The source checks the options before the topic is taken, so a refused
     // option leaves the topic free; until it is read, the source holds nothing.
     this.source = new LiveKitRoomAudioSource({
@@ -201,7 +223,19 @@ export class LiveKitStreamTransport extends EventEmitter implements IStreamTrans
   private async pump(): Promise<void> {
     try {
       for await (const frame of this.source) {
-        this.emit('audio', frame);
+        if (!this.paused) {
+          this.emit('audio', frame);
+          continue;
+        }
+        const ms = (frame.samples.length / frame.sampleRate) * 1000;
+        this.held.push(frame);
+        this.heldMs += ms;
+        while (this.heldMs > this.bufferMs && this.held.length) {
+          const old = this.held.shift()!;
+          const oldMs = (old.samples.length / old.sampleRate) * 1000;
+          this.heldMs -= oldMs;
+          this.droppedMs += oldMs;
+        }
       }
     } catch (err) {
       this.emitErrorSafe(err instanceof Error ? err : new Error(String(err)));

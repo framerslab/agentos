@@ -541,79 +541,97 @@ export class OllamaProvider implements IProvider {
     };
     abortSignal?.addEventListener('abort', abortHandler, { once: true });
 
-    try {
+    // Network chunks can split both JSON lines and UTF-8 code points.
+    async function* readJsonLines(): AsyncGenerator<string> {
+      const decoder = new TextDecoder();
+      let remainder = '';
       for await (const chunk of stream) {
+        if (abortSignal?.aborted) {
+          yield ''; // Let the consumer emit its terminal abort chunk.
+          return;
+        }
+        remainder += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
+        const lines = remainder.split('\n');
+        remainder = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.trim()) yield line;
+        }
+      }
+      remainder += decoder.decode();
+      if (abortSignal?.aborted) yield '';
+      else if (remainder.trim()) yield remainder;
+    }
+
+    try {
+      for await (const jsonObjStr of readJsonLines()) {
         if (abortSignal?.aborted) {
           yield { id: `ollama-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted by caller', type: 'abort' }, isFinal: true };
           break;
         }
-        const chunkString = chunk.toString();
-        // Ollama stream sends multiple JSON objects, newline-separated.
-        const jsonObjects = chunkString.split('\n').filter(Boolean);
+        try {
+          const parsedChunk = JSON.parse(jsonObjStr) as OllamaChatResponseChunk;
+          responseId = `ollama-stream-${parsedChunk.model || modelId}-${new Date(parsedChunk.created_at).getTime()}`;
 
-        for (const jsonObjStr of jsonObjects) {
-          try {
-            const parsedChunk = JSON.parse(jsonObjStr) as OllamaChatResponseChunk;
-            responseId = `ollama-stream-${parsedChunk.model || modelId}-${new Date(parsedChunk.created_at).getTime()}`;
-
-            if (parsedChunk.error) {
-                yield {
-                    id: responseId, object: 'chat.completion.chunk', created: new Date(parsedChunk.created_at).getTime()/1000,
-                    modelId: parsedChunk.model || modelId, choices: [], isFinal: true,
-                    error: { message: parsedChunk.error, type: 'ollama_api_error' }
-                };
-                return; // Terminate stream on error
-            }
-
-            const deltaContent = parsedChunk.message?.content || "";
-            if (deltaContent) accumulatedContent += deltaContent;
-
-            // Handle tool_calls in stream chunks
-            const chunkToolCalls = parsedChunk.message?.tool_calls;
-            const normalizedChunkToolCalls = this.normalizeToolCalls(chunkToolCalls);
-            const hasChunkToolCalls = normalizedChunkToolCalls.length > 0;
-            if (hasChunkToolCalls) {
-              accumulatedToolCalls.push(...normalizedChunkToolCalls);
-            }
-
-            const isFinalChunk = parsedChunk.done;
-            if (isFinalChunk) {
-              const promptTokens = parsedChunk.prompt_eval_count || 0;
-              const completionTokens = parsedChunk.eval_count || 0;
-              finalUsage = {
-                promptTokens,
-                completionTokens,
-                totalTokens: promptTokens + completionTokens,
-                costUSD: 0,
+          if (parsedChunk.error) {
+              yield {
+                  id: responseId, object: 'chat.completion.chunk', created: new Date(parsedChunk.created_at).getTime()/1000,
+                  modelId: parsedChunk.model || modelId, choices: [], isFinal: true,
+                  error: { message: parsedChunk.error, type: 'ollama_api_error' }
               };
-            }
-
-            const hasAnyToolCalls = accumulatedToolCalls.length > 0;
-
-            yield {
-              id: responseId,
-              object: 'chat.completion.chunk',
-              created: new Date(parsedChunk.created_at).getTime() / 1000,
-              modelId: parsedChunk.model || modelId,
-              choices: parsedChunk.message ? [{
-                index: 0,
-                message: {
-                  role: parsedChunk.message.role || 'assistant',
-                  content: accumulatedContent,
-                  ...(isFinalChunk && hasAnyToolCalls && { tool_calls: accumulatedToolCalls }),
-                },
-                finishReason: isFinalChunk ? (hasAnyToolCalls ? 'tool_calls' : 'stop') : null,
-              }] : [],
-              responseTextDelta: deltaContent,
-              isFinal: isFinalChunk,
-              usage: isFinalChunk ? finalUsage : undefined,
-            };
-
-            if (isFinalChunk) return;
-          } catch (parseError: unknown) {
-            console.warn('OllamaProvider: Could not parse stream chunk JSON:', jsonObjStr, parseError);
-            // Optionally yield an error chunk or decide to continue
+              return; // Terminate stream on error
           }
+
+          const deltaContent = parsedChunk.message?.content || "";
+          if (deltaContent) accumulatedContent += deltaContent;
+
+          // Handle tool_calls in stream chunks
+          const chunkToolCalls = parsedChunk.message?.tool_calls;
+          const normalizedChunkToolCalls = this.normalizeToolCalls(chunkToolCalls);
+          const hasChunkToolCalls = normalizedChunkToolCalls.length > 0;
+          if (hasChunkToolCalls) {
+            accumulatedToolCalls.push(...normalizedChunkToolCalls);
+          }
+
+          const isFinalChunk = parsedChunk.done;
+          if (isFinalChunk) {
+            const promptTokens = parsedChunk.prompt_eval_count || 0;
+            const completionTokens = parsedChunk.eval_count || 0;
+            finalUsage = {
+              promptTokens,
+              completionTokens,
+              totalTokens: promptTokens + completionTokens,
+              costUSD: 0,
+            };
+          }
+
+          const hasAnyToolCalls = accumulatedToolCalls.length > 0;
+
+          yield {
+            id: responseId,
+            object: 'chat.completion.chunk',
+            created: new Date(parsedChunk.created_at).getTime() / 1000,
+            modelId: parsedChunk.model || modelId,
+            choices: parsedChunk.message ? [{
+              index: 0,
+              message: {
+                role: parsedChunk.message.role || 'assistant',
+                content: accumulatedContent,
+                ...(isFinalChunk && hasAnyToolCalls && { tool_calls: accumulatedToolCalls }),
+              },
+              finishReason: isFinalChunk ? (hasAnyToolCalls ? 'tool_calls' : 'stop') : null,
+            }] : [],
+            responseTextDelta: deltaContent,
+            isFinal: isFinalChunk,
+            usage: isFinalChunk ? finalUsage : undefined,
+          };
+
+          if (isFinalChunk) return;
+        } catch {
+          console.warn('OllamaProvider: Could not parse stream chunk JSON:', {
+            eventBytes: new TextEncoder().encode(jsonObjStr).byteLength,
+            error: 'Invalid stream JSON.',
+          });
+          // Optionally yield an error chunk or decide to continue
         }
       }
     } catch (streamError: unknown) {
@@ -626,9 +644,9 @@ export class OllamaProvider implements IProvider {
         error: { message, type: 'STREAM_PROCESSING_ERROR' }
       };
     } finally {
-        stream?.destroy?.();
+      stream?.destroy?.();
+      abortSignal?.removeEventListener('abort', abortHandler);
     }
-  abortSignal?.removeEventListener('abort', abortHandler);
   }
 
   /** @inheritdoc */

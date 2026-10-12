@@ -13,7 +13,7 @@ import {
   normalizeOutputFormat,
   type ReplicateImageProviderOptions,
 } from '../IImageProvider.js';
-import { imageDataUrl } from '../blobPart.js';
+import { editPartType, imageDataUrl, imageFilePart, type ImagePartType } from '../blobPart.js';
 import {
   INDEXED_IMAGE_NAMES,
   styleTransferImageTypes,
@@ -24,6 +24,22 @@ import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
 
 /** Replicate's API, the provider's base URL unless one is configured. */
 const REPLICATE_BASE_URL = 'https://api.replicate.com/v1';
+
+/**
+ * The size from which an input image goes through Replicate's Files API
+ * instead of inline. Replicate recommends a data URL "only if the file is less
+ * than 1MB" (https://replicate.com/docs/topics/predictions/input-files), and its
+ * own client uploads every file (`POST /v1/files`, the input then naming the
+ * file's `urls.get`).
+ */
+const MAX_INLINE_IMAGE_BYTES = 1_000_000;
+
+/**
+ * How long the delete of an uploaded file may take. The operation's result
+ * waits for the cleanup, so a delete that stalls is given up after this long
+ * and warned about; Replicate removes the file 24 hours after its upload.
+ */
+const DELETE_UPLOAD_TIMEOUT_MS = 10_000;
 
 /**
  * The models Replicate's style transfer runs on, FLUX.2 Pro first as the
@@ -339,7 +355,8 @@ export class ReplicateImageProvider implements IImageProvider {
    *
    * Uses `black-forest-labs/flux-fill` for inpainting (when a mask is provided)
    * or falls back to `stability-ai/sdxl` for generic img2img transforms.
-   * The source image is passed as a base64 data URL in the model input.
+   * The source image goes in the model input as a data URL of its type, or,
+   * from 1 MB, as a file uploaded to Replicate's Files API.
    *
    * @param request - Edit request with source image, prompt, and optional mask.
    * @returns Generation result with the edited image(s).
@@ -347,31 +364,37 @@ export class ReplicateImageProvider implements IImageProvider {
    * @throws {Error} When the provider is not initialised or the API fails.
    */
   async editImage(request: ImageEditRequest): Promise<ImageGenerationResult> {
-    if (!this.isInitialized) {
-      throw new Error('Replicate image provider is not initialized.');
-    }
+    return this.withInputImages((apiKey, uploads) => this.editWith(request, apiKey, uploads));
+  }
 
+  /** {@link editImage} on one key of the pool, recording the files it uploads. */
+  private async editWith(request: ImageEditRequest, apiKey: string, uploads: string[]): Promise<ImageGenerationResult> {
     const providerOptions = getImageProviderOptions<ReplicateImageProviderOptions>(
       this.providerId,
       request.providerOptions,
     );
-
-    // Convert image buffer to a base64 data URL that Replicate models accept.
-    const imageDataUrl = `data:image/png;base64,${request.image.toString('base64')}`;
-    const input: Record<string, unknown> = {
-      prompt: request.prompt,
-      image: imageDataUrl,
-      ...(providerOptions?.input ?? {}),
-    };
 
     // Choose the model based on whether inpainting is requested.
     const hasInpaintingMask = !!request.mask;
     const defaultModel = hasInpaintingMask
       ? 'black-forest-labs/flux-fill-pro'  // Flux Fill Pro for production inpainting.
       : SDXL_IMG2IMG;                     // SDXL supports generic img2img via image input.
+    const model = request.modelId || defaultModel;
+
+    // The source goes as `image` (a Kontext model's `input_image`, below), as
+    // its own type; one the caller set in providerOptions.input wins and is not
+    // uploaded.
+    const callerInput = providerOptions?.input ?? {};
+    const callerSource =
+      callerInput.image !== undefined || (model.includes('kontext') && callerInput.input_image !== undefined);
+    const input: Record<string, unknown> = {
+      prompt: request.prompt,
+      ...(callerSource ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image', apiKey, uploads) }),
+      ...callerInput,
+    };
 
     if (hasInpaintingMask) {
-      input.mask = `data:image/png;base64,${request.mask!.toString('base64')}`;
+      input.mask = await this.inputImage(request.mask!, editPartType(request.mask!), 'mask', apiKey, uploads);
     }
 
     if (request.strength !== undefined) input.strength = request.strength;
@@ -385,8 +408,6 @@ export class ReplicateImageProvider implements IImageProvider {
     if (providerOptions?.disableSafetyChecker !== undefined) {
       input.disable_safety_checker = providerOptions.disableSafetyChecker;
     }
-
-    const model = request.modelId || defaultModel;
 
     // SDXL takes the edit strength as prompt_strength and has no `strength`
     // input. A prompt_strength the caller put in providerOptions.input wins.
@@ -442,7 +463,7 @@ export class ReplicateImageProvider implements IImageProvider {
         input,
       };
       if (providerOptions?.extraBody) Object.assign(body, providerOptions.extraBody);
-      prediction = await this.createPrediction(body, waitSeconds);
+      prediction = await this.createPrediction(body, waitSeconds, apiKey);
     } else if (extraBodyVersion) {
       // Version supplied via providerOptions.extraBody.version. Build
       // the legacy body so the SHA ends up on `version` rather than
@@ -453,7 +474,7 @@ export class ReplicateImageProvider implements IImageProvider {
       };
       const { version: _v, ...rest } = providerOptions?.extraBody ?? {};
       if (Object.keys(rest).length > 0) Object.assign(body, rest);
-      prediction = await this.createPrediction(body, waitSeconds);
+      prediction = await this.createPrediction(body, waitSeconds, apiKey);
     } else {
       const slashIndex = model.indexOf('/');
       if (slashIndex === -1) {
@@ -463,10 +484,10 @@ export class ReplicateImageProvider implements IImageProvider {
       }
       const owner = model.substring(0, slashIndex);
       const name = model.substring(slashIndex + 1);
-      prediction = await this.createModelPrediction(owner, name, input, waitSeconds);
+      prediction = await this.createModelPrediction(owner, name, input, waitSeconds, apiKey);
     }
 
-    prediction = await this.finishedPrediction(prediction, 'image edit');
+    prediction = await this.finishedPrediction(prediction, 'image edit', apiKey);
 
     const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
     if (images.length === 0) {
@@ -494,20 +515,21 @@ export class ReplicateImageProvider implements IImageProvider {
    * @throws {Error} When the provider is not initialised or the API fails.
    */
   async upscaleImage(request: ImageUpscaleRequest): Promise<ImageGenerationResult> {
-    if (!this.isInitialized) {
-      throw new Error('Replicate image provider is not initialized.');
-    }
+    return this.withInputImages((apiKey, uploads) => this.upscaleWith(request, apiKey, uploads));
+  }
 
+  /** {@link upscaleImage} on one key of the pool, recording the file it uploads. */
+  private async upscaleWith(request: ImageUpscaleRequest, apiKey: string, uploads: string[]): Promise<ImageGenerationResult> {
     const providerOptions = getImageProviderOptions<ReplicateImageProviderOptions>(
       this.providerId,
       request.providerOptions,
     );
 
-    const imageDataUrl = `data:image/png;base64,${request.image.toString('base64')}`;
+    const callerInput = providerOptions?.input ?? {};
     const input: Record<string, unknown> = {
-      image: imageDataUrl,
+      ...(callerInput.image !== undefined ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image', apiKey, uploads) }),
       scale: request.scale ?? 2,
-      ...(providerOptions?.input ?? {}),
+      ...callerInput,
     };
 
     const model = request.modelId || 'nightmareai/real-esrgan';
@@ -517,7 +539,7 @@ export class ReplicateImageProvider implements IImageProvider {
     };
 
     const waitSeconds = providerOptions?.wait ?? 60;
-    const prediction = await this.finishedPrediction(await this.createPrediction(body, waitSeconds), 'image upscale');
+    const prediction = await this.finishedPrediction(await this.createPrediction(body, waitSeconds, apiKey), 'image upscale', apiKey);
 
     const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
     if (images.length === 0) {
@@ -582,9 +604,11 @@ export class ReplicateImageProvider implements IImageProvider {
    *   succeed, or its output holds no image.
    */
   async transferStyle(request: ImageStyleTransferRequest): Promise<ImageGenerationResult> {
-    if (!this.isInitialized) {
-      throw new Error('Replicate image provider is not initialized.');
-    }
+    return this.withInputImages((apiKey, uploads) => this.transferStyleWith(request, apiKey, uploads));
+  }
+
+  /** {@link transferStyle} on one key of the pool, recording the files it uploads. */
+  private async transferStyleWith(request: ImageStyleTransferRequest, apiKey: string, uploads: string[]): Promise<ImageGenerationResult> {
     const model = this.styleTransferModel(request.modelId);
     const providerOptions = getImageProviderOptions<ReplicateImageProviderOptions>(
       this.providerId,
@@ -612,7 +636,10 @@ export class ReplicateImageProvider implements IImageProvider {
     const input: Record<string, unknown> = {
       ...callerInput,
       prompt: styleTransferPrompt(request.prompt, request.strength, INDEXED_IMAGE_NAMES),
-      input_images: [imageDataUrl(request.image, types.image), imageDataUrl(request.styleImage, types.style)],
+      input_images: [
+        await this.inputImage(request.image, types.image, 'image', apiKey, uploads),
+        await this.inputImage(request.styleImage, types.style, 'style', apiKey, uploads),
+      ],
     };
     if (input.aspect_ratio === undefined) input.aspect_ratio = 'match_input_image';
     const seed = request.seed ?? providerOptions?.seed;
@@ -626,8 +653,9 @@ export class ReplicateImageProvider implements IImageProvider {
 
     const slash = model.indexOf('/');
     const prediction = await this.finishedPrediction(
-      await this.createModelPrediction(model.slice(0, slash), model.slice(slash + 1), input, providerOptions?.wait ?? 60),
+      await this.createModelPrediction(model.slice(0, slash), model.slice(slash + 1), input, providerOptions?.wait ?? 60, apiKey),
       'style transfer',
+      apiKey,
     );
 
     const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
@@ -650,16 +678,18 @@ export class ReplicateImageProvider implements IImageProvider {
    *
    * @param prediction - The prediction as created.
    * @param what - The operation's name, for the errors.
+   * @param apiKey - The key that created it, which then polls it; the pool's
+   *   next key when not given.
    * @throws {Error} When it fails, is canceled, runs with no URL to poll, or
    *   ends without a status.
    */
-  private async finishedPrediction(prediction: ReplicatePrediction, what: string): Promise<ReplicatePrediction> {
+  private async finishedPrediction(prediction: ReplicatePrediction, what: string, apiKey?: string): Promise<ReplicatePrediction> {
     let current = prediction;
     if (current.status && !['succeeded', 'failed', 'canceled'].includes(current.status)) {
       if (!current.urls?.get) {
         throw new Error(`Replicate ${what} is ${current.status} and gave no URL to poll.`);
       }
-      current = await this.pollPrediction(current.urls.get, 60_000, 1_000);
+      current = await this.pollPrediction(current.urls.get, 60_000, 1_000, apiKey);
     }
     switch (current.status) {
       case 'succeeded':
@@ -711,6 +741,103 @@ export class ReplicateImageProvider implements IImageProvider {
   }
 
   /**
+   * Runs an operation that takes input images on one key of the pool, and
+   * deletes the files it uploaded once it ends, however it ends. One key,
+   * because Replicate lets only the account that uploaded a file pass it as an
+   * input; deleted, because Replicate keeps an uploaded file for 24 hours,
+   * where it removes a prediction's own inputs after an hour.
+   *
+   * @param run - The operation, given the key and the list its uploads go on.
+   * @throws {Error} When the provider is not initialised, or as `run` throws.
+   */
+  private async withInputImages<T>(run: (apiKey: string, uploads: string[]) => Promise<T>): Promise<T> {
+    if (!this.isInitialized) {
+      throw new Error('Replicate image provider is not initialized.');
+    }
+    const apiKey = this.keyPool.next();
+    const uploads: string[] = [];
+    try {
+      return await run(apiKey, uploads);
+    } finally {
+      await this.deleteUploads(uploads, apiKey);
+    }
+  }
+
+  /**
+   * An input image as Replicate takes it: inline as a data URL of its type when
+   * it is under {@link MAX_INLINE_IMAGE_BYTES}, or when the base URL is not
+   * Replicate's (a self-hosted model has no Files API); else uploaded to the
+   * Files API and named by the file's URL.
+   *
+   * @param bytes - The image.
+   * @param type - Its format.
+   * @param name - The upload's file name, without its extension.
+   * @param apiKey - The key of the prediction the image is for.
+   * @param uploads - The operation's uploaded file URLs; an upload is added.
+   * @throws {Error} When the upload fails or answers without the file's URL.
+   */
+  private async inputImage(bytes: Buffer, type: ImagePartType, name: string, apiKey: string, uploads: string[]): Promise<string> {
+    if (bytes.byteLength < MAX_INLINE_IMAGE_BYTES || this.hasCustomEndpoint()) return imageDataUrl(bytes, type);
+    const { blob, filename } = imageFilePart(bytes, type, name);
+    const form = new FormData();
+    form.append('content', blob, filename);
+    const response = await fetch(`${this.config.baseURL}/files`, {
+      method: 'POST',
+      headers: { Authorization: `Token ${apiKey}` },
+      body: form,
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Replicate file upload failed (${response.status}): ${errorText}`);
+    }
+    const file = (await response.json()) as { urls?: { get?: unknown } };
+    if (typeof file.urls?.get !== 'string') {
+      throw new Error('Replicate file upload answered without the file URL (urls.get).');
+    }
+    uploads.push(file.urls.get);
+    return file.urls.get;
+  }
+
+  /**
+   * Deletes an operation's uploaded files (`DELETE /v1/files/{id}`, the URL
+   * the upload answered with). Only a URL under this provider's Files API is
+   * sent the key. A file that could not be deleted, or whose delete took over
+   * {@link DELETE_UPLOAD_TIMEOUT_MS}, is warned about and never fails the
+   * call; Replicate removes it 24 hours after its upload.
+   *
+   * @param uploads - The file URLs.
+   * @param apiKey - The key that uploaded them.
+   */
+  private async deleteUploads(uploads: string[], apiKey: string): Promise<void> {
+    const filesUrl = `${(this.config.baseURL ?? REPLICATE_BASE_URL).replace(/\/+$/, '')}/files/`;
+    await Promise.all(
+      uploads
+        .filter((url) => url.startsWith(filesUrl))
+        .map(async (url) => {
+          const timeout = new AbortController();
+          const timer = setTimeout(
+            () => timeout.abort(new Error(`no answer within ${DELETE_UPLOAD_TIMEOUT_MS / 1000} seconds`)),
+            DELETE_UPLOAD_TIMEOUT_MS,
+          );
+          try {
+            const response = await fetch(url, {
+              method: 'DELETE',
+              headers: { Authorization: `Token ${apiKey}` },
+              signal: timeout.signal,
+            });
+            if (!response.ok && response.status !== 404) {
+              console.warn(`[agentos] Replicate did not delete an uploaded input image (${response.status}); it expires 24 hours after its upload.`);
+            }
+          } catch (error) {
+            console.warn(`[agentos] Deleting an uploaded Replicate input image failed (${error instanceof Error ? error.message : String(error)}); it expires 24 hours after its upload.`);
+          } finally {
+            clearTimeout(timer);
+          }
+        }),
+    );
+  }
+
+  /**
    * Creates a prediction using the modern model-based endpoint.
    *
    * Official models on Replicate (e.g. `black-forest-labs/flux-1.1-pro`)
@@ -728,13 +855,14 @@ export class ReplicateImageProvider implements IImageProvider {
     name: string,
     input: Record<string, unknown>,
     waitSeconds: number,
+    apiKey: string = this.keyPool.next(),
   ): Promise<ReplicatePrediction> {
     const response = await fetch(
       `${this.config.baseURL}/models/${owner}/${name}/predictions`,
       {
         method: 'POST',
         headers: {
-          Authorization: `Token ${this.keyPool.next()}`,
+          Authorization: `Token ${apiKey}`,
           'Content-Type': 'application/json',
           Prefer: `wait=${waitSeconds}`,
         },
@@ -752,11 +880,15 @@ export class ReplicateImageProvider implements IImageProvider {
     return (await response.json()) as ReplicatePrediction;
   }
 
-  private async createPrediction(body: Record<string, unknown>, waitSeconds: number): Promise<ReplicatePrediction> {
+  private async createPrediction(
+    body: Record<string, unknown>,
+    waitSeconds: number,
+    apiKey: string = this.keyPool.next(),
+  ): Promise<ReplicatePrediction> {
     const response = await fetch(`${this.config.baseURL}/predictions`, {
       method: 'POST',
       headers: {
-        Authorization: `Token ${this.keyPool.next()}`,
+        Authorization: `Token ${apiKey}`,
         'Content-Type': 'application/json',
         Prefer: `wait=${waitSeconds}`,
       },
@@ -771,13 +903,13 @@ export class ReplicateImageProvider implements IImageProvider {
     return (await response.json()) as ReplicatePrediction;
   }
 
-  private async pollPrediction(url: string, timeoutMs: number, pollIntervalMs: number): Promise<ReplicatePrediction> {
+  private async pollPrediction(url: string, timeoutMs: number, pollIntervalMs: number, apiKey?: string): Promise<ReplicatePrediction> {
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < timeoutMs) {
       const response = await fetch(url, {
         headers: {
-          Authorization: `Token ${this.keyPool.next()}`,
+          Authorization: `Token ${apiKey ?? this.keyPool.next()}`,
         },
       });
 

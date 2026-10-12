@@ -185,7 +185,10 @@ export class GraphRuntime {
    *
    * Checkpoints are saved according to both the graph-wide `checkpointPolicy` and
    * per-node `checkpoint` settings. An `interrupt` event causes immediate suspension
-   * followed by a terminal `run_end`.
+   * followed by a terminal `run_end`. When a node interrupts or fails, the checkpoint
+   * the run resumes from is saved before any event that reports the node's result is
+   * yielded, so a consumer may stop iterating at `interrupt` or `error` and still
+   * resume the run.
    *
    * @param graph - Compiled execution graph to run.
    * @param input - Initial user-provided input; frozen into `GraphState.input`.
@@ -377,6 +380,20 @@ export class GraphRuntime {
           }),
         );
 
+        // A branch that interrupted or failed stops the run, and the first one
+        // in batch order is where the loop below stops. Every branch has run,
+        // so save the checkpoint the run resumes from before yielding any of
+        // the batch's events: a consumer that stops iterating at one of them
+        // (`interrupt`, `error`) closes this generator at that `yield`, and
+        // the code after it never runs.
+        const haltingOutcome = parallelOutcomes.find((outcome) => outcome?.earlyTermination);
+        const haltCheckpointId = haltingOutcome
+          ? await this.saveCheckpoint(
+              activeGraph, runId, haltingOutcome.nodeId, haltingOutcome.branchState,
+              nodeResults, completedNodes, skippedNodes, [],
+            )
+          : undefined;
+
         // Yield all collected events from parallel branches in order,
         // then merge branch states into the shared baseline.
         const successfulBranches: GraphState[] = [];
@@ -395,11 +412,8 @@ export class GraphRuntime {
             for (const event of outcome.earlyTermination.events) {
               yield event;
             }
-            // Save checkpoint and terminate.
-            const checkpointId = await this.saveCheckpoint(
-              activeGraph, runId, outcome.nodeId, outcome.branchState,
-              nodeResults, completedNodes, skippedNodes, [],
-            );
+            // This is the halting branch; its checkpoint was saved above.
+            const checkpointId = haltCheckpointId!;
             state = this.attachCheckpointMetadata(outcome.branchState, checkpointId);
             yield { type: 'checkpoint_saved', checkpointId, nodeId: outcome.nodeId };
             if (outcome.earlyTermination.type === 'interrupt') {
@@ -578,16 +592,14 @@ export class GraphRuntime {
               : nodeId;
           state = stateManager.updateArtifacts(state, { [artifactKey]: result.output });
         }
-        for (const event of getResultEvents(result)) {
-          yield event;
-        }
-
-        // ── Human interrupt ───────────────────────────────────────────────────
-        if (result.interrupt) {
-          yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
-          yield { type: 'interrupt', nodeId, reason: 'human_approval' };
-          // Persist so the run can be resumed later.
-          const checkpointId = await this.saveCheckpoint(
+        // A node that interrupts or fails stops the run here. Save the
+        // checkpoint the run resumes from before yielding the node's events:
+        // a consumer that stops iterating at one of them (`interrupt`,
+        // `error`) closes this generator at that `yield`, and the code after
+        // it never runs.
+        let haltCheckpointId: string | undefined;
+        if (result.interrupt || !result.success) {
+          haltCheckpointId = await this.saveCheckpoint(
             activeGraph,
             runId,
             nodeId,
@@ -597,8 +609,18 @@ export class GraphRuntime {
             skippedNodes,
             [],
           );
-          state = this.attachCheckpointMetadata(state, checkpointId);
-          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+          state = this.attachCheckpointMetadata(state, haltCheckpointId);
+        }
+
+        for (const event of getResultEvents(result)) {
+          yield event;
+        }
+
+        // ── Human interrupt ───────────────────────────────────────────────────
+        if (result.interrupt) {
+          yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
+          yield { type: 'interrupt', nodeId, reason: 'human_approval' };
+          yield { type: 'checkpoint_saved', checkpointId: haltCheckpointId!, nodeId };
           yield { type: 'run_end', runId, finalOutput: state.artifacts, totalDurationMs: Date.now() - startTime };
           return;
         }
@@ -617,18 +639,7 @@ export class GraphRuntime {
               message: errorMessage,
             },
           };
-          const checkpointId = await this.saveCheckpoint(
-            activeGraph,
-            runId,
-            nodeId,
-            state,
-            nodeResults,
-            completedNodes,
-            skippedNodes,
-            [],
-          );
-          state = this.attachCheckpointMetadata(state, checkpointId);
-          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+          yield { type: 'checkpoint_saved', checkpointId: haltCheckpointId!, nodeId };
           yield {
             type: 'interrupt',
             nodeId,
@@ -903,14 +914,12 @@ export class GraphRuntime {
               : nodeId;
           state = stateManager.updateArtifacts(state, { [artifactKey]: result.output });
         }
-        for (const event of getResultEvents(result)) {
-          yield event;
-        }
-
-        if (result.interrupt) {
-          yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
-          yield { type: 'interrupt', nodeId, reason: 'human_approval' };
-          const checkpointId = await this.saveCheckpoint(
+        // As in stream(): save the checkpoint of a node that interrupts or
+        // fails before yielding its events, so a consumer that stops
+        // iterating at `interrupt` or `error` still finds it saved.
+        let haltCheckpointId: string | undefined;
+        if (result.interrupt || !result.success) {
+          haltCheckpointId = await this.saveCheckpoint(
             activeGraph,
             runId,
             nodeId,
@@ -920,8 +929,17 @@ export class GraphRuntime {
             skippedNodes,
             [],
           );
-          state = this.attachCheckpointMetadata(state, checkpointId);
-          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+          state = this.attachCheckpointMetadata(state, haltCheckpointId);
+        }
+
+        for (const event of getResultEvents(result)) {
+          yield event;
+        }
+
+        if (result.interrupt) {
+          yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
+          yield { type: 'interrupt', nodeId, reason: 'human_approval' };
+          yield { type: 'checkpoint_saved', checkpointId: haltCheckpointId!, nodeId };
           yield { type: 'run_end', runId, finalOutput: state.artifacts, totalDurationMs: Date.now() - startTime };
           return;
         }
@@ -940,18 +958,7 @@ export class GraphRuntime {
               message: errorMessage,
             },
           };
-          const checkpointId = await this.saveCheckpoint(
-            activeGraph,
-            runId,
-            nodeId,
-            state,
-            nodeResults,
-            completedNodes,
-            skippedNodes,
-            [],
-          );
-          state = this.attachCheckpointMetadata(state, checkpointId);
-          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+          yield { type: 'checkpoint_saved', checkpointId: haltCheckpointId!, nodeId };
           yield {
             type: 'interrupt',
             nodeId,

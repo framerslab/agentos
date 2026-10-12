@@ -73,6 +73,54 @@ describe('LiveKitStreamTransport', () => {
     transport.close();
   });
 
+  it('holds frames while paused, up to the buffer, and reports what it dropped as a gap', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('bot', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'bot',
+      sampleRate: 16_000,
+      frameSizeMs: 20,
+      bufferMs: 100,
+      rtc: fakeRtc(),
+    });
+    const audio: AudioFrame[] = [];
+    const gaps: unknown[] = [];
+    transport.on('audio', (f: AudioFrame) => audio.push(f));
+    transport.on('gap', (g: unknown) => gaps.push(g));
+    await settle(); // the source opens the fake stream on its first read
+    const stream = FakeAudioStream.opened[0];
+    transport.emit('pause');
+    // Ten frames of 20 ms at 16 kHz.
+    for (let i = 0; i < 10; i++) stream.push(rtcFrame(new Array(320).fill(0), 16_000, 1));
+    await settle();
+    expect(audio).toEqual([]);
+    transport.emit('resume');
+    await settle();
+    expect(audio.length).toBe(5); // 100 ms kept, the oldest 100 ms dropped
+    expect(gaps).toEqual([{ droppedMs: 100, reason: 'paused' }]);
+    transport.close();
+  });
+
+  it('never buffers while not paused', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('bot', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'bot',
+      sampleRate: 16_000,
+      bufferMs: 100,
+      rtc: fakeRtc(),
+    });
+    const audio: AudioFrame[] = [];
+    transport.on('audio', (f: AudioFrame) => audio.push(f));
+    await settle();
+    for (let i = 0; i < 20; i++) FakeAudioStream.opened[0].push(rtcFrame(new Array(320).fill(0), 16_000, 1));
+    await settle();
+    expect(audio.length).toBe(20);
+    transport.close();
+  });
+
   it('sends control messages as text streams on its topic, to the participant', async () => {
     const room = new FakeRoom();
     const { transport } = open(room);

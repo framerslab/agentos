@@ -489,7 +489,7 @@ export class AgencyMemoryManager {
 
       this.logger?.debug?.('Queried agency shared memory', {
         agencyId,
-        query: options.query.slice(0, 50),
+        queryLength: options.query.length,
         resultsReturned: filteredChunks.length,
       });
 

@@ -189,6 +189,16 @@ export interface MeetingRunRecord {
   monitorSeenAt?: number;
   /** How many participants besides the bot the provider last reported. */
   participantCount?: number;
+  /**
+   * When the bot was last told to leave: a bot that has not left the manager's `killAfterMs` later is killed. This and
+   * the two fields after it are the manager's timers, kept on the row so that any manager sharing the stores, or one
+   * that restarted, runs the limits on them.
+   */
+  leaveCommandedAt?: number;
+  /** When capture was suspended because the stop monitor went quiet; cleared when capture resumes. */
+  captureSuspendedAt?: number;
+  /** Since when the provider has reported no participant besides the bot; cleared when one is reported. */
+  aloneSince?: number;
 }
 
 /** The terminal, content-free form of a run: ids, platform, times, reason, seconds, the notice version and the consent record. */

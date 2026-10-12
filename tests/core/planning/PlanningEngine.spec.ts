@@ -79,6 +79,27 @@ describe('PlanningEngine', () => {
     vi.clearAllMocks();
   });
 
+  it('logs goal and task lengths without words, including failed planning and loops', async () => {
+    const sentinel = 'sentinel-words-7731';
+    const logger = { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() };
+    const planning = new PlanningEngine({ llmProvider: mockLLMProvider, logger: logger as any });
+    await planning.generatePlan(sentinel);
+    mockGenerateCompletion.mockResolvedValueOnce(createMockResponse(JSON.stringify({ subtasks: [] })));
+    await planning.decomposeTask(sentinel);
+    mockGenerateCompletion.mockResolvedValue(createMockResponse(sentinel));
+    await expect(planning.generatePlan(sentinel)).rejects.toThrow();
+    const loop = planning.runAutonomousLoop(sentinel);
+    const end = await loop.next();
+    expect(end.done).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith('Generating execution plan', { goalLength: sentinel.length, strategy: expect.any(String) });
+    expect(logger.debug).toHaveBeenCalledWith('Decomposing task', { taskLength: sentinel.length, depth: 3 });
+    expect(logger.info).toHaveBeenCalledWith('Starting autonomous loop', { goalLength: sentinel.length, maxIterations: 20 });
+    for (const message of ['Failed to generate plan', 'Autonomous loop failed']) {
+      expect(logger.error).toHaveBeenCalledWith(message, { goalLength: sentinel.length, error: 'Planning operation failed.' });
+    }
+    expect(JSON.stringify(Object.values(logger).map((spy) => spy.mock.calls))).not.toContain(sentinel);
+  });
+
   describe('generatePlan', () => {
     it('should generate a valid execution plan', async () => {
       const plan = await engine.generatePlan('Test goal', {}, { maxSteps: 10 });

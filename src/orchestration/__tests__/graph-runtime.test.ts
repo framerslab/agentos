@@ -16,7 +16,10 @@ import { NodeExecutor } from '../runtime/NodeExecutor.js';
 import { InMemoryCheckpointStore } from '../checkpoint/InMemoryCheckpointStore.js';
 import type { CompiledExecutionGraph, GraphNode, GraphState } from '../ir/types.js';
 import { START, END } from '../ir/types.js';
-import type { NodeExecutionResult } from '../runtime/NodeExecutor.js';
+import type { NodeExecutionResult, NodeExecutorDeps } from '../runtime/NodeExecutor.js';
+import { LoopController, type LoopChunk, type LoopOutput } from '../runtime/LoopController.js';
+import { gmiNode, humanNode } from '../builders/nodes.js';
+import type { GraphEvent } from '../events/GraphEvent.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -1397,5 +1400,218 @@ describe('GraphRuntime', () => {
     expect(nodeEnds.join).toEqual({
       iterations: 1, toolCalls: 0, toolErrors: 0, iterationsExhausted: false,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The checkpoint a halted run resumes from
+// ---------------------------------------------------------------------------
+//
+// A human node with no decision interrupts the run, and a node that fails
+// stops it. A host reading `stream()` stops at `interrupt` or `error` with
+// `break`, which closes the generator at that `yield`, so the checkpoint the
+// run resumes from has to be saved by then. The nodes run through the real
+// NodeExecutor and LoopController; only the model's stream is scripted.
+
+/**
+ * A scripted model for GMI nodes: each node's instructions map to the text the
+ * model streams back, or to the error the provider throws.
+ */
+function scriptedModel(replies: Record<string, string | Error>) {
+  const calls: string[] = [];
+  async function* providerCall(instructions: string): AsyncGenerator<LoopChunk, LoopOutput, undefined> {
+    calls.push(instructions);
+    const reply = replies[instructions];
+    if (reply === undefined) throw new Error(`no reply scripted for "${instructions}"`);
+    if (reply instanceof Error) throw reply;
+    yield { type: 'text_delta', content: reply };
+    return { responseText: reply, toolCalls: [], finishReason: 'stop' };
+  }
+  return { calls, providerCall };
+}
+
+function runtimeOver(
+  store: InMemoryCheckpointStore,
+  providerCall: NodeExecutorDeps['providerCall'],
+): GraphRuntime {
+  return new GraphRuntime({
+    checkpointStore: store,
+    nodeExecutor: new NodeExecutor({ loopController: new LoopController(), providerCall }),
+  });
+}
+
+const DRAFT = 'Draft the release notes.';
+const PUBLISH = 'Publish the release notes.';
+
+function draftNode(): GraphNode {
+  return { ...gmiNode({ instructions: DRAFT }), id: 'draft' };
+}
+
+function approveNode(): GraphNode {
+  return { ...humanNode({ prompt: 'Publish these notes?' }), id: 'approve' };
+}
+
+function publishNode(): GraphNode {
+  return { ...gmiNode({ instructions: PUBLISH }), id: 'publish' };
+}
+
+/** Reads `stream` up to the first event of type `stopAt`, then stops as `break` does. */
+async function readUntil(
+  stream: AsyncIterable<GraphEvent>,
+  stopAt: GraphEvent['type'],
+): Promise<GraphEvent[]> {
+  const seen: GraphEvent[] = [];
+  for await (const event of stream) {
+    seen.push(event);
+    if (event.type === stopAt) break;
+  }
+  return seen;
+}
+
+async function readAll(stream: AsyncIterable<GraphEvent>): Promise<GraphEvent[]> {
+  const seen: GraphEvent[] = [];
+  for await (const event of stream) seen.push(event);
+  return seen;
+}
+
+/** Each event as `type:nodeId`, or `edge_transition:source->target`. */
+function trace(events: GraphEvent[]): string[] {
+  return events.map((event) => {
+    if (event.type === 'edge_transition') return `edge_transition:${event.sourceId}->${event.targetId}`;
+    if ('nodeId' in event && event.nodeId) return `${event.type}:${event.nodeId}`;
+    return event.type;
+  });
+}
+
+function runIdOf(events: GraphEvent[]): string {
+  const first = events[0];
+  if (first?.type !== 'run_start') throw new Error('the stream did not open with run_start');
+  return first.runId;
+}
+
+describe('GraphRuntime: the checkpoint a halted run resumes from', () => {
+  it('is saved before stream() yields interrupt, and a resume from it finishes the run', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = scriptedModel({ [DRAFT]: 'Draft: v2 ships the importer.', [PUBLISH]: 'Published.' });
+    const runtime = runtimeOver(store, model.providerCall);
+    const graph = makeLinearGraph('g-halt-interrupt', [draftNode(), approveNode(), publishNode()]);
+
+    const seen = await readUntil(runtime.stream(graph, { release: 'v2' }), 'interrupt');
+
+    expect(trace(seen)).toEqual([
+      'run_start',
+      'node_start:draft',
+      'node_end:draft',
+      'edge_transition:draft->approve',
+      'node_start:approve',
+      'node_end:approve',
+      'interrupt:approve',
+    ]);
+    const runId = runIdOf(seen);
+    expect(await store.latest(runId)).toMatchObject({
+      graphId: 'g-halt-interrupt',
+      nodeId: 'approve',
+      visitedNodes: ['draft'],
+      state: { artifacts: { draft: 'Draft: v2 ships the importer.' } },
+      nodeResults: { approve: { effectClass: 'human', output: { prompt: 'Publish these notes?' } } },
+    });
+
+    // resume() marks the human node complete with its recorded output and runs the rest.
+    const artifacts = await runtime.resume(graph, runId);
+    expect(artifacts).toEqual({ draft: 'Draft: v2 ships the importer.', publish: 'Published.' });
+    expect(model.calls).toEqual([DRAFT, PUBLISH]);
+  });
+
+  it('keeps the order of the events a consumer reads to the end, and invoke() returns as before', async () => {
+    const model = scriptedModel({ [DRAFT]: 'Draft: v2 ships the importer.' });
+    const graph = makeLinearGraph('g-halt-order', [draftNode(), approveNode(), publishNode()]);
+
+    const streamStore = new InMemoryCheckpointStore();
+    const events = await readAll(runtimeOver(streamStore, model.providerCall).stream(graph, {}));
+    expect(trace(events)).toEqual([
+      'run_start',
+      'node_start:draft',
+      'node_end:draft',
+      'edge_transition:draft->approve',
+      'node_start:approve',
+      'node_end:approve',
+      'interrupt:approve',
+      'checkpoint_saved:approve',
+      'run_end',
+    ]);
+    const saved = await streamStore.list('g-halt-order');
+    expect(saved).toHaveLength(1);
+    expect(events).toContainEqual({ type: 'checkpoint_saved', checkpointId: saved[0]?.id, nodeId: 'approve' });
+    expect(events[events.length - 1]).toMatchObject({
+      type: 'run_end',
+      finalOutput: { draft: 'Draft: v2 ships the importer.' },
+    });
+
+    const invokeStore = new InMemoryCheckpointStore();
+    const artifacts = await runtimeOver(invokeStore, model.providerCall).invoke(graph, {});
+    expect(artifacts).toEqual({ draft: 'Draft: v2 ships the importer.' });
+    expect((await invokeStore.list('g-halt-order')).map((cp) => cp.nodeId)).toEqual(['approve']);
+  });
+
+  it('is saved before stream() yields error when a node fails', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = scriptedModel({
+      [DRAFT]: 'Draft: v2 ships the importer.',
+      [PUBLISH]: new Error('provider unavailable'),
+    });
+    const graph = makeLinearGraph('g-halt-error', [draftNode(), publishNode()]);
+
+    const seen = await readUntil(runtimeOver(store, model.providerCall).stream(graph, {}), 'error');
+
+    expect(seen[seen.length - 1]).toEqual({
+      type: 'error',
+      nodeId: 'publish',
+      error: { code: 'NODE_EXECUTION_FAILED', message: 'GMI execution failed: provider unavailable' },
+    });
+    expect(await store.latest(runIdOf(seen))).toMatchObject({ nodeId: 'publish', visitedNodes: ['draft'] });
+  });
+
+  it('is saved before stream() yields interrupt from a branch of a parallel batch', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = scriptedModel({ [DRAFT]: 'Draft: v2 ships the importer.' });
+    // START fans out to draft and approve, which both lead to publish.
+    const graph = makeParallelJoinGraph('g-halt-parallel', draftNode(), approveNode(), publishNode());
+
+    const seen = await readUntil(runtimeOver(store, model.providerCall).stream(graph, {}), 'interrupt');
+
+    expect(trace(seen)).toEqual([
+      'run_start',
+      'node_start:draft',
+      'node_end:draft',
+      'edge_transition:draft->publish',
+      'node_start:approve',
+      'node_end:approve',
+      'interrupt:approve',
+    ]);
+    expect(await store.latest(runIdOf(seen))).toMatchObject({ nodeId: 'approve', visitedNodes: ['draft'] });
+  });
+
+  it('is saved before streamResume() yields interrupt', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = scriptedModel({ [DRAFT]: 'Draft: v2 ships the importer.', [PUBLISH]: 'Published.' });
+    const runtime = runtimeOver(store, model.providerCall);
+    const announce: GraphNode = { ...humanNode({ prompt: 'Announce the release?' }), id: 'announce' };
+    const graph = makeLinearGraph('g-halt-resume', [draftNode(), approveNode(), publishNode(), announce]);
+
+    const runId = runIdOf(await readAll(runtime.stream(graph, {})));
+    const resumed = await readUntil(runtime.streamResume(graph, runId), 'interrupt');
+
+    expect(trace(resumed)).toEqual([
+      'run_start',
+      'node_end:approve',
+      'node_start:publish',
+      'node_end:publish',
+      'edge_transition:publish->announce',
+      'node_start:announce',
+      'node_end:announce',
+      'interrupt:announce',
+    ]);
+    const saved = await store.list('g-halt-resume', { runId });
+    expect(saved.map((cp) => cp.nodeId).sort()).toEqual(['announce', 'approve']);
   });
 });

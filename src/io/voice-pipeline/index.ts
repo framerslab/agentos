@@ -43,6 +43,10 @@
  * **Agent Adapter:**
  * - {@link AgentSessionVoiceAdapter} — Wraps any AgentOS `AgentSession` as `IVoicePipelineAgentSession`.
  *
+ * **Listening:**
+ * - {@link startListenSession}: a transport's audio into a transcriber and each final into a sink as a numbered turn, with no speech output.
+ * - {@link ReconnectingSTT}: one transcriber whose session is reconnected, with the buffered audio replayed and replayed duplicates dropped.
+ *
  * ## Usage
  *
  * ```typescript
@@ -120,6 +124,10 @@ export { WebRTCStreamTransport, createWebRTCTransport } from './WebRTCStreamTran
 
 // Central pipeline orchestrator (state machine)
 export { VoicePipelineOrchestrator } from './VoicePipelineOrchestrator.js';
+
+// A listen-only session and a transcriber that reconnects (TranscriptTurn and ITranscriptInputSink come from types.ts, above)
+export { startListenSession, type ListenSession, type ListenSessionOverrides, type ListenSessionStats, type ListenSessionState, type ListenEndReason } from './ListenSession.js';
+export { ReconnectingSTT, type ReconnectingSTTOptions, type SttReconnectedEvent, type SttGapEvent } from './ReconnectingSTT.js';
 
 // Typed error for barge-in interruptions
 export { VoiceInterruptError } from './VoiceInterruptError.js';

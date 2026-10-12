@@ -230,6 +230,11 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     this.silenceTimeoutMs = options.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS;
   }
 
+  /** Maximum wait for a pending turn after speech ends, used when draining a listen session. */
+  get turnCompletionTimeoutMs(): number {
+    return this.silenceTimeoutMs;
+  }
+
   // ---------------------------------------------------------------------------
   // IEndpointDetector -- pushTranscript
   // ---------------------------------------------------------------------------

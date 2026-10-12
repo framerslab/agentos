@@ -549,7 +549,10 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
   }
 
   /**
-   * Retries delivery of a failed message.
+   * Retries delivery of a failed message. The retry is counted on the message's
+   * status before the re-send, the status the re-send stores keeps the count, and
+   * once `routingConfig.maxRetries` retries have been made this throws without
+   * sending.
    */
   public async retryDelivery(messageId: string): Promise<DeliveryStatus> {
     const status = this.deliveryStatuses.get(messageId);
@@ -810,7 +813,7 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
       targetAgentId,
       status: 'delivered',
       deliveredAt: new Date(),
-      retryCount: 0,
+      retryCount: this.retriesMade(messageId),
     };
   }
 
@@ -824,10 +827,20 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
       targetAgentId,
       status: 'failed',
       failureReason: reason,
-      retryCount: 0,
+      retryCount: this.retriesMade(messageId),
     };
     this.deliveryStatuses.set(messageId, status);
     return status;
+  }
+
+  /**
+   * The retries made so far for a message. Every send stores a new status, so
+   * the status a re-send stores starts from the count on the one it replaces,
+   * which retryDelivery() raised before the re-send; the maxRetries check then
+   * reads every retry made.
+   */
+  private retriesMade(messageId: string): number {
+    return this.deliveryStatuses.get(messageId)?.retryCount ?? 0;
   }
 
   private updateAvgDeliveryTime(newTime: number): void {

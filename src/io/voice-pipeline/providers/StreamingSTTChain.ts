@@ -65,8 +65,9 @@ export interface StreamingSTTChainOptions {
   /** When true, the chain tracks audio via a ring buffer and re-routes to
    *  the next backup on mid-session failure. The session is then the
    *  chain's facade: it forwards transcripts, speech events, `'usage'` and
-   *  `'warning'` from its provider sessions, and has no `flush()`.
-   *  Default: false. */
+   *  `'warning'` from its provider sessions, and its `flush()` drains the
+   *  provider session in use. A provider close after flush and before the next
+   *  frame emits one facade close; later audio is ignored. Default: false. */
   enableMidUtteranceFailover?: boolean;
   /** Ring buffer capacity in ms for mid-utterance replay. Default 3000. */
   ringBufferCapacityMs?: number;
@@ -180,9 +181,12 @@ export class StreamingSTTChain implements IStreamingSTT {
    * for ends the session: it starts no backup, and a backup still starting
    * then is closed when it opens. The facade forwards `'transcript'`,
    * `'vad'`, `'speech_start'`, `'speech_end'`, `'usage'` and `'warning'`
-   * from its sessions, and has `pushAudio()` and `close()` but no `flush()`:
-   * a caller that ends turns with `flush()` runs the chain with failover
-   * off, where the session is the provider's own.
+   * from its sessions, and has `pushAudio()`, `flush()` and `close()`.
+   * `flush()` drains the provider session in use; a close that session makes
+   * before the next frame is pushed is the provider ending its stream, as
+   * the session contract has it (a final, then `'close'`), and starts no
+   * backup. Both that close and the caller's close emit `'close'` once, release
+   * the active session, and ignore subsequent `pushAudio()` and `flush()` calls.
    */
   private wrapSession(
     initial: StreamingSTTSession,
@@ -200,7 +204,7 @@ export class StreamingSTTChain implements IStreamingSTT {
     const minReplayMs = this.opts.minReplayMs ?? 400;
     const facade = new EventEmitter();
 
-    let currentSession = initial;
+    let currentSession: StreamingSTTSession | undefined = initial;
     let currentProvider = initialProvider;
     let remaining = [...candidates];
     let isFailingOver = false;
@@ -208,6 +212,20 @@ export class StreamingSTTChain implements IStreamingSTT {
     // closed, so a 'close' after this is the end the caller asked for, not a
     // provider failure.
     let closedByCaller = false;
+    // Set by the facade's flush() and cleared by the next frame pushed. A
+    // provider may end its stream once flushed (Deepgram closes its socket
+    // after CloseStream), so a 'close' then is not a provider failure either.
+    let flushed = false;
+    let ended = false;
+
+    const finish = (): void => {
+      if (ended) return;
+      ended = true;
+      closedByCaller = true;
+      currentSession = undefined;
+      ring.clear();
+      facade.emit('close');
+    };
 
     const attach = (session: StreamingSTTSession, providerId: string) => {
       session.on('transcript', (evt: TranscriptEvent) => {
@@ -242,9 +260,10 @@ export class StreamingSTTChain implements IStreamingSTT {
         // Natural close on the active session is a failover trigger so the
         // user doesn't silently lose voice mid-turn. The close the facade's
         // close() asks for is not: tryFailover returns once closedByCaller
-        // is set.
+        // is set. Nor is the close that ends a flushed stream.
         if (!isFailingOver && currentSession === session) {
-          void tryFailover(undefined);
+          if (flushed || closedByCaller) finish();
+          else void tryFailover(undefined);
         }
       });
     };
@@ -335,11 +354,13 @@ export class StreamingSTTChain implements IStreamingSTT {
     attach(initial, initialProvider.providerId);
 
     // The returned object must conform to StreamingSTTSession (EventEmitter
-    // with pushAudio + close). We build that explicitly so TS sees the
-    // right shape.
+    // with pushAudio, flush and close). We build that explicitly so TS sees
+    // the right shape.
     const wrapped = Object.assign(facade, {
       providerId: 'chain',
       pushAudio: async (frame: AudioFrame) => {
+        if (closedByCaller || !currentSession) return;
+        flushed = false;
         ring.push(frame);
         try {
           await currentSession.pushAudio(frame);
@@ -347,9 +368,19 @@ export class StreamingSTTChain implements IStreamingSTT {
           void tryFailover(pushErr as Error);
         }
       },
+      flush: async (): Promise<void> => {
+        if (closedByCaller || !currentSession) return;
+        flushed = true;
+        await currentSession.flush();
+      },
       close: async () => {
+        if (closedByCaller) return;
         closedByCaller = true;
-        await currentSession.close();
+        try {
+          await currentSession?.close();
+        } finally {
+          finish();
+        }
       },
     }) as unknown as StreamingSTTSession;
 

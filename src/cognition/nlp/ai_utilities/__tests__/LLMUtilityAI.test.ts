@@ -101,6 +101,43 @@ describe('LLMUtilityAI', () => {
     );
   });
 
+  it('keeps malformed input and repaired model text out of parsing diagnostics', async () => {
+    const sentinel = 'sentinel-words-7731';
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await llmUtility.parseJsonSafe(sentinel)).toBeNull();
+      vi.mocked(mockProvider.generateCompletion).mockResolvedValueOnce({
+        id: 'reply-1', object: 'chat.completion', created: 1, modelId: 'model-1',
+        choices: [{ index: 0, message: { role: 'assistant', content: sentinel }, finishReason: 'stop' }],
+      });
+      expect(await llmUtility.parseJsonSafe(sentinel, { attemptFixWithLLM: true })).toBeNull();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('JSON parsing failed'), { textLength: sentinel.length });
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('Failed to parse LLM-fixed JSON'), { textLength: sentinel.length });
+      expect(JSON.stringify([log.mock.calls, warn.mock.calls, error.mock.calls])).not.toContain(sentinel);
+    } finally {
+      log.mockRestore(); warn.mockRestore(); error.mockRestore();
+    }
+  });
+
+  it.each(['extractKeywords', 'detectLanguage'] as const)('logs only model text length when %s returns no array', async (method) => {
+    const sentinel = 'sentinel-words-7731';
+    const response = JSON.stringify({ text: sentinel });
+    vi.mocked(mockProvider.generateCompletion).mockResolvedValueOnce({
+      id: 'reply-1', object: 'chat.completion', created: 1, modelId: 'model-1',
+      choices: [{ index: 0, message: { role: 'assistant', content: response }, finishReason: 'stop' }],
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await llmUtility[method](sentinel);
+      expect(warn).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('array'), { textLength: response.length });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(sentinel);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('checkHealth should report as healthy if initialized and provider manager is healthy', async () => {
     const health = await llmUtility.checkHealth();
     expect(health.isHealthy).toBe(true);

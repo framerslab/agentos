@@ -1,3 +1,51 @@
+## [0.13.80](https://github.com/framerslab/agentos/compare/v0.13.79...v0.13.80) (2026-10-12)
+
+### feat
+
+* **meetings:** Postgres stores for the meeting channel (#368) ([98bf43a](https://github.com/framerslab/agentos/commit/98bf43a624fbd5429798782b55c1b60ae895e665))
+* **voice-pipeline:** the LiveKit transport holds a bounded buffer while paused and reports the gap (#369) ([a893837](https://github.com/framerslab/agentos/commit/a8938375f56a45dc16705feff151ed4d9b2d94bd))
+
+### fix
+
+* **logging:** keep people's words, model output, keys and phone numbers off the log lines (#370) ([e8bf3af](https://github.com/framerslab/agentos/commit/e8bf3af0238e9eca7539a54ec78928bc9a026a68))
+
+## [0.13.79](https://github.com/framerslab/agentos/compare/v0.13.78...v0.13.79) (2026-10-12)
+
+### feat
+
+* **voice-pipeline:** a listen-only session and a transcriber that reconnects (#367) ([6a4c7c6](https://github.com/framerslab/agentos/commit/6a4c7c6cc62b714c3f9d03139f72e85216a78ba2))
+
+## [0.13.78](https://github.com/framerslab/agentos/compare/v0.13.77...v0.13.78) (2026-10-12)
+
+### fix
+
+* **orchestration:** the graph saves its checkpoint before yielding an interrupt, and the communication bus retry cap holds (#354) ([40f7960](https://github.com/framerslab/agentos/commit/40f79603776ee93eaaf54d78a134dba7b0ab93ec))
+* **voice-pipeline:** the orchestrator re-emits turn_complete, so waitForUserTurn resolves (#356) ([a7a00d9](https://github.com/framerslab/agentos/commit/a7a00d94e952ad94aac2f22a481d4a6f9adf9be8))
+
+## [0.13.77](https://github.com/framerslab/agentos/compare/v0.13.76...v0.13.77) (2026-10-12)
+
+### fix
+
+* **images:** the delete of a Replicate upload is given ten seconds (#359) ([f0d5864](https://github.com/framerslab/agentos/commit/f0d58648b9daae48d826336db657c5f5ece6846d))
+
+## [0.13.76](https://github.com/framerslab/agentos/compare/v0.13.75...v0.13.76) (2026-10-12)
+
+### fix
+
+* **images:** Replicate gets an input image from 1 MB through its Files API, and each image as its own type (#358) ([3839eb3](https://github.com/framerslab/agentos/commit/3839eb3896671fec7a6ffd2355805fcc7b181f06))
+
+## [0.13.75](https://github.com/framerslab/agentos/compare/v0.13.74...v0.13.75) (2026-10-12)
+
+### feat
+
+* **meetings:** the meeting manager: a run's life from the request to the content-free record (#337) ([3d4b5fc](https://github.com/framerslab/agentos/commit/3d4b5fc509b27a669f57e73e339e72efef883f64))
+
+## [0.13.74](https://github.com/framerslab/agentos/compare/v0.13.73...v0.13.74) (2026-10-12)
+
+### fix
+
+* **runtime:** a multimodal turn's retrieval feedback carries its text, not its image data (#355) ([7cc36c9](https://github.com/framerslab/agentos/commit/7cc36c980309b950b3b20a6da250288bb33ccb7b))
+
 ## [0.13.73](https://github.com/framerslab/agentos/compare/v0.13.72...v0.13.73) (2026-10-12)
 
 ### fix

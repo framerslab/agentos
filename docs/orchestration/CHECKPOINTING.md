@@ -91,7 +91,7 @@ The graph-wide `checkpointPolicy` and each node's `checkpoint` setting decide wh
 | `explicit` | Save only around nodes with `checkpoint: 'before'`, `'after'`, or `'both'`. |
 | `none` | The same as `explicit`: the runtime saves around nodes that set `checkpoint`, and no others. The default of [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts). |
 
-Whatever the policy, the runtime also saves a checkpoint when a node fails (after its retries) and when a node interrupts the run for human approval, so a failed or interrupted run can always be resumed.
+Whatever the policy, the runtime also saves a checkpoint when a node fails (after its retries) and when a node interrupts the run for human approval, so a failed or interrupted run can always be resumed. It saves that checkpoint before it yields any event that reports the node's result, so a host that leaves its `for await` loop over `stream()` or `streamResume()` at `interrupt` or `error` can still resume the run.
 
 ```typescript
 // Graph-wide policy

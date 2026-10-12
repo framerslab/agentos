@@ -99,7 +99,7 @@ wunderland chat \
 | Interface | Implementations in AgentOS |
 |-----------|---------|
 | [`IStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `WebSocketStreamTransport`, `WebRTCStreamTransport`, `LiveKitStreamTransport`, `TelephonyStreamTransport` |
-| [`IStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `DeepgramStreamingSTT` (default model `nova-3`), `ElevenLabsStreamingSTT`, `OpenAIRealtimeTranscriptionSTT` (default model `gpt-4o-mini-transcribe`), and `StreamingSTTChain` over several of them |
+| [`IStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `DeepgramStreamingSTT` (default model `nova-3`), `ElevenLabsStreamingSTT`, `OpenAIRealtimeTranscriptionSTT` (default model `gpt-4o-mini-transcribe`), `StreamingSTTChain` over several of them, and `ReconnectingSTT` over one |
 | [`IEndpointDetector`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `HeuristicEndpointDetector`, `AcousticEndpointDetector` |
 | [`IStreamingTTS`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `ElevenLabsStreamingTTS`, `DeepgramAuraStreamingTTS`, `CartesiaStreamingTTS`, `HumeStreamingTTS`, `OpenAIRealtimeTTS`, and `StreamingTTSChain` over several of them |
 | [`IBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `HardCutBargeinHandler`, `SoftFadeBargeinHandler` |
@@ -194,6 +194,8 @@ The source opens rtc-node's `AudioStream` on the participant's microphone track 
 
 `LiveKitStreamTransport` implements `IStreamTransport` over the same room: `'audio'` carries the participant's frames, `sendControl()` sends a JSON message to the participant as a text stream on a topic (`'agentos.voice'` unless `topic` says otherwise), and a JSON message the participant sends on that topic arrives as `'message'`. Another sender's text stream on the topic is closed unread. It does not publish audio: `sendAudio()` rejects, and a caller that does not wait for that promise raises no unhandled rejection, so a `VoicePipelineOrchestrator` given this transport hears the participant and sends its control messages, and its speech is not heard. `close()` leaves the room connected and closes the text streams still arriving.
 
+When a consumer emits `'pause'` on the transport, it holds up to two seconds of audio (`bufferMs`, default `2000`), drops the oldest frames beyond that limit, and on `'resume'` reports any dropped audio as `'gap'` with `{ droppedMs, reason: 'paused' }` before emitting the held frames in order.
+
 `@framers/agentos/io/hearing/livekit` exports both, with `loadLiveKitRtc()` and the structural types the two accept (`LiveKitRoomLike`, `LiveKitRtcModule` and their parts), which a real rtc-node `Room` and module satisfy as they are.
 
 ### Transcripts in the room
@@ -227,6 +229,73 @@ room.registerTextStreamHandler(LIVEKIT_TRANSCRIPTION_TOPIC, async (reader) => {
 ```
 
 A line the provider could not transcribe arrives as an empty final with `agentos.transcription_failed` holding a short reason; an empty final without it takes back the text the line showed, and the ledger hides the line. `transcriptEventFromLiveKit()` reads a final's `agentos.start_ms` and `agentos.end_ms` into the event's `startMs` and `endMs`, so the ledger's line holds the times its final carried; a value that is not whole milliseconds in decimal digits is ignored, and its field stays undefined.
+
+## Listening without speaking
+
+[`startListenSession(transport, sink, overrides)`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/ListenSession.ts) runs a session that only listens: the transport's audio goes to a streaming transcriber, and each final goes to a sink as a numbered turn. It takes no TTS, no barge-in handler and no agent session, and the endpoint detector is optional; `streamingSTT` and `runId` are the only fields `overrides` requires.
+
+```typescript
+import {
+  DeepgramStreamingSTT,
+  startListenSession,
+  type ITranscriptInputSink,
+  type TranscriptTurn,
+} from '@framers/agentos/io/voice-pipeline';
+
+const stored: TranscriptTurn[] = [];
+const sink: ITranscriptInputSink = {
+  async append(turn) {
+    stored.push(turn);
+  },
+  // Numbers each final as its run's next turn (one run here).
+  async appendNext(input) {
+    const seq = stored.length + 1;
+    const turn = { ...input, seq, turnId: `${input.runId}:${seq}` };
+    stored.push(turn);
+    return turn;
+  },
+};
+
+const session = await startListenSession(transport, sink, {
+  streamingSTT: new DeepgramStreamingSTT({ apiKey: process.env.DEEPGRAM_API_KEY! }),
+  runId: 'run-1',
+});
+session.on('turn', (turn: TranscriptTurn) => render(turn));
+
+// At the end: flush the transcriber and write its last final.
+await session.close('stopped');
+```
+
+- **Turns.** Without an endpoint detector, each final of the transcriber is a turn, with the final's `startMs` and `endMs`. With `overrides.endpointDetector`, the detector's `turn_complete` is the turn; the session gives the detector the transcriber's transcripts and its `speech_start` and `speech_end`, as the orchestrator does. When the detector supplies empty text, as `AcousticEndpointDetector` does, the turn uses the STT finals since the previous turn, joined with spaces, with the first final's `startMs` and the last final's `endMs`. Interim hypotheses are excluded; an empty detector turn with no final text writes nothing.
+- **The sink numbers them.** `appendNext(input)` takes an unnumbered final (`TranscriptInput`) and returns the stored `TranscriptTurn` with its run's next `seq` and the id `<runId>:<seq>`, or `undefined` when it drops the turn. The session writes one turn at a time, in arrival order, so a second listen session on the same run continues the run's sequence where the sink left it.
+- **Backpressure.** When `sinkQueueLimit` finals (default `8`) wait for the sink, the session emits `pause` on the transport and `paused` on itself, then `resume` and `resumed` once the queue is down to half. Every ending path also releases an outstanding pause exactly once, so a caller-owned transport can be reused. No final is dropped for a slow sink. Frames a transport sends while asked to pause still reach the transcriber, and `stats().dropped` counts them.
+- **The end.** `close('stopped')`, the default, moves the session to `draining`: the transcriber is flushed and finals that arrive within `drainMs` (default `250`) are still accepted. A pending detector turn then has up to its `turnCompletionTimeoutMs`, plus one timer tick, to complete before reset: the heuristic detector exposes its configured silence timeout; the acoustic detector includes its silence threshold and polling interval. Detectors that omit the bound receive `3250` ms. If the provider has not reported speech ending, stop supplies `speech_end`. The turn and sink queue are written out before `ended`. `close('purged')` drains nothing and drops the finals waiting for the sink. The session also ends by itself with `stt_failed` (the transcriber failed for good), `transport_closed`, `transport_failed` (a transport error, included as `ended.error`) or `sink_failed` (the sink threw). It ends once, closes the transcriber, removes its transport listeners and leaves the transport open.
+
+| Event | Payload | When |
+|---|---|---|
+| `turn` | `TranscriptTurn` | the sink stored a turn |
+| `interim` | `TranscriptEvent` | the transcriber emitted an interim hypothesis |
+| `stt:reconnected`, `stt:gap` | `SttReconnectedEvent`, `SttGapEvent` | the transcriber reconnected (below) |
+| `paused`, `resumed` | none | the sink fell behind, then caught up or the session released the pause on ending |
+| `ended` | `{ reason, error? }` | the session ended; `state` is `ended` |
+
+### A transcriber that reconnects
+
+Unless `overrides.reconnect` is `false`, the listen session wraps its transcriber in [`ReconnectingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/ReconnectingSTT.ts), and `reconnect` may carry its options. A `StreamingSTTChain` of several providers is passed with `reconnect: false`, since the chain fails over by itself. `ReconnectingSTT` is an `IStreamingSTT` of its own and wraps any one provider:
+
+| Option | Default | Effect |
+|---|---|---|
+| `maxAttemptsPerMinute` | `3` | Reconnects allowed in any sixty seconds; past them the session emits `error`, then `close`, and a listen session ends with `stt_failed`. |
+| `ringBufferCapacityMs` | `3000` | Audio kept for replay into the new session. |
+| `minReplayMs` | `400` | Less buffered audio than this is not replayed. |
+| `queueCapacityMs` | `2000` | Audio queued while a reconnect runs; beyond it the oldest frames are dropped and counted in the session's `droppedFrames`. |
+| `clock` | `Date.now` | The time for the attempt window and the gap. |
+
+When the provider's session errors or closes without the caller asking, a new session of the same provider opens and hears the replayed audio first, then the frames that came meanwhile, then live audio. Each session's `startMs` and `endMs` are moved onto one timeline, the audio pushed since the session began. Queue overflow leaves a gap after the replay: with one second buffered and three seconds arriving into a two-second queue, the replay remains at 0–1000 ms and the retained queue starts at 2000 ms. End bounds are exclusive, so a final ending exactly at the replay boundary keeps its original end time.
+
+`TranscriptDedupe` drops a final that repeats one already emitted over the same audio. Only finals with finite `startMs` and `endMs` and `endMs > startMs` enter its history; other finals bypass it without accumulating retained observations. `OpenAIRealtimeTranscriptionSTT` reports these bounds, while `DeepgramStreamingSTT` and `ElevenLabsStreamingSTT` do not, so with those a final transcribed again from the replay can arrive twice. Each reconnect emits `stt:reconnected` (`{ attempt, replayedMs }`) and `stt:gap` (`{ attempt, lostMs }`, the time the reconnect took).
+
+A `flush()` during reconnect waits for the replacement and its replay and queued audio, then flushes that session. A close during the flush, or after it before further provider activity or pushed audio, ends the stream without reconnecting. A transcript, speech event, usage report or warning after a completed flush clears that terminal-close expectation, so a later close-only network failure reconnects. Deepgram can end its stream while flushing ([CloseStream](https://developers.deepgram.com/docs/close-stream)).
 
 ## Speech-to-text in the browser
 
@@ -310,7 +379,7 @@ await copyFile(new URL('./capture-worklet.js', entry), 'public/audio/capture-wor
 |---------|----------|
 | The transport closes | The pipeline goes `closed` and closes the STT and TTS sessions. The client reconnects into a new session. |
 | An STT or TTS provider fails to start | Through `StreamingSTTChain` or `StreamingTTSChain`, the next provider in priority order starts instead; a circuit breaker skips providers that failed recently. A single provider fails the `startSession()` call. |
-| An STT or TTS session fails during the call | Through a chain with mid-call failover on (`enableMidUtteranceFailover` and `enableMidSynthesisFailover`, both on by default in `createVoiceProvidersFromEnv()`), the next provider takes over: the STT chain replays up to `ringBufferCapacityMs` (default `3000`) of buffered audio, and the TTS chain replays the text it was given. Otherwise the session is the provider's own, and a provider has no reconnect, except `OpenAIRealtimeTranscriptionSTT`: it reconnects, the first retry after 100 ms and each later one after 2 s, up to 3 in a row, and sends the audio held meanwhile first; past the retries its session fails like any other. |
+| An STT or TTS session fails during the call | Through a chain with mid-call failover on (`enableMidUtteranceFailover` and `enableMidSynthesisFailover`, both on by default in `createVoiceProvidersFromEnv()`), the next provider takes over: the STT chain replays up to `ringBufferCapacityMs` (default `3000`) of buffered audio, and the TTS chain replays the text it was given. Otherwise the session is the provider's own, and a provider has no reconnect, except `OpenAIRealtimeTranscriptionSTT`: it reconnects, the first retry after 100 ms and each later one after 2 s, up to 3 in a row, and sends the audio held meanwhile first; past the retries its session fails like any other. `ReconnectingSTT` reconnects any one STT provider, with replay ([A transcriber that reconnects](#a-transcriber-that-reconnects)). |
 | No turn completes | The watchdog gives the endpoint detector a synthetic `speech_end` after `maxTurnDurationMs`. |
 
 Wunderland's `chat --voice` server and `TelephonyStreamTransport` (Twilio, Telnyx and Plivo media streams) build on the same orchestrator; see [Telephony Providers](./TELEPHONY_PROVIDERS.md).
@@ -553,7 +622,7 @@ Events: `transcript` (with `itemId`, `startMs` and `endMs` on the session's audi
 
 **Long sessions.** OpenAI documents a 60-minute limit for a Realtime session ([Realtime conversations](https://developers.openai.com/api/docs/guides/realtime-conversations)); the rollover keeps every connection under it. Once a connection is 55 minutes old (`rollover.afterMs`), the session opens the next one at the first end of speech, or at 58 minutes (`rollover.deadlineMs`) whatever is being said. Both connections receive the same audio for at least 3 s (`rollover.overlapMs`); the old one then stops at its first pause, finishes its items and closes, and an utterance both transcribed is emitted once: from the old connection, or from the new one when the old connection's transcription of it fails, comes back empty or never arrives. An old connection still in speech at 59.5 minutes (`rollover.hardStopMs`) commits what it holds, and the words of that last stretch can appear in both connections' finals. With `turnDetection: null` the switch comes at the first `flush()` after 55 minutes, or with a commit at 58, and the connections do not overlap. `rollover.approve` is called before the rollover opens the next connection: refusing it, or not answering by the hard stop, keeps the current connection until its hard stop and then closes the session, so a host that pays for each hour can reserve the next one first. A next connection that cannot open within the retries also keeps the current one until its hard stop, and the session then ends with that `error`. A connection opened to recover from a dropped one runs under the current approval and keeps the dropped connection's clocks, so the next approval comes at the same time as without the drop; when the connection that took over drops during the overlap, its replacement keeps that newer connection's clocks.
 
-**Without speech output.** `createSttChainFromEnv()` builds the STT chain alone. It reads `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` and `OPENAI_API_KEY` as `createVoiceProvidersFromEnv()` does, needs no TTS key, and leaves mid-utterance failover off, so a session is its provider's own and keeps `flush()`:
+**Without speech output.** `createSttChainFromEnv()` builds the STT chain alone. It reads `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` and `OPENAI_API_KEY` as `createVoiceProvidersFromEnv()` does, needs no TTS key, and leaves mid-utterance failover off, so a session is its provider's own:
 
 ```typescript
 import { createSttChainFromEnv } from '@framers/agentos/io/voice-pipeline';
@@ -562,7 +631,7 @@ const { stt } = createSttChainFromEnv({ openaiRealtime: { usageIntervalMs: 15_00
 const session = await stt.startSession({ language: 'en' });
 ```
 
-In both constructors OpenAI Realtime transcription joins the STT chain when `OPENAI_API_KEY` is set, after Deepgram and ElevenLabs. With mid-utterance failover on, the default in `createVoiceProvidersFromEnv()`, a session is the chain's failover facade: it forwards transcripts, speech events, `usage` and `warning` from its provider sessions, and has no `flush()`. A configuration in which the caller commits each turn (`turnDetection: null`) needs `enableMidUtteranceFailover: false`.
+In both constructors OpenAI Realtime transcription joins the STT chain when `OPENAI_API_KEY` is set, after Deepgram and ElevenLabs. With mid-utterance failover on, the default in `createVoiceProvidersFromEnv()`, a session is the chain's failover facade: it forwards transcripts, speech events, `usage` and `warning` from its provider sessions, and its `flush()` drains the provider session in use, so a configuration in which the caller commits each turn (`turnDetection: null`) commits through the facade too. A close that session makes after flush and before the next frame is pushed ends the facade: it emits `close` once, releases the active session and starts no backup. Later `pushAudio()` and `flush()` calls are ignored, as after the caller's `close()`; open a new session to resume transcription. `currentProviderId` retains the last selected provider's id.
 
 ### ElevenLabs TTS Options
 
