@@ -58,12 +58,14 @@ describe('meeting run states', () => {
 });
 
 describe('billing and the content-free record', () => {
-  it('bills a run that captured and ended by a stop, and never one that never captured', () => {
+  it('bills a run that captured and ended by a stop, and never one that never captured or that ended for an unbilled reason', () => {
     expect(isBilledEnd({ ...run(), reason: 'stopped_by_participant' })).toBe(true);
     expect(isBilledEnd({ ...run(), reason: 'crashed' })).toBe(true);
     expect(isBilledEnd({ ...run(), reason: 'crashed', captureStartedAt: undefined })).toBe(false);
     for (const reason of ['not_admitted', 'notice_failed', 'stop_monitor_failed', 'permission_denied', 'no_capacity'] as const) {
       expect(isBilledEnd({ ...run(), reason, captureStartedAt: undefined })).toBe(false);
+      // the fixture's run captured (captureStartedAt 3), so here the reason alone keeps it unbilled
+      expect(isBilledEnd({ ...run(), reason }), reason).toBe(false);
     }
   });
   it('keeps only the id, the platform, the times, the reason, the seconds, the notice version and the consent id', () => {
