@@ -9,7 +9,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { ITranscriptInputSink, TranscriptTurn } from '../../voice-pipeline/types.js';
-import type { DispatchResult, IMeetingBotProvider, ProviderEventContext } from './IMeetingBotProvider.js';
+import type { DispatchResult, IMeetingBotProvider, ProviderCommand, ProviderEventContext } from './IMeetingBotProvider.js';
 import type { MeetingRoom, MeetingRoomHandle } from './MeetingRoom.js';
 import { MeetingTranscriptSink } from './MeetingTranscriptSink.js';
 import { hashWorkerToken, mintWorkerToken } from './signing.js';
@@ -766,7 +766,11 @@ export class MeetingManager {
     }
     if (run.state === 'requested' || run.state === 'scheduled') {
       const cancelled = await this.stores.jobs.cancel(runId);
-      if (cancelled === 'already_dispatched') return this.leave(run, reason);
+      if (cancelled === 'already_dispatched') {
+        // the job was dispatched after the read above, so the run is past `requested`, which cannot move to `leaving`: leave from the state it is in now
+        const current = await this.stores.runs.get(runId);
+        return current ? this.leave(current, reason) : false;
+      }
       const stillWaiting = await this.stores.runs.update(runId, { reason }, ['requested', 'scheduled']);
       if (!stillWaiting) {
         // a dispatcher took the run between the read and the cancel: it learns the cancel at markDispatched and tells the bot to leave with this reason
@@ -840,16 +844,28 @@ export class MeetingManager {
 
   /**
    * Moves the run to `leaving` (a run behind the fence stays `purging`), arms the kill and tells the bot to leave. The
-   * kill's deadline is armed on the run before the command goes, so a bot that does not leave is killed by whichever
-   * manager runs the limits, after a restart too, and a leave command that never reached the bot is followed by the kill.
+   * kill's deadline is armed on the run before the command goes, so a leave the bot never receives still ends in the
+   * kill, and whichever manager runs the limits, after a restart too, sends it.
    */
   private async leave(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<boolean> {
     if (!canTransition(run.state, 'leaving') && run.state !== 'purging') return false;
-    const provider = this.providers.get(run.providerName);
     const armed: Partial<MeetingRunRecord> = run.state === 'purging' ? { leaveCommandedAt: this.now() } : { state: 'leaving', reason, leaveCommandedAt: this.now() };
     if (!(await this.stores.runs.update(run.runId, armed, run.state))) return false;
-    await provider?.command(run.runId, { name: 'leave', reason });
+    await this.sendCommand(run, { name: 'leave', reason });
     return true;
+  }
+
+  /**
+   * Sends a command on the way out (suspend, leave, kill) to the run's bot. A command that fails, its worker unreachable
+   * for a moment, is logged and not thrown: the kill armed before it, and the end recorded after the kill, cover a bot
+   * that never received it.
+   */
+  private async sendCommand(run: MeetingRunRecord, command: ProviderCommand): Promise<void> {
+    try {
+      await this.providers.get(run.providerName)?.command(run.runId, command);
+    } catch (err) {
+      this.config.logger?.warn(`[MeetingManager] ${command.name} to the bot of ${run.runId} failed: ${String(err)}`);
+    }
   }
 
   /** A run that ends before it joined (a failed revalidation, no capacity, a cancel): never billed. */
@@ -941,7 +957,6 @@ export class MeetingManager {
 
   /** (a) the fence; (b) the purge, each step retried until it resolves; (c) the content-free record. */
   private async purge(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<void> {
-    const provider = this.providers.get(run.providerName);
     if (run.state !== 'purging') {
       // a bot that may be out is told to leave below: the kill's deadline goes on the run with the fence, before the commands
       const fenced = await this.stores.runs.update(run.runId, { state: 'purging', reason, ...(run.dispatch ? { leaveCommandedAt: this.now() } : {}) }, PURGEABLE_STATES);
@@ -949,12 +964,18 @@ export class MeetingManager {
       await this.stores.transcript.fence(run.runId);
       await this.stores.events.fence(run.runId);
       await this.stores.outbox.purgeContent(run.runId);
-      if (run.state === 'requested' || run.state === 'scheduled') {
+      // decided on the row the fence wrote, not on the read before it: a dispatcher may have taken the run in between,
+      // written its dispatch record and started a bot. With no dispatch record no bot can start (the dispatcher's write of
+      // one expects `dispatching`); with one, the bot is told at once unless it has already left.
+      if (fenced.dispatch === undefined) {
         await this.stores.jobs.cancel(run.runId);
         await this.stores.jobs.remove(run.runId);
-      } else if (run.dispatch) {
-        await provider?.command(run.runId, { name: 'suspendCapture' });
-        await provider?.command(run.runId, { name: 'leave', reason });
+      } else if (fenced.leftAt === undefined) {
+        // the kill is armed first, so a suspend or a leave the bot never receives still ends in the kill; a fence written
+        // without its deadline (a dispatcher took the run after the read above) has it written here, before the commands
+        if (fenced.leaveCommandedAt === undefined) await this.stores.runs.update(run.runId, { leaveCommandedAt: this.now() }, 'purging');
+        await this.sendCommand(run, { name: 'suspendCapture' });
+        await this.sendCommand(run, { name: 'leave', reason });
       }
     }
     await this.continuePurge(run.runId);
@@ -987,82 +1008,107 @@ export class MeetingManager {
       else await this.stores.entitlement.release(run.reservationId);
     }
     await this.stores.jobs.remove(runId);
-    const done = await this.stores.runs.update(runId, { state: 'done', doneAt: now, purgedAt: now, billedSeconds: billed }, 'purging');
+    // one write, `done` and the content-free row together as complete() and fail() write theirs: a failure after a first
+    // write of `done` would leave a done row holding the url, the bot's name and the notice, and nothing returns to a done run
+    const done = await this.stores.runs.update(runId, { ...contentFreeRun(run), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'done', doneAt: now, purgedAt: now, billedSeconds: billed, cleanupPending: false }, 'purging');
     if (!done) return;
-    const free = { ...contentFreeRun(done), purgedAt: now };
-    await this.stores.runs.replace(free);
-    await this.emit('bot:purged', free, { reason: free.reason });
-    await this.emit('bot:done', free, { reason: free.reason, billedSeconds: billed });
+    await this.emit('bot:purged', done, { reason: done.reason });
+    await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
   }
 
   // ── The limits ──
 
+  /**
+   * Each run's limits, kills, resumed purges and retried cleanups, in turn. A run whose step throws (a cleanup, a settle,
+   * a command) holds back no other run's, the stop monitor's suspension among them: it is tried again on the next pass,
+   * and the first error is thrown once every run has had its turn.
+   */
   private async enforceLimits(): Promise<void> {
     const now = this.now();
     const runs = await this.stores.runs.list({ states: ['requested', 'scheduled', ...ACTIVE_STATES], limit: Number.MAX_SAFE_INTEGER });
+    let failure: { error: unknown } | undefined;
     for (const run of runs) {
-      if (run.cleanupPending && ['requested', 'scheduled', 'dispatching'].includes(run.state)) {
-        await this.fail(run, run.reason ?? 'crashed');
-        continue;
-      }
-      if (run.state === 'requested' || run.state === 'scheduled') continue;
-      const provider = this.providers.get(run.providerName);
-      // the kill's deadline is on the run, so a bot that has not left is killed whichever manager told it to leave; a kill
-      // that throws is sent again on the next pass, and the bot's leaving (`leftAt`) disarms it
-      if (run.leaveCommandedAt !== undefined && run.leftAt === undefined && now - run.leaveCommandedAt > this.killAfterMs) {
-        await provider?.command(run.runId, { name: 'kill' });
-        await this.crash(run, now, undefined);
-        continue;
-      }
-      if (run.state === 'purging') {
-        await this.continuePurge(run.runId);
-        continue;
-      }
-      if (run.state === 'left') {
-        // a cleanup that threw last time is tried again here, until `done` is written
-        await this.complete(run, undefined);
-        continue;
-      }
-      if (run.state === 'leaving') continue;
-      const since = run.dispatchedAt ?? run.joinAt;
-      if (now - since > run.limits.totalMs) {
-        await this.leave(run, 'cap');
-        continue;
-      }
-      if (run.state === 'waiting_room' && now - (run.joinedAt ?? since) > run.limits.waitingRoomMs) {
-        await this.leave(run, 'not_admitted');
-        continue;
-      }
-      if (run.state === 'in_call_notice_pending' && run.joinedAt !== undefined && now - run.joinedAt > this.noticeConfirmMs) {
-        await this.leave(run, 'notice_failed');
-        continue;
-      }
-      if (run.state === 'in_call') {
-        // quiet once monitorMissedBeats intervals have passed since the last heartbeat, the boundary captureReady and startCaptureIfReady use
-        const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats;
-        if (monitorStale) {
-          if (run.captureSuspendedAt === undefined) {
-            // kept on the run: the manager that hears the monitor recover resumes capture, and the recovery window holds after a restart
-            const suspended = await this.stores.runs.update(run.runId, { captureSuspendedAt: now }, 'in_call');
-            if (suspended) {
-              await provider?.command(run.runId, { name: 'suspendCapture' });
-              await this.emit('bot:capture_suspended', suspended, { reason: 'stop monitor quiet' });
+      try {
+        if (run.cleanupPending && ['requested', 'scheduled', 'dispatching'].includes(run.state)) {
+          await this.fail(run, run.reason ?? 'crashed');
+          continue;
+        }
+        if (run.state === 'requested' || run.state === 'scheduled') continue;
+        const provider = this.providers.get(run.providerName);
+        // the kill's deadline is on the run, so a bot that has not left is killed whichever manager told it to leave, after a
+        // restart too, and the bot's leaving (`leftAt`) disarms it. The end is recorded whether or not the kill reaches the
+        // bot: the cleanup that follows deletes its room
+        if (run.leaveCommandedAt !== undefined && run.leftAt === undefined && now - run.leaveCommandedAt > this.killAfterMs) {
+          await this.sendCommand(run, { name: 'kill' });
+          await this.crash(run, now, undefined);
+          continue;
+        }
+        if (run.state === 'purging') {
+          await this.continuePurge(run.runId);
+          continue;
+        }
+        if (run.state === 'left') {
+          // a cleanup that threw last time is tried again here, until `done` is written
+          await this.complete(run, undefined);
+          continue;
+        }
+        if (run.state === 'leaving') continue;
+        // a cancel that leaveBot wrote during a dispatch, with no dispatcher left to act on it: the dispatcher stopped, so the
+        // cancelled job is never leased again and no markDispatched learns it. The leave goes from here, from whatever state
+        // the bot's own reports have moved the run to; a dispatch still under a live lease learns it at markDispatched.
+        if (run.reason !== undefined && !(run.state === 'dispatching' && (await this.dispatchLeaseLive(run.runId, now)))) {
+          await this.leave(run, run.reason);
+          continue;
+        }
+        const since = run.dispatchedAt ?? run.joinAt;
+        if (now - since > run.limits.totalMs) {
+          await this.leave(run, 'cap');
+          continue;
+        }
+        if (run.state === 'waiting_room' && now - (run.joinedAt ?? since) > run.limits.waitingRoomMs) {
+          await this.leave(run, 'not_admitted');
+          continue;
+        }
+        if (run.state === 'in_call_notice_pending' && run.joinedAt !== undefined && now - run.joinedAt > this.noticeConfirmMs) {
+          await this.leave(run, 'notice_failed');
+          continue;
+        }
+        if (run.state === 'in_call') {
+          // quiet once monitorMissedBeats intervals have passed since the last heartbeat, the boundary captureReady and startCaptureIfReady use
+          const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats;
+          if (monitorStale) {
+            if (run.captureSuspendedAt === undefined) {
+              // kept on the run: the manager that hears the monitor recover resumes capture, and the recovery window holds after a restart
+              const suspended = await this.stores.runs.update(run.runId, { captureSuspendedAt: now }, 'in_call');
+              if (suspended) {
+                await provider?.command(run.runId, { name: 'suspendCapture' });
+                await this.emit('bot:capture_suspended', suspended, { reason: 'stop monitor quiet' });
+              }
+            } else if (now - run.captureSuspendedAt > this.monitorRecoverMs) {
+              await this.leave(run, 'stop_monitor_failed');
+              continue;
             }
-          } else if (now - run.captureSuspendedAt > this.monitorRecoverMs) {
-            await this.leave(run, 'stop_monitor_failed');
+          }
+          if (run.aloneSince !== undefined && now - run.aloneSince > run.limits.aloneMs) {
+            await this.leave(run, 'alone');
+            continue;
+          }
+          if (run.limits.pageAwayMs !== undefined && run.pageSeenAt !== undefined && now - run.pageSeenAt > run.limits.pageAwayMs) {
+            await this.leave(run, 'page_away');
             continue;
           }
         }
-        if (run.aloneSince !== undefined && now - run.aloneSince > run.limits.aloneMs) {
-          await this.leave(run, 'alone');
-          continue;
-        }
-        if (run.limits.pageAwayMs !== undefined && run.pageSeenAt !== undefined && now - run.pageSeenAt > run.limits.pageAwayMs) {
-          await this.leave(run, 'page_away');
-          continue;
-        }
+      } catch (error) {
+        failure ??= { error };
       }
     }
+    if (failure) throw failure.error;
+  }
+
+  /** Whether a dispatcher still holds the run's job under a lease that has not run out. */
+  private async dispatchLeaseLive(runId: string, now: number): Promise<boolean> {
+    const job = await this.stores.jobs.get(runId);
+    return job !== undefined && job.leaseHolder !== undefined && job.leaseExpiresAt !== undefined && job.leaseExpiresAt > now;
   }
 
   /** Evicts completed in-memory runs after the grace. Durable stores omit forget and keep their terminal records. */
@@ -1090,25 +1136,31 @@ export class MeetingManager {
    * Compares dispatched jobs with the providers' usage: a run whose container is gone is ended as crashed; an unfinished
    * purge is resumed. A run still waiting for its dispatch whose job is missing (a send whose job could not be stored)
    * is given its job again, and one a cancel left without its job (the cancel's reason is on the run) is ended, so
-   * neither waits for ever holding its reservation.
+   * neither waits for ever holding its reservation. As in the limits, a run whose step throws holds back no other, and
+   * the first error is thrown at the end.
    */
   async reconcile(): Promise<void> {
     const now = this.now();
+    let failure: { error: unknown } | undefined;
     const byProvider = new Map<string, string[]>();
     for (const job of await this.stores.jobs.listDispatched()) {
-      const run = await this.stores.runs.get(job.runId);
-      if (!run) {
-        await this.stores.jobs.remove(job.runId);
-        continue;
+      try {
+        const run = await this.stores.runs.get(job.runId);
+        if (!run) {
+          await this.stores.jobs.remove(job.runId);
+          continue;
+        }
+        if (run.state === 'purging') {
+          await this.continuePurge(run.runId);
+          continue;
+        }
+        if (!ACTIVE_STATES.includes(run.state) || run.state === 'dispatching') continue;
+        const list = byProvider.get(run.providerName) ?? [];
+        list.push(run.runId);
+        byProvider.set(run.providerName, list);
+      } catch (error) {
+        failure ??= { error };
       }
-      if (run.state === 'purging') {
-        await this.continuePurge(run.runId);
-        continue;
-      }
-      if (!ACTIVE_STATES.includes(run.state) || run.state === 'dispatching') continue;
-      const list = byProvider.get(run.providerName) ?? [];
-      list.push(run.runId);
-      byProvider.set(run.providerName, list);
     }
     for (const [providerName, runIds] of byProvider) {
       const provider = this.providers.get(providerName);
@@ -1122,20 +1174,29 @@ export class MeetingManager {
       }
       for (const u of usage) {
         if (u.alive) continue;
-        const run = await this.stores.runs.get(u.runId);
-        if (run && (run.state === 'joining' || run.state === 'waiting_room' || run.state === 'in_call_notice_pending' || run.state === 'in_call' || run.state === 'leaving')) {
-          this.config.logger?.warn(`[MeetingManager] ${run.runId}: worker reports no container; ending as crashed`);
-          await this.crash(run, now, u.seconds || undefined);
+        try {
+          const run = await this.stores.runs.get(u.runId);
+          if (run && (run.state === 'joining' || run.state === 'waiting_room' || run.state === 'in_call_notice_pending' || run.state === 'in_call' || run.state === 'leaving')) {
+            this.config.logger?.warn(`[MeetingManager] ${run.runId}: worker reports no container; ending as crashed`);
+            await this.crash(run, now, u.seconds || undefined);
+          }
+        } catch (error) {
+          failure ??= { error };
         }
       }
     }
     // only a job is ever dispatched: a waiting run without one would hold its reservation for ever. A run whose end has
     // begun (cleanupPending) is the limits pass's to finish.
     for (const run of await this.stores.runs.list({ states: ['requested', 'scheduled'], limit: Number.MAX_SAFE_INTEGER })) {
-      if (run.cleanupPending || (await this.stores.jobs.get(run.runId))) continue;
-      if (run.reason !== undefined) await this.fail(run, run.reason);
-      else await this.stores.jobs.schedule({ runId: run.runId, dispatchAt: run.joinAt });
+      try {
+        if (run.cleanupPending || (await this.stores.jobs.get(run.runId))) continue;
+        if (run.reason !== undefined) await this.fail(run, run.reason);
+        else await this.stores.jobs.schedule({ runId: run.runId, dispatchAt: run.joinAt });
+      } catch (error) {
+        failure ??= { error };
+      }
     }
+    if (failure) throw failure.error;
   }
 
   // ── The transcript ──
