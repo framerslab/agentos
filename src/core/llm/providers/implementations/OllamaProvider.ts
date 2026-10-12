@@ -180,13 +180,18 @@ const percentDecodeBytes = (payload: string): Buffer => {
  * base64 only, or `null` for anything that is not a data URL holding data.
  * Read as WHATWG Fetch reads a data URL
  * (https://fetch.spec.whatwg.org/#data-url-processor): tabs and line breaks
- * are dropped, the text before the first comma marks base64 when it ends in
- * `;base64` (spaces allowed around it), and the payload is percent-decoded
- * first. A data URL that is not base64 is percent-decoded and re-encoded.
- * Each step is linear in the URL's length.
+ * are dropped, a `#` fragment is not part of the data, the text before the
+ * first comma marks base64 when it ends in `;base64` (spaces allowed around
+ * it), and the payload is percent-decoded first. A data URL that is not
+ * base64 is percent-decoded and re-encoded. Each step is linear in the URL's
+ * length.
  */
 const extractBase64ImagePayload = (url: string): string | null => {
-  const text = url.trim().replace(/[\t\n\r]/g, '');
+  const whole = url.trim().replace(/[\t\n\r]/g, '');
+  // The URL parser takes everything from the first '#' as the fragment, which
+  // the data URL processor leaves out.
+  const hash = whole.indexOf('#');
+  const text = hash === -1 ? whole : whole.slice(0, hash);
   const comma = text.indexOf(',');
   if (!/^data:/i.test(text) || comma === -1) return null;
   const payload = text.slice(comma + 1);

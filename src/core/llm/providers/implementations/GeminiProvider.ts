@@ -212,7 +212,8 @@ function isBase64(text: string): boolean {
  *   would reach whatever network the process runs in.
  * - A data URL becomes `inlineData`, read as WHATWG Fetch reads one
  *   (https://fetch.spec.whatwg.org/#data-url-processor): tabs and line breaks
- *   are dropped, the text before the first comma is the media type and marks
+ *   are dropped, a `#` fragment is not part of the data, the text before the
+ *   first comma is the media type and marks
  *   base64 when it ends in `;base64` (spaces allowed around it), and the rest
  *   is percent-decoded, then read as base64 when so marked. Each step is linear
  *   in the URL's length, so a URL a caller forwards cannot stall the process.
@@ -238,7 +239,11 @@ function imagePartOf(url: string): GeminiPart {
       'IMAGE_URL_NOT_SUPPORTED',
     );
   }
-  const text = url.replace(/[\t\n\r]/g, '');
+  const whole = url.replace(/[\t\n\r]/g, '');
+  // The URL parser takes everything from the first '#' as the fragment, which
+  // the data URL processor leaves out.
+  const hash = whole.indexOf('#');
+  const text = hash === -1 ? whole : whole.slice(0, hash);
   const comma = text.indexOf(',');
   if (!/^data:/i.test(text) || comma === -1) {
     throw refusedImage('Gemini takes an image as an https URL or a data URL; this image_url is neither.', 'INVALID_IMAGE_URL');

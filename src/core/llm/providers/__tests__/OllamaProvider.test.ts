@@ -94,6 +94,8 @@ describe('OllamaProvider multimodal message mapping', () => {
             { type: 'image_url', image_url: { url: 'data:image/png; base64 ,Zm9v\nYmFy' } },
             { type: 'image_url', image_url: { url: 'data:image/png;base64,Zm9vYmFy%3D%3D' } },
             { type: 'image_url', image_url: { url: 'data:image/svg+xml,%3Csvg%3E' } },
+            // The fragment is not part of the data.
+            { type: 'image_url', image_url: { url: 'data:image/svg+xml,%3Csvg%2F%3E#icon' } },
           ],
         },
       ],
@@ -103,7 +105,7 @@ describe('OllamaProvider multimodal message mapping', () => {
     const [, body] = postMock.mock.calls[0];
     // No text: the content is empty, not the parts (and their data URLs) as JSON.
     expect(body.messages).toEqual([
-      expect.objectContaining({ role: 'user', content: '', images: ['Zm9vYmFy', 'Zm9vYmFy==', 'PHN2Zz4='] }),
+      expect.objectContaining({ role: 'user', content: '', images: ['Zm9vYmFy', 'Zm9vYmFy==', 'PHN2Zz4=', 'PHN2Zy8+'] }),
     ]);
   });
 

@@ -118,9 +118,12 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
   // Data URL (RFC 2397): base64 after ";base64", percent-encoded bytes otherwise.
   if (/^data:/i.test(trimmed)) {
     // Read as WHATWG Fetch reads a data URL: the URL parser first drops every
-    // tab and line break, so a URL wrapped across lines reads as one, and
-    // spaces may then stand around `;base64`.
-    const url = trimmed.replace(/[\t\n\r]/g, '');
+    // tab and line break, so a URL wrapped across lines reads as one, takes
+    // everything from the first '#' as the fragment, which the data URL
+    // processor leaves out, and spaces may then stand around `;base64`.
+    const whole = trimmed.replace(/[\t\n\r]/g, '');
+    const hash = whole.indexOf('#');
+    const url = hash === -1 ? whole : whole.slice(0, hash);
     const commaIdx = url.indexOf(',');
     if (commaIdx === -1) {
       throw new Error('imageToBuffer: malformed data URL — missing comma separator.');

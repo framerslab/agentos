@@ -176,6 +176,13 @@ describe('imageToBuffer', () => {
     expect([...(await imageToBuffer('data:image/png,%89P\nNG'))]).toEqual([0x89, 0x50, 0x4e, 0x47]);
   });
 
+  it('leaves the fragment out of a data URL, as the WHATWG URL parser does', async () => {
+    expect(await imageToBuffer('data:image/png;base64,aGVsbG8=#frame-2')).toEqual(Buffer.from('hello'));
+    expect((await imageToBuffer('data:image/svg+xml,%3Csvg%2F%3E#icon')).toString('utf8')).toBe('<svg/>');
+    // An encoded '#' is data.
+    expect((await imageToBuffer('data:text/plain,a%23b')).toString('utf8')).toBe('a#b');
+  });
+
   it('reads a file URL whose scheme is in capitals', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'imageToBuffer-'));
     try {

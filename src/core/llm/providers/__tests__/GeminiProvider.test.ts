@@ -435,13 +435,15 @@ describe('GeminiProvider', () => {
             { type: 'image_url', image_url: { url: `data:image/png;\tbase64,${png}` } },
             { type: 'image_url', image_url: { url: 'data:IMAGE/PNG;base64,iVBORw0KGgo%3D' } },
             { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBO Rw0K\nGgo=' } },
+            // The fragment is not part of the data.
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${png}#frame-2` } },
           ],
         },
       ], {});
 
       const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(requestBody.contents[0].parts).toEqual(
-        Array.from({ length: 4 }, () => ({ inlineData: { mimeType: 'image/png', data: png } })),
+        Array.from({ length: 5 }, () => ({ inlineData: { mimeType: 'image/png', data: png } })),
       );
     });
 
