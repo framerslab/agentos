@@ -107,6 +107,7 @@ export type {
   VisionResult,
   VisionStrategy,
   VisionTier,
+  VisionCloudTask,
   ContentCategory as VisionContentCategory,
   TierResult as VisionTierResult,
   FailedTier as VisionFailedTier,
@@ -161,10 +162,15 @@ export {
   extractWikiLinks,
   WIKI_PAGE_TYPES,
   isWikiPageType,
+  InvalidWikiPageIdError,
+  isWikiPageId,
+  assertWikiPageId,
+  MAX_WIKI_PAGE_ID_LENGTH,
 } from './cognition/substrate/memory/wiki/index.js';
 export type {
   WikiPage,
   WikiPageType,
+  WikiPageIdProblem,
   MetaIndex,
   IndexResult as WikiIndexResult,
   CompileResult as WikiCompileResult,
@@ -285,6 +291,7 @@ export { souledAgent } from './api/souledAgent.js';
 export type { SouledAgentOptions, SouledAgent } from './api/souledAgent.js';
 export type {
   Agent,
+  AgentLearning,
   AgentSession,
   AgentSessionOptions,
   AgentOptions,
@@ -303,6 +310,28 @@ export type {
   ResolvedCognition,
 } from './api/runtime/gmiCognition.js';
 export { personaFromAgentOptions } from './api/runtime/gmiPersona.js';
+// The learning layer (docs/GMI.md, "Learning"): off unless a host sets its `learning` option.
+export { createLearningLayer } from './cognition/learning/index.js';
+export type {
+  HostLoopName,
+  ILearnerSession,
+  ILearningLayer,
+  LearnerContext,
+  LearnerKey,
+  LearningConfig,
+  LearningLayerOptions,
+  LearningLoopName,
+  LearningMode,
+  LearningProfile,
+  LoopManifest,
+  LoopName,
+  LoopState,
+  NoLearnerReason,
+  ResolvedLearning,
+  ToolLearningContext,
+  TurnInputForLearning,
+  TurnPreparation,
+} from './cognition/learning/index.js';
 export { createAgentCognitiveMemory } from './api/runtime/agentCognitiveMemory.js';
 export type { AgentCognitiveMemory, AgentCognitiveMemoryOptions } from './api/runtime/agentCognitiveMemory.js';
 export type { MemoryProviderHookOptions } from './api/runtime/memoryProviderHooks.js';

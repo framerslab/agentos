@@ -61,6 +61,9 @@ import {
   type ITaskOutcomeTelemetryStore,
 } from './runtime/AgentOSOrchestrator';
 import { GMIManager, GMIManagerConfig } from '../cognition/substrate/GMIManager';
+import { createLearningLayer } from '../cognition/learning/LearningLayer.js';
+import { resolveLearningConfig } from '../cognition/learning/config.js';
+import type { HostLoopName, ILearningLayer, LearningConfig, LoopState } from '../cognition/learning/types.js';
 import {
   AIModelProviderManager,
   AIModelProviderManagerConfig,
@@ -770,6 +773,17 @@ export interface AgentOSConfig {
    * Default: disabled (opt-in).
    */
   observability?: AgentOSObservabilityConfig;
+
+  /**
+   * The learning layer (docs/GMI.md, "Learning"). Unset or `false`: off, and the runtime's GMIs run as they did
+   * before the layer existed. `true` or a {@link LearningConfig}: every GMI sends its persona's personality section
+   * as a system prompt of its own on every turn, and each session is bound to a learner: its persona with the user
+   * and the resolved organization of its first turn. `namespace` is refused here, because the runtime takes the
+   * organization from each turn. A host that built a layer itself passes it in `gmiManagerConfig.learningLayer`
+   * instead. {@link AgentOS.getLearningLayer} returns the layer.
+   * @default false
+   */
+  learning?: boolean | LearningConfig;
 }
 
 export interface AgentOSActiveConversationSnapshot {
@@ -861,6 +875,10 @@ export class AgentOS implements IAgentOS {
   private guardrailService?: IGuardrailService;
   private workflowFacade?: WorkflowFacade;
   private discoveryInitializer?: CapabilityDiscoveryInitializer;
+  /** The learning layer the runtime's GMIs use: built from `learning`, or passed in `gmiManagerConfig`. */
+  private learningLayer?: ILearningLayer;
+  /** True when this runtime built the layer, and so closes it at shutdown. */
+  private ownsLearningLayer = false;
 
   private ragMemoryInitializer!: RagMemoryInitializer;
 
@@ -947,6 +965,7 @@ export class AgentOS implements IAgentOS {
     }
 
     this.validateConfiguration(config);
+    this.assertLearningConfig(config);
     const resolvedConfig = RagMemoryInitializer.resolveConfig(config);
     const normalizedConfigTools = adaptToolsToMap(resolvedConfig.tools);
     const normalizedExternalTools = normalizeExternalToolRegistry(resolvedConfig.externalTools);
@@ -1229,10 +1248,17 @@ export class AgentOS implements IAgentOS {
       await this.streamingManager.initialize(this.config.streamingManagerConfig);
       console.log('AgentOS: StreamingManager initialized.');
 
+      // The learning layer, only when the host turned learning on (or passed a layer of its own).
+      this.learningLayer = this.resolveLearningLayer();
+
       // Initialize GMI Manager
       const personaSource = resolvePersonaLoader(this.config);
       this.gmiManager = new GMIManager(
-        { ...this.config.gmiManagerConfig, personaLoaderConfig: personaSource.personaLoaderConfig },
+        {
+          ...this.config.gmiManagerConfig,
+          personaLoaderConfig: personaSource.personaLoaderConfig,
+          ...(this.learningLayer ? { learningLayer: this.learningLayer } : {}),
+        },
         this.subscriptionService,
         this.authService,
         this.conversationManager, // Removed Prisma parameter
@@ -1682,6 +1708,97 @@ export class AgentOS implements IAgentOS {
   public getGMIManager(): GMIManager {
     this.ensureInitialized();
     return this.gmiManager;
+  }
+
+  /**
+   * The runtime's learning layer, or `undefined` when learning is off: no `learning` option and no layer passed
+   * in `gmiManagerConfig.learningLayer`. A host reads the loop manifest from it; a measurement asserts on it
+   * that a runtime it compares has learning off.
+   */
+  public getLearningLayer(): ILearningLayer | undefined {
+    this.ensureInitialized();
+    return this.learningLayer;
+  }
+
+  /**
+   * Checks the `learning` option before any service starts: a `LearningConfig` must be valid, `learning.namespace`
+   * is refused (the runtime takes each turn's resolved organization), and `learning` and
+   * `gmiManagerConfig.learningLayer` are not both set (the manager takes one layer).
+   *
+   * @throws {AgentOSServiceError} With `CONFIGURATION_ERROR`, naming the option.
+   */
+  private assertLearningConfig(config: AgentOSConfig): void {
+    const option = config.learning;
+    if (option === undefined || option === false) return;
+    const refuse = (message: string): never => {
+      throw new AgentOSServiceError(message, GMIErrorCode.CONFIGURATION_ERROR, undefined, 'AgentOS.initialize');
+    };
+    if (config.gmiManagerConfig?.learningLayer) {
+      refuse('Both learning and gmiManagerConfig.learningLayer are set; set one.');
+    }
+    if (option !== true && (option as LearningConfig | null)?.namespace !== undefined) {
+      refuse("learning.namespace is read by gmi() only; the runtime takes each turn's resolved organizationId.");
+    }
+    try {
+      resolveLearningConfig(option === true ? {} : option, 'custom');
+    } catch (error) {
+      throw AgentOSServiceError.wrap(error, GMIErrorCode.CONFIGURATION_ERROR, 'The learning option is not valid', 'AgentOS.initialize');
+    }
+  }
+
+  /**
+   * The layer the GMI manager is built with: one built from `learning` (profile `custom`: the runtime has no
+   * cognition profile, so rendering is on and the self-change kinds are off unless the config asks for them), or
+   * the one the host passed in `gmiManagerConfig.learningLayer`, or none.
+   */
+  private resolveLearningLayer(): ILearningLayer | undefined {
+    const option = this.config.learning;
+    this.ownsLearningLayer = false;
+    if (option === undefined || option === false) return this.config.gmiManagerConfig.learningLayer;
+    const layer = createLearningLayer({
+      ...(option === true ? {} : option),
+      profile: 'custom',
+      surface: 'runtime',
+      hostLoops: this.describeHostLoops(),
+    });
+    this.ownsLearningLayer = true;
+    return layer;
+  }
+
+  /** What this runtime's configuration says about the loops it runs, for the learning layer's manifest. */
+  private describeHostLoops(): Partial<Record<HostLoopName, LoopState>> {
+    const perFactory: LoopState = { live: 'varies', detail: "decided by the host's cognitiveMemoryFactory" };
+    const perPersona: LoopState = { live: 'varies', detail: 'set per persona' };
+    const off = (detail: string): LoopState => ({ live: false, detail });
+    const memory = Boolean(this.config.gmiManagerConfig.cognitiveMemoryFactory);
+    const emergent = this.config.emergent === true;
+    return {
+      memory: memory ? { live: true } : off('no gmiManagerConfig.cognitiveMemoryFactory'),
+      memory_mechanisms: memory ? perFactory : off('no cognitive memory'),
+      memory_observer_reflector: memory ? perFactory : off('no cognitive memory'),
+      memory_store: memory ? perFactory : off('no cognitive memory'),
+      sentiment: perPersona,
+      metaprompts: perPersona,
+      emergent_tools: emergent ? { live: true } : off('emergent is off'),
+      self_improvement_tools:
+        emergent && this.config.emergentConfig?.selfImprovement?.enabled === true
+          ? { live: true }
+          : off('emergentConfig.selfImprovement is off'),
+      forged_code_executor:
+        emergent && this.config.emergentConfig?.allowSandboxTools === true ? { live: true } : off('sandbox forging is off'),
+      // The tool orchestrator's approval gate runs only with toolOrchestratorConfig.hitl.enabled.
+      hitl:
+        this.config.toolOrchestratorConfig?.hitl?.enabled === true
+          ? this.config.hitlManager
+            ? { live: true }
+            : { live: true, detail: 'no hitlManager: side-effect tools are refused unless hitl.autoApproveWhenNoManager is set' }
+          : off('toolOrchestratorConfig.hitl.enabled is off'),
+      tool_policy:
+        this.config.orchestratorConfig.adaptiveExecution?.enabled === false
+          ? off('orchestratorConfig.adaptiveExecution is off')
+          : { live: true },
+      rag: this.ragMemoryInitializer?.retrievalAugmentor ? { live: true } : off('no retrieval augmentor'),
+    };
   }
 
   public getExtensionManager(): ExtensionManager {
@@ -2550,6 +2667,12 @@ export class AgentOS implements IAgentOS {
         await this.gmiManager.shutdown();
         console.log('AgentOS: GMIManager shut down.');
       }
+      // After the GMIs: each ended its learner session as it shut down. A layer the host passed stays the host's.
+      if (this.learningLayer && this.ownsLearningLayer) {
+        await this.learningLayer.close();
+      }
+      this.learningLayer = undefined;
+      this.ownsLearningLayer = false;
       if (this.streamingManager?.shutdown) {
         await this.streamingManager.shutdown();
         console.log('AgentOS: StreamingManager shut down.');

@@ -61,6 +61,7 @@ const ENV_URL_MAP: Record<string, string> = {
   requesty: 'REQUESTY_BASE_URL',
   stability: 'STABILITY_BASE_URL',
   replicate: 'REPLICATE_BASE_URL',
+  fal: 'FAL_BASE_URL',
   ollama: 'OLLAMA_BASE_URL',
   'stable-diffusion-local': 'STABLE_DIFFUSION_LOCAL_BASE_URL',
 };
@@ -434,7 +435,7 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
 const CHAT_MODEL_FAMILY =
   /^(?:[\w.-]+:)?(?:[\w.-]+\/)?(?:gpt-|chatgpt|o\d|claude|gemini|gemma|llama|mistral|mixtral|codestral|ministral|magistral|grok|deepseek|qwen|command|phi-|sonar|kimi|glm)/i;
 
-/** Names that mark a non-chat model inside a chat family (gpt-image-1, gemini-embedding-2). */
+/** Names that mark a non-chat model inside a chat family (gpt-image-2.5-flare, gemini-embedding-2). */
 const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|audio|realtime|moderation/i;
 
 /**

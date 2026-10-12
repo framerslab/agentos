@@ -9,6 +9,7 @@
  */
 
 import type { MemoryRetrievalPolicy } from '../../../rag/unified/policy.js';
+import type { PathNameProblem } from '../../../../core/utils/pathName.js';
 
 // ---------------------------------------------------------------------------
 // Embedding configuration
@@ -488,6 +489,50 @@ export interface ExportOptions {
    * @default true
    */
   includeConversations?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// export() result
+// ---------------------------------------------------------------------------
+
+/**
+ * A trace an export left out. Nothing was written for it.
+ */
+export interface RefusedExportTrace {
+  /** The trace's id, as stored. */
+  id: string;
+
+  /**
+   * The value that was refused: the trace's `scope`, `type` or `id`, which name its folders and its file in a
+   * Markdown or Obsidian export; or `path`, the trace's place in the export folder as a whole.
+   */
+  field: 'scope' | 'type' | 'id' | 'path';
+
+  /**
+   * Why: for a scope, type or id, the part of the name rule the value breaks (`PathNameProblem` in
+   * `core/utils/pathName`); for a path, `outside` when the path an exporter subclass builds lies outside the export
+   * folder, `link` when a folder or file in the trace's place under the export folder is a symbolic link or the
+   * file has a second name (a hard link), since the export never writes through a link, and `collision` when an
+   * older trace's file is the same file where names ignore case (macOS, Windows).
+   */
+  problem: PathNameProblem | 'outside' | 'link' | 'collision';
+}
+
+/**
+ * What `Memory.export()` reports.
+ */
+export interface ExportResult {
+  /**
+   * The traces the export left out, each with its id and the reason; its length is how many. A Markdown or
+   * Obsidian export names a trace's folders after its scope and type and its file after its id, so it leaves out
+   * a trace whose scope, type or id is not a safe file or folder name: an empty one, one that holds a slash, a
+   * backslash, a colon, one of `"`, `*`, `<`, `>`, `?` and `|`, or a control character, one that starts with a
+   * dot, starts or ends with a space or ends with a dot, or one longer than 200 bytes in UTF-8. It also leaves out
+   * a trace whose place under the export folder holds a link, symbolic or hard, and the newer of two traces whose
+   * files would be one where names ignore case. Every other trace is written. A JSON or SQLite export writes every
+   * trace into its one file and leaves none out.
+   */
+  refused: RefusedExportTrace[];
 }
 
 // ---------------------------------------------------------------------------

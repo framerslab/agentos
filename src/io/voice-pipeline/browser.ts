@@ -31,3 +31,10 @@ export {
 
 // An input's level and the watch for an input that carries no sound; inputLevel.ts imports nothing.
 export { InputSilenceWatch, inputLevelDb, type InputSilenceWatchOptions } from './inputLevel.js';
+
+// Whether a given sentence was said in a transcript's first lines; phraseHeard.ts imports only the library's word
+// rule, cognition/library/tokens.ts, which imports nothing.
+export { phraseHeard, type HeardLine, type PhraseHeardOptions, type PhraseHeardResult } from './phraseHeard.js';
+
+// The entries a speech-to-text chain is built from, and their parser; sttEntries.ts imports nothing.
+export { STT_CHAIN_VENDORS, parseSttEntry, type SttChainVendor, type SttEntry } from './sttEntries.js';

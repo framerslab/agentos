@@ -172,7 +172,7 @@ Two production bridges extend it:
 | [`ClaudeCodeCLIBridge`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/ClaudeCodeCLIBridge.ts) | `claude` | Anthropic Claude via Max subscription (no API key needed) |
 | [`GeminiCLIBridge`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiCLIBridge.ts) | `gemini` | Google Gemini via Google account login (no API key needed) |
 
-Both bridges use `checkBinaryInstalled()` (which internally runs `which` + `--version`) before attempting LLM calls, and fall back gracefully when the binary is missing.
+The `claude-code-cli` and `gemini-cli` providers call their bridge's `checkBinaryInstalled()` (`which`, then `--version`) when they initialize, and `initialize()` throws `BINARY_NOT_FOUND` when the binary is missing ([CLI Error Codes](./CLI_ERROR_CODES.md)).
 
 ### Creating a custom bridge
 
@@ -246,7 +246,7 @@ CLI_ERROR.PERMISSION_DENIED  // EACCES
 CLI_ERROR.CONTEXT_TOO_LONG   // Input too long for the CLI
 ```
 
-Each error carries a `guidance` string with human-readable fix instructions and a `recoverable` flag indicating whether retry/fallback is appropriate.
+Each error carries a `guidance` string with fix instructions and a `recoverable` flag, both set by the code that builds the error. [CLI Error Codes](./CLI_ERROR_CODES.md) lists which of these codes the Claude Code and Gemini CLI bridges raise and when, and what AgentOS does with the error.
 
 ## Exports
 
@@ -260,6 +260,7 @@ export type {
   BridgeOptions,
   BridgeResult,
   StreamEvent,
+  StreamParseContext,
   OutputFormat,
   InstallCheckResult,
   CLIDescriptor,
@@ -309,14 +310,14 @@ Runtime registrations via `registry.register()` or `registry.registerAll()` are 
 
 ### scan() is slow
 
-The `scan()` method runs `which` + `--version` for every registered descriptor. With 54+ CLIs, this involves 100+ subprocess spawns.
+The `scan()` method runs `which` for every registered descriptor, and the version flag for each binary `which` finds. With the 54 bundled descriptors, that is 54 `which` processes and one more process for each installed binary.
 
 **Common causes:**
 - **Network-attached PATH entries.** If PATH includes NFS or CIFS mounts, each `which` call may incur network latency. Remove network paths from PATH or move them to the end.
 - **Slow binary startup.** Some CLIs (e.g., Java, `gcloud`) have slow startup times for `--version`. The registry runs all checks in parallel, but a single slow binary can delay the overall result.
 - **Antivirus scanning.** On Windows, real-time antivirus may scan each spawned subprocess, adding per-binary overhead.
 
-**Fix:** The registry already runs checks in parallel. To reduce scan time further, use `check(binaryName)` for specific binaries instead of `scan()` for all, or use `byCategory(category)` to scan only the categories you need.
+**Fix:** The registry already runs checks in parallel. To reduce scan time further, use `check(binaryName)` for the registered binaries you need instead of `scan()` (for a binary with no descriptor, `check()` reports `installed: false` without looking). `byCategory(category)` saves no time: it runs the full `scan()` and filters its results.
 
 ## Complete CLI Reference
 

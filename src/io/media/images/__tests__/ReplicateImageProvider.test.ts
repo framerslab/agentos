@@ -119,9 +119,12 @@ describe('ReplicateImageProvider', () => {
       expect(models.some(m => m.modelId === 'zsxkib/pulid')).toBe(true);
     });
 
-    it('includes Flux Redux for style transfer', async () => {
+    it('lists the FLUX.2 models transferStyle runs on, and Flux Redux as a variation of one reference', async () => {
       const models = await provider.listAvailableModels();
-      expect(models.some(m => m.modelId === 'black-forest-labs/flux-redux-dev')).toBe(true);
+      for (const modelId of ['black-forest-labs/flux-2-pro', 'black-forest-labs/flux-2-max', 'black-forest-labs/flux-2-flex', 'black-forest-labs/flux-2-dev']) {
+        expect(models.find(m => m.modelId === modelId)?.description).toMatch(/transferStyle/);
+      }
+      expect(models.find(m => m.modelId === 'black-forest-labs/flux-redux-dev')?.description).toMatch(/variation of one reference image/);
     });
 
     it('includes Flux Fill Pro for inpainting', async () => {

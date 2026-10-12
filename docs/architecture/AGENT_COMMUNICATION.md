@@ -20,7 +20,7 @@ The [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/
 
 ## Architecture
 
-![AgentCommunicationBus three-layer architecture: Message Router (point-to-point, role-based, topic router, load balancer) feeds Subscription Manager (agent subs, topic subs, filters) feeds Delivery Manager (queue manager, retry handler, ACK tracker, history store).](/img/diagrams/agent-communication-bus.svg)
+![AgentCommunicationBus: one in-process class a host builds and wires its agents to, in three steps. Routing picks the target agents: sendToAgent() for one agent by id, sendToRole() for one agent holding a role (a random one by default when several do), broadcast() for every agent in the agency but the sender, publishToTopic() for each handler subscribed to a topic, plus broadcastToRoles(), requestResponse() (waits for a reply, 30 seconds by default) and handoff() (a request that waits 60 seconds). Subscriptions decide which handlers get a message: subscribe() with filters on message type, sender role, minimum priority and thread, subscribeToTopic() for a topic made by createTopic(), and registerAgent() for the agency and role map that routing reads. Delivery runs in process, at once: the matching handlers are awaited one by one and a handler that throws does not stop the rest; a send to one agent gets a delivery status (delivered or failed, then acknowledged after acknowledgeMessage()), a broadcast gets one per recipient and none when it has no recipient, the bus keeps the last 100 messages per agent by default, and retryDelivery() re-sends a failed send from that history when the host calls it. A send that no handler takes, or that every handler throws on, is marked failed at once unless it answers a pending request; publishToTopic() messages stay out of the history, so they cannot be retried, and a topic with no subscribers returns no statuses. There is no queue and no automatic retry.](/img/diagrams/agent-communication-bus.svg)
 
 ## Implementation Details
 
@@ -53,19 +53,19 @@ const targetAgentId = this.routingConfig.enableLoadBalancing
 | **Exactly-once** | No | No transaction support |
 | **Message persistence** | Limited | In-memory history of the last 100 messages per agent (`maxHistoryPerAgent`) |
 
-Nothing retries on its own. `retryDelivery(messageId)` re-sends a failed delivery from the target's history, up to `routingConfig.maxRetries` (3) times. `acknowledgeMessage(messageId, agentId)` marks a delivered message `acknowledged`. The bus does not read `defaultTtlMs`, `retryDelayMs` or `enableRoleRouting` from its routing config, nor `expiresAt` or `requiresAck` on a message: messages do not expire.
+Nothing retries on its own. `retryDelivery(messageId)` re-sends a failed delivery from the target's history when the host calls it; a `publishToTopic()` message is not kept in the history, so it cannot be re-sent. The `routingConfig.maxRetries` check (default 3) reads the retry count on the message's stored status, which `retryDelivery()` raises by one before it re-sends, and a re-send that fails stores a new failed status whose count is 0. So the check refuses a retry when `maxRetries` is 0 or less, or when `maxRetries` re-sends of the message have started since its last delivery attempt finished; it never stops re-sends made one after another, each awaited, that keep failing. `retryDelivery()` also throws for a message whose stored status is not `failed`, such as one a re-send delivered. A host that wants a limit counts its own retries. `acknowledgeMessage(messageId, agentId)` marks a delivered message `acknowledged`. The bus does not read `defaultTtlMs`, `retryDelayMs` or `enableRoleRouting` from its routing config, nor `expiresAt` or `requiresAck` on a message: messages do not expire.
 
 ### Priority System
 
 Four-tier priority: `low` < `normal` < `high` < `urgent`
 
 - Used for subscription filtering (`minPriority` option)
-- Messages delivered FIFO regardless of priority (no reordering)
+- Priority does not change delivery order: each send runs its handlers when it is called, and there is no queue to reorder
 - Default: `'normal'` if not specified
 
 ### Message Ordering
 
-- **Per-agent FIFO**: Strict ordering per subscription
+- **No per-agent queue**: each send runs the matching handlers when it is called, with no queue or lock per agent. A host that awaits each send before the next gets its messages handled in send order; sends that overlap interleave, so a handler can receive a later message before it has finished an earlier one, and the sends can complete out of order
 - **No global ordering**: Independent delivery per agent
 - **Threading**: Optional `threadId` and `inReplyTo` fields for conversation tracking
 

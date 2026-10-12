@@ -34,6 +34,9 @@ const vector = await vision.embed(image);          // CLIP tier, returns number[
 
 // Cloud tier only: a description of the image plus the text it shows.
 const described = await vision.process(image, { tiers: ['cloud-vision'] });
+
+// Cloud tier only, asked for the text alone, exactly as written.
+const transcribed = await vision.process(image, { tiers: ['cloud-vision'], cloudTask: 'transcribe' });
 ```
 
 `image` is a `Buffer`, a file path, an `http(s)` URL or a data URL. Preprocessing applies to a `Buffer` only. A file path works for the local tiers only: the cloud tier sends a string to the provider as the image URL, and a provider cannot read a path on your machine. Pass a local file as a `Buffer` when the cloud tier can run. The local tiers fetch an `http(s)` URL string themselves, and nothing checks where it points: for a URL from a model or a user, read it with `imageToBuffer(url, { untrusted: true })` (see [Image Editing](./IMAGE_EDITING.md)) and pass the `Buffer`.
@@ -47,7 +50,7 @@ const described = await vision.process(image, { tiers: ['cloud-vision'] });
 | `ocr` | PaddleOCR (`ppu-paddle-ocr`) or Tesseract.js (`tesseract.js`, English), per the `ocr` option | the package | PaddleOCR: the mean of the region confidences. Tesseract.js: the page confidence divided by 100 |
 | `handwriting` | TrOCR, `Xenova/trocr-base-handwritten` (Microsoft's checkpoint converted to ONNX), Transformers.js `image-to-text` task | `@huggingface/transformers` and `handwriting: true` | 0.75 when it returns text, else 0 |
 | `document-ai` | Florence-2, `onnx-community/Florence-2-base-ft`, loaded as a model and a processor and run with the `<OCR_WITH_REGION>` task | `@huggingface/transformers` and `documentAI: true` | 0.8 when it returns text, else 0 |
-| `cloud-vision` | `generateText()` with the image and a fixed prompt: describe the image, extract all visible text, name the kind of content | `cloudProvider` | 0.95, fixed |
+| `cloud-vision` | `generateText()` with the image and one of two fixed prompts: by default, describe the image, extract all visible text and name the kind of content; with `cloudTask: 'transcribe'`, give the text alone, exactly as written, in reading order | `cloudProvider` | 0.95, fixed; 0 for an answer with no text |
 | `embedding` | CLIP, `Xenova/clip-vit-base-patch32`, Transformers.js `image-feature-extraction` task: 512 numbers in the space of CLIP's text embeddings | `@huggingface/transformers` and `embedding: true` | none; fills `result.embedding` |
 
 `result.text` and `result.confidence` come from the tier with the highest confidence, so a cloud result (0.95) wins over every local tier that ran. `result.regions` holds that tier's text regions. The Florence-2 tier reads the image line by line: `result.layout` holds one page the size of the image, with a `text` block for each line and the line's bounding box in the image's pixels, and the tier's text is the lines in reading order. It does not label headings, tables or figures.
@@ -99,6 +102,16 @@ const result = await vision.process(image, { forceCategory: 'handwritten' });
 ```
 
 `forceCategory` sets the reported category and routes the handwriting and document tiers. In `progressive` the OCR tier still runs first, and an OCR result at or above the threshold still ends the run. To run TrOCR alone, pass `{ tiers: ['handwriting'] }`.
+
+The cloud tier describes the image unless `cloudTask: 'transcribe'` is passed, and its answer has confidence 0.95, so it becomes `result.text` over every local tier that ran. An answer with no text in it, which the transcription prompt asks for when the image shows none, has confidence 0, so a local tier's text stands. A call that wants text passes `'transcribe'`. TrOCR is a single-line model ([its card](https://huggingface.co/microsoft/trocr-base-handwritten)): its processor resizes the whole image to 384 by 384 pixels and generation stops at 20 tokens, so a page of handwriting is read with the cloud tier listed too:
+
+```typescript
+const page = await vision.process(scan, {
+  tiers: ['handwriting', 'cloud-vision'],
+  forceCategory: 'handwritten',
+  cloudTask: 'transcribe',
+});
+```
 
 ---
 
@@ -155,7 +168,7 @@ interface VisionPipelineConfig {
 
 ```typescript
 interface VisionResult {
-  text: string;                 // text of the winning tier
+  text: string;                 // text of the winning tier (the cloud tier's: a description with the text, or with cloudTask 'transcribe' the text alone)
   confidence: number;           // confidence of the winning tier, 0-1
   category: ContentCategory;    // 'printed-text' | 'handwritten' | 'document-layout' | 'photograph' | 'diagram' | 'screenshot' | 'mixed'
   tiers: VisionTier[];          // tiers that ran: 'ocr' | 'handwriting' | 'document-ai' | 'embedding' | 'cloud-vision'

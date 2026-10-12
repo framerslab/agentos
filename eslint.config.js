@@ -1,6 +1,10 @@
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
+/** What an import of gray-matter outside the front-matter module is told. */
+const FRONT_MATTER_MODULE =
+  'Read and write front matter with readFrontMatter and writeFrontMatter from src/core/utils/frontMatter.ts.';
+
 export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
@@ -32,13 +36,19 @@ export default tseslint.config(
   {
     // gray-matter's own engines evaluate a front-matter block marked as
     // JavaScript, so one module reads and writes front matter for the rest.
+    // The pattern covers the files inside the package (gray-matter/index.js,
+    // gray-matter/lib/engines.js), which reach the same engines.
     files: ['src/**/*.ts'],
     ignores: ['src/core/utils/frontMatter.ts'],
     rules: {
       'no-restricted-imports': ['error', {
         paths: [{
           name: 'gray-matter',
-          message: 'Read and write front matter with readFrontMatter and writeFrontMatter from src/core/utils/frontMatter.ts.',
+          message: FRONT_MATTER_MODULE,
+        }],
+        patterns: [{
+          regex: '^gray-matter/',
+          message: FRONT_MATTER_MODULE,
         }],
       }],
     },

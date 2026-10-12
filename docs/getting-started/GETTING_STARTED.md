@@ -111,13 +111,15 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export GEMINI_API_KEY=AIza...
 export OPENROUTER_API_KEY=sk-or-...
 
-# Key rotation — comma-separated keys rotate automatically with quota detection
+# Key rotation: each request draws a key from a comma-separated list
 export OPENAI_API_KEY=sk-key1,sk-key2,sk-key3
 
 # Local providers (no key required, just a running server)
 export OLLAMA_BASE_URL=http://localhost:11434
 export STABLE_DIFFUSION_LOCAL_BASE_URL=http://localhost:7860
 ```
+
+[API Key Rotation](../KEY_ROTATION.md) lists the providers that rotate a key list and the ones that rest a key after a quota error. Among the LLM providers, Anthropic, Gemini and OpenRouter rest a key; the OpenAI provider rotates its keys and rests none.
 
 ### Inline API Keys
 
@@ -191,11 +193,11 @@ The three levels below build on this picture:
 
 | Level | API | What it adds |
 |---|---|---|
-| 1 | `generateText()` / `streamText()` | one LLM call, no agent loop, no memory, no tools |
+| 1 | `generateText()` / `streamText()` | a model call, and with `tools`, a tool loop of up to `maxSteps` model calls (one by default, five on the prompt-emulated tool path); no sessions, no memory |
 | 2 | `agent()` | the tool-calling loop (up to 5 steps by default), sessions with their own message history, memory hooks |
-| 3 | `agency()` | multiple agents under a coordination strategy; optional runtime tool generation and specialist spawning |
+| 3 | `agency()` | multiple agents under a coordination strategy; optional human approvals and, with `emergent.enabled` on `hierarchical` (or with `adaptive: true`, which puts a hierarchical manager over the strategy), specialists the manager spawns at run time |
 
-Guardrails, retrieval, human approval, voice and channels come with `agency()` and the full runtime; [API paths](../API_PATHS.md) lists what each surface does with each option.
+The full runtime runs guardrails, retrieval, human approval and channels. Of these, `agency()` applies human approval alone: it reports its guardrails as not enforced, adds no retrieved context and wires no channels (with `channels` set, its `connect()` rejects), and with `voice.enabled` its `listen()` takes JSON text over a local WebSocket, not audio. [API paths](../API_PATHS.md) lists what each surface does with each option.
 
 ---
 
@@ -406,7 +408,7 @@ Usage: {
   promptTokens: 312,
   completionTokens: 487,
   totalTokens: 799,
-  costUSD: 0.00024,
+  costUSD: 0.008241,
   calls: 2
 }
 ```

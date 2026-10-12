@@ -67,6 +67,39 @@ The LLM folds new conversation into pages when memory consolidates: a
 and `agent.memory.compileWiki()` triggers it mid-session. Merges integrate new facts
 rather than clobbering human edits. The runtime does not version the pages.
 
+A page's id is its path under `memory/` without `.md`, with `/` between folders:
+`entities/johnny` is `memory/entities/johnny.md`. An id is one or more names joined
+by `/`. No name is empty or starts with a dot, so `.` and `..` are never names, and
+no name starts or ends with a space or ends with a dot, which Windows drops from a
+name; the id holds no backslash, no colon, none of `"`, `*`, `<`, `>`, `?` and `|`,
+which Windows refuses in a name, and no control character, a NUL byte among them; it
+is at most 512 characters, and each name in it at most 200 bytes in UTF-8, so a
+page's file name, with `.md`, stays under the 255 bytes Linux allows in a name; and it
+is not `index`, in any case, which names the catalog. The store checks every id
+against this rule, and checks that the path the id names lies inside `memory/`,
+before it reads or writes anything. `readPage` and `writePage` throw an
+`InvalidWikiPageIdError` for any other id, `read_memory_page` answers one with an
+error result whose `details.code` is `INVALID_WIKI_PAGE_ID`, and a compile skips a
+cluster assignment whose page id is refused and reports it in the result's
+`conflicts`. A compile also reports there a page the file system refuses for its
+path, such as a name too long or a file where a folder must be, and goes on with the
+other pages; any other failed write, such as on a full disk, stops the compile, and
+the next compile takes up the same traces again. `isWikiPageId` tells whether an id
+has this form. A file whose path makes no valid id, such as any file in a folder whose
+name starts with a dot (`.meta/`, `.store/`), is not a page: the store does not list
+or index it.
+
+Both checks are on the path the id names, not on where a link leads. A link inside
+`memory/` is followed like any other file there, for reads and for writes: what it
+points to, inside the folder or outside it, is part of the wiki, and a compile that
+merges into a page that is a link rewrites the file the link points to. The store
+never makes a link, and no page id makes one, so only whoever can write the folder
+can add one. Let only people and tools you trust as much as the agent's own process
+write to `memory/`, and check a `memory/` folder you did not make for links before an
+agent uses it. A check on where links lead would refuse every link that points
+outside the folder, which a wiki that links shared notes in on purpose relies on, so
+the store does not check where links lead.
+
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
 and is left untouched on disk.
 
@@ -75,6 +108,8 @@ and is left untouched on disk.
 SOUL.md is markdown with YAML frontmatter. The frontmatter holds structured
 config (HEXACO scores, voice, mood, hard limits) that maps to existing AgentOS
 persona machinery. The body is prose placed at the head of the system prompt.
+The frontmatter is read as data: a block marked as JavaScript (`---js`) gives
+no fields and is never evaluated.
 
 ```markdown
 ---
@@ -211,7 +246,11 @@ The renderer writes the name, id (as `agentId`), description (as `role`), HEXACO
 traits, voice, mood defaults, reasoning-trace limits, hard limits, avatar and
 metadata to the frontmatter, and `baseSystemPrompt` as the body. Other fields
 (model defaults, metaprompts, sentiment tracking, tools, contextual elements) are
-not written.
+not written. A persona with none of the written fields has no frontmatter to
+write; when its prompt opens with three dashes that a fourth does not follow,
+which the loader would read as the start of a frontmatter block, the renderer
+puts an empty frontmatter block (two lines of `---`) in front of it, so that the
+loader reads the whole prompt as the body.
 
 ## Cross-Framework Compatibility
 

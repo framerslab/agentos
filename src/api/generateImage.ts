@@ -4,7 +4,7 @@
  *
  * Parses a `provider:model` string, resolves media-provider credentials, and
  * dispatches the request to the appropriate image provider implementation
- * (e.g. OpenAI DALL-E, Stability AI, Replicate).
+ * (e.g. OpenAI's GPT Image models, Stability AI, Replicate).
  *
  * When multiple image-capable providers are configured (via env vars), the
  * primary provider is wrapped in a {@link FallbackImageProxy} so that a
@@ -199,7 +199,7 @@ export interface GenerateImageOptions {
    * Model identifier. Prefer the plain model name with `provider` set;
    * the combined `"provider:model"` string is also accepted.
    *
-   * @example `"gpt-image-1"` (with `provider: 'openai'`), `"stable-diffusion-xl-1024-v1-0"`
+   * @example `"gpt-image-2.5-flare"` (with `provider: 'openai'`), `"stable-diffusion-xl-1024-v1-0"`
    *
    * Either `provider` or `model` (or an API key env var for auto-detection) is required.
    */
@@ -214,7 +214,11 @@ export interface GenerateImageOptions {
   size?: string;
   /** Aspect ratio string, e.g. `"16:9"`. Used by some providers instead of `size`. */
   aspectRatio?: string;
-  /** Quality hint forwarded to the provider (e.g. `"hd"` for DALL-E 3). */
+  /**
+   * Quality hint forwarded to the provider. OpenAI's GPT Image models take
+   * `low`, `medium`, `high` and `auto`; DALL·E 3's `standard` and `hd` are
+   * sent to them as `medium` and `high`.
+   */
   quality?: string;
   /** Background style for transparent-capable providers. */
   background?: ImageBackground;
@@ -245,7 +249,7 @@ export interface GenerateImageOptions {
   /**
    * Content policy tier. When mature or private-adult, the image provider
    * chain is reordered to prefer uncensored providers (Replicate, Fal)
-   * over censored ones (DALL-E, Stability safe mode) and
+   * over censored ones (OpenAI, Stability safe mode) and
    * `disable_safety_checker: true` is applied automatically to the
    * Replicate request so the community model's own NSFW filter does
    * not veto the prompt.
@@ -300,7 +304,7 @@ export interface GenerateImageResult {
  * ```ts
  * const result = await generateImage({
  *   provider: 'openai',
- *   model: 'gpt-image-1',
+ *   model: 'gpt-image-2.5-flare',
  *   prompt: 'A photorealistic red panda sitting on a moonlit rooftop.',
  *   size: '1024x1024',
  * });
@@ -448,6 +452,12 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
       });
 
       metricUsage = result.usage;
+      // What served the call: a fallback provider when the first one failed,
+      // and a local server's own checkpoint when the call named no model.
+      metricProviderId = result.providerId || metricProviderId;
+      metricModelId = result.modelId || metricModelId;
+      if (metricProviderId) span?.setAttribute('llm.provider', metricProviderId);
+      if (metricModelId) span?.setAttribute('llm.model', metricModelId);
       span?.setAttribute('agentos.api.images_count', result.images.length);
       attachUsageAttributes(span, {
         promptTokens: result.usage?.promptTokens,

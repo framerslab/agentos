@@ -11,9 +11,10 @@
 import * as fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-import { fetchUntrustedImage } from './untrustedImageFetch.js';
+import { fetchUntrustedImage, untrustedByteLimit } from './untrustedImageFetch.js';
 
 export { bufferToBlobPart } from './blobPart.js';
+export { imageUrlRefusalDetail, type ImageUrlRefusalDetail } from './untrustedImageFetch.js';
 
 /** Options for {@link imageToBuffer}. */
 export interface ImageToBufferOptions {
@@ -24,10 +25,14 @@ export interface ImageToBufferOptions {
    * connection's address is checked when the connection is made, so a host
    * name that resolves to this machine or a private network is refused, and
    * every redirect is checked the same way. The fetch stops at `maxBytes`
-   * and `timeoutMs`. Default `false`.
+   * and `timeoutMs`, and an image given in the string itself (a data URL,
+   * raw base64) is held to `maxBytes` too. Default `false`.
    */
   untrusted?: boolean;
-  /** For an untrusted http(s) URL: the most bytes the response may have (default 50 MiB). */
+  /**
+   * For untrusted input: the most bytes the image may have, whether it is
+   * fetched or decoded from the string (default 50 MiB).
+   */
   maxBytes?: number;
   /** For an untrusted http(s) URL: how long the fetch may take in milliseconds, redirects and body included (default 30 seconds). */
   timeoutMs?: number;
@@ -60,7 +65,8 @@ export interface ImageToBufferOptions {
  * file paths and `file:` URLs are refused (raw base64 of a recognised image
  * format is still decoded), and an http(s) URL is fetched only from public
  * network addresses, checked at every connection and every redirect, within
- * `maxBytes` and `timeoutMs`.
+ * `maxBytes` and `timeoutMs`. An image decoded from the string is refused
+ * when it is larger than `maxBytes`.
  *
  * @param input - The image in any supported format.
  * @param options - {@link ImageToBufferOptions}; `untrusted` for input from
@@ -68,10 +74,13 @@ export interface ImageToBufferOptions {
  * @returns A `Buffer` containing the raw image bytes.
  *
  * @throws {TypeError} When `input` is neither a string nor a Buffer.
+ * @throws {RangeError} With `untrusted`, when `maxBytes` is not a positive
+ *   number.
  * @throws {Error} When a remote URL fetch fails or the file cannot be read;
  *   with `untrusted`, also when the input names a local file
- *   (`code: 'IMAGE_LOCAL_FILE_REFUSED'`) or a URL whose address or redirect
- *   is refused (`code: 'IMAGE_URL_REFUSED'`).
+ *   (`code: 'IMAGE_LOCAL_FILE_REFUSED'`), a URL whose address or redirect
+ *   is refused (`code: 'IMAGE_URL_REFUSED'`), or an image larger than
+ *   `maxBytes`.
  *
  * @example
  * ```ts
@@ -94,6 +103,17 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
   }
 
   const trimmed = input.trim();
+  // Untrusted input is held to a size whether it is fetched or decoded here.
+  // The size is worked out from the text, so nothing over the limit is
+  // decoded: `most` is a bound that costs nothing, `exactly` is counted only
+  // when the bound is over the limit.
+  const maxBytes = options.untrusted ? untrustedByteLimit(options.maxBytes) : undefined;
+  const hold = (most: number, exactly: () => number): void => {
+    if (maxBytes !== undefined && most > maxBytes && exactly() > maxBytes) {
+      throw new Error(`imageToBuffer: the image is larger than ${maxBytes} bytes.`);
+    }
+  };
+  const holdBase64 = (text: string): void => hold(Math.floor((text.length * 3) / 4), () => base64ByteBound(text));
 
   // Data URL (RFC 2397): base64 after ";base64", percent-encoded bytes otherwise.
   if (/^data:/i.test(trimmed)) {
@@ -106,7 +126,12 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
       throw new Error('imageToBuffer: malformed data URL — missing comma separator.');
     }
     const payload = url.slice(commaIdx + 1);
-    return /; *base64 *$/i.test(url.slice(0, commaIdx)) ? Buffer.from(payload, 'base64') : percentDecodeBytes(payload);
+    if (/; *base64 *$/i.test(url.slice(0, commaIdx))) {
+      holdBase64(payload);
+      return Buffer.from(payload, 'base64');
+    }
+    hold(Buffer.byteLength(payload, 'utf8'), () => percentDecodedLength(payload));
+    return percentDecodeBytes(payload);
   }
 
   // file: URL — convert to a local path and read.
@@ -137,6 +162,7 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
     trimmed.includes('/') || trimmed.includes('\\') || /\.\w{2,5}$/.test(trimmed);
   if (looksLikePath && options.untrusted) {
     // No file is read for untrusted input; base64 of an image is still decoded.
+    holdBase64(trimmed);
     const bytes = imageBase64(trimmed);
     if (bytes) {
       return bytes;
@@ -173,7 +199,51 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
   }
 
   // Fallback: raw base64 string (no data URL prefix).
+  holdBase64(trimmed);
   return Buffer.from(trimmed, 'base64');
+}
+
+/**
+ * The most bytes `text` can decode to as base64: three for every four
+ * characters that can stand for six bits. Those are the characters of the
+ * alphabet, standard or URL-safe (RFC 4648), and every character outside
+ * ASCII: Node's decoder falls back to reading each character of a string
+ * that holds one by its low byte, so `Ł` decodes as `A`. ASCII padding,
+ * white space and punctuation decode to nothing.
+ */
+function base64ByteBound(text: string): number {
+  let characters = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (
+      code > 0x7f ||
+      (code >= 0x30 && code <= 0x39) ||
+      (code >= 0x41 && code <= 0x5a) ||
+      (code >= 0x61 && code <= 0x7a) ||
+      code === 0x2b ||
+      code === 0x2f ||
+      code === 0x2d ||
+      code === 0x5f
+    ) {
+      characters += 1;
+    }
+  }
+  return Math.floor((characters * 3) / 4);
+}
+
+/**
+ * The number of bytes {@link percentDecodeBytes} gives for `payload`: its
+ * UTF-8 length, less two for every `%XX` escape.
+ */
+function percentDecodedLength(payload: string): number {
+  let escapes = 0;
+  for (let i = payload.indexOf('%'); i !== -1 && i + 2 < payload.length; i = payload.indexOf('%', i + 1)) {
+    if (hexValue(payload.charCodeAt(i + 1)) >= 0 && hexValue(payload.charCodeAt(i + 2)) >= 0) {
+      escapes += 1;
+      i += 2;
+    }
+  }
+  return Buffer.byteLength(payload, 'utf8') - 2 * escapes;
 }
 
 /** The error for untrusted input that names a local file. */

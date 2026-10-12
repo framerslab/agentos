@@ -186,6 +186,7 @@ export { AudioRingBuffer, type AudioRingBufferOptions } from './AudioRingBuffer.
 export { InputSilenceWatch, inputLevelDb, type InputSilenceWatchOptions } from './inputLevel.js';
 export {
   TranscriptDedupe,
+  normalizeTranscriptText,
   type TranscriptObservation,
   type DedupeResult,
 } from './TranscriptDedupe.js';
@@ -200,6 +201,7 @@ export {
   type LedgerItem,
   type TranscriptLedgerOptions,
 } from './transcriptLedger.js';
+export { phraseHeard, type HeardLine, type PhraseHeardOptions, type PhraseHeardResult } from './phraseHeard.js';
 export {
   VoiceMetricsReporter,
   type VoiceMetricEvent,
@@ -213,4 +215,11 @@ export {
   type VoiceProviderBundle,
   type SttProviderEnvConfig,
   type SttProviderBundle,
+  createSttChain,
+  sttEntryPricePerMinute,
+  parseSttEntry,
+  STT_CHAIN_VENDORS,
+  type SttChainEntryOptions,
+  type SttChainVendor,
+  type SttEntry,
 } from './env-constructor.js';

@@ -54,9 +54,9 @@ export interface EditImageOptions {
    * Model identifier. Prefer the plain model name with `provider` set;
    * the combined `"provider:model"` string is also accepted. When omitted,
    * the provider's own edit default applies, not its text-to-image default:
-   * OpenAI `gpt-image-1`, Stability `sd3-medium`, Replicate
+   * OpenAI `gpt-image-2.5-sunburst`, Stability `sd3.5-medium`, Replicate
    * `stability-ai/sdxl` (or `black-forest-labs/flux-fill-pro` with a mask).
-   * @example `"gpt-image-1"` (with `provider: 'openai'`), `"sd3-medium"`
+   * @example `"gpt-image-2.5-sunburst"` (with `provider: 'openai'`), `"sd3.5-medium"`
    */
   model?: string;
   /**

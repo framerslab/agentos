@@ -35,10 +35,34 @@ import {
   type ImageGenerationResult,
   type ImageEditRequest,
   type ImageModelInfo,
+  type ImageStyleTransferRequest,
   type GeneratedImage,
   parseImageSize,
 } from '../IImageProvider.js';
+import { imageDataUrl } from '../blobPart.js';
+import {
+  INDEXED_IMAGE_NAMES,
+  styleTransferImageTypes,
+  styleTransferModelError,
+  styleTransferPrompt,
+} from '../styleTransfer.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
+
+/** Fal's queue, the provider's base URL unless one is configured. */
+const FAL_QUEUE_URL = 'https://queue.fal.run';
+
+/**
+ * The endpoints Fal's style transfer runs on, FLUX.2 Pro first as the
+ * default. Each requires `prompt` and `image_urls`, "List of URLs of input
+ * images for editing" (Fal's OpenAPI schema of each, read 2026-10-12:
+ * https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=fal-ai/flux-2-pro/edit).
+ */
+export const FAL_STYLE_TRANSFER_MODELS: readonly string[] = [
+  'fal-ai/flux-2-pro/edit',
+  'fal-ai/flux-2-max/edit',
+  'fal-ai/flux-2-flex/edit',
+  'fal-ai/flux-2/edit',
+];
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -127,8 +151,12 @@ interface FalSubmitResponse {
  * @internal
  */
 interface FalStatusResponse {
-  /** Current status: 'IN_QUEUE', 'IN_PROGRESS', 'COMPLETED', 'FAILED'. */
+  /** Current status: 'IN_QUEUE', 'IN_PROGRESS' or 'COMPLETED'; a failed request completes, with `error`. */
   status: string;
+  /** A human-readable error, present only when the request failed (with status COMPLETED). */
+  error?: string;
+  /** The error's machine-readable type, present with `error`. */
+  error_type?: string;
 }
 
 /**
@@ -267,7 +295,7 @@ export class FalImageProvider implements IImageProvider {
       baseURL:
         typeof config.baseURL === 'string' && config.baseURL.trim()
           ? config.baseURL.trim()
-          : 'https://queue.fal.run',
+          : FAL_QUEUE_URL,
       defaultModelId:
         typeof config.defaultModelId === 'string' && config.defaultModelId.trim()
           ? config.defaultModelId.trim()
@@ -390,7 +418,7 @@ export class FalImageProvider implements IImageProvider {
     const { requestId, statusUrl, responseUrl } = await this._submitTask(resolvedModel, body);
 
     // Step 2: Poll until complete (use the URLs Fal returns, not reconstructed paths)
-    await this._pollStatus(resolvedModel, requestId, statusUrl);
+    await this._pollStatus(resolvedModel, requestId, statusUrl, responseUrl);
 
     // Step 3: Fetch the result
     const result = await this._fetchResult(resolvedModel, requestId, responseUrl);
@@ -481,14 +509,15 @@ export class FalImageProvider implements IImageProvider {
     if (request.n) body.num_images = request.n;
 
     const { requestId, statusUrl, responseUrl } = await this._submitTask(model, body);
-    await this._pollStatus(model, requestId, statusUrl);
+    await this._pollStatus(model, requestId, statusUrl, responseUrl);
     const result = await this._fetchResult(model, requestId, responseUrl);
 
-    if (!result.images || result.images.length === 0) {
+    const usable = (result.images ?? []).filter((img) => typeof img?.url === 'string' && img.url !== '');
+    if (usable.length === 0) {
       throw new Error('Fal.ai edit completed but returned no images.');
     }
 
-    const images: GeneratedImage[] = result.images.map((img) => ({
+    const images: GeneratedImage[] = usable.map((img) => ({
       url: img.url,
       mimeType: img.content_type,
       providerMetadata: { width: img.width, height: img.height, seed: result.seed },
@@ -503,6 +532,95 @@ export class FalImageProvider implements IImageProvider {
     };
   }
 
+  /**
+   * The endpoint a style transfer runs on for `modelId`, or a refusal. An
+   * empty id takes the configured default when it is one of
+   * {@link FAL_STYLE_TRANSFER_MODELS}, else FLUX.2 Pro's edit endpoint. A
+   * named model must be one of them, or one of them without its `/edit`,
+   * which it is given; any name is taken when the provider's base URL is not
+   * Fal's queue.
+   *
+   * @param modelId - The model the call names, or an empty string.
+   * @throws {Error} For a model the style transfer does not run.
+   */
+  styleTransferModel(modelId: string): string {
+    if (!modelId) {
+      return this.defaultModelId && FAL_STYLE_TRANSFER_MODELS.includes(this.defaultModelId)
+        ? this.defaultModelId
+        : FAL_STYLE_TRANSFER_MODELS[0];
+    }
+    if (FAL_STYLE_TRANSFER_MODELS.includes(modelId)) return modelId;
+    if (FAL_STYLE_TRANSFER_MODELS.includes(`${modelId}/edit`)) return `${modelId}/edit`;
+    if (this.hasCustomEndpoint()) return modelId;
+    throw styleTransferModelError('Fal', modelId, FAL_STYLE_TRANSFER_MODELS);
+  }
+
+  /**
+   * Restyles an image after a style reference on a FLUX.2 edit endpoint,
+   * which takes both as `image_urls`, the source first, with an instruction
+   * that names them by index. FLUX.2 takes no strength and no negative
+   * prompt: `strength` picks the instruction (see `styleTransfer.ts`).
+   * `image_size` and `output_format` are left at the endpoint's defaults:
+   * `auto` and JPEG on pro, max and flex; on `fal-ai/flux-2/edit`, PNG and
+   * a size the schema does not state (Fal's OpenAPI schema of each).
+   * Both images must be JPEG, PNG or WebP.
+   *
+   * @param request - The source, the reference and the prompt.
+   * @returns Generation result with the restyled image(s).
+   *
+   * @throws {Error} When the provider is not initialised, the model or an
+   *   image is refused, the queue reports a failure or times out, or the
+   *   result holds no image.
+   */
+  async transferStyle(request: ImageStyleTransferRequest): Promise<ImageGenerationResult> {
+    if (!this.isInitialized) {
+      throw new Error('Fal.ai image provider is not initialized. Call initialize() first.');
+    }
+    const model = this.styleTransferModel(request.modelId);
+    const providerOpts = (request.providerOptions as Record<string, unknown> | undefined)?.fal as FalImageProviderOptions | undefined;
+    const types = styleTransferImageTypes(
+      'Fal',
+      ['image/jpeg', 'image/png', 'image/webp'],
+      request.image,
+      request.styleImage,
+    );
+
+    const body: Record<string, unknown> = {
+      prompt: styleTransferPrompt(request.prompt, request.strength, INDEXED_IMAGE_NAMES),
+      image_urls: [imageDataUrl(request.image, types.image), imageDataUrl(request.styleImage, types.style)],
+    };
+    const seed = request.seed ?? providerOpts?.seed;
+    if (seed !== undefined) body.seed = seed;
+
+    const { requestId, statusUrl, responseUrl } = await this._submitTask(model, body);
+    await this._pollStatus(model, requestId, statusUrl, responseUrl);
+    const result = await this._fetchResult(model, requestId, responseUrl);
+
+    const images: GeneratedImage[] = (result.images ?? [])
+      .filter((img) => typeof img?.url === 'string' && img.url !== '')
+      .map((img) => ({
+        url: img.url,
+        mimeType: img.content_type,
+        providerMetadata: { width: img.width, height: img.height, seed: result.seed },
+      }));
+    if (images.length === 0) {
+      throw new Error('Fal style transfer returned no image.');
+    }
+
+    return {
+      created: Math.floor(Date.now() / 1000),
+      modelId: model,
+      providerId: this.providerId,
+      images,
+      usage: { totalImages: images.length },
+    };
+  }
+
+  /** Whether the provider's base URL is not Fal's queue. */
+  private hasCustomEndpoint(): boolean {
+    return Boolean(this._config?.baseURL) && this._config.baseURL.replace(/\/+$/, '') !== FAL_QUEUE_URL;
+  }
+
   async listAvailableModels(): Promise<ImageModelInfo[]> {
     return [
       { providerId: this.providerId, modelId: 'fal-ai/flux/dev', displayName: 'Flux Dev (Fal)', description: 'Fast iteration, open weights, img2img capable' },
@@ -512,6 +630,19 @@ export class FalImageProvider implements IImageProvider {
       { providerId: this.providerId, modelId: 'fal-ai/flux-pro/v1.1-ultra', displayName: 'Flux Pro 1.1 Ultra (Fal)', description: 'Ultra-high resolution' },
       { providerId: this.providerId, modelId: 'fal-ai/flux-lora', displayName: 'Flux LoRA (Fal)', description: 'LoRA fine-tuned generation' },
       { providerId: this.providerId, modelId: 'fal-ai/flux-realism', displayName: 'Flux Realism (Fal)', description: 'Photorealistic output' },
+      // FLUX.2: each generates from a prompt, and transferStyle runs it on its
+      // /edit endpoint, which takes the source and the style reference. The
+      // /edit endpoints are not listed: they require input images, so a
+      // generation would fail there.
+      ...FAL_STYLE_TRANSFER_MODELS.map((editModelId) => {
+        const modelId = editModelId.replace(/\/edit$/, '');
+        return {
+          providerId: this.providerId,
+          modelId,
+          displayName: `${modelId.replace(/^fal-ai\//, '')} (Fal)`,
+          description: 'FLUX.2 generation; transferStyle runs it on its /edit endpoint',
+        };
+      }),
     ];
   }
 
@@ -566,7 +697,7 @@ export class FalImageProvider implements IImageProvider {
    * @throws {Error} If the generation fails or times out.
    * @internal
    */
-  private async _pollStatus(model: string, requestId: string, statusUrl?: string): Promise<void> {
+  private async _pollStatus(model: string, requestId: string, statusUrl?: string, responseUrl?: string): Promise<void> {
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < this._config.timeoutMs) {
@@ -586,6 +717,14 @@ export class FalImageProvider implements IImageProvider {
       const data = (await response.json()) as FalStatusResponse;
 
       if (data.status === 'COMPLETED') {
+        // A failed request completes too, with `error` and `error_type`
+        // ("present only if the request failed (only when COMPLETED)",
+        // https://fal.ai/docs/documentation/model-apis/inference/queue).
+        if (typeof data.error === 'string' && data.error) {
+          throw new Error(
+            `Fal.ai request ${requestId} failed: ${data.error}${typeof data.error_type === 'string' ? ` (${data.error_type})` : ''}`,
+          );
+        }
         return;
       }
 
@@ -597,7 +736,9 @@ export class FalImageProvider implements IImageProvider {
         // response endpoint carries the error payload for failed requests.
         let detail = '';
         try {
-          const resultUrl = `${this._config.baseURL}/${model}/requests/${requestId}`;
+          // The submit answer's response_url, as the result read uses: the
+          // rebuilt path can answer 405 on a multi-segment endpoint (above).
+          const resultUrl = responseUrl ?? `${this._config.baseURL}/${model}/requests/${requestId}`;
           const resultResponse = await fetch(resultUrl, {
             headers: { Authorization: `Key ${this.keyPool.next()}` },
           });

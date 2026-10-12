@@ -50,6 +50,7 @@ export type {
   VisionResult,
   VisionStrategy,
   VisionTier,
+  VisionCloudTask,
   ContentCategory,
   TierResult,
   FailedTier,

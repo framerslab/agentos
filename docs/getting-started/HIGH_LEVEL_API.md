@@ -24,7 +24,7 @@ import {
 | `streamText()` | Stream text in real-time | `for await (const d of streamText({...}).textStream) {}` |
 | `generateObject()` | Extract structured JSON (Zod) | `await generateObject({ schema: z.object({...}), prompt: '...' })` |
 | `generateImage()` | Generate images (with character consistency) | `await generateImage({ provider: 'openai', prompt: '...' })` |
-| `transferStyle()` | Style transfer between images | `await transferStyle({ image: src, styleReference: ref, prompt: '...' })` |
+| `transferStyle()` | Restyle an image after a reference image, sending the provider both | `await transferStyle({ image: src, styleReference: ref, prompt: '...' })` |
 | `generateVideo()` | Generate video from text/image | `await generateVideo({ prompt: '...' })` |
 | `generateMusic()` | Generate music | `await generateMusic({ prompt: '...' })` |
 | `performOCR()` | Extract text from images | `await performOCR({ imagePath: './doc.png' })` |
@@ -57,7 +57,7 @@ for the requested task automatically:
 
 | Provider                 | Type  | Text default               | Image default                    | Embedding default        | Env var                           |
 | ------------------------ | ----- | -------------------------- | -------------------------------- | ------------------------ | --------------------------------- |
-| `openai`                 | Cloud | `gpt-4o`                   | `gpt-image-1`                    | `text-embedding-3-small` | `OPENAI_API_KEY`                  |
+| `openai`                 | Cloud | `gpt-4o`                   | `gpt-image-2.5-flare`            | `text-embedding-3-small` | `OPENAI_API_KEY`                  |
 | `anthropic`              | Cloud | `claude-sonnet-4-6`        | —                                | —                        | `ANTHROPIC_API_KEY`               |
 | `gemini`                 | Cloud | `gemini-2.5-flash`         | —                                | —                        | `GEMINI_API_KEY`                  |
 | `openrouter`             | Cloud | `openai/gpt-4o`            | —                                | —                        | `OPENROUTER_API_KEY`              |
@@ -327,7 +327,7 @@ See [Query Router](../QUERY_ROUTER.md) for the full contract and host-hook examp
 ```ts
 import { generateImage } from '@framers/agentos';
 
-// Provider-first: resolves to gpt-image-1 by default for openai.
+// Provider-first: resolves to gpt-image-2.5-flare by default for openai.
 const result = await generateImage({
   provider: 'openai',
   prompt: 'A cinematic neon city skyline reflected in rain at night.',
@@ -431,7 +431,7 @@ order as fallbacks.
 
 | Provider                 | Type      | Default model                    | API key env var       |
 | ------------------------ | --------- | -------------------------------- | --------------------- |
-| `openai`                 | Cloud API | `gpt-image-1`                    | `OPENAI_API_KEY`      |
+| `openai`                 | Cloud API | `gpt-image-2.5-flare`            | `OPENAI_API_KEY`      |
 | `stability`              | Cloud API | `stable-diffusion-xl-1024-v1-0`  | `STABILITY_API_KEY`   |
 | `replicate`              | Cloud API | `black-forest-labs/flux-1.1-pro` | `REPLICATE_API_TOKEN` |
 | `openrouter`             | Cloud API | —                                | `OPENROUTER_API_KEY`  |
@@ -579,6 +579,8 @@ await tutor.close();
 ```
 
 With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), the same function under its own name), every session is a Generalized Mind Instance built from the agent's options, and `memory` turns on cognitive memory: one manager for the agent's sessions, scoped per user, embedding with `memory.embedding` (unset, a model picked from the global default provider or the environment's keys). `cognition: 'full'` adds sentiment tracking and the metaprompt presets. Of the `MemoryConfig` fields, this path reads `embedding` and `consolidation`; `types: ['episodic', 'semantic']`, `working` and `shared` are read by neither runtime of `agent()`, and without `runtime: 'gmi'` the agent reads no `memory` option at all. [GMIs from agent()](../GMI.md#gmis-from-agent) lists what each option does on this path.
+
+`learning: true`, or a `LearningConfig`, turns on the agent's learning layer: every GMI of the agent sends the persona's personality section as a system prompt of its own on every turn, in the words `agent()` writes, a session opened with a `userId` is bound to a learner, and `agent.learning.manifest()` says which loops run. Unset or `false` (the default), the agent builds no layer and the persona's base prompt carries the section; `agent()` without `runtime: 'gmi'` ignores the option. [Learning](../GMI.md#learning) has the rules.
 
 ### Per-agent identity via SOUL.md
 
@@ -773,6 +775,8 @@ For custom host-managed tools that are not registered in AgentOS, keep using
 
 This recovery path assumes the conversation store is still available after the
 original process exits.
+
+`AgentOSConfig.learning` turns on the runtime's learning layer: every GMI sends its persona's personality section as a system prompt of its own on every turn, each session is bound to its user under the turn's resolved organization, and `AgentOS.getLearningLayer()` returns the layer (`undefined` while learning is off). [Learning](../GMI.md#learning) has the rules.
 
 ## Guidance
 

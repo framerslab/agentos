@@ -12,10 +12,10 @@ GMIs serve the full runtime's sessions, and, with `runtime: 'gmi'` (or [`gmi()`]
 |---|---|---|---|
 | Entry point | `AgentOS.create()`, or `new AgentOS()` and `initialize(config)`; then `processRequest()` | `agent({ runtime: 'gmi', ... }).session(id).send()` or `.stream()` | `agent({...}).session(id).send()` or `.stream()`; `agency({...})` |
 | Per-session state | A GMI from `GMIManager` | A GMI per session, over the session's message history held in process memory | A message history held in process memory |
-| Persona | A persona definition, named on every request by `selectedPersonaId` | A persona built from the agent's options: the system prompt `agent()` sends, `personality` as HEXACO traits | `instructions` and `personality`, written into the system prompt |
+| Persona | A persona definition, named on every request by `selectedPersonaId`; its HEXACO traits reach the prompt only with `learning` on ([Learning](#learning)) | A persona built from the agent's options: the system prompt `agent()` sends, `personality` as HEXACO traits; with `learning` on, the personality section is a system prompt of its own | `instructions` and `personality`, written into the system prompt |
 | Sentiment tracking and metaprompts | Yes | With `cognition: 'full'` or a `CognitionConfig` that turns them on | No |
 | Long-term memory | A cognitive memory manager, when `gmiManagerConfig.cognitiveMemoryFactory` supplies one | A cognitive memory manager built from `memory`, one per agent; or a `memoryProvider` you pass in | A `memoryProvider` you pass in |
-| Guardrails, RAG, HITL, channels, emergent tools | Run by the runtime | Accepted without being applied, with a warning; `voice`, `avatar` and `channels` throw | `agent()` accepts them without applying them and logs a warning ([capability contract](https://github.com/framerslab/agentos/blob/master/src/api/runtime/capabilityContract.ts)); `agency()` applies HITL approvals and, on `hierarchical`, emergent specialists at the agency level, reports its guardrail ids as not enforced, adds no RAG context and wires no channels ([Agencies](./AGENCIES.md)) |
+| Guardrails, RAG, HITL, channels, emergent tools | Run by the runtime | Accepted without being applied, with a warning; `voice`, `avatar`, `channels` and `budget` throw | `agent()` accepts them without applying them and logs a warning ([capability contract](https://github.com/framerslab/agentos/blob/master/src/api/runtime/capabilityContract.ts)); `agency()` applies HITL approvals and, on `hierarchical`, emergent specialists at the agency level, reports its guardrail ids as not enforced, adds no RAG context and wires no channels ([Agencies](./AGENCIES.md)) |
 | Output | A stream of `AgentOSResponse` chunks | `GenerateTextResult` and `StreamTextResult`, as `agent()` returns them | A `StreamTextResult` (`textStream`, `fullStream`) |
 
 ## What a GMI adds over a plain agent
@@ -29,10 +29,12 @@ A plain agent, `agent({...})` without `runtime: 'gmi'`, calls the model with a s
 | Metaprompts | Events and turn intervals run metaprompts: frustration recovery, confusion clarification, satisfaction reinforcement, error recovery, engagement, and a self-reflection metaprompt (`gmi_self_trait_adjustment`) that re-reads the GMI's mood, user skill and task context from evidence. It does not change HEXACO traits; `adapt_personality` and a host's own `GMI.setPersonalityTrait()` call do. The sentiment presets merge into a persona that enables `sentimentTracking`; turn-interval and manual metaprompts run from the persona's own `metaPrompts` regardless. | [`MetapromptExecutor.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts), [`metaprompt_presets.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/metaprompt_presets.ts), [`PersonaLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/PersonaLoader.ts) lines 199-222 |
 | Mood-weighted memory bridge | With cognitive memory attached, every exchange is observed and encoded with the GMI's current PAD state and mood, and recalled with emotional congruence in the composite score | [`CognitiveMemoryBridge.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts) lines 277-292, [`RetrievalPriorityScorer.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/RetrievalPriorityScorer.ts) lines 40-46 |
 | Reasoning trace | The last N decision entries of the turn loop (500 by default; `reasoningTraceConfig.maxEntries` on the persona, `defaultReasoningTraceMaxEntries` on the runtime config), readable for debugging and used as evidence by the self-reflection metaprompt | [`GMI.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) (`initialize()` and `addTraceEntry()`), [`reasoningTraceLimits.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/reasoningTraceLimits.ts) |
-| Self-modification tools | With `emergentConfig.selfImprovement.enabled`, the runtime registers `adapt_personality`, `manage_skills`, `create_workflow` and `self_evaluate`. `adapt_personality` changes the running GMI's traits within bounds; a `PersonalityMutationStore` records the changes only when a storage adapter is supplied and `personality.persistWithDecay` is on, and stored mutations are not reloaded into later GMIs | [`ToolOrchestrator.ts`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) lines 362-392, [`SelfImprovementSessionManager.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/SelfImprovementSessionManager.ts) line 369, [`AdaptPersonalityTool.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) line 340 |
+| Self-modification tools | With `emergentConfig.selfImprovement.enabled`, the runtime registers `adapt_personality`, `manage_skills`, `create_workflow` and `self_evaluate`. `adapt_personality` changes the running GMI's traits within bounds; a `PersonalityMutationStore` records the changes only when a storage adapter is supplied and `personality.persistWithDecay` is on, and stored mutations are not reloaded into later GMIs. Only the full runtime passes the tool orchestrator the options that register these tools, so a GMI from `agent({ runtime: 'gmi' })` or `gmi()` has none of them. With a learning layer, the actions of these four tools and `forge_tool` that change the agent refuse on a turn with no learner and in modes `off` and `frozen`, and under `AGENTOS_LEARNING_FREEZE=1` they refuse with a layer or without one ([Learning](#learning)) | [`ToolOrchestrator.ts`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) lines 369-401, [`SelfImprovementSessionManager.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/SelfImprovementSessionManager.ts) line 369, [`AdaptPersonalityTool.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) line 391, [`toolContext.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/learning/toolContext.ts) |
 | RAG trigger and discovery context | The loop decides per turn whether to retrieve, and injects capability-discovery context when discovery is configured | [`GMI.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) (`processTurnStream()`: the RAG decision and the discovery-context step) |
 
-Reusable without a GMI: the eight memory mechanisms, the observer and reflector pipeline, HyDE and graph retrieval all belong to `CognitiveMemoryManager` and the RAG layer. A host wires them (wilds-ai and Wunderland build the manager themselves). `agent()` without `runtime: 'gmi'` runs none of them and warns when given `cognitiveMechanisms`; with `runtime: 'gmi'` and memory on (`memory` set, or `cognition: 'full'`), the agent's own `CognitiveMemoryManager` runs the mechanisms, `cognitiveMechanisms` or all eight at their defaults ([GMIs from agent()](#gmis-from-agent)). Shared by both paths: the model and provider, tools and extensions, and the HEXACO trait values. `agent()` writes those values into the prompt once; a GMI carries them as persona state that `adapt_personality` can change.
+Reusable without a GMI: the eight memory mechanisms, the observer and reflector pipeline, HyDE and graph retrieval all belong to `CognitiveMemoryManager` and the RAG layer. A host wires them (wilds-ai and Wunderland build the manager themselves). `agent()` without `runtime: 'gmi'` runs none of them and warns when given `cognitiveMechanisms`; with `runtime: 'gmi'` and memory on (`memory` set, or `cognition: 'full'`), the agent's own `CognitiveMemoryManager` runs the mechanisms, `cognitiveMechanisms` or all eight at their defaults ([GMIs from agent()](#gmis-from-agent)). Shared by both paths: the model and provider, tools and extensions, and the HEXACO trait values. `agent()` writes those values into the prompt once; a GMI also carries them as persona state. On the full runtime, with self-improvement enabled, `adapt_personality` can change that state; a GMI from `agent({ runtime: 'gmi' })` or `gmi()` gets no such tool, so its traits stay as given.
+
+The [GMI versus agent() Study](./evaluation/GMI_VS_AGENT.md) measures whether these additions improve companion conversation, against `agent()` and a bare model loop.
 
 ## Getting a GMI
 
@@ -87,7 +89,7 @@ await tutor.close();
 
 `agent({ runtime: 'gmi' })` returns [`gmi(opts)`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), and `gmi()` (alias `createGmi()`, both exported from `@framers/agentos` and `@framers/agentos/api`) builds the same handle from the same options. It has the `Agent` surface (`generate()`, `stream()`, `session()`, `usage()`, `close()`, `export()`), and every session it opens is served by a GMI built in process from the agent's options: no `AgentOS` runtime, no persona files, no `GMIManager`. `agent()` without `runtime`, or with `runtime: 'legacy'`, keeps the `generateText()` path.
 
-**Construction.** `gmi()` checks at construction what needs no environment, and throws naming the option: `voice`, `avatar` and `channels`, which the GMI path does not run (a config that sets nothing but `enabled: false` counts as unset, as on `agent()`); an unknown cognition profile or metaprompt preset; a `memory.embedding` that names a provider without embedding models, a model that does not resolve on it, a dimension that is not a positive integer, or no dimension for a model whose output size agentos does not know. `rag`, `discovery`, `guardrails`, `security`, `permissions`, `hitl`, `emergent`, `output` and `provenance` are accepted without being applied, and one warning names the ones that are set (the `gmi` column of the [capability contract](https://github.com/framerslab/agentos/blob/master/src/api/runtime/capabilityContract.ts)). The persona, with the provider and model it resolves, the prompt engine, the tool orchestrator and the cognitive memory are built on first use, so an agent created before its keys are set reads them on its first call. When no provider or model resolves, that call rejects with the error `agent()` gives; a build that fails is not kept, and the next call builds again.
+**Construction.** `gmi()` checks at construction what needs no environment, and throws naming the option: `voice`, `avatar` and `channels`, which the GMI path does not run, and `budget`, which it could not enforce, because a GMI's model calls do not pass through `generateText()` or `streamText()` (a config that sets nothing but `enabled: false` counts as unset, as on `agent()`); an unknown cognition profile or metaprompt preset; a `learning` value of the wrong type, a blank `learning.agentKey` or an unknown `learning.mode`; a `memory.embedding` that names a provider without embedding models, a model that does not resolve on it, a dimension that is not a positive integer, or no dimension for a model whose output size agentos does not know. `rag`, `discovery`, `guardrails`, `security`, `permissions`, `hitl`, `emergent`, `output` and `provenance` are accepted without being applied, and one warning names the ones that are set (the `gmi` column of the [capability contract](https://github.com/framerslab/agentos/blob/master/src/api/runtime/capabilityContract.ts)). The persona, with the provider and model it resolves, the prompt engine, the tool orchestrator and the cognitive memory are built on first use, so an agent created before its keys are set reads them on its first call. When no provider or model resolves, that call rejects with the error `agent()` gives; a build that fails is not kept, and the next call builds again.
 
 **Profiles.** `cognition` picks what each GMI runs: `'light'` (the default), `'full'`, or a `CognitionConfig` that sets each switch ([`gmiCognition.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiCognition.ts); `resolveCognition()` returns the switches an agent's options resolve to).
 
@@ -105,7 +107,7 @@ Every profile keeps the reasoning trace. Sentiment tracking scores each user tur
 | Persona field | From |
 |---|---|
 | `id`, `name`, `description` | A slug of `name` (an id of its own for an agent with no name); `name`, or `Agent`; the first line of `instructions`, or the name |
-| `baseSystemPrompt` | The system prompt `agent()` sends ([`buildSystemPrompt()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts): the soul file's body and style, `instructions`, the name line, the personality description, `skills`), or the joined `systemBlocks` |
+| `baseSystemPrompt` | The system prompt `agent()` sends ([`buildSystemPrompt()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts): the soul file's body and style, `instructions`, the name line, the personality description, `skills`), or the joined `systemBlocks`; with `learning` on, without the personality description, which the GMI sends as a system prompt of its own ([Learning](#learning)) |
 | `personalityTraits` | `personality`, as HEXACO traits |
 | `defaultProviderId`, `defaultModelId` | `provider` and `model`, resolved as `generateText()` resolves them |
 | `defaultModelCompletionOptions` | `maxTokens` (or `controls.maxTotalTokens`), `controls.maxDurationMs` as `requestTimeout`, `thinking`, `effort`, `customModelParams`, `cache`; nothing else, so the provider's default temperature applies ([Completion options](#completion-options)) |
@@ -146,7 +148,7 @@ A hook that throws (or an `onBeforeToolExecution` that resolves with nothing) is
 
 **Usage.** Each model call of a turn is metered with the provider and model that served it: one usage ledger row and one usage event for the process-wide observer (`setGlobalLlmObserver()`) per finished step, and one for each attempt that failed and was billed, with the finish reason `error`. `session.usage()` and `agent.usage(id)` add a session's turns, and `agent.usage()` adds every session's and every `generate()` and `stream()` call's; with the usage ledger enabled they read the ledger alone.
 
-**Closing.** `session.close()` stops a turn still running: its model call is aborted, its caller gets the abort error, and the steps it finished stay in `messages()`, marked partial; then the session's GMI is shut down, and the next `agent.session(id)` with that id starts empty. `agent.close()` closes every session, then the cognitive memory; a session opened afterwards builds a new one. The tools the agent was given are not shut down.
+**Closing.** `session.close()` stops a turn still running: its model call is aborted, its caller gets the abort error, and the steps it finished stay in `messages()`, marked partial; then the session's GMI is shut down and, with `learning` on, its learner session ended, and the next `agent.session(id)` with that id starts empty. `agent.close()` closes every session, then the cognitive memory; a session opened afterwards builds a new one and uses the agent's learning layer, which `close()` leaves open. The tools the agent was given are not shut down.
 
 ## What a turn does
 
@@ -172,9 +174,9 @@ flowchart TD
 1. **Sentiment.** When the persona enables `sentimentTracking` and the latest message is from the user, `SentimentTracker` scores it before the first model call. Score thresholds, runs of consecutive turns and confusion phrases emit [`GMIEvent`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMIEvent.ts)s, which drive event-based metaprompts ([Adaptive Prompt Intelligence](./ADAPTIVE_PROMPT_INTELLIGENCE.md) lists the conditions).
 2. **Retrieval.** When `shouldTriggerRAGRetrieval()` decides the turn needs context and a retrieval augmentor is configured, the GMI calls `retrieveContext()` and emits a `RAG_SOURCES_AVAILABLE` chunk with the retrieved sources.
 3. **Memory context.** With cognitive memory attached, `CognitiveMemoryBridge.assembleContext()` retrieves memories relevant to the user's message.
-4. **Prompt.** `IPromptEngine.constructPrompt()` builds the messages for the model call.
+4. **Prompt.** `IPromptEngine.constructPrompt()` builds the messages for the model call. A GMI given a learner session or the persona's traits (`GMIBaseConfig.learning`, `GMIBaseConfig.personaTraits`) adds the personality section after the persona's base prompt; the section is prepared once per user turn, before the first model call, and every model step of the turn sends it ([Learning](#learning)).
 5. **Model call.** `AIModelProviderManager` resolves the provider for the turn's model, and the GMI streams `generateCompletionStream()` with the persona's and the turn's [completion options](#completion-options). With a completion gateway, the gateway resolves the serving model before step 4 and streams the call ([Model calls through a completion gateway](#model-calls-through-a-completion-gateway)). A model step that completes ends with a `STEP_FINISHED` chunk. A step that fails emits none: an error after output, a failure that is not retryable, the end of the fallback chain or any other error inside the step ends the turn with an `ERROR` chunk. When `GMIBaseConfig.beforeModelCall` is set, the GMI calls it before every attempt, a fallback hop's included, with the turn id, the step index, the hop, the provider, the model and a copy of the attempt's prompt. Messages it returns replace that attempt's prompt and do not enter the history; a hook that throws or returns an empty list is recorded on the reasoning trace, and the built prompt is sent. A turn whose `metadata.options` sets `cacheDiagnostics` (`true`, or `{ previousMessageId }`) sends Anthropic's prompt-cache diagnostics on every step: the first step compares against the message the turn names, each later step against the previous step's response ([Cache Diagnostics](./features/CACHE_DIAGNOSTICS.md)).
-6. **Tools.** The GMI runs each requested tool call through `IToolOrchestrator.processToolCall()` and emits a `TOOL_RESULT` chunk for each result it records in the history: a failed call's too, and, when a round stops early, the error result it records for each call the round did not finish. The loop then builds the next prompt with the tool results (step 4) and calls the model again, until the model answers without requesting tools or `maxToolLoopIterations` (5 by default) is reached. Retrieval and memory context (steps 2 and 3) run only for the turn's first model call.
+6. **Tools.** The GMI runs each requested tool call through `IToolOrchestrator.processToolCall()`, with the turn's learner and mode in the call's `sessionData.learning` when the GMI has a learner session, and emits a `TOOL_RESULT` chunk for each result it records in the history: a failed call's too, and, when a round stops early, the error result it records for each call the round did not finish. The loop then builds the next prompt with the tool results (step 4) and calls the model again, until the model answers without requesting tools or `maxToolLoopIterations` (5 by default) is reached. Retrieval and memory context (steps 2 and 3) run only for the turn's first model call.
 7. **After the turn.** With cognitive memory attached, the bridge encodes the exchange (`syncForTurn()`). When the persona's RAG configuration enables turn-summary ingestion, the GMI ingests the exchange into the retrieval augmentor, summarizing it first if that is configured. Finally `MetapromptExecutor` checks its triggers.
 
 ## Model calls through a completion gateway
@@ -229,6 +231,125 @@ Both replacing calls take [`ConversationMessage`](https://github.com/framerslab/
 
 A turn whose `metadata.conversationHistoryForPrompt` is a non-empty array builds its prompts from that history instead of the GMI's own: the conversation before the turn, ending before the current user message. The full runtime passes its stored conversation this way. An empty array is ignored.
 
+## Learning
+
+```typescript
+import { agent } from '@framers/agentos';
+
+const tutor = agent({
+  runtime: 'gmi',
+  provider: 'openai',
+  name: 'Tutor',
+  instructions: 'You are a patient CS tutor.',
+  personality: { openness: 0.9, conscientiousness: 0.95 },
+  learning: true,
+});
+
+const session = tutor.session('lesson-1', { userId: 'student-7f3a' });
+await session.send('Explain recursion with an analogy.');
+
+const manifest = await tutor.learning!.manifest();
+console.log(manifest.loops.personality_rendering); // { live: true }
+console.log(manifest.turns); // { prepared: 1, bound: 1, none: {} }
+```
+
+The learning layer binds each session to a learner (one agent with one user, in one namespace) and sends the persona's personality section on every turn. It is off unless the host turns it on: `AgentOSConfig.learning`, or a layer passed in `gmiManagerConfig.learningLayer`, on the full runtime, and the `learning` option of `agent({ runtime: 'gmi' })` and `gmi()`. With `learning` unset or `false` and no layer passed, there is no layer: the full runtime's GMIs send no personality section, the persona base prompt of `gmi()` carries it, and the self-modification tools refuse only under the process freeze ([Modes and the process switches](#modes-and-the-process-switches)). The layer keeps nothing beyond the process: it records no outcome, lesson, trait change or ledger entry, and its manifest lists those loops as off ([`src/cognition/learning/`](https://github.com/framerslab/agentos/tree/master/src/cognition/learning)).
+
+### The option
+
+| `learning` | Effect |
+|---|---|
+| unset or `false` (the default) | No layer |
+| `true` | A layer in mode `on`, with the switches of the agent's cognition profile (the full runtime's is `custom`) |
+| a `LearningConfig` | A layer with each field it sets, and the others as `true` gives them |
+
+| `LearningConfig` field | Meaning |
+|---|---|
+| `mode` | `'on'` (the default), `'frozen'` or `'off'` ([Modes and the process switches](#modes-and-the-process-switches)) |
+| `agentKey` | Names the agent its learners belong to. Unset: the registered persona's id, or the persona id of a `gmi()` agent with a `name` |
+| `namespace` | The organization of every learner of a `gmi()` agent. The full runtime refuses it: it takes each turn's resolved organization |
+| `anonymousUserIds` | User ids that name no learner, added to `''`, `anonymous_user`, `anonymous`, `system` and `guest` |
+| `traits`, `lessons`, `skills` | Ask for trait changes, lessons and the skill library. `true` on a `gmi()` agent with `cognition: 'full'` asks for all three; `'light'`, a `CognitionConfig` and the full runtime ask for none. The manifest lists each as off and says whether it was asked for |
+
+A value of the wrong type, a blank `agentKey` or an unknown `mode` throws naming the field: at construction on `gmi()`, and from `AgentOS.initialize()` with `CONFIGURATION_ERROR` before any service starts. `initialize()` also refuses `learning` set together with `gmiManagerConfig.learningLayer`, a layer the host built itself with `createLearningLayer()`: the runtime uses a passed layer and leaves it open at shutdown, and closes the layer it built from `learning`. `AgentOS.getLearningLayer()` returns the runtime's layer, or `undefined` with learning off; `agent.learning` is set on a `gmi()` agent with learning on; `resolveCognition()` returns the resolved switches as `learning`.
+
+### The personality section
+
+With the layer on, every GMI sends its persona's personality section as a system prompt of its own at priority 2, right after the persona's base prompt at priority 1. The section is prepared once per user turn, before the first model call, and every model step of the turn sends the same text. The words are the ones `agent()` writes ([`personalityPrompt.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/personalityPrompt.ts)): the heading `## Personality & Communication Style` and one directive for each HEXACO trait above 0.65 or below 0.35, in the order honesty, emotionality, extraversion, agreeableness, conscientiousness, openness. A persona whose traits all sit from 0.35 to 0.65 sends none. `gmi()` leaves the section out of the persona's base prompt, so the prompt holds it once; an agent built with `systemBlocks` gets it after its blocks.
+
+The section renders the persona's authored traits in every mode. `GMI.setPersonalityTrait()`, and so `adapt_personality`, changes the GMI's copy of the persona and no prompt. A workflow seat's role overlay renders for that seat's session only and never sets honesty-humility or emotionality: an overlay value for either is not rendered, and a warning names the persona and the trait.
+
+### Learners
+
+| | `gmi()` and `agent({ runtime: 'gmi' })` | Full runtime |
+|---|---|---|
+| Layer | One per agent | One per `AgentOS` |
+| Learner session | One per `agent.session()` entry, built with its first turn; one per `generate()` or `stream()` call | One per GMI, built with the GMI |
+| User | The `userId` passed to `session()`. A session opened without one, `generate()` and `stream()` have no learner | The user the GMI is created for |
+| Agent | `learning.agentKey`, else the persona id of an agent with a `name`; an agent with neither has no learner | `learning.agentKey`, else the persona id |
+| Namespace | `learning.namespace`, else none (`''`) | The turn's resolved organization (`organizationId`, or the single-tenant default), else none. The turn pipeline resolves it before it acquires the GMI; a GMI built again to resume a stored turn is bound at the first turn it prepares, under that turn's organization |
+| Ends | At `session.close()`; a call's when the call's GMI is released; `agent.close()` ends every session's and leaves the layer open | When the GMI shuts down: deactivation, idle cleanup or `AgentOS.shutdown()` |
+
+A session has no learner when its user id is blank, `anonymous_user`, `anonymous`, `system`, `guest` or one of `learning.anonymousUserIds`, and a workflow seat's GMI has none. A session belongs to the user of its first turn and to the namespace it was opened under: a turn of another user, or of the same user id in another organization, has no learner, and neither has any later turn of that session. A turn that carries `metadata.workflowId` has none: one of the session's own user leaves the next turn its learner, and one of another user or organization ends the session's learner as any such turn does. A tool continuation belongs to the turn it continues; one that runs under another organization than its turn (a resume whose host passes another `organizationId`) is a turn of another namespace.
+
+A turn with no learner renders the authored traits and learns nothing, and the self-modification tools refuse on it. A learner session that rejects, answers with no preparation or does not answer within 2,000 ms never fails the turn: the GMI sends the section it renders from the persona's traits, the turn has no learner, and the reasoning trace holds a `WARNING`. A layer that fails to open a learner session never fails the GMI either: the session asks again at each turn, and until one opens each turn runs that way.
+
+### Modes and the process switches
+
+| Mode | The section | The self-modification tools |
+|---|---|---|
+| `on` | The authored traits | Act on a learner's turn; refuse on a turn with no learner (`no_learner`) |
+| `frozen` | The authored traits | Refuse (`frozen`) |
+| `off` | The authored traits | Refuse (`off`) |
+
+`AGENTOS_LEARNING_OFF=1` puts every turn of every layer in the process in mode `off`. `AGENTOS_LEARNING_FREEZE=1` freezes a turn whose mode would be `on`, and makes the self-modification tools refuse with `frozen` on every host, a host with no layer included. Any other value of either variable sets nothing. The manifest's `mode` and `modeSetBy` say which mode is in effect and what set it.
+
+### The self-modification tools
+
+On a host with a layer every tool call carries the turn's learner and mode (`sessionData.learning`: `{ learner: 'bound' | 'none', mode }`). Before they act, `forge_tool`, `create_workflow`'s `create`, `manage_skills`' `enable` and `disable`, `self_evaluate`'s `adjust` and `adapt_personality` check, in this order: the freeze (`AGENTOS_LEARNING_FREEZE=1` or mode `frozen`, refused with `frozen`), the mode (`off`, refused with `off`) and the learner (none, refused with `no_learner`) ([`toolContext.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/learning/toolContext.ts)). A refusal is a failed tool result that changes nothing: its `error` reads `<tool> refused (<reason>): <why>; nothing was changed.`, and its `details` are `{ status: 'rejected', reason }`. `self_evaluate`'s `evaluate` on such a turn scores the response and keeps it in the session's report, stores no memory trace, applies no adjustment, and names the reason in its output's `selfChangeRefused`. `list`, `search`, `report` and `create_workflow`'s `run` answer as they do without a layer.
+
+With a layer, `adapt_personality` also keeps the layer's bounds: it refuses `honesty` and `emotionality` (`operator_only`), a `delta` above 0.02 either way (`step_bound`), and a call after three accepted ones in the session (`call_limit`). A call it accepts changes the GMI's trait as it does without a layer, and the prompt keeps the authored traits ([The personality section](#the-personality-section)). Without a layer the five tools act by their own rules, and `AGENTOS_LEARNING_FREEZE=1` is their one refusal. Only the full runtime registers these tools ([What a GMI adds over a plain agent](#what-a-gmi-adds-over-a-plain-agent)).
+
+### The manifest
+
+`manifest()`, on `agent.learning` and on `AgentOS.getLearningLayer()`, says which loops the deployment runs and, for each one that is off, why ([`LoopManifest`](https://github.com/framerslab/agentos/blob/master/src/cognition/learning/types.ts)):
+
+- `surface` (`'gmi'`, `'runtime'` or `'custom'`), `profile`, `mode` and `modeSetBy` (`'config'`, `AGENTOS_LEARNING_OFF` or `AGENTOS_LEARNING_FREEZE`).
+- `loops`: the host's (`memory`, `memory_mechanisms`, `memory_observer_reflector`, `memory_store`, `sentiment`, `metaprompts`, `emergent_tools`, `self_improvement_tools`, `forged_code_executor`, `hitl`, `tool_policy`, `rag`) and the layer's own (`personality_rendering`, `outcomes`, `trait_changes`, `lessons`, `skills`, `ledger`), each `{ live, detail? }`, where `live` is `'varies'` when a persona or a factory the host passes decides it. `personality_rendering` is the one live loop of the layer's own.
+- `guardrails`: `{ complete: false }` with its detail; no self-change kind runs.
+- `turns`: the turns the layer prepared, how many had a learner, and the others by reason.
+
+The layer logs its manifest once, as a console line that starts `[agentos] learning layer manifest:`, when it opens its first learner session.
+
+### A turn loop of your own
+
+A product that runs its own turn loop over its own memory manager calls the layer itself:
+
+```typescript
+import { createLearningLayer } from '@framers/agentos';
+
+const layer = createLearningLayer({ agentKey: 'support-bot' });
+const learner = await layer.forLearner(
+  { namespace: 'acme', agentKey: 'support-bot', userId: 'user-42' },
+  { sessionId: 'session-1', personaId: 'support-bot', authoredTraits: { honesty: 0.9, extraversion: 0.8 } },
+);
+
+const turn = await learner.prepareTurn({
+  turnId: 'turn-1',
+  userId: 'user-42',
+  namespace: 'acme',
+  text: 'Where is my order?',
+  modelIds: ['gpt-4o'],
+  workflowSeat: false,
+});
+// turn.systemPrompts: the personality section at priority 2; turn.learner: 'bound'; turn.mode: 'on'
+
+await learner.endSession();
+await layer.close();
+```
+
+A key of `null`, a placeholder user id or a key with no agent gives a session with no learner, which renders the authored traits; `context.noLearnerReason` says why a caller passes `null`. A GMI built with `GMIBaseConfig.learning` calls `prepareTurn()` itself, and its `getLearnerSession()` returns the session; the host that passed the session ends it.
+
 ## What a GMI holds
 
 From [`GMI.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) (trimmed):
@@ -275,6 +396,7 @@ export class GMI implements IGMI {
 | [`CompletionGateway`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/completionGateway.ts) | Optional, set by `GMIBaseConfig.completionGateway`. Resolves the model that serves each step, initialises its provider and streams the call, moving to the next hop when a hop cannot start or an attempt fails before any output with a retryable error. |
 | [`IUtilityAI`](https://github.com/framerslab/agentos/blob/master/src/cognition/nlp/ai_utilities/IUtilityAI.ts) | Smaller jobs, such as summarizing an exchange before RAG ingestion. |
 | `ICognitiveMemoryManager` | Optional long-term cognitive memory, described below. |
+| [`ILearnerSession`](https://github.com/framerslab/agentos/blob/master/src/cognition/learning/types.ts) | Optional, set by `GMIBaseConfig.learning` when the host's `learning` option is on: prepares each user turn's personality section, and the learner and mode each tool call is told ([Learning](#learning)). |
 
 ## Cognitive memory
 
@@ -313,7 +435,7 @@ When the manager receives HEXACO `traits` (each from 0 to 1), every mechanism ex
 | Honesty | Agent-inference and reflection decay multipliers | − 0.15v, with floors of 0.5 and 0.4 |
 | Agreeableness | Emotion-regulation reappraisal rate | × (0.7 + 0.6v) |
 
-Personality reaches the model separately on each path. `agent()` writes its `personality` traits into a "Personality & Communication Style" section of the system prompt, with distinct instructions for values above 0.65 and below 0.35. `agent({ runtime: 'gmi' })` puts the same section in its persona's base prompt and carries the traits as the persona's `personalityTraits`, which its memory manager scales the mechanisms with. On the full runtime, persona definitions carry `personalityTraits`; `GMI.setPersonalityTrait()` changes one trait for one GMI, and the `adapt_personality` tool (with `emergentConfig.selfImprovement.enabled`) calls it for the GMI that runs the tool; no metaprompt changes traits.
+Personality reaches the model separately on each path. `agent()` writes its `personality` traits into a "Personality & Communication Style" section of the system prompt, with distinct instructions for values above 0.65 and below 0.35. `agent({ runtime: 'gmi' })` puts the same section in its persona's base prompt and carries the traits as the persona's `personalityTraits`, which its memory manager scales the mechanisms with; nothing on that path changes them afterwards, because `gmi()` registers no `adapt_personality` tool and hands the caller no GMI to call `setPersonalityTrait()` on. With `learning` on it leaves the section out of the base prompt and sends it as a system prompt of its own on every turn ([Learning](#learning)). On the full runtime, persona definitions carry `personalityTraits`, which reach the prompt as that section only with `learning` on; `GMI.setPersonalityTrait()` changes one trait for one GMI, and the `adapt_personality` tool (with `emergentConfig.selfImprovement.enabled`) calls it for the GMI that runs the tool; no metaprompt changes traits, and a changed trait reaches no prompt: the section renders the persona's authored traits.
 
 ### Retrieval
 
@@ -358,6 +480,7 @@ The classes in [`src/agents/agency/`](https://github.com/framerslab/agentos/tree
 - [`src/api/agent.ts`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) and [`src/api/agency.ts`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts): the lightweight helpers
 - [`src/api/gmi.ts`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts): `gmi()` and `agent({ runtime: 'gmi' })`; [`src/api/runtime/gmiSession.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiSession.ts) runs a session's turns, [`gmiResults.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiResults.ts) folds them into results, [`gmiCognition.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiCognition.ts) and [`gmiPersona.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiPersona.ts) turn the options into a profile and a persona, and [`agentCognitiveMemory.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/agentCognitiveMemory.ts) builds the memory
 - [`src/cognition/emergent/`](https://github.com/framerslab/agentos/tree/master/src/cognition/emergent): emergent tool and agent forging
+- [`src/cognition/learning/`](https://github.com/framerslab/agentos/tree/master/src/cognition/learning): the learning layer (`createLearningLayer()`, learner sessions, the loop manifest, what a tool reads about its turn); [`src/cognition/substrate/personas/personalityPrompt.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/personalityPrompt.ts): the personality section
 
 ## Further reading
 
@@ -368,6 +491,7 @@ The classes in [`src/agents/agency/`](https://github.com/framerslab/agentos/tree
 - [Emergent Capabilities](/features/emergent-capabilities): runtime tool forging and `spawn_specialist`
 - [Guardrails](/features/guardrails): how guardrails intercept tool calls and generation
 - [LLM Providers](/architecture/llm-providers): the provider implementations
+- [GMI versus agent() Study](./evaluation/GMI_VS_AGENT.md): the study design that compares a GMI with agent() and a bare model loop, and its reports
 
 ---
 

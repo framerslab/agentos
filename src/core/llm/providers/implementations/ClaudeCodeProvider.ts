@@ -316,18 +316,17 @@ export class ClaudeCodeProvider implements IProvider {
     const result = await this.bridge.execute(bridgeOpts);
 
     if (result.isError) {
-      throw new ClaudeCodeProviderError(
-        `Claude Code returned an error: ${result.result}`,
-        'CRASHED',
-        'Try running "claude --bare -p test" manually to diagnose.',
-        true,
-      );
+      /* The bridge carries the failure's message in `error`. */
+      throw this.errorResultError(result.error ?? result.result);
     }
 
-    /* Parse tool call response if tools were requested */
+    /* Parse tool call response if tools were requested. With --json-schema,
+     * Claude Code returns the reply that matches it in structured_output,
+     * which the bridge passes on as structuredOutput; the result text is
+     * parsed when there is none. */
     if (hasTools) {
       try {
-        const parsed = JSON.parse(result.result);
+        const parsed = result.structuredOutput ?? JSON.parse(result.result);
         if (parsed.response_type === 'tool_calls' && Array.isArray(parsed.tool_calls)) {
           return this.buildToolCallResponse(parsed.tool_calls, result, undefined, undefined, modelId);
         }
@@ -350,6 +349,21 @@ export class ClaudeCodeProvider implements IProvider {
    * Text-only turns get full token-by-token streaming. Tool-calling turns
    * stream progress events for UX feedback, then yield a single final
    * response with parsed tool calls.
+   *
+   * The final chunk is yielded once the bridge's stream has ended, which is
+   * after the CLI has exited: a non-zero exit after the result line ends the
+   * stream with the bridge's classified error, and a result flagged
+   * `is_error` ends it with an error chunk.
+   *
+   * A text reply in the result's structured output that the text deltas do
+   * not already hold (none came, or only text the model wrote before the
+   * reply, such as whitespace) is yielded as one text delta just before the
+   * final chunk built from it, so a consumer that builds the reply from the
+   * deltas (streamText(), the StreamingReconstructor, the GMI) reads it once.
+   * The delta goes out only once the run has ended with that reply, so a run
+   * that fails after its result line still ends with its error chunk alone.
+   * A caller who aborts while the consumer holds the delta gets the abort
+   * chunk in place of the reply's final chunk.
    */
   async *generateCompletionStream(
     modelId: string,
@@ -376,26 +390,26 @@ export class ClaudeCodeProvider implements IProvider {
     let accumulatedText = '';
     const responseId = `cc-${Date.now()}`;
     let finalUsage: ModelUsage | undefined;
-    let emittedFinal = false;
+    /* The chunk that ends the stream. It is held while the bridge's stream is
+     * read to its end, where the bridge awaits the CLI's exit, so a failed
+     * exit after the result line still reaches the catch below. */
+    let finalChunk: ModelCompletionResponse | undefined;
+    /* Set when the CLI reports a failure in its own output (an error event or
+     * an is_error result), which says more than the exit code that follows. */
+    let cliReportedError = false;
+    /* A text reply in the result's structured output that the text deltas
+     * did not carry, and the final chunk built from it: it goes out as a
+     * delta of its own after the loop, if that chunk still ends the stream. */
+    let structuredText: { text: string; finalChunk: ModelCompletionResponse } | undefined;
 
     try {
       for await (const event of this.bridge.stream(bridgeOpts)) {
+        /* Once the ending is known the rest of the stream is only drained. */
+        if (finalChunk) continue;
         switch (event.type) {
           case 'text_delta':
             accumulatedText += event.text;
-            yield {
-              id: responseId,
-              object: 'chat.completion.chunk',
-              created: Date.now(),
-              modelId,
-              choices: [{
-                index: 0,
-                message: { role: 'assistant', content: accumulatedText },
-                finishReason: null,
-              }],
-              responseTextDelta: event.text,
-              isFinal: false,
-            };
+            yield this.buildTextDeltaChunk(event.text, accumulatedText, modelId, responseId);
             break;
 
           case 'result': {
@@ -404,64 +418,122 @@ export class ClaudeCodeProvider implements IProvider {
               ? { promptTokens: usage.input_tokens, completionTokens: usage.output_tokens, totalTokens: usage.input_tokens + usage.output_tokens, costUSD: 0 }
               : { totalTokens: 0, costUSD: 0 };
 
+            /* A failed turn: the error generateCompletion() throws for it */
+            if (event.isError) {
+              /* The bridge carries the failure's message in `error`. */
+              const error = this.errorResultError(event.error ?? event.result);
+              cliReportedError = true;
+              finalChunk = this.buildStreamErrorResponse(error.message, modelId, responseId, finalUsage, error.code, error);
+              break;
+            }
+
             const finalText = event.result || accumulatedText;
 
-            /* Try parsing as tool call response */
+            /* Try parsing as tool call response. With --json-schema, Claude
+             * Code returns the reply that matches it in structured_output,
+             * which the bridge passes on as structuredOutput; the final text
+             * is parsed when there is none. */
             if (hasTools) {
               try {
-                const parsed = JSON.parse(finalText);
+                const parsed = event.structuredOutput ?? JSON.parse(finalText);
                 if (parsed.response_type === 'tool_calls' && Array.isArray(parsed.tool_calls)) {
-                  emittedFinal = true;
-                  yield this.buildToolCallResponse(
+                  finalChunk = this.buildToolCallResponse(
                     parsed.tool_calls,
                     { sessionId: event.sessionId, usage: event.usage },
                     responseId,
                     finalUsage,
                     modelId,
                   );
-                  return;
+                  break;
+                }
+                /* A text reply in structured output is its `text`: the turn
+                 * that returns it ends with no assistant message of its own. */
+                if (event.structuredOutput != null && typeof parsed.text === 'string') {
+                  finalChunk = this.buildTextResponse(
+                    parsed.text,
+                    { sessionId: event.sessionId, usage: event.usage },
+                    responseId,
+                    finalUsage,
+                    modelId,
+                  );
+                  /* Text deltas that hold the reply already carried it, and
+                   * it gets no second copy. Any others came before it (text
+                   * the model wrote ahead of the reply, or whitespace), and
+                   * the reply follows them. Any text holds an empty reply. */
+                  if (!accumulatedText.includes(parsed.text)) {
+                    structuredText = { text: parsed.text, finalChunk };
+                  }
+                  break;
                 }
               } catch { /* fall through to text */ }
             }
 
-            emittedFinal = true;
-            yield this.buildTextResponse(
+            finalChunk = this.buildTextResponse(
               finalText,
               { sessionId: event.sessionId, usage: event.usage },
               responseId,
               finalUsage,
               modelId,
             );
-            return;
+            break;
           }
 
           case 'error':
-            emittedFinal = true;
-            yield this.buildStreamErrorResponse(
+            cliReportedError = true;
+            finalChunk = this.buildStreamErrorResponse(
               `Claude Code stream error: ${event.error}`,
               modelId,
               responseId,
               finalUsage,
             );
-            return;
+            break;
         }
       }
     } catch (error: any) {
-      emittedFinal = true;
-      yield this.buildStreamErrorResponse(
-        error?.message ?? 'Claude Code stream failed.',
-        modelId,
-        responseId,
-        finalUsage,
-        error?.code,
-        error,
-      );
-      return;
+      /* A failed run (a non-zero exit, a timeout, an abort) ends the stream
+       * with the bridge's classified error, unless the CLI already reported
+       * the failure itself. */
+      if (!cliReportedError) {
+        finalChunk = this.buildStreamErrorResponse(
+          error?.message ?? 'Claude Code stream failed.',
+          modelId,
+          responseId,
+          finalUsage,
+          error?.code,
+          error,
+          /* The caller's abort ends the stream with type 'abort', as the
+           * abortSignal contract in IProvider asks of a streaming provider. */
+          error?.code === 'REQUEST_ABORTED' ? 'abort' : undefined,
+        );
+      }
     }
 
-    if (!emittedFinal) {
-      yield this.buildTextResponse(accumulatedText, {}, responseId, finalUsage, modelId);
+    /* streamText() and the StreamingReconstructor build a reply's text from
+     * the deltas alone. The delta goes out once the run is known to have
+     * ended with this reply: a run that failed or was aborted after its
+     * result line ends with its error chunk alone, as a stream with no reply
+     * text does. */
+    if (structuredText && finalChunk === structuredText.finalChunk) {
+      yield this.buildTextDeltaChunk(structuredText.text, accumulatedText + structuredText.text, modelId, responseId);
+      /* The bridge's stream has ended, so it no longer sees the caller's
+       * signal. An abort while the consumer held the delta still comes before
+       * the final chunk, and ends the stream as the bridge ends a run the
+       * caller aborted before the stream's end. */
+      if (options.abortSignal?.aborted) {
+        const error = ClaudeCodeProviderError.requestAborted();
+        finalChunk = this.buildStreamErrorResponse(
+          error.message,
+          modelId,
+          responseId,
+          finalUsage,
+          error.code,
+          error,
+          'abort',
+        );
+      }
     }
+
+    yield finalChunk ?? this.buildTextResponse(accumulatedText, {}, responseId, finalUsage, modelId);
   }
 
   /* ---- Embeddings (not supported) -------------------------------- */
@@ -647,6 +719,31 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
 
   /* ---- Private: response builders ------------------------------- */
 
+  /**
+   * Build a streaming chunk for a piece of the reply's text: `delta` is the
+   * new text, and `message.content` the reply's text so far.
+   */
+  private buildTextDeltaChunk(
+    delta: string,
+    textSoFar: string,
+    modelId: string,
+    responseId: string,
+  ): ModelCompletionResponse {
+    return {
+      id: responseId,
+      object: 'chat.completion.chunk',
+      created: Date.now(),
+      modelId,
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: textSoFar },
+        finishReason: null,
+      }],
+      responseTextDelta: delta,
+      isFinal: false,
+    };
+  }
+
   /** Build a text-only ModelCompletionResponse. */
   private buildTextResponse(
     text: string,
@@ -706,6 +803,15 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
     };
   }
 
+  /**
+   * The error a result flagged `is_error` stands for: generateCompletion()
+   * throws it, and a stream ends with it. The bridge's execute() throws the
+   * same error when the CLI exits non-zero after such a result.
+   */
+  private errorResultError(message: string): ClaudeCodeProviderError {
+    return ClaudeCodeProviderError.fromErrorResult(message);
+  }
+
   /** Build a terminal streaming error chunk instead of throwing mid-stream. */
   private buildStreamErrorResponse(
     message: string,
@@ -714,6 +820,7 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
     usage?: ModelUsage,
     code?: string | number,
     details?: unknown,
+    type?: string,
   ): ModelCompletionResponse {
     return {
       id: responseId,
@@ -724,6 +831,7 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
       usage,
       error: {
         message,
+        ...(type === undefined ? {} : { type }),
         ...(code === undefined ? {} : { code }),
         ...(details === undefined ? {} : { details }),
       },

@@ -103,6 +103,40 @@ describe('Memory.compileWiki', () => {
     expect(compileCalls).toBe(callsAfterFirst);
   });
 
+  it('keeps the watermark when a compile rejects, so the next compile takes up the same traces', async () => {
+    const mem = await makeMemory(false);
+    await mem.remember('Johnny prefers terse commits.', { type: 'episodic', scope: 'persona', scopeId: 'a1' });
+
+    let watermark: string | null = null;
+    let diskFull = true;
+    const compiled: string[][] = [];
+    mem.attachWiki({
+      store: {
+        index: async () => ({ indexed: [], skipped: [], removed: [] }),
+        readMetaWatermark: async () => watermark,
+        writeMetaWatermark: async (iso: string) => {
+          watermark = iso;
+        },
+      } as any,
+      compiler: {
+        compile: async (input: any) => {
+          compiled.push(input.traces.map((t: any) => t.content));
+          if (diskFull) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+          return { pagesWritten: ['entities/johnny'], tracesConsumed: input.traces.length, conflicts: [] };
+        },
+      } as any,
+    });
+
+    await expect(mem.compileWiki({ reason: 'explicit' })).rejects.toMatchObject({ code: 'ENOSPC' });
+    expect(watermark).toBeNull();
+
+    diskFull = false;
+    const res = await mem.compileWiki({ reason: 'explicit' });
+    expect(res.tracesConsumed).toBe(1);
+    expect(compiled).toEqual([['Johnny prefers terse commits.'], ['Johnny prefers terse commits.']]);
+    expect(watermark).not.toBeNull();
+  });
+
   it('no-ops when no wiki is attached', async () => {
     const mem = await makeMemory(false);
     const res = await mem.compileWiki({ reason: 'explicit' });

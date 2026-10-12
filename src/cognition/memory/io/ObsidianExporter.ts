@@ -22,7 +22,7 @@
  * @module memory/io/ObsidianExporter
  */
 
-import type { ExportOptions } from './facade/types.js';
+import type { ExportOptions, ExportResult } from './facade/types.js';
 import { MarkdownExporter } from './MarkdownExporter.js';
 import { writeFrontMatter } from '../../../core/utils/frontMatter.js';
 
@@ -77,16 +77,18 @@ export class ObsidianExporter extends MarkdownExporter {
    * Export all memory traces as Obsidian-flavoured `.md` files.
    *
    * Pre-fetches all knowledge-edge relationships into an in-memory cache,
-   * then delegates to the parent `export()` method. Directory creation and
-   * file writing are handled there; only `buildFileContent` is overridden.
+   * then delegates to the parent `export()` method. Directory creation,
+   * file writing and the checks on each trace's path are handled there; only
+   * `buildFileContent` is overridden.
    *
    * @param outputDir - Root directory to write the Obsidian vault into.
    * @param options   - Optional export configuration.
+   * @returns The traces left out, with the reason for each.
    */
-  override async export(outputDir: string, options?: ExportOptions): Promise<void> {
+  override async export(outputDir: string, options?: ExportOptions): Promise<ExportResult> {
     // Pre-fetch all related nodes so buildFileContent can use them synchronously.
     await this._prefetchRelatedNodes();
-    await super.export(outputDir, options);
+    return super.export(outputDir, options);
   }
 
   // -------------------------------------------------------------------------

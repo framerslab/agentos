@@ -172,6 +172,8 @@ OPENROUTER_API_KEY=sk-or-...
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
+For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list that its requests draw their key from. [API Key Rotation](../KEY_ROTATION.md) lists those providers, the ones that rest a key after a quota error, and the ones that need a single key.
+
 ### Per-Agent Override
 
 Individual agents pick their provider/model directly in the `agent({ ... })` config:
@@ -362,7 +364,8 @@ export OPENAI_API_KEY=sk-...
 | `gpt-5.6-sol` | 1.05M | Yes | Yes | GPT-5.6 flagship ($4/$20 per MTok) |
 | `gpt-4o` | 128K | Yes | Yes | Accepts `temperature` |
 | `gpt-4o-mini` | 128K | Yes | Yes | Fast, cheap |
-| `gpt-image-1` | n/a | n/a | n/a | Image generation only. OpenAI retires it on 2026-10-23 |
+| `gpt-image-2.5-flare` | n/a | n/a | n/a | Image generation only: the `generateImage()` default |
+| `gpt-image-2.5-sunburst` | n/a | n/a | n/a | Image editing: the `editImage()`, `variateImage()` and `transferStyle()` default |
 
 The GPT-5, GPT-6 and o-series models reject `temperature` and `top_p` and require `max_completion_tokens`; the provider handles both. Streamed and non-streamed calls follow one routing rule. The provider sends a call to the Responses API when it goes to a Responses-only model (the `-pro` models, the codex models, `gpt-5.6-cyber` and the deep-research models), when it is a GPT-6 call carrying function tools, or when it is a GPT-5 call carrying function tools and an `effort`; everything else goes to Chat Completions. OpenAI serves GPT-6 tool calls only through Responses (Chat Completions accepts them from Sol and Luna only with `reasoning_effort: "none"`). On the Responses path, `responseFormat` travels as `text.format`, images in user turns and tool results travel as `input_image`, and a streamed call reports its usage on the final chunk. A message part Responses cannot carry, such as audio, fails a call that has no Chat Completions route with `RESPONSES_UNMAPPABLE_CONTENT`. OpenAI retires `o1`, `o1-pro`, `o3-mini` and `o4-mini` on 2026-10-23, and `o3` and `o3-pro` on 2026-12-11.
 
@@ -688,6 +691,8 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 - [Cost Optimization](../safety/COST_OPTIMIZATION.md) — Budget management and routing
 - [Architecture](../architecture/ARCHITECTURE.md) — System architecture overview
 - [Structured Output](../orchestration/STRUCTURED_OUTPUT.md) — JSON schema enforcement per provider
+- [API Key Rotation](../KEY_ROTATION.md): comma-separated key lists, and which providers rotate and rest keys
+- [CLI Error Codes](./CLI_ERROR_CODES.md): the errors the Claude Code and Gemini CLI providers raise
 
 ## Prompt caching
 

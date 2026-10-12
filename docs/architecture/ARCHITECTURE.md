@@ -14,9 +14,9 @@ This page is the system map. For the *what* of each subsystem — components, li
 For specific subsystem deep-dives, see:
 - [Provenance & Immutability](../safety/PROVENANCE_IMMUTABILITY.md)
 
-![AgentOS layered architecture: seven cooperating layers from caller-facing API (generateText, streamText, agent, agency, mission) through cognitive substrate (GMI coordinator, PersonaOverlayManager, SentimentTracker, MetapromptExecutor), memory and RAG (4-tier memory, 8 cognitive mechanisms, HyDE, GraphRAG, 7 vector backends), tools and capabilities (100+ extension packs, 88 SKILL.md modules, runtime tool forging), guardrails and HITL (PII redaction, ML classifiers, NLI grounding, 5 approval triggers), orchestration (workflow, mission, AgentGraph, checkpointing), down to I/O and providers (voice pipeline, channels, media generation, 13 LLM providers, OpenRouter fanout).](/img/diagrams/system-architecture.svg)
+![AgentOS layered architecture: seven cooperating layers from the API surface (generateText, streamText, generateObject, generateImage, agent, agency, mission) through the cognitive substrate (GMI, GMIManager, PersonaOverlayManager, SentimentTracker, MetapromptExecutor), memory and RAG (working memory, five trace types, Ebbinghaus decay, 8 cognitive mechanisms, observer and reflector, HyDE, GraphRAG, hybrid retrieval, 7 vector stores), tools, skills and extensions (ToolOrchestrator, ExtensionRegistry, SkillRegistry, CapabilityDiscoveryEngine, ForgeToolMetaTool, 100+ extension packs, 88 SKILL.md skills), guardrails and HITL (ParallelGuardrailDispatcher, 4-tier PII redaction, ML classifiers, Grounding Guard, HumanInteractionManager), orchestration (workflow, mission, AgentGraph, CompiledExecutionGraph, ICheckpointStore), down to I/O and providers (voice pipeline, channels, media generation, 13 LLM providers, fallback chains).](/img/diagrams/system-architecture.svg)
 
-Each layer above corresponds to a section below. The mapping is one-to-one: layer 1 → [API Surface Contract](#api-surface-contract), layer 2 → [GMI](#gmi-generalized-mind-instance), layer 3 → [Memory System](#memory-system), layer 4 → [Tools, Skills, Extensions](#tools-skills--extensions), layer 5 → [Safety & Guardrails](#safety--guardrails), layer 6 → [Orchestration](#orchestration), layer 7 → [Perception & Channels](#perception--channels). The component pills inside each layer in the diagram are the same class and function names you'll see in the subsystem write-ups.
+The sections below follow the layers: layer 1 → [API Surface Contract](#api-surface-contract), layer 2 → [GMI](#gmi-generalized-mind-instance), layer 3 → [Memory System](#memory-system) and [RAG System](#rag-system), layer 4 → [Tool System](#tool-system) and [Extension & Guardrail Runtime](#extension--guardrail-runtime), layer 5 → [Guardrails](#guardrails) and [Human-in-the-Loop](#human-in-the-loop), layer 6 → [Multi-Agent Coordination](#multi-agent-coordination), layer 7 → [Voice Pipeline](#voice-pipeline) and [Channels](#channels). The class and function names on the diagram's pills are the names in the code.
 
 ---
 
@@ -55,12 +55,12 @@ All paths below are under [`src/`](https://github.com/framerslab/agentos/tree/ma
 The diagram at the top of this page is the canonical layered view. From top to bottom:
 
 1. **API surface** — `generateText` / [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts) / [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) / [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts) / `generateImage`, plus the [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) lifecycle facade.
-2. **Orchestration** — DAG runtime, `workflow()`, `mission()`, [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts), HITL, checkpointing, planning engine.
-3. **GMI** — per-mind state: `ConversationHistory`, [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts), [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts), [`MetapromptExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts), persona overlays.
-4. **Safety & Guardrails** alongside **Tools & Extensions** — guardrail packs (PII, toxicity, grounding, code safety, topicality), circuit breakers and the cost guard, and the 110-extension / 88-skill catalog with capability discovery and runtime tool forging.
-5. **Memory & RAG** — cognitive memory (five trace types, working memory, Ebbinghaus decay, 8 mechanisms such as retrieval-induced forgetting and reconsolidation), 7 vector stores, HyDE, GraphRAG, hybrid retrieval, [`CitationVerifier`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/citation/CitationVerifier.ts).
-6. **LLM providers** — 13 providers, OpenRouter among them, with fallback chains in `generateText()`, `streamText()`, `agent()` and `agency()`.
-7. **Perception & channels** — vision (OCR), hearing (STT, VAD), speech (TTS, voice pipeline), 12 messaging adapters, telephony.
+2. **GMI** — per-mind state: [`ConversationHistoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/ConversationHistoryManager.ts), [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts), [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts), [`MetapromptExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts), persona overlays.
+3. **Memory & RAG** — cognitive memory (five trace types, working memory, Ebbinghaus decay, 8 mechanisms such as retrieval-induced forgetting and reconsolidation), 7 vector stores, HyDE, GraphRAG, hybrid retrieval, [`CitationVerifier`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/citation/CitationVerifier.ts).
+4. **Tools & Extensions** — the extension and skill catalog (100+ extension packs, 88 skills) with capability discovery and runtime tool forging.
+5. **Safety & Guardrails** — guardrail packs (PII, toxicity, grounding, code safety, topicality), circuit breakers and the cost guard, and HITL approvals (the `agency()` approval gates and the runtime `HumanInteractionManager`).
+6. **Orchestration** — DAG runtime, `workflow()`, `mission()`, [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) with its human nodes, checkpointing, planning engine.
+7. **I/O & providers** — 13 LLM providers, OpenRouter among them, with fallback chains in `generateText()`, `streamText()`, `agent()` and `agency()`; vision (OCR), hearing (STT, VAD), speech (TTS, voice pipeline), 12 messaging adapters, telephony.
 
 The diagram above the prose shows how a typical request enters at layer 1 and traverses downward.
 
@@ -348,14 +348,14 @@ Each guardrail service can also configure timeouts via `config.timeoutMs`. If a 
 
 ### Built-in Guardrail Packs
 
-Six built-in packs ship from [`packages/agentos-extensions/registry/curated/safety/`](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/safety):
+Six built-in packs ship on npm as `@framers/agentos-ext-<id>`. The source of `ml-classifiers`, `topicality` and `content-policy-rewriter` is in [`agentos-extensions/registry/curated/safety/`](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/safety); the `pii-redaction`, `code-safety` and `grounding-guard` folders there hold a README that points to their npm packages:
 
 - `pii-redaction` — sanitizer; redacts personally identifiable information before tokens leave the runtime
 - `ml-classifiers` — toxicity / hate-speech / harm classification via on-device ONNX models
-- `topicality` — LLM-as-judge classifier that rejects off-topic / out-of-scope prompts
+- `topicality` — input check that blocks a prompt matching a blocked topic and flags one outside the allowed topics, by embedding similarity, with an LLM judge and then keyword matching as fallbacks
 - `code-safety` — static + heuristic detection of dangerous code patterns in agent-emitted snippets
 - `grounding-guard` — verifies output claims against retrieved RAG sources (citation faithfulness)
-- `content-policy-rewriter` — sanitizer; rewrites policy-violating output in-place rather than blocking
+- `content-policy-rewriter` — output check that rewrites text in a category set to `sanitize` and blocks text in a category set to `block`; by default only the `illegal_harmful` category is on, and it blocks
 
 For details on writing custom guardrails, see [Creating Guardrails](../safety/CREATING_GUARDRAILS.md) and [Guardrails Usage](../safety/GUARDRAILS_USAGE.md).
 
@@ -921,7 +921,7 @@ The engine pipeline: `User Message -> CapabilityIndex.search() -> CapabilityGrap
 
 ### Extension-Provided Tools
 
-Tools are typically loaded via [`ExtensionPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/manifest.ts) descriptors. The curated registry in `@framers/agentos-extensions` holds 110 extension manifests, 37 of them channels and 16 voice extensions.
+Tools are typically loaded via [`ExtensionPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/manifest.ts) descriptors. The curated registry in `@framers/agentos-extensions` holds more than 100 extension manifests, 37 of them channels and 16 voice extensions.
 
 For details, see [Tool Calling & Loading](../extensions/TOOL_CALLING_AND_LOADING.md) and [Capability Discovery](../extensions/CAPABILITY_DISCOVERY.md).
 
@@ -1024,7 +1024,7 @@ graph LR
 
 | Interface | Purpose | Implementations |
 |-----------|---------|-----------------|
-| [`IStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Bidirectional audio/text transport | [`WebSocketStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/WebSocketStreamTransport.ts), [`WebRTCStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/WebRTCStreamTransport.ts) |
+| [`IStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Bidirectional audio/text transport | [`WebSocketStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/WebSocketStreamTransport.ts), [`WebRTCStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/WebRTCStreamTransport.ts), [`LiveKitStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/LiveKitStreamTransport.ts) |
 | [`IStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Speech-to-text recognition | In tree ([`providers/`](https://github.com/framerslab/agentos/tree/master/src/io/voice-pipeline/providers)): Deepgram streaming, ElevenLabs streaming, OpenAI Realtime transcription, and batch fallbacks over Deepgram pre-recorded and OpenAI Whisper |
 | [`IStreamingTTS`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Text-to-speech synthesis | In tree: OpenAI, ElevenLabs, Deepgram Aura, Cartesia and Hume, streaming and batch |
 | [`IEndpointDetector`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Detect when the user finishes speaking | [`HeuristicEndpointDetector`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/HeuristicEndpointDetector.ts), [`AcousticEndpointDetector`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/AcousticEndpointDetector.ts) |

@@ -33,7 +33,7 @@
 | Replicate | `replicate` | `REPLICATE_API_TOKEN` | `black-forest-labs/flux-1.1-pro` |
 | fal | `fal` | `FAL_API_KEY` | `fal-ai/flux/dev` |
 | Black Forest Labs | `bfl` | `BFL_API_KEY` | `flux-pro-1.1` |
-| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-image-1` |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-image-2.5-flare` |
 | Stability AI | `stability` | `STABILITY_API_KEY` | `stable-diffusion-xl-1024-v1-0` |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | none: pass `model` |
 | Stable Diffusion Local | `stable-diffusion-local` | `STABLE_DIFFUSION_LOCAL_BASE_URL` | `v1-5-pruned-emaonly` |
@@ -62,7 +62,7 @@ const result = await generateImage({
 
   // Optional
   provider:       'openai',
-  model:          'gpt-image-1',      // provider default if omitted
+  model:          'gpt-image-2.5-flare', // provider default if omitted
   size:           '1024x1024',        // or aspectRatio: '16:9'
   n:              1,
   outputFormat:   'png',              // 'png' | 'jpeg' | 'webp'
@@ -117,19 +117,23 @@ Each image is a `GeneratedImage`: `url`, `dataUrl`, `base64`, `mimeType`, `revis
 ```typescript
 const image = await generateImage({
   provider: 'openai',
-  model:    'gpt-image-1',
+  model:    'gpt-image-2.5-flare',
   prompt:   'A minimal logo for a tech startup, flat design, blue and white.',
   size:     '1024x1024',
   providerOptions: {
     openai: {
       moderation: 'low',     // 'low' | 'auto'
-      // style: 'vivid' | 'natural', extraBody: fields sent as they are
+      // extraBody: fields sent as they are
     },
   },
 });
 ```
 
-**Default model:** `gpt-image-1` through `generateImage()`. **Env var:** `OPENAI_API_KEY`.
+**Default model:** `gpt-image-2.5-flare` through `generateImage()`, OpenAI's model for everyday generation; edits, variations and style transfer use `gpt-image-2.5-sunburst`, its model for precise edits. **Env var:** `OPENAI_API_KEY`.
+
+OpenAI retired `dall-e-2` and `dall-e-3` on 2026-05-12. It retires `gpt-image-1` on 2026-10-23, and `gpt-image-1.5`, `gpt-image-1-mini` and `chatgpt-image-latest` on 2026-12-01 ([deprecations](https://developers.openai.com/api/docs/deprecations)). A call that names one of them fails from its date on: name a GPT Image 2.5 model, or leave `model` out.
+
+`quality` takes `low`, `medium`, `high` and `auto`, and on the 2.5 models also `xhigh` and `max`. DALL·E 3's `standard` and `hd` are sent to a GPT Image model as `medium` and `high`, and its `style` option is left out, since the GPT Image models do not take it: put the style in the prompt. On the GPT Image 2 and 2.5 models `size` takes any `WIDTHxHEIGHT` whose sides are divisible by 16, with an aspect ratio between 1:3 and 3:1, up to `3840x2160`.
 
 ---
 

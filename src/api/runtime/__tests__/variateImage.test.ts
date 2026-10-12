@@ -55,7 +55,7 @@ describe('variateImage', () => {
     const [url, requestInit] = vi.mocked(globalThis.fetch).mock.calls[0];
     expect(String(url)).toMatch(/\/images\/edits$/);
     const form = requestInit?.body as FormData;
-    expect(form.get('model')).toBe('gpt-image-1');
+    expect(form.get('model')).toBe('gpt-image-2.5-sunburst');
     expect(String(form.get('prompt'))).toContain('variation of this image');
     expect(form.get('n')).toBe('3');
     expect(form.get('image')).toBeInstanceOf(Blob);

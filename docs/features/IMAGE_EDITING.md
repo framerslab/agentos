@@ -11,7 +11,7 @@
 3. [upscaleImage() API](#upscaleimage-api)
 4. [variateImage() API](#variateimage-api)
 5. [Provider Matrix](#provider-matrix)
-6. [Img2Img (Style Transfer)](#img2img-style-transfer)
+6. [Img2Img (a style from the prompt)](#img2img-a-style-from-the-prompt)
 7. [Inpainting](#inpainting)
 8. [Outpainting](#outpainting)
 9. [Upscaling](#upscaling)
@@ -46,7 +46,13 @@ const image = await imageToBuffer(imageUrl, { untrusted: true });
 const result = await editImage({ image, prompt: 'Make it a watercolor' });
 ```
 
-With `untrusted: true`, a file path or `file:` URL is refused (`code: 'IMAGE_LOCAL_FILE_REFUSED'`). An http(s) URL is fetched only from public network addresses: an address in the URL is checked before connecting, every address a host name resolves to is checked when the connection is made, and each of up to five redirects is checked the same way (`code: 'IMAGE_URL_REFUSED'`). The fetch stops at `maxBytes` (default 50 MiB) and `timeoutMs` (default 30 seconds). `isPublicNetworkAddress()` is the address check on its own.
+With `untrusted: true`, a file path or `file:` URL is refused (`code: 'IMAGE_LOCAL_FILE_REFUSED'`). An http(s) URL is fetched only from public network addresses (`code: 'IMAGE_URL_REFUSED'` otherwise):
+
+- An address in the URL is checked before connecting. Every address a host name resolves to, in both address families, is checked when the connection is made, and each of up to five redirects is checked the same way.
+- Public means inside the space allocated for the internet and outside its special blocks: for IPv6, `2000::/3` only. An IPv6 address that stands for an IPv4 address (IPv4-mapped, 6to4, NAT64) is judged by that address. The network's own NAT64 prefixes count too: the resolver reveals them through `ipv4only.arpa` (RFC 7050), and they are asked for only when a fetch goes to an IPv6 address. When the resolver fails to answer that question, the IPv6 address is refused. A network that announces its NAT64 prefix by other means than DNS64 is not covered.
+- A refusal's message is the same for a name that resolves to a refused address and for a name that does not resolve. `imageUrlRefusalDetail(error)` gives the difference for a log; it is not a property of the error.
+
+The image is held to `maxBytes` (default 50 MiB) whether it is fetched or decoded from the string (a data URL, raw base64): a fetched body is counted on the wire and after decoding, and an inline image's size is worked out from its text, so one over the limit is not decoded. The fetch stops at `timeoutMs` (default 30 seconds). `isPublicNetworkAddress()` is the address check on its own.
 
 **Mature edits:** `editImage` accepts a `policyTier` option. With `'mature'` or `'private-adult'`, Replicate's safety checker is turned off, and when the call pins neither `provider` nor `model`, the edit moves to the uncensored catalog's preferred Replicate model for its `capabilities` (default `['img2img']`). Pass `capabilities: ['face-consistency', 'img2img']` when preserving an existing character's identity matters. A mature edit has no fallback model. See [UNCENSORED_CONTENT.md](./UNCENSORED_CONTENT.md).
 
@@ -89,7 +95,7 @@ Without `model`, each provider edits with its own default for edits, not with it
 
 | Provider | Edit model when none is named |
 |----------|-------------------------------|
-| OpenAI | `gpt-image-1` |
+| OpenAI | `gpt-image-2.5-sunburst` |
 | Stability AI | `sd3.5-medium` on the SD3 route in its image-to-image mode; with a `mask`, the inpaint endpoint, which takes no model |
 | Replicate | `stability-ai/sdxl` at a pinned version, or `black-forest-labs/flux-fill-pro` when a `mask` is passed |
 | fal | `fal-ai/flux/dev` |
@@ -147,7 +153,7 @@ OpenAI and fal do not upscale.
 
 ## variateImage() API
 
-OpenAI makes a variation through its image edits endpoint, with `gpt-image-1` and a prompt that asks for one; its `/images/variations` endpoint and the DALL·E models it served are retired. Every other provider that can edit makes a variation as an img2img edit whose strength is `variance`.
+OpenAI makes a variation through its image edits endpoint, with `gpt-image-2.5-sunburst` and a prompt that asks for one; its `/images/variations` endpoint and the DALL·E models it served are retired. Every other provider that can edit makes a variation as an img2img edit whose strength is `variance`.
 
 ```typescript
 import { variateImage } from '@framers/agentos';
@@ -193,9 +199,9 @@ A local server running ComfyUI serves text-to-image only; edits and upscales go 
 
 ---
 
-## Img2Img (Style Transfer)
+## Img2Img (a style from the prompt)
 
-Transform the style of an image while preserving its composition:
+Restyle an image by describing the style in the prompt, keeping its composition. To take the style from a reference image instead, use [`transferStyle()`](./STYLE_TRANSFER.md), which sends the provider both images.
 
 ```typescript
 import { editImage } from '@framers/agentos';

@@ -70,6 +70,7 @@ import type {
   VisionResult,
   VisionStrategy,
   VisionTier,
+  VisionCloudTask,
   ContentCategory,
   TierResult,
   FailedTier,
@@ -106,6 +107,15 @@ const CLOUD_VISION_PROMPT =
   'Identify the type of content (printed document, handwritten note, photograph, ' +
   'diagram, screenshot, etc.). If the image contains a document, preserve the ' +
   'logical reading order and structure.';
+
+/**
+ * Prompt sent to cloud vision LLMs with `cloudTask: 'transcribe'`: the text
+ * alone, so a call that wants text does not get a description in its place.
+ */
+const CLOUD_TRANSCRIBE_PROMPT =
+  'Transcribe all the text in this image exactly as written, in reading order, ' +
+  'keeping its line breaks. Reply with the text alone: no description, no ' +
+  'commentary. If the image shows no text, reply with nothing.';
 
 /**
  * The Hub models of the local tiers. Each is a conversion for
@@ -306,6 +316,11 @@ export class VisionPipeline {
    *   instead of auto-detecting from OCR confidence heuristics.
    * @param options.tiers - Run only these specific tiers, ignoring
    *   the strategy's normal routing logic.
+   * @param options.cloudTask - What the cloud tier asks for: `'describe'`
+   *   (default), a description of the image with its text, or
+   *   `'transcribe'`, the text alone as written. Its confidence is 0.95 either
+   *   way, so its text wins over every local tier that ran; an answer with no
+   *   text in it has confidence 0, and a local tier's text stands.
    * @returns Aggregated vision result with text, confidence, embeddings, etc.
    *
    * @throws {Error} If all configured tiers fail to produce a result.
@@ -326,6 +341,13 @@ export class VisionPipeline {
    * const partial = await pipeline.process(imageBuffer, {
    *   tiers: ['ocr', 'embedding'],
    * });
+   *
+   * // A page of handwriting: TrOCR and the cloud model's transcription
+   * const page = await pipeline.process(scanBuffer, {
+   *   tiers: ['handwriting', 'cloud-vision'],
+   *   forceCategory: 'handwritten',
+   *   cloudTask: 'transcribe',
+   * });
    * ```
    */
   async process(
@@ -333,6 +355,7 @@ export class VisionPipeline {
     options?: {
       forceCategory?: ContentCategory;
       tiers?: VisionTier[];
+      cloudTask?: VisionCloudTask;
     },
   ): Promise<VisionResult> {
     return this._track(() => this._process(image, options));
@@ -344,8 +367,13 @@ export class VisionPipeline {
     options?: {
       forceCategory?: ContentCategory;
       tiers?: VisionTier[];
+      cloudTask?: VisionCloudTask;
     },
   ): Promise<VisionResult> {
+    const cloudTask = options?.cloudTask ?? 'describe';
+    if (cloudTask !== 'describe' && cloudTask !== 'transcribe') {
+      throw new Error(`VisionPipeline: cloudTask must be 'describe' or 'transcribe', not ${String(cloudTask)}.`);
+    }
     const startTime = Date.now();
     const { strategy } = this._config;
     const threshold = this._config.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD;
@@ -379,7 +407,7 @@ export class VisionPipeline {
     // Strategy: cloud-only — skip all local tiers
     // -----------------------------------------------------------------------
     if (strategy === 'cloud-only' && !requestedTiers) {
-      const cloudResult = await this._runCloudVision(preprocessed);
+      const cloudResult = await this._runCloudVision(preprocessed, cloudTask);
       tierResults.push(cloudResult);
       activeTiers.push('cloud-vision');
 
@@ -490,7 +518,7 @@ export class VisionPipeline {
 
     if (this._shouldRunCloudVision(strategy, bestLocalConfidence, threshold, requestedTiers)) {
       try {
-        const cloudResult = await this._runCloudVision(preprocessed);
+        const cloudResult = await this._runCloudVision(preprocessed, cloudTask);
         tierResults.push(cloudResult);
         activeTiers.push('cloud-vision');
       } catch (error) {
@@ -1038,7 +1066,7 @@ export class VisionPipeline {
    * @throws {Error} If no cloud provider is configured.
    * @throws {Error} If the cloud API call fails.
    */
-  private async _runCloudVision(image: Buffer | string): Promise<TierResult> {
+  private async _runCloudVision(image: Buffer | string, task: VisionCloudTask = 'describe'): Promise<TierResult> {
     const start = Date.now();
 
     if (!this._config.cloudProvider) {
@@ -1069,17 +1097,21 @@ export class VisionPipeline {
       messages: [{
         role: 'user',
         content: [
-          { type: 'text', text: CLOUD_VISION_PROMPT },
+          { type: 'text', text: task === 'transcribe' ? CLOUD_TRANSCRIBE_PROMPT : CLOUD_VISION_PROMPT },
           { type: 'image_url', image_url: { url: imageUrl } },
         ],
       }],
     });
 
+    // An answer with no text in it, which the transcription prompt asks for
+    // when the image shows none, has no confidence: at 0.95 it would replace
+    // the text a local tier did read.
+    const text = typeof result.text === 'string' ? result.text : '';
     return {
       tier: 'cloud-vision',
       provider: this._config.cloudProvider,
-      text: result.text,
-      confidence: CLOUD_VISION_CONFIDENCE,
+      text,
+      confidence: text.trim() === '' ? 0 : CLOUD_VISION_CONFIDENCE,
       durationMs: Date.now() - start,
     };
   }

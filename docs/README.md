@@ -65,6 +65,7 @@
 - [**Streaming Semantics**](./architecture/STREAMING_SEMANTICS.md) — Raw live chunks vs finalized approved output across `textStream`, `fullStream`, `text`, and `finalTextStream`
 - [**Evaluation Guide**](./observability/EVALUATION.md) — Test cases, graders, LLM-as-judge, A/B testing, experiment tracking
 - [**Evaluation Framework**](./observability/EVALUATION_FRAMEWORK.md) — Testing, scoring, and quality assurance
+- [**GMI versus agent() Study**](./evaluation/GMI_VS_AGENT.md): the study that compares a GMI, agent() and a bare model loop on companion conversation, its design and its published reports
 - [**Query Router**](./QUERY_ROUTER.md) — Tiered query classification, retrieval routing, keyword fallback, and grounded answer generation
 - [**Image Generation Guide**](./features/IMAGE_GENERATION.md) — Provider-agnostic image generation across cloud and local backends
 - [**Capability Discovery Guide**](./extensions/DISCOVERY.md) — Three-tier semantic discovery, CAPABILITY.yaml, meta-tool
@@ -88,6 +89,8 @@
 - [**Platform Support**](./architecture/PLATFORM_SUPPORT.md) — Supported environments and requirements
 - [**Observability (OpenTelemetry)**](./observability/OBSERVABILITY.md) — Tracing, metrics, and log correlation/export (opt-in)
 - [**Logging (Pino + OpenTelemetry)**](./observability/LOGGING.md) — Structured logs, trace correlation, and OTEL LogRecord export (opt-in)
+- [**API Key Rotation**](./KEY_ROTATION.md): comma-separated keys per provider, which providers rotate them, and which rest a key after a quota error
+- [**CLI Error Codes**](./features/CLI_ERROR_CODES.md): the codes a CLI subprocess bridge raises, and when the Claude Code and Gemini CLI providers raise each one
 
 ### Ecosystem
 
@@ -108,7 +111,6 @@
 | GitHub      | [framerslab/agentos](https://github.com/framerslab/agentos)              |
 | npm         | [@framers/agentos](https://www.npmjs.com/package/@framers/agentos)     |
 | Issues      | [GitHub Issues](https://github.com/framerslab/agentos/issues)           |
-| Discussions | [GitHub Discussions](https://github.com/framerslab/agentos/discussions) |
 
 ---
 

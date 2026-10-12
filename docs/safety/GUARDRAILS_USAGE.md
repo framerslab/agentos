@@ -97,30 +97,48 @@ Stop generation when the response exceeds a token budget:
 ```typescript
 class CostCeilingGuardrail implements IGuardrailService {
   // Enable streaming evaluation
-  config = {
-    evaluateStreamingChunks: true,
-    maxStreamingEvaluations: 100  // Rate limit
-  };
+  config = { evaluateStreamingChunks: true };
 
-  private tokenCount = 0;
   private readonly maxTokens = 1000;
+  // Characters per response stream, and when each stream was last seen
+  private readonly streams = new Map<string, { chars: number; seenAt: number }>();
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
+    // The stream's final chunk ends its count
+    if (chunk.isFinal) {
+      this.streams.delete(chunk.streamId);
+      return null;
+    }
+
     // Only evaluate text chunks
     if (chunk.type !== AgentOSResponseChunkType.TEXT_DELTA || !chunk.textDelta) {
       return null;
     }
 
-    // Estimate tokens (rough: 1 token ≈ 4 chars)
-    this.tokenCount += Math.ceil(chunk.textDelta.length / 4);
+    const now = Date.now();
+    let stream = this.streams.get(chunk.streamId);
+    if (!stream) {
+      // A stream that ended without a final chunk left its entry: drop the ones idle for ten minutes
+      for (const [id, idle] of this.streams) {
+        if (now - idle.seenAt > 600_000) this.streams.delete(id);
+      }
+      stream = { chars: 0, seenAt: now };
+      this.streams.set(chunk.streamId, stream);
+    }
+    stream.chars += chunk.textDelta.length;
+    stream.seenAt = now;
 
-    if (this.tokenCount > this.maxTokens) {
+    // Estimate tokens (rough: 1 token ≈ 4 chars)
+    const tokensUsed = Math.ceil(stream.chars / 4);
+
+    if (tokensUsed > this.maxTokens) {
+      this.streams.delete(chunk.streamId);
       // "Change mind" - stop generating mid-stream
       return {
         action: GuardrailAction.BLOCK,
         reason: 'Response exceeded token budget. Please refine your request.',
         reasonCode: 'COST_CEILING_EXCEEDED',
-        metadata: { tokensUsed: this.tokenCount, limit: this.maxTokens },
+        metadata: { tokensUsed, limit: this.maxTokens },
       };
     }
 
@@ -128,6 +146,8 @@ class CostCeilingGuardrail implements IGuardrailService {
   }
 }
 ```
+
+The guardrail counts characters per `streamId`, so each response is measured on its own, and the stream's final chunk, which every output guardrail is called for, ends the count. A stream can end without a final chunk (another guardrail blocked it, or it failed), so an entry left idle for ten minutes is dropped when the next stream starts. It sets no `maxStreamingEvaluations`: once a stream reaches that limit, the dispatcher stops calling the guardrail on the stream's text deltas (it still calls it on the final chunk), and the count would stop short of the budget.
 
 ### Example 2: Real-Time PII Redaction
 
@@ -208,14 +228,31 @@ class ContentPolicyGuardrail implements IGuardrailService {
     // ... more patterns
   ];
 
-  private accumulatedText = '';
+  // The text each response stream has produced so far, kept as Example 1 keeps its counts
+  private readonly streams = new Map<string, { text: string; seenAt: number }>();
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
+    if (chunk.isFinal) {
+      this.streams.delete(chunk.streamId);
+      return null;
+    }
+
     if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA && chunk.textDelta) {
-      this.accumulatedText += chunk.textDelta;
+      const now = Date.now();
+      let stream = this.streams.get(chunk.streamId);
+      if (!stream) {
+        for (const [id, idle] of this.streams) {
+          if (now - idle.seenAt > 600_000) this.streams.delete(id);
+        }
+        stream = { text: '', seenAt: now };
+        this.streams.set(chunk.streamId, stream);
+      }
+      stream.text += chunk.textDelta;
+      stream.seenAt = now;
 
       for (const pattern of this.prohibitedPatterns) {
-        if (pattern.test(this.accumulatedText)) {
+        if (pattern.test(stream.text)) {
+          this.streams.delete(chunk.streamId);
           return {
             action: GuardrailAction.BLOCK,
             reason: 'Response contains content that violates our usage policy.',
@@ -391,6 +428,8 @@ const neverDo = await PhraseListGuardrail.create({
 ### Hard limits in the persona
 
 `IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter, when the file is loaded as a persona) renders as the last block of the system prompt of every GMI turn for that persona, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
+
+A GMI built by `agent({ runtime: 'gmi' })` or `gmi()` has no such block. Its persona comes from [`personaFromAgentOptions()`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiPersona.ts), which sets no `hardLimits`, and the front matter of a `soul` file is not applied on that path ([GMIs from agent()](../GMI.md#gmis-from-agent)).
 
 ## Using Multiple Guardrails
 

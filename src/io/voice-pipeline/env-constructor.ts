@@ -7,10 +7,19 @@
  * reporter. Host apps can skip the manual wiring and use this factory as
  * the default integration point. {@link createSttChainFromEnv} builds the
  * STT chain alone, for a consumer with no speech output.
+ * {@link createSttChain} builds an STT chain from a list of provider entries
+ * the host chooses, such as `openai:gpt-4o-transcribe`, in place of the
+ * environment's keys.
  */
 
-import { DeepgramStreamingSTT } from './providers/DeepgramStreamingSTT.js';
-import { ElevenLabsStreamingSTT } from './providers/ElevenLabsStreamingSTT.js';
+import {
+  DeepgramStreamingSTT,
+  type DeepgramStreamingSTTConfig,
+} from './providers/DeepgramStreamingSTT.js';
+import {
+  ElevenLabsStreamingSTT,
+  type ElevenLabsStreamingSTTConfig,
+} from './providers/ElevenLabsStreamingSTT.js';
 import {
   OpenAIRealtimeTranscriptionSTT,
   type OpenAIRealtimeTranscriptionSTTConfig,
@@ -22,12 +31,17 @@ import { ElevenLabsBatchTTS } from './providers/ElevenLabsBatchTTS.js';
 import { CartesiaStreamingTTS } from './providers/CartesiaStreamingTTS.js';
 import { HumeStreamingTTS } from './providers/HumeStreamingTTS.js';
 import { OpenAIBatchTTS } from './providers/OpenAIBatchTTS.js';
-import { StreamingSTTChain } from './providers/StreamingSTTChain.js';
+import {
+  StreamingSTTChain,
+  type StreamingSTTChainOptions,
+} from './providers/StreamingSTTChain.js';
 import { StreamingTTSChain } from './providers/StreamingTTSChain.js';
 import { CircuitBreaker } from './CircuitBreaker.js';
 import { VoiceMetricsReporter } from './VoiceMetricsReporter.js';
 import type { IStreamingSTT, IStreamingTTS } from './types.js';
 import type { HealthyProvider } from './HealthyProvider.js';
+import { openAITranscriptionPricing } from '../../core/llm/providers/implementations/openaiPricing.js';
+import { parseSttEntry } from './sttEntries.js';
 
 export class NoVoiceProvidersAvailableError extends Error {
   readonly checkedEnvVars: string[];
@@ -319,4 +333,75 @@ export function createSttChainFromEnv(config: SttProviderEnvConfig = {}): SttPro
       /* Sessions clean themselves up; nothing global to release today. */
     },
   };
+}
+
+export { STT_CHAIN_VENDORS, parseSttEntry, type SttChainVendor, type SttEntry } from './sttEntries.js';
+
+/** Each vendor's options for {@link createSttChain}, its key among them; the entry gives the model and the order gives the priority. */
+export interface SttChainEntryOptions {
+  openai?: Omit<OpenAIRealtimeTranscriptionSTTConfig, 'model' | 'priority'>;
+  deepgram?: Omit<DeepgramStreamingSTTConfig, 'model' | 'priority'>;
+  elevenlabs?: Omit<ElevenLabsStreamingSTTConfig, 'model' | 'priority'>;
+}
+
+/**
+ * US dollars a minute of an entry's audio, from the providers' price rows;
+ * `undefined` when there is no row.
+ *
+ * @throws {RangeError} For an entry {@link parseSttEntry} refuses: another
+ *   shape, or a vendor outside `STT_CHAIN_VENDORS`, such as
+ *   `device:moonshine-auto`.
+ */
+export function sttEntryPricePerMinute(entry: string): number | undefined {
+  const { vendor, model } = parseSttEntry(entry);
+  const price = vendor === 'openai' ? openAITranscriptionPricing(model) : undefined;
+  // A model named like a member every object inherits (`constructor`, `toString`)
+  // has no row; the guard keeps the answer a number or undefined for it.
+  return typeof price === 'number' ? price : undefined;
+}
+
+/**
+ * A speech-to-text chain that tries the entries in the order given (priority
+ * 10, 20, 30 ...). Mid-utterance failover is off unless the chain options turn
+ * it on, as in {@link createSttChainFromEnv}. With failover off a session is
+ * its provider's own, with `flush()` and every event the provider emits; the
+ * failover facade forwards transcripts, speech events, `'usage'` and
+ * `'warning'`, and has no `flush()`.
+ *
+ * Entries of one vendor share that vendor's provider id (every `openai`
+ * entry is `openai-realtime-transcription`), so `currentProviderId`, the
+ * chain's provider events and a `CircuitBreaker` in the chain options
+ * cannot tell them apart: a breaker counts the failures of all of a
+ * vendor's entries together, and once it trips, later sessions skip every
+ * entry of that vendor.
+ *
+ * @throws {RangeError} For no entry, an entry twice, an entry
+ *   {@link parseSttEntry} refuses, or a vendor with no options.
+ */
+export function createSttChain(
+  entries: readonly string[],
+  options: SttChainEntryOptions,
+  chainOptions: StreamingSTTChainOptions = {}
+): StreamingSTTChain {
+  if (entries.length === 0) throw new RangeError('createSttChain: no entry');
+  if (new Set(entries).size !== entries.length) throw new RangeError('createSttChain: an entry is named twice');
+  const providers = entries.map((entry, index) => {
+    const { vendor, model } = parseSttEntry(entry);
+    const priority = (index + 1) * 10;
+    switch (vendor) {
+      case 'openai': {
+        if (!options.openai) throw new RangeError('createSttChain: an openai entry needs options.openai');
+        return new OpenAIRealtimeTranscriptionSTT({ ...options.openai, model, priority });
+      }
+      case 'deepgram': {
+        if (!options.deepgram) throw new RangeError('createSttChain: a deepgram entry needs options.deepgram');
+        return new DeepgramStreamingSTT({ ...options.deepgram, model, priority });
+      }
+      case 'elevenlabs': {
+        if (!options.elevenlabs) throw new RangeError('createSttChain: an elevenlabs entry needs options.elevenlabs');
+        return new ElevenLabsStreamingSTT({ ...options.elevenlabs, model, priority });
+      }
+    }
+  });
+  return new StreamingSTTChain(providers, chainOptions);
 }

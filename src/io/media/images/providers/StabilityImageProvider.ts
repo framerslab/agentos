@@ -8,11 +8,14 @@ import {
   type ImageGenerationRequest,
   type ImageGenerationResult,
   type ImageEditRequest,
+  type ImageStyleTransferRequest,
   type ImageUpscaleRequest,
   type ImageModelInfo,
   type StabilityImageProviderOptions,
 } from '../IImageProvider.js';
 import { bufferToBlobPart } from '../imageToBuffer.js';
+import { editPartType, imageFilePart } from '../blobPart.js';
+import { styleTransferImageTypes } from '../styleTransfer.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
 
 export interface StabilityImageProviderConfig {
@@ -133,6 +136,29 @@ const UPSCALE_MODEL_ID = 'stable-image-upscale-fast';
 /** Whether a model id is one the SD3 route takes. */
 function isSd3Model(modelId: string | undefined): modelId is string {
   return typeof modelId === 'string' && /^sd3/i.test(modelId);
+}
+
+/** The model id reported for a style transfer, whose endpoint takes no model. */
+export const STABILITY_STYLE_TRANSFER_MODEL = 'stable-image-style-transfer';
+
+/** "Your request was larger than 10MiB" is the style-transfer endpoint's 413 (Stability's API reference). */
+const STYLE_TRANSFER_REQUEST_BYTES = 10 * 1024 * 1024;
+
+/** What a style-transfer form adds to its fields: boundaries and part headers, rounded up. */
+const MULTIPART_OVERHEAD_BYTES = 4096;
+
+/** The longest prompt and negative prompt the style-transfer endpoint takes. */
+const STYLE_TRANSFER_TEXT_CHARACTERS = 10_000;
+
+/** The largest seed the style-transfer endpoint takes. */
+const STYLE_TRANSFER_MAX_SEED = 4_294_967_294;
+
+/** Throws unless `value` is undefined or a finite number from `min` to `max`. */
+function checkRange(name: string, value: number | undefined, min: number, max: number): void {
+  if (value === undefined) return;
+  if (!(typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max)) {
+    throw new Error(`Stability's style transfer takes ${name} from ${min} to ${max}; it is ${value}.`);
+  }
 }
 
 export class StabilityImageProvider implements IImageProvider {
@@ -273,7 +299,9 @@ export class StabilityImageProvider implements IImageProvider {
       usageImages = images.length;
     } else {
       const buffer = Buffer.from(await response.arrayBuffer());
-      const mimeType = contentType || 'image/png';
+      // The media type alone: `image/png; charset=binary` would make a data
+      // URL that parseDataUrl does not read.
+      const mimeType = contentType.split(';')[0].trim() || 'image/png';
       const base64 = buffer.toString('base64');
       const parsed = parseDataUrl(`data:${mimeType};base64,${base64}`);
       images.push(parsed);
@@ -326,12 +354,10 @@ export class StabilityImageProvider implements IImageProvider {
 
     const formData = new FormData();
 
-    // Source image — sent as a Blob so the multipart encoder assigns a filename.
-    formData.append(
-      'image',
-      new Blob([bufferToBlobPart(request.image)], { type: 'image/png' }),
-      'image.png'
-    );
+    // Source image — sent as a Blob of its own type (a JPEG or WebP as one,
+    // anything else as PNG) so the multipart encoder assigns a filename.
+    const source = imageFilePart(request.image, editPartType(request.image), 'image');
+    formData.append('image', source.blob, source.filename);
     formData.append('prompt', request.prompt);
     appendIfDefined(
       formData,
@@ -385,7 +411,10 @@ export class StabilityImageProvider implements IImageProvider {
       throw new Error(`Stability image edit failed (${response.status}): ${errorText}`);
     }
 
-    const images = await this.parseStabilityResponse(response, providerOptions);
+    const images = (await this.parseStabilityResponse(response, providerOptions)).filter((image) => image.base64);
+    if (images.length === 0) {
+      throw new Error('Stability returned no image data.');
+    }
 
     return {
       created: Math.floor(Date.now() / 1000),
@@ -422,11 +451,8 @@ export class StabilityImageProvider implements IImageProvider {
     );
 
     const formData = new FormData();
-    formData.append(
-      'image',
-      new Blob([bufferToBlobPart(request.image)], { type: 'image/png' }),
-      'image.png'
-    );
+    const source = imageFilePart(request.image, editPartType(request.image), 'image');
+    formData.append('image', source.blob, source.filename);
 
     appendIfDefined(
       formData,
@@ -451,11 +477,128 @@ export class StabilityImageProvider implements IImageProvider {
       throw new Error(`Stability image upscale failed (${response.status}): ${errorText}`);
     }
 
-    const images = await this.parseStabilityResponse(response, providerOptions);
+    const images = (await this.parseStabilityResponse(response, providerOptions)).filter((image) => image.base64);
+    if (images.length === 0) {
+      throw new Error('Stability returned no image data.');
+    }
 
     return {
       created: Math.floor(Date.now() / 1000),
       modelId: UPSCALE_MODEL_ID,
+      providerId: this.providerId,
+      images,
+      usage: { totalImages: images.length },
+    };
+  }
+
+  /**
+   * The model a style transfer reports: Stability's style-transfer endpoint
+   * takes no model, so an empty id and {@link STABILITY_STYLE_TRANSFER_MODEL}
+   * are the only ones accepted.
+   *
+   * @param modelId - The model the call names, or an empty string.
+   * @throws {Error} For any other model.
+   */
+  styleTransferModel(modelId: string): string {
+    if (!modelId || modelId === STABILITY_STYLE_TRANSFER_MODEL) return STABILITY_STYLE_TRANSFER_MODEL;
+    throw new Error(`Stability's style transfer endpoint takes no model; leave model unset (it reports ${STABILITY_STYLE_TRANSFER_MODEL}).`);
+  }
+
+  /**
+   * Restyles an image after a style reference with Stability AI's style
+   * transfer, `/v2beta/stable-image/control/style-transfer`, which takes the
+   * source as `init_image` and the reference as `style_image` and answers
+   * with one image of 1 MP at the source's aspect ratio (Stability's API
+   * reference). `strength` is sent as `style_strength`, where 0 leaves the
+   * source as it is; the endpoint takes no model and no size.
+   *
+   * Before the request: both images must be JPEG, PNG or WebP, the request
+   * within 10 MiB, the prompt and negative prompt at most 10,000 characters,
+   * the seed an integer from 0 to 4,294,967,294, `compositionFidelity` from 0
+   * to 1 and `changeStrength` from 0.1 to 1.
+   *
+   * @param request - The source, the reference and the prompt.
+   * @returns Generation result with the restyled image.
+   *
+   * @throws {Error} When the provider is not initialised, the model or an
+   *   argument is refused, the API returns an HTTP error status, or the answer
+   *   holds no image.
+   */
+  async transferStyle(request: ImageStyleTransferRequest): Promise<ImageGenerationResult> {
+    if (!this.isInitialized) {
+      throw new Error('Stability image provider is not initialized.');
+    }
+    const model = this.styleTransferModel(request.modelId);
+    const providerOptions = getImageProviderOptions<StabilityImageProviderOptions>(
+      this.providerId,
+      request.providerOptions
+    );
+    const types = styleTransferImageTypes(
+      'Stability',
+      ['image/jpeg', 'image/png', 'image/webp'],
+      request.image,
+      request.styleImage,
+    );
+
+    const negativePrompt = request.negativePrompt ?? providerOptions?.negativePrompt;
+    const seed = request.seed ?? providerOptions?.seed;
+    const outputFormat = normalizeOutputFormat(providerOptions?.outputFormat);
+    for (const [text, name] of [[request.prompt, 'prompt'], [negativePrompt, 'negative prompt']] as const) {
+      if (text !== undefined && text.length > STYLE_TRANSFER_TEXT_CHARACTERS) {
+        throw new Error(`Stability's style transfer takes a ${name} of at most 10,000 characters; it is ${text.length}.`);
+      }
+    }
+    if (seed !== undefined && !(Number.isInteger(seed) && seed >= 0 && seed <= STYLE_TRANSFER_MAX_SEED)) {
+      throw new Error(`Stability's style transfer takes a seed that is an integer from 0 to 4,294,967,294; it is ${seed}.`);
+    }
+    checkRange('compositionFidelity', providerOptions?.compositionFidelity, 0, 1);
+    checkRange('changeStrength', providerOptions?.changeStrength, 0.1, 1);
+    if (outputFormat !== undefined && !['jpeg', 'png', 'webp'].includes(outputFormat)) {
+      throw new Error(`Stability's style transfer returns jpeg, png or webp; outputFormat is ${outputFormat}.`);
+    }
+    const textBytes = Buffer.byteLength(request.prompt) + Buffer.byteLength(negativePrompt ?? '');
+    const requestBytes = request.image.length + request.styleImage.length + textBytes + MULTIPART_OVERHEAD_BYTES;
+    if (requestBytes > STYLE_TRANSFER_REQUEST_BYTES) {
+      throw new Error(
+        `Stability takes a request of up to 10 MiB; the two images and the text are ${requestBytes} bytes with the form's own fields.`,
+      );
+    }
+
+    const formData = new FormData();
+    const source = imageFilePart(request.image, types.image, 'image');
+    const style = imageFilePart(request.styleImage, types.style, 'style');
+    formData.append('init_image', source.blob, source.filename);
+    formData.append('style_image', style.blob, style.filename);
+    if (request.prompt.trim()) formData.append('prompt', request.prompt);
+    appendIfDefined(formData, 'negative_prompt', negativePrompt);
+    appendIfDefined(formData, 'seed', seed);
+    appendIfDefined(formData, 'style_strength', request.strength);
+    appendIfDefined(formData, 'composition_fidelity', providerOptions?.compositionFidelity);
+    appendIfDefined(formData, 'change_strength', providerOptions?.changeStrength);
+    appendIfDefined(formData, 'output_format', outputFormat);
+
+    const response = await fetch(`${this.config.baseURL}/v2beta/stable-image/control/style-transfer`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.keyPool.next()}`,
+        Accept: 'application/json',
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Stability style transfer failed (${response.status}): ${errorText}`);
+    }
+
+    const images = (await this.parseStabilityResponse(response, providerOptions)).filter((image) => image.base64);
+    if (images.length === 0) {
+      throw new Error('Stability returned no image data.');
+    }
+
+    return {
+      created: Math.floor(Date.now() / 1000),
+      modelId: model,
       providerId: this.providerId,
       images,
       usage: { totalImages: images.length },
@@ -498,7 +641,9 @@ export class StabilityImageProvider implements IImageProvider {
       }
     } else {
       const buffer = Buffer.from(await response.arrayBuffer());
-      const mimeType = contentType || 'image/png';
+      // The media type alone: `image/png; charset=binary` would make a data
+      // URL that parseDataUrl does not read.
+      const mimeType = contentType.split(';')[0].trim() || 'image/png';
       const base64 = buffer.toString('base64');
       const parsed = parseDataUrl(`data:${mimeType};base64,${base64}`);
       images.push(parsed);

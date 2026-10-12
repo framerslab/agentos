@@ -67,6 +67,26 @@ describe('souledAgent', () => {
     compileSpy.mockRestore();
   });
 
+  it('starts with pages named after members every object has, and finds their index entries on the next start', async () => {
+    const memoryDir = path.join(dir, 'memory');
+    fs.mkdirSync(memoryDir);
+    const names = ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__'];
+    for (const name of names) {
+      fs.writeFileSync(path.join(memoryDir, `${name}.md`), `---\nsummary: The ${name} page.\n---\nNotes on the page ${name}.\n`);
+    }
+    const indexEntries = () => JSON.parse(fs.readFileSync(path.join(memoryDir, '.meta', 'index.json'), 'utf8')).pages;
+
+    const first = (await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: dir } as any)) as any;
+    await first.close();
+    const entries = indexEntries();
+    expect(Object.keys(entries).sort()).toEqual([...names].sort());
+
+    // Each page finds its own entry, so the next start indexes none of them again.
+    const second = (await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: dir } as any)) as any;
+    await second.close();
+    expect(indexEntries()).toEqual(entries);
+  });
+
   it('falls back to a plain agent for an inline soul with no workspace', async () => {
     await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: { content: '---\nname: X\n---\nhi' } } as any);
     expect(agentSpy).toHaveBeenCalledTimes(1);

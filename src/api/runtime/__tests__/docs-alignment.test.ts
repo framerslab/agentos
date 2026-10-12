@@ -37,36 +37,52 @@ function plainAgentCallsWithMemory(text: string): string[] {
   return found;
 }
 
-/** Skip tests that reference files outside the agentos package (e.g. in CI where submodules aren't checked out). */
-const hasLiveDocs = exists('../../../../../apps/agentos-live-docs/docs/index.md');
-const hasSkillsPackages = exists('../../../../agentos-skills/package.json');
+// Paths resolve against this file's URL: '../../../../' is the agentos package root,
+// '../../../../../' the monorepo's packages/ directory and '../../../../../../' the
+// monorepo root. The docs site (apps/agentos-live-docs) and the skills packages
+// (packages/agentos-skills, packages/agentos-skills-registry) sit there only in the
+// monorepo; standalone agentos CI checks out neither, so the tests that read them skip.
+// These two guards each check every file outside the package that their tests read.
+const hasLiveDocs = [
+  '../../../../../../apps/agentos-live-docs/docs/index.md',
+  '../../../../../../apps/agentos-live-docs/src/pages/index.tsx',
+].every((file) => exists(file));
+const hasSkillsPackages = [
+  '../../../../../agentos-skills/package.json',
+  '../../../../../agentos-skills-registry/package.json',
+].every((file) => exists(file));
 const itIfLiveDocs = hasLiveDocs ? it : it.skip;
 const itIfSkills = hasSkillsPackages ? it : it.skip;
 // Monorepo-root docs (../../../../../../docs) only exist when agentos is a
-// submodule of the monorepo; they are absent in standalone agentos CI.
+// submodule of the monorepo; they are absent in standalone agentos CI. This guard
+// checks docs/README.md alone; its tests read other files under that docs/ too.
 const hasRepoRootDocs = exists('../../../../../../docs/README.md');
 const itIfRepoRootDocs = hasRepoRootDocs ? it : it.skip;
+
+// docs.agentos.sh serves the API reference at /api and answers /api/ with a 404. The
+// pattern matches https://docs.agentos.sh/api/ itself, not a page under it.
+const apiReferenceWithSlash = /https:\/\/docs\.agentos\.sh\/api\/(?![\w-])/;
 
 describe('AgentOS docs alignment', () => {
   it('keeps the package README aligned with the high-level API surface', () => {
     const readme = read('../../../../README.md');
-    // Each of these names is a real exported helper users discover from
-    // the README — assert presence, not specific heading text. README
-    // structure is allowed to evolve without breaking this test.
+    // generateImage, agent() and agency() are exported helpers users discover
+    // from the README, and '## API Surfaces' heads the README section that lists
+    // the API surfaces. The test asserts only that each is present.
     expect(readme).toContain('generateImage');
     expect(readme).toContain('agent()');
     expect(readme).toContain('agency()');
     expect(readme).toContain('## API Surfaces');
   });
 
-  it('describes provider fallback as an explicit opt-in helper contract', () => {
+  it("keeps 'Auto-fallback on 402/429/5xx.' out of the README and finds fallbackProviders, buildFallbackChain or 'automatic fallback' in it", () => {
     const readme = read('../../../../README.md');
-    // Reject the old auto-fallback-on-error wording that implied the
-    // runtime silently routes around failures without consent.
+    // The old one-line summary 'Auto-fallback on 402/429/5xx.' stays out of the README.
     expect(readme).not.toContain('Auto-fallback on 402/429/5xx.');
-    // The README must point at the public fallback API somewhere — either
-    // the agency-level config field or the helper that builds chains.
-    // Both names are stable parts of the public surface.
+    // Fallback is on by default: generateText(), streamText(), generateObject() and
+    // agent() build a chain when fallbackProviders is omitted, and
+    // fallbackProviders: [] turns it off. The README names that option, the
+    // buildFallbackChain() helper or 'automatic fallback'.
     const mentionsFallback =
       readme.includes('fallbackProviders') ||
       readme.includes('buildFallbackChain') ||
@@ -116,38 +132,79 @@ describe('AgentOS docs alignment', () => {
 
   itIfLiveDocs('keeps the runnable example and docs homepage aligned with the streamlined APIs', () => {
     const example = read('../../../../examples/high-level-api.mjs');
-    const docsIndex = read('../../../../../apps/agentos-live-docs/docs/index.md');
-    const homepage = read('../../../../../apps/agentos-live-docs/src/pages/index.tsx');
+    const docsIndex = read('../../../../../../apps/agentos-live-docs/docs/index.md');
+    const homepage = read('../../../../../../apps/agentos-live-docs/src/pages/index.tsx');
 
     expect(example).toContain('generateImage');
-    expect(docsIndex).toContain('High-Level API');
-    expect(homepage).toContain('High-Level API');
+    // docs/getting-started/HIGH_LEVEL_API.md is published at /getting-started/high-level-api.
+    expect(docsIndex).toContain('/getting-started/high-level-api');
     expect(homepage).toContain('/getting-started/high-level-api');
   });
 
   itIfLiveDocs('keeps the live docs skills routes aligned with the canonical manifest', () => {
-    const docsIndex = read('../../../../../apps/agentos-live-docs/docs/index.md');
-    const homepage = read('../../../../../apps/agentos-live-docs/src/pages/index.tsx');
+    const docsIndex = read('../../../../../../apps/agentos-live-docs/docs/index.md');
+    const homepage = read('../../../../../../apps/agentos-live-docs/src/pages/index.tsx');
 
-    expect(docsIndex).toContain('/skills/agentos-skills');
     expect(docsIndex).not.toContain('/skills/skills-extension');
-    expect(homepage).toContain('/api/');
-    expect(homepage).toContain('/skills/overview');
+    // The site builds with trailingSlash: false. It serves the API reference at /api and
+    // answers /api/ with a 404; a Link to '/api/' renders as /api.
+    expect(homepage).toMatch(/to="\/api\/?"/);
+    // The skills overview (manifest dest skills/index.md) is served at /skills, and
+    // /skills/overview redirects there.
+    expect(homepage).toContain("'/skills'");
     expect(homepage).not.toContain('72 Curated Skills');
     expect(homepage).not.toContain('107 Extensions');
   });
 
-  itIfLiveDocs('surfaces the unified orchestration guides in the package docs and live docs indexes', () => {
+  it('lists the unified orchestration guides in docs/README.md, the source of the site documentation index', () => {
     const packageDocsIndex = read('../../../../docs/README.md');
-    const liveDocsIndex = read('../../../../../apps/agentos-live-docs/docs/index.md');
-    const documentationIndex = read('../../../../../apps/agentos-live-docs/docs/getting-started/documentation-index.md');
+    const requireCjs = createRequire(import.meta.url);
+    const { publicationManifest } = requireCjs('../../../../docs/publication-manifest.cjs') as {
+      publicationManifest: Array<{ sourcePath?: string; dest: string }>;
+    };
 
+    expect(
+      publicationManifest.find((entry) => entry.dest === 'getting-started/documentation-index.md')?.sourcePath,
+    ).toBe('packages/agentos/docs/README.md');
     expect(packageDocsIndex).toContain('Unified Orchestration Layer');
     expect(packageDocsIndex).toContain('AgentGraph');
     expect(packageDocsIndex).toContain('workflow() DSL');
     expect(packageDocsIndex).toContain('mission() API');
-    expect(liveDocsIndex).toContain('/features/unified-orchestration');
-    expect(documentationIndex).toContain('Checkpointing');
+    expect(packageDocsIndex).toContain('Checkpointing');
+  });
+
+  it('publishes the PII redaction extension page from its live-docs static page, and keeps PII_REDACTION.md links on the guide', () => {
+    const requireCjs = createRequire(import.meta.url);
+    const { publicationManifest, buildFilenameRewriteMap } = requireCjs('../../../../docs/publication-manifest.cjs') as {
+      publicationManifest: Array<Record<string, unknown> & { dest: string }>;
+      buildFilenameRewriteMap: () => Record<string, string>;
+    };
+
+    // agentos-live-docs holds the page at static-docs/extensions/built-in/pii-redaction.md, so the
+    // entry is a static doc that must resolve, not a stub allowed to go missing.
+    const piiPage = publicationManifest.find((entry) => entry.dest === 'extensions/built-in/pii-redaction.md');
+    expect(piiPage).toMatchObject({
+      sourceType: 'static-doc',
+      sourcePath: 'apps/agentos-live-docs/static-docs/extensions/built-in/pii-redaction.md',
+      title: 'PII Redaction',
+      section: 'Extensions',
+      group: 'Guardrail Extensions',
+    });
+    expect(piiPage).not.toHaveProperty('allowMissingSource');
+
+    // The site reads a link's file name case-insensitively, with '-' as '_', so pii-redaction.md
+    // and PII_REDACTION.md share one key there. The first entry keeps it: the guide.
+    const rewrites = buildFilenameRewriteMap();
+    expect(rewrites['PII_REDACTION.md']).toBe('/features/pii-redaction');
+    const keys = Object.keys(rewrites).map((fileName) => fileName.toLowerCase().replace(/-/g, '_'));
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  itIfLiveDocs('links the unified orchestration guide from the docs homepage', () => {
+    const homepage = read('../../../../../../apps/agentos-live-docs/src/pages/index.tsx');
+
+    // docs/orchestration/UNIFIED_ORCHESTRATION.md is published at /features/unified-orchestration.
+    expect(homepage).toContain("'/features/unified-orchestration'");
   });
 
   it('keeps the package documentation index pointed at real source files', () => {
@@ -186,14 +243,20 @@ describe('AgentOS docs alignment', () => {
     expect(contributing).toContain('verify:publication');
   });
 
-  itIfRepoRootDocs('points ecosystem API links at the published docs site', () => {
-    const ecosystemGuide = read('../../../../../../docs/getting-started/ecosystem.md');
+  it('points the package ecosystem guide at the API reference route the docs site serves', () => {
     const packageEcosystemGuide = read('../../../../docs/architecture/ECOSYSTEM.md');
 
-    expect(ecosystemGuide).toContain('https://docs.agentos.sh/api/');
-    expect(packageEcosystemGuide).toContain('https://docs.agentos.sh/api/');
-    expect(ecosystemGuide).not.toContain('agentos-live-docs branch');
+    expect(packageEcosystemGuide).toContain('(https://docs.agentos.sh/api)');
+    expect(packageEcosystemGuide).not.toMatch(apiReferenceWithSlash);
     expect(packageEcosystemGuide).not.toContain('agentos-live-docs branch');
+  });
+
+  itIfRepoRootDocs('points ecosystem API links at the published docs site', () => {
+    const ecosystemGuide = read('../../../../../../docs/getting-started/ecosystem.md');
+
+    expect(ecosystemGuide).toContain('https://docs.agentos.sh/api');
+    expect(ecosystemGuide).not.toMatch(apiReferenceWithSlash);
+    expect(ecosystemGuide).not.toContain('agentos-live-docs branch');
   });
 
   itIfRepoRootDocs('keeps runtime-status guidance centralized across orchestration and backend docs', () => {
@@ -223,8 +286,8 @@ describe('AgentOS docs alignment', () => {
   });
 
   itIfSkills('references the 3-tier skills architecture (engine + content + catalog SDK)', () => {
-    const contentPackage = JSON.parse(read('../../../../agentos-skills/package.json'));
-    const catalogSdkPackage = JSON.parse(read('../../../../agentos-skills-registry/package.json'));
+    const contentPackage = JSON.parse(read('../../../../../agentos-skills/package.json'));
+    const catalogSdkPackage = JSON.parse(read('../../../../../agentos-skills-registry/package.json'));
     const packageSkillsGuide = read('../../../../docs/extensions/SKILLS.md');
 
     // @framers/agentos-skills is now the CONTENT package (SKILL.md files + registry.json)
@@ -240,7 +303,7 @@ describe('AgentOS docs alignment', () => {
     expect(packageSkillsGuide).toContain('@framers/agentos-skills');
     expect(packageSkillsGuide).toContain('@framers/agentos-skills-registry');
   });
-  it('keeps every relative docs link from a published guide pointed at a published page', () => {
+  it('keeps every ./ or ../ link from a published guide to a Markdown file under docs/ pointed at a published page', () => {
     // docs.agentos.sh builds its guide pages from the publication manifest and
     // rewrites a relative link by the target's file name. A link from a published
     // guide to a docs file the manifest does not publish stays as written, and the

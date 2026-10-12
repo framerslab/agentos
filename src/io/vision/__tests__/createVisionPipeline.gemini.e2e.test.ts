@@ -81,3 +81,31 @@ describe('createVisionPipeline Gemini detection, through the real provider', () 
     expect(images).toEqual([{ inlineData: { mimeType: 'image/jpeg', data: JPEG.toString('base64') } }]);
   });
 });
+
+describe('the cloud task, through the real provider', () => {
+  it("asks Gemini for a description by default, and for the text alone with cloudTask 'transcribe'", async () => {
+    process.env.GEMINI_API_KEY = 'gemini-env-key-e2e';
+    const pipeline = await createVisionPipeline({
+      strategy: 'cloud-only',
+      ocr: 'none',
+      handwriting: false,
+      documentAI: false,
+      embedding: false,
+    });
+
+    await pipeline.process(JPEG);
+    await pipeline.process(JPEG, { cloudTask: 'transcribe' });
+
+    // The prompt is the text part sent with the image.
+    const prompts = fetchMock.mock.calls
+      .filter(([url]) => GEMINI.test(String(url)))
+      .map(([, init]) => {
+        const body = JSON.parse(String((init as RequestInit).body)) as { contents: { parts: { text?: string }[] }[] };
+        return body.contents.flatMap((content) => content.parts).flatMap((part) => (part.text ? [part.text] : [])).join('\n');
+      });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toMatch(/^Describe this image in detail\./);
+    expect(prompts[1]).toMatch(/^Transcribe all the text in this image exactly as written/);
+    expect(prompts[1]).not.toMatch(/Describe this image/);
+  });
+});

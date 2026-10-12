@@ -10,6 +10,8 @@
  *   EnvironmentalCalibrator, AudioProcessor
  * - **STT providers**: OpenAI Whisper, Deepgram, AssemblyAI, Azure Speech (batch), and OpenAI Realtime transcription (streaming, from the voice pipeline)
  * - **VAD providers**: BuiltInAdaptiveVadProvider
+ * - **Batch transcription**: transcribePieces, which sends a recording's
+ *   pieces in order and joins their texts with mergeSeam
  */
 
 // Audio processing utilities
@@ -36,3 +38,5 @@ export type {
   OpenAIRealtimeRolloverRequest,
   OpenAIRealtimeTurnDetection,
 } from '../voice-pipeline/providers/OpenAIRealtimeTranscriptionSTT.js';
+// A recording transcribed in pieces
+export { transcribePieces, mergeSeam, lastSentence, PiecesFailed, type PieceInput, type PieceTranscript, type PieceOutcome, type TranscribePiece, type TranscribePiecesOptions } from './transcribePieces.js';

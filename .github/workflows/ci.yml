@@ -5,6 +5,15 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  # bump-framers-deps.yml dispatches this workflow on its pull request branch: a pull request
+  # opened with GITHUB_TOKEN starts no pull_request run. A dispatched run can read any secret a
+  # step references, and that branch carries dependency updates nobody has read yet, so no step
+  # that runs on workflow_dispatch may reference a repository secret.
+  workflow_dispatch: {}
+
+# The workflow's token can read the repository and nothing else.
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -99,10 +108,36 @@ jobs:
         run: pnpm run test -- --coverage
 
       - name: Upload coverage to Codecov
-        if: always()
+        # Not on a dispatched run: see the note on workflow_dispatch above.
+        if: always() && github.event_name != 'workflow_dispatch'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  browser:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install browsers
+        run: pnpm exec playwright install --with-deps chromium webkit
+
+      - name: Browser tests
+        run: pnpm run test:browser
 
   # Fast targeted gate for the batch-1 hardening test set: fails in minutes
   # without waiting on the coverage matrix. The full suite above is

@@ -78,6 +78,13 @@ export type ContentCategory =
  */
 export type VisionTier = 'ocr' | 'handwriting' | 'document-ai' | 'embedding' | 'cloud-vision';
 
+/**
+ * What the cloud tier asks its model for. `'describe'` (the default) asks for
+ * a description of the image together with the text it shows; `'transcribe'`
+ * asks for the text alone, exactly as written, for a call that wants text.
+ */
+export type VisionCloudTask = 'describe' | 'transcribe';
+
 // ---------------------------------------------------------------------------
 // Result types
 // ---------------------------------------------------------------------------
@@ -238,7 +245,11 @@ export interface LayoutBlock {
  * ```
  */
 export interface VisionResult {
-  /** Best extracted text (from OCR, handwriting, or vision description). */
+  /**
+   * Best extracted text: from OCR, handwriting or layout, or from the cloud
+   * tier, which gives a description of the image with its text, or with
+   * `cloudTask: 'transcribe'` the text alone.
+   */
   text: string;
 
   /** Overall confidence score 0–1, taken from the winning tier. */

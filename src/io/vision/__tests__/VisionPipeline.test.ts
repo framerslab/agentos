@@ -340,6 +340,80 @@ describe('VisionPipeline', () => {
   });
 
   // =========================================================================
+  // Cloud task
+  // =========================================================================
+
+  describe('cloud task', () => {
+    /** The text part of the prompt that the cloud tier sent in its nth call. */
+    const promptOf = (n = 0): string => mockGenerateText.mock.calls[n][0].messages[0].content[0].text;
+
+    it('asks for a description by default, and for the text alone with cloudTask transcribe', async () => {
+      const pipeline = createFullPipeline();
+      await pipeline.process(testImage(), { tiers: ['cloud-vision'] });
+      await pipeline.process(testImage(), { tiers: ['cloud-vision'], cloudTask: 'transcribe' });
+
+      expect(promptOf(0)).toMatch(/^Describe this image in detail\./);
+      expect(promptOf(1)).toMatch(/^Transcribe all the text in this image exactly as written/);
+      expect(promptOf(1)).not.toMatch(/Describe this image/);
+    });
+
+    it('reads a page of handwriting with TrOCR and the cloud transcription, whose text wins', async () => {
+      mockGenerateText.mockResolvedValueOnce({ ...cloudVisionResult(), text: 'Dear Sam,\nthe meeting moved to Friday.' });
+      const pipeline = createFullPipeline();
+
+      const result = await pipeline.process(testImage(), {
+        tiers: ['handwriting', 'cloud-vision'],
+        forceCategory: 'handwritten',
+        cloudTask: 'transcribe',
+      });
+
+      expect(result.tiers).toEqual(['handwriting', 'cloud-vision']);
+      expect(result.text).toBe('Dear Sam,\nthe meeting moved to Friday.');
+      expect(promptOf()).toMatch(/^Transcribe/);
+    });
+
+    it('keeps the text a local tier read when the cloud transcription comes back empty', async () => {
+      mockGenerateText.mockResolvedValueOnce({ ...cloudVisionResult(), text: '  \n' });
+      const pipeline = createFullPipeline();
+
+      const result = await pipeline.process(testImage(), {
+        tiers: ['handwriting', 'cloud-vision'],
+        forceCategory: 'handwritten',
+        cloudTask: 'transcribe',
+      });
+
+      // Both tiers ran; the empty cloud answer has no confidence, so TrOCR's text stands.
+      expect(result.tiers).toEqual(['handwriting', 'cloud-vision']);
+      const [handwriting, cloud] = result.tierResults;
+      expect(cloud).toMatchObject({ tier: 'cloud-vision', text: '  \n', confidence: 0 });
+      expect(handwriting.text.trim()).not.toBe('');
+      expect(result.text).toBe(handwriting.text);
+      expect(result.confidence).toBe(handwriting.confidence);
+    });
+
+    it('gives empty text when the cloud tier alone finds none', async () => {
+      mockGenerateText.mockResolvedValueOnce({ ...cloudVisionResult(), text: '' });
+      const pipeline = createFullPipeline();
+
+      const result = await pipeline.process(testImage(), { tiers: ['cloud-vision'], cloudTask: 'transcribe' });
+
+      expect(result.tiers).toEqual(['cloud-vision']);
+      expect(result.text).toBe('');
+      expect(result.confidence).toBe(0);
+    });
+
+    it('refuses a cloudTask it does not know, before any tier runs', async () => {
+      const pipeline = createFullPipeline();
+
+      await expect(pipeline.process(testImage(), { cloudTask: 'summarize' as never })).rejects.toThrow(
+        "cloudTask must be 'describe' or 'transcribe'",
+      );
+      expect(mockPaddleOcrInstance.recognize).not.toHaveBeenCalled();
+      expect(mockGenerateText).not.toHaveBeenCalled();
+    });
+  });
+
+  // =========================================================================
   // Local-only strategy
   // =========================================================================
 

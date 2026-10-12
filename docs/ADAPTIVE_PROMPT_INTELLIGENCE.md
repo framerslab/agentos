@@ -27,7 +27,7 @@ The agent stays the same persona; how it sounds, what it remembers, and how conf
 
 The dollar math, in one line: sentiment scoring is the one adaptive surface that runs on *every* user turn once it is enabled, and the runtime's utility AI decides whether it costs an LLM call, not `sentimentTracking.method`: the default `LLMUtilityAI` makes one call per scored user turn, and a second one when its reply is not valid JSON and it asks for a repair, while a `StatisticalUtilityAI` (or a `HybridUtilityAI` with a statistical part) scores with a lexicon at no cost. Contextual elements cost nothing extra. A metaprompt costs one call each time its trigger fires, and a repair call when its reply is not valid JSON: every `intervalTurns` user turns (every turn with `intervalTurns: 1`), on a sentiment event, or on a host-set flag. See [Operational notes](#operational-notes) below for a concrete per-1000-turn cost table.
 
-![Adaptive Prompt Intelligence: per-turn assembly loop on top (user message → PromptEngine.assemble → MetapromptExecutor.checkAndTriggerMetaprompts → state updates → LLM call); three trigger lanes in the middle (turn_interval periodic self-regulation, event_based SentimentTracker-driven, manual host or tool-driven flags); and the state surfaces at the bottom (GMI mood, user context, task context, working-memory imprints) that metaprompts mutate via callbacks and that re-enter the next turn's prompt; the HEXACO traits the diagram also places there are changed by the adapt_personality tool or by a host's own GMI.setPersonalityTrait() call, not by metaprompts.](/img/diagrams/adaptive-intelligence.svg)
+![Adaptive Prompt Intelligence: one GMI turn (SentimentTracker scores the user message when the persona turns sentiment tracking on, PromptEngine.constructPrompt() builds the prompt from the persona and the contextual elements whose criteria match the GMI's state, the model call streams the reply with tool rounds as needed, then MetapromptExecutor.checkAndTriggerMetaprompts() queues the metaprompts that fired as one background batch whose updates land on GMI state and working memory); the three trigger types (turn_interval fires on user turns N, 2N, 3N; event_based fires on a pending GMIEvent such as user_frustrated, which the SentimentTracker raises; manual fires on a working-memory flag named manual_trigger_ and the metaprompt id, which host code sets, a metaprompt cannot set, and the executor deletes once it queues the metaprompt), with each metaprompt's handler chosen by its id; and the state a metaprompt's JSON reply writes (GMI mood, user skill level, task complexity, working-memory imprints), of which prompt assembly reads mood, skill level and complexity and not imprints, beside the HEXACO traits, which metaprompts do not set and the adapt_personality tool or setPersonalityTrait() changes.](/img/diagrams/adaptive-intelligence.svg)
 
 This page is the source-verified map of that loop. Every class, interface, trigger name, and handler ID below corresponds to a real surface in [`packages/agentos`](https://github.com/framerslab/agentos/tree/master). If you only need one mental model: the persona definition is the static contract, and the metaprompt executor is the dynamic editor of the GMI's state turn over turn.
 
@@ -43,7 +43,7 @@ const support = agent({
 });
 ```
 
-`agent()` without `runtime: 'gmi'` and `agency()` create no GMI ([GMIs](./GMI.md)), so none of this runs on their sessions.
+`agent()` without `runtime: 'gmi'` creates no GMI ([GMIs](./GMI.md)), so none of this runs on its sessions. Under `agency()`, a roster member is a GMI only when its config sets `runtime: 'gmi'` or the roster holds an agent built that way, and the strategies call its `generate()` or `stream()`, which run the `'light'` profile: no sentiment tracking and no metaprompts ([Multi-agent work](./GMI.md#multi-agent-work)).
 
 ## What's actually adaptive
 
@@ -626,7 +626,7 @@ The executor checks triggers at the end of a turn, after the regular completion 
 ## Further reading
 
 - [Generalized Mind Instances (GMIs)](/architecture/gmi) for the coordinator class that owns this whole loop.
-- [HEXACO Personality](/features/hexaco-personality) for the trait model the drift mechanism mutates.
+- [HEXACO Personality](/features/hexaco-personality) for the trait model that `adapt_personality` changes and the drift mechanism computes proposals for.
 - [Cognitive Memory](/features/cognitive-memory) for the eight mechanisms that read the trait values the memory manager is configured with.
 - [Emergent Capabilities](/features/emergent-capabilities) for the runtime layer that exposes `adapt_personality` and the rest of the emergent tools.
 - [Human-in-the-Loop (HITL)](/features/human-in-the-loop) for adding approval gates around emergent mutations like trait adjustments.
@@ -645,7 +645,7 @@ The executor checks triggers at the end of a turn, after the regular completion 
 
 ### Personality structure
 
-- Ashton, M. C., & Lee, K. (2007). [*Empirical, theoretical, and practical advantages of the HEXACO model of personality structure.*](https://doi.org/10.1177/1088868306294907) *Personality and Social Psychology Review*, 11(2), 150-166. The six-factor model both the `AdaptPersonalityTool` and `PersonaDriftMechanism` mutate.
+- Ashton, M. C., & Lee, K. (2007). [*Empirical, theoretical, and practical advantages of the HEXACO model of personality structure.*](https://doi.org/10.1177/1088868306294907) *Personality and Social Psychology Review*, 11(2), 150-166. The six-factor model whose traits the `AdaptPersonalityTool` changes and the `PersonaDriftMechanism` computes proposals for.
 
 ### Agent self-improvement and reflection
 

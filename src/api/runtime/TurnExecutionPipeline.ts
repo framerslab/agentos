@@ -172,7 +172,8 @@ export class TurnExecutionPipeline {
    * @param config - Resolved orchestrator config for this pipeline's needs.
    * @param chunkTransformer - For constructing GMI input and filtering turn plans.
    * @param telemetry - For adaptive execution policy decisions.
-   * @param resolveOrganizationContext - Callback to resolve tenant org context.
+   * @param resolveOrganizationContext - Callback to resolve tenant org context. It runs once per turn, before the
+   *   GMI is acquired, and must have no side effects.
    */
   constructor(
     private readonly activeStreamContexts: Map<string, PipelineStreamContext>,
@@ -212,6 +213,16 @@ export class TurnExecutionPipeline {
     // -------------------------------------------------------------------
     // Phase 2: GMI acquisition
     // -------------------------------------------------------------------
+    // The turn's organization, resolved before the GMI is acquired: a runtime with a learning layer binds a new GMI's
+    // learner session under it (docs/GMI.md, "Learning"). The resolver reads only the input and the config, and
+    // Phase 5 uses the same value; an organization it refuses is raised in Phase 5, after the stream context is
+    // registered and the turn announced.
+    let organizationResolution: { id: string | undefined } | { error: unknown };
+    try {
+      organizationResolution = { id: this.resolveOrganizationContext(input.organizationId) };
+    } catch (error) {
+      organizationResolution = { error };
+    }
     const gmiResult = await withAgentOSSpan('agentos.gmi.get_or_create', async (span) => {
       span?.setAttribute('agentos.user_id', input.userId);
       span?.setAttribute('agentos.session_id', input.sessionId);
@@ -227,6 +238,8 @@ export class TurnExecutionPipeline {
         input.options?.preferredModelId,
         input.options?.preferredProviderId,
         input.userApiKeys,
+        undefined,
+        'id' in organizationResolution ? (organizationResolution.id ?? '') : undefined,
       );
     });
     const gmi = gmiResult.gmi;
@@ -273,7 +286,8 @@ export class TurnExecutionPipeline {
     // Phase 5: Turn planning
     // -------------------------------------------------------------------
     let turnPlan: TurnPlan | null = null;
-    const resolvedOrganizationId = this.resolveOrganizationContext(input.organizationId);
+    if ('error' in organizationResolution) throw organizationResolution.error;
+    const resolvedOrganizationId = organizationResolution.id;
     streamContext.organizationId = resolvedOrganizationId;
 
     if (this.dependencies.turnPlanner) {

@@ -51,8 +51,8 @@ export interface VariateImageOptions {
   /**
    * Model identifier. When omitted, the provider's own default for a
    * variation applies: OpenAI makes one through its edits endpoint with
-   * `gpt-image-1`, and a provider without native variations through its edit
-   * default (Replicate `stability-ai/sdxl`, Stability `sd3-medium`).
+   * `gpt-image-2.5-sunburst`, and a provider without native variations through
+   * its edit default (Replicate `stability-ai/sdxl`, Stability `sd3.5-medium`).
    */
   model?: string;
   /**

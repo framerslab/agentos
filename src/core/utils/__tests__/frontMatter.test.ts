@@ -4,7 +4,8 @@
  * gray-matter's own engines evaluate, is never run, whether a file opens with
  * it or a body that front matter is written onto does. Each such case also
  * hands the same text to gray-matter with its own engines, which shows the
- * block is one it runs.
+ * block is one it runs. A body written with fields or with none comes back
+ * whole from a read, whatever it opens with.
  */
 import matter from 'gray-matter';
 
@@ -17,6 +18,9 @@ const MARK = '__agentosFrontMatterEvaluated';
 
 /** The text after the block in the files below. */
 const BODY = '# Notes\n\nThe review moved to Thursday.\n';
+
+/** A byte order mark, built from its code so that no copy of the character sits in this file. */
+const BOM = String.fromCharCode(0xfeff);
 
 /** Whether a block below has been evaluated since the last test. */
 function evaluated(): boolean {
@@ -93,5 +97,55 @@ describe('writeFrontMatter', () => {
     // matter.stringify given the same body as a string reads it with its own engines and runs the block.
     expect(() => matter.stringify(body, { id: 'trace-2' }, {})).toThrow('stringifying JavaScript is not supported');
     expect(evaluated()).toBe(true);
+  });
+
+  it('writes a body alone when there are no fields, behind an empty block when a read would change its opening', () => {
+    expect(writeFrontMatter('# Notes', {})).toBe('# Notes\n');
+    expect(writeFrontMatter('', {})).toBe('\n');
+    // Four dashes or more open no block, so the rule needs none in front of it.
+    expect(writeFrontMatter('----\nA longer rule opens this note.', {})).toBe('----\nA longer rule opens this note.\n');
+
+    expect(writeFrontMatter('---\nA rule opens this note.', {})).toBe('---\n---\n---\nA rule opens this note.\n');
+    expect(writeFrontMatter('---', {})).toBe('---\n---\n---\n');
+    // A read takes a byte order mark off the start of a file, then looks for the block.
+    expect(writeFrontMatter(`${BOM}---\nA rule opens this note.`, {})).toBe(`---\n---\n${BOM}---\nA rule opens this note.\n`);
+    expect(writeFrontMatter(`${BOM}# Notes`, {})).toBe(`---\n---\n${BOM}# Notes\n`);
+  });
+});
+
+describe('writeFrontMatter, then readFrontMatter', () => {
+  /** A description of each body, and the body. */
+  const bodies: Array<[string, string]> = [
+    ['opens with a line of dashes', '---\nA rule opens this note.\n'],
+    ['is only dashes', '---'],
+    ['is only a line of dashes', '---\n'],
+    ['holds a whole block of its own', `---\ntitle: Another note\n---\n${BODY}`],
+    ['opens with a block marked as JavaScript', fileMarked('js')],
+    ['opens with dashes after a byte order mark', `${BOM}---\nA rule opens this note.\n`],
+    ['opens with a byte order mark', `${BOM}${BODY}`],
+    ['opens with a longer rule', '----\nA longer rule opens this note.\n'],
+    ['is empty', ''],
+    ['is ordinary text', BODY],
+  ];
+
+  /** What a body is written as: itself, ending in a line break. */
+  function asWritten(body: string): string {
+    return body.endsWith('\n') ? body : `${body}\n`;
+  }
+
+  it.each<[string, string]>(bodies)('gives back a body that %s, written with fields', (_description, body) => {
+    const back = readFrontMatter(writeFrontMatter(body, { id: 'trace-3', strength: 0.5 }));
+
+    expect(evaluated()).toBe(false);
+    expect(back.data).toEqual({ id: 'trace-3', strength: 0.5 });
+    expect(back.content).toBe(asWritten(body));
+  });
+
+  it.each<[string, string]>(bodies)('gives back a body that %s, written with no fields', (_description, body) => {
+    const back = readFrontMatter(writeFrontMatter(body, {}));
+
+    expect(evaluated()).toBe(false);
+    expect(back.data).toEqual({});
+    expect(back.content).toBe(asWritten(body));
   });
 });

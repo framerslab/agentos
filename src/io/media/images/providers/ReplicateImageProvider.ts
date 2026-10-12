@@ -7,12 +7,38 @@ import {
   type ImageGenerationRequest,
   type ImageGenerationResult,
   type ImageEditRequest,
+  type ImageStyleTransferRequest,
   type ImageUpscaleRequest,
   type ImageModelInfo,
   normalizeOutputFormat,
   type ReplicateImageProviderOptions,
 } from '../IImageProvider.js';
+import { imageDataUrl } from '../blobPart.js';
+import {
+  INDEXED_IMAGE_NAMES,
+  styleTransferImageTypes,
+  styleTransferModelError,
+  styleTransferPrompt,
+} from '../styleTransfer.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
+
+/** Replicate's API, the provider's base URL unless one is configured. */
+const REPLICATE_BASE_URL = 'https://api.replicate.com/v1';
+
+/**
+ * The models Replicate's style transfer runs on, FLUX.2 Pro first as the
+ * default. Each takes `input_images` ("Maximum 8 images" for pro and max, 10
+ * for flex, 5 for dev; "Must be jpeg, png, gif, or webp") and an
+ * `aspect_ratio` of `match_input_image`
+ * (https://replicate.com/black-forest-labs/flux-2-pro/llms.txt and the same
+ * page of the other three, read 2026-10-12).
+ */
+export const REPLICATE_STYLE_TRANSFER_MODELS: readonly string[] = [
+  'black-forest-labs/flux-2-pro',
+  'black-forest-labs/flux-2-max',
+  'black-forest-labs/flux-2-flex',
+  'black-forest-labs/flux-2-dev',
+];
 
 /**
  * Pinned version for the strict-consistency Pulid auto-route. zsxkib/pulid
@@ -112,7 +138,7 @@ export class ReplicateImageProvider implements IImageProvider {
       baseURL:
         typeof config.baseURL === 'string' && config.baseURL.trim()
           ? config.baseURL.trim()
-          : 'https://api.replicate.com/v1',
+          : REPLICATE_BASE_URL,
       defaultModelId:
         typeof config.defaultModelId === 'string' && config.defaultModelId.trim()
           ? config.defaultModelId.trim()
@@ -266,22 +292,9 @@ export class ReplicateImageProvider implements IImageProvider {
       prediction = await this.createModelPrediction(owner, name, input, waitSeconds);
     }
 
-    if (
-      prediction.status
-      && !['succeeded', 'failed', 'canceled'].includes(prediction.status)
-      && prediction.urls?.get
-    ) {
-      prediction = await this.pollPrediction(prediction.urls.get, 60_000, 1_000);
-    }
+    prediction = await this.finishedPrediction(prediction, 'image generation');
 
-    if (prediction.status === 'failed') {
-      throw new Error(`Replicate image generation failed: ${prediction.error ?? 'unknown error'}`);
-    }
-    if (prediction.status === 'canceled') {
-      throw new Error('Replicate image generation was canceled.');
-    }
-
-    const images = normalizeReplicateOutput(prediction.output);
+    const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
     if (images.length === 0) {
       throw new Error('Replicate returned no image output.');
     }
@@ -429,19 +442,9 @@ export class ReplicateImageProvider implements IImageProvider {
       prediction = await this.createModelPrediction(owner, name, input, waitSeconds);
     }
 
-    if (
-      prediction.status
-      && !['succeeded', 'failed', 'canceled'].includes(prediction.status)
-      && prediction.urls?.get
-    ) {
-      prediction = await this.pollPrediction(prediction.urls.get, 60_000, 1_000);
-    }
+    prediction = await this.finishedPrediction(prediction, 'image edit');
 
-    if (prediction.status === 'failed') {
-      throw new Error(`Replicate image edit failed: ${prediction.error ?? 'unknown error'}`);
-    }
-
-    const images = normalizeReplicateOutput(prediction.output);
+    const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
     if (images.length === 0) {
       throw new Error('Replicate edit returned no image output.');
     }
@@ -490,21 +493,9 @@ export class ReplicateImageProvider implements IImageProvider {
     };
 
     const waitSeconds = providerOptions?.wait ?? 60;
-    let prediction = await this.createPrediction(body, waitSeconds);
+    const prediction = await this.finishedPrediction(await this.createPrediction(body, waitSeconds), 'image upscale');
 
-    if (
-      prediction.status
-      && !['succeeded', 'failed', 'canceled'].includes(prediction.status)
-      && prediction.urls?.get
-    ) {
-      prediction = await this.pollPrediction(prediction.urls.get, 60_000, 1_000);
-    }
-
-    if (prediction.status === 'failed') {
-      throw new Error(`Replicate image upscale failed: ${prediction.error ?? 'unknown error'}`);
-    }
-
-    const images = normalizeReplicateOutput(prediction.output);
+    const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
     if (images.length === 0) {
       throw new Error('Replicate upscale returned no image output.');
     }
@@ -518,6 +509,152 @@ export class ReplicateImageProvider implements IImageProvider {
     };
   }
 
+  /**
+   * The model a style transfer runs on for `modelId`, or a refusal. An empty
+   * id takes the configured default when it is one of
+   * {@link REPLICATE_STYLE_TRANSFER_MODELS}, else FLUX.2 Pro. A named model
+   * must be one of them, unless the provider's base URL is not Replicate's;
+   * it is run by its name on the model endpoint, so a pinned version
+   * (`owner/name:version`) is refused.
+   *
+   * @param modelId - The model the call names, or an empty string.
+   * @throws {Error} For a model the style transfer does not run.
+   */
+  styleTransferModel(modelId: string): string {
+    if (!modelId) {
+      return this.defaultModelId && REPLICATE_STYLE_TRANSFER_MODELS.includes(this.defaultModelId)
+        ? this.defaultModelId
+        : REPLICATE_STYLE_TRANSFER_MODELS[0];
+    }
+    if (!/^[^/:\s]+\/[^/:\s]+$/.test(modelId)) {
+      throw new Error(
+        `Replicate's style transfer runs a model by its name, "owner/name", on the model endpoint; ${modelId} is not one (a pinned version is not taken).`,
+      );
+    }
+    if (REPLICATE_STYLE_TRANSFER_MODELS.includes(modelId) || this.hasCustomEndpoint()) return modelId;
+    throw styleTransferModelError('Replicate', modelId, REPLICATE_STYLE_TRANSFER_MODELS, 'A custom baseUrl takes another "owner/name" model.');
+  }
+
+  /**
+   * Restyles an image after a style reference on a FLUX.2 model, which takes
+   * both as `input_images`, the source first, with an instruction that names
+   * them by index ("point to other reference images by their index number",
+   * https://replicate.com/black-forest-labs/flux-2-pro). FLUX.2 takes no
+   * strength and no negative prompt: `strength` picks the instruction (see
+   * `styleTransfer.ts`), and the output keeps the source's aspect ratio
+   * (`match_input_image`) unless `providerOptions.input` sets another.
+   *
+   * The call's prompt and its two images are what it sends, so a
+   * `providerOptions.input` naming `prompt`, `input_images`, `image` or
+   * `input_image` is refused, and so is `providerOptions.extraBody`, which
+   * could pin another version or replace the input. The prediction must end
+   * `succeeded`; a failed, canceled or unfinished one throws.
+   *
+   * @param request - The source, the reference and the prompt.
+   * @returns Generation result with the restyled image(s).
+   *
+   * @throws {Error} When the provider is not initialised, the model, an image
+   *   or an option is refused, the API fails, the prediction does not
+   *   succeed, or its output holds no image.
+   */
+  async transferStyle(request: ImageStyleTransferRequest): Promise<ImageGenerationResult> {
+    if (!this.isInitialized) {
+      throw new Error('Replicate image provider is not initialized.');
+    }
+    const model = this.styleTransferModel(request.modelId);
+    const providerOptions = getImageProviderOptions<ReplicateImageProviderOptions>(
+      this.providerId,
+      request.providerOptions,
+    );
+    const callerInput = providerOptions?.input ?? {};
+    const reserved = ['prompt', 'input_images', 'image', 'input_image'].filter((key) => callerInput[key] !== undefined);
+    if (reserved.length > 0) {
+      throw new Error(
+        `Replicate's style transfer sends the call's prompt and its two images; providerOptions.input may not set ${reserved.join(', ')}.`,
+      );
+    }
+    if (providerOptions?.extraBody !== undefined) {
+      throw new Error(
+        "Replicate's style transfer runs the model it names; providerOptions.extraBody, which can pin another version or replace the input, is not taken.",
+      );
+    }
+    const types = styleTransferImageTypes(
+      'Replicate',
+      ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
+      request.image,
+      request.styleImage,
+    );
+
+    const input: Record<string, unknown> = {
+      ...callerInput,
+      prompt: styleTransferPrompt(request.prompt, request.strength, INDEXED_IMAGE_NAMES),
+      input_images: [imageDataUrl(request.image, types.image), imageDataUrl(request.styleImage, types.style)],
+    };
+    if (input.aspect_ratio === undefined) input.aspect_ratio = 'match_input_image';
+    const seed = request.seed ?? providerOptions?.seed;
+    if (seed !== undefined) input.seed = seed;
+    // FLUX.2's examples write JPEG as `jpg` (https://replicate.com/black-forest-labs/flux-2-pro).
+    if (providerOptions?.outputFormat !== undefined) {
+      const format = normalizeOutputFormat(providerOptions.outputFormat);
+      input.output_format = format === 'jpeg' ? 'jpg' : format;
+    }
+    if (providerOptions?.outputQuality !== undefined) input.output_quality = providerOptions.outputQuality;
+
+    const slash = model.indexOf('/');
+    const prediction = await this.finishedPrediction(
+      await this.createModelPrediction(model.slice(0, slash), model.slice(slash + 1), input, providerOptions?.wait ?? 60),
+      'style transfer',
+    );
+
+    const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
+    if (images.length === 0) {
+      throw new Error('Replicate style transfer returned no image.');
+    }
+
+    return {
+      created: Math.floor(Date.now() / 1000),
+      modelId: model,
+      providerId: this.providerId,
+      images,
+      usage: { totalImages: images.length },
+    };
+  }
+
+  /**
+   * A prediction run to its end: polled at its `urls.get` while it runs, and
+   * returned only once it has succeeded.
+   *
+   * @param prediction - The prediction as created.
+   * @param what - The operation's name, for the errors.
+   * @throws {Error} When it fails, is canceled, runs with no URL to poll, or
+   *   ends without a status.
+   */
+  private async finishedPrediction(prediction: ReplicatePrediction, what: string): Promise<ReplicatePrediction> {
+    let current = prediction;
+    if (current.status && !['succeeded', 'failed', 'canceled'].includes(current.status)) {
+      if (!current.urls?.get) {
+        throw new Error(`Replicate ${what} is ${current.status} and gave no URL to poll.`);
+      }
+      current = await this.pollPrediction(current.urls.get, 60_000, 1_000);
+    }
+    switch (current.status) {
+      case 'succeeded':
+        return current;
+      case 'failed':
+        throw new Error(`Replicate ${what} failed: ${current.error ?? 'unknown error'}`);
+      case 'canceled':
+        throw new Error(`Replicate ${what} was canceled.`);
+      default:
+        throw new Error(`Replicate ${what} ended without a status.`);
+    }
+  }
+
+  /** Whether the provider's base URL is not Replicate's own. */
+  private hasCustomEndpoint(): boolean {
+    const baseURL = this.config?.baseURL;
+    return typeof baseURL === 'string' && baseURL.replace(/\/+$/, '') !== REPLICATE_BASE_URL;
+  }
+
   async listAvailableModels(): Promise<ImageModelInfo[]> {
     return [
       // Generation
@@ -528,8 +665,15 @@ export class ReplicateImageProvider implements IImageProvider {
       { providerId: this.providerId, modelId: 'black-forest-labs/flux-1.1-pro-ultra', displayName: 'Flux 1.1 Pro Ultra', description: 'Ultra-high resolution' },
       { providerId: this.providerId, modelId: 'bytedance/sdxl-lightning-4step', displayName: 'SDXL Lightning', description: '4-step fast SDXL' },
       { providerId: this.providerId, modelId: 'stability-ai/sdxl', displayName: 'SDXL', description: 'Classic Stable Diffusion XL' },
-      // Style transfer
-      { providerId: this.providerId, modelId: 'black-forest-labs/flux-redux-dev', displayName: 'Flux Redux Dev', description: 'Image-guided style transfer' },
+      // Style transfer: the FLUX.2 models, which take the source and the style reference
+      ...REPLICATE_STYLE_TRANSFER_MODELS.map((modelId) => ({
+        providerId: this.providerId,
+        modelId,
+        displayName: `FLUX.2 ${modelId.slice('black-forest-labs/flux-2-'.length)}`,
+        description: 'Generation and editing from several reference images; transferStyle runs on it',
+      })),
+      // Variation of a reference image
+      { providerId: this.providerId, modelId: 'black-forest-labs/flux-redux-dev', displayName: 'Flux Redux Dev', description: 'A variation of one reference image, steered by the prompt' },
       // ControlNet
       { providerId: this.providerId, modelId: 'black-forest-labs/flux-canny-dev', displayName: 'Flux Canny', description: 'Edge-guided generation' },
       { providerId: this.providerId, modelId: 'black-forest-labs/flux-depth-dev', displayName: 'Flux Depth', description: 'Depth-guided generation' },
