@@ -226,7 +226,7 @@ function gatewayFor(opts: AgentOptions): CompletionGateway {
   return {
     stream: base.stream,
     schemaInstruction: base.schemaInstruction,
-    resolve: (route, after) =>
+    resolve: (route, after, failure) =>
       base.resolve(
         {
           ...route,
@@ -240,6 +240,7 @@ function gatewayFor(opts: AgentOptions): CompletionGateway {
           },
         },
         after,
+        failure,
       ),
   };
 }

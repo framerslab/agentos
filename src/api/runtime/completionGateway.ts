@@ -27,6 +27,7 @@ import {
   isContentPolicyRefusal,
   isRetryableError,
   resolveFallbackChain,
+  resolvePolicyTier,
   usageOfError,
   type FallbackProviderEntry,
   type FallbackSkipReason,
@@ -70,7 +71,14 @@ export interface CompletionRoute {
    * for the first model, a refill no standing leg is owed, a Claude leg after
    * a refusal.
    */
-  onHopSkipped?: (info: { provider: string; model?: string; reason: FallbackSkipReason }) => void;
+  onHopSkipped?: (info: CompletionHopSkip) => void;
+}
+
+/** A chain entry the walk passed over without an attempt, and why. */
+export interface CompletionHopSkip {
+  provider: string;
+  model?: string;
+  reason: FallbackSkipReason;
 }
 
 /** One entry of the hop list a route resolves to. */
@@ -103,6 +111,15 @@ export interface CompletionResolution {
    * @internal
    */
   readonly walk?: FallbackWalkState;
+  /**
+   * The entries the chain's one-time resolution passed over (an excluded
+   * model, a missing capability, the policy chain's entry for the first
+   * model), held on the first hop until a walk starts, as the walkers log
+   * theirs only when they walk.
+   *
+   * @internal
+   */
+  readonly pendingSkips?: ReadonlyArray<CompletionHopSkip>;
 }
 
 /**
@@ -582,14 +599,19 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     const route: CompletionRoute = { ...defaults, ...definedOnly(input as unknown as Record<string, unknown>) } as CompletionRoute;
     let chain: ReadonlyArray<CompletionHop>;
     let walk: FallbackWalkState;
+    // The resolution's passed-over entries, reported when a walk starts.
+    let pendingSkips: CompletionHopSkip[] = [];
     if (after) {
+      for (const skip of after.pendingSkips ?? []) route.onHopSkipped?.(skip);
       chain = after.chain;
       // The failed hop updates the walk: a refusal is recorded, and a standing
       // leg that failed on availability is owed a refill.
       walk = advanceFallbackWalk(after.walk ?? INITIAL_FALLBACK_WALK, chain[after.hop]?.entry?.walkRole, failure);
     } else {
       const primary = await selectPrimary(route);
-      const fallbacks = route.fallbackProviders ?? buildPolicyAwareFallbackChain(route.policyTier, primary.provider);
+      // The tier the walkers read: route params, the call's own, the host policy's, the router's.
+      const tier = resolvePolicyTier({ routerParams: route.routerParams, policyTier: route.policyTier, hostPolicy: route.hostPolicy, router: route.router });
+      const fallbacks = route.fallbackProviders ?? buildPolicyAwareFallbackChain(tier, primary.provider);
       // Resolved once, as generateText and streamText resolve a walk's chain:
       // the policy chain's entry for the first model is dropped, the route's
       // explicit capability and exclusion requirements apply to every entry
@@ -599,7 +621,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         primary,
         requiredCapabilities: explicitRequiredCapabilities({ hostPolicy: route.hostPolicy, routerParams: route.routerParams }),
         excludedModelIds: route.routerParams?.excludedModelIds,
-        onSkip: (entry, reason) => route.onHopSkipped?.({ provider: entry.provider, model: entry.model, reason }),
+        onSkip: (entry, reason) => pendingSkips.push({ provider: entry.provider, model: entry.model, reason }),
       });
       chain = [{ provider: primary.provider, model: primary.model }, ...resolved.map((entry) => ({ provider: entry.provider, model: entry.model, entry }))];
       walk = INITIAL_FALLBACK_WALK;
@@ -643,9 +665,12 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
             : {},
           chain,
           walk,
+          ...(hop === 0 && pendingSkips.length > 0 ? { pendingSkips } : {}),
         };
         if (hop > 0) {
-          route.onFallback?.({ from: after?.providerId ?? chain[0].provider, to: resolved.providerId, hop, error: lastError ?? new Error('the previous hop failed') });
+          // The error that moved the turn off the previous hop: the one it failed with, else the one it could not start with.
+          const cause = (failure instanceof Error ? failure : undefined) ?? lastError ?? new Error('the previous hop failed');
+          route.onFallback?.({ from: after?.providerId ?? chain[0].provider, to: resolved.providerId, hop, error: cause });
         }
         return resolution;
       } catch (err) {
@@ -660,6 +685,11 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         // The primary's configuration error (no credentials, unknown provider) is the caller's to see.
         // A fallback leg that cannot start is skipped.
         if (hop === 0 && !isRetryableError(lastError)) throw lastError;
+        // The primary could not start, so the walk starts here.
+        if (hop === 0) {
+          for (const skip of pendingSkips) route.onHopSkipped?.(skip);
+          pendingSkips = [];
+        }
         // A hop that could not start failed on availability: a standing leg is owed a refill.
         walk = advanceFallbackWalk(walk, h.entry?.walkRole, lastError);
       }
