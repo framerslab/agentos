@@ -15,14 +15,13 @@ import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.j
 // ---------------------------------------------------------------------------
 
 /**
- * Named security tier controlling which tools and capabilities an agent is
- * permitted to invoke.  Ordered from least-restrictive to most-restrictive.
+ * Named security tier, ordered from least to most restrictive: `"dangerous"`,
+ * `"permissive"`, `"balanced"`, `"strict"`, `"paranoid"`.
  *
- * - `"dangerous"` — no restrictions; only for trusted internal contexts.
- * - `"permissive"` — most capabilities enabled; network + filesystem allowed.
- * - `"balanced"` — sensible defaults; destructive actions require approval.
- * - `"strict"` — read-only filesystem, no shell spawn, narrow tool allow-list.
- * - `"paranoid"` — minimal surface; all side-effecting tools blocked.
+ * `security.tier` and `guardrails.tier` accept one. AgentOS ties no policy to
+ * any tier and enforces none: no tool, filesystem, network, shell or approval
+ * rule changes with the tier. A host that wants tiers maps each one to its own
+ * policy, such as a list of guardrail packs.
  */
 export type SecurityTier = 'dangerous' | 'permissive' | 'balanced' | 'strict' | 'paranoid';
 
@@ -180,36 +179,40 @@ export interface DiscoveryConfig {
 }
 
 /**
- * Structured guardrail configuration.
- * Allows separate input and output guardrail sets, plus an optional security tier
- * override.  Pass a plain `string[]` to `BaseAgentConfig.guardrails` as a shorthand.
+ * Structured guardrail configuration: separate input and output guardrail id
+ * lists, plus a security tier. A plain `string[]` passed to
+ * `BaseAgentConfig.guardrails` is a shorthand for the output list.
+ *
+ * `agency()` evaluates none of these ids: it reports each one through
+ * `on.guardrailResult` with `enforced: false` and passes the text on
+ * unchanged. `agent()` does not apply them either, and logs a warning when
+ * any is set.
  */
 export interface GuardrailsConfig {
-  /** Guardrail identifiers applied to every incoming user message. */
+  /** Guardrail ids for each prompt `agency()` receives; reported as not enforced. */
   input?: string[];
-  /** Guardrail identifiers applied to every outgoing assistant response. */
+  /** Guardrail ids for each final answer `agency()` returns; reported as not enforced. */
   output?: string[];
-  /** Security tier applied when evaluating guardrail policies. */
+  /** Security tier. Not enforced (see {@link SecurityTier}). */
   tier?: SecurityTier;
 }
 
 /**
- * Tool and resource permission overrides for the agent.
+ * Tool and resource permission fields. AgentOS enforces none of them:
+ * `agent()`, `agency()` and its strategies do not apply them. To gate tools,
+ * use `hitl.approvals.beforeTool` on `agency()` or an
+ * `onBeforeToolExecution` hook.
  */
 export interface PermissionsConfig {
-  /**
-   * Which tools the agent is allowed to call.
-   * - `"all"` — unrestricted (subject to the active security tier).
-   * - `string[]` — explicit allow-list of tool names.
-   */
+  /** Tools the agent is meant to call: `"all"`, or an allow-list of tool names. Not enforced. */
   tools?: 'all' | string[];
-  /** Whether the agent may make outbound network requests. */
+  /** Whether the agent is meant to make outbound network requests. Not enforced. */
   network?: boolean;
-  /** Whether the agent may read or write files. */
+  /** Whether the agent is meant to read or write files. Not enforced. */
   filesystem?: boolean;
-  /** Whether the agent may spawn subprocesses. */
+  /** Whether the agent is meant to spawn subprocesses. Not enforced. */
   spawn?: boolean;
-  /** Tool names that require a human-in-the-loop approval before execution. */
+  /** Tool names meant to need a human approval before they run. Not enforced: `hitl.approvals.beforeTool` gates tools. */
   requireApproval?: string[];
 }
 
@@ -245,7 +248,11 @@ export interface HitlConfig {
     beforeEmergent?: boolean;
     /** Whether returning the final answer requires approval. */
     beforeReturn?: boolean;
-    /** Whether a runtime strategy override requires approval. */
+    /**
+     * Reserved. No strategy asks for a strategy-override approval, so it
+     * pauses nothing; like the other triggers, setting it makes `agency()`
+     * require a `handler`.
+     */
     beforeStrategyOverride?: boolean;
   };
   /**
@@ -264,25 +271,28 @@ export interface HitlConfig {
    * Policy applied when the handler does not respond within `timeoutMs`
    * (`beforeTool` and `beforeReturn` requests only).
    * - `"reject"` — treat as denied; the action is blocked.
-   * - `"approve"` — treat as approved; the action proceeds automatically.
+   * - `"approve"` — treat as approved: the post-approval check still runs
+   *   (unless `guardrailOverride` is `false`) and can veto the action.
    * - `"error"` — the request fails with an `AgencyConfigError`, and the
    *   call rejects with it (on `beforeTool`, once the strategy settles).
    */
   onTimeout?: 'reject' | 'approve' | 'error';
 
   /**
-   * Run guardrails AFTER HITL approval to catch destructive actions.
+   * Run the post-approval check AFTER HITL approval to catch destructive actions.
    *
    * When enabled (default), even after the HITL handler (auto-approve, LLM
    * judge, or human) approves a `beforeTool`, `beforeAgent` or
-   * `beforeReturn` request, the configured guardrails run a final safety
-   * check against the tool call's arguments, the agent's input or the final
-   * text. The agent's input is checked as the strategy passes it, before the
-   * approval's `modifications.instructions` are appended, so those
-   * instructions are not checked. If any guardrail returns `action: 'block'`,
-   * the approval is overridden: the tool call is skipped, the agent does not
-   * run, or the final output is rejected. A `beforeEmergent` approval is not
-   * checked.
+   * `beforeReturn` request, `agency()` runs the built-in checks named by
+   * {@link postApprovalGuardrails} over the tool call's name and arguments,
+   * the agent's name and input, or the final text. These are fixed pattern
+   * checks inside `agency()`, not guardrail packs. The agent's input is
+   * checked as the strategy passes it, before the approval's
+   * `modifications.instructions` are appended, and the final text before the
+   * approval's `modifications.output` replaces it, so neither is checked. If
+   * a check matches, the approval is overridden: the tool call is skipped,
+   * the agent does not run, or the final output is rejected. A
+   * `beforeEmergent` approval is not checked.
    *
    * Set to `false` to disable this safety net and give full autonomy to the
    * HITL handler's decision.
@@ -292,12 +302,14 @@ export interface HitlConfig {
   guardrailOverride?: boolean;
 
   /**
-   * Guardrail IDs to run as a post-approval safety check.
+   * Ids of the built-in post-approval checks to run.
    *
-   * Only evaluated when {@link guardrailOverride} is not `false`. These
-   * guardrails are invoked after the HITL handler approves a `beforeTool`,
-   * `beforeAgent` or `beforeReturn` request and can veto the approval if
-   * they detect destructive patterns.
+   * Only evaluated when {@link guardrailOverride} is not `false`, after the
+   * HITL handler approves a `beforeTool`, `beforeAgent` or `beforeReturn`
+   * request. Two ids have a check: `code-safety` (destructive commands and
+   * statements such as `rm -rf /` and `DROP TABLE`) and `pii-redaction`
+   * (unredacted SSNs and card numbers). Any other id passes without a check;
+   * the guardrail packs registered with a runtime are not consulted.
    *
    * @default ['pii-redaction', 'code-safety']
    */
@@ -313,10 +325,11 @@ export interface EmergentConfig {
   /** Whether runtime agent synthesis is enabled. */
   enabled: boolean;
   /**
-   * Scope in which synthesised agents are visible.
-   * - `"session"` — ephemeral; discarded when the run ends.
-   * - `"agent"` — persisted for the lifetime of the parent agent instance.
-   * - `"shared"` — persisted globally across all agent instances.
+   * Intended scope of synthesised agents: `"session"`, `"agent"` or
+   * `"shared"`. `agency()` does not read it: the hierarchical strategy keeps
+   * the specialists the manager spawns in the roster of that call alone, and
+   * the next call starts from the configured roster, whatever this field
+   * names.
    */
   tier?: 'session' | 'agent' | 'shared';
   /** When `true`, a separate judge agent evaluates emergent agents before use. */
@@ -703,7 +716,7 @@ export interface ApprovalRequest {
    * - `"agent"` — an agent invocation.
    * - `"emergent"` — synthesis of a new runtime agent.
    * - `"output"` — the final answer before returning to the caller.
-   * - `"strategy-override"` — the orchestrator wants to change the execution strategy.
+   * - `"strategy-override"` — reserved; nothing raises it (see `beforeStrategyOverride`).
    */
   type: 'tool' | 'agent' | 'emergent' | 'output' | 'strategy-override';
   /** Name of the agent that triggered the approval request. */
@@ -714,15 +727,24 @@ export interface ApprovalRequest {
   description: string;
   /** Structured details about the pending action (tool args, agent config, etc.). */
   details: Record<string, unknown>;
-  /** Snapshot of run context at the time the request was raised. */
+  /**
+   * Run context. A `beforeReturn` (`"output"`) request fills it from the
+   * result it approves: its agent calls, token total and cost, and the
+   * milliseconds since the call started. An `"agent"` or `"emergent"`
+   * request carries zeros and the strategy's own list of agent calls, not a
+   * copy: it holds the calls made before the request and grows as later
+   * calls finish, including calls of the same graph tier that finish while
+   * the request waits (under the `parallel` strategy it is an empty list of
+   * its own). A `"tool"` request carries no agent calls and zeros.
+   */
   context: {
-    /** All agent call records completed so far in this run. */
+    /** Agent call records (see above for which requests carry them). */
     agentCalls: AgentCallRecord[];
-    /** Cumulative token count up to this point. */
+    /** Total tokens of the result, on a `beforeReturn` request; `0` on the others. */
     totalTokens: number;
-    /** Cumulative cost in USD up to this point. */
+    /** Total cost in USD of the result, on a `beforeReturn` request; `0` on the others. */
     totalCostUSD: number;
-    /** Wall-clock milliseconds elapsed since the run started. */
+    /** Milliseconds since the call started, on a `beforeReturn` request; `0` on the others. */
     elapsedMs: number;
   };
 }
@@ -903,18 +925,18 @@ export interface GuardrailEvent {
 }
 
 /**
- * Emitted when a post-approval guardrail overrides an HITL approval.
+ * Emitted when the post-approval check overrides an HITL approval.
  *
- * This event fires after a tool call has been approved by the HITL handler
- * (auto-approve, LLM judge, or human) but a guardrail detected a
- * destructive pattern and vetoed the execution.
+ * This event fires after the HITL handler (auto-approve, LLM judge, or
+ * human) approved a tool call, an agent run or the final output, and a
+ * built-in check named in `postApprovalGuardrails` matched and vetoed it.
  */
 export interface GuardrailHitlOverrideEvent {
-  /** The guardrail ID that triggered the override. */
+  /** The id of the check that triggered the override. */
   guardrailId: string;
   /** Human-readable reason for the override. */
   reason: string;
-  /** The tool name that was blocked. */
+  /** What was blocked: the tool's name, `agent:<name>` for an agent run, or `return` for the final output. */
   toolName: string;
   /** Unix timestamp in milliseconds. */
   timestamp: number;
@@ -950,9 +972,11 @@ export type AgencyTraceEvent =
 // ---------------------------------------------------------------------------
 
 /**
- * Event callbacks registered on `BaseAgentConfig.on`.
- * All handlers are fire-and-forget (return `void`); errors thrown inside them
- * are swallowed to prevent disrupting the main run.
+ * Event callbacks registered on `BaseAgentConfig.on`. Each returns `void`.
+ * Most are called directly, so an error thrown inside one propagates into
+ * the run: an `agentStart` callback that throws ends the call with its
+ * error. The callbacks of a `beforeTool` approval and the `guardrailResult`
+ * calls catch the error and log a warning instead.
  */
 export interface AgencyCallbacks {
   /** Called immediately before an agent starts. */
@@ -976,9 +1000,9 @@ export interface AgencyCallbacks {
   /** Called after an approval decision is resolved. */
   approvalDecided?: (e: ApprovalDecision) => void;
   /**
-   * Called when a post-approval guardrail overrides an HITL approval.
-   * Fires after a tool call was approved but a guardrail detected a
-   * destructive pattern and vetoed the execution.
+   * Called when the post-approval check overrides an HITL approval: a tool
+   * call, an agent run or the final output was approved, and a built-in
+   * check matched and vetoed it.
    */
   guardrailHitlOverride?: (e: GuardrailHitlOverrideEvent) => void;
 }
@@ -1288,7 +1312,7 @@ export type Agency = Agent;
  * Each field is optional; sensible defaults are applied at runtime.  For the
  * lightweight `agent()` helper, only `model`/`provider`, `instructions`, and
  * `tools` are typically needed.  `agency()` additionally consumes orchestration,
- * session, aggregate usage, resource control, and `beforeReturn` HITL settings.
+ * session, aggregate usage, resource control, and HITL approval settings.
  * The richer fields (`rag`, `discovery`, `guardrails`, `voice`, `channels`,
  * `provenance`, etc.) remain part of the shared config surface for forward
  * compatibility, but are still more fully enforced by the deeper runtime.
@@ -1434,14 +1458,16 @@ export interface BaseAgentConfig {
   /** Runtime capability discovery configuration. */
   discovery?: DiscoveryConfig;
   /**
-   * Guardrail policy identifiers or structured config.
-   * - `string[]` — shorthand; applies to both input and output.
-   * - `GuardrailsConfig` — full control with separate input/output lists.
+   * Guardrail policy identifiers or structured config. `agency()` evaluates
+   * none of them (see {@link GuardrailsConfig}), and `agent()` does not apply
+   * them.
+   * - `string[]` — shorthand; `agency()` reads it as the output list.
+   * - `GuardrailsConfig` — separate input and output lists.
    */
   guardrails?: string[] | GuardrailsConfig;
-  /** Security tier controlling permitted tools and capabilities. */
+  /** Security tier. Accepted and not enforced (see {@link SecurityTier}). */
   security?: { tier: SecurityTier };
-  /** Fine-grained tool and resource permission overrides. */
+  /** Tool and resource permission fields. Accepted and not enforced (see {@link PermissionsConfig}). */
   permissions?: PermissionsConfig;
   /** Human-in-the-loop approval configuration. */
   hitl?: HitlConfig;
@@ -1505,13 +1531,16 @@ export interface BaseAgentConfig {
   cognitiveMechanisms?: import('../cognition/memory/mechanisms/types.js').CognitiveMechanismsConfig;
 
   /**
-   * Auto-verify citations after every generation.
+   * Verify citations after each `generate()` call of an `agent()`.
    *
-   * When set, the agent retrieves sources for each user input, runs
-   * generation, then scores each atomic claim in the response against the
-   * retrieved sources via `CitationVerifier`. The resulting `VerifiedResponse`
-   * is attached to the generation result's `grounding` field — no separate
-   * `verifier.verify(text, sources)` call needed.
+   * When set, `generate()` produces the answer, then fetches sources for the
+   * user's input with the configured retriever and scores each atomic claim
+   * of the answer against them via `CitationVerifier`. The resulting
+   * `VerifiedResponse` is attached to the result's `grounding` field — no
+   * separate `verifier.verify(text, sources)` call needed. `stream()` and a
+   * session's `send()` do not verify. When the retriever returns no sources,
+   * or retrieval or the verifier fails, `grounding` stays unset and the
+   * answer is returned as generated.
    *
    * Pass a config object with the embedding function and the source
    * retriever the verifier should use:
@@ -1522,7 +1551,7 @@ export interface BaseAgentConfig {
    *   provider: 'openai',
    *   model: 'gpt-4o',
    *   verifyCitations: {
-   *     embedFn:  (texts) => embeddingManager.embedBatch(texts),
+   *     embedFn: async (texts) => (await embeddingManager.generateEmbeddings({ texts })).embeddings,
    *     retrieve: (query) => retriever.search(query),
    *   },
    * });
@@ -1545,10 +1574,10 @@ export interface BaseAgentConfig {
  *
  * 1. **Auto-wire via `retrievalAugmentor`** (preferred for any agent already
  *    using RAG): pass an `IRetrievalAugmentor` and the verifier derives both
- *    `embedFn` and `retrieve` from it. The verifier reuses the augmentor's
- *    embedding model and retrieves through `retrieveContext()` so the
- *    sources scored against generated claims are exactly the same sources
- *    the agent saw at prompt-construction time.
+ *    `embedFn` and `retrieve` from it: it embeds with the augmentor's
+ *    `embedTexts()` and retrieves through `retrieveContext()`. `agent()`
+ *    calls the augmentor only for this check, after the answer is
+ *    generated.
  *
  * 2. **Manual wiring** (for non-augmentor pipelines or testing): supply
  *    `embedFn` and `retrieve` directly.
@@ -1574,9 +1603,10 @@ export interface VerifyCitationsConfig {
   embedFn?: (texts: string[]) => Promise<number[][]>;
 
   /**
-   * Function the agent calls before each generation to fetch the sources
-   * the response will be verified against. Typically wraps your vector
-   * store or retrieval pipeline. Required unless `retrievalAugmentor` is set.
+   * Function `generate()` calls after each answer, with the user's input as
+   * the query, to fetch the sources the answer is verified against.
+   * Typically wraps your vector store or retrieval pipeline. Required unless
+   * `retrievalAugmentor` is set.
    */
   retrieve?: (
     query: string,

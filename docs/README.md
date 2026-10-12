@@ -65,6 +65,7 @@
 - [**Streaming Semantics**](./architecture/STREAMING_SEMANTICS.md) — Raw live chunks vs finalized approved output across `textStream`, `fullStream`, `text`, and `finalTextStream`
 - [**Evaluation Guide**](./observability/EVALUATION.md) — Test cases, graders, LLM-as-judge, A/B testing, experiment tracking
 - [**Evaluation Framework**](./observability/EVALUATION_FRAMEWORK.md) — Testing, scoring, and quality assurance
+- [**GMI versus agent() Study**](./evaluation/GMI_VS_AGENT.md): the study that compares a GMI, agent() and a bare model loop on companion conversation, its design and its published reports
 - [**Query Router**](./QUERY_ROUTER.md) — Tiered query classification, retrieval routing, keyword fallback, and grounded answer generation
 - [**Image Generation Guide**](./features/IMAGE_GENERATION.md) — Provider-agnostic image generation across cloud and local backends
 - [**Capability Discovery Guide**](./extensions/DISCOVERY.md) — Three-tier semantic discovery, CAPABILITY.yaml, meta-tool

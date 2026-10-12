@@ -129,6 +129,7 @@ const publicationManifest = [
   siteDoc('benchmarks/index.md', 'benchmarks/index.md', 'Memory Benchmarks', 'Benchmarks', 1, {
     categoryIndex: true,
   }),
+  agentosDoc('evaluation/GMI_VS_AGENT.md', 'benchmarks/gmi-vs-agent.md', 'GMI versus agent() Study', 'Benchmarks', 2),
 
   agentosDoc('ARCHITECTURE.md', 'architecture/system-architecture.md', 'System Architecture', 'Concepts', 1),
   agentosDoc('GMI.md', 'architecture/gmi.md', 'Generalized Mind Instances (GMIs)', 'Concepts', 0.5),

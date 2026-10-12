@@ -34,6 +34,8 @@ A plain agent, `agent({...})` without `runtime: 'gmi'`, calls the model with a s
 
 Reusable without a GMI: the eight memory mechanisms, the observer and reflector pipeline, HyDE and graph retrieval all belong to `CognitiveMemoryManager` and the RAG layer. A host wires them (wilds-ai and Wunderland build the manager themselves). `agent()` without `runtime: 'gmi'` runs none of them and warns when given `cognitiveMechanisms`; with `runtime: 'gmi'` and memory on (`memory` set, or `cognition: 'full'`), the agent's own `CognitiveMemoryManager` runs the mechanisms, `cognitiveMechanisms` or all eight at their defaults ([GMIs from agent()](#gmis-from-agent)). Shared by both paths: the model and provider, tools and extensions, and the HEXACO trait values. `agent()` writes those values into the prompt once; a GMI also carries them as persona state. On the full runtime, with self-improvement enabled, `adapt_personality` can change that state; a GMI from `agent({ runtime: 'gmi' })` or `gmi()` gets no such tool, so its traits stay as given.
 
+The [GMI versus agent() Study](./evaluation/GMI_VS_AGENT.md) measures whether these additions improve companion conversation, against `agent()` and a bare model loop.
+
 ## Getting a GMI
 
 ```typescript
@@ -489,6 +491,7 @@ The classes in [`src/agents/agency/`](https://github.com/framerslab/agentos/tree
 - [Emergent Capabilities](/features/emergent-capabilities): runtime tool forging and `spawn_specialist`
 - [Guardrails](/features/guardrails): how guardrails intercept tool calls and generation
 - [LLM Providers](/architecture/llm-providers): the provider implementations
+- [GMI versus agent() Study](./evaluation/GMI_VS_AGENT.md): the study design that compares a GMI with agent() and a bare model loop, and its reports
 
 ---
 

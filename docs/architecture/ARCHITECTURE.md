@@ -16,7 +16,7 @@ For specific subsystem deep-dives, see:
 
 ![AgentOS layered architecture: seven cooperating layers from the API surface (generateText, streamText, generateObject, generateImage, agent, agency, mission) through the cognitive substrate (GMI, GMIManager, PersonaOverlayManager, SentimentTracker, MetapromptExecutor), memory and RAG (working memory, five trace types, Ebbinghaus decay, 8 cognitive mechanisms, observer and reflector, HyDE, GraphRAG, hybrid retrieval, 7 vector stores), tools, skills and extensions (ToolOrchestrator, ExtensionRegistry, SkillRegistry, CapabilityDiscoveryEngine, ForgeToolMetaTool, 100+ extension packs, 88 SKILL.md skills), guardrails and HITL (ParallelGuardrailDispatcher, 4-tier PII redaction, ML classifiers, Grounding Guard, HumanInteractionManager), orchestration (workflow, mission, AgentGraph, CompiledExecutionGraph, ICheckpointStore), down to I/O and providers (voice pipeline, channels, media generation, 13 LLM providers, fallback chains).](/img/diagrams/system-architecture.svg)
 
-Each layer above corresponds to a section below. The mapping is one-to-one: layer 1 → [API Surface Contract](#api-surface-contract), layer 2 → [GMI](#gmi-generalized-mind-instance), layer 3 → [Memory System](#memory-system), layer 4 → [Tools, Skills, Extensions](#tools-skills--extensions), layer 5 → [Safety & Guardrails](#safety--guardrails), layer 6 → [Orchestration](#orchestration), layer 7 → [Perception & Channels](#perception--channels). The component pills inside each layer in the diagram are the same class and function names you'll see in the subsystem write-ups.
+The sections below follow the layers: layer 1 → [API Surface Contract](#api-surface-contract), layer 2 → [GMI](#gmi-generalized-mind-instance), layer 3 → [Memory System](#memory-system) and [RAG System](#rag-system), layer 4 → [Tool System](#tool-system) and [Extension & Guardrail Runtime](#extension--guardrail-runtime), layer 5 → [Guardrails](#guardrails) and [Human-in-the-Loop](#human-in-the-loop), layer 6 → [Multi-Agent Coordination](#multi-agent-coordination), layer 7 → [Voice Pipeline](#voice-pipeline) and [Channels](#channels). The class and function names on the diagram's pills are the names in the code.
 
 ---
 
@@ -348,14 +348,14 @@ Each guardrail service can also configure timeouts via `config.timeoutMs`. If a 
 
 ### Built-in Guardrail Packs
 
-Six built-in packs ship from [`packages/agentos-extensions/registry/curated/safety/`](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/safety):
+Six built-in packs ship on npm as `@framers/agentos-ext-<id>`. The source of `ml-classifiers`, `topicality` and `content-policy-rewriter` is in [`agentos-extensions/registry/curated/safety/`](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/safety); the `pii-redaction`, `code-safety` and `grounding-guard` folders there hold a README that points to their npm packages:
 
 - `pii-redaction` — sanitizer; redacts personally identifiable information before tokens leave the runtime
 - `ml-classifiers` — toxicity / hate-speech / harm classification via on-device ONNX models
-- `topicality` — LLM-as-judge classifier that rejects off-topic / out-of-scope prompts
+- `topicality` — input check that blocks a prompt matching a blocked topic and flags one outside the allowed topics, by embedding similarity, with an LLM judge and then keyword matching as fallbacks
 - `code-safety` — static + heuristic detection of dangerous code patterns in agent-emitted snippets
 - `grounding-guard` — verifies output claims against retrieved RAG sources (citation faithfulness)
-- `content-policy-rewriter` — sanitizer; rewrites policy-violating output in-place rather than blocking
+- `content-policy-rewriter` — output check that rewrites text in a category set to `sanitize` and blocks text in a category set to `block`; by default only the `illegal_harmful` category is on, and it blocks
 
 For details on writing custom guardrails, see [Creating Guardrails](../safety/CREATING_GUARDRAILS.md) and [Guardrails Usage](../safety/GUARDRAILS_USAGE.md).
 
