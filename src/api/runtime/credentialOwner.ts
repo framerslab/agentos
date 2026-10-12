@@ -17,21 +17,23 @@ export interface ProviderAndModel {
 /**
  * Whether credentials set beside `owner` go with a call to `target`: false
  * when the call resolves to another provider than the owner's. The owner's
- * provider is the one its provider and model resolve to, or, when its model
- * does not resolve (a malformed id), the provider it names. An owner that
- * names no provider and no model, or only a model that does not resolve, is
- * for whichever provider the call names, as it always was; a target that does
+ * provider is the one it names, even beside a model whose `provider:` prefix
+ * names another (a call with both and a key is refused for that conflict);
+ * when it names only a model, it is the provider that model resolves to. An
+ * owner that names neither, or only a model that does not resolve, is for
+ * whichever provider the call names, as it always was; a target that does
  * not resolve fails in the call's own resolution, which reports why.
  */
 export function credentialsGoWith(owner: ProviderAndModel, target: ProviderAndModel): boolean {
-  if (owner.provider === undefined && owner.model === undefined) return true;
-  let ownerProviderId: string | undefined;
-  try {
-    ownerProviderId = resolveModelOption({ provider: owner.provider, model: owner.model }, 'text').providerId;
-  } catch {
-    ownerProviderId = owner.provider;
+  let ownerProviderId = owner.provider;
+  if (ownerProviderId === undefined) {
+    if (owner.model === undefined) return true;
+    try {
+      ownerProviderId = resolveModelOption({ model: owner.model }, 'text').providerId;
+    } catch {
+      return true;
+    }
   }
-  if (ownerProviderId === undefined) return true;
   try {
     return resolveModelOption({ provider: target.provider, model: target.model }, 'text').providerId === ownerProviderId;
   } catch {

@@ -21,7 +21,8 @@ describe('credentialsGoWith', () => {
     expect(credentialsGoWith({ provider: 'openai', model: 'gpt-4o' }, { provider: 'openai', model: 'anthropic:claude-x' })).toBe(false);
   });
 
-  it('reads the provider an owner names when its model does not resolve', () => {
+  it('takes the provider an owner names as its own, whatever its model says', () => {
+    expect(credentialsGoWith({ provider: 'openai', model: 'anthropic:claude-x' }, { provider: 'anthropic', model: 'claude-x' })).toBe(false);
     expect(credentialsGoWith({ provider: 'openai', model: 'openai:' }, { provider: 'anthropic', model: 'claude-x' })).toBe(false);
     expect(credentialsGoWith({ provider: 'openai', model: 'openai:' }, { provider: 'openai', model: 'gpt-4.1' })).toBe(true);
   });
