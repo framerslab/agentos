@@ -162,10 +162,15 @@ export {
   extractWikiLinks,
   WIKI_PAGE_TYPES,
   isWikiPageType,
+  InvalidWikiPageIdError,
+  isWikiPageId,
+  assertWikiPageId,
+  MAX_WIKI_PAGE_ID_LENGTH,
 } from './cognition/substrate/memory/wiki/index.js';
 export type {
   WikiPage,
   WikiPageType,
+  WikiPageIdProblem,
   MetaIndex,
   IndexResult as WikiIndexResult,
   CompileResult as WikiCompileResult,

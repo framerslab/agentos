@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { parsePage, serializePage, renderCatalog } from './WikiPageCodec.js';
+import { isWikiPageId, resolveWikiPagePath } from './WikiPageId.js';
 import type { WikiPage, MetaIndex, IndexResult } from './types.js';
 
 /** The slice of the Memory facade the store depends on (injected for testability). */
@@ -29,11 +30,17 @@ export class WikiMemoryStore {
     this.agentId = opts.agentId;
   }
 
+  /**
+   * The file of page `id`, inside memory/. The id is checked first, so a refused id never reaches the disk.
+   *
+   * @throws InvalidWikiPageIdError when the id does not have the wiki's id form (see `isWikiPageId`) or its
+   *   file would be outside memory/.
+   */
   private pagePath(id: string): string {
-    return path.join(this.memoryDir, `${id}.md`);
+    return resolveWikiPagePath(this.memoryDir, id);
   }
 
-  /** Read every page file under memory/ (excluding index.md and .meta/). */
+  /** Read every page file under memory/ (excluding index.md and every file or folder whose name starts with a dot). */
   async load(): Promise<WikiPage[]> {
     const ids = await this.listPageIds();
     const pages: WikiPage[] = [];
@@ -44,16 +51,26 @@ export class WikiMemoryStore {
     return pages;
   }
 
+  /**
+   * Read page `id`, or null when it has no file or the file cannot be read.
+   *
+   * @throws InvalidWikiPageIdError when the id is refused (see `isWikiPageId`); nothing is read.
+   */
   async readPage(id: string): Promise<WikiPage | null> {
+    const file = this.pagePath(id);
     try {
-      const raw = await fs.readFile(this.pagePath(id), 'utf8');
+      const raw = await fs.readFile(file, 'utf8');
       return parsePage(id, raw);
     } catch {
       return null;
     }
   }
 
-  /** Write a page, then refresh index.md from the full page set. */
+  /**
+   * Write a page, then refresh index.md from the full page set.
+   *
+   * @throws InvalidWikiPageIdError when the page's id is refused (see `isWikiPageId`); nothing is written.
+   */
   async writePage(page: WikiPage): Promise<void> {
     const file = this.pagePath(page.id);
     await fs.mkdir(path.dirname(file), { recursive: true });
@@ -74,7 +91,11 @@ export class WikiMemoryStore {
     await fs.writeFile(path.join(this.memoryDir, 'index.md'), renderCatalog(pages));
   }
 
-  /** Recursively list page ids (relative path, no extension), skipping index.md and .meta/. */
+  /**
+   * Recursively list page ids (the path under memory/ with `/` between folders, no extension), skipping
+   * index.md and every file or folder whose name starts with a dot (`.meta/` among them). A file whose path
+   * does not make a valid page id is not a page, so every id listed is one `readPage` accepts.
+   */
   private async listPageIds(): Promise<string[]> {
     const out: string[] = [];
     const walk = async (relDir: string): Promise<void> => {
@@ -86,12 +107,14 @@ export class WikiMemoryStore {
         return;
       }
       for (const e of entries) {
-        const rel = relDir ? path.join(relDir, e.name) : e.name;
+        if (e.name.startsWith('.')) continue;
+        // Ids join folders with `/` on every platform, the form the compiler writes and readPage takes.
+        const rel = relDir ? `${relDir}/${e.name}` : e.name;
         if (e.isDirectory()) {
-          if (e.name === '.meta') continue;
           await walk(rel);
         } else if (e.name.endsWith('.md') && rel !== 'index.md') {
-          out.push(rel.slice(0, -3));
+          const id = rel.slice(0, -3);
+          if (isWikiPageId(id)) out.push(id);
         }
       }
     };

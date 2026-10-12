@@ -1,5 +1,6 @@
 /** @fileoverview Folds new memory traces into wiki pages via LLM merge (merge-not-clobber). */
 import { extractWikiLinks } from './WikiPageCodec.js';
+import { assertWikiPageId, InvalidWikiPageIdError } from './WikiPageId.js';
 import type { WikiPage, WikiPageType, CompileResult } from './types.js';
 
 interface TraceLike {
@@ -40,6 +41,11 @@ const MERGE_PROMPT = (currentBody: string, facts: string[]): string =>
 export class WikiCompiler {
   constructor(private readonly opts: WikiCompilerOptions) {}
 
+  /**
+   * Fold traces into the pages the cluster step assigns them to. An assignment whose page id the wiki
+   * refuses (see `isWikiPageId`) is not read, merged or written: it is reported in `conflicts`, with the
+   * reason as its note, and the other assignments go on.
+   */
   async compile(input: {
     traces: TraceLike[];
     reason: 'consolidation' | 'session-end' | 'explicit';
@@ -58,7 +64,16 @@ export class WikiCompiler {
       const facts = a.traceIds.map((id) => byId.get(id)?.content).filter((c): c is string => !!c);
       if (facts.length === 0) continue;
 
-      const current = await this.opts.store.readPage(a.pageId);
+      let current: WikiPage | null;
+      try {
+        // Checked before the read, so a refused id costs no merge call and is never written.
+        assertWikiPageId(a.pageId);
+        current = await this.opts.store.readPage(a.pageId);
+      } catch (err) {
+        if (!(err instanceof InvalidWikiPageIdError)) throw err;
+        result.conflicts.push({ pageId: String(a.pageId), note: err.message });
+        continue;
+      }
       const mergedBody = (await this.opts.llm(MERGE_PROMPT(current?.body ?? '', facts))).trim();
 
       const type: WikiPageType = current?.type ?? inferType(a.pageId);
