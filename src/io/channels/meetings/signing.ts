@@ -122,31 +122,40 @@ const SECRET_BOX_KEY_ID = 'box';
  * Seals a run's meeting url at rest under one 32-byte key the host holds, with
  * the library's AES-256-GCM sealing ({@link sealSecret}, {@link openSecret}): a
  * fresh nonce per seal, so one value seals to a different text each time, and
- * the text `v1.box.<base64url(nonce | ciphertext | tag)>`.
+ * the text `v1.box.<base64url(nonce | ciphertext | tag)>`. A context given to
+ * `seal` (the run's id) is bound into the text, so a text moved to another
+ * run's row does not open there.
  */
 export class SecretBox {
   private readonly key: SealingKey;
 
   /**
-   * @param key - The host's key: 32 bytes.
+   * @param key - The host's key: 32 bytes. The box keeps a copy, so a host that wipes or reuses its buffer afterwards does not change the box's key.
    * @throws RangeError when `key` is not 32 bytes.
    */
   constructor(key: Buffer) {
     if (key.length !== 32) throw new RangeError('SecretBox needs a 32-byte key');
-    this.key = { id: SECRET_BOX_KEY_ID, key };
+    this.key = { id: SECRET_BOX_KEY_ID, key: Buffer.from(key) };
   }
 
-  /** Seals `plain`; the sealed text differs on every call. */
-  seal(plain: string): string {
-    return sealSecret(plain, this.key.key, this.key.id);
+  /**
+   * Seals `plain`; the sealed text differs on every call.
+   *
+   * @param plain - The text to seal.
+   * @param context - What the text belongs to (the run's id), bound into the text as additional authenticated data; `open` must be given the same. Empty when absent.
+   */
+  seal(plain: string, context = ''): string {
+    return sealSecret(plain, this.key.key, this.key.id, context);
   }
 
   /**
    * Opens a text this box's key sealed.
    *
-   * @throws SealedSecretError when the text is not a sealed text, was sealed under another key, or was changed.
+   * @param sealed - The sealed text.
+   * @param context - The context the text was sealed with; empty when absent.
+   * @throws SealedSecretError when the text is not a sealed text, was sealed under another key or with another context, or was changed.
    */
-  open(sealed: string): string {
-    return Buffer.from(openSecret(sealed, [this.key])).toString('utf8');
+  open(sealed: string, context = ''): string {
+    return Buffer.from(openSecret(sealed, [this.key], context)).toString('utf8');
   }
 }

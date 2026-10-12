@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { SealedSecretError } from '../../../../core/llm/auth/sealing.js';
 import { envelopeHeaders, hashWorkerToken, mintWorkerToken, SecretBox, signEnvelope, verifyEnvelope, workerTokenMatches } from '../signing.js';
 
 const secret = 'not-a-real-secret';
@@ -52,5 +53,20 @@ describe('SecretBox', () => {
     expect(() => box.open(sealed.slice(0, -1) + (sealed.endsWith('A') ? 'Q' : 'A'))).toThrow();
     expect(() => new SecretBox(Buffer.alloc(31)).seal('x')).toThrow(RangeError);
     expect(() => new SecretBox(Buffer.alloc(32, 8)).open(sealed)).toThrow();
+  });
+  it('keeps its own copy of the key', () => {
+    const key = Buffer.alloc(32, 7);
+    const box = new SecretBox(key);
+    const sealed = box.seal('https://meet.google.com/abc-defg-hij');
+    key.fill(0); // the host wipes its buffer
+    expect(box.open(sealed)).toBe('https://meet.google.com/abc-defg-hij');
+    expect(new SecretBox(Buffer.alloc(32, 7)).open(box.seal('x'))).toBe('x');
+  });
+  it('opens a text only with the context it was sealed with', () => {
+    const box = new SecretBox(Buffer.alloc(32, 7));
+    const sealed = box.seal('https://meet.google.com/abc-defg-hij', 'r1');
+    expect(box.open(sealed, 'r1')).toBe('https://meet.google.com/abc-defg-hij');
+    expect(() => box.open(sealed, 'r2')).toThrow(SealedSecretError); // moved to another run's row
+    expect(() => box.open(sealed)).toThrow(SealedSecretError);
   });
 });
