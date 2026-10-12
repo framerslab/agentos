@@ -64,7 +64,13 @@ export function harness() {
   const request = { ownerRef: 'acct_1', platform: 'google_meet' as const, meetingUrl: 'https://meet.google.com/abc-defg-hij', botName: "Dana's notes", keep: 'none' as const, notice: { text: 'the notice', version: '1', lateArrivalText: 'the short notice' }, stopPhrase: 'stop taking notes', idempotencyKey: 'k1' };
   const report = (runId: string, type: Parameters<typeof mockEventContext>[1], data: Parameters<typeof mockEventContext>[2] = {}, at = clock.now()) =>
     manager.processProviderEvent('mock', mockEventContext(runId, type, data, at, provider.tokenOf(runId)));
-  return { clock, provider, entitlement, rooms, stores, manager, seen, request, report };
+  /** Another manager on the same stores and provider: a second process, or the first one after a restart, with nothing of its memory. */
+  const peer = (managerId: string) => {
+    const other = new MeetingManager({ managerId, stores, room: new MeetingRoom(rooms), reportUrlFor: (runId, p) => `https://product.test/events/${p}/${runId}` });
+    other.registerProvider(provider);
+    return other;
+  };
+  return { clock, provider, entitlement, rooms, stores, manager, seen, request, report, peer };
 }
 
 describe('sendBot', () => {

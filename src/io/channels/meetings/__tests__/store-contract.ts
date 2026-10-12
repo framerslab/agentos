@@ -180,6 +180,17 @@ export function meetingStoreContract(name: string, make: () => Promise<ContractS
         expect((await r.findByIdempotencyKey('owner-a', 'same-key'))?.runId).toBe('idem-1');
         expect((await r.findByIdempotencyKey('owner-b', 'same-key'))?.runId).toBe('idem-3');
       });
+      it('keeps the manager\'s timers on the row, and clears one a patch gives as undefined', async () => {
+        const r = stores.runs;
+        await r.insert({ runId: 'r1', ownerRef: 'a', providerName: 'mock', platform: 'google_meet', state: 'leaving', keep: 'none', meetingUrl: 'u', botName: 'b', notice: { text: 'n', version: '1', lateArrivalText: 's' }, stopPhrase: 'stop', limits: { waitingRoomMs: 1, aloneMs: 1, totalMs: 1 }, requestedAt: 0, joinAt: 0, billedSeconds: 0 });
+        await r.update('r1', { leaveCommandedAt: 5, captureSuspendedAt: 6, aloneSince: 7 }, 'leaving');
+        expect(await r.get('r1')).toMatchObject({ leaveCommandedAt: 5, captureSuspendedAt: 6, aloneSince: 7 });
+        await r.update('r1', { captureSuspendedAt: undefined, aloneSince: undefined });
+        const cleared = await r.get('r1');
+        expect(cleared?.leaveCommandedAt).toBe(5);
+        expect(cleared?.captureSuspendedAt).toBeUndefined();
+        expect(cleared?.aloneSince).toBeUndefined();
+      });
     });
 
     describe('shared contracts', () => {

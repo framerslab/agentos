@@ -3,8 +3,9 @@
  *
  * Owns a run's life: the state machine, the capture interlock, the stop
  * command, the purge sequence behind its fence, the limits, the meter and the
- * reconciliation. Keeps nothing durable itself: every row is in an injected
- * store, so several manager processes may share one database.
+ * reconciliation. Keeps nothing about a run in process: every row, and every
+ * timer the limits run on, is in an injected store, so several manager
+ * processes may share one database and one that restarts carries on.
  */
 import { randomUUID } from 'node:crypto';
 import type { ITranscriptInputSink, TranscriptTurn } from '../../voice-pipeline/types.js';
@@ -170,12 +171,6 @@ export class MeetingManager {
   private readonly killAfterMs: number;
   private readonly minReservationSeconds: number;
   private readonly purgeHooks: Array<(runId: string) => Promise<void>> = [];
-  /** Runs whose capture is suspended, with the time of the suspension. */
-  private readonly suspendedAt = new Map<string, number>();
-  /** Runs told to leave, with the time, for the kill after `killAfterMs`. */
-  private readonly leaveAt = new Map<string, number>();
-  /** Runs alone, with the time they became alone. */
-  private readonly aloneSince = new Map<string, number>();
   private lastReconcileAt = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
 
@@ -606,8 +601,7 @@ export class MeetingManager {
         await this.move(run, 'waiting_room', {}, 'bot:waiting_room', undefined, event);
         return true;
       case 'in_call':
-        await this.move(run, 'in_call_notice_pending', { joinedAt: event.at, participantCount: event.data?.participantCount }, 'bot:in_call', undefined, event);
-        this.trackAlone(run.runId, event.data?.participantCount, event.at);
+        await this.move(run, 'in_call_notice_pending', { joinedAt: event.at, participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) }, 'bot:in_call', undefined, event);
         return true;
       case 'notice_posted': {
         // the notice alone does not open capture: the stop monitor must report a real observation after it (the interlock)
@@ -628,8 +622,7 @@ export class MeetingManager {
         await this.emitFrom(run, 'bot:capture_suspended', {}, event);
         return true;
       case 'participant_joined': {
-        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount })) ?? run;
-        this.trackAlone(run.runId, event.data?.participantCount, event.at);
+        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) })) ?? run;
         await this.emitFrom(updated, 'bot:participant_joined', { participantRef: event.data?.participantRef }, event);
         const provider = this.providers.get(run.providerName);
         if (updated.state === 'in_call' && provider?.capabilities.postsChat && !fenced) {
@@ -638,8 +631,7 @@ export class MeetingManager {
         return true;
       }
       case 'participant_left': {
-        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount })) ?? run;
-        this.trackAlone(run.runId, event.data?.participantCount, event.at);
+        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) })) ?? run;
         await this.emitFrom(updated, 'bot:participant_left', { participantRef: event.data?.participantRef }, event);
         return true;
       }
@@ -661,7 +653,6 @@ export class MeetingManager {
       }
       case 'left': {
         const reason = run.reason ?? event.data?.reason ?? 'ended';
-        this.leaveAt.delete(run.runId);
         if (run.state === 'purging') {
           await this.stores.runs.update(run.runId, { leftAt: event.at, reason, reportedSeconds: event.data?.seconds ?? run.reportedSeconds });
           return true;
@@ -688,11 +679,10 @@ export class MeetingManager {
     return !!text && text.toLowerCase().includes(run.stopPhrase.toLowerCase());
   }
 
-  private trackAlone(runId: string, count: number | undefined, at: number): void {
-    if (count === undefined) return;
-    if (count === 0) {
-      if (!this.aloneSince.has(runId)) this.aloneSince.set(runId, at);
-    } else this.aloneSince.delete(runId);
+  /** The alone timer's patch for a report of `count` participants besides the bot: started by the first report of none, kept while there is none, cleared when one is reported. */
+  private aloneTimer(run: MeetingRunRecord, count: number | undefined, at: number): Partial<MeetingRunRecord> {
+    if (count === undefined) return {};
+    return { aloneSince: count === 0 ? run.aloneSince ?? at : undefined };
   }
 
   /** Moves the run forward when the transition is allowed; a repeated state does nothing; a disallowed one is logged and dropped. */
@@ -718,7 +708,7 @@ export class MeetingManager {
       && run.monitorSeenAt !== undefined
       && run.monitorSeenAt >= run.noticePostedAt
       && this.now() - run.monitorSeenAt < this.monitorHeartbeatMs * this.monitorMissedBeats
-      && !this.suspendedAt.has(run.runId);
+      && run.captureSuspendedAt === undefined;
   }
 
   /** The capture interlock: `in_call`, the notice confirmed, and the stop monitor's own observation reported after the notice, no fence. */
@@ -726,12 +716,12 @@ export class MeetingManager {
     if (run.state !== 'in_call' || run.noticePostedAt === undefined || run.monitorSeenAt === undefined) return;
     if (run.monitorSeenAt < run.noticePostedAt) return; // a heartbeat from before the notice proves nothing about the chat being watched now
     if (this.now() - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats) return;
-    if (run.captureStartedAt !== undefined && !this.suspendedAt.has(run.runId)) return; // already capturing
+    if (run.captureStartedAt !== undefined && run.captureSuspendedAt === undefined) return; // already capturing
     const provider = this.providers.get(run.providerName);
     if (!provider) return;
     await provider.command(run.runId, { name: 'startCapture' });
-    this.suspendedAt.delete(run.runId);
-    const started = await this.stores.runs.update(run.runId, { captureStartedAt: run.captureStartedAt ?? this.now() }, 'in_call');
+    // the suspension is on the run, so the manager that hears the monitor recover resumes capture, whichever one suspended it
+    const started = await this.stores.runs.update(run.runId, { captureStartedAt: run.captureStartedAt ?? this.now(), captureSuspendedAt: undefined }, 'in_call');
     if (started) await this.emit('bot:capture_started', started, { resumed: run.captureStartedAt !== undefined });
   }
 
@@ -826,16 +816,17 @@ export class MeetingManager {
 
   // ── Ends ──
 
-  /** Tells the bot to leave, arms the kill, and moves the run to `leaving`. */
+  /**
+   * Moves the run to `leaving`, arms the kill and tells the bot to leave. The kill's deadline is armed on the run before
+   * the command goes, so a bot that does not leave is killed by whichever manager runs the limits, after a restart too,
+   * and a leave command that never reached the bot is followed by the kill.
+   */
   private async leave(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<boolean> {
     if (!canTransition(run.state, 'leaving') && run.state !== 'purging') return false;
     const provider = this.providers.get(run.providerName);
-    if (run.state !== 'purging') {
-      const moved = await this.stores.runs.update(run.runId, { state: 'leaving', reason }, run.state);
-      if (!moved) return false;
-    }
+    const armed: Partial<MeetingRunRecord> = run.state === 'purging' ? { leaveCommandedAt: this.now() } : { state: 'leaving', reason, leaveCommandedAt: this.now() };
+    if (!(await this.stores.runs.update(run.runId, armed, run.state))) return false;
     await provider?.command(run.runId, { name: 'leave', reason });
-    this.leaveAt.set(run.runId, this.now());
     return true;
   }
 
@@ -855,9 +846,8 @@ export class MeetingManager {
     if (pending.dispatch?.roomName) await this.config.room.delete(pending.dispatch.roomName);
     await this.stores.jobs.remove(run.runId);
     const now = this.now();
-    const failed = await this.stores.runs.update(run.runId, { ...contentFreeRun(pending), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, state: 'failed', leftAt: now, doneAt: now, billedSeconds: 0, cleanupPending: false }, pending.state);
+    const failed = await this.stores.runs.update(run.runId, { ...contentFreeRun(pending), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'failed', leftAt: now, doneAt: now, billedSeconds: 0, cleanupPending: false }, pending.state);
     if (!failed) return;
-    this.forget(run.runId);
     await this.emit('bot:left', failed, { reason: failed.reason, message });
     await this.emit('bot:done', failed, { reason: failed.reason, billedSeconds: 0 });
   }
@@ -900,9 +890,8 @@ export class MeetingManager {
     }
     const free = contentFreeRun(run);
     const kept = run.keep === 'none' ? free : { ...free, botName: run.botName, notice: run.notice };
-    const done = await this.stores.runs.update(run.runId, { ...kept, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, state: 'done', doneAt: now, billedSeconds: billed, cleanupPending: false }, 'left');
+    const done = await this.stores.runs.update(run.runId, { ...kept, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'done', doneAt: now, billedSeconds: billed, cleanupPending: false }, 'left');
     if (!done) return;
-    this.forget(run.runId);
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
   }
 
@@ -911,7 +900,6 @@ export class MeetingManager {
     if (!current || TERMINAL_RUN_STATES.has(current.state)) return;
     if (current.state === 'purging') {
       await this.stores.runs.update(run.runId, { leftAt: at, reportedSeconds: seconds ?? current.reportedSeconds }, 'purging');
-      this.leaveAt.delete(run.runId);
       return;
     }
     const expected = ACTIVE_STATES.filter((state) => state !== 'purging');
@@ -927,19 +915,14 @@ export class MeetingManager {
     await this.complete(left, seconds);
   }
 
-  private forget(runId: string): void {
-    this.suspendedAt.delete(runId);
-    this.leaveAt.delete(runId);
-    this.aloneSince.delete(runId);
-  }
-
   // ── The purge sequence ──
 
   /** (a) the fence; (b) the purge, each step retried until it resolves; (c) the content-free record. */
   private async purge(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<void> {
     const provider = this.providers.get(run.providerName);
     if (run.state !== 'purging') {
-      const fenced = await this.stores.runs.update(run.runId, { state: 'purging', reason }, PURGEABLE_STATES);
+      // a bot that may be out is told to leave below: the kill's deadline goes on the run with the fence, before the commands
+      const fenced = await this.stores.runs.update(run.runId, { state: 'purging', reason, ...(run.dispatch ? { leaveCommandedAt: this.now() } : {}) }, PURGEABLE_STATES);
       if (!fenced) return;
       await this.stores.transcript.fence(run.runId);
       await this.stores.events.fence(run.runId);
@@ -950,7 +933,6 @@ export class MeetingManager {
       } else if (run.dispatch) {
         await provider?.command(run.runId, { name: 'suspendCapture' });
         await provider?.command(run.runId, { name: 'leave', reason });
-        this.leaveAt.set(run.runId, this.now());
       }
     }
     await this.continuePurge(run.runId);
@@ -985,7 +967,6 @@ export class MeetingManager {
     await this.stores.jobs.remove(runId);
     const done = await this.stores.runs.update(runId, { state: 'done', doneAt: now, purgedAt: now, billedSeconds: billed }, 'purging');
     if (!done) return;
-    this.forget(runId);
     const free = { ...contentFreeRun(done), purgedAt: now };
     await this.stores.runs.replace(free);
     await this.emit('bot:purged', free, { reason: free.reason });
@@ -1004,9 +985,9 @@ export class MeetingManager {
       }
       if (run.state === 'requested' || run.state === 'scheduled') continue;
       const provider = this.providers.get(run.providerName);
-      const commandedLeaveAt = this.leaveAt.get(run.runId);
-      if (commandedLeaveAt !== undefined && now - commandedLeaveAt > this.killAfterMs) {
-        this.leaveAt.delete(run.runId);
+      // the kill's deadline is on the run, so a bot that has not left is killed whichever manager told it to leave; a kill
+      // that throws is sent again on the next pass, and the bot's leaving (`leftAt`) disarms it
+      if (run.leaveCommandedAt !== undefined && run.leftAt === undefined && now - run.leaveCommandedAt > this.killAfterMs) {
         await provider?.command(run.runId, { name: 'kill' });
         await this.crash(run, now, undefined);
         continue;
@@ -1038,18 +1019,19 @@ export class MeetingManager {
         // quiet once monitorMissedBeats intervals have passed since the last heartbeat, the boundary captureReady and startCaptureIfReady use
         const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats;
         if (monitorStale) {
-          const suspended = this.suspendedAt.get(run.runId);
-          if (suspended === undefined) {
-            this.suspendedAt.set(run.runId, now);
-            await provider?.command(run.runId, { name: 'suspendCapture' });
-            await this.emit('bot:capture_suspended', run, { reason: 'stop monitor quiet' });
-          } else if (now - suspended > this.monitorRecoverMs) {
+          if (run.captureSuspendedAt === undefined) {
+            // kept on the run: the manager that hears the monitor recover resumes capture, and the recovery window holds after a restart
+            const suspended = await this.stores.runs.update(run.runId, { captureSuspendedAt: now }, 'in_call');
+            if (suspended) {
+              await provider?.command(run.runId, { name: 'suspendCapture' });
+              await this.emit('bot:capture_suspended', suspended, { reason: 'stop monitor quiet' });
+            }
+          } else if (now - run.captureSuspendedAt > this.monitorRecoverMs) {
             await this.leave(run, 'stop_monitor_failed');
             continue;
           }
         }
-        const alone = this.aloneSince.get(run.runId);
-        if (alone !== undefined && now - alone > run.limits.aloneMs) {
+        if (run.aloneSince !== undefined && now - run.aloneSince > run.limits.aloneMs) {
           await this.leave(run, 'alone');
           continue;
         }
@@ -1077,7 +1059,6 @@ export class MeetingManager {
       await jobs.forget(run.runId);
       await entitlement.forget?.(run.runId);
       await runs.forget(run.runId);
-      this.forget(run.runId);
     }
   }
 

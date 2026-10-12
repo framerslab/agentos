@@ -34,7 +34,11 @@ export interface RunFilter {
   limit?: number;
 }
 
-/** The run's row. An implementation seals `meetingUrl` at rest. */
+/**
+ * The run's row. An implementation keeps every field of it, the manager's timers (`leaveCommandedAt`,
+ * `captureSuspendedAt`, `aloneSince`) among them: the manager keeps nothing about a run in process. An implementation
+ * seals `meetingUrl` at rest.
+ */
 export interface IRunStore {
   /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
   forget?(runId: string): Promise<void>;

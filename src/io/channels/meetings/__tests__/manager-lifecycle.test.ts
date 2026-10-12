@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { harness } from './manager-send-dispatch.test.js';
 import { FencedError } from '../stores/types.js';
-import { MockMeetingBotProvider } from '../providers/mock.js';
+import { MockMeetingBotProvider, mockEventContext } from '../providers/mock.js';
 
 async function joined(h: ReturnType<typeof harness>, key = 'k1', keep: 'none' | 'account' = 'none') {
   const r = await h.manager.sendBot({ ...h.request, idempotencyKey: key, keep });
@@ -53,6 +53,21 @@ describe('the stop command and the purge sequence', () => {
     expect(tries).toBe(3);
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stopped_by_owner' });
   });
+  it('kills a bot that does not leave when another manager, or this one after a restart, runs the limits', async () => {
+    const h = harness();
+    const purged = await joined(h);
+    const leaving = await joined(h, 'k2');
+    await h.manager.purgeRun(purged, 'stopped_by_owner');
+    await h.manager.leaveBot(leaving, 'stopped_by_owner');
+    const restarted = h.peer('m2'); // nothing of the first manager's memory
+    h.clock.advance(30_001);
+    await restarted.tick();
+    expect(h.provider.commands.get(purged)?.at(-1)).toEqual({ name: 'kill' });
+    expect(h.provider.commands.get(leaving)?.at(-1)).toEqual({ name: 'kill' });
+    await restarted.tick();
+    expect(await h.stores.runs.get(purged)).toMatchObject({ state: 'done', reason: 'stopped_by_owner', botName: '' });
+    expect(await h.stores.runs.get(leaving)).toMatchObject({ state: 'done', reason: 'stopped_by_owner' });
+  });
 });
 
 describe('the limits, the meter and the ends', () => {
@@ -85,6 +100,19 @@ describe('the limits, the meter and the ends', () => {
     await h.manager.tick();
     expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'leave', reason: 'stop_monitor_failed' });
   });
+  it('a capture one manager suspended is resumed by the manager that hears the monitor recover, after a restart too', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    h.clock.advance(30_001);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'suspendCapture' });
+    const other = h.peer('m2'); // another process, or this one restarted: nothing of the suspension in its memory
+    await other.processProviderEvent('mock', mockEventContext(runId, 'monitor_heartbeat', {}, h.clock.now(), h.provider.tokenOf(runId)));
+    expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'startCapture' });
+    h.clock.advance(30_001);
+    await h.manager.tick(); // quiet again: suspended again, not ended on the clock of the first suspension
+    expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'suspendCapture' });
+  });
   it('leaves when alone for five minutes, at four hours, and when the page is away', async () => {
     const h = harness();
     const runId = await joined(h);
@@ -116,6 +144,24 @@ describe('the limits, the meter and the ends', () => {
     await h.report(id3, 'monitor_heartbeat');
     await h.manager.tick();
     expect(h.provider.commands.get(id3)?.at(-1)).toEqual({ name: 'leave', reason: 'cap' });
+  });
+  it('the alone limit is the run\'s: a restarted manager ends a run left alone, and a manager that missed a participant joining does not', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    await h.report(runId, 'participant_left', { participantRef: 'p', participantCount: 0 });
+    const restarted = h.peer('m2');
+    h.clock.advance(300_001);
+    await h.report(runId, 'monitor_heartbeat');
+    await restarted.tick();
+    expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'leave', reason: 'alone' });
+    const id2 = await joined(h, 'k2');
+    await h.report(id2, 'participant_left', { participantRef: 'p', participantCount: 0 });
+    // the report that someone joined reaches the other manager
+    await restarted.processProviderEvent('mock', mockEventContext(id2, 'participant_joined', { participantRef: 'q', participantCount: 1 }, h.clock.now(), h.provider.tokenOf(id2)));
+    h.clock.advance(300_001);
+    await h.report(id2, 'monitor_heartbeat');
+    await h.manager.tick();
+    expect(h.provider.commands.get(id2)?.some((c) => c.name === 'leave')).toBe(false);
   });
   it('meters usage, settles at done, drops the turns of a run that is not kept, and bills a crash after capture', async () => {
     const h = harness();
