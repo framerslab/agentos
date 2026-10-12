@@ -185,8 +185,8 @@ flowchart TB
         I1["new content"]:::input
         I2["IngestRouter<br/><i>kind classifier</i>"]:::process
         I3["Memory store + archive + graph"]:::data
-        I4["ConsolidationLoop<br/><i>Memory facade: prune, merge, strengthen,<br/>derive, compact, re-index</i>"]:::process
-        I5["ConsolidationPipeline<br/><i>CognitiveMemoryManager: decay, replay, schemas,<br/>conflicts, spaced repetition; the 8 mechanisms'<br/>hooks only with cognitiveMechanisms</i>"]:::process
+        I4["ConsolidationLoop<br/><i>Memory facade: prune, merge, strengthen,<br/>compact, re-index; derive needs an LLM invoker,<br/>which the facade does not pass</i>"]:::process
+        I5["ConsolidationPipeline<br/><i>CognitiveMemoryManager: decay sweep; replay,<br/>schemas and conflicts with a graph; spaced repetition;<br/>the 8 mechanisms' hooks only with cognitiveMechanisms</i>"]:::process
         I1 --> I2 --> I3
         I3 -. consolidate or memory_reflect .-> I4
         I3 -. hourly timer by default .-> I5
@@ -198,7 +198,7 @@ flowchart TB
         R2["QueryClassifier<br/><i>T0 / T1 / T2 / T3</i>"]:::process
         R3["context-only<br/><i>skips memory</i>"]:::output
         R4["MemoryRouter<br/><i>category → backend</i>"]:::process
-        R5["canonical-hybrid retrieval<br/><i>BM25 + dense + Cohere rerank</i>"]:::process
+        R5["canonical-hybrid retrieval<br/><i>dense + BM25, RRF merge, optional rerank</i>"]:::process
         R6["scored evidence chunks"]:::data
         R1 --> R2
         R2 -- T0 --> R3
