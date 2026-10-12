@@ -59,16 +59,20 @@ const frameMs = (f: AudioFrame): number => (f.samples.length / f.sampleRate) * 1
  * `minReplayMs` of it), then the frames pushed while it opened, then live
  * audio. Its `startMs` and `endMs` are moved onto one timeline, the audio
  * pushed since the session began, and a final that repeats one already
- * emitted over the same audio is dropped. Each reconnect emits
+ * emitted over the same audio is dropped. Only finals with finite start and end
+ * bounds and a positive duration enter the dedupe history; others pass through.
+ * Queue overflow leaves a gap after the replay, preserving the original times
+ * of both replayed and retained audio. Each reconnect emits
  * `stt:reconnected` ({@link SttReconnectedEvent}) and `stt:gap`
  * ({@link SttGapEvent}). Past the cap the session emits `error`, then `close`.
  *
  * The session forwards `transcript`, `vad`, `speech_start`, `speech_end`,
  * `usage` and `warning` from the provider's sessions; `usage` comes from every
  * one of them, a replaced one too, since a session reports its audio as it
- * closes. A close that follows the caller's `flush()`, with no audio pushed
- * since, is the provider ending its stream as the session contract has it (a
- * final, then `close`): the session emits `close` and does not reconnect.
+ * closes. `flush()` during a reconnect waits for the replacement, replay and
+ * queued audio before flushing it. A close during that flush, or after it with
+ * no further provider activity or pushed audio, ends the stream without a
+ * reconnect. Activity after a completed flush makes a later close a failure.
  *
  * @example
  * ```typescript
@@ -119,6 +123,7 @@ export class ReconnectingSTT implements IStreamingSTT {
     const attempts: number[] = [];
     const queue: AudioFrame[] = [];
     let queuedMs = 0;
+    let droppedQueuedMs = 0;
     let dropped = 0;
     let current = await this.inner.startSession(config);
     // the connection generation: the dedupe skips observations of one provider id, so each session gets an id of its own
@@ -127,10 +132,12 @@ export class ReconnectingSTT implements IStreamingSTT {
     let pushedMs = 0;
     let offsetMs = 0;
     let reconnecting = false;
+    let reconnectPromise: Promise<void> | undefined;
     let closedByCaller = false;
     let ended = false;
-    // set by the caller's flush() and cleared by the next frame: a close then is the provider ending its stream
+    // The flush is the last operation until audio or provider activity follows it.
     let flushed = false;
+    let flushing: StreamingSTTSession | undefined;
 
     /** Ends the session once: `close`, after which nothing but `usage` is forwarded. */
     const finish = (): void => {
@@ -139,17 +146,24 @@ export class ReconnectingSTT implements IStreamingSTT {
       facade.emit('close');
     };
 
-    const attach = (session: StreamingSTTSession, sessionGeneration: number, sessionOffsetMs: number): void => {
+    const attach = (session: StreamingSTTSession, sessionGeneration: number, sessionOffsetMs: number, replayedMs = 0, gapMs = 0): void => {
       const providerId = `${this.inner.providerId}#${sessionGeneration}`;
+      const activity = (): void => {
+        if (session === current) flushed = false;
+      };
+      // End bounds are exclusive: an utterance ending exactly at the replay
+      // boundary still belongs to the audio before the gap.
+      const mapTime = (time: number, end = false): number => time + sessionOffsetMs + ((end ? time > replayedMs : time >= replayedMs) ? gapMs : 0);
       session.on('transcript', (raw: TranscriptEvent) => {
         if (ended) return;
+        activity();
         const evt: TranscriptEvent = {
           ...raw,
-          ...(raw.startMs !== undefined ? { startMs: raw.startMs + sessionOffsetMs } : {}),
-          ...(raw.endMs !== undefined ? { endMs: raw.endMs + sessionOffsetMs } : {}),
+          ...(raw.startMs !== undefined ? { startMs: mapTime(raw.startMs) } : {}),
+          ...(raw.endMs !== undefined ? { endMs: mapTime(raw.endMs, true) } : {}),
         };
-        if (evt.isFinal) {
-          const r = dedupe.evaluate({ provider: providerId, text: evt.text, audioStartMs: evt.startMs ?? 0, audioEndMs: evt.endMs ?? 0, isFinal: true });
+        if (evt.isFinal && evt.startMs !== undefined && evt.endMs !== undefined && Number.isFinite(evt.startMs) && Number.isFinite(evt.endMs) && evt.endMs > evt.startMs) {
+          const r = dedupe.evaluate({ provider: providerId, text: evt.text, audioStartMs: evt.startMs, audioEndMs: evt.endMs, isFinal: true });
           if (r.isDuplicate) return;
         }
         facade.emit('transcript', evt);
@@ -157,15 +171,18 @@ export class ReconnectingSTT implements IStreamingSTT {
       for (const name of ['vad', 'speech_start', 'speech_end'] as const) {
         session.on(name, (...args: unknown[]) => {
           if (ended) return;
+          activity();
           facade.emit(name, ...args);
         });
       }
       // from every session, a replaced or ended one too: a session reports the audio of its connections as it closes
       session.on('usage', (usage: unknown) => {
+        activity();
         facade.emit('usage', usage);
       });
       session.on('warning', (warning: Error) => {
         if (ended) return;
+        activity();
         // Listening here must not silence a warning: a provider session prints one nobody listens for, so the
         // session prints it when its own caller does not listen either.
         if (facade.listenerCount('warning') > 0) facade.emit('warning', warning);
@@ -173,11 +190,12 @@ export class ReconnectingSTT implements IStreamingSTT {
       });
       session.on('error', (err: Error) => {
         if (closedByCaller || session !== current) return;
+        activity();
         void reconnect(err);
       });
       session.on('close', () => {
         if (closedByCaller || session !== current || reconnecting) return;
-        if (flushed) {
+        if (flushed || flushing === session) {
           // the provider sent its last final and ended its stream, as the caller's flush asked
           finish();
           return;
@@ -199,7 +217,7 @@ export class ReconnectingSTT implements IStreamingSTT {
       facade.emit('close');
     };
 
-    const reconnect = async (err: Error | undefined): Promise<void> => {
+    const runReconnect = async (err: Error | undefined): Promise<void> => {
       if (reconnecting || closedByCaller || ended) return;
       reconnecting = true;
       const startedAt = this.clock();
@@ -222,7 +240,7 @@ export class ReconnectingSTT implements IStreamingSTT {
         next = await this.inner.startSession(config);
       } catch (startErr) {
         reconnecting = false;
-        await reconnect(startErr instanceof Error ? startErr : new Error(String(startErr)));
+        await runReconnect(startErr instanceof Error ? startErr : new Error(String(startErr)));
         return;
       }
       if (closedByCaller) {
@@ -231,24 +249,31 @@ export class ReconnectingSTT implements IStreamingSTT {
         return;
       }
       const replay = ring.snapshot();
-      const bufferedMs = ring.durationMs();
+      const bufferedMs = replay.reduce((duration, frame) => duration + frameMs(frame), 0);
       const replayedMs = bufferedMs >= this.minReplayMs ? bufferedMs : 0;
-      // The new session hears the replay, then the queued frames, then live audio, so its clock 0 sits where the
-      // replay starts: what was pushed before the queue, less the replay. Frames a full queue dropped count as pushed,
-      // so the queued and live audio keep their place on the timeline.
+      // Clock zero belongs to the replay before the failure. Dropped queue
+      // audio shifts only the retained queue and the live audio after it.
       generation += 1;
-      offsetMs = pushedMs - queuedMs - replayedMs;
+      offsetMs = pushedMs - queuedMs - droppedQueuedMs - replayedMs;
       current = next;
-      attach(next, generation, offsetMs);
+      flushed = false;
+      attach(next, generation, offsetMs, replayedMs, droppedQueuedMs);
       if (replayedMs > 0) for (const f of replay) next.pushAudio(f);
       for (const f of queue.splice(0)) {
         ring.push(f);
         next.pushAudio(f);
       }
       queuedMs = 0;
+      droppedQueuedMs = 0;
       reconnecting = false;
       facade.emit('stt:reconnected', { attempt, replayedMs } satisfies SttReconnectedEvent);
       facade.emit('stt:gap', { attempt, lostMs: this.clock() - startedAt } satisfies SttGapEvent);
+    };
+
+    const reconnect = (err: Error | undefined): Promise<void> => {
+      if (reconnecting || closedByCaller || ended) return reconnectPromise ?? Promise.resolve();
+      reconnectPromise = runReconnect(err);
+      return reconnectPromise;
     };
 
     attach(current, generation, offsetMs);
@@ -257,6 +282,7 @@ export class ReconnectingSTT implements IStreamingSTT {
       pushAudio: (frame: AudioFrame): void => {
         if (ended || closedByCaller) return;
         flushed = false;
+        flushing = undefined;
         pushedMs += frameMs(frame);
         if (reconnecting) {
           queue.push(frame);
@@ -264,6 +290,7 @@ export class ReconnectingSTT implements IStreamingSTT {
           while (queuedMs > this.queueCapacityMs && queue.length) {
             const old = queue.shift()!;
             queuedMs -= frameMs(old);
+            droppedQueuedMs += frameMs(old);
             dropped += 1;
           }
           return;
@@ -275,11 +302,22 @@ export class ReconnectingSTT implements IStreamingSTT {
           void reconnect(err instanceof Error ? err : new Error(String(err)));
         }
       },
-      /** Drains the live session. A close the provider makes before the next frame ends the session, without a reconnect. */
+      /**
+       * Waits for any reconnect and its replay, then drains the adopted session. A close during the flush or
+       * before subsequent provider activity or audio ends the stream without reconnecting.
+       */
       flush: async (): Promise<void> => {
         if (ended || closedByCaller) return;
+        while (reconnecting && reconnectPromise) await reconnectPromise;
+        if (ended || closedByCaller) return;
+        const target = current;
         flushed = true;
-        await current.flush();
+        flushing = target;
+        try {
+          await target.flush();
+        } finally {
+          if (flushing === target) flushing = undefined;
+        }
       },
       /** Closes the live session and emits `close` once, from the facade itself: what the provider does after is ignored. */
       close: (): void => {

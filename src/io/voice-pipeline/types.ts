@@ -680,6 +680,13 @@ export interface IEndpointDetector extends EventEmitter {
   readonly mode: 'acoustic' | 'heuristic' | 'semantic';
 
   /**
+   * Upper bound in milliseconds for a pending turn after `speech_end`, including
+   * any timer polling interval. A listen session uses this to drain on stop;
+   * detectors that omit it receive a 3250 ms drain bound.
+   */
+  readonly turnCompletionTimeoutMs?: number;
+
+  /**
    * Push a VAD event from the upstream voice activity detector.
    *
    * @param event - The VAD event to process.

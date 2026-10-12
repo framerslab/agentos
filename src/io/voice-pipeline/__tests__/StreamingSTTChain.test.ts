@@ -321,4 +321,32 @@ describe('StreamingSTTChain: mid-utterance failover and close', () => {
     expect(failover).not.toHaveBeenCalled();
     expect(chain.currentProviderId).toBe('a');
   });
+
+  it('forwards a flushed provider close once and ignores audio after terminal close', async () => {
+    const sessionA = mkClosingSession('a');
+    const startB = vi.fn(async () => mkClosingSession('b'));
+    const chain = new StreamingSTTChain(
+      [mkProvider('a', 10, async () => sessionA), mkProvider('b', 20, startB)],
+      { enableMidUtteranceFailover: true }
+    );
+    const session = await chain.startSession();
+    const closed = vi.fn();
+    const errors = vi.fn();
+    session.on('close', closed);
+    session.on('error', errors);
+    await session.flush();
+    sessionA.emit('close');
+    sessionA.emit('close');
+    expect(closed).toHaveBeenCalledTimes(1);
+    await session.pushAudio({ samples: new Float32Array(320), sampleRate: 16_000, timestamp: 0 });
+    await session.flush();
+    await session.close();
+    sessionA.emit('error', new Error('late error'));
+    await settle();
+    expect(sessionA.pushAudio).not.toHaveBeenCalled();
+    expect(sessionA.close).not.toHaveBeenCalled();
+    expect(startB).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
 });

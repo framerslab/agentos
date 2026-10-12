@@ -81,6 +81,8 @@ export interface VoiceProviderEnvConfig {
    * Default true. A session is then the chain's failover facade: it forwards
    * transcripts, speech events, `'usage'` and `'warning'` from its provider
    * sessions, and its `flush()` drains the provider session in use.
+   * A provider close after flush and before the next frame emits one facade
+   * `close`; later audio is ignored and no backup starts.
    */
   enableMidUtteranceFailover?: boolean;
   /** Whether the TTS chain re-sends accumulated tokens on primary
@@ -146,6 +148,8 @@ function sttProvidersFromEnv(
  * mid-call by default. An STT session is then the chain's failover facade:
  * it forwards transcripts, speech events, `'usage'` and `'warning'` from its
  * provider sessions, and its `flush()` drains the provider session in use.
+ * A provider close after flush and before the next frame emits one facade
+ * `close`; later audio is ignored and no backup starts.
  *
  * @param config - Environment source, preferences, failover switches and OpenAI Realtime options.
  * @returns The chains with their metrics reporter and circuit breaker.
@@ -269,6 +273,8 @@ export interface SttProviderEnvConfig {
    * with `flush()` and every event the provider emits. The failover facade
    * forwards transcripts, speech events, `'usage'` and `'warning'`, and its
    * `flush()` drains the provider session in use.
+   * A provider close after flush and before the next frame emits one facade
+   * `close`; later audio is ignored and no backup starts.
    */
   enableMidUtteranceFailover?: boolean;
   /**
@@ -367,6 +373,8 @@ export function sttEntryPricePerMinute(entry: string): number | undefined {
  * its provider's own, with `flush()` and every event the provider emits; the
  * failover facade forwards transcripts, speech events, `'usage'` and
  * `'warning'`, and its `flush()` drains the provider session in use.
+ * A provider close after flush and before the next frame emits one facade
+ * `close`; later audio is ignored and no backup starts.
  *
  * Entries of one vendor share that vendor's provider id (every `openai`
  * entry is `openai-realtime-transcription`), so `currentProviderId`, the

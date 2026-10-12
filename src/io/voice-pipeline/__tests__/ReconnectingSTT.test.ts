@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { ReconnectingSTT } from '../ReconnectingSTT.js';
+import { TranscriptDedupe } from '../TranscriptDedupe.js';
 import type { AudioFrame, IStreamingSTT, StreamingSTTSession, TranscriptEvent } from '../types.js';
 
 /** A provider whose sessions the test drives: it records pushed frames and emits what the test says. */
@@ -25,6 +26,115 @@ const frame = (t: number): AudioFrame => ({ samples: new Float32Array(320), samp
 const final = (text: string, startMs: number, endMs: number): TranscriptEvent => ({ text, confidence: 1, words: [], isFinal: true, startMs, endMs });
 
 describe('ReconnectingSTT', () => {
+  it('keeps replay timing before an overflow gap and retained queue timing after it', async () => {
+    const { stt, sessions } = scripted();
+    const session = await new ReconnectingSTT(stt, { minReplayMs: 0, queueCapacityMs: 2_000 }).startSession();
+    const got: Array<[string, number | undefined, number | undefined]> = [];
+    session.on('transcript', (event: TranscriptEvent) => got.push([event.text, event.startMs, event.endMs]));
+    for (let t = 0; t < 1_000; t += 20) session.pushAudio(frame(t));
+    sessions[0].emit('error', new Error('connection lost'));
+    for (let t = 1_000; t < 4_000; t += 20) session.pushAudio(frame(t));
+    await vi.waitFor(() => expect(sessions[1].frames.length).toBe(150));
+    expect(sessions[1].frames.map((f) => f.timestamp)).toEqual([
+      ...Array.from({ length: 50 }, (_, i) => i * 20),
+      ...Array.from({ length: 100 }, (_, i) => 2_000 + i * 20),
+    ]);
+    expect(session).toMatchObject({ droppedFrames: 50 });
+    sessions[1].emit('transcript', final('replayed words', 0, 1_000));
+    sessions[1].emit('transcript', final('retained words', 1_000, 3_000));
+    sessions[1].emit('transcript', final('across the gap', 900, 1_100));
+    expect(got).toEqual([
+      ['replayed words', 0, 1_000], ['retained words', 2_000, 4_000], ['across the gap', 900, 2_100],
+    ]);
+    session.close();
+  });
+  it('flush waits for a reconnect and drains the replacement after replay and queued audio', async () => {
+    const { stt, sessions } = scripted();
+    const session = await new ReconnectingSTT(stt, { minReplayMs: 0 }).startSession();
+    const open = stt.startSession.bind(stt);
+    let release: () => void = () => {};
+    const opening = new Promise<void>((resolve) => { release = resolve; });
+    stt.startSession = async () => {
+      await opening;
+      const next = await open();
+      next.flush = vi.fn(async () => {
+        expect(sessions[1].frames.map((f) => f.timestamp)).toEqual([0, 20]);
+        next.emit('transcript', final('last words', 0, 40));
+      });
+      return next;
+    };
+    const got: string[] = [];
+    session.on('transcript', (event: TranscriptEvent) => got.push(event.text));
+    session.pushAudio(frame(0));
+    sessions[0].emit('error', new Error('connection lost'));
+    session.pushAudio(frame(20));
+    const drained = vi.fn();
+    const flushing = session.flush().then(drained);
+    await Promise.resolve();
+    expect(sessions[0].flush).not.toHaveBeenCalled();
+    expect(drained).not.toHaveBeenCalled();
+    release();
+    await flushing;
+    expect(sessions[1].flush).toHaveBeenCalledTimes(1);
+    expect(got).toEqual(['last words']);
+    session.close();
+  });
+  it('untimed and invalid finals bypass dedupe without increasing retained observations', async () => {
+    const evaluate = vi.spyOn(TranscriptDedupe.prototype, 'evaluate');
+    try {
+      const { stt, sessions } = scripted();
+      const session = await new ReconnectingSTT(stt).startSession();
+      const got = vi.fn();
+      session.on('transcript', got);
+      sessions[0].emit('transcript', final('timed words', 0, 100));
+      const dedupe = evaluate.mock.contexts[0] as unknown as { recent: unknown[] };
+      for (let i = 0; i < 1_000; i++) {
+        sessions[0].emit('transcript', { text: 'untimed words', confidence: 1, words: [], isFinal: true });
+      }
+      for (const bounds of [
+        { startMs: 100 }, { endMs: 200 }, { startMs: 0, endMs: 0 },
+        { startMs: 200, endMs: 100 }, { startMs: 0, endMs: Infinity }, { startMs: NaN, endMs: 100 },
+      ]) sessions[0].emit('transcript', { text: 'invalid timing', confidence: 1, words: [], isFinal: true, ...bounds });
+      expect(got).toHaveBeenCalledTimes(1_007);
+      expect(evaluate).toHaveBeenCalledTimes(1);
+      expect(dedupe.recent.length).toBe(1);
+      sessions[0].emit('transcript', final('later words', 20_000, 20_100));
+      expect(dedupe.recent.length).toBe(1);
+      session.close();
+    } finally {
+      evaluate.mockRestore();
+    }
+  });
+  it.each(['transcript', 'vad', 'speech_start', 'speech_end', 'usage', 'warning'] as const)('reconnects a close-only failure after %s follows a completed flush', async (name) => {
+    const { stt, sessions } = scripted();
+    const session = await new ReconnectingSTT(stt).startSession();
+    const closed = vi.fn();
+    session.on('close', closed);
+    session.on('warning', () => {});
+    await session.flush();
+    if (name === 'transcript') sessions[0].emit(name, final('completed words', 0, 100));
+    else if (name === 'vad') sessions[0].emit(name, { type: 'silence', timestamp: 100, source: 'stt' });
+    else if (name === 'usage') sessions[0].emit(name, { providerId: 'scripted', connectionIndex: 1, audioSeconds: 1, final: false });
+    else if (name === 'warning') sessions[0].emit(name, new Error('provider notification'));
+    else sessions[0].emit(name);
+    sessions[0].emit('close');
+    await vi.waitFor(() => expect(sessions.length).toBe(2));
+    expect(closed).not.toHaveBeenCalled();
+    session.close();
+  });
+  it('audio during a pending flush makes a later close reconnect', async () => {
+    const { stt, sessions } = scripted();
+    const session = await new ReconnectingSTT(stt).startSession();
+    let release: () => void = () => {};
+    sessions[0].flush = () => new Promise<void>((resolve) => { release = resolve; });
+    const flushing = session.flush();
+    session.pushAudio(frame(0));
+    sessions[0].emit('close');
+    await vi.waitFor(() => expect(sessions.length).toBe(2));
+    release();
+    await flushing;
+    session.close();
+  });
   it('reconnects the same provider on error, replays the buffer first, then the frames that arrived meanwhile, and reports the gap', async () => {
     const { stt, sessions } = scripted();
     let now = 0;
