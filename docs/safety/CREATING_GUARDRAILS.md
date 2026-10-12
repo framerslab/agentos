@@ -66,8 +66,8 @@ interface GuardrailConfig {
 
   // When true, evaluateOutput also receives each TOOL_CALL_REQUEST chunk.
   // A BLOCK ends the stream with the verdict in place of the chunk, so the
-  // host never receives an actionable call; a SANITIZE is applied as a
-  // BLOCK, since a tool call cannot be rewritten.
+  // stream never hands the host an actionable call; a SANITIZE is applied
+  // as a BLOCK, since a tool call cannot be rewritten.
   evaluateToolCalls?: boolean; // default: false
 
   // Rate-limits how many streaming evaluations happen per guarded stream
@@ -241,7 +241,7 @@ The complete, assembled response emitted at the end of a turn.
 
 Emitted when the model requests a tool call. It carries `isFinal: false`, and `evaluateOutput` receives it only when the guardrail's `config.evaluateToolCalls` is `true`:
 
-- **`BLOCK`** ends the stream with the guardrail's verdict (the error chunk, or the final response holding `replacementText`) in place of the chunk, so the host never receives an actionable call and never executes it.
+- **`BLOCK`** ends the stream with the guardrail's verdict (the error chunk, or the final response holding `replacementText`) in place of the chunk, so the stream never hands the host an actionable call to execute. The pause the runtime saved for that call stays in `getPendingExternalToolRequest()` until the conversation's next turn ends.
 - **`SANITIZE`** cannot rewrite a tool call: it is applied as a `BLOCK` that keeps your reason and reason code.
 - **`FLAG`** and **`ALLOW`** pass the chunk on, with the evaluation in its `metadata.guardrail.output`.
 

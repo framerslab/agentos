@@ -823,9 +823,9 @@ export class ParallelGuardrailDispatcher {
       // ---------------------------------------------------------------
       // TOOL_CALL_REQUEST (non-final): the guards that evaluate tool calls
       // ---------------------------------------------------------------
-      // A block ends the stream with the verdict in place of the chunk, so a
-      // host never receives an actionable call it would execute; in hold mode
-      // the text held before the call is dropped with it.
+      // A block ends the stream with the verdict in place of the chunk, so the
+      // stream never hands a host an actionable call it would execute; in hold
+      // mode the text held before the call is dropped with it.
       if (isToolCallRequestChunk(chunk) && !chunk.isFinal && toolCallGuards.length > 0) {
         const verdict = await evaluateToolCall(currentChunk);
         if (verdict.outcome === 'block') {

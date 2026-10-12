@@ -453,7 +453,7 @@ class ShellCommandGuard implements IGuardrailService {
 }
 ```
 
-- **Block.** The stream ends with the guard's verdict in place of the chunk: the error chunk, or the final response holding `replacementText`. The host never receives an actionable call (`executionMode: 'external'`), so it never executes it. In hold mode the text held before the call is dropped with it.
+- **Block.** The stream ends with the guard's verdict in place of the chunk: the error chunk, or the final response holding `replacementText`. The stream never hands the host an actionable call (`executionMode: 'external'`), so the host does not execute it. In hold mode the text held before the call is dropped with it. The runtime saved the pause for that call before the chunk went out, and `getPendingExternalToolRequest()` returns it until the conversation's next turn ends: a host that resumes saved pauses after a restart does not run a call whose stream ended in a block.
 - **Sanitize.** A guard cannot rewrite a tool call. A `SANITIZE` is applied as a `BLOCK` that keeps the guard's reason and reason code.
 - **Flag and allow.** The chunk goes on with the evaluation in `metadata.guardrail.output`.
 - **Calls the runtime runs itself.** A call with `executionMode: 'internal'` runs inside the turn without waiting for the output guards: a block ends the stream but does not stop that call. To stop such a call before it runs, gate the tool: with a `hitlManager` and `toolOrchestratorConfig.hitl.enabled`, the tool orchestrator asks for an approval before a tool with `hasSideEffects: true` runs ([Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)).

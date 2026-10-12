@@ -264,8 +264,11 @@ export interface GuardrailConfig {
    * applies as it does to text:
    * - BLOCK ends the stream with the guard's verdict (the error chunk, or the
    *   final response holding `replacementText`) in place of the chunk, so the
-   *   host never receives an actionable call (`executionMode: 'external'`)
-   *   and never executes it.
+   *   stream never hands the host an actionable call
+   *   (`executionMode: 'external'`) to execute. The pause the runtime saved
+   *   for that call before the chunk went out stays in
+   *   `getPendingExternalToolRequest()` until the conversation's next turn
+   *   ends.
    * - SANITIZE cannot rewrite a tool call; it is applied as a BLOCK that keeps
    *   the guard's reason and reason code.
    * - FLAG and ALLOW pass the chunk on with the evaluation in its
