@@ -44,7 +44,7 @@ export class InMemoryRunStore implements IRunStore {
   private readonly runs = new Map<string, MeetingRunRecord>();
   async insert(run: MeetingRunRecord): Promise<void> {
     if (this.runs.has(run.runId)) throw new Error(`run ${run.runId} exists`);
-    // no await between the check and the write below, so of two inserts with one owner and key only the first is stored
+    // one run per owner and key, with no await between the check and the write: of two sends racing with one key, the second insert fails and the sender finds the first
     const key = run.idempotencyKey;
     if (key !== undefined && [...this.runs.values()].some((r) => r.ownerRef === run.ownerRef && r.idempotencyKey === key)) {
       throw new DuplicateIdempotencyKeyError(run.ownerRef, key);

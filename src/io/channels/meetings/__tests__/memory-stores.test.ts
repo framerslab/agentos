@@ -75,6 +75,7 @@ describe('InMemoryEventStore', () => {
     const e = new InMemoryEventStore();
     expect(await e.append({ eventId: 'a', runId: 'r1', type: 'bot:in_call', at: 1 })).toEqual({ inserted: true, seq: 1 });
     expect(await e.append({ eventId: 'b', runId: 'r1', type: 'bot:chat_message', at: 2, data: { text: 'hi' } })).toEqual({ inserted: true, seq: 2 });
+    expect(await e.append({ eventId: 'r2-a', runId: 'r2', type: 'bot:in_call', at: 2 })).toEqual({ inserted: true, seq: 1 }); // another run counts from one
     expect(await e.append({ eventId: 'a', runId: 'r1', type: 'bot:in_call', at: 1 })).toEqual({ inserted: false, seq: 1 });
     await e.fence('r1');
     await e.purgePayloads('r1');
@@ -151,16 +152,16 @@ describe('InMemoryRunStore', () => {
     expect((await r.findByIdempotencyKey('a', 'k'))?.runId).toBe('r1');
     expect(await r.findByIdempotencyKey('b', 'k')).toBeUndefined();
   });
-  it('keeps one run per owner and idempotency key: a second insert with the key is refused and stores nothing', async () => {
-    const row = (runId: string, ownerRef: string, idempotencyKey?: string): MeetingRunRecord => ({ runId, ownerRef, providerName: 'mock', platform: 'google_meet', state: 'requested', keep: 'none', meetingUrl: 'u', botName: 'b', notice: { text: 'n', version: '1', lateArrivalText: 's' }, stopPhrase: 'stop', limits: { waitingRoomMs: 1, aloneMs: 1, totalMs: 1 }, requestedAt: 0, joinAt: 0, billedSeconds: 0, idempotencyKey });
+  it('makes one run per owner and idempotency key', async () => {
     const r = new InMemoryRunStore();
-    await r.insert(row('r1', 'a', 'k'));
-    await expect(r.insert(row('r2', 'a', 'k'))).rejects.toBeInstanceOf(DuplicateIdempotencyKeyError);
-    expect(await r.get('r2')).toBeUndefined();
-    expect((await r.findByIdempotencyKey('a', 'k'))?.runId).toBe('r1');
-    await r.insert(row('r3', 'b', 'k')); // another owner's key
-    await r.insert(row('r4', 'a'));
-    await r.insert(row('r5', 'a')); // runs without a key are not limited
-    expect((await r.list({ ownerRef: 'a' })).map((x) => x.runId).sort()).toEqual(['r1', 'r4', 'r5']);
+    const run: MeetingRunRecord = { runId: 'idem-1', ownerRef: 'owner-a', providerName: 'mock', platform: 'google_meet', state: 'requested', keep: 'none', meetingUrl: 'u', botName: 'b', notice: { text: 'n', version: '1', lateArrivalText: 's' }, stopPhrase: 'stop', limits: { waitingRoomMs: 1, aloneMs: 1, totalMs: 1 }, requestedAt: 0, joinAt: 0, billedSeconds: 0, idempotencyKey: 'same-key' };
+    await r.insert(run);
+    await expect(r.insert({ ...run, runId: 'idem-2' })).rejects.toBeInstanceOf(DuplicateIdempotencyKeyError); // a second send with the key makes no second run
+    await r.insert({ ...run, runId: 'idem-3', ownerRef: 'owner-b' }); // the key is the owner's own
+    await r.insert({ ...run, runId: 'idem-4', idempotencyKey: undefined });
+    await r.insert({ ...run, runId: 'idem-5', idempotencyKey: undefined }); // runs sent without a key never collide
+    expect(await r.get('idem-2')).toBeUndefined();
+    expect((await r.findByIdempotencyKey('owner-a', 'same-key'))?.runId).toBe('idem-1');
+    expect((await r.findByIdempotencyKey('owner-b', 'same-key'))?.runId).toBe('idem-3');
   });
 });
