@@ -28,12 +28,14 @@ export const ENVELOPE_WINDOW_MS = 300_000;
 /**
  * `v1,` then the base64 HMAC-SHA256 of `<id>.<timestamp>.<payload>` under the destination's secret.
  *
- * @param secret - The destination's secret.
+ * @param secret - The destination's nonempty secret, used as UTF-8 bytes without base64 decoding.
  * @param id - The delivery's id.
  * @param timestampMs - The time the delivery is signed, in milliseconds since the epoch.
  * @param payload - The body exactly as it is sent.
+ * @throws Error when the secret is empty.
  */
 export function signEnvelope(secret: string, id: string, timestampMs: number, payload: string): string {
+  if (secret.length === 0) throw new Error('empty envelope secret');
   const mac = createHmac('sha256', secret).update(`${id}.${timestampMs}.${payload}`).digest('base64');
   return `v1,${mac}`;
 }
@@ -64,12 +66,12 @@ function header(headers: Record<string, string | string[] | undefined>, name: st
 /**
  * The receiving side: the three headers, the raw payload and the receiver's clock.
  *
- * @param secret - The destination's secret.
- * @param headers - The delivery's headers.
+ * @param secret - The destination's nonempty secret, used as UTF-8 bytes without base64 decoding.
+ * @param headers - The delivery's headers; the timestamp must contain only ASCII digits and is authenticated literally.
  * @param payload - The body exactly as it arrived, before any parse.
  * @param nowMs - The receiver's clock, in milliseconds since the epoch.
  * @param options - `windowMs`, how far the delivery's time may be from `nowMs` ({@link ENVELOPE_WINDOW_MS} when absent); `names`, the header names ({@link DEFAULT_ENVELOPE_HEADERS} when absent).
- * @returns `{ valid: true }`, or `valid: false` with why: a header missing, a timestamp that is not a number, a timestamp outside the window, or a signature that does not match.
+ * @returns `{ valid: true }`, or `valid: false` with why: an empty secret, a header missing, a bad timestamp, a timestamp outside the window (including a NaN clock or window), or a signature that does not match.
  */
 export function verifyEnvelope(
   secret: string,
@@ -78,16 +80,19 @@ export function verifyEnvelope(
   nowMs: number,
   options: { windowMs?: number; names?: EnvelopeHeaderNames } = {}
 ): { valid: boolean; error?: string } {
+  if (secret.length === 0) return { valid: false, error: 'empty envelope secret' };
   const names = options.names ?? DEFAULT_ENVELOPE_HEADERS;
   const windowMs = options.windowMs ?? ENVELOPE_WINDOW_MS;
   const id = header(headers, names.id);
   const ts = header(headers, names.timestamp);
   const sig = header(headers, names.signature);
   if (!id || !ts || !sig) return { valid: false, error: 'missing envelope header' };
+  if (/[^0-9]/.test(ts)) return { valid: false, error: 'bad timestamp' };
   const timestamp = Number(ts);
   if (!Number.isFinite(timestamp)) return { valid: false, error: 'bad timestamp' };
-  if (Math.abs(nowMs - timestamp) > windowMs) return { valid: false, error: 'outside the window' };
-  const expected = Buffer.from(signEnvelope(secret, id, timestamp, payload));
+  if (!(Math.abs(nowMs - timestamp) <= windowMs)) return { valid: false, error: 'outside the window' };
+  const mac = createHmac('sha256', secret).update(`${id}.${ts}.${payload}`).digest('base64');
+  const expected = Buffer.from(`v1,${mac}`);
   const given = Buffer.from(sig);
   if (expected.length !== given.length || !timingSafeEqual(expected, given)) return { valid: false, error: 'signature mismatch' };
   return { valid: true };
@@ -139,6 +144,11 @@ export class SecretBox {
   constructor(key: Buffer) {
     if (key.length !== 32) throw new RangeError('SecretBox needs a 32-byte key');
     this.key = { id: SECRET_BOX_KEY_ID, key: Buffer.from(key) };
+  }
+
+  /** Serialises only a redacted marker, never key bytes. */
+  toJSON(): string {
+    return '[SecretBox redacted]';
   }
 
   /**
