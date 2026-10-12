@@ -446,19 +446,39 @@ describe('ReplicateImageProvider', () => {
       expect(JSON.parse(mockFetch.mock.calls[0][1].body).input.image).toMatch(/^data:image\/png;base64,/);
     });
 
-    it('bounds a delete with a timeout, and one that runs out leaves the result as it is', async () => {
+    it('gives a delete ten seconds, and one that never answers leaves the result as it is', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-      mockFetch.mockResolvedValueOnce(fileResponse('src3'));
-      mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/upscaled.png']));
-      // What fetch rejects with when its AbortSignal.timeout() fires.
-      mockFetch.mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+      vi.useFakeTimers();
+      try {
+        mockFetch.mockResolvedValueOnce(fileResponse('src3'));
+        mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/upscaled.png']));
+        // A delete that answers only by failing when its signal aborts.
+        mockFetch.mockImplementationOnce(
+          (_url: string, init: RequestInit) =>
+            new Promise((_resolve, reject) => {
+              init.signal!.addEventListener('abort', () => reject(init.signal!.reason));
+            }),
+        );
 
-      const result = await provider.upscaleImage({ modelId: '', image: large(PNG) });
+        let settled = false;
+        const pending = provider.upscaleImage({ modelId: '', image: large(PNG) }).finally(() => {
+          settled = true;
+        });
+        // The upload and the prediction answer at once; the call then waits on the delete.
+        await vi.advanceTimersByTimeAsync(0);
+        expect(requests()[2]).toBe('DELETE https://api.replicate.com/v1/files/src3');
+        await vi.advanceTimersByTimeAsync(9_000);
+        expect(settled).toBe(false);
 
-      expect(result.images.map((image) => image.url)).toEqual(['https://example.com/upscaled.png']);
-      expect((mockFetch.mock.calls[2][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Deleting an uploaded Replicate input image failed'));
-      warn.mockRestore();
+        await vi.advanceTimersByTimeAsync(1_000);
+        const result = await pending;
+
+        expect(result.images.map((image) => image.url)).toEqual(['https://example.com/upscaled.png']);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('failed (no answer within 10 seconds)'));
+      } finally {
+        vi.useRealTimers();
+        warn.mockRestore();
+      }
     });
 
     it('deletes the upload when the prediction fails, and a failed delete does not change the error', async () => {

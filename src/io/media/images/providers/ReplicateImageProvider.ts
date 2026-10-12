@@ -814,17 +814,24 @@ export class ReplicateImageProvider implements IImageProvider {
       uploads
         .filter((url) => url.startsWith(filesUrl))
         .map(async (url) => {
+          const timeout = new AbortController();
+          const timer = setTimeout(
+            () => timeout.abort(new Error(`no answer within ${DELETE_UPLOAD_TIMEOUT_MS / 1000} seconds`)),
+            DELETE_UPLOAD_TIMEOUT_MS,
+          );
           try {
             const response = await fetch(url, {
               method: 'DELETE',
               headers: { Authorization: `Token ${apiKey}` },
-              signal: AbortSignal.timeout(DELETE_UPLOAD_TIMEOUT_MS),
+              signal: timeout.signal,
             });
             if (!response.ok && response.status !== 404) {
               console.warn(`[agentos] Replicate did not delete an uploaded input image (${response.status}); it expires 24 hours after its upload.`);
             }
           } catch (error) {
             console.warn(`[agentos] Deleting an uploaded Replicate input image failed (${error instanceof Error ? error.message : String(error)}); it expires 24 hours after its upload.`);
+          } finally {
+            clearTimeout(timer);
           }
         }),
     );
