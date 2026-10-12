@@ -357,10 +357,11 @@ export class ReplicateImageProvider implements IImageProvider {
    * @throws {Error} When the provider is not initialised or the API fails.
    */
   async editImage(request: ImageEditRequest): Promise<ImageGenerationResult> {
-    if (!this.isInitialized) {
-      throw new Error('Replicate image provider is not initialized.');
-    }
+    return this.withInputImages((apiKey, uploads) => this.editWith(request, apiKey, uploads));
+  }
 
+  /** {@link editImage} on one key of the pool, recording the files it uploads. */
+  private async editWith(request: ImageEditRequest, apiKey: string, uploads: string[]): Promise<ImageGenerationResult> {
     const providerOptions = getImageProviderOptions<ReplicateImageProviderOptions>(
       this.providerId,
       request.providerOptions,
@@ -373,10 +374,6 @@ export class ReplicateImageProvider implements IImageProvider {
       : SDXL_IMG2IMG;                     // SDXL supports generic img2img via image input.
     const model = request.modelId || defaultModel;
 
-    // One key for the uploads, the prediction and its polling: Replicate lets
-    // only the account that uploaded a file pass it as an input.
-    const apiKey = this.keyPool.next();
-
     // The source goes as `image` (a Kontext model's `input_image`, below), as
     // its own type; one the caller set in providerOptions.input wins and is not
     // uploaded.
@@ -385,12 +382,12 @@ export class ReplicateImageProvider implements IImageProvider {
       callerInput.image !== undefined || (model.includes('kontext') && callerInput.input_image !== undefined);
     const input: Record<string, unknown> = {
       prompt: request.prompt,
-      ...(callerSource ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image', apiKey) }),
+      ...(callerSource ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image', apiKey, uploads) }),
       ...callerInput,
     };
 
     if (hasInpaintingMask) {
-      input.mask = await this.inputImage(request.mask!, editPartType(request.mask!), 'mask', apiKey);
+      input.mask = await this.inputImage(request.mask!, editPartType(request.mask!), 'mask', apiKey, uploads);
     }
 
     if (request.strength !== undefined) input.strength = request.strength;
@@ -511,20 +508,19 @@ export class ReplicateImageProvider implements IImageProvider {
    * @throws {Error} When the provider is not initialised or the API fails.
    */
   async upscaleImage(request: ImageUpscaleRequest): Promise<ImageGenerationResult> {
-    if (!this.isInitialized) {
-      throw new Error('Replicate image provider is not initialized.');
-    }
+    return this.withInputImages((apiKey, uploads) => this.upscaleWith(request, apiKey, uploads));
+  }
 
+  /** {@link upscaleImage} on one key of the pool, recording the file it uploads. */
+  private async upscaleWith(request: ImageUpscaleRequest, apiKey: string, uploads: string[]): Promise<ImageGenerationResult> {
     const providerOptions = getImageProviderOptions<ReplicateImageProviderOptions>(
       this.providerId,
       request.providerOptions,
     );
 
-    // One key for the upload, the prediction and its polling (see editImage).
-    const apiKey = this.keyPool.next();
     const callerInput = providerOptions?.input ?? {};
     const input: Record<string, unknown> = {
-      ...(callerInput.image !== undefined ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image', apiKey) }),
+      ...(callerInput.image !== undefined ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image', apiKey, uploads) }),
       scale: request.scale ?? 2,
       ...callerInput,
     };
@@ -601,9 +597,11 @@ export class ReplicateImageProvider implements IImageProvider {
    *   succeed, or its output holds no image.
    */
   async transferStyle(request: ImageStyleTransferRequest): Promise<ImageGenerationResult> {
-    if (!this.isInitialized) {
-      throw new Error('Replicate image provider is not initialized.');
-    }
+    return this.withInputImages((apiKey, uploads) => this.transferStyleWith(request, apiKey, uploads));
+  }
+
+  /** {@link transferStyle} on one key of the pool, recording the files it uploads. */
+  private async transferStyleWith(request: ImageStyleTransferRequest, apiKey: string, uploads: string[]): Promise<ImageGenerationResult> {
     const model = this.styleTransferModel(request.modelId);
     const providerOptions = getImageProviderOptions<ReplicateImageProviderOptions>(
       this.providerId,
@@ -628,14 +626,12 @@ export class ReplicateImageProvider implements IImageProvider {
       request.styleImage,
     );
 
-    // One key for the uploads, the prediction and its polling (see editImage).
-    const apiKey = this.keyPool.next();
     const input: Record<string, unknown> = {
       ...callerInput,
       prompt: styleTransferPrompt(request.prompt, request.strength, INDEXED_IMAGE_NAMES),
       input_images: [
-        await this.inputImage(request.image, types.image, 'image', apiKey),
-        await this.inputImage(request.styleImage, types.style, 'style', apiKey),
+        await this.inputImage(request.image, types.image, 'image', apiKey, uploads),
+        await this.inputImage(request.styleImage, types.style, 'style', apiKey, uploads),
       ],
     };
     if (input.aspect_ratio === undefined) input.aspect_ratio = 'match_input_image';
@@ -738,6 +734,29 @@ export class ReplicateImageProvider implements IImageProvider {
   }
 
   /**
+   * Runs an operation that takes input images on one key of the pool, and
+   * deletes the files it uploaded once it ends, however it ends. One key,
+   * because Replicate lets only the account that uploaded a file pass it as an
+   * input; deleted, because Replicate keeps an uploaded file for 24 hours,
+   * where it removes a prediction's own inputs after an hour.
+   *
+   * @param run - The operation, given the key and the list its uploads go on.
+   * @throws {Error} When the provider is not initialised, or as `run` throws.
+   */
+  private async withInputImages<T>(run: (apiKey: string, uploads: string[]) => Promise<T>): Promise<T> {
+    if (!this.isInitialized) {
+      throw new Error('Replicate image provider is not initialized.');
+    }
+    const apiKey = this.keyPool.next();
+    const uploads: string[] = [];
+    try {
+      return await run(apiKey, uploads);
+    } finally {
+      await this.deleteUploads(uploads, apiKey);
+    }
+  }
+
+  /**
    * An input image as Replicate takes it: inline as a data URL of its type when
    * it is under {@link MAX_INLINE_IMAGE_BYTES}, or when the base URL is not
    * Replicate's (a self-hosted model has no Files API); else uploaded to the
@@ -746,11 +765,11 @@ export class ReplicateImageProvider implements IImageProvider {
    * @param bytes - The image.
    * @param type - Its format.
    * @param name - The upload's file name, without its extension.
-   * @param apiKey - The key of the prediction the image is for: Replicate
-   *   lets only the account that uploaded a file pass it as an input.
+   * @param apiKey - The key of the prediction the image is for.
+   * @param uploads - The operation's uploaded file URLs; an upload is added.
    * @throws {Error} When the upload fails or answers without the file's URL.
    */
-  private async inputImage(bytes: Buffer, type: ImagePartType, name: string, apiKey: string): Promise<string> {
+  private async inputImage(bytes: Buffer, type: ImagePartType, name: string, apiKey: string, uploads: string[]): Promise<string> {
     if (bytes.byteLength < MAX_INLINE_IMAGE_BYTES || this.hasCustomEndpoint()) return imageDataUrl(bytes, type);
     const { blob, filename } = imageFilePart(bytes, type, name);
     const form = new FormData();
@@ -768,7 +787,35 @@ export class ReplicateImageProvider implements IImageProvider {
     if (typeof file.urls?.get !== 'string') {
       throw new Error('Replicate file upload answered without the file URL (urls.get).');
     }
+    uploads.push(file.urls.get);
     return file.urls.get;
+  }
+
+  /**
+   * Deletes an operation's uploaded files (`DELETE /v1/files/{id}`, the URL
+   * the upload answered with). Only a URL under this provider's Files API is
+   * sent the key. A file that could not be deleted is warned about and never
+   * fails the call; Replicate removes it 24 hours after its upload.
+   *
+   * @param uploads - The file URLs.
+   * @param apiKey - The key that uploaded them.
+   */
+  private async deleteUploads(uploads: string[], apiKey: string): Promise<void> {
+    const filesUrl = `${(this.config.baseURL ?? REPLICATE_BASE_URL).replace(/\/+$/, '')}/files/`;
+    await Promise.all(
+      uploads
+        .filter((url) => url.startsWith(filesUrl))
+        .map(async (url) => {
+          try {
+            const response = await fetch(url, { method: 'DELETE', headers: { Authorization: `Token ${apiKey}` } });
+            if (!response.ok && response.status !== 404) {
+              console.warn(`[agentos] Replicate did not delete an uploaded input image (${response.status}); it expires 24 hours after its upload.`);
+            }
+          } catch (error) {
+            console.warn(`[agentos] Deleting an uploaded Replicate input image failed (${error instanceof Error ? error.message : String(error)}); it expires 24 hours after its upload.`);
+          }
+        }),
+    );
   }
 
   /**

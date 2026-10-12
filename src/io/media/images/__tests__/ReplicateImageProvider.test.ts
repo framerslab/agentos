@@ -344,10 +344,14 @@ describe('ReplicateImageProvider', () => {
       headers: new Headers(),
     });
     const uploaded = (call: unknown[]) => (call[1] as RequestInit).body as FormData;
+    const deleted = { ok: true, status: 204, json: async () => ({}), text: async () => '', headers: new Headers() };
+    /** Each request as `METHOD url`. */
+    const requests = () => mockFetch.mock.calls.map(([url, init]) => `${(init as RequestInit).method ?? 'GET'} ${url}`);
 
     it('uploads an edit source from 1 MB and names its URL; a small mask stays inline as its own type', async () => {
       mockFetch.mockResolvedValueOnce(fileResponse('src1'));
       mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/edited.png']));
+      mockFetch.mockResolvedValueOnce(deleted);
 
       await provider.editImage({
         modelId: '',
@@ -356,7 +360,13 @@ describe('ReplicateImageProvider', () => {
         mask: Buffer.concat([JPEG, Buffer.alloc(16)]),
       });
 
-      expect(mockFetch).toHaveBeenCalledTimes(2);
+      // The upload, the prediction, then the upload deleted: Replicate keeps a file 24 hours otherwise.
+      expect(requests()).toEqual([
+        'POST https://api.replicate.com/v1/files',
+        'POST https://api.replicate.com/v1/models/black-forest-labs/flux-fill-pro/predictions',
+        'DELETE https://api.replicate.com/v1/files/src1',
+      ]);
+      expect(mockFetch.mock.calls[2][1]).toMatchObject({ headers: { Authorization: 'Token test-key' } });
       const [uploadUrl, uploadInit] = mockFetch.mock.calls[0];
       expect(uploadUrl).toBe('https://api.replicate.com/v1/files');
       expect(uploadInit).toMatchObject({ method: 'POST', headers: { Authorization: 'Token test-key' } });
@@ -371,9 +381,14 @@ describe('ReplicateImageProvider', () => {
       mockFetch.mockResolvedValueOnce(fileResponse('source'));
       mockFetch.mockResolvedValueOnce(fileResponse('style'));
       mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/styled.png']));
+      mockFetch.mockResolvedValueOnce(deleted).mockResolvedValueOnce(deleted);
 
       await provider.transferStyle({ modelId: '', image: large(PNG), styleImage: large(JPEG), prompt: 'as a watercolour' });
 
+      expect(requests().slice(3)).toEqual([
+        'DELETE https://api.replicate.com/v1/files/source',
+        'DELETE https://api.replicate.com/v1/files/style',
+      ]);
       expect((uploaded(mockFetch.mock.calls[1]).get('content') as File).name).toBe('style.jpg');
       const body = JSON.parse(mockFetch.mock.calls[2][1].body);
       expect(body.input.input_images).toEqual([
@@ -395,11 +410,13 @@ describe('ReplicateImageProvider', () => {
         headers: new Headers(),
       });
       mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/styled.png']));
+      mockFetch.mockResolvedValueOnce(deleted).mockResolvedValueOnce(deleted);
 
       await pooled.transferStyle({ modelId: '', image: large(PNG), styleImage: large(JPEG), prompt: 'as a watercolour' });
 
+      // Two uploads, the prediction, its poll and two deletes.
       const keys = mockFetch.mock.calls.map((call) => (call[1] as { headers: Record<string, string> }).headers.Authorization);
-      expect(keys).toHaveLength(4);
+      expect(keys).toHaveLength(6);
       expect(new Set(keys).size).toBe(1);
     });
 
@@ -427,6 +444,24 @@ describe('ReplicateImageProvider', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
       expect(mockFetch.mock.calls[0][0]).toBe('http://cog.local/v1/predictions');
       expect(JSON.parse(mockFetch.mock.calls[0][1].body).input.image).toMatch(/^data:image\/png;base64,/);
+    });
+
+    it('deletes the upload when the prediction fails, and a failed delete does not change the error', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockFetch.mockResolvedValueOnce(fileResponse('src2'));
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: 'p2', status: 'failed', error: 'model crashed' }),
+        text: async () => '',
+        headers: new Headers(),
+      });
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}), text: async () => '', headers: new Headers() });
+
+      await expect(provider.upscaleImage({ modelId: '', image: large(PNG) })).rejects.toThrow('model crashed');
+
+      expect(requests()[2]).toBe('DELETE https://api.replicate.com/v1/files/src2');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('did not delete an uploaded input image (500)'));
+      warn.mockRestore();
     });
 
     it('fails the call when the upload fails, before any prediction', async () => {
