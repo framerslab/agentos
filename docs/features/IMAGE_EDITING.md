@@ -98,7 +98,7 @@ Without `model`, each provider edits with its own default for edits, not with it
 | OpenAI | `gpt-image-2.5-sunburst` |
 | Stability AI | `sd3.5-medium` on the SD3 route in its image-to-image mode; with a `mask`, the inpaint endpoint, which takes no model |
 | Replicate | `stability-ai/sdxl` at a pinned version, or `black-forest-labs/flux-fill-pro` when a `mask` is passed |
-| fal | `fal-ai/flux/dev` |
+| fal | `fal-ai/flux/dev/image-to-image`, or `fal-ai/flux-lora/inpainting` when a `mask` is passed. `fal-ai/flux/dev` is text-to-image, so an edit that names it runs on the same endpoints |
 | Local SD (A1111) | the checkpoint the server has loaded |
 
 Replicate runs a model by its name alone only when it is one of its official models; any other model needs its version (`owner/name:version`), which is why the SDXL default carries one.

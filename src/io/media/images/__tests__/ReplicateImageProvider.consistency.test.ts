@@ -50,17 +50,28 @@ describe('ReplicateImageProvider — Character Consistency', () => {
     expect(body.input.main_face_image).toBe('https://ref.test/face.png');
   });
 
-  it('maps referenceImageUrl to image for Flux Redux models', async () => {
+  it('sends a Flux Redux reference as redux_image, with no prompt, as its schema takes it', async () => {
     mockFetch.mockResolvedValueOnce(mockSuccess());
 
     await provider.generateImage({
       modelId: 'black-forest-labs/flux-redux-dev',
       prompt: 'style transfer',
+      negativePrompt: 'blur',
       referenceImageUrl: 'https://ref.test/style.png',
     });
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.input.image).toBe('https://ref.test/style.png');
+    expect(body.input.redux_image).toBe('https://ref.test/style.png');
+    expect(body.input).not.toHaveProperty('image');
+    expect(body.input).not.toHaveProperty('prompt');
+    expect(body.input).not.toHaveProperty('negative_prompt');
+  });
+
+  it('refuses a Flux Redux generation with no reference image, before any request', async () => {
+    await expect(
+      provider.generateImage({ modelId: 'black-forest-labs/flux-redux-dev', prompt: 'a lighthouse' }),
+    ).rejects.toThrow('pass referenceImageUrl, which it takes as redux_image');
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('sets image_strength based on consistencyMode for standard Flux models', async () => {

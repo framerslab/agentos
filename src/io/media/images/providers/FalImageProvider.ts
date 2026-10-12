@@ -9,6 +9,8 @@
  * | Model ID                    | Description                                  |
  * |-----------------------------|----------------------------------------------|
  * | `fal-ai/flux/dev`           | Flux Dev — fast iteration, open weights      |
+ * | `fal-ai/flux/dev/image-to-image` | Flux Dev's edit endpoint (the edit default) |
+ * | `fal-ai/flux-lora/inpainting` | Flux Dev inpainting (the default with a mask) |
  * | `fal-ai/flux-pro`           | Flux Pro — highest quality                   |
  * | `fal-ai/flux/schnell`       | Flux Schnell — optimised for speed           |
  *
@@ -39,7 +41,7 @@ import {
   type GeneratedImage,
   parseImageSize,
 } from '../IImageProvider.js';
-import { imageDataUrl } from '../blobPart.js';
+import { editPartType, imageDataUrl } from '../blobPart.js';
 import {
   INDEXED_IMAGE_NAMES,
   styleTransferImageTypes,
@@ -237,6 +239,18 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
+
+/**
+ * Where an edit runs when the call names no model, or names `fal-ai/flux/dev`,
+ * which is text-to-image on Fal and takes no image (its queue schema,
+ * https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=fal-ai/flux/dev,
+ * has no image field). Its image-to-image endpoint takes `image_url` and
+ * `strength`; with a mask, the FLUX.1 [dev] inpainting endpoint takes
+ * `image_url`, `mask_url` and `strength`.
+ */
+export const FAL_EDIT_MODEL = 'fal-ai/flux/dev/image-to-image';
+/** See {@link FAL_EDIT_MODEL}: the endpoint an edit with a mask runs on. */
+export const FAL_INPAINT_MODEL = 'fal-ai/flux-lora/inpainting';
 
 /**
  * Image generation provider connecting to the Fal.ai serverless platform.
@@ -457,8 +471,11 @@ export class FalImageProvider implements IImageProvider {
    * Edit an image using a Fal.ai-hosted Flux model.
    *
    * Supports img2img (prompt-guided transformation) and inpainting
-   * (mask-guided regional editing). The source image is passed as a
-   * base64 data URL in the `image` field of the model input.
+   * (mask-guided regional editing). With no model named, or with
+   * `fal-ai/flux/dev`, which is text-to-image, the edit runs on
+   * {@link FAL_EDIT_MODEL}, or with a mask on {@link FAL_INPAINT_MODEL}.
+   * The source image and the mask go as base64 data URLs typed by their
+   * bytes, in the field the endpoint takes.
    *
    * @param request - Edit request with source image, prompt, and optional mask.
    * @returns Generation result with the edited image(s).
@@ -467,7 +484,7 @@ export class FalImageProvider implements IImageProvider {
    * @example
    * ```typescript
    * const result = await provider.editImage({
-   *   modelId: 'fal-ai/flux/dev',
+   *   modelId: 'fal-ai/flux/dev/image-to-image',
    *   image: imageBuffer,
    *   prompt: 'Convert to watercolor style',
    *   strength: 0.7,
@@ -480,31 +497,50 @@ export class FalImageProvider implements IImageProvider {
     }
 
     const hasMask = !!request.mask;
-    const model = request.modelId || 'fal-ai/flux/dev';
+    // fal-ai/flux/dev cannot edit: an edit on it, or on no named model, runs
+    // on its image-to-image endpoint, or with a mask on its inpainting one.
+    const model =
+      !request.modelId || request.modelId === 'fal-ai/flux/dev'
+        ? hasMask
+          ? FAL_INPAINT_MODEL
+          : FAL_EDIT_MODEL
+        : request.modelId;
 
-    const imageDataUrl = `data:image/png;base64,${request.image.toString('base64')}`;
+    // Typed by the image's bytes, as the other providers' edits send it.
+    const source = imageDataUrl(request.image, editPartType(request.image));
     const body: Record<string, unknown> = {
       prompt: request.prompt,
     };
 
     // Source-image field is model-specific: kontext takes image_url
     // (singular, no strength); the FLUX.2 /edit endpoints take an
-    // image_urls ARRAY (no strength); the legacy flux/dev img2img path
-    // keeps image + strength. Fal accepts data: URIs in all of them.
+    // image_urls ARRAY (no strength); the image-to-image and inpainting
+    // endpoints take image_url with strength, and mask_url for the mask;
+    // any other endpoint keeps the image + strength pair this provider has
+    // always sent. Fal accepts data: URIs in all of them.
+    const imageUrlEndpoint = /\/(image-to-image|inpainting)$/.test(model);
     if (model.includes('kontext')) {
-      body.image_url = imageDataUrl;
+      body.image_url = source;
     } else if (model.includes('flux-2')) {
-      body.image_urls = [imageDataUrl];
+      body.image_urls = [source];
+    } else if (imageUrlEndpoint) {
+      body.image_url = source;
+      body.strength = request.strength ?? 0.75;
     } else {
-      body.image = imageDataUrl;
+      body.image = source;
       body.strength = request.strength ?? 0.75;
     }
 
     if (hasMask) {
-      body.mask = `data:image/png;base64,${request.mask!.toString('base64')}`;
+      const mask = imageDataUrl(request.mask!, editPartType(request.mask!));
+      if (imageUrlEndpoint) body.mask_url = mask;
+      else body.mask = mask;
     }
 
-    if (request.negativePrompt) body.negative_prompt = request.negativePrompt;
+    // FLUX.1 [dev]'s edit endpoints take no negative prompt.
+    if (request.negativePrompt && model !== FAL_EDIT_MODEL && model !== FAL_INPAINT_MODEL) {
+      body.negative_prompt = request.negativePrompt;
+    }
     if (request.seed !== undefined) body.seed = request.seed;
     if (request.n) body.num_images = request.n;
 
@@ -623,7 +659,9 @@ export class FalImageProvider implements IImageProvider {
 
   async listAvailableModels(): Promise<ImageModelInfo[]> {
     return [
-      { providerId: this.providerId, modelId: 'fal-ai/flux/dev', displayName: 'Flux Dev (Fal)', description: 'Fast iteration, open weights, img2img capable' },
+      { providerId: this.providerId, modelId: 'fal-ai/flux/dev', displayName: 'Flux Dev (Fal)', description: 'Fast iteration, open weights; text-to-image, so edits run on its image-to-image endpoint' },
+      { providerId: this.providerId, modelId: FAL_EDIT_MODEL, displayName: 'Flux Dev Image-to-Image (Fal)', description: 'Edits a source image after the prompt, with a strength' },
+      { providerId: this.providerId, modelId: FAL_INPAINT_MODEL, displayName: 'Flux Dev Inpainting (Fal)', description: 'Repaints the masked region of a source image' },
       { providerId: this.providerId, modelId: 'fal-ai/flux-pro', displayName: 'Flux Pro (Fal)', description: 'Highest quality generation' },
       { providerId: this.providerId, modelId: 'fal-ai/flux/schnell', displayName: 'Flux Schnell (Fal)', description: 'Speed-optimized generation' },
       { providerId: this.providerId, modelId: 'fal-ai/flux-pro/v1.1', displayName: 'Flux Pro 1.1 (Fal)', description: 'Latest pro generation' },

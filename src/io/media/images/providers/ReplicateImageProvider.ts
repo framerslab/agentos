@@ -236,11 +236,25 @@ export class ReplicateImageProvider implements IImageProvider {
           input.input_image = refUrl;
         }
       } else if (modelId.includes('flux-redux')) {
-        input.image = refUrl;
+        // FLUX.1 Redux takes the reference as redux_image, which "replaces
+        // prompt": its input has no image, prompt or negative_prompt
+        // (https://replicate.com/black-forest-labs/flux-redux-dev/api/schema).
+        // A caller's own providerOptions.input is sent as given.
+        if (input.redux_image === undefined) input.redux_image = refUrl;
+        const raw = providerOptions?.input ?? {};
+        if (!('prompt' in raw)) delete input.prompt;
+        if (!('negative_prompt' in raw)) delete input.negative_prompt;
       } else {
         input.image = refUrl;
         input.image_strength = CONSISTENCY_STRENGTHS[consistencyMode];
       }
+    }
+
+    // A Redux model makes a variation of its reference image and nothing else.
+    if (modelId.includes('flux-redux') && input.redux_image === undefined) {
+      throw new Error(
+        `Replicate ${modelId} makes a variation of a reference image: pass referenceImageUrl, which it takes as redux_image.`,
+      );
     }
 
     // Map control image for ControlNet models
@@ -673,7 +687,7 @@ export class ReplicateImageProvider implements IImageProvider {
         description: 'Generation and editing from several reference images; transferStyle runs on it',
       })),
       // Variation of a reference image
-      { providerId: this.providerId, modelId: 'black-forest-labs/flux-redux-dev', displayName: 'Flux Redux Dev', description: 'A variation of one reference image, steered by the prompt' },
+      { providerId: this.providerId, modelId: 'black-forest-labs/flux-redux-dev', displayName: 'Flux Redux Dev', description: 'A variation of one reference image (referenceImageUrl); it takes no prompt' },
       // ControlNet
       { providerId: this.providerId, modelId: 'black-forest-labs/flux-canny-dev', displayName: 'Flux Canny', description: 'Edge-guided generation' },
       { providerId: this.providerId, modelId: 'black-forest-labs/flux-depth-dev', displayName: 'Flux Depth', description: 'Depth-guided generation' },

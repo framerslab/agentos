@@ -23,7 +23,7 @@ describe('FalImageProvider — editImage', () => {
     await provider.initialize({ apiKey: 'fal_test', pollIntervalMs: 1, timeoutMs: 5000 });
   });
 
-  it('performs img2img with strength parameter', async () => {
+  it('runs an edit on fal-ai/flux/dev, which is text-to-image, on its image-to-image endpoint', async () => {
     mockFetch
       .mockResolvedValueOnce(mockSubmit())
       .mockResolvedValueOnce(mockStatus())
@@ -34,13 +34,34 @@ describe('FalImageProvider — editImage', () => {
       image: Buffer.from('fake'),
       prompt: 'oil painting style',
       strength: 0.65,
+      negativePrompt: 'blur',
     });
 
     expect(result.images).toHaveLength(1);
     expect(result.providerId).toBe('fal');
-    const submitBody = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(submitBody.image).toBeDefined();
+    expect(result.modelId).toBe('fal-ai/flux/dev/image-to-image');
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(String(url)).toMatch(/\/fal-ai\/flux\/dev\/image-to-image$/);
+    const submitBody = JSON.parse(init.body);
+    // The endpoint's own fields: image_url and strength, no image and no negative prompt.
+    expect(submitBody.image_url).toMatch(/^data:image\/png;base64,/);
     expect(submitBody.strength).toBe(0.65);
+    expect(submitBody).not.toHaveProperty('image');
+    expect(submitBody).not.toHaveProperty('negative_prompt');
+  });
+
+  it('edits on the image-to-image endpoint when no model is named, the source typed by its bytes', async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockSubmit())
+      .mockResolvedValueOnce(mockStatus())
+      .mockResolvedValueOnce(mockResult());
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+
+    await provider.editImage({ modelId: '', image: jpeg, prompt: 'warmer light' });
+
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(String(url)).toMatch(/\/fal-ai\/flux\/dev\/image-to-image$/);
+    expect(JSON.parse(init.body).image_url).toBe(`data:image/jpeg;base64,${jpeg.toString('base64')}`);
   });
 
   it('defaults strength to 0.75 when not specified', async () => {
@@ -59,21 +80,26 @@ describe('FalImageProvider — editImage', () => {
     expect(submitBody.strength).toBe(0.75);
   });
 
-  it('passes mask as base64 data URL when provided', async () => {
+  it('inpaints on the FLUX.1 dev inpainting endpoint, with the mask as mask_url', async () => {
     mockFetch
       .mockResolvedValueOnce(mockSubmit())
       .mockResolvedValueOnce(mockStatus())
       .mockResolvedValueOnce(mockResult());
 
-    await provider.editImage({
+    const result = await provider.editImage({
       modelId: 'fal-ai/flux/dev',
       image: Buffer.from('fake-image'),
       prompt: 'fill area',
       mask: Buffer.from('fake-mask'),
     });
 
-    const submitBody = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(submitBody.mask).toContain('data:image/png;base64,');
+    expect(result.modelId).toBe('fal-ai/flux-lora/inpainting');
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(String(url)).toMatch(/\/fal-ai\/flux-lora\/inpainting$/);
+    const submitBody = JSON.parse(init.body);
+    expect(submitBody.image_url).toContain('data:image/png;base64,');
+    expect(submitBody.mask_url).toBe(`data:image/png;base64,${Buffer.from('fake-mask').toString('base64')}`);
+    expect(submitBody).not.toHaveProperty('mask');
   });
 
   it('throws when not initialized', async () => {
@@ -157,22 +183,33 @@ describe('FalImageProvider — editImage', () => {
       expect(body.strength).toBeUndefined();
     });
 
-    it('legacy img2img models keep image + strength', async () => {
+    it('image-to-image and inpainting endpoints take image_url + strength, as their schemas name them', async () => {
+      for (const modelId of ['fal-ai/flux/dev/image-to-image', 'fal-ai/flux-general/inpainting']) {
+        mockFetch
+          .mockResolvedValueOnce(mockSubmit())
+          .mockResolvedValueOnce(mockStatus())
+          .mockResolvedValueOnce(mockResult());
+        await provider.editImage({ modelId, image: Buffer.from('img'), prompt: 'edit it', strength: 0.6 });
+      }
+      for (const [, init] of [mockFetch.mock.calls[0], mockFetch.mock.calls[3]]) {
+        const body = JSON.parse(init.body);
+        expect(body.image_url).toContain('data:image/png;base64,');
+        expect(body.strength).toBe(0.6);
+        expect(body.image).toBeUndefined();
+        expect(body.image_urls).toBeUndefined();
+      }
+    });
+
+    it('any other model keeps the image + strength pair this provider has always sent', async () => {
       mockFetch
         .mockResolvedValueOnce(mockSubmit())
         .mockResolvedValueOnce(mockStatus())
         .mockResolvedValueOnce(mockResult());
-      await provider.editImage({
-        modelId: 'fal-ai/flux/dev/image-to-image',
-        image: Buffer.from('img'),
-        prompt: 'edit it',
-        strength: 0.6,
-      });
+      await provider.editImage({ modelId: 'acme/custom-img2img', image: Buffer.from('img'), prompt: 'edit it', strength: 0.6 });
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(body.image).toContain('data:image/png;base64,');
       expect(body.strength).toBe(0.6);
       expect(body.image_url).toBeUndefined();
-      expect(body.image_urls).toBeUndefined();
     });
   });
 
