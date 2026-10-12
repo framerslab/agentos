@@ -350,3 +350,27 @@ describe('the limits, the meter and the ends', () => {
     expect(h.seen.filter((e) => e.type === 'bot:transcript').length).toBe(1);
   });
 });
+
+describe('a step that fails, or a race, on the way out', () => {
+  it('a run whose purge keeps failing holds back neither the limits nor the reconcile of the other runs', async () => {
+    const h = harness();
+    const first = await joined(h, 'k1'); // the oldest: the limits reach it last, the reconcile first
+    h.clock.advance(1);
+    const failing = await joined(h, 'k2');
+    h.clock.advance(1);
+    const last = await joined(h, 'k3'); // the newest: the limits reach it first, the reconcile last
+    await h.manager.purgeRun(failing);
+    await h.report(failing, 'left', { reason: 'stopped_by_owner', seconds: 5 });
+    const remove = h.stores.jobs.remove.bind(h.stores.jobs);
+    vi.spyOn(h.stores.jobs, 'remove').mockImplementation(async (id) => {
+      if (id === failing) throw new Error('job store unavailable');
+      return remove(id);
+    });
+    h.provider.alive.delete(last); // its container is gone
+    h.clock.advance(60_000); // every stop monitor quiet, and a reconcile due
+    await expect(h.manager.tick()).rejects.toThrow('job store unavailable');
+    expect(h.provider.commands.get(first)?.at(-1)).toEqual({ name: 'suspendCapture' });
+    expect(await h.stores.runs.get(last)).toMatchObject({ state: 'done', reason: 'crashed' });
+    expect((await h.stores.runs.get(failing))?.state).toBe('purging');
+  });
+});

@@ -992,71 +992,82 @@ export class MeetingManager {
 
   // ── The limits ──
 
+  /**
+   * Each run's limits, kills, resumed purges and retried cleanups, in turn. A run whose step throws (a cleanup, a settle,
+   * a command) holds back no other run's, the stop monitor's suspension among them: it is tried again on the next pass,
+   * and the first error is thrown once every run has had its turn.
+   */
   private async enforceLimits(): Promise<void> {
     const now = this.now();
     const runs = await this.stores.runs.list({ states: ['requested', 'scheduled', ...ACTIVE_STATES], limit: Number.MAX_SAFE_INTEGER });
+    let failure: { error: unknown } | undefined;
     for (const run of runs) {
-      if (run.cleanupPending && ['requested', 'scheduled', 'dispatching'].includes(run.state)) {
-        await this.fail(run, run.reason ?? 'crashed');
-        continue;
-      }
-      if (run.state === 'requested' || run.state === 'scheduled') continue;
-      const provider = this.providers.get(run.providerName);
-      const commandedLeaveAt = this.leaveAt.get(run.runId);
-      if (commandedLeaveAt !== undefined && now - commandedLeaveAt > this.killAfterMs) {
-        this.leaveAt.delete(run.runId);
-        await provider?.command(run.runId, { name: 'kill' });
-        await this.crash(run, now, undefined);
-        continue;
-      }
-      if (run.state === 'purging') {
-        await this.continuePurge(run.runId);
-        continue;
-      }
-      if (run.state === 'left') {
-        // a cleanup that threw last time is tried again here, until `done` is written
-        await this.complete(run, undefined);
-        continue;
-      }
-      if (run.state === 'leaving') continue;
-      const since = run.dispatchedAt ?? run.joinAt;
-      if (now - since > run.limits.totalMs) {
-        await this.leave(run, 'cap');
-        continue;
-      }
-      if (run.state === 'waiting_room' && now - (run.joinedAt ?? since) > run.limits.waitingRoomMs) {
-        await this.leave(run, 'not_admitted');
-        continue;
-      }
-      if (run.state === 'in_call_notice_pending' && run.joinedAt !== undefined && now - run.joinedAt > this.noticeConfirmMs) {
-        await this.leave(run, 'notice_failed');
-        continue;
-      }
-      if (run.state === 'in_call') {
-        // quiet once monitorMissedBeats intervals have passed since the last heartbeat, the boundary captureReady and startCaptureIfReady use
-        const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats;
-        if (monitorStale) {
-          const suspended = this.suspendedAt.get(run.runId);
-          if (suspended === undefined) {
-            this.suspendedAt.set(run.runId, now);
-            await provider?.command(run.runId, { name: 'suspendCapture' });
-            await this.emit('bot:capture_suspended', run, { reason: 'stop monitor quiet' });
-          } else if (now - suspended > this.monitorRecoverMs) {
-            await this.leave(run, 'stop_monitor_failed');
+      try {
+        if (run.cleanupPending && ['requested', 'scheduled', 'dispatching'].includes(run.state)) {
+          await this.fail(run, run.reason ?? 'crashed');
+          continue;
+        }
+        if (run.state === 'requested' || run.state === 'scheduled') continue;
+        const provider = this.providers.get(run.providerName);
+        const commandedLeaveAt = this.leaveAt.get(run.runId);
+        if (commandedLeaveAt !== undefined && now - commandedLeaveAt > this.killAfterMs) {
+          this.leaveAt.delete(run.runId);
+          await provider?.command(run.runId, { name: 'kill' });
+          await this.crash(run, now, undefined);
+          continue;
+        }
+        if (run.state === 'purging') {
+          await this.continuePurge(run.runId);
+          continue;
+        }
+        if (run.state === 'left') {
+          // a cleanup that threw last time is tried again here, until `done` is written
+          await this.complete(run, undefined);
+          continue;
+        }
+        if (run.state === 'leaving') continue;
+        const since = run.dispatchedAt ?? run.joinAt;
+        if (now - since > run.limits.totalMs) {
+          await this.leave(run, 'cap');
+          continue;
+        }
+        if (run.state === 'waiting_room' && now - (run.joinedAt ?? since) > run.limits.waitingRoomMs) {
+          await this.leave(run, 'not_admitted');
+          continue;
+        }
+        if (run.state === 'in_call_notice_pending' && run.joinedAt !== undefined && now - run.joinedAt > this.noticeConfirmMs) {
+          await this.leave(run, 'notice_failed');
+          continue;
+        }
+        if (run.state === 'in_call') {
+          // quiet once monitorMissedBeats intervals have passed since the last heartbeat, the boundary captureReady and startCaptureIfReady use
+          const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats;
+          if (monitorStale) {
+            const suspended = this.suspendedAt.get(run.runId);
+            if (suspended === undefined) {
+              this.suspendedAt.set(run.runId, now);
+              await provider?.command(run.runId, { name: 'suspendCapture' });
+              await this.emit('bot:capture_suspended', run, { reason: 'stop monitor quiet' });
+            } else if (now - suspended > this.monitorRecoverMs) {
+              await this.leave(run, 'stop_monitor_failed');
+              continue;
+            }
+          }
+          const alone = this.aloneSince.get(run.runId);
+          if (alone !== undefined && now - alone > run.limits.aloneMs) {
+            await this.leave(run, 'alone');
+            continue;
+          }
+          if (run.limits.pageAwayMs !== undefined && run.pageSeenAt !== undefined && now - run.pageSeenAt > run.limits.pageAwayMs) {
+            await this.leave(run, 'page_away');
             continue;
           }
         }
-        const alone = this.aloneSince.get(run.runId);
-        if (alone !== undefined && now - alone > run.limits.aloneMs) {
-          await this.leave(run, 'alone');
-          continue;
-        }
-        if (run.limits.pageAwayMs !== undefined && run.pageSeenAt !== undefined && now - run.pageSeenAt > run.limits.pageAwayMs) {
-          await this.leave(run, 'page_away');
-          continue;
-        }
+      } catch (error) {
+        failure ??= { error };
       }
     }
+    if (failure) throw failure.error;
   }
 
   /** Evicts completed in-memory runs after the grace. Durable stores omit forget and keep their terminal records. */
@@ -1081,24 +1092,33 @@ export class MeetingManager {
 
   // ── Reconcile ──
 
-  /** Compares dispatched jobs with the providers' usage: a run whose container is gone is ended as crashed; an unfinished purge is resumed. */
+  /**
+   * Compares dispatched jobs with the providers' usage: a run whose container is gone is ended as crashed; an unfinished
+   * purge is resumed. As in the limits, a run whose step throws holds back no other, and the first error is thrown at the
+   * end.
+   */
   async reconcile(): Promise<void> {
     const now = this.now();
+    let failure: { error: unknown } | undefined;
     const byProvider = new Map<string, string[]>();
     for (const job of await this.stores.jobs.listDispatched()) {
-      const run = await this.stores.runs.get(job.runId);
-      if (!run) {
-        await this.stores.jobs.remove(job.runId);
-        continue;
+      try {
+        const run = await this.stores.runs.get(job.runId);
+        if (!run) {
+          await this.stores.jobs.remove(job.runId);
+          continue;
+        }
+        if (run.state === 'purging') {
+          await this.continuePurge(run.runId);
+          continue;
+        }
+        if (!ACTIVE_STATES.includes(run.state) || run.state === 'dispatching') continue;
+        const list = byProvider.get(run.providerName) ?? [];
+        list.push(run.runId);
+        byProvider.set(run.providerName, list);
+      } catch (error) {
+        failure ??= { error };
       }
-      if (run.state === 'purging') {
-        await this.continuePurge(run.runId);
-        continue;
-      }
-      if (!ACTIVE_STATES.includes(run.state) || run.state === 'dispatching') continue;
-      const list = byProvider.get(run.providerName) ?? [];
-      list.push(run.runId);
-      byProvider.set(run.providerName, list);
     }
     for (const [providerName, runIds] of byProvider) {
       const provider = this.providers.get(providerName);
@@ -1112,13 +1132,18 @@ export class MeetingManager {
       }
       for (const u of usage) {
         if (u.alive) continue;
-        const run = await this.stores.runs.get(u.runId);
-        if (run && (run.state === 'joining' || run.state === 'waiting_room' || run.state === 'in_call_notice_pending' || run.state === 'in_call' || run.state === 'leaving')) {
-          this.config.logger?.warn(`[MeetingManager] ${run.runId}: worker reports no container; ending as crashed`);
-          await this.crash(run, now, u.seconds || undefined);
+        try {
+          const run = await this.stores.runs.get(u.runId);
+          if (run && (run.state === 'joining' || run.state === 'waiting_room' || run.state === 'in_call_notice_pending' || run.state === 'in_call' || run.state === 'leaving')) {
+            this.config.logger?.warn(`[MeetingManager] ${run.runId}: worker reports no container; ending as crashed`);
+            await this.crash(run, now, u.seconds || undefined);
+          }
+        } catch (error) {
+          failure ??= { error };
         }
       }
     }
+    if (failure) throw failure.error;
   }
 
   // ── The transcript ──
