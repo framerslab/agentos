@@ -14,11 +14,11 @@
 export interface IMeetingRoomService {
   /** The url a participant connects to (`wss://…`). */
   readonly url: string;
-  /** Creates the room, which the server closes when nobody has joined within `emptyTimeoutSeconds` or `departureTimeoutSeconds` after the last participant leaves, and which holds at most `maxParticipants` at once. */
+  /** Creates the room, which the server closes when nobody has joined within `emptyTimeoutSeconds` or `departureTimeoutSeconds` after the last participant leaves, and which holds at most `maxParticipants` at once. A room of that name that exists already is not an error (LiveKit's `CreateRoom` returns it): a dispatch tried again after a failure may ask for a room its first attempt made. */
   createRoom(input: { name: string; emptyTimeoutSeconds: number; departureTimeoutSeconds: number; maxParticipants: number }): Promise<void>;
   /** Deletes the room. For a room that does not exist it must reject with an error whose `status` is 404 (the LiveKit server SDK's errors carry the response's HTTP status, so passing its error through does). */
   deleteRoom(name: string): Promise<void>;
-  /** Mints a join token for one identity in one room with exactly the publish and subscribe rights given, valid for `ttlSeconds`. */
+  /** Mints a join token for one identity in one room with exactly the publish and subscribe rights given and no right to publish data, valid for `ttlSeconds`. With the LiveKit server SDK, set `canPublishData: false` in the grant: left unset, LiveKit allows data wherever `canPublish` is true. */
   mintToken(input: { room: string; identity: string; canPublish: boolean; canSubscribe: boolean; ttlSeconds: number }): Promise<string>;
 }
 
@@ -40,7 +40,7 @@ export interface MeetingRoomOptions {
 
 /** A run's room as {@link MeetingRoom.create} made it. The two tokens are secrets: the manager keeps neither on the run's record. */
 export interface MeetingRoomHandle {
-  /** The url both participants connect to. */
+  /** The service's url, the address the bot is given. An agent that reaches the server by another address, such as one inside the host's own network, connects there. */
   url: string;
   /** The room's name: the prefix, then the run id. */
   name: string;
