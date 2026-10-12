@@ -508,11 +508,12 @@ export class FalImageProvider implements IImageProvider {
     await this._pollStatus(model, requestId, statusUrl, responseUrl);
     const result = await this._fetchResult(model, requestId, responseUrl);
 
-    if (!result.images || result.images.length === 0) {
+    const usable = (result.images ?? []).filter((img) => typeof img?.url === 'string' && img.url !== '');
+    if (usable.length === 0) {
       throw new Error('Fal.ai edit completed but returned no images.');
     }
 
-    const images: GeneratedImage[] = result.images.map((img) => ({
+    const images: GeneratedImage[] = usable.map((img) => ({
       url: img.url,
       mimeType: img.content_type,
       providerMetadata: { width: img.width, height: img.height, seed: result.seed },

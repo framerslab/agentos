@@ -13,7 +13,7 @@ import {
   type OpenAIImageProviderOptions,
 } from '../IImageProvider.js';
 import { bufferToBlobPart } from '../imageToBuffer.js';
-import { imageFilePart } from '../blobPart.js';
+import { IMAGE_PART_TYPES, imageFilePart, imagePartType } from '../blobPart.js';
 import {
   ORDINAL_IMAGE_NAMES,
   styleTransferImageTypes,
@@ -243,12 +243,10 @@ export class OpenAIImageProvider implements IImageProvider {
 
     const formData = new FormData();
 
-    // OpenAI expects the image as a file-like Blob in the multipart payload.
-    formData.append(
-      'image',
-      new Blob([bufferToBlobPart(request.image)], { type: 'image/png' }),
-      'image.png'
-    );
+    // OpenAI expects the image as a file-like Blob in the multipart payload,
+    // of its own type: a JPEG or WebP is sent as one, anything else as PNG.
+    const source = imageFilePart(request.image, imagePartType(request.image) ?? IMAGE_PART_TYPES['image/png'], 'image');
+    formData.append('image', source.blob, source.filename);
     formData.append('prompt', request.prompt);
 
     // Mask is only used for inpainting — white regions are edited.
@@ -266,7 +264,10 @@ export class OpenAIImageProvider implements IImageProvider {
     if (typeof request.n === 'number') formData.append('n', String(request.n));
     if (request.size) formData.append('size', request.size);
 
-    return this.postEdit(formData, model, 'OpenAI image edit');
+    const result = await this.postEdit(formData, model, 'OpenAI image edit');
+    const images = result.images.filter((image) => image.base64 || image.url);
+    if (images.length === 0) throw new Error('OpenAI image edit returned no image.');
+    return { ...result, images, usage: { totalImages: images.length } };
   }
 
   /**
