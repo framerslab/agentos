@@ -19,6 +19,7 @@
  * - Transport disconnect transitions to CLOSED
  * - stopSession tears down all components
  * - VAD events are forwarded from STT speech_start/speech_end to endpoint detector
+ * - turn_complete is re-emitted on the orchestrator, so waitForUserTurn() resolves
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -354,5 +355,23 @@ describe('VoicePipelineOrchestrator', () => {
     expect(endpoint.pushVadEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'speech_end', source: 'stt' }),
     );
+  });
+
+  it('re-emits the detector\'s turn_complete, so waitForUserTurn() resolves', async () => {
+    const transport = createMockTransport();
+    const sttSession = createMockSTTSession();
+    const ttsSession = createMockTTSSession();
+    const detector = createMockEndpoint();
+    const orchestrator = new VoicePipelineOrchestrator({ stt: 'mock', tts: 'mock' } as VoicePipelineConfig);
+    await orchestrator.startSession(transport, createMockAgentSession(), {
+      streamingSTT: createMockSTT(sttSession),
+      streamingTTS: createMockTTS(ttsSession),
+      endpointDetector: detector,
+      bargeinHandler: createMockBargeinHandler(),
+    });
+    const turn = orchestrator.waitForUserTurn();
+    const event: TurnCompleteEvent = { transcript: 'hello there', confidence: 0.9, durationMs: 800, reason: 'punctuation' };
+    detector.emit('turn_complete', event);
+    await expect(turn).resolves.toMatchObject({ transcript: 'hello there' });
   });
 });

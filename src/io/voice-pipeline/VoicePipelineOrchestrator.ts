@@ -474,6 +474,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    *
    * The turn is only processed if the orchestrator is currently in LISTENING
    * state, preventing duplicate processing from stale events.
+   * A turn it processes is first re-emitted as the orchestrator's own
+   * `turn_complete`, which resolves `waitForUserTurn()`.
    *
    * @param endpointDetector - The detector that fires turn_complete events.
    * @param transport - For sending agent_thinking/agent_speaking control messages.
@@ -491,6 +493,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // This prevents processing stale events that arrive after a barge-in
       // or transport disconnect has already moved us out of LISTENING.
       if (this._state !== 'listening') return;
+
+      // Re-emit for waitForUserTurn() and for hosts that listen on the orchestrator (the class comment lists it).
+      this.emit('turn_complete', event);
 
       // Stop the watchdog -- the user has finished speaking
       this._clearWatchdog();
