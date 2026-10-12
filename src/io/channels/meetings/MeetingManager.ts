@@ -9,7 +9,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ITranscriptInputSink, TranscriptTurn } from '../../voice-pipeline/types.js';
 import type { DispatchResult, IMeetingBotProvider, ProviderEventContext } from './IMeetingBotProvider.js';
-import type { MeetingRoom } from './MeetingRoom.js';
+import type { MeetingRoom, MeetingRoomHandle } from './MeetingRoom.js';
 import { MeetingTranscriptSink } from './MeetingTranscriptSink.js';
 import { hashWorkerToken, mintWorkerToken } from './signing.js';
 import { DuplicateIdempotencyKeyError, type IClock, type IEntitlementHook, type IEventStore, type IJobStore, type IOutbox, type IRunStore, type ITranscriptStore } from './stores/types.js';
@@ -358,15 +358,28 @@ export class MeetingManager {
     this.timer = undefined;
   }
 
-  /** One pass: due jobs dispatched, limits enforced, kills issued, purges resumed, a reconcile every minute. */
+  /**
+   * One pass: due jobs dispatched, limits enforced, kills issued, purges resumed, a reconcile every minute. Each step runs
+   * even when an earlier one throws, so a dispatch that fails on one run never holds back the limits of the others (the
+   * stop monitor's suspension among them); the first error is thrown once the pass is over.
+   */
   async tick(): Promise<void> {
-    await this.dispatchDue();
-    await this.enforceLimits();
-    await this.cleanupExpired();
+    let failure: { error: unknown } | undefined;
+    const step = async (pass: () => Promise<void>): Promise<void> => {
+      try {
+        await pass();
+      } catch (error) {
+        failure ??= { error };
+      }
+    };
+    await step(() => this.dispatchDue());
+    await step(() => this.enforceLimits());
+    await step(() => this.cleanupExpired());
     if (this.now() - this.lastReconcileAt >= 60_000) {
       this.lastReconcileAt = this.now();
-      await this.reconcile();
+      await step(() => this.reconcile());
     }
+    if (failure) throw failure.error;
   }
 
   private async dispatchDue(): Promise<void> {
@@ -453,7 +466,14 @@ export class MeetingManager {
       this.config.logger?.warn(`[MeetingManager] lease of ${run.runId} lost before dispatch`);
       return;
     }
-    const room = await this.config.room.create(run.runId);
+    let room: MeetingRoomHandle;
+    try {
+      room = await this.config.room.create(run.runId);
+    } catch (err) {
+      // a room that cannot be made fails the dispatch as a provider's refusal does: tried again after the pause, ended at the deadline
+      await this.dispatchFailed(run, err, undefined);
+      return;
+    }
     const workerToken = mintWorkerToken();
     const withDispatch = await this.stores.runs.update(run.runId, { dispatch: { roomName: room.name, workerTokenHash: hashWorkerToken(workerToken) } }, 'dispatching');
     if (!withDispatch) return;
@@ -471,22 +491,8 @@ export class MeetingManager {
     } catch (err) {
       clearInterval(timer);
       await renewal;
-      const job = await this.stores.jobs.get(run.runId);
-      if (leaseLost || !job || job.leaseHolder !== this.id) return;
-      await this.config.room.delete(room.name);
-      if (err instanceof NoCapacityError || this.now() - run.joinAt > this.dispatchRetryMs) {
-        const current = await this.stores.runs.get(run.runId);
-        if (current) await this.fail(current, job.cancelled ? current.reason ?? 'stopped_by_owner' : err instanceof NoCapacityError ? 'no_capacity' : 'crashed');
-        return;
-      }
-      // Keep dispatching: the forward-only graph allows retrying the same state.
-      // Preserve the dispatch record so recovery checks whether the provider started a bot before its reply failed.
-      if (!(await this.stores.jobs.release(run.runId, this.id, this.now() + this.dispatchRetryDelayMs))) return;
-      const released = await this.stores.jobs.get(run.runId);
-      if (released?.cancelled) {
-        const current = await this.stores.runs.get(run.runId);
-        if (current) await this.fail(current, current.reason ?? 'stopped_by_owner');
-      }
+      if (leaseLost) return;
+      await this.dispatchFailed(run, err, room.name);
       return;
     } finally {
       clearInterval(timer);
@@ -498,6 +504,30 @@ export class MeetingManager {
     const dispatched = await this.stores.runs.update(run.runId, { dispatch: { ...withDispatch.dispatch!, workerId: result.workerId, providerRunRef: result.providerRunRef } }, 'dispatching');
     if (dispatched) await this.emit('bot:dispatching', dispatched, { workerId: result.workerId });
     if (dispatched && cancelled) await this.leave(dispatched, dispatched.reason ?? 'stopped_by_owner');
+  }
+
+  /**
+   * A dispatch that failed before the bot was out, while this manager still holds the job: the room goes, then the run
+   * ends (no capacity, a cancel that landed meanwhile, or the retry window past its due time) or its job is released to
+   * be tried again after the pause.
+   */
+  private async dispatchFailed(run: MeetingRunRecord, err: unknown, roomName: string | undefined): Promise<void> {
+    const job = await this.stores.jobs.get(run.runId);
+    if (!job || job.leaseHolder !== this.id) return;
+    if (roomName) await this.config.room.delete(roomName);
+    if (err instanceof NoCapacityError || this.now() - run.joinAt > this.dispatchRetryMs) {
+      const current = await this.stores.runs.get(run.runId);
+      if (current) await this.fail(current, job.cancelled ? current.reason ?? 'stopped_by_owner' : err instanceof NoCapacityError ? 'no_capacity' : 'crashed');
+      return;
+    }
+    // Keep dispatching: the forward-only graph allows retrying the same state.
+    // Preserve the dispatch record so recovery checks whether the provider started a bot before its reply failed.
+    if (!(await this.stores.jobs.release(run.runId, this.id, this.now() + this.dispatchRetryDelayMs))) return;
+    const released = await this.stores.jobs.get(run.runId);
+    if (released?.cancelled) {
+      const current = await this.stores.runs.get(run.runId);
+      if (current) await this.fail(current, current.reason ?? 'stopped_by_owner');
+    }
   }
 
   // ── Reports ──

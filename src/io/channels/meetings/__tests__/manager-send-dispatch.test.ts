@@ -9,7 +9,10 @@ class FakeRooms implements IMeetingRoomService {
   readonly url = 'wss://lk.test';
   readonly created: string[] = [];
   readonly deleted: string[] = [];
+  /** When set, createRoom rejects with it (a room service that is down). */
+  createError: Error | undefined;
   async createRoom(input: { name: string }): Promise<void> {
+    if (this.createError) throw this.createError;
     this.created.push(input.name);
   }
   async deleteRoom(name: string): Promise<void> {
@@ -235,5 +238,33 @@ describe('dispatch and the interlock', () => {
     await h.manager.tick();
     const ctx = { ...mockEventContext(runId, 'chat_message', {}, h.clock.now(), h.provider.tokenOf(runId)), body: 'what someone said in the call' };
     expect(await h.manager.processProviderEvent('mock', ctx)).toEqual({ accepted: false, error: 'unparseable', applied: 0 });
+  });
+  it('a room that cannot be made fails the dispatch: tried again after the pause, and ended once the retry window has passed', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    h.rooms.createError = new Error('room service unavailable');
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('dispatching');
+    expect(await h.stores.jobs.get(runId)).toMatchObject({ dispatchAt: h.clock.now() + 15_000, dispatched: false });
+    expect((await h.stores.jobs.get(runId))?.leaseHolder).toBeUndefined();
+    h.clock.advance(300_001);
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'failed', reason: 'crashed' });
+    expect(h.entitlement.released).toEqual(['res-1']);
+    expect(h.provider.dispatched.size).toBe(0);
+  });
+  it('a step of the pass that throws holds back no other: the limits are enforced in the same pass, and the error is thrown after it', async () => {
+    const h = harness();
+    const first = await h.manager.sendBot(h.request);
+    const firstId = first.ok ? first.run.runId : '';
+    await h.manager.tick();
+    await h.report(firstId, 'joining');
+    await h.report(firstId, 'waiting_room');
+    await h.manager.sendBot({ ...h.request, idempotencyKey: 'k2', joinAt: h.clock.now() + 600_001 });
+    vi.spyOn(h.entitlement, 'revalidate').mockRejectedValue(new Error('billing unavailable'));
+    h.clock.advance(600_001);
+    await expect(h.manager.tick()).rejects.toThrow('billing unavailable');
+    expect(h.provider.commands.get(firstId)).toEqual([{ name: 'leave', reason: 'not_admitted' }]);
   });
 });
