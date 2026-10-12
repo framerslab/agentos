@@ -67,6 +67,20 @@ describe('ReplicateImageProvider — Character Consistency', () => {
     expect(body.input).not.toHaveProperty('negative_prompt');
   });
 
+  it('drops the prompt for a Redux reference given in providerOptions.input too', async () => {
+    mockFetch.mockResolvedValueOnce(mockSuccess());
+
+    await provider.generateImage({
+      modelId: 'black-forest-labs/flux-redux-dev',
+      prompt: 'a variation',
+      providerOptions: { replicate: { input: { redux_image: 'https://ref.test/direct.png' } } },
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.input).toEqual(expect.objectContaining({ redux_image: 'https://ref.test/direct.png' }));
+    expect(body.input).not.toHaveProperty('prompt');
+  });
+
   it('refuses a Flux Redux generation with no reference image, before any request', async () => {
     await expect(
       provider.generateImage({ modelId: 'black-forest-labs/flux-redux-dev', prompt: 'a lighthouse' }),

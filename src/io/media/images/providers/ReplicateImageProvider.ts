@@ -236,18 +236,23 @@ export class ReplicateImageProvider implements IImageProvider {
           input.input_image = refUrl;
         }
       } else if (modelId.includes('flux-redux')) {
-        // FLUX.1 Redux takes the reference as redux_image, which "replaces
-        // prompt": its input has no image, prompt or negative_prompt
-        // (https://replicate.com/black-forest-labs/flux-redux-dev/api/schema).
-        // A caller's own providerOptions.input is sent as given.
+        // The reference goes as redux_image (see the prompt rule below).
         if (input.redux_image === undefined) input.redux_image = refUrl;
-        const raw = providerOptions?.input ?? {};
-        if (!('prompt' in raw)) delete input.prompt;
-        if (!('negative_prompt' in raw)) delete input.negative_prompt;
       } else {
         input.image = refUrl;
         input.image_strength = CONSISTENCY_STRENGTHS[consistencyMode];
       }
+    }
+
+    // FLUX.1 Redux takes its reference as redux_image, which "replaces
+    // prompt": its input has no image, prompt or negative_prompt
+    // (https://replicate.com/black-forest-labs/flux-redux-dev/api/schema).
+    // The prompt this provider adds is dropped however the reference came; a
+    // caller's own providerOptions.input is sent as given.
+    if (modelId.includes('flux-redux')) {
+      const raw = providerOptions?.input ?? {};
+      if (!('prompt' in raw)) delete input.prompt;
+      if (!('negative_prompt' in raw)) delete input.negative_prompt;
     }
 
     // Map control image for ControlNet models

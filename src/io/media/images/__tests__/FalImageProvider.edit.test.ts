@@ -80,6 +80,24 @@ describe('FalImageProvider — editImage', () => {
     expect(submitBody.strength).toBe(0.75);
   });
 
+  it('runs a masked edit named for the image-to-image endpoint, which takes no mask, on the inpainting one', async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockSubmit())
+      .mockResolvedValueOnce(mockStatus())
+      .mockResolvedValueOnce(mockResult());
+
+    const result = await provider.editImage({
+      modelId: 'fal-ai/flux/dev/image-to-image',
+      image: Buffer.from('fake-image'),
+      prompt: 'fill area',
+      mask: Buffer.from('fake-mask'),
+    });
+
+    expect(result.modelId).toBe('fal-ai/flux-lora/inpainting');
+    expect(String(mockFetch.mock.calls[0][0])).toMatch(/\/fal-ai\/flux-lora\/inpainting$/);
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).mask_url).toContain('data:image/png;base64,');
+  });
+
   it('inpaints on the FLUX.1 dev inpainting endpoint, with the mask as mask_url', async () => {
     mockFetch
       .mockResolvedValueOnce(mockSubmit())

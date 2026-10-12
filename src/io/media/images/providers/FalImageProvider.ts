@@ -499,8 +499,10 @@ export class FalImageProvider implements IImageProvider {
     const hasMask = !!request.mask;
     // fal-ai/flux/dev cannot edit: an edit on it, or on no named model, runs
     // on its image-to-image endpoint, or with a mask on its inpainting one.
+    // The image-to-image endpoint takes no mask, so a masked edit named for
+    // it runs on the inpainting endpoint.
     const model =
-      !request.modelId || request.modelId === 'fal-ai/flux/dev'
+      !request.modelId || request.modelId === 'fal-ai/flux/dev' || (hasMask && request.modelId === FAL_EDIT_MODEL)
         ? hasMask
           ? FAL_INPAINT_MODEL
           : FAL_EDIT_MODEL
