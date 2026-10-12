@@ -151,16 +151,49 @@ const isImageUrlContentPart = (part: MessageContentPart): part is ImageUrlConten
   && part.image_url !== null
   && typeof part.image_url.url === 'string';
 
+/** The bytes of a percent-encoded payload: `%XX` is one byte, any other character its UTF-8 bytes. */
+const percentDecodeBytes = (payload: string): Buffer => {
+  const text = Buffer.from(payload, 'utf8');
+  const out = Buffer.allocUnsafe(text.length);
+  const hex = (byte: number): number =>
+    byte >= 0x30 && byte <= 0x39 ? byte - 0x30
+      : byte >= 0x41 && byte <= 0x46 ? byte - 0x37
+        : byte >= 0x61 && byte <= 0x66 ? byte - 0x57
+          : -1;
+  let length = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const high = text[i] === 0x25 && i + 2 < text.length ? hex(text[i + 1]) : -1;
+    const low = high >= 0 ? hex(text[i + 2]) : -1;
+    if (low >= 0) {
+      out[length] = high * 16 + low;
+      i += 2;
+    } else {
+      out[length] = text[i];
+    }
+    length += 1;
+  }
+  return out.subarray(0, length);
+};
+
+/**
+ * The base64 of a data URL's image, for Ollama's `images`, which takes
+ * base64 only, or `null` for anything that is not a data URL holding data.
+ * Read as WHATWG Fetch reads a data URL
+ * (https://fetch.spec.whatwg.org/#data-url-processor): tabs and line breaks
+ * are dropped, the text before the first comma marks base64 when it ends in
+ * `;base64` (spaces allowed around it), and the payload is percent-decoded
+ * first. A data URL that is not base64 is percent-decoded and re-encoded.
+ * Each step is linear in the URL's length.
+ */
 const extractBase64ImagePayload = (url: string): string | null => {
-  const trimmed = url.trim();
-  if (!trimmed.startsWith('data:')) return null;
-
-  const marker = ';base64,';
-  const markerIndex = trimmed.indexOf(marker);
-  if (markerIndex === -1) return null;
-
-  const payload = trimmed.slice(markerIndex + marker.length).trim();
-  return payload.length > 0 ? payload : null;
+  const text = url.trim().replace(/[\t\n\r]/g, '');
+  const comma = text.indexOf(',');
+  if (!/^data:/i.test(text) || comma === -1) return null;
+  const payload = text.slice(comma + 1);
+  const base64 = /; *base64 *$/i.test(text.slice(5, comma))
+    ? (payload.includes('%') ? percentDecodeBytes(payload).toString('latin1') : payload).replace(/[\t\n\f\r ]+/g, '')
+    : percentDecodeBytes(payload).toString('base64');
+  return base64.length > 0 ? base64 : null;
 };
 
 /**
@@ -320,14 +353,26 @@ export class OllamaProvider implements IProvider {
             .map((part) => part.text.trim())
             .filter(Boolean)
             .join('\n');
-          const images = msg.content
-            .filter(isImageUrlContentPart)
-            .map((part) => extractBase64ImagePayload(part.image_url.url))
-            .filter((value): value is string => typeof value === 'string' && value.length > 0);
+          // Ollama takes images as base64 and fetches nothing: an image it
+          // cannot be sent is refused, not dropped, which would leave the
+          // model answering about an image it never saw.
+          const images = msg.content.filter(isImageUrlContentPart).map((part) => {
+            const payload = extractBase64ImagePayload(part.image_url.url);
+            if (payload === null) {
+              throw new OllamaProviderError(
+                'Ollama takes an image as base64 data and does not fetch URLs: pass this image as a data URL.',
+                'IMAGE_URL_NOT_SUPPORTED',
+                400,
+              );
+            }
+            return payload;
+          });
 
+          // The text alone: with no text, the content is empty and the images
+          // carry the message, rather than its parts as JSON text.
           return {
             role: msg.role,
-            content: textContent || JSON.stringify(msg.content),
+            content: textContent,
             ...(images.length > 0 ? { images } : {}),
           };
         }

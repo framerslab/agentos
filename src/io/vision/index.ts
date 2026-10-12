@@ -195,9 +195,31 @@ export async function createVisionPipeline(
   const documentAI = config?.documentAI ?? (hasTransformers ? true : false);
   const embedding = config?.embedding ?? (hasTransformers ? true : false);
 
-  // Resolve cloud provider: caller override > env var auto-detect
-  const detected = config?.cloudProvider ? undefined : detectCloudProvider();
-  const cloudProvider = config?.cloudProvider ?? detected?.provider;
+  // Resolve cloud provider: the one the caller names (cloudProvider, or the
+  // provider a cloudModel prefix names, which generateText follows) > env
+  // var auto-detect. A key or a base URL the caller gives goes only to a
+  // provider the caller named: with none named, detection would pick one
+  // from the environment and send it there.
+  const keyed = config?.cloudApiKey !== undefined || config?.cloudBaseUrl !== undefined;
+  let named = config?.cloudProvider;
+  if (config?.cloudModel) {
+    const { routedProviderOf } = await import('../../api/model.js');
+    named = routedProviderOf({ provider: config.cloudProvider, model: config.cloudModel });
+    if (keyed && config.cloudProvider && named !== config.cloudProvider) {
+      throw new Error(
+        `createVisionPipeline: cloudModel '${config.cloudModel}' names provider '${named}', not cloudProvider ` +
+          `'${config.cloudProvider}'; the cloudApiKey or cloudBaseUrl given for one would go to the other.`,
+      );
+    }
+  }
+  if (keyed && !named) {
+    throw new Error(
+      'createVisionPipeline: cloudApiKey and cloudBaseUrl need cloudProvider (or a cloudModel such as ' +
+        "'openai:gpt-4o'): without one, the key would go to whichever provider the environment names.",
+    );
+  }
+  const detected = named ? undefined : detectCloudProvider();
+  const cloudProvider = named ?? detected?.provider;
 
   // Build the final resolved config
   const resolvedConfig: import('./types.js').VisionPipelineConfig = {
@@ -210,6 +232,7 @@ export async function createVisionPipeline(
     cloudModel: config?.cloudModel,
     cloudApiKey: config?.cloudApiKey ?? detected?.apiKey,
     cloudBaseUrl: config?.cloudBaseUrl,
+    cloudFallbackProviders: config?.cloudFallbackProviders,
     confidenceThreshold: config?.confidenceThreshold,
     preprocessing: config?.preprocessing,
   };

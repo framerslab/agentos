@@ -144,10 +144,21 @@ interface VisionPipelineConfig {
   cloudProvider?: string;
   /** Cloud model. Default: the provider's default text model. */
   cloudModel?: string;
-  /** Key for the cloud provider. Default: its environment variable (OPENAI_API_KEY and so on). */
+  /**
+   * Key for the cloud provider. Default: its environment variable
+   * (OPENAI_API_KEY and so on). Refused, with cloudBaseUrl, when neither
+   * cloudProvider nor a cloudModel prefix ('openai:gpt-4o') names the
+   * provider, and when the two name different providers.
+   */
   cloudApiKey?: string;
   /** Base URL for the cloud provider, such as a proxy. */
   cloudBaseUrl?: string;
+  /**
+   * Providers the cloud tier may try, in order, after cloudProvider fails
+   * (generateText's fallbackProviders). Default: none, so the image goes to
+   * cloudProvider alone, whatever other keys the environment holds.
+   */
+  cloudFallbackProviders?: Array<{ provider: string; model?: string }>;
 
   /** Confidence below which 'progressive' runs the next tier. Default: 0.7. */
   confidenceThreshold?: number;
@@ -182,7 +193,8 @@ interface VisionResult {
 
 interface TierResult {
   tier: VisionTier;
-  provider: string;             // 'paddle', 'tesseract', 'trocr', 'florence-2', or the cloud provider id
+  provider: string;             // 'paddle', 'tesseract', 'trocr', 'florence-2', or the cloud provider that answered
+  model?: string;               // the cloud tier's model, as generateText reports it
   text: string;
   confidence: number;
   durationMs: number;
@@ -226,7 +238,7 @@ await indexer.indexImage({ image: readFileSync('./receipt.jpg'), metadata: { sou
 const hits = await indexer.search('receipt total');
 ```
 
-Pass the pipeline through this factory (or as `visionProvider: new PipelineVisionProvider(pipeline)`), not as `new MultimodalIndexer({ visionPipeline })`: that constructor path fails in the published ES module build. The indexer sends a `Buffer` to the pipeline as a data URL labelled `image/png`, so the pipeline skips preprocessing, and a provider that checks the label against the bytes (Anthropic does) rejects a JPEG.
+Pass the pipeline through this factory (or as `visionProvider: new PipelineVisionProvider(pipeline)`), not as `new MultimodalIndexer({ visionPipeline })`: that constructor path fails in the published ES module build. The indexer sends a `Buffer` to the pipeline as a data URL labelled with the type its first bytes show (PNG, JPEG, WebP or GIF; anything else as PNG), so the pipeline skips preprocessing.
 
 `agent()` accepts a `rag` field (including `rag.multimodal.images`) and does not read it.
 
@@ -244,6 +256,8 @@ npm install sharp            # only for preprocessing
 `@huggingface/transformers` is an optional dependency of `@framers/agentos` and installs with it unless optional dependencies are skipped. Transformers.js downloads model weights from the Hugging Face Hub the first time a tier loads them.
 
 The cloud tier reads the provider's key from its environment variable: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (with `cloudProvider: 'gemini'`) or `OPENROUTER_API_KEY`, unless `cloudApiKey` is set.
+
+The image goes to `cloudProvider` alone. When that provider fails, the tier fails (or, beside a local result, is listed in `failedTiers`), and no other vendor whose key is in the environment receives the image. `cloudFallbackProviders` lists the providers it may go to next; each uses its own key from the environment, and the tier's result names the provider and model that answered. Under the default `cloudTask: 'describe'`, an empty answer is a failed tier: every image has a description. Under `'transcribe'`, an empty answer means the image shows no text, and it has confidence 0.
 
 ---
 

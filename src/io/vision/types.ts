@@ -21,6 +21,8 @@
  * @see {@link VisionStrategy} for how tiers are combined.
  */
 
+import type { FallbackProviderEntry } from '../../api/generateText.js';
+
 // ---------------------------------------------------------------------------
 // Strategy
 // ---------------------------------------------------------------------------
@@ -100,8 +102,15 @@ export interface TierResult {
   /** Which tier produced this result. */
   tier: VisionTier;
 
-  /** Provider name within the tier (e.g. 'paddle', 'tesseract', 'openai'). */
+  /**
+   * Provider name within the tier (e.g. 'paddle', 'tesseract', 'openai').
+   * For the cloud tier, the provider that answered: `cloudProvider`, or a
+   * `cloudFallbackProviders` entry after it failed.
+   */
   provider: string;
+
+  /** For the cloud tier, the model that answered, as `generateText` reports it. */
+  model?: string;
 
   /** Extracted or generated text content. */
   text: string;
@@ -386,15 +395,28 @@ export interface VisionPipelineConfig {
   /**
    * API key for the cloud vision provider. When unset, the provider's key is
    * read from its environment variable (`OPENAI_API_KEY` and so on), as
-   * {@link generateText} does.
+   * {@link generateText} does. `createVisionPipeline` refuses a key, and a
+   * base URL, that comes with no `cloudProvider` and no `cloudModel` naming a
+   * provider (`openai:gpt-4o`): it would go to whichever provider the
+   * environment names.
    */
   cloudApiKey?: string;
 
   /**
    * Base URL for the cloud vision provider, such as a proxy or a local
    * OpenAI-compatible server. When unset, the provider's default is used.
+   * Needs a named provider, as `cloudApiKey` does.
    */
   cloudBaseUrl?: string;
+
+  /**
+   * The providers the cloud tier may try, in order, after `cloudProvider`
+   * fails: `generateText`'s `fallbackProviders`. Default `[]`, so the image
+   * goes to `cloudProvider` alone and never to another vendor whose key is in
+   * the environment. A listed provider uses its own key from the environment,
+   * never `cloudApiKey` or `cloudBaseUrl`.
+   */
+  cloudFallbackProviders?: FallbackProviderEntry[];
 
   /**
    * Minimum confidence to accept an OCR result without escalating to cloud.

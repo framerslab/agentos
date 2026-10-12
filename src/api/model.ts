@@ -199,7 +199,9 @@ export function resolveProvider(
 
   // Anthropic fallback: when ANTHROPIC_API_KEY is missing, fall back to OpenRouter
   // if available. This is a convenience — OpenRouter proxies Anthropic models.
-  if (providerId === 'anthropic' && !apiKey) {
+  // Not when the call or the global default gave a base URL: that is where
+  // the caller sends Anthropic requests, and OpenRouter would drop it.
+  if (providerId === 'anthropic' && !apiKey && !baseUrl) {
     const orKey = process.env['OPENROUTER_API_KEY'];
     if (orKey) {
       // Anthropic's native API takes dated model IDs (e.g. "claude-haiku-4-5-20251001").

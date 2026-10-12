@@ -150,7 +150,7 @@ const { text: local } = await generateText({
 });
 ```
 
-All high-level functions support `apiKey`: `generateText`, [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts), `generateObject`, [`streamObject`](https://github.com/framerslab/agentos/blob/master/src/api/streamObject.ts), `generateImage`, `generateVideo`, `generateMusic`, `generateSFX`, `embedText`, [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), and [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts). `performOCR` accepts `apiKey` but does not pass it on: its cloud tier reads the provider's environment variable.
+All high-level functions support `apiKey`: `generateText`, [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts), `generateObject`, [`streamObject`](https://github.com/framerslab/agentos/blob/master/src/api/streamObject.ts), `generateImage`, `generateVideo`, `generateMusic`, `generateSFX`, `embedText`, [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), and [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts). `performOCR` passes its `apiKey` (and `baseUrl`) to the cloud tier, and needs `provider` (or a `model` prefix such as `openai:gpt-4o`) with them: a key never goes to a provider picked from the environment.
 
 ---
 

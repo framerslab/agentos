@@ -55,6 +55,7 @@ import type {
 } from './types.js';
 import type { VisionPipeline } from '../../../io/vision/VisionPipeline.js';
 import type { HydeRetriever } from '../HydeRetriever.js';
+import { imagePartType } from '../../../io/media/images/blobPart.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -313,10 +314,11 @@ export class MultimodalIndexer {
     let imageUrl: string;
     if (isNodeBuffer(opts.image)) {
       const base64 = opts.image.toString('base64');
-      // Default to PNG MIME type since we don't inspect the magic bytes.
-      // Most vision LLMs accept any common image format regardless of the
-      // declared MIME type.
-      imageUrl = `data:image/png;base64,${base64}`;
+      // Labelled with the type its first bytes show (PNG, JPEG, WebP or GIF,
+      // anything else as PNG): a provider that checks the label against the
+      // data (Anthropic does) refuses a JPEG sent as image/png.
+      const mimeType = imagePartType(opts.image)?.mimeType ?? 'image/png';
+      imageUrl = `data:${mimeType};base64,${base64}`;
     } else {
       imageUrl = opts.image;
     }
