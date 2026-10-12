@@ -94,7 +94,11 @@ export interface IMeetingBotProvider {
   readonly capabilities: MeetingBotCapabilities;
   /** The provider's own authentication of a report: a platform's signature scheme, or the worker's per-run token against the run's dispatch record. */
   verifyEvent(ctx: ProviderEventContext, run: MeetingRunRecord | undefined): ProviderVerificationResult;
-  /** Turns a verified report into the channel's events, each with a stable id; throws on a report it cannot read. */
+  /**
+   * Turns a verified report into the channel's events, each with a stable id; throws on a report it cannot read. When the
+   * report was verified against a run, its caller applies only the events that name that run: a worker's per-run token
+   * speaks for its own run alone.
+   */
   parseEvent(ctx: ProviderEventContext): ProviderParseResult;
   /** Tells a join url's platform, or why it is refused. */
   checkJoinUrl(url: string): { ok: true; platform: MeetingPlatform } | { ok: false; message: string };
