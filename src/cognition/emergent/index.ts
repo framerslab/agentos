@@ -68,6 +68,7 @@ export {
   buildCapabilityYaml,
   writeSkillFile,
   exportToolAsSkillPack,
+  SkillExportRefusedError,
 } from './SkillExporter.js';
 export { InvalidToolNameError } from './ToolName.js';
 export type { ToolNameProblem } from './ToolName.js';

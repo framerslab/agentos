@@ -13,10 +13,10 @@
  * to the name rule in `core/utils/pathName` before anything is written, and the
  * file's resolved path must lie inside the export folder. Below the export
  * folder no folder or file is made or written through a link, symbolic or
- * hard, nothing but a regular file is written (a named pipe at a file's
- * place is refused at once, never waited on), and two traces whose
- * files would be one, where names ignore case or by the file system's own
- * reckoning, are not both written. A trace that fails any of these is left
+ * hard, and nothing but a regular file is written, a named pipe at a file's
+ * place refused at once, never waited on (`core/utils/linkFreeWrite`). Two
+ * traces whose files would be one, where names ignore case or by the file
+ * system's own reckoning, are not both written. A trace that fails any of these is left
  * out and reported in the export's result. The checks run as each folder is
  * made and each file opened; Node has no `openat`, so a process that swaps a
  * folder below the export folder for a link while the export runs is outside
@@ -40,11 +40,11 @@
  */
 
 import fs, { type FileHandle } from 'node:fs/promises';
-import { constants as fsConstants, type Stats } from 'node:fs';
 import path from 'node:path';
 import type { ExportOptions, ExportResult, RefusedExportTrace } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { writeFrontMatter } from '../../../core/utils/frontMatter.js';
+import { makeFoldersOutsideLinks, openFileOutsideLinks } from '../../../core/utils/linkFreeWrite.js';
 import { pathNameProblem, resolveInsideFolder, type PathNameProblem } from '../../../core/utils/pathName.js';
 
 // ---------------------------------------------------------------------------
@@ -66,40 +66,10 @@ interface TraceRow {
 type TracePathField = 'scope' | 'type' | 'id';
 
 /**
- * The flags a trace's file is opened with: for writing, made when missing, and, where the platform has each flag
- * (Windows has neither), never through a symbolic link in the file's own place (`O_NOFOLLOW`) and never waiting
- * (`O_NONBLOCK`). Without `O_NONBLOCK`, an open for writing of a named pipe that no process reads waits for a
- * reader that may never come, and the export with it. The file is emptied only once the open file shows it is a
- * regular file with no second name.
- */
-const OPEN_FLAGS: number =
-  fsConstants.O_WRONLY |
-  fsConstants.O_CREAT |
-  (fsConstants.O_NOFOLLOW !== undefined ? fsConstants.O_NOFOLLOW : 0) |
-  (fsConstants.O_NONBLOCK !== undefined ? fsConstants.O_NONBLOCK : 0);
-
-/** The codes an open with `O_NOFOLLOW` fails with when a symbolic link holds the file's place (EMLINK on FreeBSD). */
-const LINK_OPEN_CODES: ReadonlySet<string> = new Set(['ELOOP', 'EMLINK']);
-
-/**
- * The codes an open for writing fails with when something other than a regular file holds the file's place:
- * EISDIR for a folder; ENXIO for a named pipe that no process reads (under `O_NONBLOCK`), a device with no driver,
- * or, on Linux, a socket; EOPNOTSUPP for a socket on macOS.
- */
-const SPECIAL_OPEN_CODES: ReadonlySet<string> = new Set(['EISDIR', 'ENXIO', 'EOPNOTSUPP']);
-
-/**
  * The most trace files one export holds open at once. The files are opened, checked and written a batch of this many
  * at a time, in export order, so a large export does not run out of file descriptors.
  */
 export const MAX_OPEN_TRACE_FILES = 64;
-
-/** A trace's file, open for writing and checked, and the identity of the file the open reached. */
-interface OpenedTraceFile {
-  handle: FileHandle;
-  /** The file's device and inode numbers, or null when the file system reports an inode of 0, which names no file. */
-  identity: string | null;
-}
 
 /** Thrown by `traceRelativePath` for a trace whose scope, type or id is not a safe name; the export reports it. */
 class RefusedTraceName extends Error {
@@ -211,12 +181,12 @@ export class MarkdownExporter {
     let failure: { error: unknown } | undefined;
     for (let start = 0; start < writable.length; start += MAX_OPEN_TRACE_FILES) {
       const batch = writable.slice(start, start + MAX_OPEN_TRACE_FILES);
-      const opened = await Promise.allSettled(batch.map(({ file, trace }) => openTraceFile(file, String(trace.id))));
+      const opened = await Promise.allSettled(batch.map(({ file }) => openFileOutsideLinks(file)));
       const handles: FileHandle[] = [];
       for (const outcome of opened) {
         if (outcome.status !== 'fulfilled') continue;
         const value = outcome.value;
-        if ('handle' in value) handles.push(value.handle);
+        if (typeof value !== 'string') handles.push(value.handle);
       }
       try {
         const writes: Array<Promise<void>> = [];
@@ -228,8 +198,8 @@ export class MarkdownExporter {
             continue;
           }
           const value = outcome.value;
-          if (!('handle' in value)) {
-            refused.push(value);
+          if (typeof value === 'string') {
+            refused.push({ id: String(trace.id), field: 'path', problem: value });
             continue;
           }
           if (value.identity !== null) {
@@ -245,11 +215,14 @@ export class MarkdownExporter {
           if (written.status === 'rejected') failure ??= { error: written.reason };
         }
       } finally {
-        await Promise.allSettled(handles.map((handle) => handle.close()));
+        // A file whose close fails may not hold what was written, so that fails the export too.
+        for (const closed of await Promise.allSettled(handles.map((handle) => handle.close()))) {
+          if (closed.status === 'rejected') failure ??= { error: closed.reason };
+        }
       }
     }
-    // A file that could not be opened or written for a reason other than a refusal, such as a full disk, fails the
-    // export once every other trace has been tried.
+    // A file that could not be opened, written or closed for a reason other than a refusal, such as a full disk,
+    // fails the export once every other trace has been tried.
     if (failure) throw failure.error;
     return { refused };
   }
@@ -328,8 +301,8 @@ export class MarkdownExporter {
   }
 
   /**
-   * Write a trace into its file, opened and checked by `openTraceFile` and
-   * claimed for this trace alone: the content is built, then the file is
+   * Write a trace into its file, opened and checked by `openFileOutsideLinks`
+   * and claimed for this trace alone: the content is built, then the file is
    * emptied and written.
    *
    * @param handle - The trace's open file.
@@ -343,88 +316,23 @@ export class MarkdownExporter {
 }
 
 /**
- * Open a trace's file for writing, in a folder already made, and check what the open reached. A symbolic link in
- * the file's place is refused before the open, and where the platform has `O_NOFOLLOW` the open refuses one put
- * there since. A folder fails the open, and where the platform has `O_NONBLOCK` so does a named pipe that no process
- * reads, at once. An open file that is not a regular file (a named pipe that a process reads, a device) is refused,
- * and so is a file with a second name (a hard link), which is the same file as that name and may lie outside the
- * export folder. Nothing is emptied or written here.
- *
- * @param file - Absolute path of the trace's file, inside the output directory.
- * @param id   - The trace's id, as a refusal names it.
- * @returns The open file and its identity, or the refusal: `link` or `special`.
- */
-async function openTraceFile(file: string, id: string): Promise<OpenedTraceFile | RefusedExportTrace> {
-  const refusal = (problem: 'link' | 'special'): RefusedExportTrace => ({ id, field: 'path', problem });
-  if ((await lstatOrNull(file))?.isSymbolicLink()) return refusal('link');
-  const handle = await fs.open(file, OPEN_FLAGS).catch((err: unknown) => {
-    const code = String((err as NodeJS.ErrnoException).code);
-    if (LINK_OPEN_CODES.has(code)) return 'link' as const;
-    if (SPECIAL_OPEN_CODES.has(code)) return 'special' as const;
-    throw err;
-  });
-  if (typeof handle === 'string') return refusal(handle);
-  let handedOver = false;
-  try {
-    const stat = await handle.stat({ bigint: true });
-    if (!stat.isFile()) return refusal('special');
-    if (stat.nlink > 1n) return refusal('link');
-    handedOver = true;
-    return { handle, identity: stat.ino === 0n ? null : `${stat.dev}:${stat.ino}` };
-  } finally {
-    if (!handedOver) await handle.close();
-  }
-}
-
-/**
  * The key two places share when a file system that ignores case and Unicode form (macOS, Windows) makes them one
- * file. Lower case, then upper, then lower again: lower-casing first keeps every pair that lower-casing alone joins,
- * and the round through upper case joins letters that lower-casing alone keeps apart but such a file system folds
- * together, such as the long s and s, the final sigma and sigma, and the micro sign and mu. The key also joins a
- * few names those file systems keep apart, such as ß and ss; the newer of two such traces is left out.
+ * file. Each character is lower-cased, then, when its upper case is one character, upper-cased and lower-cased
+ * again. Lower-casing first joins every pair that lower-casing alone joins, and the round through upper case joins
+ * letters that lower-casing alone keeps apart but such a file system folds together, such as the long s and s, the
+ * final sigma and sigma, and the micro sign and mu. A letter whose upper case is longer, such as ß (SS), keeps its
+ * lower case, so ß and ss stay apart, as those file systems keep them.
  *
  * @param place - The absolute path of a trace's file.
  */
 function caseFoldKey(place: string): string {
-  return place.normalize('NFC').toLowerCase().toUpperCase().toLowerCase().normalize('NFC');
-}
-
-/** The entry at `file` itself, a link not followed, or null when there is none. */
-async function lstatOrNull(file: string): Promise<Stats | null> {
-  try {
-    return await fs.lstat(file);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw err;
+  let key = '';
+  for (const character of place.normalize('NFC')) {
+    const lower = character.toLowerCase();
+    const upper = lower.toUpperCase();
+    key += [...upper].length === 1 ? upper.toLowerCase() : lower;
   }
-}
-
-/**
- * Make the folders `relative` names under `root`, one name at a time, and stop at a link. A folder this makes is
- * never a link, so a file written into it stays under `root`.
- *
- * @param root     - The export folder.
- * @param relative - The folder's path under `root`.
- * @returns True when every folder is in place and none of them is a link.
- */
-async function makeFoldersOutsideLinks(root: string, relative: string): Promise<boolean> {
-  let dir = root;
-  for (const name of relative.split(path.sep).filter((part) => part.length > 0)) {
-    dir = path.join(dir, name);
-    const entry = await lstatOrNull(dir);
-    if (entry) {
-      if (entry.isSymbolicLink()) return false;
-      continue;
-    }
-    try {
-      await fs.mkdir(dir);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      // Something was put there since the look: look again.
-      if ((await fs.lstat(dir)).isSymbolicLink()) return false;
-    }
-  }
-  return true;
+  return key.normalize('NFC');
 }
 
 /**

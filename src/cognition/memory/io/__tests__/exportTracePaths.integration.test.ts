@@ -170,18 +170,22 @@ describe('memory exports write only inside the export folder', () => {
   );
 
   it.each(['markdown', 'obsidian'] as const)(
-    'a %s export writes the older of two traces whose ids a file system that ignores case folds together, the long s and s',
+    'a %s export writes the older of two traces whose ids a file system that ignores case folds together, the long s and s, and both of ß and ss, which it keeps apart',
     async (format) => {
       const memory = await openMemory();
       await importTraces(memory, [
         { id: 's', scope: 'user', type: 'semantic', content: 'The older trace, whose id is s.', created_at: 1 },
         { id: 'ſ', scope: 'user', type: 'semantic', content: 'The newer trace, whose id is the long s.', created_at: 2 },
+        { id: 'ß', scope: 'user', type: 'semantic', content: 'A trace whose id is the sharp s.', created_at: 3 },
+        { id: 'ss', scope: 'user', type: 'semantic', content: 'A trace whose id is two s.', created_at: 4 },
       ]);
 
       const result = await memory.export(exportDir, { format });
 
       expect(result.refused).toEqual([{ id: 'ſ', field: 'path', problem: 'collision' }]);
-      expect(exportedFiles()).toEqual([path.join('user', 'semantic', 's.md')]);
+      expect(exportedFiles()).toEqual(['s', 'ss', 'ß'].map((id) => path.join('user', 'semantic', `${id}.md`)).sort());
+      expect(fs.readFileSync(path.join(exportDir, 'user', 'semantic', 'ß.md'), 'utf8')).toContain('the sharp s');
+      expect(fs.readFileSync(path.join(exportDir, 'user', 'semantic', 'ss.md'), 'utf8')).toContain('two s');
       expect(fs.readFileSync(path.join(exportDir, 'user', 'semantic', 's.md'), 'utf8')).toContain(
         'The older trace, whose id is s.',
       );

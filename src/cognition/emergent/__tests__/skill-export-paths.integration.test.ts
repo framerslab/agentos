@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import YAML from 'yaml';
-import { exportToolAsSkillPack, writeSkillFile } from '../SkillExporter.js';
+import { SkillExportRefusedError, exportToolAsSkillPack, writeSkillFile } from '../SkillExporter.js';
 import { InvalidToolNameError } from '../ToolName.js';
 import type { EmergentTool, ForgeToolRequest } from '../types.js';
 import { callTool, makeForgeHost } from './helpers/forge-host.js';
@@ -145,5 +145,71 @@ describe('a forged tool is exported as a skill only inside the skills folder', (
     expect(entries()).toEqual(before);
     expect(fs.existsSync(path.join(workspace, 'escaped'))).toBe(false);
     expect(fs.readFileSync(path.join(workspace, 'SKILL.md'), 'utf8')).toBe(ONE_LEVEL_UP);
+  });
+});
+
+describe('a skill export writes through no link below the skills folder', () => {
+  /** A tool forged through forge_tool as double_it, and the folder the exporters give it. */
+  async function forgedTool(): Promise<{ tool: EmergentTool; folder: string }> {
+    const host = await makeForgeHost();
+    const forged = await callTool(host.orchestrator, 'forge_tool', doubleRequest('double_it'));
+    expect(forged.isError).toBeFalsy();
+    return { tool: forged.output.tool as EmergentTool, folder: path.join(skillsDir, 'double_it') };
+  }
+
+  it("a link at the tool's folder, to a folder outside the skills folder, is refused by both exporters, and nothing is written", async () => {
+    const { tool, folder } = await forgedTool();
+    const elsewhere = path.join(root, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    fs.symlinkSync(elsewhere, folder, 'dir');
+    const before = entries();
+
+    const refusals = [
+      await writeSkillFile(tool, skillsDir).catch((err: unknown) => err),
+      await exportToolAsSkillPack(tool, skillsDir).catch((err: unknown) => err),
+    ];
+
+    for (const refused of refusals) {
+      expect(refused).toBeInstanceOf(SkillExportRefusedError);
+      expect(refused).toMatchObject({ code: 'SKILL_EXPORT_REFUSED', problem: 'link', target: folder });
+    }
+    expect(fs.readdirSync(elsewhere)).toEqual([]);
+    expect(entries()).toEqual(before);
+  });
+
+  it('a link at CAPABILITY.yaml, to the file two levels up, refuses the skill pack before either file is made, and the file stays as it was', async () => {
+    const { tool, folder } = await forgedTool();
+    fs.mkdirSync(folder);
+    fs.symlinkSync(path.join(root, 'CAPABILITY.yaml'), path.join(folder, 'CAPABILITY.yaml'));
+    const before = entries();
+
+    const refused = await exportToolAsSkillPack(tool, skillsDir).catch((err: unknown) => err);
+
+    expect(refused).toBeInstanceOf(SkillExportRefusedError);
+    expect(refused).toMatchObject({ problem: 'link', target: path.join(folder, 'CAPABILITY.yaml') });
+    // SKILL.md was not made, and the file the link leads to holds its own text.
+    expect(fs.existsSync(path.join(folder, 'SKILL.md'))).toBe(false);
+    expect(fs.readFileSync(path.join(root, 'CAPABILITY.yaml'), 'utf8')).toBe(TWO_LEVELS_UP);
+    expect(entries()).toEqual(before);
+  });
+
+  it('a second name at SKILL.md for the file one level up is refused by both exporters, and that file stays as it was', async () => {
+    const { tool, folder } = await forgedTool();
+    fs.mkdirSync(folder);
+    fs.linkSync(path.join(workspace, 'SKILL.md'), path.join(folder, 'SKILL.md'));
+    const before = entries();
+
+    const refusals = [
+      await writeSkillFile(tool, skillsDir).catch((err: unknown) => err),
+      await exportToolAsSkillPack(tool, skillsDir).catch((err: unknown) => err),
+    ];
+
+    for (const refused of refusals) {
+      expect(refused).toBeInstanceOf(SkillExportRefusedError);
+      expect(refused).toMatchObject({ problem: 'link', target: path.join(folder, 'SKILL.md') });
+    }
+    expect(fs.readFileSync(path.join(workspace, 'SKILL.md'), 'utf8')).toBe(ONE_LEVEL_UP);
+    expect(fs.existsSync(path.join(folder, 'CAPABILITY.yaml'))).toBe(false);
+    expect(entries()).toEqual(before);
   });
 });

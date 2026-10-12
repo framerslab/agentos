@@ -20,15 +20,25 @@
  * name to the rule every name built from data meets and write only when the
  * folder resolves inside the output directory (`resolveToolFolder`). A tool
  * whose name fails either check is refused with an `InvalidToolNameError`
- * before any folder is made or file written.
+ * before any folder is made or file written. Below the output directory they
+ * make the tool's folder and write its files never through a link, and only
+ * into regular files with one name (`core/utils/linkFreeWrite`); anything else
+ * there is refused with a `SkillExportRefusedError`, and nothing is written.
  */
 
 import * as fs from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import YAML from 'yaml';
 
 import type { EmergentTool, ComposableToolSpec, SandboxedToolSpec } from './types.js';
 import type { JSONSchemaObject } from '../../core/tools/ITool.js';
+import {
+  lookOutsideLinks,
+  makeFoldersOutsideLinks,
+  openFileOutsideLinks,
+  type OpenRefusal,
+} from '../../core/utils/linkFreeWrite.js';
 import { resolveToolFolder } from './ToolName.js';
 
 // ============================================================================
@@ -327,12 +337,109 @@ export function buildCapabilityYaml(tool: EmergentTool): string {
 // ============================================================================
 
 /**
+ * Thrown by `writeSkillFile` and `exportToolAsSkillPack` when something below
+ * the output directory is not written through: a symbolic link at the tool's
+ * folder or at one of its files, a second name (a hard link) for one of its
+ * files, or anything but a regular file at a file's place. Nothing is written.
+ */
+export class SkillExportRefusedError extends Error {
+  /** A stable code for callers that branch on the kind of failure. */
+  readonly code = 'SKILL_EXPORT_REFUSED';
+
+  /**
+   * @param problem - `link` for a symbolic link or a second name, `special` for anything but a regular file.
+   * @param target - The absolute path of the folder or file refused.
+   */
+  constructor(
+    readonly problem: OpenRefusal,
+    readonly target: string,
+  ) {
+    super(
+      `skill export refused: ${problem === 'link' ? 'a link' : 'something other than a regular file'} is at ${target}`,
+    );
+    this.name = 'SkillExportRefusedError';
+  }
+}
+
+/**
+ * Write a tool's files into its own folder under `outputDir`, all of them or
+ * none. The folder is resolved by `resolveToolFolder`, which refuses a name that
+ * is not a safe folder name or a folder outside `outputDir`. The output
+ * directory is the caller's: it is made when missing and used as it is, even
+ * when it is a link. Below it, the tool's folder is made never through a link;
+ * every file's place is looked at before any file is opened, and every file is
+ * opened and checked before any is written.
+ *
+ * @param tool - The tool whose files are written.
+ * @param outputDir - The folder the tool's folder is made in.
+ * @param files - Each file's name in the tool's folder and its content.
+ * @returns The absolute path of each file, in the order given.
+ * @throws {InvalidToolNameError} When the name is refused. Nothing is written.
+ * @throws {SkillExportRefusedError} When a link or anything but a regular file
+ *   is in the way. Nothing is written.
+ */
+async function writeToolFiles(
+  tool: EmergentTool,
+  outputDir: string,
+  files: ReadonlyArray<{ name: string; content: string }>,
+): Promise<string[]> {
+  const folder = resolveToolFolder(outputDir, tool.name);
+  const root = path.resolve(outputDir);
+  await fs.mkdir(root, { recursive: true });
+  if (!(await makeFoldersOutsideLinks(root, path.relative(root, folder)))) {
+    throw new SkillExportRefusedError('link', folder);
+  }
+
+  // Every file's place is looked at before any file is opened, so a link or a special file already there refuses
+  // the export before an open makes a missing file.
+  const paths = files.map((file) => path.join(folder, file.name));
+  for (const file of paths) {
+    const refusal = await lookOutsideLinks(file);
+    if (refusal) throw new SkillExportRefusedError(refusal, file);
+  }
+  const opened = await Promise.allSettled(paths.map((file) => openFileOutsideLinks(file)));
+  const handles: FileHandle[] = [];
+  for (const outcome of opened) {
+    if (outcome.status !== 'fulfilled') continue;
+    const value = outcome.value;
+    if (typeof value !== 'string') handles.push(value.handle);
+  }
+
+  let failure: { error: unknown } | undefined;
+  try {
+    const ready: Array<{ handle: FileHandle; content: string }> = [];
+    for (let index = 0; index < opened.length; index++) {
+      const outcome = opened[index];
+      if (outcome.status === 'rejected') throw outcome.reason;
+      const value = outcome.value;
+      if (typeof value === 'string') throw new SkillExportRefusedError(value, paths[index]);
+      ready.push({ handle: value.handle, content: files[index].content });
+    }
+    await Promise.all(
+      ready.map(async ({ handle, content }) => {
+        await handle.truncate(0);
+        await handle.writeFile(content, 'utf8');
+      }),
+    );
+  } catch (error) {
+    failure = { error };
+  }
+  // A file whose close fails may not hold what was written, so that fails the export too.
+  for (const closed of await Promise.allSettled(handles.map((handle) => handle.close()))) {
+    if (closed.status === 'rejected') failure ??= { error: closed.reason };
+  }
+  if (failure) throw failure.error;
+  return paths;
+}
+
+/**
  * Writes a SKILL.md file to disk for an emergent tool.
  *
  * Creates the output directory if it does not exist. The file is written to
  * `<outputDir>/<tool.name>/SKILL.md`. The tool's name must be a safe folder
- * name and its folder must resolve inside `outputDir`; otherwise nothing is
- * written.
+ * name and its folder must resolve inside `outputDir`, and below `outputDir`
+ * the file is written through no link and only into a regular file; otherwise
+ * nothing is written.
  *
  * @param tool - The emergent tool to export.
  * @param outputDir - Base directory where the skill subdirectory will be created.
@@ -340,6 +447,8 @@ export function buildCapabilityYaml(tool: EmergentTool): string {
  *
  * @throws {InvalidToolNameError} If the tool's name is not a safe folder name
  *   or its folder would lie outside `outputDir`. Nothing is written.
+ * @throws {SkillExportRefusedError} If a link, a second name or anything but a
+ *   regular file is at the tool's folder or at SKILL.md. Nothing is written.
  * @throws {Error} If the filesystem write fails (permissions, disk full, etc.).
  *
  * @example
@@ -349,13 +458,9 @@ export function buildCapabilityYaml(tool: EmergentTool): string {
  * ```
  */
 export async function writeSkillFile(tool: EmergentTool, outputDir: string): Promise<string> {
-  const skillDir = resolveToolFolder(outputDir, tool.name);
-  await fs.mkdir(skillDir, { recursive: true });
-
-  const skillPath = path.join(skillDir, 'SKILL.md');
-  const content = exportToolAsSkill(tool);
-  await fs.writeFile(skillPath, content, 'utf-8');
-
+  const [skillPath] = await writeToolFiles(tool, outputDir, [
+    { name: 'SKILL.md', content: exportToolAsSkill(tool) },
+  ]);
   return skillPath;
 }
 
@@ -367,7 +472,9 @@ export async function writeSkillFile(tool: EmergentTool, outputDir: string): Pro
  * capability manifest scanner and can be placed in any scan directory
  * (`~/.wunderland/capabilities/`, `./.wunderland/capabilities/`, etc.) for
  * automatic discovery. The tool's name must be a safe folder name and its
- * folder must resolve inside `outputDir`; otherwise nothing is written.
+ * folder must resolve inside `outputDir`, and below `outputDir` the files are
+ * written through no link and only into regular files; otherwise nothing is
+ * written.
  *
  * @param tool - The emergent tool to export.
  * @param outputDir - Base directory where the skill subdirectory will be created.
@@ -375,6 +482,8 @@ export async function writeSkillFile(tool: EmergentTool, outputDir: string): Pro
  *
  * @throws {InvalidToolNameError} If the tool's name is not a safe folder name
  *   or its folder would lie outside `outputDir`. Nothing is written.
+ * @throws {SkillExportRefusedError} If a link, a second name or anything but a
+ *   regular file is at the tool's folder or at either file. Nothing is written.
  * @throws {Error} If the filesystem writes fail (permissions, disk full, etc.).
  *
  * @example
@@ -391,20 +500,9 @@ export async function exportToolAsSkillPack(
   tool: EmergentTool,
   outputDir: string
 ): Promise<{ skillPath: string; capabilityPath: string }> {
-  const skillDir = resolveToolFolder(outputDir, tool.name);
-  await fs.mkdir(skillDir, { recursive: true });
-
-  // Write both files in parallel — they are independent
-  const skillContent = exportToolAsSkill(tool);
-  const capabilityContent = buildCapabilityYaml(tool);
-
-  const skillPath = path.join(skillDir, 'SKILL.md');
-  const capabilityPath = path.join(skillDir, 'CAPABILITY.yaml');
-
-  await Promise.all([
-    fs.writeFile(skillPath, skillContent, 'utf-8'),
-    fs.writeFile(capabilityPath, capabilityContent, 'utf-8'),
+  const [skillPath, capabilityPath] = await writeToolFiles(tool, outputDir, [
+    { name: 'SKILL.md', content: exportToolAsSkill(tool) },
+    { name: 'CAPABILITY.yaml', content: buildCapabilityYaml(tool) },
   ]);
-
   return { skillPath, capabilityPath };
 }
