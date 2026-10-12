@@ -594,15 +594,18 @@ describe('AgentCommunicationBus', () => {
       const sent = await retrying.sendToAgent('agent-1', question);
       expect(sent).toMatchObject({ status: 'failed', failureReason: 'Delivery failed', retryCount: 0 });
 
-      const first = await retrying.retryDelivery(sent.messageId);
-      const second = await retrying.retryDelivery(sent.messageId);
+      // Each call returns the message's stored status, and the next retry
+      // raises the count on that same object, so read each count as its call
+      // returns.
+      const firstCount = (await retrying.retryDelivery(sent.messageId)).retryCount;
+      const secondCount = (await retrying.retryDelivery(sent.messageId)).retryCount;
 
       await expect(retrying.retryDelivery(sent.messageId)).rejects.toThrow(
         `Max retries exceeded for message ${sent.messageId}`,
       );
       // The send and two retries reached the handler; the refused retry sent nothing.
       expect(handler).toHaveBeenCalledTimes(3);
-      expect([first.retryCount, second.retryCount]).toEqual([1, 2]);
+      expect([firstCount, secondCount]).toEqual([1, 2]);
       expect(await retrying.getDeliveryStatus(sent.messageId)).toMatchObject({
         status: 'failed',
         retryCount: 2,
