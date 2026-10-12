@@ -102,20 +102,22 @@ export class InMemoryJobStore implements IJobStore {
     job.leaseExpiresAt = now + ttlMs;
     return true;
   }
-  async markDispatched(runId: string, workerId: string | undefined): Promise<{ cancelled: boolean }> {
+  async markDispatched(runId: string, holder: string, workerId: string | undefined): Promise<{ recorded: boolean; cancelled: boolean }> {
     const job = this.jobs.get(runId);
-    if (!job) return { cancelled: false };
+    if (!job) return { recorded: false, cancelled: false };
+    // a holder whose lease another holder took changes nothing: the new holder's dispatch is the job's
+    if (job.leaseHolder !== holder) return { recorded: false, cancelled: job.cancelled };
     job.dispatched = true;
     job.workerId = workerId;
-    return { cancelled: job.cancelled };
+    return { recorded: true, cancelled: job.cancelled };
   }
-  async release(runId: string, retryAt: number): Promise<void> {
+  async release(runId: string, holder: string, retryAt: number): Promise<boolean> {
     const job = this.jobs.get(runId);
-    if (job) {
-      job.leaseHolder = undefined;
-      job.leaseExpiresAt = undefined;
-      job.dispatchAt = retryAt;
-    }
+    if (!job || job.leaseHolder !== holder) return false;
+    job.leaseHolder = undefined;
+    job.leaseExpiresAt = undefined;
+    job.dispatchAt = retryAt;
+    return true;
   }
   async cancel(runId: string): Promise<'cancelled' | 'already_dispatched' | 'missing'> {
     const job = this.jobs.get(runId);

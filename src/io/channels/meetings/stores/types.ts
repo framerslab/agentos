@@ -63,10 +63,17 @@ export interface IJobStore {
   lease(holder: string, now: number, ttlMs: number): Promise<MeetingJob | undefined>;
   /** Extends a lease the holder still holds; false when it expired or another holder took it, and then the holder must stop. */
   renew(runId: string, holder: string, now: number, ttlMs: number): Promise<boolean>;
-  /** Records the dispatch and answers whether a cancel arrived meanwhile (then the dispatcher tells the bot to leave at once). */
-  markDispatched(runId: string, workerId: string | undefined): Promise<{ cancelled: boolean }>;
-  /** Releases a lease without dispatching (the dispatch failed and will be retried), moving the job's due time to `retryAt`. */
-  release(runId: string, retryAt: number): Promise<void>;
+  /**
+   * Records the dispatch for the lease's holder and answers whether a cancel arrived meanwhile (then the dispatcher tells
+   * the bot to leave at once). A dispatch can outlive its lease and another holder can take the job: when `holder` no
+   * longer holds the lease, or the job is gone, nothing is recorded and `recorded` is false.
+   */
+  markDispatched(runId: string, holder: string, workerId: string | undefined): Promise<{ recorded: boolean; cancelled: boolean }>;
+  /**
+   * Releases the holder's lease without dispatching (the dispatch failed and will be retried), moving the job's due time
+   * to `retryAt`. False, and nothing changes, when `holder` no longer holds the lease or the job is gone.
+   */
+  release(runId: string, holder: string, retryAt: number): Promise<boolean>;
   /** Marks the job cancelled. `already_dispatched` when the bot is out: the caller tells it to leave instead. A job under a live lease is cancelled too, and its dispatcher learns it from `markDispatched`. */
   cancel(runId: string): Promise<'cancelled' | 'already_dispatched' | 'missing'>;
   /** The run's job, or undefined when there is none. */

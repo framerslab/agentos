@@ -21,7 +21,7 @@ describe('InMemoryJobStore', () => {
     await jobs.schedule({ runId: 'r1', dispatchAt: 0 });
     await jobs.schedule({ runId: 'r2', dispatchAt: 0 });
     await jobs.lease('m1', 0, 1000);
-    expect(await jobs.markDispatched('r1', 'w1')).toEqual({ cancelled: false });
+    expect(await jobs.markDispatched('r1', 'm1', 'w1')).toEqual({ recorded: true, cancelled: false });
     expect(await jobs.cancel('r1')).toBe('already_dispatched');
     expect(await jobs.cancel('r2')).toBe('cancelled');
     expect(await jobs.cancel('r9')).toBe('missing');
@@ -32,12 +32,26 @@ describe('InMemoryJobStore', () => {
     await jobs.schedule({ runId: 'r1', dispatchAt: 0 });
     await jobs.lease('m1', 0, 1000);
     expect(await jobs.cancel('r1')).toBe('cancelled');
-    expect(await jobs.markDispatched('r1', 'w1')).toEqual({ cancelled: true });
+    expect(await jobs.markDispatched('r1', 'm1', 'w1')).toEqual({ recorded: true, cancelled: true });
     await jobs.schedule({ runId: 'r2', dispatchAt: 0 });
     await jobs.lease('m1', 0, 1000);
-    await jobs.release('r2', 15_000);
+    expect(await jobs.release('r2', 'm1', 15_000)).toBe(true);
     expect(await jobs.lease('m1', 14_999, 1000)).toBeUndefined();
     expect((await jobs.lease('m1', 15_000, 1000))?.runId).toBe('r2');
+  });
+  it('records a dispatch and releases a lease only for the lease holder: not for one whose lease another took, nor for a job that is gone', async () => {
+    const jobs = new InMemoryJobStore();
+    await jobs.schedule({ runId: 'r1', dispatchAt: 0 });
+    await jobs.lease('m1', 0, 1000);
+    expect((await jobs.lease('m2', 1001, 1000))?.leaseHolder).toBe('m2'); // m1's dispatch outlived its lease
+    expect(await jobs.release('r1', 'm1', 50_000)).toBe(false);
+    expect(await jobs.markDispatched('r1', 'm1', 'w1')).toEqual({ recorded: false, cancelled: false });
+    expect(await jobs.get('r1')).toMatchObject({ dispatchAt: 0, leaseHolder: 'm2', leaseExpiresAt: 2001, dispatched: false });
+    expect(await jobs.lease('m3', 1500, 1000)).toBeUndefined(); // m2's lease still holds
+    expect(await jobs.markDispatched('r1', 'm2', 'w2')).toEqual({ recorded: true, cancelled: false });
+    expect((await jobs.get('r1'))?.workerId).toBe('w2');
+    expect(await jobs.release('r9', 'm1', 0)).toBe(false);
+    expect(await jobs.markDispatched('r9', 'm1', 'w1')).toEqual({ recorded: false, cancelled: false });
   });
 });
 
