@@ -512,10 +512,13 @@ export interface RefusedExportTrace {
    * Why: for a scope, type or id, the part of the name rule the value breaks (`PathNameProblem` in
    * `core/utils/pathName`); for a path, `outside` when the path an exporter subclass builds lies outside the export
    * folder, `link` when a folder or file in the trace's place under the export folder is a symbolic link or the
-   * file has a second name (a hard link), since the export never writes through a link, and `collision` when an
-   * older trace's file is the same file where names ignore case (macOS, Windows).
+   * file has a second name (a hard link), since the export never writes through a link, `special` when something
+   * other than a regular file holds the file's place (a folder, a named pipe, a socket, a device), which the export
+   * never writes to or waits on, and `collision` when an older trace's file is the same file: where names differ
+   * only in case or Unicode form, which macOS and Windows treat as one name, or where the file system makes two
+   * names one file in another way, such as a Windows short name.
    */
-  problem: PathNameProblem | 'outside' | 'link' | 'collision';
+  problem: PathNameProblem | 'outside' | 'link' | 'special' | 'collision';
 }
 
 /**
@@ -528,9 +531,10 @@ export interface ExportResult {
    * a trace whose scope, type or id is not a safe file or folder name: an empty one, one that holds a slash, a
    * backslash, a colon, one of `"`, `*`, `<`, `>`, `?` and `|`, or a control character, one that starts with a
    * dot, starts or ends with a space or ends with a dot, or one longer than 200 bytes in UTF-8. It also leaves out
-   * a trace whose place under the export folder holds a link, symbolic or hard, and the newer of two traces whose
-   * files would be one where names ignore case. Every other trace is written. A JSON or SQLite export writes every
-   * trace into its one file and leaves none out.
+   * a trace whose place under the export folder holds a link, symbolic or hard, or anything but a regular file,
+   * and the newer of two traces whose files would be one, where names ignore case or by the file system's own
+   * reckoning. Every other trace is written. A JSON or SQLite export writes every trace into its one file and leaves
+   * none out.
    */
   refused: RefusedExportTrace[];
 }

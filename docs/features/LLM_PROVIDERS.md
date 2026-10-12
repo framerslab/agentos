@@ -228,6 +228,12 @@ another vendor accepts: OpenRouter's routing controls (`provider`, `models`,
 (`thinkingConfig`, `topK`, `safetySettings` and the rest of
 [`GEMINI_ONLY_PARAM_KEYS`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/openrouter-only-params.ts)) reach only Gemini.
 
+With `planning` on, the planning call carries the caller's messages, so it
+takes OpenRouter's routing controls and `plugins` from `customModelParams`: a
+`provider.data_collection: 'deny'` or a context-compression plugin set for
+the turn holds for it too. The other keys, such as `max_tokens` or
+`response_format`, go to the turn's requests alone.
+
 ```
 Primary provider (e.g., Anthropic)
   ↓ fails with a retryable error
@@ -414,6 +420,8 @@ The key travels in the `x-goog-api-key` header, never in the request URL, so pro
 | `gemini-2.5-flash-lite` | 1M | Yes | Yes | Cheapest ($0.10/$0.40 per MTok) |
 
 Google has retired `gemini-2.0-flash`, `gemini-2.0-flash-lite` and `gemini-1.5-pro`, and requests for them return HTTP 404. A request for `gemini-3.1-pro-preview` that returns 404 is retried once on `gemini-pro-latest`. On `gemini-3.1-pro-preview`, `effort` sets the thinking level (`low`, `medium` or `high`; `xhigh` and `max` send `high`), and other models keep the API default. A `thinkingConfig` object passed through `customModelParams` takes precedence: `thinkingBudget` on Gemini 2.5, `thinkingLevel` on Gemini 3. With `thinkingConfig.includeThoughts`, the model's thought summaries come back on the provider's message as `reasoningText` (streamed as `reasoningTextDelta` chunks), apart from the answer; no provider sends them back. The shared `thinking` option is Anthropic's and Gemini ignores it. Gemini 3 requires its thought signature back on every tool-call turn; the provider captures and replays it, and sends Google's placeholder when a turn has none, such as a call made by another provider in a fallback chain.
+
+Images go to Gemini in two ways. A data URL is sent inline, read as WHATWG Fetch reads it, and a request carries at most 100 MB of inline data counted in base64 ([Google's file limits](https://blog.google/innovation-and-ai/technology/developers-tools/gemini-api-new-file-limits/)). An https URL is sent as `fileData`, and Gemini fetches it itself, up to 15 MB a file ([file input methods](https://ai.google.dev/gemini-api/docs/file-input-methods)); the provider fetches nothing. An http URL, a malformed data URL and too much inline data are refused before the request, with HTTP status 400, so they count as the caller's error and not against Gemini's health. A prompt Gemini blocks (`promptFeedback.blockReason`) and an answer its filters stop with no content (`SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII` and the `IMAGE_` reasons) throw a `content_filter` error that names the reason.
 
 ### Groq
 

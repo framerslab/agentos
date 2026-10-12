@@ -361,6 +361,7 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `evaluateStreamingChunks` | `boolean` | `false` | Evaluate TEXT_DELTA chunks (real-time) vs only FINAL_RESPONSE |
+| `evaluateToolCalls` | `boolean` | `false` | Evaluate TOOL_CALL_REQUEST chunks: a block keeps an actionable call from the host and ends the stream, a sanitize is applied as a block. See [Tool Calls](#tool-calls) |
 | `maxStreamingEvaluations` | `number` | `undefined` | Rate limit streaming evaluations per guarded stream (the turn's stream and each continuation stream count on their own) |
 | `canSanitize` | `boolean` | `false` | Run this guardrail in Phase 1 so SANITIZE results chain deterministically |
 | `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required |
@@ -430,6 +431,35 @@ const neverDo = await PhraseListGuardrail.create({
 `IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter, when the file is loaded as a persona) renders as the last block of the system prompt of every GMI turn for that persona, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
 
 A GMI built by `agent({ runtime: 'gmi' })` or `gmi()` has no such block. Its persona comes from [`personaFromAgentOptions()`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiPersona.ts), which sets no `hardLimits`, and the front matter of a `soul` file is not applied on that path ([GMIs from agent()](../GMI.md#gmis-from-agent)).
+
+## Tool Calls
+
+An output guardrail can judge the tool calls a turn requests. With `config.evaluateToolCalls: true`, `evaluateOutput` receives each `TOOL_CALL_REQUEST` chunk of a guarded stream, the turn's and each continuation's, as the stream carries it: `chunk.toolCalls` lists each call's `id`, `name` and parsed `arguments`.
+
+```typescript
+class ShellCommandGuard implements IGuardrailService {
+  readonly id = 'shell-commands';
+  readonly config: GuardrailConfig = { evaluateToolCalls: true };
+
+  async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
+    if (chunk.type !== AgentOSResponseChunkType.TOOL_CALL_REQUEST) return null;
+    for (const call of chunk.toolCalls) {
+      if (call.name === 'shell_execute' && /rm\s+-rf\s+\//.test(String(call.arguments.command))) {
+        return { action: GuardrailAction.BLOCK, reason: 'A destructive shell command', reasonCode: 'SHELL_DESTRUCTIVE' };
+      }
+    }
+    return null;
+  }
+}
+```
+
+- **Block.** The stream ends with the guard's verdict in place of the chunk: the error chunk, or the final response holding `replacementText`. The stream never hands the host an actionable call (`executionMode: 'external'`), so the host does not execute it. In hold mode the text held before the call is dropped with it. The runtime saved the pause for that call before the chunk went out, and `getPendingExternalToolRequest()` returns it until the conversation's next turn ends: a host that resumes saved pauses after a restart does not run a call whose stream ended in a block.
+- **Sanitize.** A guard cannot rewrite a tool call. A `SANITIZE` is applied as a `BLOCK` that keeps the guard's reason and reason code.
+- **Flag and allow.** The chunk goes on with the evaluation in `metadata.guardrail.output`.
+- **Calls the runtime runs itself.** A call with `executionMode: 'internal'` runs inside the turn without waiting for the output guards: a block ends the stream but does not stop that call. To stop such a call before it runs, gate the tool: with a `hitlManager` and `toolOrchestratorConfig.hitl.enabled`, the tool orchestrator asks for an approval before a tool with `hasSideEffects: true` runs ([Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)).
+- **Several guards.** The guards that evaluate tool calls run in parallel on each tool-call chunk; the first block in registration order is the verdict.
+
+**Why it is opt-in.** A guard written for text may read any chunk it is given as text: one that takes every non-final chunk for a `TEXT_DELTA` reads `textDelta` as `undefined`, and a fail-closed guard that throws on it would block every tool call. A guard that sets `evaluateToolCalls` is written to read tool calls, and a guard without it never receives one. A guard that has a tool-call branch already, as the code-safety pack's guard does, runs it once its config sets the flag.
 
 ## Using Multiple Guardrails
 
@@ -546,7 +576,7 @@ Extension packs that need expensive resources (NER models, ONNX classifiers, emb
 
 ## Folder-Level Permissions
 
-AgentOS has no folder-permission layer: its guardrails see the user's input and the response chunks, not tool arguments. [Wunderland](https://github.com/jddunn/wunderland), the agent CLI built on AgentOS, adds one. Its [`SafeGuardrails`](https://github.com/jddunn/wunderland/blob/master/src/security/SafeGuardrails.ts) class checks a tool call's file paths, and the paths it reads out of `rm`, `cp`, `mv`, `cat`, `touch`, `mkdir`, `rmdir`, `chmod` and `chown` commands, against glob rules with separate read and write flags before the tool runs. It writes each violation to `~/.wunderland/security/violations.log` and can notify webhooks or an email address of high and critical ones. An agent's `security.folderPermissions` in its `agent.config.json` sets the rules; see Wunderland's [guardrails documentation](https://github.com/jddunn/wunderland/blob/master/docs/features/GUARDRAILS.md).
+AgentOS has no folder-permission layer. Its guardrails see the user's input and the response chunks, and a guard that sets `evaluateToolCalls` sees each tool call's arguments, but AgentOS ships no path rules. [Wunderland](https://github.com/jddunn/wunderland), the agent CLI built on AgentOS, adds one. Its [`SafeGuardrails`](https://github.com/jddunn/wunderland/blob/master/src/security/SafeGuardrails.ts) class checks a tool call's file paths, and the paths it reads out of `rm`, `cp`, `mv`, `cat`, `touch`, `mkdir`, `rmdir`, `chmod` and `chown` commands, against glob rules with separate read and write flags before the tool runs. It writes each violation to `~/.wunderland/security/violations.log` and can notify webhooks or an email address of high and critical ones. An agent's `security.folderPermissions` in its `agent.config.json` sets the rules; see Wunderland's [guardrails documentation](https://github.com/jddunn/wunderland/blob/master/docs/features/GUARDRAILS.md).
 
 ## Related Documentation
 

@@ -649,6 +649,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               : {}),
             ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
             ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+            ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
           },
           usage,
           budget ? { budget, providerId: resolved.providerId, what: 'stream_text.plan' } : undefined,

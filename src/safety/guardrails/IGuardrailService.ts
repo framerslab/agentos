@@ -187,9 +187,11 @@ export interface GuardrailInputPayload {
  * Every guardrail is called for each chunk of the turn's output stream that
  * carries `isFinal: true` (the FINAL_RESPONSE, an ERROR the turn yields). With
  * {@link GuardrailConfig.evaluateStreamingChunks} set, it is also called for
- * each TEXT_DELTA chunk (real-time filtering). Other chunks are not evaluated,
- * and neither is the ERROR that `processRequest()` yields from its own
- * `catch` or for an input guardrail's BLOCK.
+ * each TEXT_DELTA chunk (real-time filtering), and with
+ * {@link GuardrailConfig.evaluateToolCalls} set, for each TOOL_CALL_REQUEST
+ * chunk. Other chunks are not evaluated, and neither is the ERROR that
+ * `processRequest()` yields from its own `catch` or for an input guardrail's
+ * BLOCK.
  */
 export interface GuardrailOutputPayload {
   /** Conversational context for policy decisions */
@@ -252,6 +254,37 @@ export interface GuardrailConfig {
    * @default false
    */
   evaluateStreamingChunks?: boolean;
+
+  /**
+   * Evaluate the tool calls a turn requests.
+   *
+   * When `true`, `evaluateOutput` also receives each TOOL_CALL_REQUEST chunk
+   * of a guarded output stream, as the stream carries it: `chunk.toolCalls`
+   * lists each call's `id`, `name` and parsed `arguments`. The verdict
+   * applies as it does to text:
+   * - BLOCK ends the stream with the guard's verdict (the error chunk, or the
+   *   final response holding `replacementText`) in place of the chunk, so the
+   *   stream never hands the host an actionable call
+   *   (`executionMode: 'external'`) to execute. The pause the runtime saved
+   *   for that call before the chunk went out stays in
+   *   `getPendingExternalToolRequest()` until the conversation's next turn
+   *   ends.
+   * - SANITIZE cannot rewrite a tool call; it is applied as a BLOCK that keeps
+   *   the guard's reason and reason code.
+   * - FLAG and ALLOW pass the chunk on with the evaluation in its
+   *   `metadata.guardrail.output`.
+   *
+   * A call the runtime executes itself (`executionMode: 'internal'`) does not
+   * wait for the output guards: a block ends the stream but does not stop
+   * that call.
+   *
+   * When `false` (default), the guard never receives a tool-call chunk. The
+   * flag is opt-in because a guard written for text may read any chunk it is
+   * given as text.
+   *
+   * @default false
+   */
+  evaluateToolCalls?: boolean;
 
   /**
    * Maximum streaming evaluations per guarded stream (the turn's stream and
@@ -445,11 +478,12 @@ export interface IGuardrailService {
    *
    * Called for each chunk of a guarded output stream (the turn's, and the
    * continuation after an external tool result) that carries
-   * `isFinal: true` (the FINAL_RESPONSE, an ERROR the turn yields) and, when
-   * {@link GuardrailConfig.evaluateStreamingChunks} is set, for each
-   * TEXT_DELTA chunk (real-time filtering). Other chunks, such as
-   * TOOL_CALL_REQUEST, are not passed to it, nor is the ERROR that
-   * `processRequest()` yields from its own `catch`.
+   * `isFinal: true` (the FINAL_RESPONSE, an ERROR the turn yields), for each
+   * TEXT_DELTA chunk when {@link GuardrailConfig.evaluateStreamingChunks} is
+   * set (real-time filtering), and for each TOOL_CALL_REQUEST chunk when
+   * {@link GuardrailConfig.evaluateToolCalls} is set. Other chunks are not
+   * passed to it, nor is the ERROR that `processRequest()` yields from its own
+   * `catch`.
    *
    * @param payload - Response chunk and context to evaluate
    * @returns Evaluation result, or `null` to allow without action
@@ -458,7 +492,8 @@ export interface IGuardrailService {
    * - Return `BLOCK` to immediately terminate the stream with an error chunk, or
    *   with a FINAL_RESPONSE holding `replacementText` when the result carries a
    *   non-empty one
-   * - Return `SANITIZE` with `modifiedText` to redact/modify content
+   * - Return `SANITIZE` with `modifiedText` to redact/modify content; on a
+   *   TOOL_CALL_REQUEST chunk it is applied as `BLOCK`
    * - Streaming evaluation adds latency; use only when real-time filtering is required
    */
   evaluateOutput?(payload: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null>;

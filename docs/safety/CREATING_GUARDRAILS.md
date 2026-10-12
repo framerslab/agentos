@@ -64,6 +64,12 @@ interface GuardrailConfig {
   // PII redaction or immediate blocking.
   evaluateStreamingChunks?: boolean; // default: false
 
+  // When true, evaluateOutput also receives each TOOL_CALL_REQUEST chunk.
+  // A BLOCK ends the stream with the verdict in place of the chunk, so the
+  // stream never hands the host an actionable call; a SANITIZE is applied
+  // as a BLOCK, since a tool call cannot be rewritten.
+  evaluateToolCalls?: boolean; // default: false
+
   // Rate-limits how many streaming evaluations happen per guarded stream
   // (the turn's stream and each continuation stream count on their own).
   // After this limit, remaining chunks pass through unevaluated.
@@ -121,7 +127,7 @@ Called for chunks of the streams the runtime passes through the output guardrail
 - **`false` (default)** -- each chunk that carries `isFinal: true`: the `FINAL_RESPONSE`, and an `ERROR` the turn yields.
 - **`true`** -- those, and each `TEXT_DELTA` chunk during streaming, up to `maxStreamingEvaluations` per stream. The dispatcher counts these evaluations by the guardrail object's `id` property: streaming sanitizers (`canSanitize: true`) without an `id` share one count, so give each of them an `id`.
 
-Other chunks (`TOOL_CALL_REQUEST`, `METADATA_UPDATE`, `SYSTEM_PROGRESS` and the rest that carry `isFinal: false`) are never passed to `evaluateOutput`. Three `ERROR` chunks never reach it either: the one `processRequest()` yields when an exception reaches its own `catch` (errors inside the turn arrive on the turn's stream and are evaluated), the one an input guardrail's `BLOCK` produces, and the `SYS_GUARDRAIL_REQUIRED_MISSING` chunk a request or a continuation gets while a guard named in `requiredGuardrails` is missing.
+A `TOOL_CALL_REQUEST` reaches it only when `config.evaluateToolCalls` is `true` (see [TOOL_CALL_REQUEST](#tool_call_request)). Other chunks (`METADATA_UPDATE`, `SYSTEM_PROGRESS` and the rest that carry `isFinal: false`) are never passed to `evaluateOutput`. Three `ERROR` chunks never reach it either: the one `processRequest()` yields when an exception reaches its own `catch` (errors inside the turn arrive on the turn's stream and are evaluated), the one an input guardrail's `BLOCK` produces, and the `SYS_GUARDRAIL_REQUIRED_MISSING` chunk a request or a continuation gets while a guard named in `requiredGuardrails` is missing.
 
 With hold mode on (`guardrailOutputMode: 'hold'` on the runtime config, or a guard required on the `output` stage), the runtime holds every `TEXT_DELTA` until the final guardrails have judged the whole reply, and drops the held deltas when one blocks or sanitizes it. An actionable `TOOL_CALL_REQUEST` closes the window: the runtime first evaluates the held text as a `FINAL_RESPONSE` chunk it builds for the purpose (`isFinal: true`), then sends the held text, as the sanitizers left it, and the request; a block drops the text and ends the stream. See [Required Guards, Hold Mode and Replacement Replies](./GUARDRAILS_USAGE.md#required-guards-hold-mode-and-replacement-replies).
 
@@ -195,7 +201,7 @@ interface GuardrailEvaluationResult {
 
 ## Understanding the Chunk Lifecycle
 
-The `chunk` field is typed as the union of all AgentOS response types, but `evaluateOutput` receives only `TEXT_DELTA` chunks (with `evaluateStreamingChunks: true`) and chunks that carry `isFinal: true`. The sections below describe the chunks of a `processRequest()` stream and say which ones reach your guardrail.
+The `chunk` field is typed as the union of all AgentOS response types, but `evaluateOutput` receives only `TEXT_DELTA` chunks (with `evaluateStreamingChunks: true`), `TOOL_CALL_REQUEST` chunks (with `evaluateToolCalls: true`) and chunks that carry `isFinal: true`. The sections below describe the chunks of a `processRequest()` stream and say which ones reach your guardrail.
 
 ### TEXT_DELTA
 
@@ -233,7 +239,13 @@ The complete, assembled response emitted at the end of a turn.
 
 ### TOOL_CALL_REQUEST
 
-Emitted when the model requests a tool call. It carries `isFinal: false`, so `evaluateOutput` never receives it: an output guardrail cannot approve or deny a tool call.
+Emitted when the model requests a tool call. It carries `isFinal: false`, and `evaluateOutput` receives it only when the guardrail's `config.evaluateToolCalls` is `true`:
+
+- **`BLOCK`** ends the stream with the guardrail's verdict (the error chunk, or the final response holding `replacementText`) in place of the chunk, so the stream never hands the host an actionable call to execute. The pause the runtime saved for that call stays in `getPendingExternalToolRequest()` until the conversation's next turn ends.
+- **`SANITIZE`** cannot rewrite a tool call: it is applied as a `BLOCK` that keeps your reason and reason code.
+- **`FLAG`** and **`ALLOW`** pass the chunk on, with the evaluation in its `metadata.guardrail.output`.
+
+A call with `executionMode: 'internal'` is one the runtime executes itself, without waiting for the output guardrails: a block ends the stream but does not stop that call.
 
 ```typescript
 {
@@ -245,7 +257,7 @@ Emitted when the model requests a tool call. It carries `isFinal: false`, so `ev
     {
       id: 'call_001',
       name: 'web_search',
-      arguments: '{"query": "latest news"}'
+      arguments: { query: 'latest news' }, // parsed into an object
     }
   ],
   rationale: 'User asked about current events.',

@@ -277,4 +277,50 @@ describe('generateText planning and the transcript delta', () => {
       { role: 'assistant', content: 'Done.' },
     ]);
   });
+
+  // -----------------------------------------------------------------------
+  // 4. customModelParams reach the planning call
+  // -----------------------------------------------------------------------
+  it('sends the routing keys of the caller customModelParams with the planning call', async () => {
+    const routing = {
+      provider: { data_collection: 'deny', order: ['Fireworks'] },
+      plugins: [{ id: 'context-compression' }],
+    };
+    // Keys that shape the turn's own request: they would lift the planner's output limit and change its format.
+    const customModelParams = { ...routing, max_tokens: 9000, response_format: { type: 'json_object' } };
+
+    hoisted.generateCompletion.mockResolvedValueOnce(
+      makePlanResponse([{ description: 'Answer', tool: null, reasoning: 'Direct' }]),
+    );
+    hoisted.generateCompletion.mockResolvedValueOnce(makeTextResponse('Done.'));
+
+    await generateText({
+      model: 'openai:gpt-4.1-mini',
+      prompt: 'Plan then answer.',
+      planning: true,
+      customModelParams,
+    });
+
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
+    expect(hoisted.generateCompletion.mock.calls[0][2].customModelParams).toEqual(routing);
+    expect(hoisted.generateCompletion.mock.calls[1][2].customModelParams).toEqual(customModelParams);
+  });
+
+  it('sends the planning call no customModelParams when the caller sets no routing key', async () => {
+    hoisted.generateCompletion.mockResolvedValueOnce(
+      makePlanResponse([{ description: 'Answer', tool: null, reasoning: 'Direct' }]),
+    );
+    hoisted.generateCompletion.mockResolvedValueOnce(makeTextResponse('Done.'));
+
+    await generateText({
+      model: 'openai:gpt-4.1-mini',
+      prompt: 'Plan then answer.',
+      planning: true,
+      customModelParams: { max_tokens: 9000 },
+    });
+
+    expect(hoisted.generateCompletion.mock.calls[0][2]).not.toHaveProperty('customModelParams');
+    expect(hoisted.generateCompletion.mock.calls[0][2].maxTokens).toBe(2048);
+    expect(hoisted.generateCompletion.mock.calls[1][2].customModelParams).toEqual({ max_tokens: 9000 });
+  });
 });

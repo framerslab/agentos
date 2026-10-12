@@ -2,10 +2,10 @@
  * @fileoverview The rule for a file or folder name built from data, and the check that a path built from such
  * names lies inside its folder.
  *
- * The memory wiki builds a page's path from its id, and the Markdown and Obsidian memory exporters build a
- * trace's path from its scope, type and id. Those values come from files, imports and models, so every name
- * taken from them is checked against one rule here, and every path built from them is checked to lie inside the
- * folder it is written to.
+ * The memory wiki builds a page's path from its id, the Markdown and Obsidian memory exporters build a trace's
+ * path from its scope, type and id, and the skill exporter builds a forged tool's folder from its name. Those
+ * values come from files, imports and models, so every name taken from them is checked against one rule here,
+ * and every path built from them is checked to lie inside the folder it is written to.
  *
  * @module agentos/core/utils/pathName
  */
@@ -46,6 +46,22 @@ const COLON = 0x3a;
 const WINDOWS_RESERVED = new Set([0x22, 0x2a, 0x3c, 0x3e, 0x3f, 0x7c]);
 
 const utf8 = new TextEncoder();
+
+/** The most characters of a refused name that an error message shows. */
+const SHOWN_NAME_CHARACTERS = 64;
+
+/**
+ * A refused value as an error message shows it: a string quoted and escaped, cut to its first 64 characters, or
+ * the type of any other value.
+ *
+ * @param value - The refused value.
+ */
+export function describeRefusedName(value: unknown): string {
+  if (typeof value !== 'string') return `of type ${value === null ? 'null' : typeof value}`;
+  return JSON.stringify(
+    value.length > SHOWN_NAME_CHARACTERS ? `${value.slice(0, SHOWN_NAME_CHARACTERS)}...` : value,
+  );
+}
 
 /**
  * True when the character whose UTF-16 code is `code` may appear neither in a name nor anywhere in a path whose

@@ -601,4 +601,47 @@ describe('streamText', () => {
     expect(usage.cacheReadTokens).toBe(80);
     expect(usage.cacheCreationTokens).toBe(15);
   });
+
+  it('sends the routing keys of the caller customModelParams with the planning call', async () => {
+    const routing = { provider: { data_collection: 'deny', order: ['Fireworks'] } };
+    const customModelParams = { ...routing, max_tokens: 9000 };
+    hoisted.generateCompletion.mockResolvedValueOnce({
+      modelId: 'gpt-4.1-mini',
+      usage: { promptTokens: 20, completionTokens: 10, totalTokens: 30 },
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+            content: JSON.stringify({ steps: [{ description: 'Answer', tool: null, reasoning: 'Direct' }] }),
+          },
+          finishReason: 'stop',
+        },
+      ],
+    });
+    hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
+      yield {
+        id: 'step-1',
+        object: 'chat.completion.chunk',
+        created: 1,
+        modelId: 'gpt-4.1-mini',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'Done.' }, finishReason: 'stop' }],
+        responseTextDelta: 'Done.',
+        isFinal: true,
+        usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 },
+      };
+    });
+
+    const result = streamText({
+      model: 'openai:gpt-4.1-mini',
+      prompt: 'Explain QUIC.',
+      planning: true,
+      customModelParams,
+    });
+    for await (const _ of result.textStream) {
+      // drain
+    }
+
+    expect(hoisted.generateCompletion.mock.calls[0][2].customModelParams).toEqual(routing);
+    expect(hoisted.generateCompletionStream.mock.calls[0][2].customModelParams).toEqual(customModelParams);
+  });
 });

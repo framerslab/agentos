@@ -13,7 +13,7 @@
  * - System instruction: Separate `systemInstruction` field, not a role.
  * - Tool calling: Uses `functionDeclarations` under `tools[]`, response uses `functionCall`.
  * - Streaming: SSE via `streamGenerateContent?alt=sse` endpoint.
- * - Finish reasons: `STOP`, `MAX_TOKENS`, `SAFETY`, `RECITATION` (uppercase enum strings).
+ * - Finish reasons: `STOP`, `MAX_TOKENS`, `SAFETY`, `RECITATION` and Gemini's other uppercase enum strings.
  * - Response shape: `candidates[0].content.parts[0].text` (not `choices[0].message.content`).
  * - Usage: `usageMetadata.promptTokenCount` / `candidatesTokenCount` / `totalTokenCount`.
  *
@@ -106,13 +106,52 @@ interface GeminiPart {
   thoughtSignature?: string;
   /** An image (or other media) sent inline: its MIME type and base64 bytes. */
   inlineData?: { mimeType: string; data: string };
+  /** An image Gemini fetches itself: its https URL and, when known, its MIME type. */
+  fileData?: { fileUri: string; mimeType?: string };
 }
 
 /**
- * The most inline image data one request carries. Gemini caps a request with
- * inline data at 20 MB in all (https://ai.google.dev/gemini-api/docs/image-understanding).
+ * The most inline data one request carries, counted as Gemini counts it: in
+ * base64 characters. Gemini raised the payload for inline data from 20 MB to
+ * 100 MB, "base64 encoded, with varying limits based on data types"
+ * (https://blog.google/innovation-and-ai/technology/developers-tools/gemini-api-new-file-limits/,
+ * 2026-01-12; https://ai.google.dev/gemini-api/docs/file-input-methods). A
+ * type's own lower limit is Gemini's to apply: its 400 comes back to the caller.
  */
-const MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_INLINE_BASE64_CHARS = 100 * 1024 * 1024;
+
+/**
+ * The image types Gemini reads, by file extension, from the `Blob.mimeType`
+ * list of the v1beta API reference
+ * (https://generativelanguage.googleapis.com/$discovery/rest?version=v1beta).
+ */
+const IMAGE_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  heic: 'image/heic',
+  heif: 'image/heif',
+  gif: 'image/gif',
+  avif: 'image/avif',
+};
+
+/**
+ * Finish reasons that mean Google's filters stopped the answer (the v1beta
+ * `Candidate.finishReason` enum). A response that ends on one of them with no
+ * content is a content-policy decline, as is any prompt Gemini blocked
+ * (`PromptFeedback.blockReason`), which gets no candidates.
+ */
+const CONTENT_FILTER_FINISH_REASONS: ReadonlySet<string> = new Set([
+  'SAFETY',
+  'RECITATION',
+  'BLOCKLIST',
+  'PROHIBITED_CONTENT',
+  'SPII',
+  'IMAGE_SAFETY',
+  'IMAGE_PROHIBITED_CONTENT',
+  'IMAGE_RECITATION',
+]);
 
 /** The value of an ASCII hex digit, or -1. */
 function hexValue(byte: number): number {
@@ -142,31 +181,89 @@ function percentDecodeBytes(payload: string): Buffer {
 }
 
 /**
- * A data URL as Gemini inline data. Gemini takes images as inline bytes or
- * File API uploads and does not fetch image URLs; this adapter does not fetch
- * them either, since that would reach whatever network the process runs in.
- * So an http(s) image is an error: pass its bytes as a data URL.
+ * A request this provider refuses before sending it: the caller's input is at
+ * fault, so it carries HTTP status 400, which the provider health registry and
+ * the fallback chain read as a bad request rather than as Gemini failing.
  */
-function inlineDataOf(url: string): { mimeType: string; data: string } {
-  if (/^https?:\/\//i.test(url)) {
-    throw new GeminiProviderError(
-      'Gemini takes an image as inline data and does not fetch image URLs, nor does this provider: pass the image as a data URL.',
+function refusedImage(message: string, code: string): GeminiProviderError {
+  return new GeminiProviderError(message, code, 400);
+}
+
+/**
+ * Whether `text` is base64 Gemini reads: the standard or URL-safe alphabet,
+ * with at most two `=` of padding at the end, and not one character past a
+ * multiple of four, a length WHATWG's forgiving-base64 decode refuses
+ * (https://infra.spec.whatwg.org/#forgiving-base64-decode).
+ */
+function isBase64(text: string): boolean {
+  const body = text.length % 4 === 0 ? text.replace(/={1,2}$/, '') : text;
+  return body.length % 4 !== 1 && /^[A-Za-z0-9+/_-]*$/.test(body);
+}
+
+/**
+ * An `image_url` as a Gemini part.
+ *
+ * - An https URL becomes `fileData`, which Gemini fetches itself: it takes
+ *   "any publicly accessible URL (like a PDF or image on the web)" and
+ *   pre-signed cloud storage URLs, up to 15 MB a file
+ *   (https://ai.google.dev/gemini-api/docs/file-input-methods). The MIME type
+ *   is named when the path ends in an image extension; Gemini's `fileData`
+ *   takes it as optional. This provider fetches nothing itself, since that
+ *   would reach whatever network the process runs in.
+ * - A data URL becomes `inlineData`, read as WHATWG Fetch reads one
+ *   (https://fetch.spec.whatwg.org/#data-url-processor): tabs and line breaks
+ *   are dropped, the text before the first comma is the media type and marks
+ *   base64 when it ends in `;base64` (spaces allowed around it), and the rest
+ *   is percent-decoded, then read as base64 when so marked. Each step is linear
+ *   in the URL's length, so a URL a caller forwards cannot stall the process.
+ *
+ * @throws GeminiProviderError (HTTP status 400) for any other URL, a data URL
+ *   with no comma or no media type, base64 that is not valid, and an image of
+ *   no bytes.
+ */
+function imagePartOf(url: string): GeminiPart {
+  if (/^https:\/\//i.test(url)) {
+    let extension = '';
+    try {
+      extension = /\.([a-z0-9]+)$/i.exec(new URL(url).pathname)?.[1]?.toLowerCase() ?? '';
+    } catch {
+      throw refusedImage('This image_url is not a valid URL.', 'INVALID_IMAGE_URL');
+    }
+    const mimeType = IMAGE_TYPE_BY_EXTENSION[extension];
+    return { fileData: { fileUri: url, ...(mimeType ? { mimeType } : {}) } };
+  }
+  if (/^http:\/\//i.test(url)) {
+    throw refusedImage(
+      'Gemini fetches an image URL over HTTPS only: pass this image as an https URL or a data URL.',
       'IMAGE_URL_NOT_SUPPORTED',
     );
   }
-  const match = /^data:([^;,]+)[^,]*?(;base64)?,(.*)$/is.exec(url);
-  if (!match) {
-    throw new GeminiProviderError('Gemini takes an image as a data URL; this image_url is not one.', 'INVALID_IMAGE_URL');
+  const text = url.replace(/[\t\n\r]/g, '');
+  const comma = text.indexOf(',');
+  if (!/^data:/i.test(text) || comma === -1) {
+    throw refusedImage('Gemini takes an image as an https URL or a data URL; this image_url is neither.', 'INVALID_IMAGE_URL');
   }
-  const [, mimeType, base64, payload] = match;
-  if (base64) return { mimeType, data: payload.replace(/\s+/g, '') };
-  return { mimeType, data: percentDecodeBytes(payload).toString('base64') };
-}
-
-/** The number of bytes a base64 string decodes to. */
-function base64Bytes(data: string): number {
-  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
-  return Math.floor((data.length * 3) / 4) - padding;
+  const header = text.slice(5, comma);
+  const mimeType = header.split(';', 1)[0].trim().toLowerCase();
+  if (!mimeType) {
+    throw refusedImage('This data URL names no media type, which Gemini needs for inline data.', 'INVALID_IMAGE_URL');
+  }
+  const payload = text.slice(comma + 1);
+  let data: string;
+  if (/; *base64 *$/i.test(header)) {
+    // Percent-decoded first, as WHATWG decodes it, then the ASCII whitespace
+    // forgiving-base64 skips is dropped.
+    data = (payload.includes('%') ? percentDecodeBytes(payload).toString('latin1') : payload).replace(/[\t\n\f\r ]+/g, '');
+    if (!isBase64(data)) {
+      throw refusedImage('The base64 in this data URL is not valid.', 'INVALID_IMAGE_URL');
+    }
+  } else {
+    data = percentDecodeBytes(payload).toString('base64');
+  }
+  if (!data) {
+    throw refusedImage('This data URL holds no image data.', 'INVALID_IMAGE_URL');
+  }
+  return { inlineData: { mimeType, data } };
 }
 
 /** A single message in the Gemini contents array. */
@@ -344,6 +441,8 @@ interface GeminiCandidate {
 /** Full response from the Gemini generateContent endpoint. */
 interface GeminiResponse {
   candidates?: GeminiCandidate[];
+  /** Set when Gemini blocked the prompt itself: then no candidates are returned. */
+  promptFeedback?: { blockReason?: string };
   usageMetadata?: GeminiUsageMetadata;
   error?: {
     code: number;
@@ -850,6 +949,7 @@ export class GeminiProvider implements IProvider {
     let accumulatedContent = '';
     let accumulatedReasoning = '';
     let lastFinishReason: string | null = null;
+    let promptBlockReason: string | undefined;
     let lastUsage: GeminiUsageMetadata | undefined;
     /** Map from part index -> tool call accumulator */
     const toolCallAccum: Map<
@@ -898,6 +998,9 @@ export class GeminiProvider implements IProvider {
         // Track usage from every chunk — the last one will have final totals
         if (chunk.usageMetadata) {
           lastUsage = chunk.usageMetadata;
+        }
+        if (chunk.promptFeedback?.blockReason) {
+          promptBlockReason = chunk.promptFeedback.blockReason;
         }
 
         const candidate = chunk.candidates?.[0];
@@ -981,15 +1084,14 @@ export class GeminiProvider implements IProvider {
       const hasToolCalls = toolCalls.length > 0;
       const usage = this.mapUsage(lastUsage, modelId);
 
-      // Surface a content-policy block (SAFETY/RECITATION with no content) as a
-      // thrown content_filter error — same as the non-streaming path — so the
-      // policy-aware fallback can engage instead of silently yielding an empty
-      // success chunk. The catch below re-throws content_filter so it propagates.
-      if (this.mapFinishReason(lastFinishReason) === 'content_filter' && !accumulatedContent && !hasToolCalls) {
-        throw new GeminiProviderError(
-          `Gemini blocked the response (finishReason: ${lastFinishReason ?? 'unknown'}); no content returned.`,
-          'content_filter',
-        );
+      // Surface a content-policy block (a blocked prompt, or a filter's finish
+      // reason with no content) as a thrown content_filter error, as the
+      // non-streaming path does, so the policy-aware fallback can engage
+      // instead of silently yielding an empty success chunk. The catch below
+      // re-throws content_filter so it propagates.
+      if (!accumulatedContent && !hasToolCalls) {
+        const blocked = this.contentFilterBlock(promptBlockReason, lastFinishReason, lastUsage ? usage : undefined);
+        if (blocked) throw blocked;
       }
 
       yield {
@@ -1357,8 +1459,8 @@ export class GeminiProvider implements IProvider {
    * @private
    */
   private convertMessages(messages: ChatMessage[]): GeminiContent[] {
-    // The inline image bytes so far, against Gemini's per-request limit.
-    let inlineBytes = 0;
+    // The inline image data so far, in base64 characters, against Gemini's per-request limit.
+    let inlineChars = 0;
     const contents: GeminiContent[] = [];
     const toolNameByCallId = new Map<string, string>();
 
@@ -1461,15 +1563,15 @@ export class GeminiProvider implements IProvider {
             if (part.type === 'text') {
               parts.push({ text: (part as { text: string }).text });
             } else if (part.type === 'image_url') {
-              const inlineData = inlineDataOf((part as { image_url: { url: string } }).image_url.url);
-              inlineBytes += base64Bytes(inlineData.data);
-              if (inlineBytes > MAX_INLINE_IMAGE_BYTES) {
-                throw new GeminiProviderError(
-                  `The images in this request come to more than Gemini's 20 MB of inline data per request.`,
+              const imagePart = imagePartOf((part as { image_url: { url: string } }).image_url.url);
+              inlineChars += imagePart.inlineData?.data.length ?? 0;
+              if (inlineChars > MAX_INLINE_BASE64_CHARS) {
+                throw refusedImage(
+                  `The images in this request come to more than Gemini's 100 MB of inline data per request, counted in base64; pass large images as https URLs.`,
                   'IMAGE_TOO_LARGE',
                 );
               }
-              parts.push({ inlineData });
+              parts.push(imagePart);
             }
           }
         }
@@ -1569,16 +1671,21 @@ export class GeminiProvider implements IProvider {
     const finishReason = this.mapFinishReason(candidate?.finishReason ?? null);
     const usage = this.mapUsage(apiResponse.usageMetadata, modelId);
 
-    // A SAFETY / RECITATION block returns no content with finishReason
-    // 'content_filter'. Surface it as a content-policy error (code
-    // 'content_filter', recognized by isContentPolicyRefusal) so the
-    // policy-aware fallback chain can engage an uncensored model. Returning an
-    // empty 200 here stranded the caller — the fallback could never fire.
-    if (finishReason === 'content_filter' && !fullText && !hasToolCalls) {
-      throw new GeminiProviderError(
-        `Gemini blocked the response (finishReason: ${candidate?.finishReason ?? 'unknown'}); no content returned.`,
-        'content_filter',
+    // A blocked prompt returns no candidates, and a filter's finish reason
+    // (SAFETY, RECITATION, PROHIBITED_CONTENT and the rest of
+    // CONTENT_FILTER_FINISH_REASONS) returns no content. Surface either as a
+    // content-policy error (code 'content_filter', recognized by
+    // isContentPolicyRefusal) so the policy-aware fallback chain can engage an
+    // uncensored model. Returning an empty 200 here stranded the caller: the
+    // fallback could never fire, and an empty answer read as an image with no
+    // text.
+    if (!fullText && !hasToolCalls) {
+      const blocked = this.contentFilterBlock(
+        apiResponse.promptFeedback?.blockReason,
+        candidate?.finishReason ?? null,
+        apiResponse.usageMetadata ? usage : undefined,
       );
+      if (blocked) throw blocked;
     }
 
     const choice: ModelCompletionChoice = {
@@ -1603,26 +1710,61 @@ export class GeminiProvider implements IProvider {
   }
 
   /**
+   * The content-policy error for a response with no content that Google's
+   * filters stopped: a prompt block reason (any value, since a blocked prompt
+   * gets no candidates), or a finish reason in
+   * `CONTENT_FILTER_FINISH_REASONS`. `undefined` when neither applies.
+   * The message names the reason. The usage Gemini reported for the request
+   * goes on the error as `details.usage`, where the fallback chain and the
+   * completion gateway read a failed attempt's tokens.
+   */
+  private contentFilterBlock(
+    blockReason: string | undefined,
+    finishReason: string | null,
+    usage: ModelUsage | undefined,
+  ): GeminiProviderError | undefined {
+    const details = usage ? { usage } : undefined;
+    if (blockReason) {
+      return new GeminiProviderError(
+        `Gemini blocked the prompt (blockReason: ${blockReason}); no content returned.`,
+        'content_filter',
+        undefined,
+        undefined,
+        details,
+      );
+    }
+    if (this.mapFinishReason(finishReason) === 'content_filter') {
+      return new GeminiProviderError(
+        `Gemini blocked the response (finishReason: ${finishReason ?? 'unknown'}); no content returned.`,
+        'content_filter',
+        undefined,
+        undefined,
+        details,
+      );
+    }
+    return undefined;
+  }
+
+  /**
    * Maps Gemini finish reasons to IProvider-convention finish reasons.
    *
    * Gemini uses uppercase enum strings:
    * - `STOP` -> `"stop"` (natural completion)
    * - `MAX_TOKENS` -> `"length"` (hit token limit)
-   * - `SAFETY` -> `"content_filter"` (blocked by safety filters)
-   * - `RECITATION` -> `"content_filter"` (blocked by recitation check)
+   * - `SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII` and
+   *   the `IMAGE_` filter reasons (`CONTENT_FILTER_FINISH_REASONS`) ->
+   *   `"content_filter"` (stopped by Google's filters)
+   * - anything else -> its lowercase name
    *
    * @param {string | null} finishReason - Gemini's finish reason value.
    * @returns {string} Normalized finish reason.
    * @private
    */
   private mapFinishReason(finishReason: string | null): string {
-    switch (finishReason) {
-      case 'STOP': return 'stop';
-      case 'MAX_TOKENS': return 'length';
-      case 'SAFETY': return 'content_filter';
-      case 'RECITATION': return 'content_filter';
-      default: return finishReason?.toLowerCase() ?? 'stop';
-    }
+    if (finishReason === 'STOP') return 'stop';
+    if (finishReason === 'MAX_TOKENS') return 'length';
+    if (finishReason && CONTENT_FILTER_FINISH_REASONS.has(finishReason)) return 'content_filter';
+    return finishReason?.toLowerCase() ?? 'stop';
   }
 
   /**

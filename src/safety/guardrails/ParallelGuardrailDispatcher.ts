@@ -34,6 +34,7 @@ import {
   AgentOSResponseChunkType,
   type AgentOSFinalResponseChunk,
   isActionableToolCallRequestChunk,
+  isToolCallRequestChunk,
 } from '../../api/types/AgentOSResponse';
 import {
   GuardrailAction,
@@ -179,6 +180,38 @@ function downgradePhase2Sanitize(
     reason: evaluation.reason
       ? `${evaluation.reason} [downgraded from SANITIZE]`
       : 'SANITIZE downgraded to FLAG in parallel phase',
+  };
+}
+
+/**
+ * A guard cannot rewrite a tool call: a SANITIZE on a TOOL_CALL_REQUEST chunk
+ * is applied as a BLOCK that keeps the guard's reason, so the call never goes
+ * out in a form no guard approved.
+ *
+ * @param evaluation - The raw evaluation of a tool-call chunk
+ * @param svcIndex   - Registration index for logging
+ * @returns The evaluation, with a SANITIZE turned into a BLOCK
+ */
+function sanitizeOfToolCallAsBlock(
+  evaluation: GuardrailEvaluationResult,
+  svcIndex: number,
+): GuardrailEvaluationResult {
+  if (evaluation.action !== GuardrailAction.SANITIZE) {
+    return evaluation;
+  }
+
+  console.warn(
+    `[AgentOS][Guardrails] Guardrail at index ${svcIndex} returned SANITIZE for a tool call — ` +
+    'a tool call cannot be rewritten, so the call is blocked.',
+  );
+
+  const { modifiedText: _modifiedText, ...rest } = evaluation;
+  return {
+    ...rest,
+    action: GuardrailAction.BLOCK,
+    reason: evaluation.reason
+      ? `${evaluation.reason} [SANITIZE of a tool call applied as BLOCK]`
+      : 'SANITIZE of a tool call applied as BLOCK: a tool call cannot be rewritten',
   };
 }
 
@@ -377,8 +410,14 @@ export class ParallelGuardrailDispatcher {
    * Phase 2 runs final classifiers in parallel. All services with
    * `evaluateOutput` participate in final evaluation.
    *
+   * For each non-final TOOL_CALL_REQUEST chunk: the services whose config sets
+   * `evaluateToolCalls` run in parallel on the chunk as the stream carries it.
+   * A SANITIZE is applied as a BLOCK, since a tool call cannot be rewritten; a
+   * BLOCK ends the stream with the verdict in place of the chunk. Services
+   * without the flag never receive a tool-call chunk.
+   *
    * A BLOCK in either phase terminates the stream immediately with an error
-   * chunk.
+   * chunk, or with a final response holding the guard's `replacementText`.
    *
    * @param services  - Array of guardrail services (already normalized)
    * @param context   - Conversational context for policy decisions
@@ -406,11 +445,17 @@ export class ParallelGuardrailDispatcher {
     const finalSanitizers: IGuardrailService[] = [];
     /** Final classifiers: Phase 2 for isFinal chunks */
     const finalParallel: { svc: IGuardrailService; registrationIndex: number }[] = [];
+    /** Tool-call guards: the services that opted in to TOOL_CALL_REQUEST chunks */
+    const toolCallGuards: { svc: IGuardrailService; registrationIndex: number }[] = [];
 
     for (let i = 0; i < services.length; i++) {
       const svc = services[i];
       if (!hasEvaluateOutput(svc)) {
         continue;
+      }
+
+      if (svc.config?.evaluateToolCalls === true) {
+        toolCallGuards.push({ svc, registrationIndex: i });
       }
 
       const isStreaming = svc.config?.evaluateStreamingChunks === true;
@@ -574,6 +619,54 @@ export class ParallelGuardrailDispatcher {
       return { outcome: 'pass', chunk: workingChunk, sanitized, worst: worstAction(outputEvaluations) };
     };
 
+    /**
+     * The tool-call guards over one TOOL_CALL_REQUEST chunk, in parallel.
+     * Returns the first BLOCK by registration order (a SANITIZE counts as
+     * one), or the chunk with every evaluation attached.
+     */
+    const evaluateToolCall = async (
+      chunkIn: AgentOSResponse,
+    ): Promise<
+      | { outcome: 'block'; evaluation: GuardrailEvaluationResult }
+      | { outcome: 'pass'; chunk: AgentOSResponse }
+    > => {
+      const results = await Promise.allSettled(
+        toolCallGuards.map(({ svc }) =>
+          callWithTimeout(
+            () => svc.evaluateOutput!({ context, chunk: chunkIn, ragSources: currentRagSources }),
+            svc.config?.timeoutMs,
+            svc.config?.failClosed,
+          ),
+        ),
+      );
+
+      const outputEvaluations: GuardrailEvaluationResult[] = [];
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
+        if (result.status === 'rejected') {
+          console.warn('[AgentOS][Guardrails] Tool-call evaluateOutput rejected.', result.reason);
+          continue;
+        }
+        if (!result.value) {
+          continue;
+        }
+
+        const { svc, registrationIndex } = toolCallGuards[j];
+        const evaluation = stampGuardrailId(sanitizeOfToolCallAsBlock(result.value, registrationIndex), svc);
+        outputEvaluations.push(evaluation);
+
+        if (evaluation.action === GuardrailAction.BLOCK) {
+          return { outcome: 'block', evaluation };
+        }
+      }
+
+      const chunk =
+        outputEvaluations.length > 0
+          ? withGuardrailMetadata(chunkIn, { output: outputEvaluations.map(serializeEvaluation) })
+          : chunkIn;
+      return { outcome: 'pass', chunk };
+    };
+
     const finalTextOf = (chunk: AgentOSResponse): string | null =>
       chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE ? ((chunk as AgentOSFinalResponseChunk).finalResponseText ?? null) : null;
 
@@ -725,6 +818,23 @@ export class ParallelGuardrailDispatcher {
       if (hold && chunk.type === AgentOSResponseChunkType.TEXT_DELTA && !chunk.isFinal) {
         held.push(currentChunk);
         continue;
+      }
+
+      // ---------------------------------------------------------------
+      // TOOL_CALL_REQUEST (non-final): the guards that evaluate tool calls
+      // ---------------------------------------------------------------
+      // A block ends the stream with the verdict in place of the chunk, so the
+      // stream never hands a host an actionable call it would execute; in hold
+      // mode the text held before the call is dropped with it.
+      if (isToolCallRequestChunk(chunk) && !chunk.isFinal && toolCallGuards.length > 0) {
+        const verdict = await evaluateToolCall(currentChunk);
+        if (verdict.outcome === 'block') {
+          held = [];
+          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: null });
+          yield* blockedOutput(context, verdict.evaluation, options);
+          return;
+        }
+        currentChunk = verdict.chunk;
       }
 
       // An actionable tool call ends the turn's text for now: in hold mode the

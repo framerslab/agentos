@@ -2,6 +2,7 @@
 import * as path from 'node:path';
 import {
   MAX_PATH_NAME_BYTES,
+  describeRefusedName,
   isRefusedPathCharacter,
   pathNameProblem,
   resolveInsideFolder,
@@ -56,15 +57,6 @@ const RULE_BROKEN: Record<WikiPageIdProblem, string> = {
   outside: "the page's file would be outside the memory folder",
 };
 
-/** The most characters of a refused id that its error message shows. */
-const SHOWN_ID_CHARACTERS = 64;
-
-/** The refused id as the message shows it: quoted and escaped, cut to its first characters. */
-function describeId(id: unknown): string {
-  if (typeof id !== 'string') return `of type ${id === null ? 'null' : typeof id}`;
-  return JSON.stringify(id.length > SHOWN_ID_CHARACTERS ? `${id.slice(0, SHOWN_ID_CHARACTERS)}...` : id);
-}
-
 /** Thrown when a wiki page id is refused. Nothing is read or written for the refused id. */
 export class InvalidWikiPageIdError extends Error {
   /** A stable code for callers that branch on the kind of failure. */
@@ -78,7 +70,7 @@ export class InvalidWikiPageIdError extends Error {
     readonly problem: WikiPageIdProblem,
     id: unknown,
   ) {
-    super(`wiki page id ${describeId(id)} refused: ${RULE_BROKEN[problem]}`);
+    super(`wiki page id ${describeRefusedName(id)} refused: ${RULE_BROKEN[problem]}`);
     this.name = 'InvalidWikiPageIdError';
   }
 }

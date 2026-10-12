@@ -1,3 +1,27 @@
+## [0.13.68](https://github.com/framerslab/agentos/compare/v0.13.67...v0.13.68) (2026-10-12)
+
+### fix
+
+* **gateway:** gmi() forwards the failed hop's error, the walk reads the walkers' tier, and its skips wait for a walk (#346) ([5444af5](https://github.com/framerslab/agentos/commit/5444af5a199784ad482507e0b76fc23bfd96311d))
+
+## [0.13.67](https://github.com/framerslab/agentos/compare/v0.13.66...v0.13.67) (2026-10-12)
+
+### fix
+
+* **agency:** the post-approval check reads the approved input, and output guards receive tool-call chunks (#340) ([a81d09d](https://github.com/framerslab/agentos/commit/a81d09dc8684cd92be1438831f604d2d9c1fd365))
+* **api:** send the routing keys of customModelParams with the planning call (#329) ([7271cc3](https://github.com/framerslab/agentos/commit/7271cc36155b42697a146d0e5c8056da19073402))
+* **gateway:** the completion gateway resolves and walks its chain as generateText and streamText do (#341) ([b4c8280](https://github.com/framerslab/agentos/commit/b4c8280b60460b10037118ae019a5a3b47cf7fad))
+
+## [0.13.66](https://github.com/framerslab/agentos/compare/v0.13.65...v0.13.66) (2026-10-12)
+
+### fix
+
+* **emergent:** forged tool names are held to the name rule and skill exports write only inside their folder, and export follow-ups from the cold read of #332 (#338) ([ff8e6c5](https://github.com/framerslab/agentos/commit/ff8e6c5249b05ec8d04615c28e17c258255ac40c))
+
+### docs
+
+* name the late calls charged to a later turn on the GMI study page (#339) ([b2957fa](https://github.com/framerslab/agentos/commit/b2957fa0b5f37acc9516096c42c48682eeac250f))
+
 ## [0.13.65](https://github.com/framerslab/agentos/compare/v0.13.64...v0.13.65) (2026-10-12)
 
 ### fix
