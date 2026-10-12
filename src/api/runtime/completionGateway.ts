@@ -18,13 +18,21 @@ import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegi
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
 import { resolveModelOption, resolveProvider, createProviderManager } from '../model.js';
 import {
+  advanceFallbackWalk,
   buildPolicyAwareFallbackChain,
+  explicitRequiredCapabilities,
   fallbackHopOverrides,
+  gateFallbackEntry,
+  INITIAL_FALLBACK_WALK,
   isContentPolicyRefusal,
   isRetryableError,
+  resolveFallbackChain,
   usageOfError,
   type FallbackProviderEntry,
+  type FallbackSkipReason,
+  type FallbackWalkState,
   type GenerateTextOptions,
+  type ResolvedFallbackEntry,
 } from '../generateText.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities, type HostLLMPolicy } from './hostPolicy.js';
 import { buildResponseFormatForProvider, responseFormatCarriesSchema } from './responseFormatForProvider.js';
@@ -41,7 +49,11 @@ export interface CompletionRoute {
   routerParams?: Partial<ModelRouteParams>;
   hostPolicy?: HostLLMPolicy;
   policyTier?: GenerateTextOptions['policyTier'];
-  /** Caller chain. Undefined builds the policy-aware chain from the environment; an empty array disables fallback. */
+  /**
+   * Caller chain. Undefined builds the policy-aware chain from the environment; an empty array disables fallback.
+   * Either is resolved once, as generateText's walk resolves its chain: entries naming an excluded model or lacking
+   * an explicitly required capability are passed over, and so is the policy chain's entry for the first model.
+   */
   fallbackProviders?: FallbackProviderEntry[];
   /** Credentials for the primary only; fallback hops read the environment, as streamText's walk does. */
   apiKey?: string;
@@ -52,13 +64,21 @@ export interface CompletionRoute {
   onFallback?: (info: { from: string; to: string; hop: number; error: Error }) => void;
   /** Called for every hop that could not start (initialisation failure or open circuit). */
   onHopFailure?: (info: { providerId: string; hop: number; error: Error }) => void;
+  /**
+   * Called for every chain entry the walk passes over without an attempt: an
+   * excluded model, a missing required capability, the policy chain's entry
+   * for the first model, a refill no standing leg is owed, a Claude leg after
+   * a refusal.
+   */
+  onHopSkipped?: (info: { provider: string; model?: string; reason: FallbackSkipReason }) => void;
 }
 
 /** One entry of the hop list a route resolves to. */
 export interface CompletionHop {
   provider: string;
   model?: string;
-  entry?: FallbackProviderEntry;
+  /** The chain entry behind a fallback hop, with its role in the walk when the policy chain gave it one. */
+  entry?: ResolvedFallbackEntry;
 }
 
 /** A hop that is ready to serve: its provider is initialised and its window is known. */
@@ -75,6 +95,14 @@ export interface CompletionResolution {
   optionOverrides: Partial<ModelCompletionOptions>;
   /** The hop list fixed by the route's first `resolve()`; later calls walk it. */
   readonly chain: ReadonlyArray<CompletionHop>;
+  /**
+   * What the route's walk had seen before this hop ran: standing legs owed a
+   * refill, and whether a model refused. `resolve()` reads it from the hop it
+   * is handed.
+   *
+   * @internal
+   */
+  readonly walk?: FallbackWalkState;
 }
 
 /**
@@ -123,7 +151,15 @@ export interface LateAttemptUsage {
 }
 
 export interface CompletionGateway {
-  resolve(route: CompletionRoute, after?: CompletionResolution): Promise<CompletionResolution | null>;
+  /**
+   * The route's first hop that can start, or, given the hop that failed, the
+   * next one. `failure` is the error that hop failed with: the walk reads it
+   * as generateText's and streamText's walks do (a refusal passes over the
+   * policy chain's Claude legs; a standing uncensored leg that failed on
+   * availability is owed the next ranked model). Without it the hop counts
+   * as an availability failure.
+   */
+  resolve(route: CompletionRoute, after?: CompletionResolution, failure?: unknown): Promise<CompletionResolution | null>;
   stream(
     resolution: CompletionResolution,
     messages: ChatMessage[],
@@ -542,19 +578,45 @@ function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): M
 }
 
 export function createCompletionGateway(defaults: Partial<CompletionRoute> = {}): CompletionGateway {
-  async function resolve(input: CompletionRoute, after?: CompletionResolution): Promise<CompletionResolution | null> {
+  async function resolve(input: CompletionRoute, after?: CompletionResolution, failure?: unknown): Promise<CompletionResolution | null> {
     const route: CompletionRoute = { ...defaults, ...definedOnly(input as unknown as Record<string, unknown>) } as CompletionRoute;
     let chain: ReadonlyArray<CompletionHop>;
+    let walk: FallbackWalkState;
     if (after) {
       chain = after.chain;
+      // The failed hop updates the walk: a refusal is recorded, and a standing
+      // leg that failed on availability is owed a refill.
+      walk = advanceFallbackWalk(after.walk ?? INITIAL_FALLBACK_WALK, chain[after.hop]?.entry?.walkRole, failure);
     } else {
       const primary = await selectPrimary(route);
       const fallbacks = route.fallbackProviders ?? buildPolicyAwareFallbackChain(route.policyTier, primary.provider);
-      chain = [{ provider: primary.provider, model: primary.model }, ...fallbacks.map((entry) => ({ provider: entry.provider, model: entry.model, entry }))];
+      // Resolved once, as generateText and streamText resolve a walk's chain:
+      // the policy chain's entry for the first model is dropped, the route's
+      // explicit capability and exclusion requirements apply to every entry
+      // as it will be sent, and the uncensored group's standing legs and
+      // refills are marked.
+      const resolved = resolveFallbackChain(fallbacks, {
+        primary,
+        requiredCapabilities: explicitRequiredCapabilities({ hostPolicy: route.hostPolicy, routerParams: route.routerParams }),
+        excludedModelIds: route.routerParams?.excludedModelIds,
+        onSkip: (entry, reason) => route.onHopSkipped?.({ provider: entry.provider, model: entry.model, reason }),
+      });
+      chain = [{ provider: primary.provider, model: primary.model }, ...resolved.map((entry) => ({ provider: entry.provider, model: entry.model, entry }))];
+      walk = INITIAL_FALLBACK_WALK;
     }
     let lastError: Error | undefined;
     for (let hop = after ? after.hop + 1 : 0; hop < chain.length; hop++) {
       const h = chain[hop];
+      // A refill runs only while a standing leg is owed one, and the policy
+      // chain's Claude legs are passed over after a refusal.
+      if (h.entry) {
+        const gate = gateFallbackEntry(walk, h.entry);
+        if (!gate.run) {
+          route.onHopSkipped?.({ provider: h.provider, model: h.model, reason: gate.reason });
+          continue;
+        }
+        walk = gate.state;
+      }
       // Set once credentials resolve: the provider that serves the hop (resolveProvider
       // may serve anthropic through openrouter), whose circuit and health are the hop's.
       let servingProviderId: string | undefined;
@@ -580,6 +642,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
             ? (definedOnly({ maxTokens: overrides.maxTokens, effort: overrides.effort, cache: overrides.cache }) as Partial<ModelCompletionOptions>)
             : {},
           chain,
+          walk,
         };
         if (hop > 0) {
           route.onFallback?.({ from: after?.providerId ?? chain[0].provider, to: resolved.providerId, hop, error: lastError ?? new Error('the previous hop failed') });
@@ -597,6 +660,8 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         // The primary's configuration error (no credentials, unknown provider) is the caller's to see.
         // A fallback leg that cannot start is skipped.
         if (hop === 0 && !isRetryableError(lastError)) throw lastError;
+        // A hop that could not start failed on availability: a standing leg is owed a refill.
+        walk = advanceFallbackWalk(walk, h.entry?.walkRole, lastError);
       }
     }
     return null;

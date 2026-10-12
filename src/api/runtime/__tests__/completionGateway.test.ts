@@ -9,10 +9,13 @@
  * manager and credential lookup are faked; model resolution, the fallback
  * helpers, the retry classifier and the health registry are the real ones.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager.js';
+import { MATURE_TEXT_RANKING } from '../../../core/llm/routing/UncensoredModelCatalog.js';
+import { buildFallbackChain } from '../../generateText.js';
+import { PROVIDER_DEFAULTS } from '../provider-defaults.js';
 
 const created: Array<{ providerId: string; modelId: string; apiKey?: string; baseUrl?: string }> = [];
 const failInit = new Set<string>();
@@ -144,6 +147,126 @@ describe('CompletionGateway.resolve', () => {
     const r = await gateway.resolve({ providerId: 'openai', modelId: 'gpt-4o', messages: [{ role: 'user', content: 'summarise the attached report' }], fallbackProviders: [] });
     expect(r).toMatchObject({ providerId: 'anthropic', modelId: 'claude-routed', hop: 0 });
     expect(selectModel.mock.calls[0][0]).toMatchObject({ taskHint: 'summarise the attached report', optimizationPreference: 'balanced' });
+  });
+});
+
+// The hop list is resolved once, as generateText's and streamText's walks
+// resolve theirs, and walked with the same state: refills only while a
+// standing leg is owed one, the policy chain's Claude legs passed over after a
+// refusal. The ladder is the real catalog's; llama-3.1-8b is never a leg.
+describe('CompletionGateway.resolve: the walk', () => {
+  const LADDER = MATURE_TEXT_RANKING.filter((model) => model !== 'meta-llama/llama-3.1-8b-instruct');
+  const isClaude = (provider: string, model?: string) => provider === 'anthropic' || (provider === 'openrouter' && (model ?? '').startsWith('anthropic/'));
+
+  beforeEach(() => {
+    // Only the keys a case names: the policy chain's availability suffix follows the environment.
+    for (const k of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'GEMINI_API_KEY']) vi.stubEnv(k, '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /** Every hop the walk resolves when each one fails with `failure`, and every entry it passes over. */
+  async function walkAll(
+    route: Parameters<ReturnType<typeof createCompletionGateway>['resolve']>[0],
+    failure: Error,
+    defaults: Parameters<typeof createCompletionGateway>[0] = {},
+  ) {
+    const skipped: string[] = [];
+    const gateway = createCompletionGateway(defaults);
+    const withSkips = { ...route, onHopSkipped: ({ model, reason }: { model?: string; reason: string }) => skipped.push(`${model}:${reason}`) };
+    const served: string[] = [];
+    let r = await gateway.resolve(withSkips);
+    while (r) {
+      served.push(r.modelId);
+      r = await gateway.resolve(withSkips, r, failure);
+    }
+    return { served, skipped };
+  }
+
+  it('never sends a model the route excludes, as written or as the leg resolves it (#139)', async () => {
+    failInit.add('anthropic');
+    const skipped: Array<[string, string | undefined, string]> = [];
+    const gateway = createCompletionGateway({ routerParams: { excludedModelIds: [PROVIDER_DEFAULTS.openai!.text!, 'openrouter:x/excluded'] } });
+    const r = await gateway.resolve({
+      providerId: 'anthropic',
+      modelId: 'claude-x',
+      messages: [],
+      fallbackProviders: [{ provider: 'openai' }, { provider: 'openrouter', model: 'openrouter:x/excluded' }, { provider: 'openrouter', model: 'x/allowed' }],
+      onHopSkipped: ({ provider, model, reason }) => skipped.push([provider, model, reason]),
+    });
+    expect(r).toMatchObject({ providerId: 'openrouter', modelId: 'x/allowed', hop: 1 });
+    expect(r?.chain.map((h) => h.model)).toEqual(['claude-x', 'x/allowed']);
+    expect(skipped).toEqual([
+      ['openai', undefined, 'excluded_model'],
+      ['openrouter', 'openrouter:x/excluded', 'excluded_model'],
+    ]);
+    expect(created.map((c) => `${c.providerId}/${c.modelId}`)).toEqual(['anthropic/claude-x', 'openrouter/x/allowed']);
+  });
+
+  it("drops the policy chain's entry for the first model; the next two ladder models stand", async () => {
+    vi.stubEnv('OPENROUTER_API_KEY', 'or-key');
+    expect(LADDER.length).toBeGreaterThanOrEqual(3);
+    const skipped: string[] = [];
+    const gateway = createCompletionGateway({ policyTier: 'mature' });
+    const r = await gateway.resolve({
+      providerId: 'openrouter',
+      modelId: LADDER[0],
+      messages: [],
+      onHopSkipped: ({ model, reason }) => skipped.push(`${model}:${reason}`),
+    });
+    const roles = r?.chain.map((h) => `${h.model}${h.entry?.walkRole ? `(${h.entry.walkRole})` : ''}`);
+    expect(roles?.slice(0, LADDER.length)).toEqual([
+      LADDER[0],
+      `${LADDER[1]}(standing)`,
+      `${LADDER[2]}(standing)`,
+      ...LADDER.slice(3).map((model) => `${model}(refill)`),
+    ]);
+    expect(r?.chain.filter((h) => h.model === LADDER[0])).toHaveLength(1);
+    expect(skipped).toEqual([`${LADDER[0]}:failed_primary`]);
+  });
+
+  it("after refusals, a refill and the policy chain's Claude legs are passed over; after outages every leg runs", async () => {
+    vi.stubEnv('OPENROUTER_API_KEY', 'or-key');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'an-key');
+    const suffix = buildFallbackChain('openai');
+    expect(suffix.some((e) => isClaude(e.provider, e.model))).toBe(true);
+    const route = { providerId: 'openai', modelId: 'gpt-4o', messages: [] };
+    const mature = { policyTier: 'mature' as const };
+
+    const refused = await walkAll(route, Object.assign(new Error('The model declined.'), { code: 'content_filter' }), mature);
+    expect(refused.served).toEqual(['gpt-4o', LADDER[0], LADDER[1], ...suffix.filter((e) => !isClaude(e.provider, e.model)).map((e) => e.model)]);
+    expect(refused.skipped).toEqual([
+      ...LADDER.slice(2).map((model) => `${model}:refill_not_owed`),
+      ...suffix.filter((e) => isClaude(e.provider, e.model)).map((e) => `${e.model}:claude_after_refusal`),
+    ]);
+
+    const outages = await walkAll(route, Object.assign(new Error('[503] overloaded'), { httpStatus: 503 }), mature);
+    expect(outages.served).toEqual(['gpt-4o', ...LADDER, ...suffix.map((e) => e.model)]);
+    expect(outages.skipped).toEqual([]);
+  });
+
+  it('a standing leg that cannot start is owed a refill, as a failed attempt is', async () => {
+    vi.stubEnv('OPENROUTER_API_KEY', 'or-key');
+    // A rejected key opens OpenRouter's circuit at once: none of its legs can start.
+    globalLLMProviderHealth.recordFailure('openrouter', Object.assign(new Error('invalid key'), { httpStatus: 401 }));
+    const failedHops: number[] = [];
+    const skipped: string[] = [];
+    const gateway = createCompletionGateway({ policyTier: 'mature' });
+    const route = {
+      providerId: 'openai',
+      modelId: 'gpt-4o',
+      messages: [],
+      onHopFailure: ({ hop }: { hop: number }) => failedHops.push(hop),
+      onHopSkipped: ({ model, reason }: { model?: string; reason: string }) => skipped.push(`${model}:${reason}`),
+    };
+    const first = await gateway.resolve(route);
+    // The primary refused, which owes no refill: the refill runs only because
+    // the standing legs could not start.
+    const next = await gateway.resolve(route, first!, Object.assign(new Error('The model declined.'), { code: 'content_filter' }));
+    expect(next).toBeNull();
+    expect(failedHops.map((hop) => first!.chain[hop].model)).toEqual([...LADDER, ...buildFallbackChain('openai').map((e) => e.model)]);
+    expect(skipped).toEqual([]);
   });
 });
 

@@ -1401,6 +1401,8 @@ export class GMI implements IGMI {
                 lastHopError = error;
                 this.addTraceEntry(ReasoningEntryType.WARNING, `Provider '${providerId}' (hop ${hop}) could not start: ${error.message}`);
               },
+              onHopSkipped: ({ provider, model, reason }) =>
+                this.addTraceEntry(ReasoningEntryType.WARNING, `Fallback '${provider}${model ? `/${model}` : ''}' passed over: ${reason}`),
             }
           : undefined;
 
@@ -1663,7 +1665,7 @@ export class GMI implements IGMI {
               if (!outcome.retryable) {
                 throw new GMIError(`LLM provider error: ${outcome.error.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, { turnId, providerId: failedHop.providerId, hop: failedHop.hop });
               }
-              const next = await gateway.resolve(route, failedHop);
+              const next = await gateway.resolve(route, failedHop, outcome.error);
               if (!next) {
                 throw new GMIError(`LLM provider error after ${failedHop.hop + 1} hop(s): ${lastHopError.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, { turnId, providerId: failedHop.providerId, hop: failedHop.hop });
               }
