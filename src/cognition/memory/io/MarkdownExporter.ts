@@ -11,8 +11,13 @@
  *
  * A trace's scope, type and id name its folders and its file, so each is held
  * to the name rule in `core/utils/pathName` before anything is written, and the
- * file's resolved path must lie inside the export folder. A trace that fails
- * either check is left out and reported in the export's result.
+ * file's resolved path must lie inside the export folder. Below the export
+ * folder no folder or file is made or written through a link, symbolic or
+ * hard, and two traces whose files would be one where names ignore case are
+ * not both written. A trace that fails any of these is left out and reported
+ * in the export's result. The checks run as each folder is made and each file
+ * opened; Node has no `openat`, so a process that swaps a folder below the
+ * export folder for a link while the export runs is outside what they stop.
  *
  * ## Folder layout
  * ```
@@ -32,6 +37,7 @@
  */
 
 import fs from 'node:fs/promises';
+import { constants as fsConstants, type Stats } from 'node:fs';
 import path from 'node:path';
 import type { ExportOptions, ExportResult, RefusedExportTrace } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
@@ -55,6 +61,19 @@ interface TraceRow {
 
 /** The trace fields a file's path is built from. */
 type TracePathField = 'scope' | 'type' | 'id';
+
+/**
+ * The flags a trace's file is opened with: for writing, made when missing, and, where the platform has the flag
+ * (`O_NOFOLLOW`, which Windows lacks), never through a symbolic link in the file's own place. The file is emptied
+ * only once the open file shows it has no second name.
+ */
+const OPEN_FLAGS: number =
+  fsConstants.O_WRONLY |
+  fsConstants.O_CREAT |
+  (fsConstants.O_NOFOLLOW !== undefined ? fsConstants.O_NOFOLLOW : 0);
+
+/** The codes an open with `O_NOFOLLOW` fails with when a symbolic link holds the file's place (EMLINK on FreeBSD). */
+const LINK_OPEN_CODES: ReadonlySet<string> = new Set(['ELOOP', 'EMLINK']);
 
 /** Thrown by `traceRelativePath` for a trace whose scope, type or id is not a safe name; the export reports it. */
 class RefusedTraceName extends Error {
@@ -93,10 +112,12 @@ export class MarkdownExporter {
   /**
    * Export all memory traces as `.md` files into `outputDir`.
    *
-   * Directories are created on demand (equivalent to `mkdir -p`). A trace
-   * whose scope, type or id is not a safe file or folder name, or whose file
-   * would lie outside `outputDir`, is not written; it is reported in the
-   * result, and every other trace is written.
+   * Directories are created on demand, one name at a time. A trace is not
+   * written, and is reported in the result, when its scope, type or id is not
+   * a safe file or folder name, when its file would lie outside `outputDir`,
+   * when a folder or file in its place under `outputDir` is a symbolic link or
+   * its file has a second name (a hard link), or when an older trace's file is
+   * the same file where names ignore case. Every other trace is written.
    *
    * @param outputDir - Root directory to write the Markdown vault into.
    * @param _options  - Optional export configuration (currently unused but
@@ -104,22 +125,54 @@ export class MarkdownExporter {
    * @returns The traces left out, with the reason for each.
    */
   async export(outputDir: string, _options?: ExportOptions): Promise<ExportResult> {
+    // Oldest first, so of two traces whose files would be one, the older is written.
     const traces = await this.brain.all<TraceRow>(
-      'SELECT id, type, scope, content, strength, created_at, tags FROM memory_traces WHERE deleted = 0',
+      'SELECT id, type, scope, content, strength, created_at, tags FROM memory_traces WHERE deleted = 0 ORDER BY created_at, id',
     );
 
-    // Every trace is placed before any file is written.
+    // Every trace is placed before any folder is made or file written.
     const refused: RefusedExportTrace[] = [];
     const placed: Array<{ file: string; trace: TraceRow }> = [];
+    const taken = new Set<string>();
     for (const trace of traces) {
       const place = this._placeTrace(outputDir, trace);
-      if (typeof place === 'string') {
-        placed.push({ file: place, trace });
-      } else {
+      if (typeof place !== 'string') {
         refused.push(place);
+        continue;
+      }
+      // Paths that differ only in case or in Unicode form name one file where names ignore case (macOS, Windows).
+      const key = place.normalize('NFC').toLowerCase();
+      if (taken.has(key)) {
+        refused.push({ id: String(trace.id), field: 'path', problem: 'collision' });
+        continue;
+      }
+      taken.add(key);
+      placed.push({ file: place, trace });
+    }
+
+    // The export folder is the caller's: it is made when missing and used as it is, even when it is a link. Below
+    // it, every folder is made one name at a time, and no folder or file is written through a link.
+    await fs.mkdir(outputDir, { recursive: true });
+    const root = path.resolve(outputDir);
+    const linkFree = new Map<string, boolean>();
+    const writable: Array<{ file: string; trace: TraceRow }> = [];
+    for (const entry of placed) {
+      const folder = path.dirname(entry.file);
+      let free = linkFree.get(folder);
+      if (free === undefined) {
+        free = await makeFoldersOutsideLinks(root, path.relative(root, folder));
+        linkFree.set(folder, free);
+      }
+      if (free) {
+        writable.push(entry);
+      } else {
+        refused.push({ id: String(entry.trace.id), field: 'path', problem: 'link' });
       }
     }
-    await Promise.all(placed.map(({ file, trace }) => this._writeTrace(file, trace)));
+    const written = await Promise.all(writable.map(({ file, trace }) => this._writeTrace(file, trace)));
+    for (const refusal of written) {
+      if (refusal) refused.push(refusal);
+    }
     return { refused };
   }
 
@@ -197,20 +250,72 @@ export class MarkdownExporter {
   }
 
   /**
-   * Write a single trace to disk.
-   *
-   * Creates any missing parent directories before writing.
+   * Write a single trace to disk, into a folder already made, and never
+   * through a link. A symbolic link in the file's place is refused before the
+   * open, and where the platform has `O_NOFOLLOW` the open refuses one put
+   * there since. A file with a second name (a hard link) is the same file as
+   * that name, which may be outside the export folder, so the open file is
+   * refused before it is emptied.
    *
    * @param file  - Absolute path of the trace's file, inside the output directory.
    * @param trace - Trace row to serialise.
+   * @returns The refusal when a link holds the file's place, or null once the file is written.
    */
-  private async _writeTrace(file: string, trace: TraceRow): Promise<void> {
-    // Ensure parent directory exists.
-    await fs.mkdir(path.dirname(file), { recursive: true });
-
-    const content = this.buildFileContent(trace);
-    await fs.writeFile(file, content, 'utf8');
+  private async _writeTrace(file: string, trace: TraceRow): Promise<RefusedExportTrace | null> {
+    const linked: RefusedExportTrace = { id: String(trace.id), field: 'path', problem: 'link' };
+    if ((await lstatOrNull(file))?.isSymbolicLink()) return linked;
+    const handle = await fs.open(file, OPEN_FLAGS).catch((err: unknown) => {
+      if (LINK_OPEN_CODES.has(String((err as NodeJS.ErrnoException).code))) return null;
+      throw err;
+    });
+    if (handle === null) return linked;
+    try {
+      if ((await handle.stat()).nlink > 1) return linked;
+      await handle.truncate(0);
+      await handle.writeFile(this.buildFileContent(trace), 'utf8');
+      return null;
+    } finally {
+      await handle.close();
+    }
   }
+}
+
+/** The entry at `file` itself, a link not followed, or null when there is none. */
+async function lstatOrNull(file: string): Promise<Stats | null> {
+  try {
+    return await fs.lstat(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
+ * Make the folders `relative` names under `root`, one name at a time, and stop at a link. A folder this makes is
+ * never a link, so a file written into it stays under `root`.
+ *
+ * @param root     - The export folder.
+ * @param relative - The folder's path under `root`.
+ * @returns True when every folder is in place and none of them is a link.
+ */
+async function makeFoldersOutsideLinks(root: string, relative: string): Promise<boolean> {
+  let dir = root;
+  for (const name of relative.split(path.sep).filter((part) => part.length > 0)) {
+    dir = path.join(dir, name);
+    const entry = await lstatOrNull(dir);
+    if (entry) {
+      if (entry.isSymbolicLink()) return false;
+      continue;
+    }
+    try {
+      await fs.mkdir(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      // Something was put there since the look: look again.
+      if ((await fs.lstat(dir)).isSymbolicLink()) return false;
+    }
+  }
+  return true;
 }
 
 /**
