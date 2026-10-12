@@ -73,8 +73,8 @@ by `/`. No name is empty or starts with a dot, so `.` and `..` are never names, 
 no name starts or ends with a space or ends with a dot, which Windows drops from a
 name; the id holds no backslash, no colon and no control character, a NUL byte among
 them; it is at most 512 characters; and it is not `index`, in any case, which names
-the catalog. The store checks every id against this rule, and checks that the
-resolved file is inside `memory/`, before it reads or writes anything. `readPage`
+the catalog. The store checks every id against this rule, and checks that the path
+the id names lies inside `memory/`, before it reads or writes anything. `readPage`
 and `writePage` throw an `InvalidWikiPageIdError` for any other id,
 `read_memory_page` answers one with an error result whose `details.code` is
 `INVALID_WIKI_PAGE_ID`, and a compile skips a cluster assignment whose page id is
@@ -82,8 +82,8 @@ refused and reports it in the result's `conflicts`. `isWikiPageId` tells whether
 id has this form. A file whose path makes no valid id, such as any file in a folder
 whose name starts with a dot (`.meta/`, `.store/`), is not a page: the store does
 not list or index it. A link inside `memory/` is followed like any other file there,
-so what it points to is part of the wiki. The store never makes a link; only whoever
-can write the folder can add one.
+so what it points to, inside the folder or outside it, is part of the wiki. The
+store never makes a link; only whoever can write the folder can add one.
 
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
 and is left untouched on disk.
