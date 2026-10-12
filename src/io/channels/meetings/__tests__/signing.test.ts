@@ -124,3 +124,48 @@ describe('SecretBox', () => {
     expect(JSON.stringify({ box })).toBe('{"box":"[SecretBox redacted]"}');
   });
 });
+
+describe('SecretBox key rotation', () => {
+  it('tries previous keys in order, copies them and seals only with the current key', () => {
+    const oldest = Buffer.alloc(32, 7);
+    const previous = Buffer.alloc(32, 8);
+    const current = Buffer.alloc(32, 9);
+    const oldText = new SecretBox(oldest).seal('oldest', 'r1');
+    const previousText = new SecretBox(previous).seal('previous', 'r1');
+    const previousKeys = [previous, oldest];
+    const box = new SecretBox(current, { previousKeys });
+    current.fill(0);
+    previous.fill(0);
+    oldest.fill(0);
+    previousKeys.length = 0;
+    expect(box.open(oldText, 'r1')).toBe('oldest');
+    expect(box.open(previousText, 'r1')).toBe('previous');
+    const fresh = box.seal('current', 'r1');
+    expect(fresh.startsWith('v1.box.')).toBe(true);
+    expect(new SecretBox(Buffer.alloc(32, 9)).open(fresh, 'r1')).toBe('current');
+    expect(() => new SecretBox(Buffer.alloc(32, 8)).open(fresh, 'r1')).toThrow(SealedSecretError);
+    expect(() => new SecretBox(Buffer.alloc(32, 7)).open(fresh, 'r1')).toThrow(SealedSecretError);
+    expect(() => new SecretBox(Buffer.alloc(32, 9)).open(oldText, 'r1')).toThrow(SealedSecretError);
+    expect(JSON.stringify(box)).toBe('"[SecretBox redacted]"');
+    expect(JSON.stringify({ box })).toBe('{"box":"[SecretBox redacted]"}');
+  });
+  it('keeps context and tamper checks when trying previous keys', () => {
+    const old = new SecretBox(Buffer.alloc(32, 7));
+    const box = new SecretBox(Buffer.alloc(32, 9), { previousKeys: [Buffer.alloc(32, 8), Buffer.alloc(32, 7)] });
+    const sealed = old.seal('old', 'r1');
+    expect(() => box.open(sealed, 'r2')).toThrow(SealedSecretError);
+    expect(() => box.open(sealed)).toThrow(SealedSecretError);
+    const tampered = sealed.slice(0, -1) + (sealed.endsWith('A') ? 'Q' : 'A');
+    expect(() => box.open(tampered, 'r1')).toThrow(SealedSecretError);
+    expect(() => box.open('not-sealed', 'r1')).toThrow(SealedSecretError);
+    expect(() => box.open(sealed.replace('v1.box.', 'v1.other.'), 'r1')).toThrow(SealedSecretError);
+    expect(() => box.open(new SecretBox(Buffer.alloc(32, 6)).seal('unknown', 'r1'), 'r1')).toThrow(SealedSecretError);
+  });
+  it('validates every previous key and still permits the one-argument constructor', () => {
+    expect(() => new SecretBox(Buffer.alloc(32), { previousKeys: [Buffer.alloc(31)] })).toThrow(RangeError);
+    expect(() => new SecretBox(Buffer.alloc(32), { previousKeys: [Buffer.alloc(32), Buffer.alloc(33)] })).toThrow(RangeError);
+    expect(() => new SecretBox(Buffer.alloc(31), { previousKeys: [Buffer.alloc(32)] })).toThrow(RangeError);
+    const box = new SecretBox(Buffer.alloc(32, 9));
+    expect(box.open(box.seal('', 'r1'), 'r1')).toBe('');
+  });
+});

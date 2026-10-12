@@ -9,7 +9,7 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { openSecret, sealSecret, type SealingKey } from '../../../core/llm/auth/sealing.js';
+import { openSecret, sealSecret, SealedSecretError, type SealingKey } from '../../../core/llm/auth/sealing.js';
 
 /** The three header names of the envelope. A host passes its own (a product's branded names are the product's policy, never the library's). */
 export interface EnvelopeHeaderNames {
@@ -127,48 +127,58 @@ export function workerTokenMatches(token: string, hash: string): boolean {
 const SECRET_BOX_KEY_ID = 'box';
 
 /**
- * Seals a run's meeting url at rest under one 32-byte key the host holds, with
- * the library's AES-256-GCM sealing ({@link sealSecret}, {@link openSecret}): a
- * fresh nonce per seal, so one value seals to a different text each time, and
- * the text `v1.box.<base64url(nonce | ciphertext | tag)>`. A context given to
- * `seal` (the run's id) is bound into the text, so a text moved to another
- * run's row does not open there.
+ * Seals a run's meeting url at rest under the current 32-byte key, with the
+ * library's AES-256-GCM sealing ({@link sealSecret}, {@link openSecret}).
+ * Previous keys open older texts. Every seal uses a fresh nonce and the
+ * stored form remains `v1.box.<base64url(nonce | ciphertext | tag)>`.
+ * The run's id is bound as context, so moving a text to another row fails.
  */
 export class SecretBox {
   private readonly key: SealingKey;
+  private readonly previousKeys: readonly SealingKey[];
 
   /**
-   * @param key - The host's key: 32 bytes. The box keeps a copy, so a host that wipes or reuses its buffer afterwards does not change the box's key.
-   * @throws RangeError when `key` is not 32 bytes.
+   * @param key - The current 32-byte key, copied so later buffer changes cannot change the box.
+   * @param options - Previous 32-byte keys, copied and tried in order on open; never used to seal new text.
+   * @throws RangeError when any key is not 32 bytes.
    */
-  constructor(key: Buffer) {
+  constructor(key: Buffer, options: { previousKeys?: readonly Buffer[] } = {}) {
     if (key.length !== 32) throw new RangeError('SecretBox needs a 32-byte key');
     this.key = { id: SECRET_BOX_KEY_ID, key: Buffer.from(key) };
+    this.previousKeys = (options.previousKeys ?? []).map((previous) => {
+      if (previous.length !== 32) throw new RangeError('SecretBox needs a 32-byte key');
+      return { id: SECRET_BOX_KEY_ID, key: Buffer.from(previous) };
+    });
   }
 
-  /** Serialises only a redacted marker, never key bytes. */
+  /** Serialises only a redacted marker, never current or previous key bytes. */
   toJSON(): string {
     return '[SecretBox redacted]';
   }
 
   /**
-   * Seals `plain`; the sealed text differs on every call.
-   *
+   * Seals with the current key and a fresh nonce.
    * @param plain - The text to seal.
-   * @param context - What the text belongs to (the run's id), bound into the text as additional authenticated data; `open` must be given the same. Empty when absent.
+   * @param context - The run's id, bound as additional authenticated data; empty when absent.
    */
   seal(plain: string, context = ''): string {
     return sealSecret(plain, this.key.key, this.key.id, context);
   }
 
   /**
-   * Opens a text this box's key sealed.
-   *
-   * @param sealed - The sealed text.
-   * @param context - The context the text was sealed with; empty when absent.
-   * @throws SealedSecretError when the text is not a sealed text, was sealed under another key or with another context, or was changed.
+   * Opens with the current key, then each previous key in order.
+   * @param sealed - The sealed text, including an older `v1.box` text.
+   * @param context - The context used to seal; empty when absent.
+   * @throws SealedSecretError when the format, key, context or authentication fails for every candidate.
    */
   open(sealed: string, context = ''): string {
-    return Buffer.from(openSecret(sealed, [this.key], context)).toString('utf8');
+    for (const key of [this.key, ...this.previousKeys]) {
+      try {
+        return Buffer.from(openSecret(sealed, [key], context)).toString('utf8');
+      } catch (error) {
+        if (!(error instanceof SealedSecretError) || error.reason !== 'tampered') throw error;
+      }
+    }
+    throw new SealedSecretError('tampered');
   }
 }
