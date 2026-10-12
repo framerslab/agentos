@@ -282,4 +282,43 @@ describe('StreamingSTTChain: mid-utterance failover and close', () => {
     expect(warn).toHaveBeenCalledWith('[a] transcription failed for one item');
     warn.mockRestore();
   });
+
+  it('flush drains the active provider session', async () => {
+    const inner = Object.assign(new EventEmitter(), { pushAudio: vi.fn(), flush: vi.fn().mockResolvedValue(undefined), close: vi.fn() }) as unknown as StreamingSTTSession;
+    const provider: IStreamingSTT & HealthyProvider = {
+      providerId: 'flushing',
+      priority: 10,
+      capabilities: defaultCapabilities({ languages: ['en'] }),
+      isStreaming: true,
+      async startSession() {
+        return inner;
+      },
+      async healthCheck() {
+        return { ok: true };
+      },
+    };
+    const chain = new StreamingSTTChain([provider], { enableMidUtteranceFailover: true });
+    const session = await chain.startSession();
+    await session.flush();
+    expect(inner.flush).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts no backup when the provider ends its stream after a flush', async () => {
+    const sessionA = mkClosingSession('a');
+    const startB = vi.fn(async () => mkClosingSession('b'));
+    const failover = vi.fn();
+    const chain = new StreamingSTTChain(
+      [mkProvider('a', 10, async () => sessionA), mkProvider('b', 20, startB)],
+      { enableMidUtteranceFailover: true, onProviderFailover: failover }
+    );
+    const session = await chain.startSession();
+
+    await session.flush();
+    sessionA.emit('close'); // the provider sends its last final and closes, as the session contract has it
+    await settle();
+
+    expect(startB).not.toHaveBeenCalled();
+    expect(failover).not.toHaveBeenCalled();
+    expect(chain.currentProviderId).toBe('a');
+  });
 });
