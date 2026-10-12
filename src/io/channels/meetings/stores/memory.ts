@@ -1,5 +1,6 @@
 import { CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
 import {
+  DuplicateIdempotencyKeyError,
   FencedError,
   nextAttemptAt,
   OUTBOX_GIVE_UP_MS,
@@ -43,6 +44,11 @@ export class InMemoryRunStore implements IRunStore {
   private readonly runs = new Map<string, MeetingRunRecord>();
   async insert(run: MeetingRunRecord): Promise<void> {
     if (this.runs.has(run.runId)) throw new Error(`run ${run.runId} exists`);
+    // no await between the check and the write below, so of two inserts with one owner and key only the first is stored
+    const key = run.idempotencyKey;
+    if (key !== undefined && [...this.runs.values()].some((r) => r.ownerRef === run.ownerRef && r.idempotencyKey === key)) {
+      throw new DuplicateIdempotencyKeyError(run.ownerRef, key);
+    }
     this.runs.set(run.runId, structuredClone(run));
   }
   async get(runId: string): Promise<MeetingRunRecord | undefined> {

@@ -9,6 +9,18 @@ export class FencedError extends Error {
   }
 }
 
+/** Thrown by {@link IRunStore.insert} when the owner already has a run with the idempotency key: a send that loses that race answers the run the key has ({@link IRunStore.findByIdempotencyKey}). */
+export class DuplicateIdempotencyKeyError extends Error {
+  /**
+   * @param ownerRef - The owner the key belongs to.
+   * @param idempotencyKey - The key the owner already has a run with.
+   */
+  constructor(readonly ownerRef: string, readonly idempotencyKey: string) {
+    super(`the owner already has a run with idempotency key ${idempotencyKey}`);
+    this.name = 'DuplicateIdempotencyKeyError';
+  }
+}
+
 /** Which runs {@link IRunStore.list} returns: every condition given holds. */
 export interface RunFilter {
   /** Only this owner's runs. */
@@ -23,7 +35,11 @@ export interface RunFilter {
 
 /** The run's row. An implementation seals `meetingUrl` at rest. */
 export interface IRunStore {
-  /** Adds a new run; a run id that exists is an error. */
+  /**
+   * Adds a new run; a run id that exists is an error. An owner has at most one run per idempotency key: an insert whose
+   * `ownerRef` and `idempotencyKey` another run has stores nothing and rejects with {@link DuplicateIdempotencyKeyError},
+   * so of two sends racing with one key only one makes a run.
+   */
   insert(run: MeetingRunRecord): Promise<void>;
   /** The run, or undefined when there is none. */
   get(runId: string): Promise<MeetingRunRecord | undefined>;
@@ -33,7 +49,7 @@ export interface IRunStore {
   replace(run: MeetingRunRecord): Promise<void>;
   /** The runs the filter selects, newest first. */
   list(filter: RunFilter): Promise<MeetingRunRecord[]>;
-  /** The run an owner sent with this idempotency key, if there is one. */
+  /** The run an owner sent with this idempotency key, if there is one (there is at most one: see `insert`). */
   findByIdempotencyKey(ownerRef: string, key: string): Promise<MeetingRunRecord | undefined>;
 }
 
