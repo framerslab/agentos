@@ -1289,8 +1289,9 @@ export class Memory {
    * A Markdown or Obsidian export writes one file per trace, in folders named
    * after the trace's scope and type, and leaves out a trace whose scope, type
    * or id is not a safe file or folder name, whose place in the export folder
-   * holds a link, symbolic or hard, or whose file would be an older trace's
-   * where names ignore case; the result lists each one left out. No file is
+   * holds a link, symbolic or hard, or anything but a regular file, or whose
+   * file would be an older trace's, where names ignore case or by the file
+   * system's own reckoning; the result lists each one left out. No file is
    * written outside the export folder.
    *
    * @param outputPath - Path to write the export to.
