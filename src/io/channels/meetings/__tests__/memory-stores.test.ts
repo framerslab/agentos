@@ -61,6 +61,7 @@ describe('InMemoryEventStore', () => {
     const e = new InMemoryEventStore();
     expect(await e.append({ eventId: 'a', runId: 'r1', type: 'bot:in_call', at: 1 })).toEqual({ inserted: true, seq: 1 });
     expect(await e.append({ eventId: 'b', runId: 'r1', type: 'bot:chat_message', at: 2, data: { text: 'hi' } })).toEqual({ inserted: true, seq: 2 });
+    expect(await e.append({ eventId: 'r2-a', runId: 'r2', type: 'bot:in_call', at: 2 })).toEqual({ inserted: true, seq: 1 }); // another run counts from one
     expect(await e.append({ eventId: 'a', runId: 'r1', type: 'bot:in_call', at: 1 })).toEqual({ inserted: false, seq: 1 });
     await e.fence('r1');
     await e.purgePayloads('r1');
