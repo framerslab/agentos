@@ -15,6 +15,12 @@
  * - `writeSkillFile()` — writes a single SKILL.md to disk
  * - `exportToolAsSkillPack()` — writes both SKILL.md and CAPABILITY.yaml (a full
  *   capability directory ready for scanner pickup)
+ *
+ * The two that write name the tool's folder after the tool, so they hold the
+ * name to the rule every name built from data meets and write only when the
+ * folder resolves inside the output directory (`resolveToolFolder`). A tool
+ * whose name fails either check is refused with an `InvalidToolNameError`
+ * before any folder is made or file written.
  */
 
 import * as fs from 'node:fs/promises';
@@ -23,6 +29,7 @@ import YAML from 'yaml';
 
 import type { EmergentTool, ComposableToolSpec, SandboxedToolSpec } from './types.js';
 import type { JSONSchemaObject } from '../../core/tools/ITool.js';
+import { resolveToolFolder } from './ToolName.js';
 
 // ============================================================================
 // FRONTMATTER HELPERS
@@ -323,12 +330,16 @@ export function buildCapabilityYaml(tool: EmergentTool): string {
  * Writes a SKILL.md file to disk for an emergent tool.
  *
  * Creates the output directory if it does not exist. The file is written to
- * `<outputDir>/<tool.name>/SKILL.md`.
+ * `<outputDir>/<tool.name>/SKILL.md`. The tool's name must be a safe folder
+ * name and its folder must resolve inside `outputDir`; otherwise nothing is
+ * written.
  *
  * @param tool - The emergent tool to export.
  * @param outputDir - Base directory where the skill subdirectory will be created.
  * @returns Absolute path to the written SKILL.md file.
  *
+ * @throws {InvalidToolNameError} If the tool's name is not a safe folder name
+ *   or its folder would lie outside `outputDir`. Nothing is written.
  * @throws {Error} If the filesystem write fails (permissions, disk full, etc.).
  *
  * @example
@@ -338,7 +349,7 @@ export function buildCapabilityYaml(tool: EmergentTool): string {
  * ```
  */
 export async function writeSkillFile(tool: EmergentTool, outputDir: string): Promise<string> {
-  const skillDir = path.join(outputDir, tool.name);
+  const skillDir = resolveToolFolder(outputDir, tool.name);
   await fs.mkdir(skillDir, { recursive: true });
 
   const skillPath = path.join(skillDir, 'SKILL.md');
@@ -355,12 +366,15 @@ export async function writeSkillFile(tool: EmergentTool, outputDir: string): Pro
  * files. This directory structure is compatible with the
  * capability manifest scanner and can be placed in any scan directory
  * (`~/.wunderland/capabilities/`, `./.wunderland/capabilities/`, etc.) for
- * automatic discovery.
+ * automatic discovery. The tool's name must be a safe folder name and its
+ * folder must resolve inside `outputDir`; otherwise nothing is written.
  *
  * @param tool - The emergent tool to export.
  * @param outputDir - Base directory where the skill subdirectory will be created.
- * @returns Paths to the written SKILL.md and CAPABILITY.yaml files.
+ * @returns Absolute paths to the written SKILL.md and CAPABILITY.yaml files.
  *
+ * @throws {InvalidToolNameError} If the tool's name is not a safe folder name
+ *   or its folder would lie outside `outputDir`. Nothing is written.
  * @throws {Error} If the filesystem writes fail (permissions, disk full, etc.).
  *
  * @example
@@ -377,7 +391,7 @@ export async function exportToolAsSkillPack(
   tool: EmergentTool,
   outputDir: string
 ): Promise<{ skillPath: string; capabilityPath: string }> {
-  const skillDir = path.join(outputDir, tool.name);
+  const skillDir = resolveToolFolder(outputDir, tool.name);
   await fs.mkdir(skillDir, { recursive: true });
 
   // Write both files in parallel — they are independent

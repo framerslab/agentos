@@ -907,6 +907,8 @@ import { exportToolAsSkillPack } from '@framers/agentos/emergent';
 await exportToolAsSkillPack(forgedTool, './skills/slugify');
 ```
 
+The tool's name names its folder, `<outputDir>/<name>/`. The forge holds a name to two rules: the rule for any file or folder name built from data ([`pathNameProblem`](https://github.com/framerslab/agentos/blob/master/src/core/utils/pathName.ts): not empty; no slash, backslash or colon, none of `"`, `*`, `<`, `>`, `?` and `|`, and no control character; not starting with a dot; not starting or ending with a space, or ending with a dot; at most 200 bytes in UTF-8), and an identifier: an ASCII letter, then ASCII letters, digits, underscores and hyphens. `forge_tool` refuses a name that breaks either rule before the engine runs, with a failed result whose `details` are `{ code: 'INVALID_TOOL_NAME', problem }` (a missing or empty name gets `name is required and must be a string`), and `engine.forge`, called directly, refuses it with the same message ([`ToolName.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/ToolName.ts)). `writeSkillFile` and `exportToolAsSkillPack` hold the name to the first rule again, so a tool the forge did not check, such as one loaded from a stored row or one a host builds itself, is checked too, and they write only when the tool's folder resolves inside `outputDir`. Otherwise they reject with an `InvalidToolNameError` (`code` and `problem` as above) and write nothing.
+
 ## Related
 
 - [Adaptive Prompt Intelligence](/features/adaptive-prompt-intelligence) -- the per-turn metaprompt loop that runs on state-mutating triggers, with the `adapt_personality` tool, `PersonaDriftMechanism`, and concrete cost numbers

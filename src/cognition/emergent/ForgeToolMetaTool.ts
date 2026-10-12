@@ -21,6 +21,7 @@ import type {
 } from '../../core/tools/ITool.js';
 import type { ForgeToolRequest, ForgeResult, ForgeTestResponse } from './types.js';
 import type { EmergentCapabilityEngine } from './EmergentCapabilityEngine.js';
+import { InvalidToolNameError, forgedToolNameProblem } from './ToolName.js';
 import { refusedSelfChange, selfChangeRefusal } from '../learning/toolContext.js';
 
 // ============================================================================
@@ -34,7 +35,10 @@ import { refusedSelfChange, selfChangeRefusal } from '../learning/toolContext.js
  * satisfy the `ITool` generic constraint while retaining semantic clarity.
  */
 export interface ForgeToolInput extends Record<string, any> {
-  /** Machine-readable name for the new tool. */
+  /**
+   * Machine-readable name for the new tool: an ASCII letter, then ASCII letters, digits, underscores and hyphens,
+   * at most 200 characters. Any other name is refused before the forge runs (see `forgedToolNameProblem`).
+   */
   name: string;
 
   /** Natural language description of the tool's purpose. */
@@ -130,7 +134,9 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
     properties: {
       name: {
         type: 'string',
-        description: 'Machine-readable name for the new tool.',
+        description:
+          'Machine-readable name for the new tool: an ASCII letter, then ASCII letters, digits, underscores ' +
+          'or hyphens, at most 200 characters.',
       },
       description: {
         type: 'string',
@@ -286,6 +292,17 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
     // a clear error instead of a cryptic downstream failure.
     if (!args.name || typeof args.name !== 'string') {
       return { success: false, error: 'name is required and must be a string' };
+    }
+    // The name names the tool's folder when the tool is exported as a skill, so a name the forge's rule refuses
+    // is refused here with its typed error, before the engine runs. The engine holds a direct forge to the same rule.
+    const nameProblem = forgedToolNameProblem(args.name);
+    if (nameProblem) {
+      const refused = new InvalidToolNameError(nameProblem, args.name);
+      return {
+        success: false,
+        error: refused.message,
+        details: { code: refused.code, problem: refused.problem },
+      };
     }
     if (!args.description || typeof args.description !== 'string') {
       return { success: false, error: 'description is required and must be a string' };
