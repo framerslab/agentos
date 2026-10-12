@@ -43,8 +43,11 @@ describe('agent(): a call that names another provider than the agent', () => {
     script('anthropic', envKey, { replies: [reply.text('Streamed from Anthropic.')] });
 
     const r = openAiAgent(agentKey).stream('hi', { provider: 'anthropic', model: 'claude-x' });
+    // The result's promises settle once the stream has drained.
+    let text = '';
+    for await (const delta of r.textStream) text += delta;
 
-    expect(await r.text).toBe('Streamed from Anthropic.');
+    expect(text).toBe('Streamed from Anthropic.');
   });
 
   it("generate() with another model of the agent's provider keeps the agent's key", async () => {
