@@ -141,6 +141,20 @@ describe('CompletionGateway.resolve', () => {
     expect(r?.chain.map((h) => h.provider)).toEqual(['openai', 'anthropic']);
   });
 
+  it("keeps the defaults' credentials with the provider the defaults name; a turn that names another takes only its own", async () => {
+    const gateway = createCompletionGateway({ providerId: 'openai', modelId: 'gpt-4o', apiKey: 'sk-openai-default', baseUrl: 'http://openai.local/v1', fallbackProviders: [] });
+
+    await gateway.resolve({ providerId: 'anthropic', modelId: 'claude-x', messages: [] });
+    await gateway.resolve({ providerId: 'openai', modelId: 'gpt-4.1', messages: [] });
+    await gateway.resolve({ providerId: 'anthropic', modelId: 'claude-x', messages: [], apiKey: 'sk-ant-turn' });
+
+    expect(created).toEqual([
+      { providerId: 'anthropic', modelId: 'claude-x', apiKey: 'env-key-anthropic', baseUrl: undefined },
+      { providerId: 'openai', modelId: 'gpt-4.1', apiKey: 'sk-openai-default', baseUrl: 'http://openai.local/v1' },
+      { providerId: 'anthropic', modelId: 'claude-x', apiKey: 'sk-ant-turn', baseUrl: undefined },
+    ]);
+  });
+
   it('lets a router pick the primary, with the task hint from the last user message', async () => {
     const selectModel = vi.fn(async (_params: unknown) => ({ modelId: 'claude-routed', modelInfo: { providerId: 'anthropic' } }));
     const gateway = createCompletionGateway({ router: { routerId: 'test', initialize: async () => undefined, selectModel } as never });

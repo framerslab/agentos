@@ -18,6 +18,7 @@ import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegi
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
 import { resolveModelOption, resolveProvider, createProviderManager, type ModelOption } from '../model.js';
 import { providerHealthKey } from './providerHealthKey.js';
+import { credentialsGoWith } from './credentialOwner.js';
 import {
   advanceFallbackWalk,
   buildPolicyAwareFallbackChain,
@@ -57,7 +58,11 @@ export interface CompletionRoute {
    * an explicitly required capability are passed over, and so is the policy chain's entry for the first model.
    */
   fallbackProviders?: FallbackProviderEntry[];
-  /** Credentials for the primary only; fallback hops read the environment, as streamText's walk does. */
+  /**
+   * Credentials for the primary only; fallback hops read the environment, as streamText's walk does.
+   * Set in the gateway defaults beside a provider or model, they are for that provider: a turn that
+   * names another provider does not take them.
+   */
   apiKey?: string;
   baseUrl?: string;
   /** The call's own effort, cache and output budget, from which each fallback hop's overrides are derived. */
@@ -618,7 +623,18 @@ function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): M
 
 export function createCompletionGateway(defaults: Partial<CompletionRoute> = {}): CompletionGateway {
   async function resolve(input: CompletionRoute, after?: CompletionResolution, failure?: unknown): Promise<CompletionResolution | null> {
-    const route: CompletionRoute = { ...defaults, ...definedOnly(input as unknown as Record<string, unknown>) } as CompletionRoute;
+    const own = definedOnly(input as unknown as Record<string, unknown>) as Partial<CompletionRoute>;
+    const route: CompletionRoute = { ...defaults, ...own } as CompletionRoute;
+    // The defaults' key and base URL are for the provider the defaults name:
+    // a turn that names another provider takes only its own, and the
+    // primary then reads that provider's from the environment.
+    if (
+      (defaults.apiKey !== undefined || defaults.baseUrl !== undefined) &&
+      !credentialsGoWith({ provider: defaults.providerId, model: defaults.modelId }, { provider: route.providerId, model: route.modelId })
+    ) {
+      route.apiKey = own.apiKey;
+      route.baseUrl = own.baseUrl;
+    }
     let chain: ReadonlyArray<CompletionHop>;
     let walk: FallbackWalkState;
     // The resolution's passed-over entries, reported when a walk starts.

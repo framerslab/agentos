@@ -213,6 +213,11 @@ function hookTools(base: IToolOrchestrator, hook: AgentOptions['onBeforeToolExec
  */
 function gatewayFor(opts: AgentOptions): CompletionGateway {
   const base = createCompletionGateway({
+    // The agent's key and base URL are for its provider: a call that names
+    // another provider (generate()'s and stream()'s `provider` and `model`)
+    // runs on that provider's own credentials.
+    providerId: opts.provider,
+    modelId: opts.model,
     apiKey: opts.apiKey,
     baseUrl: opts.baseUrl,
     fallbackProviders: opts.fallbackProviders,
