@@ -60,6 +60,17 @@ describe('agent(): a call that names another provider than the agent', () => {
     expect(openai.seen.map((s) => s.modelId)).toEqual(['other-model']);
   });
 
+  it("generate() with a model whose prefix names another provider, and a key of the call's own, runs there on that key", async () => {
+    const agentKey = key();
+    const callKey = key();
+    const anthropic = script('anthropic', callKey, { whole: true, replies: [reply.text('On the prefix provider.')] });
+
+    const r = await openAiAgent(agentKey).generate('hi', { model: 'anthropic:claude-x', apiKey: callKey });
+
+    expect(r.text).toBe('On the prefix provider.');
+    expect(anthropic.seen.map((s) => s.modelId)).toEqual(['claude-x']);
+  });
+
   it("generate() with a key of the call's own sends that key", async () => {
     const agentKey = key();
     const callKey = key();
@@ -79,6 +90,26 @@ describe("agent({ runtime: 'gmi' }): a call that names another provider than the
     const anthropic = script('anthropic', envKey, { replies: [reply.text('From Anthropic.')] });
 
     const r = await openAiAgent(agentKey, 'gmi').generate('hi', { provider: 'anthropic', model: 'claude-x' });
+
+    expect(r).toMatchObject({ text: 'From Anthropic.', provider: 'anthropic' });
+    expect(anthropic.seen.map((s) => s.modelId)).toEqual(['claude-x']);
+  });
+
+  it("generate() with a model whose prefix names another provider runs there on its environment key, the agent's base URL left behind", async () => {
+    const agentKey = key();
+    const envKey = key();
+    vi.stubEnv('ANTHROPIC_API_KEY', envKey);
+    const anthropic = script('anthropic', envKey, { replies: [reply.text('From Anthropic.')] });
+    const withProxy = agent({
+      runtime: 'gmi',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: agentKey,
+      baseUrl: 'http://openai-proxy.local/v1',
+      fallbackProviders: [],
+    } as unknown as AgentOptions);
+
+    const r = await withProxy.generate('hi', { model: 'anthropic:claude-x' });
 
     expect(r).toMatchObject({ text: 'From Anthropic.', provider: 'anthropic' });
     expect(anthropic.seen.map((s) => s.modelId)).toEqual(['claude-x']);

@@ -39,6 +39,7 @@ import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 import { adaptTools } from './runtime/toolAdapter.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions } from './runtime/gmiPersona.js';
+import { modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import { assertEmbeddingConfig, createAgentCognitiveMemory, type AgentCognitiveMemory } from './runtime/agentCognitiveMemory.js';
 import { sendGmiTurn, streamGmiTurn, TurnLock, type GmiForTurn, type GmiSessionDeps, type GmiTurnContext, type GmiTurnOptions } from './runtime/gmiSession.js';
 import { transcriptToConversation } from './runtime/gmiTranscript.js';
@@ -581,8 +582,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // generate() and stream() keep no history and run the light profile whatever the agent's (spec D10).
       gmiFor: async () => {
         const s = await shared.get();
+        // A call whose model's `provider:` prefix names another provider does not inherit the agent's.
+        const callProvider =
+          extra?.provider ??
+          (extra?.model && opts.provider && modelNamesAnotherProvider(opts.provider, extra.model) ? undefined : opts.provider);
         const persona = extra && (extra.model || extra.provider)
-          ? personaFromAgentOptions({ ...opts, model: extra.model ?? opts.model, provider: extra.provider ?? opts.provider }, lightCognition, tools)
+          ? personaFromAgentOptions({ ...opts, model: extra.model ?? opts.model, provider: callProvider }, lightCognition, tools)
           : s.lightPersona;
         // A call has no user of its own, so no learner; with learning on its GMI sends the personality section.
         const learner = await learnerSessionFor(callId, persona.id, undefined);

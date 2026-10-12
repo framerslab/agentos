@@ -16,18 +16,41 @@ export interface ProviderAndModel {
 
 /**
  * Whether credentials set beside `owner` go with a call to `target`: false
- * only when both resolve, to different providers. When `owner` names neither
- * a provider nor a model, or names one that does not resolve, its provider is
- * not known and the credentials are for whichever provider the call names, as
- * they always were; a target that does not resolve fails in the call's own
- * resolution, which reports why.
+ * when the call resolves to another provider than the owner's. The owner's
+ * provider is the one its provider and model resolve to, or, when its model
+ * does not resolve (a malformed id), the provider it names. An owner that
+ * names no provider and no model, or only a model that does not resolve, is
+ * for whichever provider the call names, as it always was; a target that does
+ * not resolve fails in the call's own resolution, which reports why.
  */
 export function credentialsGoWith(owner: ProviderAndModel, target: ProviderAndModel): boolean {
   if (owner.provider === undefined && owner.model === undefined) return true;
+  let ownerProviderId: string | undefined;
   try {
-    const ownerProviderId = resolveModelOption({ provider: owner.provider, model: owner.model }, 'text').providerId;
+    ownerProviderId = resolveModelOption({ provider: owner.provider, model: owner.model }, 'text').providerId;
+  } catch {
+    ownerProviderId = owner.provider;
+  }
+  if (ownerProviderId === undefined) return true;
+  try {
     return resolveModelOption({ provider: target.provider, model: target.model }, 'text').providerId === ownerProviderId;
   } catch {
     return true;
+  }
+}
+
+/**
+ * Whether `model`, named by a call that names no provider, takes the call to
+ * another provider than `inherited`, the provider it would inherit from an
+ * agent or a gateway's defaults: a `provider:` prefix of a provider AgentOS
+ * knows wins over the inherited provider (never under 'ollama', whose tags
+ * carry colons). The call then does not inherit `inherited`, so a key of its
+ * own is not refused as one sent to a provider it did not name.
+ */
+export function modelNamesAnotherProvider(inherited: string, model: string): boolean {
+  try {
+    return resolveModelOption({ provider: inherited, model }, 'text').providerId !== inherited;
+  } catch {
+    return false;
   }
 }

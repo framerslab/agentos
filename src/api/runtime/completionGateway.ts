@@ -18,7 +18,7 @@ import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegi
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
 import { resolveModelOption, resolveProvider, createProviderManager, type ModelOption } from '../model.js';
 import { providerHealthKey } from './providerHealthKey.js';
-import { credentialsGoWith } from './credentialOwner.js';
+import { credentialsGoWith, modelNamesAnotherProvider } from './credentialOwner.js';
 import {
   advanceFallbackWalk,
   buildPolicyAwareFallbackChain,
@@ -625,6 +625,16 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
   async function resolve(input: CompletionRoute, after?: CompletionResolution, failure?: unknown): Promise<CompletionResolution | null> {
     const own = definedOnly(input as unknown as Record<string, unknown>) as Partial<CompletionRoute>;
     const route: CompletionRoute = { ...defaults, ...own } as CompletionRoute;
+    // A turn whose model's `provider:` prefix names another provider than the
+    // defaults' does not inherit the defaults' provider.
+    if (
+      own.providerId === undefined &&
+      own.modelId !== undefined &&
+      defaults.providerId !== undefined &&
+      modelNamesAnotherProvider(defaults.providerId, own.modelId)
+    ) {
+      route.providerId = undefined;
+    }
     // The defaults' key and base URL are for the provider the defaults name:
     // a turn that names another provider takes only its own, and the
     // primary then reads that provider's from the environment.
