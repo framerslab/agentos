@@ -80,7 +80,7 @@ export interface VoiceProviderEnvConfig {
    * Whether the STT chain keeps a ring buffer and re-routes mid-utterance.
    * Default true. A session is then the chain's failover facade: it forwards
    * transcripts, speech events, `'usage'` and `'warning'` from its provider
-   * sessions, and has no `flush()`.
+   * sessions, and its `flush()` drains the provider session in use.
    */
   enableMidUtteranceFailover?: boolean;
   /** Whether the TTS chain re-sends accumulated tokens on primary
@@ -90,10 +90,10 @@ export interface VoiceProviderEnvConfig {
    * Options for the OpenAI Realtime transcription provider, which joins the
    * STT chain when `OPENAI_API_KEY` is set (model, turn detection, rollover,
    * usage reports and the rest; the key comes from the environment). With
-   * mid-utterance failover on, a session has no `flush()`, so a
-   * configuration in which the caller commits each turn
-   * (`turnDetection: null`, or a model that takes no server turn detection)
-   * needs `enableMidUtteranceFailover: false`.
+   * mid-utterance failover on, a session's `flush()` reaches the provider
+   * session in use, so a configuration in which the caller commits each
+   * turn (`turnDetection: null`, or a model that takes no server turn
+   * detection) commits through the failover facade too.
    */
   openaiRealtime?: Omit<OpenAIRealtimeTranscriptionSTTConfig, 'apiKey'>;
 }
@@ -145,7 +145,7 @@ function sttProvidersFromEnv(
  * with a shared circuit breaker and metrics reporter. Both chains fail over
  * mid-call by default. An STT session is then the chain's failover facade:
  * it forwards transcripts, speech events, `'usage'` and `'warning'` from its
- * provider sessions, and has no `flush()`.
+ * provider sessions, and its `flush()` drains the provider session in use.
  *
  * @param config - Environment source, preferences, failover switches and OpenAI Realtime options.
  * @returns The chains with their metrics reporter and circuit breaker.
@@ -267,8 +267,8 @@ export interface SttProviderEnvConfig {
    * Whether the chain keeps a ring buffer and re-routes mid-utterance.
    * Default false here: with failover off a session is its provider's own,
    * with `flush()` and every event the provider emits. The failover facade
-   * forwards transcripts, speech events, `'usage'` and `'warning'`, and has
-   * no `flush()`.
+   * forwards transcripts, speech events, `'usage'` and `'warning'`, and its
+   * `flush()` drains the provider session in use.
    */
   enableMidUtteranceFailover?: boolean;
   /**
@@ -366,7 +366,7 @@ export function sttEntryPricePerMinute(entry: string): number | undefined {
  * it on, as in {@link createSttChainFromEnv}. With failover off a session is
  * its provider's own, with `flush()` and every event the provider emits; the
  * failover facade forwards transcripts, speech events, `'usage'` and
- * `'warning'`, and has no `flush()`.
+ * `'warning'`, and its `flush()` drains the provider session in use.
  *
  * Entries of one vendor share that vendor's provider id (every `openai`
  * entry is `openai-realtime-transcription`), so `currentProviderId`, the
