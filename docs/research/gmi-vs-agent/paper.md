@@ -173,7 +173,7 @@ A judgment is usable only with its full vote set: a pair with its four votes, a 
 
 Every comparison is paired within the item, with a seeded arm order whose seed 0a fixes. Intervals come from a cluster bootstrap with 10,000 resamples and a fixed seed [26]. On T1 the clusters are LongMemEval-S histories and LOCOMO conversations; on T2 and T3 the bootstrap resamples at two levels, card and then conversation or script; on T4 the clusters are cards. The analysis treats the questions as clustered and the arm comparisons as paired (sections 2.2 and 4.2 of [27]). On recall the bootstrap governs, and McNemar's test is reported beside it.
 
-Superiority uses a one-sided α of 0.015 at the full-sample look and 0.010 at the extension, with Holm's procedure [25] across one family of ten tests, R1, P1, Q1, S1 and X1 for C1 and for C0; a C0 and C1 pair served by reuse counts once. Non-inferiority uses the same α per endpoint, unadjusted, since GO requires every one. B − A and C − A are descriptions outside the family.
+Superiority uses a one-sided α of 0.015 at the full-sample look and 0.010 at the extension, with Holm's procedure [25] across one family of ten tests, R1, P1, Q1, S1 and X1 for C1 and for C0, where G1 takes R1's place when T1 is report-only (Section 4.4); a C0 and C1 pair served by reuse counts once. Non-inferiority uses the same α per endpoint, unadjusted, since GO requires every one. B − A and C − A are descriptions outside the family.
 
 An interim look at half the sample stops an axis for efficacy or harm at |z| ≥ 3.29, and for futility when the upper 95% bound sits below the sizing margin and the point estimate is at most 0. An axis that stops early keeps its interim verdict, and the interim output reveals only "stop" or "continue".
 
