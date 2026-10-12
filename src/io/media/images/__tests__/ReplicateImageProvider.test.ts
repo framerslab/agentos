@@ -382,6 +382,27 @@ describe('ReplicateImageProvider', () => {
       ]);
     });
 
+    it('uses one key of the pool for the uploads, the prediction and its polling', async () => {
+      // Replicate lets only the account that uploaded a file pass it as an input.
+      const pooled = new ReplicateImageProvider();
+      await pooled.initialize({ apiKey: 'key-a,key-b' });
+      mockFetch.mockResolvedValueOnce(fileResponse('source'));
+      mockFetch.mockResolvedValueOnce(fileResponse('style'));
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: 'p1', status: 'starting', urls: { get: 'https://api.replicate.com/v1/predictions/p1' } }),
+        text: async () => '',
+        headers: new Headers(),
+      });
+      mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/styled.png']));
+
+      await pooled.transferStyle({ modelId: '', image: large(PNG), styleImage: large(JPEG), prompt: 'as a watercolour' });
+
+      const keys = mockFetch.mock.calls.map((call) => (call[1] as { headers: Record<string, string> }).headers.Authorization);
+      expect(keys).toHaveLength(4);
+      expect(new Set(keys).size).toBe(1);
+    });
+
     it('uploads nothing for an edit source the caller set in providerOptions.input', async () => {
       mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/edited.png']));
 

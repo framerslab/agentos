@@ -373,6 +373,10 @@ export class ReplicateImageProvider implements IImageProvider {
       : SDXL_IMG2IMG;                     // SDXL supports generic img2img via image input.
     const model = request.modelId || defaultModel;
 
+    // One key for the uploads, the prediction and its polling: Replicate lets
+    // only the account that uploaded a file pass it as an input.
+    const apiKey = this.keyPool.next();
+
     // The source goes as `image` (a Kontext model's `input_image`, below), as
     // its own type; one the caller set in providerOptions.input wins and is not
     // uploaded.
@@ -381,12 +385,12 @@ export class ReplicateImageProvider implements IImageProvider {
       callerInput.image !== undefined || (model.includes('kontext') && callerInput.input_image !== undefined);
     const input: Record<string, unknown> = {
       prompt: request.prompt,
-      ...(callerSource ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image') }),
+      ...(callerSource ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image', apiKey) }),
       ...callerInput,
     };
 
     if (hasInpaintingMask) {
-      input.mask = await this.inputImage(request.mask!, editPartType(request.mask!), 'mask');
+      input.mask = await this.inputImage(request.mask!, editPartType(request.mask!), 'mask', apiKey);
     }
 
     if (request.strength !== undefined) input.strength = request.strength;
@@ -455,7 +459,7 @@ export class ReplicateImageProvider implements IImageProvider {
         input,
       };
       if (providerOptions?.extraBody) Object.assign(body, providerOptions.extraBody);
-      prediction = await this.createPrediction(body, waitSeconds);
+      prediction = await this.createPrediction(body, waitSeconds, apiKey);
     } else if (extraBodyVersion) {
       // Version supplied via providerOptions.extraBody.version. Build
       // the legacy body so the SHA ends up on `version` rather than
@@ -466,7 +470,7 @@ export class ReplicateImageProvider implements IImageProvider {
       };
       const { version: _v, ...rest } = providerOptions?.extraBody ?? {};
       if (Object.keys(rest).length > 0) Object.assign(body, rest);
-      prediction = await this.createPrediction(body, waitSeconds);
+      prediction = await this.createPrediction(body, waitSeconds, apiKey);
     } else {
       const slashIndex = model.indexOf('/');
       if (slashIndex === -1) {
@@ -476,10 +480,10 @@ export class ReplicateImageProvider implements IImageProvider {
       }
       const owner = model.substring(0, slashIndex);
       const name = model.substring(slashIndex + 1);
-      prediction = await this.createModelPrediction(owner, name, input, waitSeconds);
+      prediction = await this.createModelPrediction(owner, name, input, waitSeconds, apiKey);
     }
 
-    prediction = await this.finishedPrediction(prediction, 'image edit');
+    prediction = await this.finishedPrediction(prediction, 'image edit', apiKey);
 
     const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
     if (images.length === 0) {
@@ -516,9 +520,11 @@ export class ReplicateImageProvider implements IImageProvider {
       request.providerOptions,
     );
 
+    // One key for the upload, the prediction and its polling (see editImage).
+    const apiKey = this.keyPool.next();
     const callerInput = providerOptions?.input ?? {};
     const input: Record<string, unknown> = {
-      ...(callerInput.image !== undefined ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image') }),
+      ...(callerInput.image !== undefined ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image', apiKey) }),
       scale: request.scale ?? 2,
       ...callerInput,
     };
@@ -530,7 +536,7 @@ export class ReplicateImageProvider implements IImageProvider {
     };
 
     const waitSeconds = providerOptions?.wait ?? 60;
-    const prediction = await this.finishedPrediction(await this.createPrediction(body, waitSeconds), 'image upscale');
+    const prediction = await this.finishedPrediction(await this.createPrediction(body, waitSeconds, apiKey), 'image upscale', apiKey);
 
     const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
     if (images.length === 0) {
@@ -622,12 +628,14 @@ export class ReplicateImageProvider implements IImageProvider {
       request.styleImage,
     );
 
+    // One key for the uploads, the prediction and its polling (see editImage).
+    const apiKey = this.keyPool.next();
     const input: Record<string, unknown> = {
       ...callerInput,
       prompt: styleTransferPrompt(request.prompt, request.strength, INDEXED_IMAGE_NAMES),
       input_images: [
-        await this.inputImage(request.image, types.image, 'image'),
-        await this.inputImage(request.styleImage, types.style, 'style'),
+        await this.inputImage(request.image, types.image, 'image', apiKey),
+        await this.inputImage(request.styleImage, types.style, 'style', apiKey),
       ],
     };
     if (input.aspect_ratio === undefined) input.aspect_ratio = 'match_input_image';
@@ -642,8 +650,9 @@ export class ReplicateImageProvider implements IImageProvider {
 
     const slash = model.indexOf('/');
     const prediction = await this.finishedPrediction(
-      await this.createModelPrediction(model.slice(0, slash), model.slice(slash + 1), input, providerOptions?.wait ?? 60),
+      await this.createModelPrediction(model.slice(0, slash), model.slice(slash + 1), input, providerOptions?.wait ?? 60, apiKey),
       'style transfer',
+      apiKey,
     );
 
     const images = normalizeReplicateOutput(prediction.output).filter((image) => image.url || image.base64);
@@ -666,16 +675,18 @@ export class ReplicateImageProvider implements IImageProvider {
    *
    * @param prediction - The prediction as created.
    * @param what - The operation's name, for the errors.
+   * @param apiKey - The key that created it, which then polls it; the pool's
+   *   next key when not given.
    * @throws {Error} When it fails, is canceled, runs with no URL to poll, or
    *   ends without a status.
    */
-  private async finishedPrediction(prediction: ReplicatePrediction, what: string): Promise<ReplicatePrediction> {
+  private async finishedPrediction(prediction: ReplicatePrediction, what: string, apiKey?: string): Promise<ReplicatePrediction> {
     let current = prediction;
     if (current.status && !['succeeded', 'failed', 'canceled'].includes(current.status)) {
       if (!current.urls?.get) {
         throw new Error(`Replicate ${what} is ${current.status} and gave no URL to poll.`);
       }
-      current = await this.pollPrediction(current.urls.get, 60_000, 1_000);
+      current = await this.pollPrediction(current.urls.get, 60_000, 1_000, apiKey);
     }
     switch (current.status) {
       case 'succeeded':
@@ -735,16 +746,18 @@ export class ReplicateImageProvider implements IImageProvider {
    * @param bytes - The image.
    * @param type - Its format.
    * @param name - The upload's file name, without its extension.
+   * @param apiKey - The key of the prediction the image is for: Replicate
+   *   lets only the account that uploaded a file pass it as an input.
    * @throws {Error} When the upload fails or answers without the file's URL.
    */
-  private async inputImage(bytes: Buffer, type: ImagePartType, name: string): Promise<string> {
+  private async inputImage(bytes: Buffer, type: ImagePartType, name: string, apiKey: string): Promise<string> {
     if (bytes.byteLength < MAX_INLINE_IMAGE_BYTES || this.hasCustomEndpoint()) return imageDataUrl(bytes, type);
     const { blob, filename } = imageFilePart(bytes, type, name);
     const form = new FormData();
     form.append('content', blob, filename);
     const response = await fetch(`${this.config.baseURL}/files`, {
       method: 'POST',
-      headers: { Authorization: `Token ${this.keyPool.next()}` },
+      headers: { Authorization: `Token ${apiKey}` },
       body: form,
     });
     if (!response.ok) {
@@ -776,13 +789,14 @@ export class ReplicateImageProvider implements IImageProvider {
     name: string,
     input: Record<string, unknown>,
     waitSeconds: number,
+    apiKey: string = this.keyPool.next(),
   ): Promise<ReplicatePrediction> {
     const response = await fetch(
       `${this.config.baseURL}/models/${owner}/${name}/predictions`,
       {
         method: 'POST',
         headers: {
-          Authorization: `Token ${this.keyPool.next()}`,
+          Authorization: `Token ${apiKey}`,
           'Content-Type': 'application/json',
           Prefer: `wait=${waitSeconds}`,
         },
@@ -800,11 +814,15 @@ export class ReplicateImageProvider implements IImageProvider {
     return (await response.json()) as ReplicatePrediction;
   }
 
-  private async createPrediction(body: Record<string, unknown>, waitSeconds: number): Promise<ReplicatePrediction> {
+  private async createPrediction(
+    body: Record<string, unknown>,
+    waitSeconds: number,
+    apiKey: string = this.keyPool.next(),
+  ): Promise<ReplicatePrediction> {
     const response = await fetch(`${this.config.baseURL}/predictions`, {
       method: 'POST',
       headers: {
-        Authorization: `Token ${this.keyPool.next()}`,
+        Authorization: `Token ${apiKey}`,
         'Content-Type': 'application/json',
         Prefer: `wait=${waitSeconds}`,
       },
@@ -819,13 +837,13 @@ export class ReplicateImageProvider implements IImageProvider {
     return (await response.json()) as ReplicatePrediction;
   }
 
-  private async pollPrediction(url: string, timeoutMs: number, pollIntervalMs: number): Promise<ReplicatePrediction> {
+  private async pollPrediction(url: string, timeoutMs: number, pollIntervalMs: number, apiKey?: string): Promise<ReplicatePrediction> {
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < timeoutMs) {
       const response = await fetch(url, {
         headers: {
-          Authorization: `Token ${this.keyPool.next()}`,
+          Authorization: `Token ${apiKey ?? this.keyPool.next()}`,
         },
       });
 
