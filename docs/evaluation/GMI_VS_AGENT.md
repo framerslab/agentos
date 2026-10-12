@@ -4,7 +4,7 @@ description: "How AgentOS tests whether a GMI on the full runtime improves compa
 
 # GMI versus agent() Study
 
-This study compares a GMI on the full AgentOS runtime with the `agent()`-based reply path of a reference product, the companion chat of wilds.ai, on the same model. It reads both against `agent()` on its own and against a bare loop that calls the model with no framework. [Generalized Mind Instances (GMIs)](../GMI.md) describes what a GMI adds over a plain agent, and [Two API Paths](../API_PATHS.md) describes the runtime and the lightweight helper the arms are built on. This page sets out the study's design and lists the published reports. It states no measured number: every figure is in a report file.
+This study compares a GMI on the full AgentOS runtime with the `agent()`-based reply path of a reference product, the companion chat of wilds.ai, on the same model. It reads both against `agent()` on its own and against a bare loop that calls the model with no framework. [Generalized Mind Instances (GMIs)](../GMI.md) describes what a GMI adds over a plain agent, and [Two API Paths](../API_PATHS.md) describes the runtime and the lightweight helper the arms are built on. This page sets out the study's design and lists each report set once it is published. It states no measured number: measurements are published only in the report sets.
 
 Status: design published; protocol not yet registered; no report published.
 
@@ -74,7 +74,7 @@ Two asymmetries are recorded and reported rather than removed:
 | T4, text quality | Single-turn replies with a frozen context and memory, judged in pairs | 180 single-turn prompts | B and C0, C1 by reuse; A and Z only when the revision after the pilot adds A |
 | T5, cost and latency | Dollars and latency | every generated turn | every arm |
 
-C1 runs its own turn every time. On a single-turn item its main request equals C0's whenever no preset has fired, so the proxy serves C0's reply to C1 once the volatile fields the harness lists are masked, and the reused pair counts once in the tests. The pilot revises these counts; the second protocol file, 0b, frozen after the pilot, fixes the final ones, and every report prints the counts its run used. The cards, scripts and contexts are written for the study, and no real user conversation is sent to any vendor.
+C1 runs its own turn every time. On a single-turn item its main request equals C0's whenever no preset has fired, so the proxy serves C0's reply to C1 once the volatile fields the harness lists are masked, and the reused pair counts once in the tests. The pilot revises these counts; the second protocol file, 0b, frozen after the pilot, fixes the final ones, and every report prints the counts its run used. The cards, scripts and contexts are written for the study, and no conversation of the reference product's users is sent to any vendor. T1's conversation histories come from its datasets, and LongMemEval-S draws its histories' sessions from simulated chats and from ShareGPT and UltraChat, publicly released chat data [1].
 
 ## Metrics and decision rules
 
@@ -132,7 +132,7 @@ A record run made twice on the same inputs must send the same requests to the st
 
 In record mode a local stub answers every call: the model list, canned replies by purpose, schema-valid metaprompt replies, 1,536-dimension character-hash embeddings, reranking by the same similarity, and delay and hang modes for the deadline. It needs no keys, and its runs are deterministic. Its suite checks that memory reaches C's requests and not A's; that the turn's addon reaches C and A; that no preset text is injected into C's prompt; that C carries no date tool; that history stays within 60 messages after 35 turns; that a frustrated turn fires one metaprompt in C1 and none in C0, and that C1's next request carries the matching prompt element; that a turn held at the stub past the deadline fails in every arm; and that the sampling rewrites reach main calls only.
 
-Record mode runs in the project's CI on every change to the harness. Its reports measure the harness's mechanics, not the arms: each says so on its first page and marks every quality table. The harness code, the gmi-vs-agent family of the agentos-bench package, is not in the public agentos-bench repository and is not published, so this page gives no steps to run it elsewhere. The published record-mode report sets are listed under Reports and results.
+Record mode runs in the project's CI on every change to the harness. Its reports measure the harness's mechanics, not the arms: each says so on its first page and marks every quality table. The harness code, the gmi-vs-agent family of the agentos-bench package, is not in the public agentos-bench repository and is not published, so this page gives no steps to run it elsewhere. Reports and results lists each record-mode report set once it is published.
 
 ## Live runs
 
