@@ -28,4 +28,16 @@ describe('MeetingRoom', () => {
     };
     await expect(new MeetingRoom(service).delete('bot-x')).resolves.toBeUndefined();
   });
+  it('passes on any other failure of a delete, so the caller tries it again', async () => {
+    // a server that answers with another status, and one that cannot be reached (no status at all)
+    for (const failure of [Object.assign(new Error('unavailable'), { status: 503 }), new TypeError('fetch failed')]) {
+      const service: IMeetingRoomService = {
+        url: 'wss://lk.test',
+        async createRoom() {},
+        async deleteRoom() { throw failure; },
+        async mintToken() { return 'jwt'; },
+      };
+      await expect(new MeetingRoom(service).delete('bot-x')).rejects.toBe(failure);
+    }
+  });
 });
