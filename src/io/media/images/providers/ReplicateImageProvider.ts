@@ -13,7 +13,7 @@ import {
   normalizeOutputFormat,
   type ReplicateImageProviderOptions,
 } from '../IImageProvider.js';
-import { imageDataUrl } from '../blobPart.js';
+import { editPartType, imageDataUrl, imageFilePart, type ImagePartType } from '../blobPart.js';
 import {
   INDEXED_IMAGE_NAMES,
   styleTransferImageTypes,
@@ -24,6 +24,15 @@ import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
 
 /** Replicate's API, the provider's base URL unless one is configured. */
 const REPLICATE_BASE_URL = 'https://api.replicate.com/v1';
+
+/**
+ * The size from which an input image goes through Replicate's Files API
+ * instead of inline. Replicate recommends a data URL "only if the file is less
+ * than 1MB" (https://replicate.com/docs/topics/predictions/input-files), and its
+ * own client uploads every file (`POST /v1/files`, the input then naming the
+ * file's `urls.get`).
+ */
+const MAX_INLINE_IMAGE_BYTES = 1_000_000;
 
 /**
  * The models Replicate's style transfer runs on, FLUX.2 Pro first as the
@@ -339,7 +348,8 @@ export class ReplicateImageProvider implements IImageProvider {
    *
    * Uses `black-forest-labs/flux-fill` for inpainting (when a mask is provided)
    * or falls back to `stability-ai/sdxl` for generic img2img transforms.
-   * The source image is passed as a base64 data URL in the model input.
+   * The source image goes in the model input as a data URL of its type, or,
+   * from 1 MB, as a file uploaded to Replicate's Files API.
    *
    * @param request - Edit request with source image, prompt, and optional mask.
    * @returns Generation result with the edited image(s).
@@ -356,22 +366,27 @@ export class ReplicateImageProvider implements IImageProvider {
       request.providerOptions,
     );
 
-    // Convert image buffer to a base64 data URL that Replicate models accept.
-    const imageDataUrl = `data:image/png;base64,${request.image.toString('base64')}`;
-    const input: Record<string, unknown> = {
-      prompt: request.prompt,
-      image: imageDataUrl,
-      ...(providerOptions?.input ?? {}),
-    };
-
     // Choose the model based on whether inpainting is requested.
     const hasInpaintingMask = !!request.mask;
     const defaultModel = hasInpaintingMask
       ? 'black-forest-labs/flux-fill-pro'  // Flux Fill Pro for production inpainting.
       : SDXL_IMG2IMG;                     // SDXL supports generic img2img via image input.
+    const model = request.modelId || defaultModel;
+
+    // The source goes as `image` (a Kontext model's `input_image`, below), as
+    // its own type; one the caller set in providerOptions.input wins and is not
+    // uploaded.
+    const callerInput = providerOptions?.input ?? {};
+    const callerSource =
+      callerInput.image !== undefined || (model.includes('kontext') && callerInput.input_image !== undefined);
+    const input: Record<string, unknown> = {
+      prompt: request.prompt,
+      ...(callerSource ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image') }),
+      ...callerInput,
+    };
 
     if (hasInpaintingMask) {
-      input.mask = `data:image/png;base64,${request.mask!.toString('base64')}`;
+      input.mask = await this.inputImage(request.mask!, editPartType(request.mask!), 'mask');
     }
 
     if (request.strength !== undefined) input.strength = request.strength;
@@ -385,8 +400,6 @@ export class ReplicateImageProvider implements IImageProvider {
     if (providerOptions?.disableSafetyChecker !== undefined) {
       input.disable_safety_checker = providerOptions.disableSafetyChecker;
     }
-
-    const model = request.modelId || defaultModel;
 
     // SDXL takes the edit strength as prompt_strength and has no `strength`
     // input. A prompt_strength the caller put in providerOptions.input wins.
@@ -503,11 +516,11 @@ export class ReplicateImageProvider implements IImageProvider {
       request.providerOptions,
     );
 
-    const imageDataUrl = `data:image/png;base64,${request.image.toString('base64')}`;
+    const callerInput = providerOptions?.input ?? {};
     const input: Record<string, unknown> = {
-      image: imageDataUrl,
+      ...(callerInput.image !== undefined ? {} : { image: await this.inputImage(request.image, editPartType(request.image), 'image') }),
       scale: request.scale ?? 2,
-      ...(providerOptions?.input ?? {}),
+      ...callerInput,
     };
 
     const model = request.modelId || 'nightmareai/real-esrgan';
@@ -612,7 +625,10 @@ export class ReplicateImageProvider implements IImageProvider {
     const input: Record<string, unknown> = {
       ...callerInput,
       prompt: styleTransferPrompt(request.prompt, request.strength, INDEXED_IMAGE_NAMES),
-      input_images: [imageDataUrl(request.image, types.image), imageDataUrl(request.styleImage, types.style)],
+      input_images: [
+        await this.inputImage(request.image, types.image, 'image'),
+        await this.inputImage(request.styleImage, types.style, 'style'),
+      ],
     };
     if (input.aspect_ratio === undefined) input.aspect_ratio = 'match_input_image';
     const seed = request.seed ?? providerOptions?.seed;
@@ -708,6 +724,38 @@ export class ReplicateImageProvider implements IImageProvider {
       // Upscaling
       { providerId: this.providerId, modelId: 'nightmareai/real-esrgan', displayName: 'Real-ESRGAN', description: '2x/4x image upscaling' },
     ];
+  }
+
+  /**
+   * An input image as Replicate takes it: inline as a data URL of its type when
+   * it is under {@link MAX_INLINE_IMAGE_BYTES}, or when the base URL is not
+   * Replicate's (a self-hosted model has no Files API); else uploaded to the
+   * Files API and named by the file's URL.
+   *
+   * @param bytes - The image.
+   * @param type - Its format.
+   * @param name - The upload's file name, without its extension.
+   * @throws {Error} When the upload fails or answers without the file's URL.
+   */
+  private async inputImage(bytes: Buffer, type: ImagePartType, name: string): Promise<string> {
+    if (bytes.byteLength < MAX_INLINE_IMAGE_BYTES || this.hasCustomEndpoint()) return imageDataUrl(bytes, type);
+    const { blob, filename } = imageFilePart(bytes, type, name);
+    const form = new FormData();
+    form.append('content', blob, filename);
+    const response = await fetch(`${this.config.baseURL}/files`, {
+      method: 'POST',
+      headers: { Authorization: `Token ${this.keyPool.next()}` },
+      body: form,
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Replicate file upload failed (${response.status}): ${errorText}`);
+    }
+    const file = (await response.json()) as { urls?: { get?: unknown } };
+    if (typeof file.urls?.get !== 'string') {
+      throw new Error('Replicate file upload answered without the file URL (urls.get).');
+    }
+    return file.urls.get;
   }
 
   /**

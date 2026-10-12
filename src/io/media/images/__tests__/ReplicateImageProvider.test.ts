@@ -330,4 +330,91 @@ describe('ReplicateImageProvider', () => {
       expect(body.version).toContain('real-esrgan');
     });
   });
+
+  // Replicate recommends a data URL only under 1 MB; from 1 MB an image goes
+  // through its Files API, and the input names the URL the upload answers with.
+  describe('input images from 1 MB', () => {
+    const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    const large = (signature: Buffer) => Buffer.concat([signature, Buffer.alloc(1_000_000)]);
+    const fileResponse = (id: string) => ({
+      ok: true,
+      json: async () => ({ id, urls: { get: `https://api.replicate.com/v1/files/${id}` } }),
+      text: async () => '',
+      headers: new Headers(),
+    });
+    const uploaded = (call: unknown[]) => (call[1] as RequestInit).body as FormData;
+
+    it('uploads an edit source from 1 MB and names its URL; a small mask stays inline as its own type', async () => {
+      mockFetch.mockResolvedValueOnce(fileResponse('src1'));
+      mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/edited.png']));
+
+      await provider.editImage({
+        modelId: '',
+        image: large(PNG),
+        prompt: 'fill the gap',
+        mask: Buffer.concat([JPEG, Buffer.alloc(16)]),
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const [uploadUrl, uploadInit] = mockFetch.mock.calls[0];
+      expect(uploadUrl).toBe('https://api.replicate.com/v1/files');
+      expect(uploadInit).toMatchObject({ method: 'POST', headers: { Authorization: 'Token test-key' } });
+      const content = uploaded(mockFetch.mock.calls[0]).get('content') as File;
+      expect([content.name, content.type, content.size]).toEqual(['image.png', 'image/png', 1_000_008]);
+      const body = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(body.input.image).toBe('https://api.replicate.com/v1/files/src1');
+      expect(body.input.mask).toMatch(/^data:image\/jpeg;base64,/);
+    });
+
+    it('uploads both style transfer images from 1 MB, the source first', async () => {
+      mockFetch.mockResolvedValueOnce(fileResponse('source'));
+      mockFetch.mockResolvedValueOnce(fileResponse('style'));
+      mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/styled.png']));
+
+      await provider.transferStyle({ modelId: '', image: large(PNG), styleImage: large(JPEG), prompt: 'as a watercolour' });
+
+      expect((uploaded(mockFetch.mock.calls[1]).get('content') as File).name).toBe('style.jpg');
+      const body = JSON.parse(mockFetch.mock.calls[2][1].body);
+      expect(body.input.input_images).toEqual([
+        'https://api.replicate.com/v1/files/source',
+        'https://api.replicate.com/v1/files/style',
+      ]);
+    });
+
+    it('uploads nothing for an edit source the caller set in providerOptions.input', async () => {
+      mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/edited.png']));
+
+      await provider.editImage({
+        modelId: 'black-forest-labs/flux-kontext-pro',
+        image: large(PNG),
+        prompt: 'swap the outfit',
+        providerOptions: { replicate: { input: { input_image: 'https://ref.test/base.png' } } },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body).input.input_image).toBe('https://ref.test/base.png');
+    });
+
+    it('keeps a large image inline on a self-hosted base URL, which has no Files API', async () => {
+      const selfHosted = new ReplicateImageProvider();
+      await selfHosted.initialize({ apiKey: 'test-key', baseURL: 'http://cog.local/v1' });
+      mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/upscaled.png']));
+
+      await selfHosted.upscaleImage({ modelId: '', image: large(PNG) });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch.mock.calls[0][0]).toBe('http://cog.local/v1/predictions');
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body).input.image).toMatch(/^data:image\/png;base64,/);
+    });
+
+    it('fails the call when the upload fails, before any prediction', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 413, text: async () => 'too large', json: async () => ({}), headers: new Headers() });
+
+      await expect(provider.upscaleImage({ modelId: '', image: large(PNG) })).rejects.toThrow(
+        'Replicate file upload failed (413): too large',
+      );
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
 });

@@ -101,7 +101,7 @@ Without `model`, each provider edits with its own default for edits, not with it
 | fal | `fal-ai/flux/dev/image-to-image`, or `fal-ai/flux-lora/inpainting` when a `mask` is passed. `fal-ai/flux/dev` is text-to-image, so an edit that names it runs on the same endpoints |
 | Local SD (A1111) | the checkpoint the server has loaded |
 
-Replicate runs a model by its name alone only when it is one of its official models; any other model needs its version (`owner/name:version`), which is why the SDXL default carries one.
+Replicate runs a model by its name alone only when it is one of its official models; any other model needs its version (`owner/name:version`), which is why the SDXL default carries one. Replicate gets an input image (the source, a mask, a style reference) inline as a data URL of its type when it is under 1 MB, as Replicate recommends; from 1 MB it is uploaded to Replicate's Files API (`POST /v1/files`) and the input names the file's URL. A `baseUrl` that is not Replicate's, such as a self-hosted model, has no Files API and gets every image inline.
 
 ### Strength Parameter
 
