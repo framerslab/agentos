@@ -209,7 +209,7 @@ An arm's cost per turn counts every call its turn causes, priced at the day's pr
 
 Live runs are isolated. The workflow runs one study job at a time, in an environment that holds the study's keys; a socket guard in the arms' process admits a vendor host only on the proxy's own connections and halts the run on any other; an operating-system rule on the runner refuses every connection the study's processes open other than loopback, name lookups and HTTPS, logs refused connections and HTTPS connections to addresses no vendor host resolved to, and fails the leg when the log holds either; and a live run starts only after a record run of its legs logged no stray connection.
 
-One generator writes the study report. It reads a run's results and call log and, when given them, the ledger, the price table, the judgment sets, the determinism record, the materials' provenance, the T1 pack and the run header, and writes a markdown file, a self-contained HTML file whose content security policy loads nothing, and a PDF printed from the HTML by headless Chrome, in thirteen fixed sections (Appendix A). It calls no model: every number comes from a file, and an input not given reads "not run". A public mode renders the same inputs with item and card ids replaced by ordinals and input files by their kind and base name, and a scan in CI fails a public copy on any private name or internal reference; only public copies are published.
+One generator writes the study report. It reads a run's results and call log and, when given them, the ledger, the price table, the judgment sets, the determinism record, the materials' provenance, the T1 pack and the run header, and writes a markdown file, a self-contained HTML file whose content security policy loads nothing, and a PDF printed from the HTML by headless Chrome, in thirteen fixed sections, to which the confirmatory analysis's report adds one, "Verdicts" (Appendix A). It calls no model: every number comes from a file, and an input not given reads "not run". A public mode renders the same inputs with item and card ids replaced by ordinals and input files by their kind and base name, and a scan in CI fails a public copy on any private name or internal reference; only public copies are published.
 
 ### 4.9 Registration and deviations
 
@@ -256,18 +256,18 @@ Table 1. Validity gates V0 to V9, the calibration axes per judge and rubric, the
 | Gate or check | B | C0 | C1 | Reading |
 |---|---|---|---|---|
 
-> Pending the confirmatory analysis. This table is filled from `reports/<confirmatory set>/report.md`, sections "The determinism gate and the stability check" and "Metrics, judges and pins", at the analysis run that set's README names. Pilot data do not enter it.
+> Pending the confirmatory analysis. This table is filled from `reports/<confirmatory set>/report.md`, sections "Verdicts" (the validity gates' readings), "Metrics, judges and pins" (the calibration axes and the A/A control) and "The determinism gate and the stability check", at the analysis run that set's README names. Pilot data do not enter it.
 
 ### 6.2 Primary endpoints
 
-Table 2a. R1, P1, Q1, S1 and X1 per arm, with 95% intervals.
+Table 2a. R1, P1 and S1 per arm, with 95% intervals. Q1 and X1 are pair scores of C against B, so they have no value per arm; Table 2b gives them.
 
 | Endpoint | B (interval) | C0 (interval) | C1 (interval) |
 |---|---|---|---|
 
-> Pending the confirmatory analysis. This table is filled from `reports/<confirmatory set>/report.md`, sections "Results per family" and "Pairwise verdicts", at the analysis run that set's README names. Pilot data do not enter it.
+> Pending the confirmatory analysis. This table is filled from `reports/<confirmatory set>/report.md`, section "Results per family", at the analysis run that set's README names. Pilot data do not enter it.
 
-Table 2b. C1 − B and C0 − B on each primary endpoint, each measure oriented as in Section 4.4 (P1 as B − C): the estimate, its interval, the Holm-adjusted outcome, the planned and achieved n and the minimum detectable effect.
+Table 2b. C1 − B and C0 − B on each primary endpoint, each measure oriented as in Section 4.4 (P1 as B − C, and Q1 and X1 as the pair score of C against B): the estimate, its interval, the Holm-adjusted outcome, the planned and achieved n and the minimum detectable effect.
 
 | Endpoint | C1 − B (interval) | Outcome | C0 − B (interval) | Outcome | Planned n | Achieved n | Minimum detectable effect |
 |---|---|---|---|---|---|---|---|
@@ -292,7 +292,7 @@ Table 3b. C1 − B and C0 − B on G1 and G2, each measure oriented as in Sectio
 
 ### 6.4 Descriptive contrasts
 
-Table 4. B − A and C − A on every axis, A − Z, Z's absolute scores, and C against Z on the absolute scores of the items both ran. These contrasts are descriptions: none enters a decision rule.
+Table 4. B − A and C − A on every axis, A − Z, Z's absolute scores, and C against Z on the absolute scores of the items both ran. A contrast that no judged pair covers on an axis judged only in pairs reads "not measured". These contrasts are descriptions: none enters a decision rule.
 
 | Contrast | Axis | Estimate (interval) | Items |
 |---|---|---|---|
@@ -420,7 +420,7 @@ The AgentOS project builds both the runtime under test and the reference product
 
 ## Appendix A: the study report
 
-Every report has thirteen sections, in this order. The files a section reads are named in public words; every report lists each file it read, with its SHA-256, in its appendix.
+Every run's report has thirteen sections, in this order. The files a section reads are named in public words; every report lists each file it read, with its SHA-256, in its appendix.
 
 | Section | Title | What it reads |
 |---|---|---|
@@ -437,6 +437,8 @@ Every report has thirteen sections, in this order. The files a section reads are
 | 11 | The spend ledger | the ledger |
 | 12 | Limitations | fixed text, the run header (the protocol's deviations) and the call log (Z's wire) |
 | 13 | Appendix: rubric hashes, materials provenance and the price table | every file the report read, the judgment sets' rubric hashes, the materials' provenance, the T1 pack and the day's price table |
+
+The confirmatory analysis's report comes from the same generator over the pooled confirmatory results and adds one section, "Verdicts", after "The spend ledger". It gives, for each endpoint, C1 − B and C0 − B with their intervals and their outcomes under the tests of Section 4.4, Holm-adjusted where Section 4.6 applies the correction, and the endpoint's planned and achieved n and its minimum detectable effect; B − A and C − A on every axis, as descriptions with no outcome, where a contrast that no judged pair covers on an axis judged only in pairs reads "not measured"; the validity gates' readings; the readings against the cost, latency and failure ceilings; and the outcome under the decision rules: GO, GO-COST, PORT, KILL, NOT SHOWN or NO VERDICT. A run's report has no such section and applies no decision rule.
 
 ## Appendix B: rubrics
 
