@@ -24,6 +24,7 @@ import type {
   JSONSchemaObject,
 } from '../../core/tools/ITool.js';
 import { resolveSelfImprovementSessionKey } from './sessionScope.js';
+import { refusedSelfChange, selfChangeRefusal } from '../learning/toolContext.js';
 
 // ============================================================================
 // TYPES
@@ -290,6 +291,10 @@ export class CreateWorkflowTool implements ITool<CreateWorkflowInput> {
     args: CreateWorkflowInput,
     context: ToolExecutionContext,
   ): Promise<ToolExecutionResult> {
+    // Storing a workflow is a self-change; running or listing one is not.
+    const refusal = selfChangeRefusal(context.sessionData);
+    if (refusal) return refusedSelfChange(this.name, refusal);
+
     const { name, description, steps } = args;
 
     if (!name || typeof name !== 'string') {

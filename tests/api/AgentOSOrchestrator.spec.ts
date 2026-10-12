@@ -415,6 +415,86 @@ describe('AgentOSOrchestrator (API layer)', () => {
       expect(tenantUpdateChunk?.updates?.tenantRouting?.defaultOrganizationId).toBe('org-default');
     });
 
+    it("hands the GMI manager the turn's resolved organization before it acquires the GMI", async () => {
+      const initializeWith = async (tenantRouting?: Record<string, unknown>) => {
+        await orchestrator.shutdown();
+        await orchestrator.initialize(
+          { maxToolCallIterations: 5, defaultAgentTurnTimeoutMs: 120000, ...(tenantRouting ? { tenantRouting } : {}) } as any,
+          {
+            gmiManager: mockGMIManager,
+            toolOrchestrator: mockToolOrchestrator,
+            conversationManager: mockConversationManager,
+            streamingManager: mockStreamingManager,
+            modelProviderManager: {
+              getProvider: vi.fn(),
+              getProviderForModel: vi.fn(),
+              getModelInfo: vi.fn(),
+              listProviders: vi.fn().mockReturnValue([]),
+              listModels: vi.fn().mockReturnValue([]),
+            } as any,
+          }
+        );
+      };
+      /** The ninth argument of the turn's getOrCreateGMIForSession call: the organization the pipeline resolved. */
+      const organizationPassed = async (input: Partial<AgentOSInput>): Promise<unknown> => {
+        (mockGMIManager.getOrCreateGMIForSession as any).mockClear();
+        await orchestrator.orchestrateTurn({
+          userId: 'test-user',
+          sessionId: 'test-session',
+          textInput: 'Hello',
+          selectedPersonaId: 'persona-1',
+          ...input,
+        } as AgentOSInput);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return (mockGMIManager.getOrCreateGMIForSession as any).mock.calls[0]?.[8];
+      };
+
+      await initializeWith({ mode: 'single_tenant', defaultOrganizationId: 'org-default', strictOrganizationIsolation: true });
+      expect(await organizationPassed({})).toBe('org-default');
+      await initializeWith();
+      expect(await organizationPassed({ organizationId: 'acme' })).toBe('acme');
+      expect(await organizationPassed({})).toBe('');
+    });
+
+    it('fails a turn whose organization the single-tenant runtime refuses after it acquires the GMI and announces the turn, as before', async () => {
+      await orchestrator.shutdown();
+      await orchestrator.initialize(
+        {
+          maxToolCallIterations: 5,
+          defaultAgentTurnTimeoutMs: 120000,
+          tenantRouting: { mode: 'single_tenant', defaultOrganizationId: 'org-default', strictOrganizationIsolation: true },
+        },
+        {
+          gmiManager: mockGMIManager,
+          toolOrchestrator: mockToolOrchestrator,
+          conversationManager: mockConversationManager,
+          streamingManager: mockStreamingManager,
+          modelProviderManager: {
+            getProvider: vi.fn(),
+            getProviderForModel: vi.fn(),
+            getModelInfo: vi.fn(),
+            listProviders: vi.fn().mockReturnValue([]),
+            listModels: vi.fn().mockReturnValue([]),
+          } as any,
+        }
+      );
+      await orchestrator.orchestrateTurn({
+        userId: 'test-user',
+        sessionId: 'test-session',
+        textInput: 'Hello',
+        selectedPersonaId: 'persona-1',
+        organizationId: 'other-org',
+      } as AgentOSInput);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(mockGMIManager.getOrCreateGMIForSession).toHaveBeenCalledTimes(1);
+      const types = (mockStreamingManager.pushChunk as any).mock.calls.map((call: any[]) => call[1]?.type);
+      const progress = types.indexOf(AgentOSResponseChunkType.SYSTEM_PROGRESS);
+      expect(progress).toBeGreaterThanOrEqual(0);
+      expect(types.indexOf(AgentOSResponseChunkType.ERROR)).toBeGreaterThan(progress);
+      expect(capturedGMIInput).toBeNull();
+    });
+
     it('uses aggressive long-term-memory recall defaults when retriever is present', async () => {
       const mockLongTermMemoryRetriever = {
         retrieveLongTermMemory: vi.fn().mockResolvedValue({
