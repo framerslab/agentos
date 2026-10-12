@@ -364,6 +364,11 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
         providerChain = [providerId, ...fallbackIds];
       }
 
+      // The provider the call's own key and base URL are for: one the call
+      // or the global default names. The policy router below may move the
+      // call to another provider, which then runs on its own credentials.
+      const credentialProviderId = providerId;
+
       // Policy-tier-aware provider override. Uses the explicit
       // capabilities hint when provided, else infers
       // `'face-consistency'` from the presence of a reference image so
@@ -418,10 +423,11 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
         }
       }
 
-      const resolved = resolveMediaProvider(providerId, modelId, {
-        apiKey: opts.apiKey,
-        baseUrl: opts.baseUrl,
-      });
+      const resolved = resolveMediaProvider(
+        providerId,
+        modelId,
+        providerId === credentialProviderId ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl } : undefined,
+      );
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
 

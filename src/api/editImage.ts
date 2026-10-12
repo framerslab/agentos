@@ -184,6 +184,10 @@ export async function editImage(opts: EditImageOptions): Promise<EditImageResult
   try {
     return await withAgentOSSpan('agentos.api.edit_image', async (span) => {
       let { providerId, modelId } = resolveModelOption(opts, 'image');
+      // The provider the call's own key and base URL are for. The policy
+      // router below may move the edit to another provider, which then runs
+      // on its own credentials.
+      const credentialProviderId = providerId;
       let effectiveProviderOptions = opts.providerOptions;
       // Whether the call has a model of its own: one it names, the global
       // default's, or the policy router's pick below. Without one, the provider's own default for edits
@@ -264,10 +268,11 @@ export async function editImage(opts: EditImageOptions): Promise<EditImageResult
         }
       }
 
-      const resolved = resolveMediaProvider(providerId, modelId, {
-        apiKey: opts.apiKey,
-        baseUrl: opts.baseUrl,
-      });
+      const resolved = resolveMediaProvider(
+        providerId,
+        modelId,
+        providerId === credentialProviderId ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl } : undefined,
+      );
       // An empty model id asks the provider for its own default for the operation.
       const operationModelId = modelChosen ? resolved.modelId : '';
       metricProviderId = resolved.providerId;

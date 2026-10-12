@@ -148,6 +148,24 @@ describe('CompletionGateway.resolve', () => {
     expect(r).toMatchObject({ providerId: 'anthropic', modelId: 'claude-routed', hop: 0 });
     expect(selectModel.mock.calls[0][0]).toMatchObject({ taskHint: 'summarise the attached report', optimizationPreference: 'balanced' });
   });
+
+  it("serves a primary a router moved to another provider on that provider's own key, not the route's", async () => {
+    const selectModel = vi.fn(async () => ({ modelId: 'claude-routed', modelInfo: { providerId: 'anthropic' } }));
+    const gateway = createCompletionGateway({ router: { routerId: 'test', initialize: async () => undefined, selectModel } as never });
+
+    await gateway.resolve({ providerId: 'openai', modelId: 'gpt-4o', messages: [], apiKey: 'sk-openai-tenant', fallbackProviders: [] });
+
+    expect(created).toEqual([{ providerId: 'anthropic', modelId: 'claude-routed', apiKey: 'env-key-anthropic', baseUrl: undefined }]);
+  });
+
+  it('refuses route credentials whose model prefix names another provider than the route', async () => {
+    const gateway = createCompletionGateway();
+
+    await expect(
+      gateway.resolve({ providerId: 'openai', modelId: 'anthropic:claude-x', messages: [], apiKey: 'sk-openai-tenant', fallbackProviders: [] }),
+    ).rejects.toThrow("names provider 'anthropic', not 'openai'");
+    expect(created).toEqual([]);
+  });
 });
 
 // The hop list is resolved once, as generateText's and streamText's walks

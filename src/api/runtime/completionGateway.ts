@@ -16,7 +16,7 @@ import type { ITool } from '../../core/tools/ITool.js';
 import type { IModelRouter, ModelRouteParams } from '../../core/llm/routing/IModelRouter.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
-import { resolveModelOption, resolveProvider, createProviderManager } from '../model.js';
+import { resolveModelOption, resolveProvider, createProviderManager, type ModelOption } from '../model.js';
 import { providerHealthKey } from './providerHealthKey.js';
 import {
   advanceFallbackWalk,
@@ -88,6 +88,12 @@ export interface CompletionHop {
   model?: string;
   /** The chain entry behind a fallback hop, with its role in the walk when the policy chain gave it one. */
   entry?: ResolvedFallbackEntry;
+  /**
+   * The primary only: whether the route's own key and base URL are for this
+   * provider. False when a router picked another one, which then runs on its
+   * own credentials.
+   */
+  ownCredentials?: boolean;
 }
 
 /** A hop that is ready to serve: its provider is initialised and its window is known. */
@@ -263,8 +269,16 @@ function circuitOpenError(providerId: string, healthId: string = providerId): Er
 }
 
 /** Primary selection, the same as streamText's: explicit model and provider, then the router when one is set. */
-async function selectPrimary(route: CompletionRoute): Promise<{ provider: string; model: string }> {
-  let { providerId, modelId } = resolveModelOption({ provider: route.providerId, model: route.modelId }, 'text');
+async function selectPrimary(route: CompletionRoute): Promise<{ provider: string; model: string; ownCredentials: boolean }> {
+  // With the route's own key or base URL, so a model prefix that names
+  // another provider than the route's is refused rather than handed the key.
+  let { providerId, modelId } = resolveModelOption(
+    { provider: route.providerId, model: route.modelId, apiKey: route.apiKey, baseUrl: route.baseUrl } as ModelOption,
+    'text',
+  );
+  // The provider the route's own credentials are for: a router that picks
+  // another serves the primary on that provider's own credentials.
+  const credentialProviderId = providerId;
   if (route.router) {
     try {
       const toolNames = toolNamesOf(route.tools);
@@ -291,7 +305,7 @@ async function selectPrimary(route: CompletionRoute): Promise<{ provider: string
       console.warn('[agentos] Model router error, falling back to standard resolution:', routerErr);
     }
   }
-  return { provider: providerId, model: modelId };
+  return { provider: providerId, model: modelId, ownCredentials: providerId === credentialProviderId };
 }
 
 type InBandError = NonNullable<ModelCompletionResponse['error']>;
@@ -631,7 +645,10 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         excludedModelIds: route.routerParams?.excludedModelIds,
         onSkip: (entry, reason) => pendingSkips.push({ provider: entry.provider, model: entry.model, reason }),
       });
-      chain = [{ provider: primary.provider, model: primary.model }, ...resolved.map((entry) => ({ provider: entry.provider, model: entry.model, entry }))];
+      chain = [
+        { provider: primary.provider, model: primary.model, ownCredentials: primary.ownCredentials },
+        ...resolved.map((entry) => ({ provider: entry.provider, model: entry.model, entry })),
+      ];
       walk = INITIAL_FALLBACK_WALK;
     }
     let lastError: Error | undefined;
@@ -654,11 +671,14 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       let healthId: string | undefined;
       try {
         const parsed = hop === 0 && h.model ? { providerId: h.provider, modelId: h.model } : resolveModelOption({ provider: h.provider, model: h.model }, 'text');
-        const resolved = hop === 0
+        // The route's own credentials go to the primary only when they are for
+        // its provider (a router may have picked another).
+        const routeCredentials = hop === 0 && h.ownCredentials !== false;
+        const resolved = routeCredentials
           ? resolveProvider(parsed.providerId, parsed.modelId, { apiKey: route.apiKey, baseUrl: route.baseUrl })
           : resolveProvider(parsed.providerId, parsed.modelId);
         servingProviderId = resolved.providerId;
-        const ownCredentials = hop === 0 && (route.apiKey !== undefined || route.baseUrl !== undefined);
+        const ownCredentials = routeCredentials && (route.apiKey !== undefined || route.baseUrl !== undefined);
         const hopHealthId = providerHealthKey(
           resolved,
           ownCredentials ? () => resolveProvider(parsed.providerId, parsed.modelId) : undefined,

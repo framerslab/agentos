@@ -317,6 +317,28 @@ describe("an image operation's own key goes only to a provider the call names", 
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("sends a mature-tier call the policy routes to another provider on that provider's own key", async () => {
+    const { setDefaultProvider, clearDefaultProvider } = await import('../global-default.js');
+    vi.stubEnv('REPLICATE_API_TOKEN', 'r8-env-token');
+    setDefaultProvider({ provider: 'openai' });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => replicateDone());
+    try {
+      // The default names OpenAI, so the tenant key passes; the policy router then picks Replicate.
+      await generateImage({ apiKey: 'sk-tenant-openai', prompt: 'A lighthouse at dusk.', policyTier: 'mature' });
+      await editImage({ apiKey: 'sk-tenant-openai', image: TINY_PNG, prompt: 'Add a hat.', policyTier: 'mature' });
+    } finally {
+      clearDefaultProvider();
+    }
+
+    const replicateCalls = fetchSpy.mock.calls.filter(([url]) => String(url).startsWith('https://api.replicate.com/'));
+    expect(replicateCalls.length).toBeGreaterThanOrEqual(2);
+    for (const [, init] of replicateCalls) {
+      const authorization = new Headers(init?.headers).get('authorization') ?? '';
+      expect(authorization).toContain('r8-env-token');
+      expect(authorization).not.toContain('sk-tenant-openai');
+    }
+  });
+
   it("refuses a key whose provider and model prefix differ, since the prefix would take the key", async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => replicateDone());
 

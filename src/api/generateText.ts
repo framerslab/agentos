@@ -2102,6 +2102,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
   try {
     const successResult: GenerateTextResult = await withAgentOSSpan('agentos.api.generate_text', async (span) => {
       let { providerId, modelId } = resolveModelOption(opts, 'text');
+      // The provider the call's own key and base URL are for. A router that
+      // moves the call to another provider sends it there on that provider's
+      // own credentials, as a fallback leg runs.
+      const credentialProviderId = providerId;
 
       // --- Model routing (optional) ---
       if (opts.router) {
@@ -2155,18 +2159,18 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         }
       }
 
-      const resolved = resolveProvider(providerId, modelId, {
-        apiKey: opts.apiKey,
-        baseUrl: opts.baseUrl,
-      });
+      const ownCredentials =
+        providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
+      const resolved = resolveProvider(
+        providerId,
+        modelId,
+        providerId === credentialProviderId ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl } : undefined,
+      );
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
       // A key or base URL of the call's own, when it differs from the
       // provider's, has a health record of its own.
-      const healthId = providerHealthKey(
-        resolved,
-        opts.apiKey !== undefined || opts.baseUrl !== undefined ? () => resolveProvider(providerId, modelId) : undefined,
-      );
+      const healthId = providerHealthKey(resolved, ownCredentials ? () => resolveProvider(providerId, modelId) : undefined);
       healthProviderId = healthId;
 
       // ── Provider health circuit-breaker ──────────────────────────────

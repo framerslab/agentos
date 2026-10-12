@@ -461,6 +461,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // A stream whose signal has already aborted ends before anything is set up or sent.
       opts.abortSignal?.throwIfAborted();
       let { providerId, modelId } = resolveModelOption(opts, 'text');
+      // The provider the call's own key and base URL are for. A router that
+      // moves the call to another provider sends it there on that provider's
+      // own credentials, as a fallback leg runs.
+      const credentialProviderId = providerId;
 
       // --- Model routing (optional) ---
       if (opts.router) {
@@ -514,18 +518,18 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         }
       }
 
-      const resolved = resolveProvider(providerId, modelId, {
-        apiKey: opts.apiKey,
-        baseUrl: opts.baseUrl,
-      });
+      const ownCredentials =
+        providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
+      const resolved = resolveProvider(
+        providerId,
+        modelId,
+        providerId === credentialProviderId ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl } : undefined,
+      );
       recordedProviderId = resolved.providerId;
       recordedModelId = resolved.modelId;
       // A key or base URL of the call's own, when it differs from the
       // provider's, has a health record of its own.
-      const healthId = providerHealthKey(
-        resolved,
-        opts.apiKey !== undefined || opts.baseUrl !== undefined ? () => resolveProvider(providerId, modelId) : undefined,
-      );
+      const healthId = providerHealthKey(resolved, ownCredentials ? () => resolveProvider(providerId, modelId) : undefined);
       healthProviderId = healthId;
       // Resolve the eagerly-exposed routing Promises so callers
       // logging telemetry don't have to wait for the stream to drain.
