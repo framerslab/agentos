@@ -602,8 +602,9 @@ describe('streamText', () => {
     expect(usage.cacheCreationTokens).toBe(15);
   });
 
-  it('sends the caller customModelParams with the planning call', async () => {
-    const customModelParams = { provider: { data_collection: 'deny', order: ['Fireworks'] } };
+  it('sends the routing keys of the caller customModelParams with the planning call', async () => {
+    const routing = { provider: { data_collection: 'deny', order: ['Fireworks'] } };
+    const customModelParams = { ...routing, max_tokens: 9000 };
     hoisted.generateCompletion.mockResolvedValueOnce({
       modelId: 'gpt-4.1-mini',
       usage: { promptTokens: 20, completionTokens: 10, totalTokens: 30 },
@@ -640,7 +641,7 @@ describe('streamText', () => {
       // drain
     }
 
-    expect(hoisted.generateCompletion.mock.calls[0][2].customModelParams).toEqual(customModelParams);
+    expect(hoisted.generateCompletion.mock.calls[0][2].customModelParams).toEqual(routing);
     expect(hoisted.generateCompletionStream.mock.calls[0][2].customModelParams).toEqual(customModelParams);
   });
 });

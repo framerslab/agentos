@@ -32,6 +32,7 @@ import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';
 import { ContextWindowExceededError } from '../core/llm/providers/errors/ContextWindowExceededError.js';
+import { OPENROUTER_ONLY_PARAM_KEYS } from '../core/llm/providers/openrouter-only-params.js';
 import {
   catalogEntryHasCapability,
   createUncensoredModelCatalog,
@@ -579,6 +580,11 @@ export interface GenerateTextOptions {
    *
    * Keys collide last-wins with the typed fields at the provider layer, so
    * only pass params the target provider understands.
+   *
+   * With `planning` on, the planning call takes OpenRouter's routing controls
+   * (`provider`, `models`, `route`, `transforms`) and `plugins` from this
+   * record, so the preferences that say where the caller's messages may go
+   * hold for it too. Every other key goes to the turn's requests alone.
    */
   customModelParams?: Record<string, unknown>;
   /** Override the API key instead of reading from environment variables. */
@@ -1074,6 +1080,32 @@ Describe what tools you'll need for each step. Output a JSON plan:
 Return ONLY the JSON object: no markdown fences, no commentary.`;
 
 /**
+ * The `customModelParams` keys a planning call takes from its turn:
+ * OpenRouter's routing controls and its `plugins`. They say which upstreams
+ * may be sent the caller's messages and how the prompt is processed (context
+ * compression is a `plugins` entry), and the planning request carries those
+ * messages as the turn's does. Every other key shapes the turn's own request
+ * (`messages`, `tools`, `max_tokens`, `response_format`): spread last by the
+ * provider, it would replace the planner's messages or lift its output limit
+ * past the one its budget check counted.
+ */
+const PLANNING_INHERITED_PARAM_KEYS: readonly string[] = [...OPENROUTER_ONLY_PARAM_KEYS, 'plugins'];
+
+/**
+ * The part of a call's `customModelParams` its planning call inherits
+ * (`PLANNING_INHERITED_PARAM_KEYS`), or `undefined` when the call sets none
+ * of it.
+ */
+function planningModelParams(params: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!params) return undefined;
+  let inherited: Record<string, unknown> | undefined;
+  for (const key of PLANNING_INHERITED_PARAM_KEYS) {
+    if (params[key] !== undefined) (inherited ??= {})[key] = params[key];
+  }
+  return inherited;
+}
+
+/**
  * Makes a single LLM call to create an execution plan before the tool loop.
  *
  * The plan is a lightweight JSON object containing ordered steps.  It is
@@ -1084,8 +1116,9 @@ Return ONLY the JSON object: no markdown fences, no commentary.`;
  * @param modelId - Model identifier to use for the planning call.
  * @param userMessages - The user-supplied messages that describe the task.
  * @param toolNames - Names of available tools (informational context for the planner).
- * @param config - Optional planning configuration overrides, and the call's abort signal and `customModelParams`,
- *   which the planning request is handed as it is handed `requestTimeout`.
+ * @param config - Optional planning configuration overrides, the call's abort signal, which the planning request
+ *   is handed as it is handed `requestTimeout`, and the call's `customModelParams`, of which the planning request
+ *   takes the routing keys (`PLANNING_INHERITED_PARAM_KEYS`).
  * @param totalUsage - Mutable usage aggregator: the planning call's tokens are added here.
  * @param spend - The run's spend budget, the provider the planning call is sent to, and what to call the call in the
  *   budget's records: the planning call is checked against the budget before it is made and recorded after it.
@@ -1106,6 +1139,7 @@ export async function createPlan(
   const temperature = config?.temperature ?? 0.2;
   const maxTokens = config?.maxTokens ?? 2048;
   const requestTimeout = config?.requestTimeout;
+  const inheritedParams = planningModelParams(config?.customModelParams);
 
   // Build the planning conversation: system prompt + user context
   const planMessages: Array<Record<string, unknown>> = [
@@ -1137,8 +1171,9 @@ export async function createPlan(
     // call's planning sub-call must not auto-cache behind the caller's back.
     ...(config?.cache !== undefined ? { cache: config.cache } : {}),
     ...(config?.thinking === false ? { thinking: false } : {}),
-    // Provider-specific request fields (e.g. OpenRouter routing preferences) apply to the planning call too.
-    ...(config?.customModelParams !== undefined ? { customModelParams: config.customModelParams } : {}),
+    // Of the caller's provider-specific fields, the routing ones (OpenRouter's
+    // provider preferences and plugins) apply to the planning call too.
+    ...(inheritedParams ? { customModelParams: inheritedParams } : {}),
   });
 
   spend?.budget.record(costOfUsageUSD(spend.providerId, modelId, response.usage), response.usage?.totalTokens ?? 0, spend.what);

@@ -228,6 +228,12 @@ another vendor accepts: OpenRouter's routing controls (`provider`, `models`,
 (`thinkingConfig`, `topK`, `safetySettings` and the rest of
 [`GEMINI_ONLY_PARAM_KEYS`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/openrouter-only-params.ts)) reach only Gemini.
 
+With `planning` on, the planning call carries the caller's messages, so it
+takes OpenRouter's routing controls and `plugins` from `customModelParams`: a
+`provider.data_collection: 'deny'` or a context-compression plugin set for
+the turn holds for it too. The other keys, such as `max_tokens` or
+`response_format`, go to the turn's requests alone.
+
 ```
 Primary provider (e.g., Anthropic)
   ↓ fails with a retryable error
