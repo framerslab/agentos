@@ -419,4 +419,17 @@ describe('a step that fails, or a race, on the way out', () => {
     expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'kill' });
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stopped_by_owner' });
   });
+  it('a cancel that finds the run already dispatched is a leave from the state the run is in now', async () => {
+    const h = harness();
+    const sent = await h.manager.sendBot(h.request);
+    const runId = sent.ok ? sent.run.runId : '';
+    const cancel = h.stores.jobs.cancel.bind(h.stores.jobs);
+    vi.spyOn(h.stores.jobs, 'cancel').mockImplementationOnce(async (id) => {
+      await h.manager.tick(); // a dispatcher takes the run between the owner's read and the cancel, and the bot is out
+      return cancel(id);
+    });
+    expect(await h.manager.leaveBot(runId, 'stopped_by_owner')).toBe(true);
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stopped_by_owner' }]);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stopped_by_owner' });
+  });
 });

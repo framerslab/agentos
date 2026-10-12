@@ -752,7 +752,11 @@ export class MeetingManager {
     }
     if (run.state === 'requested' || run.state === 'scheduled') {
       const cancelled = await this.stores.jobs.cancel(runId);
-      if (cancelled === 'already_dispatched') return this.leave(run, reason);
+      if (cancelled === 'already_dispatched') {
+        // the job was dispatched after the read above, so the run is past `requested`, which cannot move to `leaving`: leave from the state it is in now
+        const current = await this.stores.runs.get(runId);
+        return current ? this.leave(current, reason) : false;
+      }
       const stillWaiting = await this.stores.runs.update(runId, { reason }, ['requested', 'scheduled']);
       if (!stillWaiting) {
         // a dispatcher took the run between the read and the cancel: it learns the cancel at markDispatched and tells the bot to leave with this reason
