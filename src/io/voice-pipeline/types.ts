@@ -1651,3 +1651,26 @@ export type ServerTextMessage =
       /** Optional human-readable reason for the session ending. */
       reason?: string;
     };
+
+// ============================================================================
+// Section 12 -- Listening: transcript turns and where they go
+// ============================================================================
+
+/** A transcript turn a listen session wrote. `turnId` is `<runId>:<seq>`, assigned by the session in arrival order. */
+export interface TranscriptTurn {
+  runId: string;
+  seq: number;
+  turnId: string;
+  /** Wall-clock milliseconds when the turn was written. */
+  at: number;
+  text: string;
+  speaker?: string;
+  /** The turn's place on the session's audio clock, when the transcriber gave one. */
+  startMs?: number;
+  endMs?: number;
+}
+
+/** Where a listen session's turns go. A slow sink pauses the transport; one that throws ends the session with `sink_failed`. */
+export interface ITranscriptSink {
+  append(turn: TranscriptTurn): Promise<void>;
+}
