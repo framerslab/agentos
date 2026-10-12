@@ -100,7 +100,12 @@ export interface IMeetingBotProvider {
   checkJoinUrl(url: string): { ok: true; platform: MeetingPlatform } | { ok: false; message: string };
   /** Hands the run to a worker with the room and the tokens minted for it; rejects when the run cannot start. */
   dispatch(input: DispatchInput): Promise<DispatchResult>;
-  /** Sends a command to the run's bot. */
+  /**
+   * Sends a command to the run's bot. A provider passes on no audio of a run
+   * before the run's first `startCapture`, and none after a `suspendCapture`
+   * until the next `startCapture`: the manager sends `startCapture` only once
+   * the run's notice is confirmed posted and its stop monitor is healthy.
+   */
   command(runId: string, command: ProviderCommand): Promise<void>;
   /** Deletes a provider's own copies of a run. Ours keep none; the method stands so a purge always has an answer. */
   deleteRun(input: { runId: string }): Promise<{ deleted: boolean }>;
