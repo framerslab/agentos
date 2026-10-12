@@ -228,4 +228,12 @@ describe('dispatch and the interlock', () => {
     expect(h.provider.commands.get(id2)).toEqual([{ name: 'leave', reason: 'notice_failed' }]);
     expect((await h.stores.runs.get(id2))?.state).toBe('leaving');
   });
+  it('answers a report it cannot parse with a fixed error that repeats none of the report', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    const ctx = { ...mockEventContext(runId, 'chat_message', {}, h.clock.now(), h.provider.tokenOf(runId)), body: 'what someone said in the call' };
+    expect(await h.manager.processProviderEvent('mock', ctx)).toEqual({ accepted: false, error: 'unparseable', applied: 0 });
+  });
 });

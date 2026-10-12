@@ -512,8 +512,9 @@ export class MeetingManager {
     let parsed;
     try {
       parsed = provider.parseEvent(ctx);
-    } catch (err) {
-      return { accepted: false, error: `unparseable: ${String(err)}`, applied: 0 };
+    } catch {
+      // a fixed answer: the parser's error may quote the report (a JSON.parse error quotes the input around the bad token), and a report carries what people said
+      return { accepted: false, error: 'unparseable', applied: 0 };
     }
     let applied = 0;
     for (const event of parsed.events) {
