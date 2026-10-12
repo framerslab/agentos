@@ -194,6 +194,8 @@ The source opens rtc-node's `AudioStream` on the participant's microphone track 
 
 `LiveKitStreamTransport` implements `IStreamTransport` over the same room: `'audio'` carries the participant's frames, `sendControl()` sends a JSON message to the participant as a text stream on a topic (`'agentos.voice'` unless `topic` says otherwise), and a JSON message the participant sends on that topic arrives as `'message'`. Another sender's text stream on the topic is closed unread. It does not publish audio: `sendAudio()` rejects, and a caller that does not wait for that promise raises no unhandled rejection, so a `VoicePipelineOrchestrator` given this transport hears the participant and sends its control messages, and its speech is not heard. `close()` leaves the room connected and closes the text streams still arriving.
 
+When a consumer emits `'pause'` on the transport, it holds up to two seconds of audio (`bufferMs`, default `2000`), drops the oldest frames beyond that limit, and on `'resume'` reports any dropped audio as `'gap'` with `{ droppedMs, reason: 'paused' }` before emitting the held frames in order.
+
 `@framers/agentos/io/hearing/livekit` exports both, with `loadLiveKitRtc()` and the structural types the two accept (`LiveKitRoomLike`, `LiveKitRtcModule` and their parts), which a real rtc-node `Room` and module satisfy as they are.
 
 ### Transcripts in the room
