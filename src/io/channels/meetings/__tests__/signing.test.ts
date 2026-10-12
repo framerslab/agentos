@@ -38,6 +38,11 @@ describe('the worker token', () => {
     expect(workerTokenMatches(t + 'x', hashWorkerToken(t))).toBe(false);
     expect(workerTokenMatches('', hashWorkerToken(t))).toBe(false);
   });
+  it('matches nothing against a stored value that is not 64 hex digits, even one that starts with the hash', () => {
+    const t = mintWorkerToken();
+    expect(workerTokenMatches(t, `${hashWorkerToken(t)}zz`)).toBe(false);
+    expect(workerTokenMatches(t, hashWorkerToken(t).toUpperCase())).toBe(true); // hex in upper case is still the hash
+  });
 });
 
 describe('SecretBox', () => {

@@ -108,8 +108,11 @@ export function hashWorkerToken(token: string): string {
  *
  * @param token - The bearer a report presented.
  * @param hash - The {@link hashWorkerToken} hash the run's dispatch record keeps.
+ * @returns false as well when `hash` is not 64 hex digits.
  */
 export function workerTokenMatches(token: string, hash: string): boolean {
+  // hex decoding stops at the first character that is not a hex digit, so a longer value that starts with the hash would decode to it
+  if (!/^[0-9a-f]{64}$/i.test(hash)) return false;
   const a = Buffer.from(hashWorkerToken(token), 'hex');
   const b = Buffer.from(hash, 'hex');
   return a.length === b.length && timingSafeEqual(a, b);
