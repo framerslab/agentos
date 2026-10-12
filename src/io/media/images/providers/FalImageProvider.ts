@@ -630,13 +630,19 @@ export class FalImageProvider implements IImageProvider {
       { providerId: this.providerId, modelId: 'fal-ai/flux-pro/v1.1-ultra', displayName: 'Flux Pro 1.1 Ultra (Fal)', description: 'Ultra-high resolution' },
       { providerId: this.providerId, modelId: 'fal-ai/flux-lora', displayName: 'Flux LoRA (Fal)', description: 'LoRA fine-tuned generation' },
       { providerId: this.providerId, modelId: 'fal-ai/flux-realism', displayName: 'Flux Realism (Fal)', description: 'Photorealistic output' },
-      // Style transfer: the FLUX.2 edit endpoints, which take the source and the style reference
-      ...FAL_STYLE_TRANSFER_MODELS.map((modelId) => ({
-        providerId: this.providerId,
-        modelId,
-        displayName: `${modelId.replace(/^fal-ai\//, '').replace(/\/edit$/, '')} edit (Fal)`,
-        description: 'Editing from several input images; transferStyle runs on it',
-      })),
+      // FLUX.2: each generates from a prompt, and transferStyle runs it on its
+      // /edit endpoint, which takes the source and the style reference. The
+      // /edit endpoints are not listed: they require input images, so a
+      // generation would fail there.
+      ...FAL_STYLE_TRANSFER_MODELS.map((editModelId) => {
+        const modelId = editModelId.replace(/\/edit$/, '');
+        return {
+          providerId: this.providerId,
+          modelId,
+          displayName: `${modelId.replace(/^fal-ai\//, '')} (Fal)`,
+          description: 'FLUX.2 generation; transferStyle runs it on its /edit endpoint',
+        };
+      }),
     ];
   }
 

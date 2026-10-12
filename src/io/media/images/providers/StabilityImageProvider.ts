@@ -14,7 +14,7 @@ import {
   type StabilityImageProviderOptions,
 } from '../IImageProvider.js';
 import { bufferToBlobPart } from '../imageToBuffer.js';
-import { IMAGE_PART_TYPES, imageFilePart, imagePartType } from '../blobPart.js';
+import { editPartType, imageFilePart } from '../blobPart.js';
 import { styleTransferImageTypes } from '../styleTransfer.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
 
@@ -299,7 +299,9 @@ export class StabilityImageProvider implements IImageProvider {
       usageImages = images.length;
     } else {
       const buffer = Buffer.from(await response.arrayBuffer());
-      const mimeType = contentType || 'image/png';
+      // The media type alone: `image/png; charset=binary` would make a data
+      // URL that parseDataUrl does not read.
+      const mimeType = contentType.split(';')[0].trim() || 'image/png';
       const base64 = buffer.toString('base64');
       const parsed = parseDataUrl(`data:${mimeType};base64,${base64}`);
       images.push(parsed);
@@ -354,7 +356,7 @@ export class StabilityImageProvider implements IImageProvider {
 
     // Source image — sent as a Blob of its own type (a JPEG or WebP as one,
     // anything else as PNG) so the multipart encoder assigns a filename.
-    const source = imageFilePart(request.image, imagePartType(request.image) ?? IMAGE_PART_TYPES['image/png'], 'image');
+    const source = imageFilePart(request.image, editPartType(request.image), 'image');
     formData.append('image', source.blob, source.filename);
     formData.append('prompt', request.prompt);
     appendIfDefined(
@@ -449,7 +451,7 @@ export class StabilityImageProvider implements IImageProvider {
     );
 
     const formData = new FormData();
-    const source = imageFilePart(request.image, imagePartType(request.image) ?? IMAGE_PART_TYPES['image/png'], 'image');
+    const source = imageFilePart(request.image, editPartType(request.image), 'image');
     formData.append('image', source.blob, source.filename);
 
     appendIfDefined(
@@ -639,7 +641,9 @@ export class StabilityImageProvider implements IImageProvider {
       }
     } else {
       const buffer = Buffer.from(await response.arrayBuffer());
-      const mimeType = contentType || 'image/png';
+      // The media type alone: `image/png; charset=binary` would make a data
+      // URL that parseDataUrl does not read.
+      const mimeType = contentType.split(';')[0].trim() || 'image/png';
       const base64 = buffer.toString('base64');
       const parsed = parseDataUrl(`data:${mimeType};base64,${base64}`);
       images.push(parsed);

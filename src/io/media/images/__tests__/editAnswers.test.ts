@@ -14,6 +14,7 @@ import { StabilityImageProvider } from '../providers/StabilityImageProvider.js';
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+const GIF = Buffer.from('GIF89a, a GIF image');
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -41,6 +42,16 @@ describe('OpenAI edits', () => {
     const part = formAt(spy).get('image') as File;
     expect(part.type).toBe('image/jpeg');
     expect(part.name).toBe('image.jpg');
+  });
+
+  it('sends a GIF source as PNG, as the edits always have', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ created: 1, data: [{ b64_json: 'b3V0' }] }));
+
+    await (await provider()).editImage({ modelId: '', image: GIF, prompt: 'Add a hat.' });
+
+    const part = formAt(spy).get('image') as File;
+    expect(part.type).toBe('image/png');
+    expect(part.name).toBe('image.png');
   });
 
   it('fails on an answer with no image instead of returning none', async () => {
@@ -107,6 +118,17 @@ describe('Stability edits', () => {
     const part = formAt(spy).get('image') as File;
     expect(part.type).toBe('image/jpeg');
     expect(part.name).toBe('image.jpg');
+  });
+
+  it('keeps a raw image whose content type carries a parameter', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () => new Response(PNG, { status: 200, headers: { 'Content-Type': 'image/png; charset=binary' } }),
+    );
+
+    const result = await (await provider()).editImage({ modelId: '', image: PNG, prompt: 'x' });
+
+    expect(result.images).toHaveLength(1);
+    expect(result.images[0]).toMatchObject({ mimeType: 'image/png', base64: PNG.toString('base64') });
   });
 
   it('fails on an answer of zero bytes, for an edit and for an upscale', async () => {

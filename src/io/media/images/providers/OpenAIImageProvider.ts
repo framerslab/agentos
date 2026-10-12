@@ -13,7 +13,7 @@ import {
   type OpenAIImageProviderOptions,
 } from '../IImageProvider.js';
 import { bufferToBlobPart } from '../imageToBuffer.js';
-import { IMAGE_PART_TYPES, imageFilePart, imagePartType } from '../blobPart.js';
+import { editPartType, imageFilePart } from '../blobPart.js';
 import {
   ORDINAL_IMAGE_NAMES,
   styleTransferImageTypes,
@@ -245,7 +245,7 @@ export class OpenAIImageProvider implements IImageProvider {
 
     // OpenAI expects the image as a file-like Blob in the multipart payload,
     // of its own type: a JPEG or WebP is sent as one, anything else as PNG.
-    const source = imageFilePart(request.image, imagePartType(request.image) ?? IMAGE_PART_TYPES['image/png'], 'image');
+    const source = imageFilePart(request.image, editPartType(request.image), 'image');
     formData.append('image', source.blob, source.filename);
     formData.append('prompt', request.prompt);
 

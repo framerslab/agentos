@@ -54,6 +54,21 @@ export function imagePartType(bytes: Buffer): ImagePartType | undefined {
 }
 
 /**
+ * The type an edit or upscale route sends an image as: PNG, JPEG or WebP as
+ * detected, and anything else, GIF included, as PNG, as these routes always
+ * labelled every image. Their providers take those three formats (OpenAI's
+ * edits: "a `png`, `webp`, or `jpg` file"; Stability's image routes: JPEG,
+ * PNG and WebP), so a GIF is sent as it was before and the provider answers
+ * for it.
+ *
+ * @param bytes - The image's bytes.
+ */
+export function editPartType(bytes: Buffer): ImagePartType {
+  const type = imagePartType(bytes);
+  return type && type.mimeType !== 'image/gif' ? type : IMAGE_PART_TYPES['image/png'];
+}
+
+/**
  * An image as a multipart file part: a Blob of its format and the file name
  * `<name>.<extension>`.
  *
