@@ -58,7 +58,7 @@ The diagram at the top of this page is the canonical layered view. From top to b
 2. **GMI** — per-mind state: [`ConversationHistoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/ConversationHistoryManager.ts), [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts), [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts), [`MetapromptExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts), persona overlays.
 3. **Memory & RAG** — cognitive memory (five trace types, working memory, Ebbinghaus decay, 8 mechanisms such as retrieval-induced forgetting and reconsolidation), 7 vector stores, HyDE, GraphRAG, hybrid retrieval, [`CitationVerifier`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/citation/CitationVerifier.ts).
 4. **Tools & Extensions** — the extension and skill catalog (100+ extension packs, 88 skills) with capability discovery and runtime tool forging.
-5. **Safety & Guardrails** — guardrail packs (PII, toxicity, grounding, code safety, topicality), circuit breakers and the cost guard, and HITL approvals (the `agency()` approval gates and the runtime `HumanInteractionManager`).
+5. **Safety & Guardrails** — guardrail packs (PII, toxicity, grounding, code safety, topicality, content policy), circuit breakers and the cost guard, and HITL approvals (the `agency()` approval gates and the runtime `HumanInteractionManager`).
 6. **Orchestration** — DAG runtime, `workflow()`, `mission()`, [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) with its human nodes, checkpointing, planning engine.
 7. **I/O & providers** — 13 LLM providers, OpenRouter among them, with fallback chains in `generateText()`, `streamText()`, `agent()` and `agency()`; vision (OCR), hearing (STT, VAD), speech (TTS, voice pipeline), 12 messaging adapters, telephony.
 
@@ -353,7 +353,7 @@ Six built-in packs ship on npm as `@framers/agentos-ext-<id>`. The source of `ml
 - `pii-redaction` — sanitizer; redacts personally identifiable information before tokens leave the runtime
 - `ml-classifiers` — toxicity / hate-speech / harm classification via on-device ONNX models
 - `topicality` — input check that blocks a prompt matching a blocked topic and flags one outside the allowed topics, by embedding similarity, with an LLM judge and then keyword matching as fallbacks
-- `code-safety` — static + heuristic detection of dangerous code patterns in agent-emitted snippets
+- `code-safety` — a default set of 25 regex rules for dangerous code patterns, run over the code fences in user input and in the agent's streamed text, and over the code argument of a `shell_execute`, `run_sql`, `write_file`, `create_file` or `edit_file` tool call ([Tool Calls](../safety/GUARDRAILS_USAGE.md#tool-calls) says what a block stops)
 - `grounding-guard` — verifies output claims against retrieved RAG sources (citation faithfulness)
 - `content-policy-rewriter` — output check that rewrites text in a category set to `sanitize` and blocks text in a category set to `block`; by default only the `illegal_harmful` category is on, and it blocks
 
