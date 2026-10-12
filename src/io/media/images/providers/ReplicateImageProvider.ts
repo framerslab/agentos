@@ -250,13 +250,6 @@ export class ReplicateImageProvider implements IImageProvider {
       }
     }
 
-    // A Redux model makes a variation of its reference image and nothing else.
-    if (modelId.includes('flux-redux') && input.redux_image === undefined) {
-      throw new Error(
-        `Replicate ${modelId} makes a variation of a reference image: pass referenceImageUrl, which it takes as redux_image.`,
-      );
-    }
-
     // Map control image for ControlNet models
     if (providerOptions?.controlImage) {
       input.control_image = providerOptions.controlImage;
@@ -280,6 +273,18 @@ export class ReplicateImageProvider implements IImageProvider {
         : undefined;
     const waitSeconds = providerOptions?.wait ?? 60;
     let prediction: ReplicatePrediction;
+
+    // A Redux model makes a variation of its reference image and nothing
+    // else. Checked on the input the request sends: the legacy endpoint's
+    // branches put extraBody over the body, so an extraBody.input replaces
+    // the input whole.
+    const extraInput = (providerOptions?.extraBody as { input?: Record<string, unknown> } | undefined)?.input;
+    const sentInput = (hasVersionHash || generateExtraBodyVersion) && extraInput ? extraInput : input;
+    if (modelId.includes('flux-redux') && sentInput.redux_image === undefined) {
+      throw new Error(
+        `Replicate ${modelId} makes a variation of a reference image: pass referenceImageUrl, which it takes as redux_image.`,
+      );
+    }
 
     if (hasVersionHash) {
       // Legacy endpoint: POST /predictions with { version, input }

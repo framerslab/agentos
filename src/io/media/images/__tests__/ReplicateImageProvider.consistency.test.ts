@@ -74,6 +74,21 @@ describe('ReplicateImageProvider — Character Consistency', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it('sends a pinned Redux request whose extraBody input carries redux_image, as that input replaces the body\'s', async () => {
+    mockFetch.mockResolvedValueOnce(mockSuccess());
+    const version = `black-forest-labs/flux-redux-dev:${'b'.repeat(64)}`;
+
+    await provider.generateImage({
+      modelId: version,
+      prompt: 'unused',
+      providerOptions: { replicate: { extraBody: { input: { redux_image: 'https://ref.test/pinned.png' } } } },
+    });
+
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(String(url)).toMatch(/\/v1\/predictions$/);
+    expect(JSON.parse(init.body)).toMatchObject({ version, input: { redux_image: 'https://ref.test/pinned.png' } });
+  });
+
   it('sets image_strength based on consistencyMode for standard Flux models', async () => {
     mockFetch.mockResolvedValueOnce(mockSuccess());
 
