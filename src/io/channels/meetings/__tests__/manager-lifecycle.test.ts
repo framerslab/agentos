@@ -373,4 +373,27 @@ describe('a step that fails, or a race, on the way out', () => {
     expect(await h.stores.runs.get(last)).toMatchObject({ state: 'done', reason: 'crashed' });
     expect((await h.stores.runs.get(failing))?.state).toBe('purging');
   });
+  it('a purge that lands as a dispatcher takes the run still tells the bot that is out to leave, and kills it', async () => {
+    const h = harness();
+    const sent = await h.manager.sendBot(h.request);
+    const runId = sent.ok ? sent.run.runId : '';
+    const update = h.stores.runs.update.bind(h.stores.runs);
+    let raced = false;
+    vi.spyOn(h.stores.runs, 'update').mockImplementation(async (id, patch, expected) => {
+      if (!raced && patch.state === 'purging') {
+        raced = true;
+        // between the purge's read and its fence a dispatcher took the run, wrote its dispatch record and started the bot
+        await update(id, { state: 'dispatching', dispatchedAt: h.clock.now(), dispatch: { roomName: `bot-${id}`, workerTokenHash: MockMeetingBotProvider.hash('t') } }, 'requested');
+      }
+      return update(id, patch, expected);
+    });
+    await h.manager.purgeRun(runId, 'stopped_by_owner');
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'suspendCapture' }, { name: 'leave', reason: 'stopped_by_owner' }]);
+    h.clock.advance(30_001);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'kill' });
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stopped_by_owner', botName: '' });
+    expect(h.rooms.deleted).toContain(`bot-${runId}`);
+  });
 });

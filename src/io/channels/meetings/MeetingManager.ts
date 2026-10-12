@@ -942,10 +942,13 @@ export class MeetingManager {
       await this.stores.transcript.fence(run.runId);
       await this.stores.events.fence(run.runId);
       await this.stores.outbox.purgeContent(run.runId);
-      if (run.state === 'requested' || run.state === 'scheduled') {
+      // decided on the row the fence wrote, not on the read before it: a dispatcher may have taken the run in between,
+      // written its dispatch record and started a bot. With no dispatch record no bot can start (the dispatcher's write of
+      // one expects `dispatching`); with one, the bot is told at once unless it has already left.
+      if (fenced.dispatch === undefined) {
         await this.stores.jobs.cancel(run.runId);
         await this.stores.jobs.remove(run.runId);
-      } else if (run.dispatch) {
+      } else if (fenced.leftAt === undefined) {
         await provider?.command(run.runId, { name: 'suspendCapture' });
         await provider?.command(run.runId, { name: 'leave', reason });
         this.leaveAt.set(run.runId, this.now());
