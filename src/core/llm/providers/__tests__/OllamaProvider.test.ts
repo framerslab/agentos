@@ -107,6 +107,22 @@ describe('OllamaProvider multimodal message mapping', () => {
     ]);
   });
 
+  it('sends the parts of a message with no text and no image, such as a tool result, as JSON', async () => {
+    const provider = new OllamaProvider();
+    await provider.initialize({ baseURL: 'http://localhost:11434', defaultModelId: 'llava' });
+    const toolResult = { type: 'tool_result', tool_use_id: 'call_1', content: 'It is 14 C in Lisbon.' };
+
+    await provider.generateCompletion(
+      'llava',
+      [{ role: 'user', content: [toolResult as never] }],
+      {},
+    );
+
+    const [, body] = postMock.mock.calls[0];
+    expect(body.messages).toEqual([expect.objectContaining({ role: 'user', content: JSON.stringify([toolResult]) })]);
+    expect(body.messages[0]).not.toHaveProperty('images');
+  });
+
   it('refuses an image URL Ollama cannot be sent, instead of dropping it, before any request', async () => {
     const provider = new OllamaProvider();
     await provider.initialize({ baseURL: 'http://localhost:11434', defaultModelId: 'llava' });

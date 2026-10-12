@@ -368,11 +368,14 @@ export class OllamaProvider implements IProvider {
             return payload;
           });
 
-          // The text alone: with no text, the content is empty and the images
-          // carry the message, rather than its parts as JSON text.
+          // The text, or with none the parts that are neither text nor an
+          // image (such as the tool_result blocks PromptEngine writes) as
+          // JSON, as before; an image-only message has empty text, rather
+          // than its data URLs as JSON text.
+          const otherParts = msg.content.filter((part) => !isTextContentPart(part) && !isImageUrlContentPart(part));
           return {
             role: msg.role,
-            content: textContent,
+            content: textContent || (otherParts.length > 0 ? JSON.stringify(otherParts) : ''),
             ...(images.length > 0 ? { images } : {}),
           };
         }
