@@ -439,7 +439,7 @@ For agencies that already use the higher-level `agency({ hitl: { approvals: { be
 
 **Do agency callbacks (`approvalRequested`, `approvalDecided`) fire for graph human nodes?** No — those callbacks are on [`AgencyCallbacks`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) and only fire for [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts)-driven pauses. A human node that suspends yields an `interrupt` event on the compiled graph's `stream()`.
 
-**Can the LLM judge see the full agent call history?** No. A `beforeReturn` request carries the run's agent calls in `ApprovalRequest.context.agentCalls`; a `beforeAgent` or `beforeEmergent` request carries the calls made before it (none under the `parallel` strategy), and a `beforeTool` request carries none. `hitl.llmJudge()` sends the judge only the request's type, agent, action, description and details; a handler of your own can read `context` and pass it on.
+**Can the LLM judge see the full agent call history?** No. A `beforeReturn` request carries the run's agent calls in `ApprovalRequest.context.agentCalls`; a `beforeAgent` or `beforeEmergent` request carries the strategy's own list of agent calls, not a copy, which grows as later calls finish, including calls of the same graph tier that finish while the request waits (under the `parallel` strategy it is an empty list of its own), and a `beforeTool` request carries none. `hitl.llmJudge()` sends the judge only the request's type, agent, action, description and details; a handler of your own can read `context` and pass it on.
 
 ## See also
 

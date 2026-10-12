@@ -731,9 +731,11 @@ export interface ApprovalRequest {
    * Run context. A `beforeReturn` (`"output"`) request fills it from the
    * result it approves: its agent calls, token total and cost, and the
    * milliseconds since the call started. An `"agent"` or `"emergent"`
-   * request carries the agent calls made before it (none under the
-   * `parallel` strategy) and zeros; a `"tool"` request carries no agent
-   * calls and zeros.
+   * request carries zeros and the strategy's own list of agent calls, not a
+   * copy: it holds the calls made before the request and grows as later
+   * calls finish, including calls of the same graph tier that finish while
+   * the request waits (under the `parallel` strategy it is an empty list of
+   * its own). A `"tool"` request carries no agent calls and zeros.
    */
   context: {
     /** Agent call records (see above for which requests carry them). */
