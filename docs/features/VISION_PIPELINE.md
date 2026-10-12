@@ -258,7 +258,7 @@ npm install sharp            # only for preprocessing
 
 The cloud tier reads the provider's key from its environment variable: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (with `cloudProvider: 'gemini'`) or `OPENROUTER_API_KEY`, unless `cloudApiKey` is set.
 
-The image goes to `cloudProvider` alone. When that provider fails, the tier fails (or, beside a local result, is listed in `failedTiers`), and no other vendor whose key is in the environment receives the image. `cloudFallbackProviders` lists the providers it may go to next; each uses its own key from the environment, and the tier's result names the provider and model that answered. Under the default `cloudTask: 'describe'`, an empty answer is a failed tier: every image has a description. Under `'transcribe'`, an empty answer means the image shows no text, and it has confidence 0.
+The image goes to `cloudProvider`, and after it fails only to the providers `cloudFallbackProviders` lists, in order: no other vendor whose key is in the environment receives it. The tier fails (or, beside a local result, is listed in `failedTiers`) when `cloudProvider` and every listed provider fail. A listed provider uses its own key from the environment, and the tier's result names the provider and model that answered. Under the default `cloudTask: 'describe'`, an empty answer is a failed tier: every image has a description. Under `'transcribe'`, an empty answer means the image shows no text, and it has confidence 0.
 
 ---
 
