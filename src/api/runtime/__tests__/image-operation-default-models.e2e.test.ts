@@ -176,6 +176,52 @@ describe('an image operation with a provider and no model', () => {
     expect(JSON.parse(String(inpaintInit?.body)).input.mask).toContain('data:image/png;base64,');
   });
 
+  it("edits on Fal's Flux Dev image-to-image endpoint, and inpaints on its inpainting endpoint", async () => {
+    // Fal's queue: the submit, the status, then the result.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/status')) return json({ status: 'COMPLETED' });
+      if (/\/requests\/r\d$/.test(url)) return json({ images: [{ url: 'https://fal.media/out.png' }], seed: 7 });
+      return json({ request_id: url.includes('inpainting') ? 'r2' : 'r1' });
+    });
+
+    const edited = await editImage({ provider: 'fal', apiKey: 'fal-key', image: TINY_PNG, prompt: 'Warmer light.', strength: 0.6 });
+    const inpainted = await editImage({ provider: 'fal', apiKey: 'fal-key', image: TINY_PNG, mask: TINY_PNG, prompt: 'Fill with sky.' });
+
+    const submits = fetchSpy.mock.calls.filter(([, init]) => init?.method === 'POST');
+    expect(String(submits[0][0])).toBe('https://queue.fal.run/fal-ai/flux/dev/image-to-image');
+    const img2img = JSON.parse(String(submits[0][1]?.body));
+    expect(img2img).toMatchObject({ prompt: 'Warmer light.', strength: 0.6 });
+    expect(img2img.image_url).toBe(`data:image/png;base64,${TINY_PNG.toString('base64')}`);
+    expect(img2img).not.toHaveProperty('image');
+    expect(edited.model).toBe('fal-ai/flux/dev/image-to-image');
+
+    expect(String(submits[1][0])).toBe('https://queue.fal.run/fal-ai/flux-lora/inpainting');
+    const inpaint = JSON.parse(String(submits[1][1]?.body));
+    expect(inpaint.mask_url).toBe(`data:image/png;base64,${TINY_PNG.toString('base64')}`);
+    expect(inpaint).not.toHaveProperty('mask');
+    expect(inpainted.model).toBe('fal-ai/flux-lora/inpainting');
+  });
+
+  it('generates a Flux Redux variation from its reference as redux_image, with no prompt', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => replicateDone());
+
+    await generateImage({
+      provider: 'replicate',
+      model: 'black-forest-labs/flux-redux-dev',
+      apiKey: 'r8-key',
+      prompt: 'A variation.',
+      referenceImageUrl: 'https://images.example/reference.png',
+    });
+
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toBe('https://api.replicate.com/v1/models/black-forest-labs/flux-redux-dev/predictions');
+    const { input } = JSON.parse(String(init?.body));
+    expect(input.redux_image).toBe('https://images.example/reference.png');
+    expect(input).not.toHaveProperty('prompt');
+    expect(input).not.toHaveProperty('image');
+  });
+
   it('edits on Stability in the SD3 route\'s image-to-image mode, with an SD3 model', async () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
