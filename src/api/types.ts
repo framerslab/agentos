@@ -185,22 +185,23 @@ export interface DiscoveryConfig {
  *
  * `agency()` evaluates none of these ids: it reports each one through
  * `on.guardrailResult` with `enforced: false` and passes the text on
- * unchanged. `agent()` logs a warning that it does not apply them.
+ * unchanged. `agent()` does not apply them either, and logs a warning when
+ * any is set.
  */
 export interface GuardrailsConfig {
   /** Guardrail ids for each prompt `agency()` receives; reported as not enforced. */
   input?: string[];
   /** Guardrail ids for each final answer `agency()` returns; reported as not enforced. */
   output?: string[];
-  /** Security tier. Nothing reads it (see {@link SecurityTier}). */
+  /** Security tier. Not enforced (see {@link SecurityTier}). */
   tier?: SecurityTier;
 }
 
 /**
- * Tool and resource permission fields. Nothing in AgentOS reads them:
- * `agent()` logs a warning that it does not apply them, and `agency()` and
- * its strategies ignore them. To gate tools, use `hitl.approvals.beforeTool`
- * on `agency()` or an `onBeforeToolExecution` hook.
+ * Tool and resource permission fields. AgentOS enforces none of them:
+ * `agent()`, `agency()` and its strategies do not apply them. To gate tools,
+ * use `hitl.approvals.beforeTool` on `agency()` or an
+ * `onBeforeToolExecution` hook.
  */
 export interface PermissionsConfig {
   /** Tools the agent is meant to call: `"all"`, or an allow-list of tool names. Not enforced. */
@@ -1456,8 +1457,8 @@ export interface BaseAgentConfig {
   discovery?: DiscoveryConfig;
   /**
    * Guardrail policy identifiers or structured config. `agency()` evaluates
-   * none of them (see {@link GuardrailsConfig}), and `agent()` logs a warning
-   * that it does not apply them.
+   * none of them (see {@link GuardrailsConfig}), and `agent()` does not apply
+   * them.
    * - `string[]` — shorthand; `agency()` reads it as the output list.
    * - `GuardrailsConfig` — separate input and output lists.
    */
