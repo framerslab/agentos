@@ -56,8 +56,13 @@ describe('wiki page id rule', () => {
     ['a hidden file', '.hidden', 'dot'],
     ['a hidden folder', 'notes/.meta/index', 'dot'],
     ['the catalog, index.md', 'index', 'reserved'],
+    ['the catalog in capitals', 'INDEX', 'reserved'],
+    ['the catalog in mixed case', 'Index', 'reserved'],
     ['a backslash', 'a\\b', 'character'],
     ['a parent folder written with a backslash', '..\\x', 'character'],
+    ['another drive on Windows', 'D:notes', 'character'],
+    ['the same drive on Windows', 'C:page', 'character'],
+    ['a file stream on Windows', 'page:stream', 'character'],
     ['an empty string', '', 'empty'],
     ['a NUL byte', 'page\u0000.txt', 'character'],
     ['a line break', 'a\nb', 'character'],
@@ -112,16 +117,23 @@ describe('resolveWikiPagePath', () => {
 
   it('checks the rule before it resolves anything', () => {
     expect(refusalOf(() => resolveWikiPagePath('/srv/agent/memory', '../outside', path.posix))?.problem).toBe('dot');
-    expect(refusalOf(() => resolveWikiPagePath('C:\\agent\\memory', '..\\outside', path.win32))?.problem).toBe(
-      'character',
-    );
+    // Each of these names a file outside the folder, or another page, once Windows resolves it.
+    for (const id of ['..\\outside', 'D:notes', 'C:page', 'C:/Windows/notes']) {
+      expect(refusalOf(() => resolveWikiPagePath('C:\\agent\\memory', id, path.win32))?.problem, id).toBe(
+        'character',
+      );
+    }
   });
 
-  it('refuses an id the rule accepts when its file would still land outside the folder', () => {
-    // On Windows a name that opens with a drive names a file on that drive, outside the folder.
-    for (const id of ['D:notes', 'C:/Windows/notes']) {
-      expect(isWikiPageId(id)).toBe(true);
-      expect(refusalOf(() => resolveWikiPagePath('C:\\agent\\memory', id, path.win32))?.problem).toBe('outside');
-    }
+  it('refuses a file the path functions place outside the folder, in a sibling that shares its name among them', () => {
+    const placing = (file: string) => ({
+      sep: '/' as const,
+      resolve: (...parts: string[]) => (parts.length === 1 ? '/srv/memory' : file),
+    });
+    expect(refusalOf(() => resolveWikiPagePath('/srv/memory', 'page', placing('/srv/memory-old/page.md')))?.problem).toBe(
+      'outside',
+    );
+    expect(refusalOf(() => resolveWikiPagePath('/srv/memory', 'page', placing('/srv/page.md')))?.problem).toBe('outside');
+    expect(resolveWikiPagePath('/srv/memory', 'page', placing('/srv/memory/page.md'))).toBe('/srv/memory/page.md');
   });
 });

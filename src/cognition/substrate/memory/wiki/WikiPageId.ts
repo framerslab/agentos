@@ -7,15 +7,23 @@ export const MAX_WIKI_PAGE_ID_LENGTH = 512;
 /** The id of the catalog file, `index.md`, which the store writes itself and never lists as a page. */
 const CATALOG_ID = 'index';
 
+/** The backslash's code: a folder separator on Windows. */
+const BACKSLASH = 0x5c;
+
+/** The colon's code: on Windows it names a drive (`C:page`) or a file's stream (`page:stream`). */
+const COLON = 0x3a;
+
 /**
  * Why a wiki page id was refused:
  * - `'type'`: the id is not a string.
  * - `'empty'`: the id is an empty string.
  * - `'length'`: the id is longer than {@link MAX_WIKI_PAGE_ID_LENGTH} characters.
- * - `'character'`: the id holds a backslash or a control character (U+0000 to U+001F, or U+007F), a NUL byte among them.
+ * - `'character'`: the id holds a backslash, a colon or a control character (U+0000 to U+001F, or U+007F), a NUL
+ *   byte among them. On Windows a backslash separates folders and a colon names a drive or a file's stream.
  * - `'segment'`: a name between slashes is empty: the id starts or ends with `/`, or holds `//`.
  * - `'dot'`: a name starts with a dot, `.` and `..` among them.
- * - `'reserved'`: the id is `index`, which names the catalog, `index.md`.
+ * - `'reserved'`: the id is `index` in any case, which names the catalog, `index.md` (on a filesystem that
+ *   ignores case, `INDEX.md` is the same file).
  * - `'outside'`: the page's file would not be inside the memory folder.
  */
 export type WikiPageIdProblem =
@@ -33,10 +41,10 @@ const RULE_BROKEN: Record<WikiPageIdProblem, string> = {
   type: 'a page id is a string',
   empty: 'a page id is not empty',
   length: `a page id is at most ${MAX_WIKI_PAGE_ID_LENGTH} characters`,
-  character: 'a page id holds no backslash and no control character',
+  character: 'a page id holds no backslash, no colon and no control character',
   segment: 'a page id is names joined by single slashes, with no slash at its start or end',
   dot: 'no name in a page id starts with a dot',
-  reserved: 'the id index names the catalog, index.md, which is not a page',
+  reserved: 'the id index, in any case, names the catalog, index.md, which is not a page',
   outside: "the page's file would be outside the memory folder",
 };
 
@@ -74,22 +82,22 @@ function problemOf(id: unknown): WikiPageIdProblem | null {
   if (id.length > MAX_WIKI_PAGE_ID_LENGTH) return 'length';
   for (let i = 0; i < id.length; i++) {
     const code = id.charCodeAt(i);
-    // 0x5c is the backslash, a folder separator on Windows.
-    if (code <= 0x1f || code === 0x7f || code === 0x5c) return 'character';
+    if (code <= 0x1f || code === 0x7f || code === BACKSLASH || code === COLON) return 'character';
   }
   for (const name of id.split('/')) {
     if (name.length === 0) return 'segment';
     if (name.startsWith('.')) return 'dot';
   }
-  return id === CATALOG_ID ? 'reserved' : null;
+  return id.toLowerCase() === CATALOG_ID ? 'reserved' : null;
 }
 
 /**
  * True when `id` has the wiki's id form: the page's path under `memory/` without `.md`, one or more names
  * joined by `/` (`entities/johnny` is `memory/entities/johnny.md`). No name is empty or starts with a dot,
- * so `.` and `..` are never names; the id holds no backslash and no control character, a NUL byte among
- * them; it is at most {@link MAX_WIKI_PAGE_ID_LENGTH} characters; and it is not `index`, the catalog's own
- * id. Every id the store lists, and every id the default clusterer of `attachMemoryWiki` makes, has this form.
+ * so `.` and `..` are never names; the id holds no backslash, no colon and no control character, a NUL
+ * byte among them; it is at most {@link MAX_WIKI_PAGE_ID_LENGTH} characters; and it is not `index` in any
+ * case, the catalog's own id. Every id the store lists, and every id the default clusterer of
+ * `attachMemoryWiki` makes, has this form.
  */
 export function isWikiPageId(id: unknown): id is string {
   return problemOf(id) === null;
@@ -108,8 +116,8 @@ export function assertWikiPageId(id: unknown): asserts id is string {
 
 /**
  * The file that holds page `id` in `memoryDir`. The id is checked against the rule first; then the resolved
- * file must lie inside the resolved folder, a second guard that holds whatever a platform's path rules make
- * of an id the rule accepts (on Windows, `D:notes` names a file on another drive).
+ * file must lie inside the resolved folder, a second guard should a platform's path rules ever place the
+ * file of an accepted id elsewhere.
  *
  * @param memoryDir - The wiki's folder.
  * @param id - The page id.
