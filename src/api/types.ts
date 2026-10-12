@@ -277,9 +277,12 @@ export interface HitlConfig {
    * judge, or human) approves a `beforeTool`, `beforeAgent` or
    * `beforeReturn` request, the configured guardrails run a final safety
    * check against the tool call's arguments, the agent's input or the final
-   * text. If any guardrail returns `action: 'block'`, the approval is
-   * overridden: the tool call is skipped, the agent does not run, or the
-   * final output is rejected. A `beforeEmergent` approval is not checked.
+   * text. The agent's input is checked as the strategy passes it, before the
+   * approval's `modifications.instructions` are appended, so those
+   * instructions are not checked. If any guardrail returns `action: 'block'`,
+   * the approval is overridden: the tool call is skipped, the agent does not
+   * run, or the final output is rejected. A `beforeEmergent` approval is not
+   * checked.
    *
    * Set to `false` to disable this safety net and give full autonomy to the
    * HITL handler's decision.
