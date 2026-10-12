@@ -440,7 +440,7 @@ export class MeetingManager {
     if (alive) {
       const { recorded, cancelled } = await this.stores.jobs.markDispatched(run.runId, this.id, run.dispatch?.workerId);
       if (!recorded) return;
-      if (cancelled) await this.leave(run, run.reason ?? 'stopped_by_owner');
+      if (cancelled) await this.leaveCancelled(run.runId);
       return;
     }
     const job = await this.stores.jobs.get(run.runId);
@@ -503,7 +503,7 @@ export class MeetingManager {
     if (!recorded) return;
     const dispatched = await this.stores.runs.update(run.runId, { dispatch: { ...withDispatch.dispatch!, workerId: result.workerId, providerRunRef: result.providerRunRef } }, 'dispatching');
     if (dispatched) await this.emit('bot:dispatching', dispatched, { workerId: result.workerId });
-    if (dispatched && cancelled) await this.leave(dispatched, dispatched.reason ?? 'stopped_by_owner');
+    if (cancelled) await this.leaveCancelled(run.runId);
   }
 
   /**
@@ -528,6 +528,15 @@ export class MeetingManager {
       const current = await this.stores.runs.get(run.runId);
       if (current) await this.fail(current, current.reason ?? 'stopped_by_owner');
     }
+  }
+
+  /**
+   * A cancel learned at `markDispatched`: the bot is out, so it is told to leave with the cancel's reason. The run is read
+   * again first, since the bot's own first report (`joining`) may have moved it on while the dispatch was in flight.
+   */
+  private async leaveCancelled(runId: string): Promise<void> {
+    const current = await this.stores.runs.get(runId);
+    if (current) await this.leave(current, current.reason ?? 'stopped_by_owner');
   }
 
   // ── Reports ──

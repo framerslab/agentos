@@ -267,4 +267,35 @@ describe('dispatch and the interlock', () => {
     await expect(h.manager.tick()).rejects.toThrow('billing unavailable');
     expect(h.provider.commands.get(firstId)).toEqual([{ name: 'leave', reason: 'not_admitted' }]);
   });
+  it('a cancel during the dispatch is a leave even when the bot reported before the dispatch returned', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    h.provider.beforeDispatch = async (input) => {
+      await h.manager.leaveBot(runId, 'stopped_by_owner');
+      await h.manager.processProviderEvent('mock', mockEventContext(runId, 'joining', {}, h.clock.now(), input.workerToken));
+    };
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stopped_by_owner' }]);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stopped_by_owner' });
+  });
+  it('a cancel that lands while a stopped dispatch is recovered is a leave from the state the bot has reported since', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    // a manager that stopped after the provider started the bot and before it recorded the dispatch
+    await h.stores.runs.update(runId, { state: 'dispatching', dispatchedAt: h.clock.now(), dispatch: { roomName: `bot-${runId}`, workerTokenHash: MockMeetingBotProvider.hash('t') } }, 'requested');
+    await h.stores.jobs.lease('stopped-manager', h.clock.now(), 1);
+    h.clock.advance(10);
+    h.provider.alive.set(runId, 5);
+    const usage = h.provider.usage.bind(h.provider);
+    vi.spyOn(h.provider, 'usage').mockImplementationOnce(async (input) => {
+      await h.manager.leaveBot(runId, 'stopped_by_owner');
+      await h.manager.processProviderEvent('mock', mockEventContext(runId, 'joining', {}, h.clock.now(), 't'));
+      return usage(input);
+    });
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stopped_by_owner' }]);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stopped_by_owner' });
+  });
 });
