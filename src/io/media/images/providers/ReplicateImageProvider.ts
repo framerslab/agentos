@@ -35,6 +35,13 @@ const REPLICATE_BASE_URL = 'https://api.replicate.com/v1';
 const MAX_INLINE_IMAGE_BYTES = 1_000_000;
 
 /**
+ * How long the delete of an uploaded file may take. The operation's result
+ * waits for the cleanup, so a delete that stalls is given up after this long
+ * and warned about; Replicate removes the file 24 hours after its upload.
+ */
+const DELETE_UPLOAD_TIMEOUT_MS = 10_000;
+
+/**
  * The models Replicate's style transfer runs on, FLUX.2 Pro first as the
  * default. Each takes `input_images` ("Maximum 8 images" for pro and max, 10
  * for flex, 5 for dev; "Must be jpeg, png, gif, or webp") and an
@@ -794,8 +801,9 @@ export class ReplicateImageProvider implements IImageProvider {
   /**
    * Deletes an operation's uploaded files (`DELETE /v1/files/{id}`, the URL
    * the upload answered with). Only a URL under this provider's Files API is
-   * sent the key. A file that could not be deleted is warned about and never
-   * fails the call; Replicate removes it 24 hours after its upload.
+   * sent the key. A file that could not be deleted, or whose delete took over
+   * {@link DELETE_UPLOAD_TIMEOUT_MS}, is warned about and never fails the
+   * call; Replicate removes it 24 hours after its upload.
    *
    * @param uploads - The file URLs.
    * @param apiKey - The key that uploaded them.
@@ -807,7 +815,11 @@ export class ReplicateImageProvider implements IImageProvider {
         .filter((url) => url.startsWith(filesUrl))
         .map(async (url) => {
           try {
-            const response = await fetch(url, { method: 'DELETE', headers: { Authorization: `Token ${apiKey}` } });
+            const response = await fetch(url, {
+              method: 'DELETE',
+              headers: { Authorization: `Token ${apiKey}` },
+              signal: AbortSignal.timeout(DELETE_UPLOAD_TIMEOUT_MS),
+            });
             if (!response.ok && response.status !== 404) {
               console.warn(`[agentos] Replicate did not delete an uploaded input image (${response.status}); it expires 24 hours after its upload.`);
             }

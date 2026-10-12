@@ -446,6 +446,21 @@ describe('ReplicateImageProvider', () => {
       expect(JSON.parse(mockFetch.mock.calls[0][1].body).input.image).toMatch(/^data:image\/png;base64,/);
     });
 
+    it('bounds a delete with a timeout, and one that runs out leaves the result as it is', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockFetch.mockResolvedValueOnce(fileResponse('src3'));
+      mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/upscaled.png']));
+      // What fetch rejects with when its AbortSignal.timeout() fires.
+      mockFetch.mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+
+      const result = await provider.upscaleImage({ modelId: '', image: large(PNG) });
+
+      expect(result.images.map((image) => image.url)).toEqual(['https://example.com/upscaled.png']);
+      expect((mockFetch.mock.calls[2][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Deleting an uploaded Replicate input image failed'));
+      warn.mockRestore();
+    });
+
     it('deletes the upload when the prediction fails, and a failed delete does not change the error', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
       mockFetch.mockResolvedValueOnce(fileResponse('src2'));
