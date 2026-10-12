@@ -242,13 +242,15 @@ export async function* createGuardrailBlockedStream(
  *
  * **Evaluation Strategy:**
  * - Guardrails with `config.evaluateStreamingChunks === true` evaluate TEXT_DELTA chunks
+ * - Guardrails with `config.evaluateToolCalls === true` evaluate TOOL_CALL_REQUEST chunks
  * - All guardrails evaluate the chunks that carry `isFinal: true` (the
  *   FINAL_RESPONSE, an ERROR); other chunks pass through unevaluated
  * - Rate limiting via `config.maxStreamingEvaluations` per guardrail
  *
  * **Actions:**
  * - {@link GuardrailAction.BLOCK} - Terminates stream immediately with error chunk
- * - {@link GuardrailAction.SANITIZE} - Replaces chunk content with `modifiedText`
+ * - {@link GuardrailAction.SANITIZE} - Replaces chunk content with `modifiedText`;
+ *   on a TOOL_CALL_REQUEST chunk it is applied as a BLOCK
  * - {@link GuardrailAction.FLAG} / {@link GuardrailAction.ALLOW} - Passes through
  *
  * @param service - Single guardrail or array of guardrails
