@@ -667,6 +667,392 @@ export class MeetingManager {
     if (started) await this.emit('bot:capture_started', started, { resumed: run.captureStartedAt !== undefined });
   }
 
+  // ── Owner commands ──
+
+  /** The bot leaves; the run's data stays under its Keep. Before dispatch the run ends; during a dispatch the cancel becomes a leave. */
+  async leaveBot(runId: string, reason: MeetingLeaveReason = 'stopped_by_owner'): Promise<boolean> {
+    const run = await this.stores.runs.get(runId);
+    if (!run) return false;
+    if (run.state === 'dispatching') {
+      await this.stores.runs.update(runId, { reason }, 'dispatching');
+      const result = await this.stores.jobs.cancel(runId);
+      if (result === 'already_dispatched') {
+        const current = await this.stores.runs.get(runId);
+        return current ? this.leave(current, reason) : false;
+      }
+      const job = await this.stores.jobs.get(runId);
+      if (job && job.leaseHolder === undefined) await this.fail(run, reason);
+      return true;
+    }
+    if (run.state === 'requested' || run.state === 'scheduled') {
+      const cancelled = await this.stores.jobs.cancel(runId);
+      if (cancelled === 'already_dispatched') return this.leave(run, reason);
+      const stillWaiting = await this.stores.runs.update(runId, { reason }, ['requested', 'scheduled']);
+      if (!stillWaiting) {
+        // a dispatcher took the run between the read and the cancel: it learns the cancel at markDispatched and tells the bot to leave with this reason
+        await this.stores.runs.update(runId, { reason }, 'dispatching');
+        return true;
+      }
+      await this.stores.jobs.remove(runId);
+      await this.fail(stillWaiting, reason);
+      return true;
+    }
+    return this.leave(run, reason);
+  }
+
+  /** The bot leaves and everything it took is deleted (the purge sequence). On a run that is already done, the kept content is deleted (a session's deletion). */
+  async purgeRun(runId: string, reason: MeetingLeaveReason = 'stopped_by_owner'): Promise<boolean> {
+    const run = await this.stores.runs.get(runId);
+    if (!run) return false;
+    if (run.state === 'done') return this.purgeKept(run);
+    if (run.state === 'failed') return false;
+    await this.purge(run, reason);
+    return true;
+  }
+
+  /** A kept run's content removed after `done`: the fences, the stores, the hooks, the provider's copies, the content-free row, `bot:purged`. A step that throws is the caller's to retry (the product's one purge path retries). */
+  private async purgeKept(run: MeetingRunRecord): Promise<boolean> {
+    if (run.purgedAt !== undefined) return true;
+    await this.stores.transcript.fence(run.runId);
+    await this.stores.events.fence(run.runId);
+    await this.stores.outbox.purgeContent(run.runId);
+    await this.stores.transcript.purge(run.runId);
+    await this.stores.events.purgePayloads(run.runId);
+    await this.stores.outbox.purgeContent(run.runId);
+    for (const hook of this.purgeHooks) await hook(run.runId);
+    await this.providers.get(run.providerName)?.deleteRun({ runId: run.runId });
+    const free = { ...contentFreeRun(run), purgedAt: this.now() };
+    await this.stores.runs.replace(free);
+    await this.emit('bot:purged', free, { reason: 'deleted' });
+    return true;
+  }
+
+  /** Posts to the meeting's chat through the run's bot; false unless the run is in the call and its provider posts to chat. */
+  async postChat(runId: string, text: string): Promise<boolean> {
+    const run = await this.stores.runs.get(runId);
+    const provider = run && this.providers.get(run.providerName);
+    if (!run || !provider || !provider.capabilities.postsChat || run.state !== 'in_call') return false;
+    await provider.command(runId, { name: 'postChat', text });
+    return true;
+  }
+
+  /** A run sent from a page: the page is still there. */
+  async pageSeen(runId: string): Promise<void> {
+    await this.stores.runs.update(runId, { pageSeenAt: this.now() });
+  }
+
+  /** Adds a step to the purge sequence, as {@link MeetingManagerConfig.purgeHooks} does. */
+  addPurgeHook(hook: (runId: string) => Promise<void>): void {
+    this.purgeHooks.push(hook);
+  }
+
+  /** The run's row, or undefined when there is none. */
+  getRun(runId: string): Promise<MeetingRunRecord | undefined> {
+    return this.stores.runs.get(runId);
+  }
+
+  /** The runs the filter selects, newest first, as the run store's {@link IRunStore.list} answers them. */
+  listRuns(filter: { ownerRef?: string; states?: readonly MeetingRunState[]; since?: number; limit?: number }): Promise<MeetingRunRecord[]> {
+    return this.stores.runs.list(filter);
+  }
+
+  // ── Ends ──
+
+  /** Tells the bot to leave, arms the kill, and moves the run to `leaving`. */
+  private async leave(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<boolean> {
+    if (!canTransition(run.state, 'leaving') && run.state !== 'purging') return false;
+    const provider = this.providers.get(run.providerName);
+    if (run.state !== 'purging') {
+      const moved = await this.stores.runs.update(run.runId, { state: 'leaving', reason }, run.state);
+      if (!moved) return false;
+    }
+    await provider?.command(run.runId, { name: 'leave', reason });
+    this.leaveAt.set(run.runId, this.now());
+    return true;
+  }
+
+  /** A run that ends before it joined (a failed revalidation, no capacity, a cancel): never billed. */
+  private async fail(run: MeetingRunRecord, reason: MeetingLeaveReason, message?: string): Promise<void> {
+    const current = await this.stores.runs.get(run.runId);
+    if (!current || !['requested', 'scheduled', 'dispatching'].includes(current.state)) return;
+    // update re-reads under the anchor and checks this exact non-purging state.
+    const pending = await this.stores.runs.update(current.runId, { reason: current.reason ?? reason, cleanupPending: true }, current.state);
+    if (!pending) return;
+    await this.stores.transcript.fence(run.runId);
+    await this.stores.events.fence(run.runId);
+    await this.stores.outbox.purgeContent(run.runId);
+    await this.stores.transcript.purge(run.runId);
+    await this.stores.events.purgePayloads(run.runId);
+    if (pending.reservationId) await this.stores.entitlement.release(pending.reservationId);
+    if (pending.dispatch?.roomName) await this.config.room.delete(pending.dispatch.roomName);
+    await this.stores.jobs.remove(run.runId);
+    const now = this.now();
+    const failed = await this.stores.runs.update(run.runId, { ...contentFreeRun(pending), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, state: 'failed', leftAt: now, doneAt: now, billedSeconds: 0, cleanupPending: false }, pending.state);
+    if (!failed) return;
+    this.forget(run.runId);
+    await this.emit('bot:left', failed, { reason: failed.reason, message });
+    await this.emit('bot:done', failed, { reason: failed.reason, billedSeconds: 0 });
+  }
+
+  /**
+   * After `left` (no purge): settle or release, drop what is not kept, delete the room, remove the job, and only then
+   * `done`. A step that throws leaves the run in `left` with `cleanupPending`, and the next tick calls this again; the
+   * entitlement hook's `settle` and `release` are idempotent, so a retry after a half-done cleanup changes nothing twice.
+   */
+  private async complete(run: MeetingRunRecord, reportedSeconds: number | undefined): Promise<void> {
+    const current = await this.stores.runs.get(run.runId);
+    if (!current || (current.state !== 'left' && current.state !== 'leaving')) return;
+    if (current.state === 'leaving') {
+      const left = await this.stores.runs.update(run.runId, { state: 'left', leftAt: current.leftAt ?? this.now(), cleanupPending: true, reportedSeconds: reportedSeconds ?? current.reportedSeconds }, 'leaving');
+      if (!left) return;
+      await this.emit('bot:left', left, { reason: left.reason });
+      run = left;
+    } else run = current;
+    const now = this.now();
+    const seconds = reportedSeconds ?? run.reportedSeconds ?? Math.max(0, Math.round(((run.leftAt ?? now) - (run.dispatchedAt ?? run.joinAt)) / 1000));
+    const billed = isBilledEnd(run) ? seconds : 0;
+    try {
+      await this.stores.transcript.fence(run.runId);
+      if (run.reservationId) {
+        if (billed > 0) await this.stores.entitlement.settle(run.reservationId, billed);
+        else await this.stores.entitlement.release(run.reservationId);
+      }
+      if (run.keep === 'none') {
+        await this.stores.events.fence(run.runId);
+        await this.stores.outbox.purgeContent(run.runId);
+        await this.stores.transcript.purge(run.runId);
+        await this.stores.events.purgePayloads(run.runId);
+      }
+      if (run.dispatch?.roomName) await this.config.room.delete(run.dispatch.roomName);
+      await this.stores.jobs.remove(run.runId);
+    } catch (err) {
+      this.config.logger?.warn(`[MeetingManager] cleanup of ${run.runId} retried on the next tick: ${String(err)}`);
+      await this.stores.runs.update(run.runId, { reportedSeconds: seconds, cleanupPending: true }, 'left');
+      return;
+    }
+    const free = contentFreeRun(run);
+    const kept = run.keep === 'none' ? free : { ...free, botName: run.botName, notice: run.notice };
+    const done = await this.stores.runs.update(run.runId, { ...kept, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, state: 'done', doneAt: now, billedSeconds: billed, cleanupPending: false }, 'left');
+    if (!done) return;
+    this.forget(run.runId);
+    await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
+  }
+
+  private async crash(run: MeetingRunRecord, at: number, seconds: number | undefined): Promise<void> {
+    const current = await this.stores.runs.get(run.runId);
+    if (!current || TERMINAL_RUN_STATES.has(current.state)) return;
+    if (current.state === 'purging') {
+      await this.stores.runs.update(run.runId, { leftAt: at, reportedSeconds: seconds ?? current.reportedSeconds }, 'purging');
+      this.leaveAt.delete(run.runId);
+      return;
+    }
+    const expected = ACTIVE_STATES.filter((state) => state !== 'purging');
+    if (!expected.includes(current.state)) return;
+    // The store re-reads under the anchor; a purge between get and update fails this exact-state guard.
+    const left = await this.stores.runs.update(run.runId, { state: 'left', leftAt: at, reason: current.reason ?? 'crashed', reportedSeconds: seconds ?? current.reportedSeconds, cleanupPending: true }, current.state);
+    if (!left) {
+      const fenced = await this.stores.runs.get(run.runId);
+      if (fenced?.state === 'purging') await this.stores.runs.update(run.runId, { leftAt: at, reportedSeconds: seconds ?? fenced.reportedSeconds }, 'purging');
+      return;
+    }
+    await this.emit('bot:left', left, { reason: left.reason });
+    await this.complete(left, seconds);
+  }
+
+  private forget(runId: string): void {
+    this.suspendedAt.delete(runId);
+    this.leaveAt.delete(runId);
+    this.aloneSince.delete(runId);
+  }
+
+  // ── The purge sequence ──
+
+  /** (a) the fence; (b) the purge, each step retried until it resolves; (c) the content-free record. */
+  private async purge(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<void> {
+    const provider = this.providers.get(run.providerName);
+    if (run.state !== 'purging') {
+      const fenced = await this.stores.runs.update(run.runId, { state: 'purging', reason }, PURGEABLE_STATES);
+      if (!fenced) return;
+      await this.stores.transcript.fence(run.runId);
+      await this.stores.events.fence(run.runId);
+      await this.stores.outbox.purgeContent(run.runId);
+      if (run.state === 'requested' || run.state === 'scheduled') {
+        await this.stores.jobs.cancel(run.runId);
+        await this.stores.jobs.remove(run.runId);
+      } else if (run.dispatch) {
+        await provider?.command(run.runId, { name: 'suspendCapture' });
+        await provider?.command(run.runId, { name: 'leave', reason });
+        this.leaveAt.set(run.runId, this.now());
+      }
+    }
+    await this.continuePurge(run.runId);
+  }
+
+  /** The steps after the fence, in order; a step that throws is retried on the next tick, and a restart resumes here through `reconcile`. */
+  private async continuePurge(runId: string): Promise<void> {
+    const run = await this.stores.runs.get(runId);
+    if (!run || run.state !== 'purging') return;
+    const provider = this.providers.get(run.providerName);
+    const stillInCall = run.dispatch !== undefined && run.leftAt === undefined;
+    if (stillInCall) return; // the bot has not left yet; the kill timer and the left report bring us back
+    try {
+      await this.stores.transcript.purge(runId);
+      await this.stores.events.purgePayloads(runId);
+      await this.stores.outbox.purgeContent(runId);
+      for (const hook of this.purgeHooks) await hook(runId);
+      if (provider) await provider.deleteRun({ runId });
+      if (run.dispatch?.roomName) await this.config.room.delete(run.dispatch.roomName);
+    } catch (err) {
+      this.config.logger?.warn(`[MeetingManager] purge of ${runId} retried: ${String(err)}`);
+      return;
+    }
+    const now = this.now();
+    const seconds = run.reportedSeconds ?? Math.max(0, Math.round(((run.leftAt ?? now) - (run.dispatchedAt ?? run.joinAt)) / 1000));
+    const billed = isBilledEnd(run) ? seconds : 0;
+    if (run.reservationId) {
+      if (billed > 0) await this.stores.entitlement.settle(run.reservationId, billed);
+      else await this.stores.entitlement.release(run.reservationId);
+    }
+    await this.stores.jobs.remove(runId);
+    const done = await this.stores.runs.update(runId, { state: 'done', doneAt: now, purgedAt: now, billedSeconds: billed }, 'purging');
+    if (!done) return;
+    this.forget(runId);
+    const free = { ...contentFreeRun(done), purgedAt: now };
+    await this.stores.runs.replace(free);
+    await this.emit('bot:purged', free, { reason: free.reason });
+    await this.emit('bot:done', free, { reason: free.reason, billedSeconds: billed });
+  }
+
+  // ── The limits ──
+
+  private async enforceLimits(): Promise<void> {
+    const now = this.now();
+    const runs = await this.stores.runs.list({ states: ['requested', 'scheduled', ...ACTIVE_STATES], limit: Number.MAX_SAFE_INTEGER });
+    for (const run of runs) {
+      if (run.cleanupPending && ['requested', 'scheduled', 'dispatching'].includes(run.state)) {
+        await this.fail(run, run.reason ?? 'crashed');
+        continue;
+      }
+      if (run.state === 'requested' || run.state === 'scheduled') continue;
+      const provider = this.providers.get(run.providerName);
+      const commandedLeaveAt = this.leaveAt.get(run.runId);
+      if (commandedLeaveAt !== undefined && now - commandedLeaveAt > this.killAfterMs) {
+        this.leaveAt.delete(run.runId);
+        await provider?.command(run.runId, { name: 'kill' });
+        await this.crash(run, now, undefined);
+        continue;
+      }
+      if (run.state === 'purging') {
+        await this.continuePurge(run.runId);
+        continue;
+      }
+      if (run.state === 'left') {
+        // a cleanup that threw last time is tried again here, until `done` is written
+        await this.complete(run, undefined);
+        continue;
+      }
+      if (run.state === 'leaving') continue;
+      const since = run.dispatchedAt ?? run.joinAt;
+      if (now - since > run.limits.totalMs) {
+        await this.leave(run, 'cap');
+        continue;
+      }
+      if (run.state === 'waiting_room' && now - (run.joinedAt ?? since) > run.limits.waitingRoomMs) {
+        await this.leave(run, 'not_admitted');
+        continue;
+      }
+      if (run.state === 'in_call_notice_pending' && run.joinedAt !== undefined && now - run.joinedAt > this.noticeConfirmMs) {
+        await this.leave(run, 'notice_failed');
+        continue;
+      }
+      if (run.state === 'in_call') {
+        const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt > this.monitorHeartbeatMs * this.monitorMissedBeats;
+        if (monitorStale) {
+          const suspended = this.suspendedAt.get(run.runId);
+          if (suspended === undefined) {
+            this.suspendedAt.set(run.runId, now);
+            await provider?.command(run.runId, { name: 'suspendCapture' });
+            await this.emit('bot:capture_suspended', run, { reason: 'stop monitor quiet' });
+          } else if (now - suspended > this.monitorRecoverMs) {
+            await this.leave(run, 'stop_monitor_failed');
+            continue;
+          }
+        }
+        const alone = this.aloneSince.get(run.runId);
+        if (alone !== undefined && now - alone > run.limits.aloneMs) {
+          await this.leave(run, 'alone');
+          continue;
+        }
+        if (run.limits.pageAwayMs !== undefined && run.pageSeenAt !== undefined && now - run.pageSeenAt > run.limits.pageAwayMs) {
+          await this.leave(run, 'page_away');
+          continue;
+        }
+      }
+    }
+  }
+
+  /** Evicts completed in-memory runs after the grace. Durable stores omit forget and keep their terminal records. */
+  private async cleanupExpired(): Promise<void> {
+    const { runs, jobs, transcript, events, outbox, entitlement } = this.stores;
+    if (!runs.forget || !jobs.forget || !transcript.forget || !events.forget || !outbox.forget) return;
+    const grace = Math.max(86_400_000, this.config.forgetAfterMs ?? 172_800_000);
+    for (const run of await runs.list({ states: ['done', 'failed'], limit: Number.MAX_SAFE_INTEGER })) {
+      if (run.doneAt === undefined || this.now() - Math.max(run.doneAt, run.purgedAt ?? 0) < grace) continue;
+      if (run.keep === 'account' && run.purgedAt === undefined && run.state !== 'failed') continue;
+      const deliveries = await outbox.listByRun(run.runId);
+      if (deliveries.some((d) => d.state === 'pending')) continue;
+      await transcript.forget(run.runId);
+      await events.forget(run.runId);
+      await outbox.forget(run.runId);
+      await jobs.forget(run.runId);
+      await entitlement.forget?.(run.runId);
+      await runs.forget(run.runId);
+      this.forget(run.runId);
+    }
+  }
+
+  // ── Reconcile ──
+
+  /** Compares dispatched jobs with the providers' usage: a run whose container is gone is ended as crashed; an unfinished purge is resumed. */
+  async reconcile(): Promise<void> {
+    const now = this.now();
+    const byProvider = new Map<string, string[]>();
+    for (const job of await this.stores.jobs.listDispatched()) {
+      const run = await this.stores.runs.get(job.runId);
+      if (!run) {
+        await this.stores.jobs.remove(job.runId);
+        continue;
+      }
+      if (run.state === 'purging') {
+        await this.continuePurge(run.runId);
+        continue;
+      }
+      if (!ACTIVE_STATES.includes(run.state) || run.state === 'dispatching') continue;
+      const list = byProvider.get(run.providerName) ?? [];
+      list.push(run.runId);
+      byProvider.set(run.providerName, list);
+    }
+    for (const [providerName, runIds] of byProvider) {
+      const provider = this.providers.get(providerName);
+      if (!provider) continue;
+      let usage;
+      try {
+        usage = await provider.usage({ runIds });
+      } catch (err) {
+        this.config.logger?.warn(`[MeetingManager] usage of ${providerName} unavailable: ${String(err)}`);
+        continue;
+      }
+      for (const u of usage) {
+        if (u.alive) continue;
+        const run = await this.stores.runs.get(u.runId);
+        if (run && (run.state === 'joining' || run.state === 'waiting_room' || run.state === 'in_call_notice_pending' || run.state === 'in_call' || run.state === 'leaving')) {
+          this.config.logger?.warn(`[MeetingManager] ${run.runId}: worker reports no container; ending as crashed`);
+          await this.crash(run, now, u.seconds || undefined);
+        }
+      }
+    }
+  }
+
   // ── The transcript ──
 
   /** A turn the listen session wrote: a `bot:transcript` event, stored and forwarded, unless the run is behind the fence or over. */
