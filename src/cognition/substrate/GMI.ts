@@ -45,6 +45,8 @@ import {
   PersonaRagConfigIngestionTrigger, // Ensure this type definition exists and is correctly imported
 } from './personas/IPersonaDefinition';
 import { hardLimitsBlock, HARD_LIMITS_PRIORITY } from './personas/hardLimits';
+import { applyTraitOverlay, droppedTraitPatchWarning, PERSONALITY_PROMPT_PRIORITY, renderPersonalitySection } from './personas/personalityPrompt';
+import type { ILearnerSession, ToolLearningContext } from '../learning/types.js';
 import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
@@ -74,6 +76,8 @@ import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
+/** How long a turn waits for its learner session's preparation before it goes on without it, in milliseconds. */
+const LEARNING_PREPARE_BUDGET_MS = 2_000;
 
 /** The completion options a persona's defaults and a turn's `metadata.options` may set (design D4b). */
 const FORWARDED_COMPLETION_OPTION_KEYS = [
@@ -125,6 +129,36 @@ function asUsageReport(value: unknown): ModelUsage | undefined {
   return [promptTokens, completionTokens, totalTokens].some((count) => typeof count === 'number' && Number.isFinite(count))
     ? (value as ModelUsage)
     : undefined;
+}
+
+/**
+ * `work`'s value when it settles within `ms`, else why it did not: its rejection, or the time it ran out of. Never
+ * rejects, and a rejection that arrives after the time ran out is handled here.
+ */
+async function answerWithin<T>(work: Promise<T>, ms: number): Promise<{ value: T } | { failure: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guarded = work.then(
+    (value): { value: T } | { failure: string } => ({ value }),
+    (error: unknown): { value: T } | { failure: string } => ({ failure: error instanceof Error ? error.message : String(error) }),
+  );
+  const expired = new Promise<{ failure: string }>((resolve) => {
+    timer = setTimeout(() => resolve({ failure: `no answer within ${ms} ms` }), ms);
+  });
+  try {
+    return await Promise.race([guarded, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** What a turn's model steps and tool calls take from the learning layer. */
+interface TurnLearning {
+  /** The personality section: the learner session's, or the GMI's own. Empty when the traits render none. */
+  systemPrompts: Array<{ content: string; priority: number; source: string }>;
+  /** What each tool call of the turn is told (`sessionData.learning`); undefined on a GMI with no learner session. */
+  tools: ToolLearningContext | undefined;
+  /** The organization the learner session was asked under; a tool continuation under another asks again. */
+  namespace?: string;
 }
 
 /** A message's content as a string two equal contents share: the text itself, or the JSON of its parts. */
@@ -241,6 +275,22 @@ export class GMI implements IGMI {
    */
   private turnMemoryScope: TurnMemoryScope | undefined;
 
+  /** The learner session the host passed (`GMIBaseConfig.learning`), when its learning option is on. */
+  private learnerSession: ILearnerSession | undefined;
+
+  /**
+   * The personality section this GMI renders itself, from `GMIBaseConfig.personaTraits`: read once at
+   * initialize(), never from the persona copy `setPersonalityTrait()` replaces. Null when it was given no
+   * traits, or when they render no section.
+   */
+  private ownPersonalitySection: string | null = null;
+
+  /**
+   * What the learning layer prepared for the turn in progress. Set once per user turn, before the tool loop;
+   * a tool continuation keeps the preparation of the turn it continues.
+   */
+  private turnLearning: TurnLearning | undefined;
+
   // (Self-reflection state is owned by MetapromptExecutor)
 
   // Cognitive Memory Bridge
@@ -296,6 +346,18 @@ export class GMI implements IGMI {
     this.llmProviderManager = config.llmProviderManager;
     this.utilityAI = config.utilityAI;
     this.cognitiveMemory = config.cognitiveMemory;
+
+    this.learnerSession = config.learning;
+    this.turnLearning = undefined;
+    this.ownPersonalitySection = null;
+    if (config.personaTraits) {
+      // Honesty-humility and emotionality come from the registry persona; a role overlay sets the other four.
+      const { traits, dropped } = applyTraitOverlay(config.personaTraits.authored, config.personaTraits.overlay);
+      this.ownPersonalitySection = renderPersonalitySection(traits);
+      if (dropped.length > 0) {
+        this.addTraceEntry(ReasoningEntryType.WARNING, droppedTraitPatchWarning(persona.id, dropped), { dropped });
+      }
+    }
 
     // Initialize cognitive memory bridge if cognitive memory is provided
     if (this.cognitiveMemory) {
@@ -560,6 +622,75 @@ export class GMI implements IGMI {
     this.addTraceEntry(ReasoningEntryType.STATE_CHANGE, `Personality trait '${trait}' set to ${value}.`, { trait, value });
   }
 
+  /** @inheritdoc */
+  public getLearnerSession(): ILearnerSession | undefined {
+    return this.learnerSession;
+  }
+
+  /**
+   * The turn's learning. With a learner session, its preparation: the personality section, and the learner and
+   * mode each tool call is told. The session is asked once per user turn, and a tool continuation reuses the
+   * preparation of the turn it continues (a GMI built again for the continuation, or a continuation under another
+   * organization than its turn's, asks, and says it is one). A session that rejects, answers with no preparation
+   * or does not answer within its budget never fails the turn: the turn then has no learner, and the GMI sends its
+   * own section. Without a learner session the GMI sends its own section, when it was given the persona's traits,
+   * and tells the tools nothing.
+   *
+   * @param turnInput - The turn's input.
+   * @param turnId - The turn's id.
+   * @param userText - The user's text; `null` when the turn's input is not plain text.
+   */
+  private async prepareTurnLearning(turnInput: GMITurnInput, turnId: string, userText: string | null): Promise<TurnLearning> {
+    const own = this.ownPersonalitySection
+      ? [{ content: this.ownPersonalitySection, priority: PERSONALITY_PROMPT_PRIORITY, source: 'gmi:personality' }]
+      : [];
+    const session = this.learnerSession;
+    if (!session) return { systemPrompts: own, tools: undefined };
+    const continuation = turnInput.metadata?.isToolContinuation === true;
+    const namespace = this.getOrganizationIdForTurn(turnInput) ?? '';
+    // A continuation keeps its turn's preparation unless it runs under another organization (a tool-result resume
+    // whose host passed one): the session is asked again and reads it as a turn of that organization.
+    if (continuation && this.turnLearning && this.turnLearning.namespace === namespace) return this.turnLearning;
+
+    const preferredModelId = turnInput.metadata?.options?.preferredModelId;
+    const modelId =
+      (typeof preferredModelId === 'string' && preferredModelId) ||
+      this.activePersona.defaultModelId ||
+      this.config.defaultLlmModelId;
+    const answer = await answerWithin(
+      Promise.resolve().then(() =>
+        session.prepareTurn({
+          turnId,
+          userId: typeof turnInput.userId === 'string' && turnInput.userId ? turnInput.userId : null,
+          namespace,
+          text: continuation ? null : userText,
+          modelIds: modelId ? [modelId] : [],
+          workflowSeat: Boolean(turnInput.metadata?.workflowId),
+          ...(continuation ? { continuation: true } : {}),
+        }),
+      ),
+      LEARNING_PREPARE_BUDGET_MS,
+    );
+    const prepared = 'value' in answer ? answer.value : undefined;
+    if (!prepared || !Array.isArray(prepared.systemPrompts)) {
+      const why = 'failure' in answer ? answer.failure : 'it answered with no preparation';
+      this.addTraceEntry(
+        ReasoningEntryType.WARNING,
+        `The learning layer did not prepare this turn (${why}); the turn runs on the persona's authored traits and has no learner.`,
+        { degraded: true },
+      );
+      return { systemPrompts: own, tools: { learner: 'none', mode: 'on' }, namespace };
+    }
+    if (prepared.learner !== 'bound') {
+      this.addTraceEntry(ReasoningEntryType.DEBUG, `This turn has no learner (${prepared.noLearnerReason ?? 'no reason given'}).`, { mode: prepared.mode });
+    }
+    return {
+      systemPrompts: prepared.systemPrompts,
+      tools: { learner: prepared.learner === 'bound' ? 'bound' : 'none', mode: prepared.mode },
+      namespace,
+    };
+  }
+
   /**
    * Adds an entry to the GMI's reasoning trace.
    * @private
@@ -735,6 +866,10 @@ export class GMI implements IGMI {
       sessionData.organizationId = organizationId;
     }
 
+    // The turn's learner and mode, on a GMI with a learner session: a self-modification tool reads them before it acts.
+    if (this.turnLearning?.tools) {
+      sessionData.learning = { ...this.turnLearning.tools };
+    }
     return Object.keys(sessionData).length > 0 ? sessionData : undefined;
   }
 
@@ -1006,6 +1141,7 @@ export class GMI implements IGMI {
     if (turnInput.metadata?.isToolContinuation !== true) {
       this.turnResolution = undefined;
       this.turnMemoryScope = memoryScopeOf(turnInput);
+      this.turnLearning = undefined;
     }
     this.stateOwnerTurn = turnNumber;
     // False once a newer turn has started; lifecycle writes below check it.
@@ -1123,6 +1259,15 @@ export class GMI implements IGMI {
         }
       }
 
+      // The turn's learning, prepared once: every model step of the turn sends the same personality section, so
+      // the system text does not change between steps, and every tool call is told the same learner and mode.
+      const turnLearning = await this.prepareTurnLearning(
+        turnInput,
+        turnId,
+        typeof currentUserMessage?.content === 'string' && currentUserMessage.content !== '' ? currentUserMessage.content : null,
+      );
+      this.turnLearning = turnLearning;
+
       // -------------------------------------------------------------------
       // Main tool-calling loop (ReAct-style).
       //
@@ -1235,7 +1380,9 @@ export class GMI implements IGMI {
                     ? [{ content: this.activePersona.baseSystemPrompt, priority: 1}]
                     : [];
 
-        const systemPrompts = [...baseSystemPrompts];
+        // The personality section sorts right after the base prompt (priority 2 after priority 1). With no
+        // learner session and no persona traits passed there is none, and the prompt is the one sent before.
+        const systemPrompts = [...baseSystemPrompts, ...turnLearning.systemPrompts];
         const rollingSummaryText = typeof turnInput.metadata?.rollingSummary?.text === 'string'
           ? turnInput.metadata.rollingSummary.text.trim()
           : '';

@@ -1,3 +1,19 @@
+## [0.13.57](https://github.com/framerslab/agentos/compare/v0.13.56...v0.13.57) (2026-10-12)
+
+### feat
+
+* **hearing:** add a LiveKit room audio source and a LiveKit stream transport (#282) ([11a41a3](https://github.com/framerslab/agentos/commit/11a41a3edbba9edbd4765ab35f5a2c32c86dbb2d))
+
+### docs
+
+* correct claims in the files #264 changed (levels table, guardrail examples, CLI registry steps) (#316) ([5ac50dc](https://github.com/framerslab/agentos/commit/5ac50dcb8b5468b91975dfb047bf8bb73ba35a18))
+
+## [0.13.56](https://github.com/framerslab/agentos/compare/v0.13.55...v0.13.56) (2026-10-11)
+
+### feat
+
+* **learning:** personality section on every GMI turn behind the learning flag (#294) ([b9abbff](https://github.com/framerslab/agentos/commit/b9abbff9d3c63d9d05b843ca59d57183ffaffbd3))
+
 ## [0.13.55](https://github.com/framerslab/agentos/compare/v0.13.54...v0.13.55) (2026-10-11)
 
 ### fix

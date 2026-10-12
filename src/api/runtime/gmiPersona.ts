@@ -3,7 +3,9 @@
  * The persona of a GMI built from agent options (`agent({ runtime: 'gmi' })`).
  *
  * The base system prompt is the text the legacy path sends: `buildSystemPrompt(opts)`
- * (or the joined `systemBlocks`). The chain-of-thought instruction is not part of
+ * (or the joined `systemBlocks`). With the agent's `learning` option on, the
+ * personality section is left out of it: the GMI sends that section as a system
+ * prompt of its own on every turn. The chain-of-thought instruction is not part of
  * it: `gmi()` puts it first in the system prompt of each model call that offers
  * tools, as `generateText` does. The completion options are the
  * ones `agent()` forwards on every call. Sentiment presets are expanded into
@@ -50,17 +52,20 @@ function completionOptionsOf(opts: AgentOptions): Partial<ModelCompletionOptions
   return out;
 }
 
-function basePrompt(opts: AgentOptions): string {
-  return opts.systemBlocks
-    ? opts.systemBlocks.map((block) => block.text).filter(Boolean).join('\n\n')
-    : buildSystemPrompt(opts) ?? '';
+/**
+ * The persona's base prompt. With learning on, the personality section stays out of it, so the section the GMI
+ * sends each turn appears once; `systemBlocks` never carry one.
+ */
+function basePrompt(opts: AgentOptions, learningOn: boolean): string {
+  if (opts.systemBlocks) return opts.systemBlocks.map((block) => block.text).filter(Boolean).join('\n\n');
+  return buildSystemPrompt(learningOn ? { ...opts, personality: undefined } : opts) ?? '';
 }
 
 /**
  * Builds the persona of a GMI from agent options (spec D6).
  *
  * @param opts - The agent's options.
- * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking and metaprompts.
+ * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, and whether learning is on.
  * @param tools - The agent's tools, adapted: they decide the persona's capabilities.
  * @throws {Error} When no provider or model can be resolved, as `generateText` throws.
  */
@@ -75,7 +80,7 @@ export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedC
     name,
     description: firstLine ?? name,
     version: '1.0.0',
-    baseSystemPrompt: basePrompt(opts),
+    baseSystemPrompt: basePrompt(opts, cognition.learning !== undefined),
     ...(opts.personality ? { personalityTraits: normalizeHexacoTraits(opts.personality) } : {}),
     defaultProviderId: providerId,
     defaultModelId: modelId,
