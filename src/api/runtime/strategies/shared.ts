@@ -291,12 +291,46 @@ export function resolveAgent(
 }
 
 /**
+ * The input an agent receives after a `beforeAgent` decision: the strategy's
+ * input, with the approver's `modifications.instructions` appended when the
+ * decision carries them.
+ *
+ * @param input - The input the strategy passes the agent.
+ * @param decision - The gate's decision, or `null` when no gate applied.
+ * @returns The input with the approver's instructions, or the input as given.
+ */
+export function withApprovalInstructions(input: string, decision: ApprovalDecision | null): string {
+  const instructions = decision?.modifications?.instructions;
+  return instructions ? `${input}\n\n[Additional instructions]: ${instructions}` : input;
+}
+
+/**
+ * The outcome of the `beforeAgent` gate for a strategy that applies an
+ * approval's instructions.
+ */
+export interface BeforeAgentGate {
+  /** The decision, as {@link checkBeforeAgent} returns it. */
+  decision: ApprovalDecision | null;
+  /**
+   * The input the agent receives when it runs: the strategy's input, with the
+   * approver's instructions appended when the approval carries them. It is
+   * the text the post-approval check read.
+   */
+  input: string;
+}
+
+/**
  * Checks the HITL `beforeAgent` gate for a named agent.
  *
  * When the agency-level `hitl.approvals.beforeAgent` list includes the agent
  * name, this function invokes the HITL handler and returns the decision.
  * If the agent name is not in the approval list, or no handler is configured,
  * returns `null` (meaning "no gate -- proceed normally").
+ *
+ * The post-approval check reads `context` as given. A strategy that appends
+ * an approval's `modifications.instructions` to the agent's input gates the
+ * agent with {@link checkBeforeAgentInput} instead, so the check reads the
+ * input with the instructions.
  *
  * ## Why return `null` instead of `{ approved: true }`?
  *
@@ -331,12 +365,59 @@ export async function checkBeforeAgent(
   agentCalls: AgentCallRecord[],
   agencyConfig: AgencyOptions
 ): Promise<ApprovalDecision | null> {
+  return (await runBeforeAgentGate(name, context, agentCalls, agencyConfig, false)).decision;
+}
+
+/**
+ * Checks the HITL `beforeAgent` gate for a strategy that appends an
+ * approval's `modifications.instructions` to the agent's input, and returns
+ * the input the agent receives.
+ *
+ * After an approval, the post-approval check reads that input, the
+ * instructions included, so instructions the check blocks turn the approval
+ * into a rejection exactly as a blocked input does. The strategy sends the
+ * returned `input`, the text the check read.
+ *
+ * @param name - The agent's declared name in the roster.
+ * @param context - The input the strategy passes the agent.
+ * @param agentCalls - Agent call records accumulated so far in this run.
+ * @param agencyConfig - The full agency configuration containing HITL settings.
+ * @returns The decision (`null` when no gate applies) and the agent's input.
+ *
+ * @example
+ * ```ts
+ * const gate = await checkBeforeAgentInput('researcher', prompt, calls, config);
+ * if (gate.decision && !gate.decision.approved) return;
+ * await researcher.generate(gate.input);
+ * ```
+ */
+export async function checkBeforeAgentInput(
+  name: string,
+  context: string,
+  agentCalls: AgentCallRecord[],
+  agencyConfig: AgencyOptions,
+): Promise<BeforeAgentGate> {
+  return runBeforeAgentGate(name, context, agentCalls, agencyConfig, true);
+}
+
+/**
+ * The `beforeAgent` gate both entry points share: asks the handler, then
+ * runs the post-approval check over the input the agent receives, which
+ * carries the approver's instructions only when `appliesInstructions` is set.
+ */
+async function runBeforeAgentGate(
+  name: string,
+  context: string,
+  agentCalls: AgentCallRecord[],
+  agencyConfig: AgencyOptions,
+  appliesInstructions: boolean,
+): Promise<BeforeAgentGate> {
   const beforeAgent = agencyConfig.hitl?.approvals?.beforeAgent;
   const handler = agencyConfig.hitl?.handler;
 
   // Short-circuit: no gate configured or agent not in the approval list.
   if (!beforeAgent?.includes(name) || !handler) {
-    return null;
+    return { decision: null, input: context };
   }
 
   // Build the approval request with full run context so the human reviewer
@@ -363,6 +444,10 @@ export async function checkBeforeAgent(
   // Fire the approvalDecided callback so event consumers know the outcome.
   agencyConfig.on?.approvalDecided?.(decision);
 
+  // The input the agent receives: built once, read by the check below and
+  // sent by the strategy, so the text checked is the text sent.
+  const input = appliesInstructions ? withApprovalInstructions(context, decision) : context;
+
   // --- Post-approval guardrail override ---
   // Even after HITL approves, run guardrails as a final safety net.
   if (decision.approved && agencyConfig.hitl?.guardrailOverride !== false) {
@@ -370,7 +455,7 @@ export async function checkBeforeAgent(
     const postGuardrails = agencyConfig.hitl?.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'];
     const overrideResult = await runPostApprovalGuardrails(
       `agent:${name}`,
-      { input: context },
+      { input },
       postGuardrails,
       agencyConfig.on,
     );
@@ -382,13 +467,16 @@ export async function checkBeforeAgent(
         timestamp: Date.now(),
       });
       return {
-        approved: false,
-        reason: `Guardrail overrode HITL approval — ${overrideResult.guardrailId}: ${overrideResult.reason}`,
+        decision: {
+          approved: false,
+          reason: `Guardrail overrode HITL approval — ${overrideResult.guardrailId}: ${overrideResult.reason}`,
+        },
+        input,
       };
     }
   }
 
-  return decision;
+  return { decision, input };
 }
 
 /**
