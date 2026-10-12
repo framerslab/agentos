@@ -22,7 +22,8 @@ import { CLISubprocessError } from '../../../../safety/sandbox/subprocess/errors
  * - `RATE_LIMITED` — subscription rate limit hit
  * - `CONTEXT_TOO_LONG` — conversation exceeds model context window
  *
- * The code the HTTP providers give a caller's abort:
+ * The code the OpenAI, Anthropic and Gemini providers throw from
+ * generateCompletion() for a caller's abort:
  * - `REQUEST_ABORTED` — the call was cancelled through its abort signal;
  *   `isRetryableError()` never counts it as retryable
  *

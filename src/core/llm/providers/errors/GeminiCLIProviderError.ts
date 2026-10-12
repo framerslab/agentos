@@ -12,7 +12,8 @@ import { CLISubprocessError } from '../../../../safety/sandbox/subprocess/errors
  * All recognized error codes for the Gemini CLI provider.
  * Combines generic CLI error codes with Gemini-specific ones.
  *
- * The code the HTTP providers give a caller's abort:
+ * The code the OpenAI, Anthropic and Gemini providers throw from
+ * generateCompletion() for a caller's abort:
  * - `REQUEST_ABORTED` — the call was cancelled through its abort signal;
  *   `isRetryableError()` never counts it as retryable
  *
