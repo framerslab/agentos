@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { harness } from './manager-send-dispatch.test.js';
 import { FencedError } from '../stores/types.js';
-import { MockMeetingBotProvider } from '../providers/mock.js';
+import { MockMeetingBotProvider, mockEventContext } from '../providers/mock.js';
 
 async function joined(h: ReturnType<typeof harness>, key = 'k1', keep: 'none' | 'account' = 'none') {
   const r = await h.manager.sendBot({ ...h.request, idempotencyKey: key, keep });
@@ -431,5 +431,29 @@ describe('a step that fails, or a race, on the way out', () => {
     expect(await h.manager.leaveBot(runId, 'stopped_by_owner')).toBe(true);
     expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stopped_by_owner' }]);
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stopped_by_owner' });
+  });
+  it('a cancel during a dispatch whose manager stopped is a leave once the lease has run out, whether or not the bot has reported', async () => {
+    const h = harness();
+    const ids: string[] = [];
+    for (const key of ['k1', 'k2']) {
+      const sent = await h.manager.sendBot({ ...h.request, idempotencyKey: key });
+      const id = sent.ok ? sent.run.runId : '';
+      // a manager that stopped after the provider started the bot and before it recorded the dispatch
+      await h.stores.runs.update(id, { state: 'dispatching', dispatchedAt: h.clock.now(), dispatch: { roomName: `bot-${id}`, workerTokenHash: MockMeetingBotProvider.hash('t') } }, 'requested');
+      await h.stores.jobs.lease('stopped-manager', h.clock.now(), 1);
+      ids.push(id);
+    }
+    h.clock.advance(10);
+    for (const id of ids) expect(await h.manager.leaveBot(id, 'stopped_by_owner')).toBe(true);
+    // the bot that manager started for the first run reports, and its run moves on; the second run's bot never does
+    await h.manager.processProviderEvent('mock', mockEventContext(ids[0], 'joining', {}, h.clock.now(), 't'));
+    await h.manager.tick();
+    for (const id of ids) {
+      expect(h.provider.commands.get(id)).toEqual([{ name: 'leave', reason: 'stopped_by_owner' }]);
+      expect(await h.stores.runs.get(id)).toMatchObject({ state: 'leaving', reason: 'stopped_by_owner' });
+    }
+    h.clock.advance(30_001);
+    await h.manager.tick();
+    for (const id of ids) expect(await h.stores.runs.get(id)).toMatchObject({ state: 'done', reason: 'stopped_by_owner', billedSeconds: 0 });
   });
 });

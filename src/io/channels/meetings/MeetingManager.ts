@@ -1046,6 +1046,13 @@ export class MeetingManager {
           continue;
         }
         if (run.state === 'leaving') continue;
+        // a cancel that leaveBot wrote during a dispatch, with no dispatcher left to act on it: the dispatcher stopped, so the
+        // cancelled job is never leased again and no markDispatched learns it. The leave goes from here, from whatever state
+        // the bot's own reports have moved the run to; a dispatch still under a live lease learns it at markDispatched.
+        if (run.reason !== undefined && !(run.state === 'dispatching' && (await this.dispatchLeaseLive(run.runId, now)))) {
+          await this.leave(run, run.reason);
+          continue;
+        }
         const since = run.dispatchedAt ?? run.joinAt;
         if (now - since > run.limits.totalMs) {
           await this.leave(run, 'cap');
@@ -1088,6 +1095,12 @@ export class MeetingManager {
       }
     }
     if (failure) throw failure.error;
+  }
+
+  /** Whether a dispatcher still holds the run's job under a lease that has not run out. */
+  private async dispatchLeaseLive(runId: string, now: number): Promise<boolean> {
+    const job = await this.stores.jobs.get(runId);
+    return job !== undefined && job.leaseHolder !== undefined && job.leaseExpiresAt !== undefined && job.leaseExpiresAt > now;
   }
 
   /** Evicts completed in-memory runs after the grace. Durable stores omit forget and keep their terminal records. */
