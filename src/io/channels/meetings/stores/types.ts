@@ -23,7 +23,10 @@ export interface RunFilter {
 
 /** The run's row. An implementation seals `meetingUrl` at rest. */
 export interface IRunStore {
-  /** Adds a new run; a run id that exists is an error. */
+  /**
+   * Adds a new run. A run id that exists is an error, and so is an idempotency key the owner already used: of two sends
+   * racing with one key only one run is made, and the other finds it with `findByIdempotencyKey`.
+   */
   insert(run: MeetingRunRecord): Promise<void>;
   /** The run, or undefined when there is none. */
   get(runId: string): Promise<MeetingRunRecord | undefined>;

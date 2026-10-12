@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { FakeClock, InMemoryEventStore, InMemoryJobStore, InMemoryOutbox, InMemoryRunStore, InMemoryTranscriptStore } from '../stores/memory.js';
 import { FencedError } from '../stores/types.js';
+import type { MeetingRunRecord } from '../types.js';
 
 describe('InMemoryJobStore', () => {
   it('leases a due job to one taker only, and renews or expires the lease', async () => {
@@ -116,5 +117,17 @@ describe('InMemoryRunStore', () => {
     expect((await r.update('r1', { state: 'dispatching' }, ['requested', 'scheduled']))?.state).toBe('dispatching');
     expect((await r.findByIdempotencyKey('a', 'k'))?.runId).toBe('r1');
     expect(await r.findByIdempotencyKey('b', 'k')).toBeUndefined();
+  });
+  it('makes one run per owner and idempotency key', async () => {
+    const r = new InMemoryRunStore();
+    const run: MeetingRunRecord = { runId: 'idem-1', ownerRef: 'owner-a', providerName: 'mock', platform: 'google_meet', state: 'requested', keep: 'none', meetingUrl: 'u', botName: 'b', notice: { text: 'n', version: '1', lateArrivalText: 's' }, stopPhrase: 'stop', limits: { waitingRoomMs: 1, aloneMs: 1, totalMs: 1 }, requestedAt: 0, joinAt: 0, billedSeconds: 0, idempotencyKey: 'same-key' };
+    await r.insert(run);
+    await expect(r.insert({ ...run, runId: 'idem-2' })).rejects.toThrow(); // a second send with the key makes no second run
+    await r.insert({ ...run, runId: 'idem-3', ownerRef: 'owner-b' }); // the key is the owner's own
+    await r.insert({ ...run, runId: 'idem-4', idempotencyKey: undefined });
+    await r.insert({ ...run, runId: 'idem-5', idempotencyKey: undefined }); // runs sent without a key never collide
+    expect(await r.get('idem-2')).toBeUndefined();
+    expect((await r.findByIdempotencyKey('owner-a', 'same-key'))?.runId).toBe('idem-1');
+    expect((await r.findByIdempotencyKey('owner-b', 'same-key'))?.runId).toBe('idem-3');
   });
 });

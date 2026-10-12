@@ -43,6 +43,12 @@ export class InMemoryRunStore implements IRunStore {
   private readonly runs = new Map<string, MeetingRunRecord>();
   async insert(run: MeetingRunRecord): Promise<void> {
     if (this.runs.has(run.runId)) throw new Error(`run ${run.runId} exists`);
+    if (run.idempotencyKey !== undefined) {
+      for (const r of this.runs.values()) {
+        // one run per owner and key: of two sends racing with one key, the second insert fails and the sender finds the first
+        if (r.ownerRef === run.ownerRef && r.idempotencyKey === run.idempotencyKey) throw new Error(`run ${r.runId} holds this owner's idempotency key`);
+      }
+    }
     this.runs.set(run.runId, structuredClone(run));
   }
   async get(runId: string): Promise<MeetingRunRecord | undefined> {
