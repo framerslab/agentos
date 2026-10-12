@@ -216,6 +216,7 @@ Store a new memory trace in the agent's brain database.
 
 **Behaviour:**
 - Creates a trace with strength 1.0 (full encoding strength at creation time) and no embedding.
+- Refuses a `type` or `scope` outside the lists above with an error result and stores nothing, also when the caller runs the tool without checking its arguments against the schema.
 - Stores the SHA-256 hash of the content in the trace's metadata. It does not check for an existing trace with the same content: calling it twice stores two traces.
 - ID format: `mt_<epoch ms>_<counter>`, the counter counting up within the process.
 - Records the scope id resolved from the execution context (for example the user id for `user` scope) in the metadata.
@@ -607,6 +608,17 @@ createdAt: 1711234567890
 User prefers TypeScript over Python
 ```
 
+A trace's scope and type name its folders and its id names its file, so each must be a safe file or folder name: not empty; no slash, backslash, colon or control character; not starting with a dot; not starting or ending with a space, or ending with a dot; at most 200 bytes in UTF-8. The ids, scopes and types AgentOS makes all are. A trace imported or added with any other value is left out of the export, and `export()` lists it in `refused` with the field and the reason; every other trace is written, and no file is written outside the export folder:
+
+```ts
+const { refused } = await mem.export('./memory-export', { format: 'markdown' });
+for (const trace of refused) {
+  console.warn(`not exported: ${trace.id} (${trace.field}: ${trace.problem})`);
+}
+```
+
+A JSON or SQLite export writes every trace into its one file, and its `refused` is empty.
+
 ### Obsidian (Wikilinks + Tags)
 
 Extends the Markdown exporter with Obsidian-specific features for integration with Obsidian knowledge vaults:
@@ -619,7 +631,7 @@ Produces:
 
 - `#tags` in the body for every tag on the trace.
 - A **Related:** list of `[[wikilinks]]` to the labels of the knowledge-graph nodes the trace's node links to (empty when the graph has no edges for it).
-- The same YAML front-matter and `{scope}/{type}/` folders as the Markdown export.
+- The same YAML front-matter and `{scope}/{type}/` folders as the Markdown export, with the same rule for the names a trace's folders and file take, and the same `refused` list.
 
 Example output:
 

@@ -18,6 +18,7 @@ import type {
   JSONSchemaObject,
 } from '../../../../core/tools/ITool.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
+import type { MemoryScope, MemoryType } from '../../core/types.js';
 import { buildInitialTraceMetadata, sha256Hex } from '../../retrieval/store/tracePersistence.js';
 import { resolveMemoryToolScopeId } from './scopeContext.js';
 
@@ -27,6 +28,12 @@ import { resolveMemoryToolScopeId } from './scopeContext.js';
 
 /** Monotonic counter shared across all MemoryAddTool instances in the process. */
 let _idCounter = 0;
+
+/** The memory types the tool stores, as its input schema lists them. */
+const MEMORY_TYPES: readonly MemoryType[] = ['episodic', 'semantic', 'procedural', 'prospective', 'relational'];
+
+/** The scopes the tool stores into, as its input schema lists them. */
+const MEMORY_SCOPES: readonly MemoryScope[] = ['thread', 'user', 'persona', 'organization'];
 
 // ---------------------------------------------------------------------------
 // Input / Output types
@@ -113,12 +120,12 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
       },
       type: {
         type: 'string',
-        enum: ['episodic', 'semantic', 'procedural', 'prospective', 'relational'],
+        enum: [...MEMORY_TYPES],
         description: 'Tulving memory type. Defaults to "episodic".',
       },
       scope: {
         type: 'string',
-        enum: ['thread', 'user', 'persona', 'organization'],
+        enum: [...MEMORY_SCOPES],
         description: 'Visibility scope of the trace. Defaults to "user".',
       },
       tags: {
@@ -151,6 +158,10 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
    * and `deleted = 0` (active). No embedding is computed here — the background
    * EmbeddingEncoder will embed it asynchronously.
    *
+   * A `type` or `scope` outside the input schema's lists is refused with an
+   * error result and nothing is stored. A caller that runs the tool without
+   * checking its arguments against the schema gets the same answer.
+   *
    * @param args    - Memory add input (content, optional type/scope/tags).
    * @param context - Tool execution context used to resolve the scope ID.
    * @returns `{ traceId }` on success, or an error result.
@@ -160,11 +171,17 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
     context: ToolExecutionContext
   ): Promise<ToolExecutionResult<MemoryAddOutput>> {
     try {
-      const now = Date.now();
-      const traceId = `mt_${now}_${_idCounter++}`;
-
       const type = args.type ?? 'episodic';
       const scope = args.scope ?? 'user';
+      if (!(MEMORY_TYPES as readonly string[]).includes(type)) {
+        return { success: false, error: `type must be one of: ${MEMORY_TYPES.join(', ')}` };
+      }
+      if (!(MEMORY_SCOPES as readonly string[]).includes(scope)) {
+        return { success: false, error: `scope must be one of: ${MEMORY_SCOPES.join(', ')}` };
+      }
+
+      const now = Date.now();
+      const traceId = `mt_${now}_${_idCounter++}`;
       const scopeId = resolveMemoryToolScopeId(scope, context);
       const tags = JSON.stringify(args.tags ?? []);
       const metadata = JSON.stringify(

@@ -1,5 +1,11 @@
 /** @fileoverview The id rule for wiki pages: an id names a file inside memory/, checked before any file is touched. */
 import * as path from 'node:path';
+import {
+  MAX_PATH_NAME_BYTES,
+  isRefusedPathCharacter,
+  pathNameProblem,
+  resolveInsideFolder,
+} from '../../../../core/utils/pathName.js';
 
 /** The most characters a wiki page id may hold. */
 export const MAX_WIKI_PAGE_ID_LENGTH = 512;
@@ -7,17 +13,12 @@ export const MAX_WIKI_PAGE_ID_LENGTH = 512;
 /** The id of the catalog file, `index.md`, which the store writes itself and never lists as a page. */
 const CATALOG_ID = 'index';
 
-/** The backslash's code: a folder separator on Windows. */
-const BACKSLASH = 0x5c;
-
-/** The colon's code: on Windows it names a drive (`C:page`) or a file's stream (`page:stream`). */
-const COLON = 0x3a;
-
 /**
  * Why a wiki page id was refused:
  * - `'type'`: the id is not a string.
  * - `'empty'`: the id is an empty string.
- * - `'length'`: the id is longer than {@link MAX_WIKI_PAGE_ID_LENGTH} characters.
+ * - `'length'`: the id is longer than {@link MAX_WIKI_PAGE_ID_LENGTH} characters, or a name in it holds more than
+ *   200 bytes in UTF-8, the most a name built from data may hold (`MAX_PATH_NAME_BYTES` in `core/utils/pathName`).
  * - `'character'`: the id holds a backslash, a colon or a control character (U+0000 to U+001F, or U+007F), a NUL
  *   byte among them. On Windows a backslash separates folders and a colon names a drive or a file's stream.
  * - `'segment'`: a name between slashes is empty: the id starts or ends with `/`, or holds `//`.
@@ -43,7 +44,9 @@ export type WikiPageIdProblem =
 const RULE_BROKEN: Record<WikiPageIdProblem, string> = {
   type: 'a page id is a string',
   empty: 'a page id is not empty',
-  length: `a page id is at most ${MAX_WIKI_PAGE_ID_LENGTH} characters`,
+  length:
+    `a page id is at most ${MAX_WIKI_PAGE_ID_LENGTH} characters, ` +
+    `and each name in it at most ${MAX_PATH_NAME_BYTES} bytes in UTF-8`,
   character: 'a page id holds no backslash, no colon and no control character',
   segment: 'a page id is names joined by single slashes, with no slash at its start or end',
   dot: 'no name in a page id starts with a dot',
@@ -79,19 +82,21 @@ export class InvalidWikiPageIdError extends Error {
   }
 }
 
-/** The part of the id rule `id` breaks, or null when the rule accepts it. */
+/**
+ * The part of the id rule `id` breaks, or null when the rule accepts it. Each name between slashes is held to the
+ * rule every name built from data is held to (`pathNameProblem`), after the whole id is checked.
+ */
 function problemOf(id: unknown): WikiPageIdProblem | null {
   if (typeof id !== 'string') return 'type';
   if (id.length === 0) return 'empty';
   if (id.length > MAX_WIKI_PAGE_ID_LENGTH) return 'length';
   for (let i = 0; i < id.length; i++) {
-    const code = id.charCodeAt(i);
-    if (code <= 0x1f || code === 0x7f || code === BACKSLASH || code === COLON) return 'character';
+    if (isRefusedPathCharacter(id.charCodeAt(i))) return 'character';
   }
   for (const name of id.split('/')) {
-    if (name.length === 0) return 'segment';
-    if (name.startsWith('.')) return 'dot';
-    if (name.startsWith(' ') || name.endsWith(' ') || name.endsWith('.')) return 'edge';
+    const problem = pathNameProblem(name);
+    // An empty name sits between two slashes, or at the id's start or end.
+    if (problem) return problem === 'empty' ? 'segment' : problem;
   }
   return id.toLowerCase() === CATALOG_ID ? 'reserved' : null;
 }
@@ -101,9 +106,9 @@ function problemOf(id: unknown): WikiPageIdProblem | null {
  * joined by `/` (`entities/johnny` is `memory/entities/johnny.md`). No name is empty or starts with a dot,
  * so `.` and `..` are never names, and no name starts or ends with a space or ends with a dot, which
  * Windows drops from a name; the id holds no backslash, no colon and no control character, a NUL
- * byte among them; it is at most {@link MAX_WIKI_PAGE_ID_LENGTH} characters; and it is not `index` in any
- * case, the catalog's own id. Every id the store lists, and every id the default clusterer of
- * `attachMemoryWiki` makes, has this form.
+ * byte among them; it is at most {@link MAX_WIKI_PAGE_ID_LENGTH} characters, and each name in it at most 200
+ * bytes in UTF-8; and it is not `index` in any case, the catalog's own id. Every id the store lists, and every
+ * id the default clusterer of `attachMemoryWiki` makes, has this form.
  */
 export function isWikiPageId(id: unknown): id is string {
   return problemOf(id) === null;
@@ -137,9 +142,7 @@ export function resolveWikiPagePath(
   paths: Pick<path.PlatformPath, 'resolve' | 'sep'> = path,
 ): string {
   assertWikiPageId(id);
-  const root = paths.resolve(memoryDir);
-  const file = paths.resolve(root, `${id}.md`);
-  const inside = root.endsWith(paths.sep) ? root : root + paths.sep;
-  if (!file.startsWith(inside)) throw new InvalidWikiPageIdError('outside', id);
+  const file = resolveInsideFolder(memoryDir, [`${id}.md`], paths);
+  if (file === null) throw new InvalidWikiPageIdError('outside', id);
   return file;
 }

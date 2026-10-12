@@ -72,18 +72,30 @@ A page's id is its path under `memory/` without `.md`, with `/` between folders:
 by `/`. No name is empty or starts with a dot, so `.` and `..` are never names, and
 no name starts or ends with a space or ends with a dot, which Windows drops from a
 name; the id holds no backslash, no colon and no control character, a NUL byte among
-them; it is at most 512 characters; and it is not `index`, in any case, which names
-the catalog. The store checks every id against this rule, and checks that the path
-the id names lies inside `memory/`, before it reads or writes anything. `readPage`
-and `writePage` throw an `InvalidWikiPageIdError` for any other id,
-`read_memory_page` answers one with an error result whose `details.code` is
-`INVALID_WIKI_PAGE_ID`, and a compile skips a cluster assignment whose page id is
-refused and reports it in the result's `conflicts`. `isWikiPageId` tells whether an
-id has this form. A file whose path makes no valid id, such as any file in a folder
-whose name starts with a dot (`.meta/`, `.store/`), is not a page: the store does
-not list or index it. A link inside `memory/` is followed like any other file there,
-so what it points to, inside the folder or outside it, is part of the wiki. The
-store never makes a link; only whoever can write the folder can add one.
+them; it is at most 512 characters, and each name in it at most 200 bytes in UTF-8,
+so a page's file name, with `.md`, stays under the 255 bytes Linux allows in a name;
+and it is not `index`, in any case, which names the catalog. The store checks every
+id against this rule, and checks that the path the id names lies inside `memory/`,
+before it reads or writes anything. `readPage` and `writePage` throw an
+`InvalidWikiPageIdError` for any other id, `read_memory_page` answers one with an
+error result whose `details.code` is `INVALID_WIKI_PAGE_ID`, and a compile skips a
+cluster assignment whose page id is refused and reports it in the result's
+`conflicts`. A compile also reports there a page the store fails to write, with the
+reason, and goes on with the other pages. `isWikiPageId` tells whether an id has
+this form. A file whose path makes no valid id, such as any file in a folder whose
+name starts with a dot (`.meta/`, `.store/`), is not a page: the store does not list
+or index it.
+
+Both checks are on the path the id names, not on where a link leads. A link inside
+`memory/` is followed like any other file there, for reads and for writes: what it
+points to, inside the folder or outside it, is part of the wiki, and a compile that
+merges into a page that is a link rewrites the file the link points to. The store
+never makes a link, and no page id makes one, so only whoever can write the folder
+can add one. Let only people and tools you trust as much as the agent's own process
+write to `memory/`, and check a `memory/` folder you did not make for links before an
+agent uses it. A check on where links lead would refuse every link that points
+outside the folder, which a wiki that links shared notes in on purpose relies on, so
+the store does not check where links lead.
 
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
 and is left untouched on disk.

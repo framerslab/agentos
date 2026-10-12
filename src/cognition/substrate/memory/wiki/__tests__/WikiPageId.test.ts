@@ -40,7 +40,9 @@ describe('wiki page id rule', () => {
     ['a page named index in a folder', 'entities/index'],
     ['a name with spaces, capitals and a letter outside ASCII', 'people/Ana L\u00f3pez'],
     ['dots inside a name', 'notes/v1..v2'],
-    ['an id at the length limit', 'x'.repeat(MAX_WIKI_PAGE_ID_LENGTH)],
+    ['an id at the length limit', ['x'.repeat(170), 'x'.repeat(170), 'x'.repeat(170)].join('/')],
+    ['a name at the byte limit', `concepts/${'x'.repeat(200)}`],
+    ['two-byte letters at the byte limit', `people/${'\u00e9'.repeat(100)}`],
   ];
 
   it.each(accepted)('accepts %s', (_label, id) => {
@@ -77,6 +79,10 @@ describe('wiki page id rule', () => {
     ['a trailing slash', 'a/', 'segment'],
     ['an id one character past the limit', 'x'.repeat(MAX_WIKI_PAGE_ID_LENGTH + 1), 'length'],
     ['a very long id', 'a/'.repeat(50_000) + 'b', 'length'],
+    ['a name longer than a file system takes', `concepts/${'x'.repeat(300)}`, 'length'],
+    ['a name one byte past the limit', `concepts/${'x'.repeat(201)}`, 'length'],
+    ['a folder name past the limit', `${'x'.repeat(201)}/page`, 'length'],
+    ['two-byte letters past the byte limit', `people/${'\u00e9'.repeat(101)}`, 'length'],
     ['a number', 42, 'type'],
     ['null', null, 'type'],
     ['undefined', undefined, 'type'],

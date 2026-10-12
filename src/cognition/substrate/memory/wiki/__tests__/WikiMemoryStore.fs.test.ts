@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { WikiMemoryStore } from '../WikiMemoryStore.js';
+import { WikiMemoryStore, listWikiPageIds, type WikiFolderEntry } from '../WikiMemoryStore.js';
 import { ensureMemoryDir } from '../migrateMemoryMd.js';
 
 let dir: string;
@@ -89,5 +89,36 @@ describe('WikiMemoryStore filesystem', () => {
     await store.writePage({ id: 'concepts/billing', type: 'concept', summary: 's', updated: '', sources: [], body: 'b', links: [] });
     const pages = await store.load();
     expect(pages.map((p) => p.id)).toEqual(['concepts/billing']);
+  });
+});
+
+describe('listWikiPageIds', () => {
+  const folder = (name: string): WikiFolderEntry => ({ name, isDirectory: () => true });
+  const file = (name: string): WikiFolderEntry => ({ name, isDirectory: () => false });
+
+  it('joins folder names with / on Windows, so nested pages keep the ids the compiler writes', async () => {
+    const listings: Record<string, WikiFolderEntry[]> = {
+      'C:\\agent\\memory': [folder('entities'), folder('.meta'), file('index.md'), file('page.md'), file('.hidden.md')],
+      'C:\\agent\\memory\\entities': [file('johnny.md'), folder('team'), file('notes.txt')],
+      'C:\\agent\\memory\\entities\\team': [file('ana.md')],
+      'C:\\agent\\memory\\.meta': [file('stale.md')],
+    };
+    const asked: string[] = [];
+    const ids = await listWikiPageIds(
+      'C:\\agent\\memory',
+      async (dir) => {
+        asked.push(dir);
+        return listings[dir] ?? [];
+      },
+      path.win32,
+    );
+
+    expect(ids).toEqual(['entities/johnny', 'entities/team/ana', 'page']);
+    // Each folder is read at its Windows path, and no folder whose name starts with a dot is read.
+    expect(asked.sort()).toEqual([
+      'C:\\agent\\memory',
+      'C:\\agent\\memory\\entities',
+      'C:\\agent\\memory\\entities\\team',
+    ]);
   });
 });

@@ -44,7 +44,9 @@ export class WikiCompiler {
   /**
    * Fold traces into the pages the cluster step assigns them to. An assignment whose page id the wiki
    * refuses (see `isWikiPageId`) is not read, merged or written: it is reported in `conflicts`, with the
-   * reason as its note, and the other assignments go on.
+   * reason as its note, and the other assignments go on. So is an assignment whose page the store fails to
+   * write, such as one whose path the file system refuses: its note says why, its traces are not counted as
+   * consumed, and the other assignments go on.
    */
   async compile(input: {
     traces: TraceLike[];
@@ -79,15 +81,23 @@ export class WikiCompiler {
       const type: WikiPageType = current?.type ?? inferType(a.pageId);
       const newSources = [...new Set([...(current?.sources ?? []), ...a.traceIds])];
 
-      await this.opts.store.writePage({
-        id: a.pageId,
-        type,
-        summary: current?.summary ?? facts[0].slice(0, 120),
-        updated: now(),
-        sources: newSources,
-        body: mergedBody,
-        links: extractWikiLinks(mergedBody),
-      });
+      try {
+        await this.opts.store.writePage({
+          id: a.pageId,
+          type,
+          summary: current?.summary ?? facts[0].slice(0, 120),
+          updated: now(),
+          sources: newSources,
+          body: mergedBody,
+          links: extractWikiLinks(mergedBody),
+        });
+      } catch (err) {
+        // One page that cannot be written does not stop the compile, which would then fail on the same
+        // batch every time it runs.
+        const reason = err instanceof Error ? err.message : String(err);
+        result.conflicts.push({ pageId: a.pageId, note: `not written: ${reason}` });
+        continue;
+      }
       result.pagesWritten.push(a.pageId);
       result.tracesConsumed += a.traceIds.length;
     }

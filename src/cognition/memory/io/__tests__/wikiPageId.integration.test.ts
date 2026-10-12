@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { attachMemoryWiki } from '../attachMemoryWiki.js';
+import { Memory } from '../facade/Memory.js';
 import { ReadMemoryPageTool } from '../tools/ReadMemoryPageTool.js';
 import { ensureMemoryDir, InvalidWikiPageIdError, type WikiPage } from '../../../substrate/memory/wiki/index.js';
 
@@ -153,5 +154,63 @@ describe('wiki page ids stay inside the memory folder', () => {
     expect((await store.load()).map((p) => p.id)).toEqual(['page']);
     expect(memory.remembered.some((c) => c.includes('Inside the wiki.'))).toBe(true);
     expect(memory.remembered.some((c) => c.includes('Hidden page.') || c.includes('Old page.'))).toBe(false);
+  });
+});
+
+describe('a compile goes on past a page the file system will not take', () => {
+  it('reports a name too long for a file and a page it cannot write, writes the rest and moves the watermark', async () => {
+    const memory = await Memory.createSqlite(path.join(root, 'memory.sqlite'), {
+      graph: false,
+      selfImprove: false,
+      decay: false,
+    });
+    try {
+      // A file where the folder of the page blocked/page would go, so that page cannot be written.
+      fs.writeFileSync(path.join(memoryDir, 'blocked'), 'Not a folder.\n');
+      const longId = `concepts/${'x'.repeat(300)}`;
+      const prompts: string[] = [];
+      const { store } = await attachMemoryWiki({
+        memory,
+        memoryDir,
+        agentId: 'a1',
+        llm: async (prompt) => {
+          prompts.push(prompt);
+          return 'Merged facts.';
+        },
+        chunk: (t) => [{ text: t }],
+        now: () => '2026-10-12T00:00:00.000Z',
+        cluster: async (traces) =>
+          traces.map((t) => ({
+            pageId: t.content.startsWith('Long') ? longId : t.content.startsWith('Blocked') ? 'blocked/page' : 'concepts/kept',
+            traceIds: [t.id],
+          })),
+      });
+      await memory.remember('Long fact.');
+      await memory.remember('Blocked fact.');
+      await memory.remember('Kept fact.');
+
+      const result = await memory.compileWiki({ reason: 'explicit' });
+
+      expect(result.pagesWritten).toEqual(['concepts/kept']);
+      expect(result.tracesConsumed).toBe(1);
+      expect(result.conflicts).toHaveLength(2);
+      expect(result.conflicts).toEqual(
+        expect.arrayContaining([
+          { pageId: longId, note: expect.stringContaining('refused') },
+          { pageId: 'blocked/page', note: expect.stringContaining('not written') },
+        ]),
+      );
+      // The long id is refused before its merge prompt; the blocked page is merged, then its write fails.
+      expect(prompts).toHaveLength(2);
+      expect(prompts.some((p) => p.includes('Long fact.'))).toBe(false);
+      expect(fs.readFileSync(path.join(memoryDir, 'concepts', 'kept.md'), 'utf8')).toContain('Merged facts.');
+      expect(await store.readMetaWatermark()).not.toBeNull();
+
+      // The watermark moved past the batch, so the next compile does not run into the same pages.
+      expect(await memory.compileWiki({ reason: 'explicit' })).toEqual({ pagesWritten: [], tracesConsumed: 0, conflicts: [] });
+      expect(prompts).toHaveLength(2);
+    } finally {
+      await memory.close();
+    }
   });
 });

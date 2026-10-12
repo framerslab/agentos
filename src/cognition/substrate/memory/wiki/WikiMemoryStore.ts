@@ -6,6 +6,68 @@ import { parsePage, serializePage, renderCatalog } from './WikiPageCodec.js';
 import { isWikiPageId, resolveWikiPagePath } from './WikiPageId.js';
 import type { WikiPage, MetaIndex, IndexResult } from './types.js';
 
+/** One entry of a folder's listing: its name, and whether it is a folder. `fs.Dirent` has this shape. */
+export interface WikiFolderEntry {
+  name: string;
+  isDirectory(): boolean;
+}
+
+/**
+ * List the page ids under `memoryDir`: each `.md` file's path under the folder without `.md`, with `/` between
+ * folders on every platform, the form the compiler writes and `readPage` takes. Every file or folder whose name
+ * starts with a dot (`.meta/` among them) is skipped, and so is every file whose path makes no valid page id,
+ * `index.md` among them, so every id listed is one `readPage` accepts.
+ *
+ * @param memoryDir - The wiki's folder.
+ * @param readDir - Lists one folder, given its path. A folder it cannot list is skipped.
+ * @param paths - The path functions that build a folder's path from `memoryDir` and its names: the platform's by
+ *   default.
+ * @returns The ids, sorted.
+ */
+export async function listWikiPageIds(
+  memoryDir: string,
+  readDir: (dir: string) => Promise<readonly WikiFolderEntry[]>,
+  paths: Pick<path.PlatformPath, 'join'> = path,
+): Promise<string[]> {
+  const out: string[] = [];
+  const walk = async (names: readonly string[]): Promise<void> => {
+    let entries: readonly WikiFolderEntry[];
+    try {
+      entries = await readDir(paths.join(memoryDir, ...names));
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.name.startsWith('.')) continue;
+      if (e.isDirectory()) {
+        await walk([...names, e.name]);
+      } else if (e.name.endsWith('.md')) {
+        // Ids join folders with `/` on every platform, never with the platform's separator.
+        const id = [...names, e.name.slice(0, -3)].join('/');
+        if (isWikiPageId(id)) out.push(id);
+      }
+    }
+  };
+  await walk([]);
+  return out.sort();
+}
+
+/**
+ * The page entries of `.meta/index.json` in an object with no prototype, so a page id that names a member every
+ * object has (`constructor`, `toString`, `__proto__`) finds only its own entry. An entry with no list of trace ids
+ * is dropped, and its page is indexed again.
+ */
+function pageEntries(pages: unknown): MetaIndex['pages'] {
+  const entries: MetaIndex['pages'] = Object.create(null);
+  if (pages === null || typeof pages !== 'object' || Array.isArray(pages)) return entries;
+  for (const [id, entry] of Object.entries(pages)) {
+    if (entry !== null && typeof entry === 'object' && Array.isArray((entry as { traceIds?: unknown }).traceIds)) {
+      entries[id] = entry as MetaIndex['pages'][string];
+    }
+  }
+  return entries;
+}
+
 /** The slice of the Memory facade the store depends on (injected for testability). */
 export interface MemoryIndexPort {
   remember(content: string, options?: Record<string, unknown>): Promise<{ id: string }>;
@@ -91,44 +153,25 @@ export class WikiMemoryStore {
     await fs.writeFile(path.join(this.memoryDir, 'index.md'), renderCatalog(pages));
   }
 
-  /**
-   * Recursively list page ids (the path under memory/ with `/` between folders, no extension), skipping
-   * index.md and every file or folder whose name starts with a dot (`.meta/` among them). A file whose path
-   * does not make a valid page id is not a page, so every id listed is one `readPage` accepts.
-   */
+  /** The page ids under memory/ (see `listWikiPageIds`). */
   private async listPageIds(): Promise<string[]> {
-    const out: string[] = [];
-    const walk = async (relDir: string): Promise<void> => {
-      const abs = path.join(this.memoryDir, relDir);
-      let entries: import('node:fs').Dirent[];
-      try {
-        entries = await fs.readdir(abs, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const e of entries) {
-        if (e.name.startsWith('.')) continue;
-        // Ids join folders with `/` on every platform, the form the compiler writes and readPage takes.
-        const rel = relDir ? `${relDir}/${e.name}` : e.name;
-        if (e.isDirectory()) {
-          await walk(rel);
-        } else if (e.name.endsWith('.md') && rel !== 'index.md') {
-          const id = rel.slice(0, -3);
-          if (isWikiPageId(id)) out.push(id);
-        }
-      }
-    };
-    await walk('');
-    return out.sort();
+    return listWikiPageIds(this.memoryDir, (dir) => fs.readdir(dir, { withFileTypes: true }));
   }
 
+  /**
+   * Read `.meta/index.json`, or an empty index when it is missing or unreadable. Its page entries are held in an
+   * object with no prototype (see `pageEntries`), so any page id is safe to look up.
+   */
   protected async readMeta(): Promise<MetaIndex> {
+    let parsed: unknown = null;
     try {
-      const raw = await fs.readFile(path.join(this.memoryDir, '.meta', 'index.json'), 'utf8');
-      return JSON.parse(raw) as MetaIndex;
+      parsed = JSON.parse(await fs.readFile(path.join(this.memoryDir, '.meta', 'index.json'), 'utf8'));
     } catch {
-      return { lastCompiledAt: null, pages: {} };
+      // No index yet, or one that does not parse: start from an empty one.
     }
+    const meta: Partial<MetaIndex> =
+      parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Partial<MetaIndex>) : {};
+    return { ...meta, lastCompiledAt: meta.lastCompiledAt ?? null, pages: pageEntries(meta.pages) };
   }
 
   protected async writeMeta(meta: MetaIndex): Promise<void> {

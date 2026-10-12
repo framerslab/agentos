@@ -9,6 +9,7 @@
  */
 
 import type { MemoryRetrievalPolicy } from '../../../rag/unified/policy.js';
+import type { PathNameProblem } from '../../../../core/utils/pathName.js';
 
 // ---------------------------------------------------------------------------
 // Embedding configuration
@@ -488,6 +489,46 @@ export interface ExportOptions {
    * @default true
    */
   includeConversations?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// export() result
+// ---------------------------------------------------------------------------
+
+/**
+ * A trace an export left out. Nothing was written for it.
+ */
+export interface RefusedExportTrace {
+  /** The trace's id, as stored. */
+  id: string;
+
+  /**
+   * The value that was refused: the trace's `scope`, `type` or `id`, which name its folders and its file in a
+   * Markdown or Obsidian export; or `path`, when the path an exporter subclass builds for the trace is outside
+   * the export folder.
+   */
+  field: 'scope' | 'type' | 'id' | 'path';
+
+  /**
+   * Why: the part of the name rule the value breaks (`PathNameProblem` in `core/utils/pathName`), or `outside`
+   * for a path outside the export folder.
+   */
+  problem: PathNameProblem | 'outside';
+}
+
+/**
+ * What `Memory.export()` reports.
+ */
+export interface ExportResult {
+  /**
+   * The traces the export left out, each with its id and the reason; its length is how many. A Markdown or
+   * Obsidian export names a trace's folders after its scope and type and its file after its id, so it leaves out
+   * a trace whose scope, type or id is not a safe file or folder name: an empty one, one that holds a slash, a
+   * backslash, a colon or a control character, one that starts with a dot, starts or ends with a space or ends
+   * with a dot, or one longer than 200 bytes in UTF-8. Every other trace is written. A JSON or SQLite export
+   * writes every trace into its one file and leaves none out.
+   */
+  refused: RefusedExportTrace[];
 }
 
 // ---------------------------------------------------------------------------

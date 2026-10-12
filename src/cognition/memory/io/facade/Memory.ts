@@ -47,6 +47,7 @@ import type {
   IngestOptions,
   IngestResult,
   ExportOptions,
+  ExportResult,
   ImportOptions,
   ImportResult,
   ConsolidationResult,
@@ -1280,10 +1281,16 @@ export class Memory {
    * - `.sqlite` / `.db` -> SQLite file copy
    * - directory path -> Markdown or Obsidian (based on `options.format`)
    *
+   * A Markdown or Obsidian export writes one file per trace, in folders named
+   * after the trace's scope and type, and leaves out a trace whose scope, type
+   * or id is not a safe file or folder name; the result lists each one left
+   * out. No file is written outside the export folder.
+   *
    * @param outputPath - Path to write the export to.
    * @param options    - Optional format and content controls.
+   * @returns The traces the export left out, with the reason for each.
    */
-  async export(outputPath: string, options?: ExportOptions): Promise<void> {
+  async export(outputPath: string, options?: ExportOptions): Promise<ExportResult> {
     await this._initPromise;
 
     const format = await this._detectExportFormat(outputPath, options);
@@ -1293,25 +1300,23 @@ export class Memory {
         const { JsonExporter } = await import('../JsonExporter.js');
         const exporter = new JsonExporter(this._brain);
         await exporter.export(outputPath, options);
-        break;
+        return { refused: [] };
       }
       case 'markdown': {
         const { MarkdownExporter } = await import('../MarkdownExporter.js');
         const exporter = new MarkdownExporter(this._brain);
-        await exporter.export(outputPath, options);
-        break;
+        return exporter.export(outputPath, options);
       }
       case 'obsidian': {
         const { ObsidianExporter } = await import('../ObsidianExporter.js');
         const exporter = new ObsidianExporter(this._brain);
-        await exporter.export(outputPath, options);
-        break;
+        return exporter.export(outputPath, options);
       }
       case 'sqlite': {
         const { SqliteExporter } = await import('../SqliteExporter.js');
         const exporter = new SqliteExporter(this._brain);
         await exporter.export(outputPath, options);
-        break;
+        return { refused: [] };
       }
       default: {
         throw new Error(`Memory.export(): unsupported format "${format}".`);
