@@ -893,12 +893,13 @@ export class MeetingManager {
     const run = await this.stores.runs.get(runId);
     if (!run || run.state !== 'purging') return;
     const provider = this.providers.get(run.providerName);
-    const stillInCall = run.dispatch !== undefined && run.leftAt === undefined;
-    if (stillInCall) return; // the bot has not left yet; the kill timer and the left report bring us back
     try {
+      // the stores' content goes at once: behind the fence nothing new is written, so these steps need not wait for the bot
       await this.stores.transcript.purge(runId);
       await this.stores.events.purgePayloads(runId);
       await this.stores.outbox.purgeContent(runId);
+      const stillInCall = run.dispatch !== undefined && run.leftAt === undefined;
+      if (stillInCall) return; // the bot has not left yet; the kill timer and the left report bring us back
       for (const hook of this.purgeHooks) await hook(runId);
       if (provider) await provider.deleteRun({ runId });
       if (run.dispatch?.roomName) await this.config.room.delete(run.dispatch.roomName);
