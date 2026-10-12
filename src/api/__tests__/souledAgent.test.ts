@@ -15,6 +15,7 @@ vi.mock('../agent.js', async (orig) => {
 
 import { souledAgent } from '../souledAgent.js';
 import { Memory } from '../../cognition/memory/io/facade/Memory.js';
+import { WikiMemoryStore } from '../../cognition/substrate/memory/wiki/WikiMemoryStore.js';
 
 let dir: string;
 beforeEach(() => {
@@ -81,9 +82,22 @@ describe('souledAgent', () => {
     const entries = indexEntries();
     expect(Object.keys(entries).sort()).toEqual([...names].sort());
 
-    // Each page finds its own entry, so the next start indexes none of them again.
-    const second = (await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: dir } as any)) as any;
-    await second.close();
+    // Each page finds its own entry, so the next start's index skips all five and indexes none of them again.
+    const index = vi.spyOn(WikiMemoryStore.prototype, 'index');
+    let boot: any;
+    try {
+      const second = (await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: dir } as any)) as any;
+      // The start's first index is the boot index over memory/.
+      boot = await index.mock.results[0]?.value;
+      await second.close();
+    } finally {
+      index.mockRestore();
+    }
+    expect({ ...boot, skipped: [...boot.skipped].sort() }).toEqual({
+      indexed: [],
+      skipped: [...names].sort(),
+      removed: [],
+    });
     expect(indexEntries()).toEqual(entries);
   });
 
