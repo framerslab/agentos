@@ -169,7 +169,7 @@ Every table names the files its figures come from. An input a run did not have r
 
 No report set is published.
 
-No research paper is published.
+The research paper's method draft is at [docs/research/gmi-vs-agent/paper.md](https://github.com/framerslab/agentos/blob/master/docs/research/gmi-vs-agent/paper.md) in this repository, with its [references](https://github.com/framerslab/agentos/blob/master/docs/research/gmi-vs-agent/references.md); its results are pending the confirmatory analysis.
 
 ## What the study does not cover
 
