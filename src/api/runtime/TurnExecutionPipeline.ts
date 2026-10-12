@@ -682,12 +682,12 @@ export class TurnExecutionPipeline {
       lifecycleDegraded,
       longTermMemoryFeedbackPayload,
       longTermMemoryRetrievalDiagnostics,
+      // The text the retrieval read when the retriever reports none: a
+      // multimodal turn as its text, with no image data.
       longTermMemoryQueryText:
         typeof (longTermMemoryRetrievalDiagnostics as any)?.queryText === 'string'
           ? ((longTermMemoryRetrievalDiagnostics as any).queryText as string)
-          : typeof gmiInput.content === 'string'
-            ? gmiInput.content
-            : JSON.stringify(gmiInput.content),
+          : turnContentText(gmiInput.content),
     };
   }
 }
