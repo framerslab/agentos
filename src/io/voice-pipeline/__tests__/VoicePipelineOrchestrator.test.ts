@@ -20,6 +20,7 @@
  * - stopSession tears down all components
  * - VAD events are forwarded from STT speech_start/speech_end to endpoint detector
  * - turn_complete is re-emitted on the orchestrator, so waitForUserTurn() resolves
+ * - A turn_complete listener that stops the session leaves it closed, and no turn is taken
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -373,5 +374,27 @@ describe('VoicePipelineOrchestrator', () => {
     const event: TurnCompleteEvent = { transcript: 'hello there', confidence: 0.9, durationMs: 800, reason: 'punctuation' };
     detector.emit('turn_complete', event);
     await expect(turn).resolves.toMatchObject({ transcript: 'hello there' });
+  });
+
+  /**
+   * A listener on the orchestrator's turn_complete runs inside the handler of
+   * the detector's event. One that stops the session must leave it closed: no
+   * state after CLOSED, no agent_thinking and no call to the agent.
+   */
+  it('takes no turn when a turn_complete listener stops the session', async () => {
+    await startSession();
+    const states: string[] = [];
+    orchestrator.on('state_changed', (evt: { from: string; to: string }) => states.push(evt.to));
+    orchestrator.on('turn_complete', () => {
+      void orchestrator.stopSession('ended by a listener');
+    });
+
+    endpoint.emit('turn_complete', makeTurnComplete());
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(orchestrator.state).toBe('closed');
+    expect(states).toEqual(['closed']);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    expect(transport.sendControl).not.toHaveBeenCalledWith({ type: 'agent_thinking' });
   });
 });
