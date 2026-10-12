@@ -22,6 +22,7 @@ import {
   type MeetingEventType,
   type MeetingLeaveReason,
   type MeetingPlatform,
+  type MeetingRunLimits,
   type MeetingRunRecord,
   type MeetingRunState,
   type NormalizedMeetingEvent,
@@ -129,6 +130,24 @@ const ACTIVE_STATES: readonly MeetingRunState[] = ['dispatching', 'joining', 'wa
 const PURGEABLE_STATES: readonly MeetingRunState[] = ['requested', 'scheduled', ...ACTIVE_STATES.filter((s) => s !== 'purging')];
 /** Reports that carry what a person said or did; behind the fence they are neither stored nor forwarded. */
 const CONTENT_REPORTS: ReadonlySet<ProviderEventType> = new Set<ProviderEventType>(['chat_message', 'stop_command', 'participant_joined', 'participant_left']);
+
+/**
+ * A run's limits: the defaults, each replaced by the request's own value where it gives one. A limit given as
+ * `undefined` keeps its default (a spread would copy the `undefined` over it and leave the run without that limit).
+ *
+ * @throws RangeError when a limit is given that is not a finite number of milliseconds, zero or more.
+ */
+function runLimits(requested: Partial<MeetingRunLimits> | undefined): MeetingRunLimits {
+  const limits: MeetingRunLimits = { ...DEFAULT_RUN_LIMITS };
+  for (const key of ['waitingRoomMs', 'aloneMs', 'totalMs', 'pageAwayMs'] as const) {
+    const value = requested?.[key];
+    if (value === undefined) continue;
+    // NaN would turn off the limit it sets: every comparison with it is false
+    if (!Number.isFinite(value) || value < 0) throw new RangeError(`limits.${key} must be a finite number of milliseconds, zero or more`);
+    limits[key] = value;
+  }
+  return limits;
+}
 
 /**
  * The meeting-participant channel's manager: sends bots, dispatches them under
@@ -252,32 +271,39 @@ export class MeetingManager {
   // ── Sending ──
 
   /**
-   * Sends a bot: checks the link against the platform, answers the run an earlier send by the same owner with the same
-   * idempotency key made, reserves the run's time, stores the run and schedules its dispatch (now, or at `joinAt`). A
-   * reservation that covers less than `minReservationSeconds` is released and the send refused.
+   * Sends a bot: answers the run an earlier send by the same owner with the same idempotency key made, checks the link
+   * against the platform, reserves the run's time, stores the run and schedules its dispatch (now, or at `joinAt`). A
+   * reservation that covers less than `minReservationSeconds` is released and the send refused. A limit the request
+   * leaves out, or gives as `undefined`, takes its default.
+   *
+   * @throws RangeError when `joinAt` or a limit the request gives is not a finite number (a limit must also be zero or more); nothing is reserved.
    */
   async sendBot(request: SendBotRequest): Promise<SendBotResult> {
+    // a repeated send answers the run its key made, whatever changed since (a platform paused in between included)
+    if (request.idempotencyKey !== undefined) {
+      const existing = await this.stores.runs.findByIdempotencyKey(request.ownerRef, request.idempotencyKey);
+      if (existing) return { ok: true, run: existing, repeated: true };
+    }
     const provider = this.providerFor(request.platform, request.providerName);
     if (!provider) return { ok: false, reason: 'no_provider', message: `no provider for ${request.platform}` };
     const url = provider.checkJoinUrl(request.meetingUrl);
     if (!url.ok) return { ok: false, reason: 'invalid_url', message: url.message };
     if (url.platform !== request.platform) return { ok: false, reason: 'invalid_url', message: `the link is a ${url.platform} link` };
     if (this.paused.has(request.platform)) return { ok: false, reason: 'platform_paused', message: `${request.platform} is paused today` };
-    if (request.idempotencyKey !== undefined) {
-      const existing = await this.stores.runs.findByIdempotencyKey(request.ownerRef, request.idempotencyKey);
-      if (existing) return { ok: true, run: existing, repeated: true };
-    }
     const now = this.now();
+    const joinAt = request.joinAt ?? now;
+    // a NaN join time is never due: the run would wait for ever with its reservation held
+    if (!Number.isFinite(joinAt)) throw new RangeError('joinAt must be a finite time in milliseconds');
+    const limits = runLimits(request.limits);
     const runId = randomUUID();
-    const limits = { ...DEFAULT_RUN_LIMITS, ...request.limits };
     const reserved = await this.stores.entitlement.reserve({ ownerRef: request.ownerRef, runId, platform: request.platform, maxSeconds: Math.ceil(limits.totalMs / 1000) });
     if (!reserved.ok) return { ok: false, reason: reserved.reason, message: reserved.message };
-    if (reserved.maxSeconds < this.minReservationSeconds) {
+    // written as "not at least" so that an answer that is not a number is refused too, rather than leaving the run without a cap
+    if (!(reserved.maxSeconds >= this.minReservationSeconds)) {
       await this.stores.entitlement.release(reserved.reservationId);
       return { ok: false, reason: 'allowance', message: `under ${Math.round(this.minReservationSeconds / 60)} minutes left` };
     }
     limits.totalMs = Math.min(limits.totalMs, reserved.maxSeconds * 1000);
-    const joinAt = request.joinAt ?? now;
     const run: MeetingRunRecord = {
       runId,
       ownerRef: request.ownerRef,

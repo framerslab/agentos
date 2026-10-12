@@ -110,6 +110,33 @@ describe('sendBot', () => {
     expect(h.entitlement.released).toEqual(['res-1']);
     expect(h.provider.dispatched.size).toBe(0);
   });
+  it('keeps the default of a limit given as undefined, and refuses a limit or a join time that is not a finite number before anything is reserved', async () => {
+    const h = harness();
+    const reserve = vi.spyOn(h.entitlement, 'reserve');
+    const sent = await h.manager.sendBot({ ...h.request, limits: { totalMs: undefined, waitingRoomMs: undefined, aloneMs: 120_000 } });
+    expect(sent.ok && sent.run.limits).toEqual({ waitingRoomMs: 600_000, aloneMs: 120_000, totalMs: 14_400_000 });
+    expect(reserve).toHaveBeenLastCalledWith(expect.objectContaining({ maxSeconds: 14_400 }));
+    await expect(h.manager.sendBot({ ...h.request, idempotencyKey: 'k2', limits: { totalMs: Number.NaN } })).rejects.toThrow(RangeError);
+    await expect(h.manager.sendBot({ ...h.request, idempotencyKey: 'k3', limits: { waitingRoomMs: -1 } })).rejects.toThrow(RangeError);
+    await expect(h.manager.sendBot({ ...h.request, idempotencyKey: 'k4', joinAt: Number.NaN })).rejects.toThrow(RangeError);
+    expect(reserve).toHaveBeenCalledTimes(1);
+    expect(await h.stores.runs.list({})).toHaveLength(1);
+  });
+  it('refuses a reservation whose answer is not a number, and releases it', async () => {
+    const h = harness();
+    h.entitlement.reserveAnswer = { ok: true, reservationId: 'res-nan', maxSeconds: Number.NaN };
+    expect(await h.manager.sendBot(h.request)).toMatchObject({ ok: false, reason: 'allowance' });
+    expect(h.entitlement.released).toEqual(['res-nan']);
+    expect(await h.stores.runs.list({})).toEqual([]);
+  });
+  it('answers a repeated send with its run even when the platform was paused in between', async () => {
+    const h = harness();
+    const first = await h.manager.sendBot(h.request);
+    h.manager.pausePlatform('google_meet');
+    const again = await h.manager.sendBot(h.request);
+    expect(again.ok && again.repeated && again.run.runId === (first.ok ? first.run.runId : '')).toBe(true);
+    expect(await h.manager.sendBot({ ...h.request, idempotencyKey: 'k2' })).toMatchObject({ ok: false, reason: 'platform_paused' });
+  });
 });
 
 describe('dispatch and the interlock', () => {
