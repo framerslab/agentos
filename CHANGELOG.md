@@ -1,3 +1,9 @@
+## [0.13.70](https://github.com/framerslab/agentos/compare/v0.13.69...v0.13.70) (2026-10-12)
+
+### fix
+
+* **vision:** the cloud tier keeps the image on its configured provider, performOCR uses its key and transcribes (#347) ([2adb4cd](https://github.com/framerslab/agentos/commit/2adb4cd199616f2b83ef50764eeb81111eda9c8e))
+
 ## [0.13.69](https://github.com/framerslab/agentos/compare/v0.13.68...v0.13.69) (2026-10-12)
 
 ### fix
