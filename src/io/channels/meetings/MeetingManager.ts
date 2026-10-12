@@ -1000,13 +1000,13 @@ export class MeetingManager {
       else await this.stores.entitlement.release(run.reservationId);
     }
     await this.stores.jobs.remove(runId);
-    const done = await this.stores.runs.update(runId, { state: 'done', doneAt: now, purgedAt: now, billedSeconds: billed }, 'purging');
+    // one write, `done` and the content-free row together as complete() and fail() write theirs: a failure after a first
+    // write of `done` would leave a done row holding the url, the bot's name and the notice, and nothing returns to a done run
+    const done = await this.stores.runs.update(runId, { ...contentFreeRun(run), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, state: 'done', doneAt: now, purgedAt: now, billedSeconds: billed, cleanupPending: false }, 'purging');
     if (!done) return;
     this.forget(runId);
-    const free = { ...contentFreeRun(done), purgedAt: now };
-    await this.stores.runs.replace(free);
-    await this.emit('bot:purged', free, { reason: free.reason });
-    await this.emit('bot:done', free, { reason: free.reason, billedSeconds: billed });
+    await this.emit('bot:purged', done, { reason: done.reason });
+    await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
   }
 
   // ── The limits ──

@@ -456,4 +456,16 @@ describe('a step that fails, or a race, on the way out', () => {
     await h.manager.tick();
     for (const id of ids) expect(await h.stores.runs.get(id)).toMatchObject({ state: 'done', reason: 'stopped_by_owner', billedSeconds: 0 });
   });
+  it('a purge whose last write to the run store fails leaves no done row holding the run\'s content', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    await h.manager.purgeRun(runId, 'stopped_by_owner');
+    await h.report(runId, 'left', { reason: 'stopped_by_owner', seconds: 20 });
+    vi.spyOn(h.stores.runs, 'replace').mockRejectedValueOnce(new Error('run store unavailable'));
+    await h.manager.tick().catch(() => undefined); // a pass that throws is the next pass's to retry
+    expect(await h.manager.purgeRun(runId)).toBe(true); // the product's one purge path, tried again
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', meetingUrl: '', botName: '', stopPhrase: '', notice: { text: '', lateArrivalText: '' }, purgedAt: expect.any(Number) });
+    expect(h.seen.filter((e) => e.type === 'bot:purged')).toHaveLength(1);
+  });
 });
