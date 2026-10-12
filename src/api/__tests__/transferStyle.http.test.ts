@@ -437,12 +437,26 @@ describe('transferStyle against the providers', () => {
   });
 
   describe('the provider and the model', () => {
-    it('lets a provider prefix on the model win over provider', async () => {
+    it('runs on the provider a model prefix names, and refuses a key when provider names another', async () => {
       routes['POST /models/black-forest-labs/flux-2-pro/predictions'] = () =>
         json({ id: 'p5', status: 'succeeded', output: ['https://replicate.delivery/out.png'] }, 201);
 
+      // The prefix wins over provider, so a key given with both would go to
+      // the prefix's provider: refused before anything is read or sent.
+      await expect(
+        transferStyle({
+          provider: 'openai',
+          model: 'replicate:black-forest-labs/flux-2-pro',
+          apiKey: 'sk-openai-key',
+          baseUrl: origin,
+          image: SOURCE,
+          styleReference: STYLE_JPEG,
+          prompt: 'x',
+        }),
+      ).rejects.toThrow("names provider 'replicate', not 'openai'");
+      expect(received).toEqual([]);
+
       const result = await transferStyle({
-        provider: 'openai',
         model: 'replicate:black-forest-labs/flux-2-pro',
         apiKey: 'r8-key',
         baseUrl: origin,

@@ -112,15 +112,24 @@ describe("a revoked key opens the breaker for its own calls, not for the provide
   });
 
   it('streamText on the environment key still runs after a caller key is refused', async () => {
+    /** The stream's text, and the error part it ended with, if any. */
     const drain = async (apiKey?: string) => {
       const result = streamText({ provider: 'openai', model: 'gpt-4.1', prompt: 'Hello?', fallbackProviders: [], ...(apiKey ? { apiKey } : {}) });
       let text = '';
-      for await (const delta of result.textStream) text += delta;
-      return text;
+      let error: Error | undefined;
+      for await (const part of result.fullStream) {
+        if (part.type === 'text') text += part.text;
+        if (part.type === 'error') error = part.error;
+      }
+      return { text, error };
     };
 
-    await expect(drain(REVOKED)).rejects.toThrow();
-    expect(await drain()).toBe('Served.');
+    // A stream reports its failure as an error part.
+    const refused = await drain(REVOKED);
+    expect(refused.error).toBeDefined();
+    expect(requestsWith(REVOKED)).toBeGreaterThan(0);
+
+    expect(await drain()).toEqual({ text: 'Served.', error: undefined });
     expect(globalLLMProviderHealth.isOpen('openai')).toBe(false);
   });
 });
