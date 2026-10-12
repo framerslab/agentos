@@ -202,8 +202,9 @@ export async function createVisionPipeline(
   // from the environment and send it there.
   const keyed = config?.cloudApiKey !== undefined || config?.cloudBaseUrl !== undefined;
   let named = config?.cloudProvider;
+  let cloudModel = config?.cloudModel;
   if (config?.cloudModel) {
-    const { routedProviderOf } = await import('../../api/model.js');
+    const { knownProviderPrefixOf, routedProviderOf } = await import('../../api/model.js');
     named = routedProviderOf({ provider: config.cloudProvider, model: config.cloudModel });
     if (keyed && config.cloudProvider && named !== config.cloudProvider) {
       throw new Error(
@@ -211,6 +212,12 @@ export async function createVisionPipeline(
           `'${config.cloudProvider}'; the cloudApiKey or cloudBaseUrl given for one would go to the other.`,
       );
     }
+    // A `provider:` prefix that names the provider is sent without it, as
+    // generateText splits it: under provider 'ollama' a colon is never split,
+    // so 'ollama:llava' would ask Ollama for a model of that name. A tag of a
+    // model the caller sent to 'ollama' itself ('llava:7b') stays whole.
+    const prefix = config.cloudProvider === 'ollama' ? undefined : knownProviderPrefixOf(config.cloudModel);
+    if (prefix && prefix === named) cloudModel = config.cloudModel.slice(prefix.length + 1);
   }
   if (keyed && !named) {
     throw new Error(
@@ -220,6 +227,16 @@ export async function createVisionPipeline(
   }
   const detected = named ? undefined : detectCloudProvider();
   const cloudProvider = named ?? detected?.provider;
+  // The gemini provider reads GEMINI_API_KEY alone, so a GOOGLE_API_KEY is
+  // passed as the tier's key, as detection passes it, also when the caller
+  // named gemini. Not over a key the caller or the global default gives.
+  let googleKey: string | undefined;
+  if (cloudProvider === 'gemini' && !detected && config?.cloudApiKey === undefined && !process.env.GEMINI_API_KEY) {
+    const { getDefaultProvider } = await import('../../api/runtime/global-default.js');
+    const def = getDefaultProvider();
+    const defaultKey = def?.apiKey && (!def.provider || def.provider === 'gemini');
+    if (!defaultKey) googleKey = process.env.GOOGLE_API_KEY || undefined;
+  }
 
   // Build the final resolved config
   const resolvedConfig: import('./types.js').VisionPipelineConfig = {
@@ -229,8 +246,8 @@ export async function createVisionPipeline(
     documentAI,
     embedding,
     cloudProvider,
-    cloudModel: config?.cloudModel,
-    cloudApiKey: config?.cloudApiKey ?? detected?.apiKey,
+    cloudModel,
+    cloudApiKey: config?.cloudApiKey ?? detected?.apiKey ?? googleKey,
     cloudBaseUrl: config?.cloudBaseUrl,
     cloudFallbackProviders: config?.cloudFallbackProviders,
     confidenceThreshold: config?.confidenceThreshold,

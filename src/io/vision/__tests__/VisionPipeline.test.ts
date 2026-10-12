@@ -1355,6 +1355,38 @@ describe('createVisionPipeline cloud provider detection', () => {
       cloudOnly({ cloudProvider: 'openai', cloudModel: 'anthropic:claude-opus-5-5', cloudApiKey: 'sk-openai-tenant' }),
     ).rejects.toThrow("names provider 'anthropic', not cloudProvider 'openai'");
   });
+
+  it('sends a model whose prefix named its provider without the prefix, an ollama one included', async () => {
+    const image = Buffer.from([0xff, 0xd8, 0xff, 0xdb]);
+    await (await cloudOnly({ cloudModel: 'ollama:llava' })).process(image);
+    await (await cloudOnly({ cloudModel: 'anthropic:claude-opus-5-5' })).process(image);
+    // A tag of a model sent to ollama itself keeps its colon.
+    await (await cloudOnly({ cloudProvider: 'ollama', cloudModel: 'llava:7b' })).process(image);
+
+    expect(mockGenerateText.mock.calls.map(([request]) => [request.provider, request.model])).toEqual([
+      ['ollama', 'llava'],
+      ['anthropic', 'claude-opus-5-5'],
+      ['ollama', 'llava:7b'],
+    ]);
+  });
+
+  it('passes a GOOGLE_API_KEY alone as the key when gemini is named, as detection does', async () => {
+    process.env.GOOGLE_API_KEY = 'google-key';
+    const image = Buffer.from([0xff, 0xd8, 0xff, 0xdb]);
+    await (await cloudOnly({ cloudModel: 'gemini:gemini-2.5-flash' })).process(image);
+    await (await cloudOnly({ cloudProvider: 'gemini' })).process(image);
+    // A key the caller gives, or GEMINI_API_KEY, which the provider reads itself, is not replaced.
+    await (await cloudOnly({ cloudProvider: 'gemini', cloudApiKey: 'gemini-tenant' })).process(image);
+    process.env.GEMINI_API_KEY = 'gemini-env';
+    await (await cloudOnly({ cloudProvider: 'gemini' })).process(image);
+
+    expect(mockGenerateText.mock.calls.map(([request]) => [request.provider, request.model, request.apiKey])).toEqual([
+      ['gemini', 'gemini-2.5-flash', 'google-key'],
+      ['gemini', undefined, 'google-key'],
+      ['gemini', undefined, 'gemini-tenant'],
+      ['gemini', undefined, undefined],
+    ]);
+  });
 });
 
 describe('imageMediaType', () => {
