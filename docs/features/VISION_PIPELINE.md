@@ -138,8 +138,9 @@ interface VisionPipelineConfig {
    * OPENAI_API_KEY is set, else 'anthropic' (ANTHROPIC_API_KEY), else 'gemini'
    * (GEMINI_API_KEY, or GOOGLE_API_KEY, which detection passes as the key),
    * else 'openrouter' (OPENROUTER_API_KEY); unset and undetected, there is no
-   * cloud tier. Gemini does not fetch image URLs, so give it a Buffer or a
-   * data URL.
+   * cloud tier. Gemini fetches an https image URL itself, up to 15 MB a
+   * file, and takes a Buffer or a data URL inline, up to 100 MB of base64
+   * per request.
    */
   cloudProvider?: string;
   /** Cloud model. Default: the provider's default text model. */

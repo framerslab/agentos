@@ -85,3 +85,69 @@ describe('GeminiProvider — SAFETY block surfaces as a content-policy error (fa
     expect(isContentPolicyRefusal(caught)).toBe(true);
   });
 });
+
+describe('GeminiProvider — every block Google reports surfaces as a content-policy error', () => {
+  /** The error a mapped response throws, or undefined when it maps without one. */
+  const thrownBy = (response: unknown): unknown => {
+    try {
+      mapper(new GeminiProvider())(response, 'gemini-2.5-flash');
+    } catch (e) {
+      return e;
+    }
+    return undefined;
+  };
+
+  it('reads a blocked prompt, which comes with no candidates, as content_filter naming the reason', () => {
+    const caught = thrownBy({ promptFeedback: { blockReason: 'PROHIBITED_CONTENT' }, usageMetadata: usage });
+
+    expect((caught as { code?: string }).code).toBe('content_filter');
+    expect((caught as Error).message).toContain('blockReason: PROHIBITED_CONTENT');
+    expect(isContentPolicyRefusal(caught)).toBe(true);
+  });
+
+  it.each(['BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII', 'IMAGE_SAFETY', 'IMAGE_PROHIBITED_CONTENT', 'IMAGE_RECITATION'])(
+    'reads finishReason %s with no content as content_filter',
+    (finishReason) => {
+      const caught = thrownBy({ candidates: [{ content: { parts: [] }, finishReason }], usageMetadata: usage });
+
+      expect((caught as { code?: string }).code).toBe('content_filter');
+      expect((caught as Error).message).toContain(`finishReason: ${finishReason}`);
+    },
+  );
+
+  it('leaves a finish reason that names no filter as a finish reason, and a filter reason that kept text as an answer', () => {
+    const other = mapper(new GeminiProvider())(
+      { candidates: [{ content: { parts: [] }, finishReason: 'OTHER' }], usageMetadata: usage },
+      'gemini-2.5-flash',
+    ) as { choices: Array<{ finishReason: string }> };
+    expect(other.choices[0].finishReason).toBe('other');
+
+    const kept = mapper(new GeminiProvider())(
+      { candidates: [{ content: { parts: [{ text: 'partial' }] }, finishReason: 'SPII' }], usageMetadata: usage },
+      'gemini-2.5-flash',
+    ) as { choices: Array<{ finishReason: string; message: { content: string } }> };
+    expect(kept.choices[0]).toMatchObject({ finishReason: 'content_filter', message: { content: 'partial' } });
+  });
+
+  it('streaming reads a blocked prompt as a propagating content_filter error', async () => {
+    const provider = new GeminiProvider();
+    Object.assign(provider as unknown as Record<string, unknown>, {
+      ensureInitialized: () => {},
+      config: { baseURL: 'https://generativelanguage.googleapis.com/v1beta', apiKey: 'k', requestTimeout: 60000, maxRetries: 1 },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce(geminiSseResponse({ promptFeedback: { blockReason: 'OTHER' }, usageMetadata: usage }));
+
+    let caught: unknown;
+    try {
+      for await (const _chunk of provider.generateCompletionStream('gemini-2.5-flash', [{ role: 'user', content: 'hi' }], {})) {
+        void _chunk;
+      }
+    } catch (e) {
+      caught = e;
+    }
+
+    expect((caught as { code?: string }).code).toBe('content_filter');
+    expect((caught as Error).message).toContain('blockReason: OTHER');
+  });
+});
