@@ -81,11 +81,11 @@ export class SlotLimiter {
     const admission = await this.acquire(request);
     if (!admission.ok) throw new Error(admission.reason);
     const lease = admission.lease; const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined; let rejectAbort!: (error: Error) => void;
+    let rejectAbort!: (error: Error) => void;
     const abort = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
     const cancel = (): void => { controller.abort(); rejectAbort(new Error('initialization cancelled')); };
     options.signal?.addEventListener('abort', cancel, { once: true });
-    timer = setTimeout(() => { controller.abort(); rejectAbort(new Error('initialization timed out')); }, options.timeoutMs);
+    const timer = setTimeout(() => { controller.abort(); rejectAbort(new Error('initialization timed out')); }, options.timeoutMs);
     try {
       if (options.signal?.aborted) cancel();
       const work = controller.signal.aborted ? abort : options.initialize(lease, controller.signal);
@@ -99,7 +99,7 @@ export class SlotLimiter {
       if (!released) throw new Error('slot cleanup deferred');
       throw error;
     } finally {
-      if (timer) clearTimeout(timer); options.signal?.removeEventListener('abort', cancel);
+      clearTimeout(timer); options.signal?.removeEventListener('abort', cancel);
     }
   }
   /** Bounded sweep. Checks external evidence outside the transaction, then fences the exact lease on release. */
