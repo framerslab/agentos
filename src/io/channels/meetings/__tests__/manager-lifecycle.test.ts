@@ -349,6 +349,34 @@ describe('the limits, the meter and the ends', () => {
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', botName: '', purgedAt: expect.any(Number) });
     expect(h.seen.at(-1)?.type).toBe('bot:purged');
   });
+  it('a run that ends for want of permission is purged whatever its Keep, unbilled', async () => {
+    const h = harness();
+    const runId = await joined(h, 'k1', 'account');
+    await h.stores.transcript.append({ runId, seq: 1, turnId: `${runId}:1`, at: 1, text: 'heard before the refusal' });
+    const purged: string[] = [];
+    h.manager.addPurgeHook(async (id) => { purged.push(id); });
+    await h.report(runId, 'left', { reason: 'permission_denied', seconds: 40 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'permission_denied', botName: '', billedSeconds: 0, purgedAt: expect.any(Number) });
+    expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
+    expect(purged).toEqual([runId]);
+    expect(h.entitlement.released).toEqual(['res-1']);
+    expect(h.seen.map((e) => e.type).slice(-3)).toEqual(['bot:left', 'bot:purged', 'bot:done']);
+  });
+  it('purges a run that failed before it joined: the host\'s purge hooks run and the answer is true', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot({ ...h.request, joinAt: h.clock.now() + 100_000 });
+    const runId = r.ok ? r.run.runId : '';
+    h.clock.advance(100_000);
+    h.entitlement.revalidateAnswer = false;
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('failed');
+    const purged: string[] = [];
+    h.manager.addPurgeHook(async (id) => { purged.push(id); });
+    expect(await h.manager.purgeRun(runId)).toBe(true);
+    expect(purged).toEqual([runId]);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'failed', purgedAt: expect.any(Number) });
+    expect(h.seen.at(-1)?.type).toBe('bot:purged');
+  });
   it('a settle that throws keeps the run in left and is retried on the next tick; done is written after it', async () => {
     const h = harness();
     const runId = await joined(h);

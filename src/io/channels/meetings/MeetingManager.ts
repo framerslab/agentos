@@ -847,17 +847,20 @@ export class MeetingManager {
     return this.leave(run, reason);
   }
 
-  /** The bot leaves and everything it took is deleted (the purge sequence). On a run that is already done, the kept content is deleted (a session's deletion). */
+  /**
+   * The bot leaves and everything it took is deleted (the purge sequence). On a run that is over, done or failed before
+   * it joined, what is kept is deleted and the host's purge hooks run (a session's deletion). False for a run that does
+   * not exist.
+   */
   async purgeRun(runId: string, reason: MeetingLeaveReason = 'stopped_by_owner'): Promise<boolean> {
     const run = await this.stores.runs.get(runId);
     if (!run) return false;
-    if (run.state === 'done') return this.purgeKept(run);
-    if (run.state === 'failed') return false;
+    if (run.state === 'done' || run.state === 'failed') return this.purgeKept(run);
     await this.purge(run, reason);
     return true;
   }
 
-  /** A kept run's content removed after `done`: the fences, the stores, the hooks, the provider's copies, `bot:purged`, the content-free row. A step that throws is the caller's to retry (the product's one purge path retries). */
+  /** A run's kept content removed after it ended (`done`, or `failed`, which kept none): the fences, the stores, the hooks, the provider's copies, `bot:purged`, the content-free row. A step that throws is the caller's to retry (the product's one purge path retries). */
   private async purgeKept(run: MeetingRunRecord): Promise<boolean> {
     if (run.purgedAt !== undefined) return true;
     await this.stores.transcript.fence(run.runId);
@@ -966,7 +969,7 @@ export class MeetingManager {
 
   /**
    * After `left` (no purge): settle or release, drop what is not kept, delete the room, remove the job, and only then
-   * `done`. A step that throws leaves the run in `left` with `cleanupPending`, and the next tick calls this again; the
+   * `done`. A run that ended with `permission_denied` is purged instead, whatever its Keep. A step that throws leaves the run in `left` with `cleanupPending`, and the next tick calls this again; the
    * entitlement hook's `settle` and `release` are idempotent, so a retry after a half-done cleanup changes nothing twice.
    */
   private async complete(run: MeetingRunRecord, reportedSeconds: number | undefined): Promise<void> {
@@ -978,6 +981,12 @@ export class MeetingManager {
       await this.emit('bot:left', left, { reason: left.reason });
       run = left;
     } else run = current;
+    if (run.reason === 'permission_denied') {
+      // the platform refused the bot the meeting's permission: what the run took is deleted whatever its Keep, through
+      // the purge sequence and the host's purge hooks, rather than kept as a completed run's content is
+      await this.purge(run, 'permission_denied');
+      return;
+    }
     const now = this.now();
     const seconds = this.countedSeconds(run.reportedSeconds, reportedSeconds) ?? Math.max(0, Math.round(((run.leftAt ?? now) - (run.dispatchedAt ?? run.joinAt)) / 1000));
     const billed = isBilledEnd(run) ? seconds : 0;

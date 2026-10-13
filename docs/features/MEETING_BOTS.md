@@ -94,7 +94,7 @@ async function sendMeetingBot(provider: IMeetingBotProvider, roomService: IMeeti
 | `pausePlatform`, `resumePlatform`, `isPaused` | Control new sends on this manager instance; existing runs continue. |
 | `getRun`, `listRuns` | Read a run or filtered runs. |
 | `leaveBot` | Leave while retaining content according to `keep`; cancel a pending send. A run already told to leave keeps the reason it was told, which decides its billing, and its kill deadline. |
-| `purgeRun` | Leave and delete content; also delete a completed run's kept content. Returns false for missing or failed runs. |
+| `purgeRun` | Leave and delete content; on a run that is over (done, or failed before it joined), delete what is kept and run the purge hooks. Returns false for a run that does not exist. |
 | `postChat` | Post only while `in_call` and the provider declares chat posting. |
 | `pageSeen` | Refresh the page-presence timestamp for an enabled `pageAwayMs` limit. |
 | `addPurgeHook` | Add deletion of host-owned copies. |
@@ -132,7 +132,7 @@ End reasons are `stopped`, `purged`, `stt_failed`, `transport_closed`, `transpor
 
 ## The purge
 
-Use `purgeRun` for an owner's deletion, a decline or permission denial that must delete content. `leaveBot` alone preserves the Keep choice. A provider report with `reason: 'permission_denied'` does not itself invoke `purgeRun`; the host must request that purge. Participant stop messages invoke it through the manager's lifecycle.
+Use `purgeRun` for an owner's deletion or a decline. `leaveBot` alone preserves the Keep choice. A run that ends with `permission_denied` (a provider's `left` report with that reason) runs the purge sequence whatever its Keep, and participant stop messages invoke it through the manager's lifecycle.
 
 An active purge changes the run to `purging`, fences transcripts and event payloads, and fences and scrubs the outbox. The bot is told to suspend capture and leave; a bot not reported gone after the configured leave deadline gets a kill command. Store content is removed immediately, without waiting for that exit. Once the bot has left or the kill path records its end, the manager runs host purge hooks, provider deletion, room deletion, settlement and job removal, emits `bot:purged` and `bot:done`, and then atomically writes the terminal content-free run. A step that fails, the events' delivery included, leaves the run `purging`, and a later tick runs the steps again; an event already stored is delivered again, not stored twice. A purge of an already completed run keeps its terminal state; a rejected cleanup step on that path must be retried by the caller, and its `bot:purged` goes out before the row is rewritten, so the retry sends one that failed.
 
