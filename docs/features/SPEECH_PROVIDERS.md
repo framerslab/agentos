@@ -194,7 +194,7 @@ sttEntryPricePerMinute('elevenlabs:scribe_v2'); // undefined: no price row
 
 A dated snapshot without a row of its own (the model's name followed by `-YYYY-MM-DD`) takes its base model's price.
 
-Deepgram's rows are `DEEPGRAM_STREAMING_PRICING` in [`deepgramPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/deepgramPricing.ts): the pay-as-you-go price a minute of streamed audio that [Deepgram's pricing page](https://deepgram.com/pricing) lists, as read on 12 October 2026. The page shows a lower current price for a limited time beside the regular price; the row holds the regular price, so a spending bound read from it still holds when the offer ends:
+Deepgram's rows are `DEEPGRAM_STREAMING_PRICING` in [`deepgramPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/deepgramPricing.ts): the pay-as-you-go price a minute of streamed audio that [Deepgram's pricing page](https://deepgram.com/pricing) lists, as read on 12 October 2026. The page shows a lower current price for a limited time beside the regular price; the row holds the regular price, so a spending bound read from it still holds when the offer ends. It is the price of a session with no add-on: Deepgram bills its add-ons a minute on top of it, at the rates its pricing page lists beside the model, and `DeepgramStreamingSTT` turns two of them on from `providerOptions` (`diarize` sends `diarize=true`; `keywords` sends `keyterm` on Nova-3 and `keywords` on older models), so a bound read from the row covers a session only while it turns on no add-on, and a consumer that turns one on prices that add-on as well:
 
 | Model | US dollars a minute |
 |---|---|
