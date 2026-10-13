@@ -115,6 +115,23 @@ describe('the limits, the meter and the ends', () => {
     await h.manager.tick();
     expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'leave', reason: 'stop_monitor_failed' });
   });
+  it('ends a run whose stop monitor never reports after the notice, once the window and the recovery wait have passed', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 2 });
+    await h.report(runId, 'notice_posted'); // no heartbeat follows: capture stays closed
+    h.clock.advance(60_000);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    h.clock.advance(1);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stop_monitor_failed' }]);
+    await h.report(runId, 'left', { seconds: 61 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stop_monitor_failed', billedSeconds: 0 });
+  });
   it('a capture one manager suspended is resumed by the manager that hears the monitor recover, after a restart too', async () => {
     const h = harness();
     const runId = await joined(h);

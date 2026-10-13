@@ -1125,6 +1125,12 @@ export class MeetingManager {
           continue;
         }
         if (run.state === 'in_call') {
+          // a stop monitor that has not reported once since the notice: capture never opened, and the run leaves when the
+          // window and the recovery wait have both passed, as it does for a monitor that went quiet and stayed quiet
+          if (run.monitorSeenAt === undefined && run.noticePostedAt !== undefined && now - run.noticePostedAt > this.monitorHeartbeatMs * this.monitorMissedBeats + this.monitorRecoverMs) {
+            await this.leave(run, 'stop_monitor_failed');
+            continue;
+          }
           // quiet once monitorMissedBeats intervals have passed since the last heartbeat, the boundary captureReady and startCaptureIfReady use
           const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats;
           if (monitorStale) {
