@@ -1615,3 +1615,124 @@ describe('GraphRuntime: the checkpoint a halted run resumes from', () => {
     expect(saved.map((cp) => cp.nodeId).sort()).toEqual(['announce', 'approve']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A parallel batch keeps the artifacts of every branch
+// ---------------------------------------------------------------------------
+//
+// Nodes that become ready together run as one batch, each branch on its own
+// copy of the state. What each branch writes to `artifacts` has to reach the
+// nodes after the batch and the result. The nodes run through the real
+// NodeExecutor and LoopController; only the model's stream is scripted.
+
+const NOTES = 'Write the notes for the importer.';
+const DRAFTED = 'Draft: v2 ships the importer.';
+const NOTED = 'Notes: the importer reads CSV.';
+
+function notesNode(): GraphNode {
+  return { ...gmiNode({ instructions: NOTES }), id: 'notes' };
+}
+
+/**
+ * A scripted model, as `scriptedModel`, that also records the state each GMI
+ * node's model call received. A reply listed in `late` waits a moment first,
+ * so a branch declared early in a batch can finish after the ones declared
+ * after it.
+ */
+function recordingModel(replies: Record<string, string>, late: string[] = []) {
+  const calls: Array<{ instructions: string; scratch: unknown; artifacts: unknown }> = [];
+  async function* providerCall(
+    instructions: string,
+    state: Partial<GraphState>,
+  ): AsyncGenerator<LoopChunk, LoopOutput, undefined> {
+    calls.push({ instructions, scratch: state.scratch, artifacts: state.artifacts });
+    const reply = replies[instructions];
+    if (reply === undefined) throw new Error(`no reply scripted for "${instructions}"`);
+    if (late.includes(instructions)) await new Promise((resolve) => setTimeout(resolve, 20));
+    yield { type: 'text_delta', content: reply };
+    return { responseText: reply, toolCalls: [], finishReason: 'stop' };
+  }
+  /** The state the model call for `instructions` received. */
+  function stateSeenBy(instructions: string): { scratch: unknown; artifacts: unknown } | undefined {
+    const call = calls.find((entry) => entry.instructions === instructions);
+    return call && { scratch: call.scratch, artifacts: call.artifacts };
+  }
+  return { providerCall, stateSeenBy };
+}
+
+/** A graph of static edges, one per `[source, target]` pair. */
+function graphOf(
+  id: string,
+  nodes: GraphNode[],
+  links: Array<[string, string]>,
+  options: Partial<CompiledExecutionGraph> = {},
+): CompiledExecutionGraph {
+  return {
+    id,
+    name: id,
+    nodes,
+    edges: links.map(([source, target], i) => ({ id: `e${i}`, source, target, type: 'static' as const })),
+    stateSchema: { input: {}, scratch: {}, artifacts: {} },
+    reducers: {},
+    checkpointPolicy: 'explicit',
+    memoryConsistency: 'live',
+    ...options,
+  };
+}
+
+describe('GraphRuntime: a parallel batch keeps the artifacts of every branch', () => {
+  it('returns the artifact of each branch from invoke(), and the node after the batch finds them', async () => {
+    const model = recordingModel({ [DRAFT]: DRAFTED, [NOTES]: NOTED, [PUBLISH]: 'Published.' });
+    // START fans out to draft and notes, which both lead to publish.
+    const graph = makeParallelJoinGraph('g-batch-artifacts', draftNode(), notesNode(), publishNode());
+
+    const artifacts = await runtimeOver(new InMemoryCheckpointStore(), model.providerCall).invoke(graph, {});
+
+    expect(artifacts).toEqual({ draft: DRAFTED, notes: NOTED, publish: 'Published.' });
+    expect(model.stateSeenBy(PUBLISH)?.artifacts).toEqual({ draft: DRAFTED, notes: NOTED });
+  });
+
+  it('gives a key both branches write to the branch declared later, or to the reducer registered for it', async () => {
+    // draft and notes both write `summary`; draft is declared first and finishes last.
+    const asSummary = (node: GraphNode): GraphNode => ({ ...node, metadata: { outputAs: 'summary' } });
+    const replies = { [DRAFT]: DRAFTED, [NOTES]: NOTED, [PUBLISH]: 'Published.' };
+    const run = (reducers: CompiledExecutionGraph['reducers']) =>
+      runtimeOver(new InMemoryCheckpointStore(), recordingModel(replies, [DRAFT]).providerCall).invoke(
+        makeParallelJoinGraph('g-batch-summary', asSummary(draftNode()), asSummary(notesNode()), publishNode(), {
+          reducers,
+        }),
+        {},
+      );
+
+    expect(await run({})).toEqual({ summary: NOTED, publish: 'Published.' });
+    expect(await run({ 'artifacts.summary': (existing, incoming) => [existing, incoming].join(' + ') })).toEqual({
+      summary: `${DRAFTED} + ${NOTED}`,
+      publish: 'Published.',
+    });
+  });
+
+  it('keeps what one branch writes over the value another branch only carried from before the batch', async () => {
+    // prep writes `summary`; then draft rewrites it in a batch with notes, which leaves it alone.
+    const PREP = 'Outline the release notes.';
+    const model = recordingModel({
+      [PREP]: 'Outline: the importer.',
+      [DRAFT]: DRAFTED,
+      [NOTES]: NOTED,
+      [PUBLISH]: 'Published.',
+    });
+    const prep: GraphNode = { ...gmiNode({ instructions: PREP }), id: 'prep', metadata: { outputAs: 'summary' } };
+    const draft: GraphNode = { ...draftNode(), metadata: { outputAs: 'summary' } };
+    const graph = graphOf('g-batch-carried', [prep, draft, notesNode(), publishNode()], [
+      [START, 'prep'],
+      ['prep', 'draft'],
+      ['prep', 'notes'],
+      ['draft', 'publish'],
+      ['notes', 'publish'],
+      ['publish', END],
+    ]);
+
+    const artifacts = await runtimeOver(new InMemoryCheckpointStore(), model.providerCall).invoke(graph, {});
+
+    expect(artifacts).toEqual({ summary: DRAFTED, notes: NOTED, publish: 'Published.' });
+  });
+});
