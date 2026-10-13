@@ -88,6 +88,17 @@ export interface EmbedTextOptions {
    */
   dimensions?: number;
 
+  /**
+   * Maximum inputs per OpenAI-compatible request, an integer from 1 to 2048.
+   * Defaults to 2048. Native Gemini and Ollama ignore this option.
+   * OpenAI allows 2048 inputs and 300,000 total input tokens per request:
+   * https://developers.openai.com/api/reference/resources/embeddings/methods/create
+   * (read 2026-10-12). Requests also stay within 300,000 UTF-8 bytes as a
+   * conservative token bound. A single input above that byte bound is rejected;
+   * callers must still respect the model's per-input token limit.
+   */
+  maxInputsPerRequest?: number;
+
   /** Override the API key instead of reading from environment variables. */
   apiKey?: string;
 
@@ -538,31 +549,60 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
             throw new Error(`No API key available for embedding provider "${resolved.providerId}".`);
           }
 
-          const result = await callOpenAIEmbedding(
-            baseUrl,
-            resolved.apiKey,
-            resolved.modelId,
-            inputArray,
-            opts.dimensions,
-            opts.abortSignal,
-          );
+          const maxInputs = opts.maxInputsPerRequest ?? 2048;
+          if (!Number.isInteger(maxInputs) || maxInputs < 1 || maxInputs > 2048) {
+            throw new RangeError('maxInputsPerRequest must be an integer from 1 to 2048.');
+          }
+          const encoder = new TextEncoder();
+          embeddings = [];
+          reportedModel = resolved.modelId;
+          usage = { promptTokens: 0, totalTokens: 0 };
+          let offset = 0;
+          try {
+            // Preserve the provider's handling of an empty input array.
+            do {
+              opts.abortSignal?.throwIfAborted();
+              const batch: string[] = [];
+              let bytes = 0;
+              while (offset < inputArray.length && batch.length < maxInputs) {
+                const input = inputArray[offset];
+                const inputBytes = encoder.encode(input).byteLength;
+                if (inputBytes > 300_000) {
+                  throw new RangeError('An embedding input exceeds the 300,000 UTF-8 byte request bound.');
+                }
+                if (bytes + inputBytes > 300_000) break;
+                batch.push(input);
+                bytes += inputBytes;
+                offset++;
+              }
+              const result = await callOpenAIEmbedding(
+                baseUrl,
+                resolved.apiKey,
+                resolved.modelId,
+                batch,
+                opts.dimensions,
+                opts.abortSignal,
+              );
 
-          // Sort by index to guarantee order matches input order
-          // (the API contract already guarantees this, but defensive coding)
-          const sorted = [...result.data].sort((a, b) => a.index - b.index);
-          embeddings = sorted.map((d) => d.embedding);
-          reportedModel = result.model;
-          // Unreported usage counts as zero rather than failing a call
-          // that already returned vectors.
-          usage = {
-            promptTokens: result.usage?.prompt_tokens ?? 0,
-            totalTokens: result.usage?.total_tokens ?? 0,
-          };
-          // OpenAI's own embedding models are priced from its table, so the
-          // result carries what the call cost.
-          if (resolved.providerId === 'openai') {
-            const costUSD = costOfUsageUSD(resolved.providerId, resolved.modelId, { promptTokens: usage.promptTokens }, true);
-            if (costUSD !== undefined) usage.costUSD = costUSD;
+              // Each response's indices start at zero for its own batch.
+              const sorted = [...result.data].sort((a, b) => a.index - b.index);
+              for (const item of sorted) embeddings.push(item.embedding);
+              reportedModel = result.model;
+              // Compatible endpoints may omit usage after returning vectors.
+              usage.promptTokens += result.usage?.prompt_tokens ?? 0;
+              usage.totalTokens += result.usage?.total_tokens ?? 0;
+              if (resolved.providerId === 'openai') {
+                const costUSD = costOfUsageUSD(resolved.providerId, resolved.modelId, { promptTokens: usage.promptTokens }, true);
+                if (costUSD !== undefined) usage.costUSD = costUSD;
+              }
+              metricUsage = usage;
+              opts.abortSignal?.throwIfAborted();
+            } while (offset < inputArray.length);
+          } catch (error) {
+            // Earlier successful batches remain billed if a later one fails.
+            // The finally block persists their usage; record their budget too.
+            if (metricUsage) budget?.record(usage.costUSD, usage.totalTokens, 'embed_text');
+            throw error;
           }
         }
 
