@@ -16,6 +16,7 @@ import { hashWorkerToken, mintWorkerToken } from './signing.js';
 import { DuplicateIdempotencyKeyError, type IClock, type IEntitlementHook, type IEventStore, type IJobStore, type IOutbox, type IRunStore, type ITranscriptStore } from './stores/types.js';
 import {
   canTransition,
+  CONTENT_EVENT_TYPES,
   contentFreeRun,
   DEFAULT_RUN_LIMITS,
   isBilledEnd,
@@ -262,13 +263,15 @@ export class MeetingManager {
    * Stores the event in its run's sequence and answers it as stored. An id stored before (a report the worker sent
    * again, or an emit tried again after a later step failed) is not stored twice: it comes back `repeated`, with the
    * time and payload of its first copy. An id that another run's event holds comes back undefined: nothing of this run.
+   * A content event comes back as the store holds it, so a fence that went up while it was on its way, which left the
+   * stored row no payload, leaves its delivery and its handlers none either.
    */
   private async storeEvent(event: Omit<StoredEvent, 'seq' | 'repeated'>, runId: string): Promise<StoredEvent | undefined> {
     const { inserted, seq } = await this.stores.events.append({ eventId: event.id, runId, type: event.type, at: event.at, data: event.data });
-    if (inserted) return { ...event, seq, repeated: false };
+    if (inserted && !CONTENT_EVENT_TYPES.has(event.type)) return { ...event, seq, repeated: false };
     const [first] = await this.stores.events.read(runId, seq - 1, 1);
-    if (first?.eventId !== event.id) return undefined;
-    return { ...event, at: first.at, data: first.data, seq, repeated: true };
+    if (first?.eventId !== event.id) return inserted ? { ...event, seq, repeated: false } : undefined;
+    return { ...event, at: first.at, data: first.data, seq, repeated: !inserted };
   }
 
   /**

@@ -570,3 +570,21 @@ describe('a report whose application fails, and the worker\'s retry of it', () =
     expect(JSON.parse(deliveries[0].payload)).toMatchObject({ type: 'bot:chat_message', data: { text: 'the agenda first', sender: 'participant-1' } });
   });
 });
+
+describe('an event on its way when the fence goes up', () => {
+  it('a transcript stored behind a fence that went up on its way reaches the handlers without its words', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    const append = h.stores.events.append.bind(h.stores.events);
+    vi.spyOn(h.stores.events, 'append').mockImplementation(async (event) => {
+      // the purge's fence goes up between the manager's check of the run and the store's write of the event
+      if (event.type === 'bot:transcript') await h.manager.purgeRun(runId, 'stopped_by_owner');
+      return append(event);
+    });
+    expect(await h.manager.recordTranscript({ runId, seq: 1, turnId: `${runId}:1`, at: 5, text: 'words after the stop' })).toBe(true);
+    const transcript = h.seen.find((e) => e.type === 'bot:transcript');
+    expect(transcript).toBeDefined();
+    expect(transcript?.data).toBeUndefined();
+    expect((await h.stores.events.read(runId, 0)).find((e) => e.type === 'bot:transcript')).toMatchObject({ purged: true });
+  });
+});
