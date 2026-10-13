@@ -138,7 +138,9 @@ export interface ICheckpointStore {
    *
    * When `nodeId` is supplied, returns the most recent checkpoint for that specific
    * node within the run. When `nodeId` is omitted, returns the most recent checkpoint
-   * for the run regardless of node (equivalent to `latest(runId)`).
+   * for the run regardless of node (equivalent to `latest(runId)`). The most recent
+   * checkpoint has the latest `timestamp` and, of checkpoints with the same
+   * `timestamp`, was saved last: the runtime can save several in one millisecond.
    *
    * @param runId  - The graph run identifier.
    * @param nodeId - Optional node filter.
@@ -148,7 +150,8 @@ export interface ICheckpointStore {
 
   /**
    * Return the most recently persisted checkpoint for a run, or `null` when the run
-   * has no checkpoints.
+   * has no checkpoints. Of checkpoints with the same `timestamp`, the one saved last
+   * is the most recent.
    *
    * @param runId - The graph run identifier.
    */

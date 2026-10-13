@@ -251,8 +251,8 @@ class PostgresCheckpointStore implements ICheckpointStore {
 
   async load(runId: string, nodeId?: string): Promise<Checkpoint | null> {
     const query = nodeId
-      ? 'SELECT payload FROM checkpoints WHERE run_id = $1 AND node_id = $2 ORDER BY timestamp DESC LIMIT 1'
-      : 'SELECT payload FROM checkpoints WHERE run_id = $1 ORDER BY timestamp DESC LIMIT 1';
+      ? 'SELECT payload FROM checkpoints WHERE run_id = $1 AND node_id = $2 ORDER BY timestamp DESC, seq DESC LIMIT 1'
+      : 'SELECT payload FROM checkpoints WHERE run_id = $1 ORDER BY timestamp DESC, seq DESC LIMIT 1';
     const { rows } = await this.pool.query(query, nodeId ? [runId, nodeId] : [runId]);
     return rows[0] ? JSON.parse(rows[0].payload) : null;
   }
@@ -264,7 +264,7 @@ class PostgresCheckpointStore implements ICheckpointStore {
   async list(graphId: string, options?: { limit?: number; runId?: string }): Promise<CheckpointMetadata[]> {
     // Return lightweight metadata, not full payloads
     const { rows } = await this.pool.query(
-      'SELECT id, run_id, graph_id, node_id, timestamp, length(payload) as state_size FROM checkpoints WHERE graph_id = $1 AND ($2::text IS NULL OR run_id = $2) ORDER BY timestamp DESC LIMIT $3',
+      'SELECT id, run_id, graph_id, node_id, timestamp, length(payload) as state_size FROM checkpoints WHERE graph_id = $1 AND ($2::text IS NULL OR run_id = $2) ORDER BY timestamp DESC, seq DESC LIMIT $3',
       [graphId, options?.runId ?? null, options?.limit ?? 100]
     );
     return rows.map(r => ({ id: r.id, runId: r.run_id, graphId: r.graph_id, nodeId: r.node_id, timestamp: r.timestamp, stateSize: r.state_size, hasMemorySnapshot: false }));
@@ -292,6 +292,8 @@ class PostgresCheckpointStore implements ICheckpointStore {
   }
 }
 ```
+
+The runtime can save several checkpoints of one run in the same millisecond, such as the checkpoints of a parallel batch's nodes and the one it saves after the batch, so `load()` and `latest()` return the checkpoint saved last of those with the latest `timestamp`, and `list()` puts it first. The example's `checkpoints` table has a `seq bigserial` column, which grows with each insert, to order them; `InMemoryCheckpointStore` uses the order it stored them in.
 
 Then pass it to any graph:
 
