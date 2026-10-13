@@ -962,6 +962,9 @@ export interface StreamingTTSConfig {
    * they support and ignore the rest; see {@link TTSExpressiveness}.
    */
   expressiveness?: TTSExpressiveness;
+
+  /** Optional scoped synthesis request. A call-profile provider reports this identity on every chunk and usage event. */
+  call?: AudioIdentity & { requestId: string };
 }
 
 /**
