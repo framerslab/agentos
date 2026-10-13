@@ -650,7 +650,8 @@ export class MeetingManager {
         await this.move(run, 'joining', {}, 'bot:joining', undefined, event);
         return true;
       case 'waiting_room':
-        await this.move(run, 'waiting_room', {}, 'bot:waiting_room', undefined, event);
+        // the waiting-room limit counts from here, the bot's arrival in the waiting room; admission moves joinedAt on to the call
+        await this.move(run, 'waiting_room', { joinedAt: this.reportedAt(event.at) }, 'bot:waiting_room', undefined, event);
         return true;
       case 'in_call':
         await this.move(run, 'in_call_notice_pending', { joinedAt: this.reportedAt(event.at), participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, this.reportedAt(event.at)) }, 'bot:in_call', undefined, event);

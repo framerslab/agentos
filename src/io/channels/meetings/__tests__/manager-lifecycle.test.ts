@@ -86,6 +86,21 @@ describe('the limits, the meter and the ends', () => {
     expect(h.entitlement.released).toEqual(['res-1']);
     expect(h.entitlement.settled).toEqual([]);
   });
+  it('counts the waiting room from the bot\'s arrival in it, not from the dispatch', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    h.clock.advance(60_000); // the bot takes a minute to reach the waiting room
+    await h.report(runId, 'waiting_room');
+    h.clock.advance(540_001); // ten minutes after the dispatch, nine in the waiting room
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    h.clock.advance(60_000);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'not_admitted' }]);
+  });
   it('suspends capture when the monitor goes quiet, resumes on a heartbeat, and ends when it stays quiet', async () => {
     const h = harness();
     const runId = await joined(h);
