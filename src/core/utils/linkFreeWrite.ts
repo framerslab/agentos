@@ -11,7 +11,8 @@
  * a link could lead a read to a file elsewhere and a named pipe could hold the read up, so it reads through
  * {@link readFileOutsideLinks}. The folder itself is the caller's and may be a link. The checks run as each folder
  * is made or looked at and each file opened; Node has no `openat`, so a process that swaps a folder for a link
- * between a check and the write or read is outside what they stop.
+ * between a check and the write or read is outside what they stop, except that on Linux a read also checks the
+ * path the kernel gives for the file it opened.
  *
  * @module agentos/core/utils/linkFreeWrite
  */
@@ -156,11 +157,17 @@ export async function openFileOutsideLinks(file: string): Promise<OpenedFile | O
  * regular file with a second name (a hard link) is read: a read changes nothing through the other name, and pnpm,
  * by default on Linux, installs a package's files as hard links to its store, so each of them has a second name.
  *
+ * On Linux, where `/proc` reports the path of an open file, the file the open reached must also lie below the real
+ * path `root` had before the looks, so a folder on the way that is swapped for a link after its look and before the
+ * open is refused too. Elsewhere Node can neither open a file relative to a folder held open nor ask an open file
+ * for its path, and such a swap is outside what the looks stop.
+ *
  * @param root - The folder the file is read below. It may itself be a link.
  * @param relative - The file's path under `root`, its names joined by the platform's separator, as `path.relative`
  *   gives it. The caller checks that the path stays under `root` (`resolveInsideFolder`).
  * @returns The file's text, read as UTF-8; `link` when a symbolic link holds the file's place or a folder's on the
- *   way; `special` when something other than a regular file holds the file's place; or null when no file is there.
+ *   way, or, on Linux, when the file the open reached lies outside `root`; `special` when something other than a
+ *   regular file holds the file's place; or null when no file is there.
  * @throws Any other error the looks, the open or the read meet.
  */
 export async function readFileOutsideLinks(
@@ -170,6 +177,8 @@ export async function readFileOutsideLinks(
   const names = relative.split(path.sep).filter((part) => part.length > 0);
   // With no name, the path is the root itself, a folder.
   if (names.length === 0) return 'special';
+  // Taken before the looks: a link put on the way after them does not move it.
+  const realRoot = await realPathWhereOpenPathsShow(root);
   let place = root;
   for (let index = 0; index < names.length; index++) {
     place = path.join(place, names[index]);
@@ -195,10 +204,46 @@ export async function readFileOutsideLinks(
   try {
     // Something put in the file's place since the look is refused here, before it is read.
     if (!(await handle.stat()).isFile()) return 'special';
+    // So is a file the open reached through a folder swapped for a link since its look.
+    if (realRoot !== null && !(await openedBelow(handle, realRoot))) return 'link';
     return { text: await handle.readFile('utf8') };
   } finally {
     await handle.close();
   }
+}
+
+/** The folder whose entries name each open file of this process by its descriptor, on Linux; null elsewhere. */
+const OPEN_FILE_PATHS: string | null = process.platform === 'linux' ? '/proc/self/fd' : null;
+
+/**
+ * The real path of `root`, as bytes, where the path of an open file can be had (Linux); null elsewhere, or when
+ * the real path cannot be had.
+ */
+async function realPathWhereOpenPathsShow(root: string): Promise<Buffer | null> {
+  if (OPEN_FILE_PATHS === null) return null;
+  try {
+    return await fs.realpath(root, { encoding: 'buffer' });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when the path the kernel gives for the open file `handle` lies below `realRoot`, or when it gives none (no
+ * `/proc` mounted), where the looks alone stand; false when it lies anywhere else.
+ */
+async function openedBelow(handle: FileHandle, realRoot: Buffer): Promise<boolean> {
+  let opened: Buffer;
+  try {
+    opened = await fs.readlink(`${OPEN_FILE_PATHS}/${handle.fd}`, { encoding: 'buffer' });
+  } catch {
+    return true;
+  }
+  const separator = Buffer.from(path.sep);
+  const below = realRoot.subarray(realRoot.length - separator.length).equals(separator)
+    ? realRoot
+    : Buffer.concat([realRoot, separator]);
+  return opened.length > below.length && opened.subarray(0, below.length).equals(below);
 }
 
 /** The entry at `file` itself, a link not followed, or null when there is none. */

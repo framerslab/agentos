@@ -6,6 +6,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -91,12 +92,14 @@ describe('a capability is read only from its own folder', () => {
     expect(thrown).toMatchObject({ code: 'CAPABILITY_MANIFEST_REFUSED', field: 'skillContent', problem: 'dot' });
   });
 
-  it('a manifest that sets skillContent to an empty value, null, false or a number is refused and recorded, and one that leaves it out reads SKILL.md beside it', async () => {
+  it('a manifest that sets skillContent to an empty value, null, no value, false or a number is refused and recorded, and one that leaves it out reads SKILL.md beside it', async () => {
     capability('good', { 'CAPABILITY.yaml': manifest('good'), 'SKILL.md': GOOD_SKILL });
     // Each of these holds a SKILL.md too, which a value read as unset would load.
     const set: Array<[string, string, string]> = [
       ['set-empty', 'skillContent: ""', 'empty'],
       ['set-null', 'skillContent: null', 'empty'],
+      ['set-tilde', 'skillContent: ~', 'empty'],
+      ['set-blank', 'skillContent:', 'empty'],
       ['set-false', 'skillContent: false', 'type'],
       ['set-zero', 'skillContent: 0', 'type'],
     ];
@@ -117,7 +120,7 @@ describe('a capability is read only from its own folder', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'a link at a capability file, or at a folder on the way to one, to a file outside, refuses the capability, and nothing is read through it',
+    'a link at a capability file, or at a folder on the way to one, to a file outside or to nothing, refuses the capability, and nothing is read through it',
     async () => {
       capability('good', { 'CAPABILITY.yaml': manifest('good'), 'SKILL.md': GOOD_SKILL });
       // SKILL.md beside the manifest is a link to the outside file.
@@ -139,18 +142,23 @@ describe('a capability is read only from its own folder', () => {
       const linkedManifest = path.join(caps, 'linked-manifest');
       fs.mkdirSync(linkedManifest);
       fs.symlinkSync(path.join(root, 'outside.yaml'), path.join(linkedManifest, 'CAPABILITY.yaml'));
+      // The manifest is a link that leads nowhere: it is refused and reported, not passed over.
+      const danglingManifest = path.join(caps, 'dangling-manifest');
+      fs.mkdirSync(danglingManifest);
+      fs.symlinkSync(path.join(root, 'missing.yaml'), path.join(danglingManifest, 'CAPABILITY.yaml'));
 
       const result = await new CapabilityManifestScanner().scanWithRefusals([caps]);
 
       expect(result.descriptors.map((descriptor) => descriptor.id)).toEqual(['tool:good']);
       expect(result.descriptors[0].fullContent).toBe(GOOD_SKILL);
-      expect(result.refused).toHaveLength(4);
+      expect(result.refused).toHaveLength(5);
       expect(result.refused).toEqual(
         expect.arrayContaining([
           { manifestPath: path.join(linkedSkill, 'CAPABILITY.yaml'), field: 'skillContent', problem: 'link' },
           { manifestPath: path.join(linkedFolder, 'CAPABILITY.yaml'), field: 'skillContent', problem: 'link' },
           { manifestPath: path.join(linkedSchema, 'CAPABILITY.yaml'), field: 'schema', problem: 'link' },
           { manifestPath: path.join(linkedManifest, 'CAPABILITY.yaml'), field: 'manifest', problem: 'link' },
+          { manifestPath: path.join(danglingManifest, 'CAPABILITY.yaml'), field: 'manifest', problem: 'link' },
         ]),
       );
       const returned = JSON.stringify(result);
@@ -182,5 +190,94 @@ describe('a capability is read only from its own folder', () => {
       expect(fs.lstatSync(path.join(pipedSkill, 'SKILL.md')).isFIFO()).toBe(true);
     },
     15_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    "a capability's folder that is a link to a folder outside is refused when parsed, as the scan passes over it, and nothing is read through it",
+    async () => {
+      const outsideCapability = path.join(root, 'outside-capability');
+      fs.mkdirSync(outsideCapability);
+      fs.writeFileSync(path.join(outsideCapability, 'CAPABILITY.yaml'), manifest('linked-capability'));
+      fs.writeFileSync(path.join(outsideCapability, 'SKILL.md'), SECRET);
+      const linkedCapability = path.join(caps, 'linked-capability');
+      fs.symlinkSync(outsideCapability, linkedCapability, 'dir');
+
+      const scanned = await new CapabilityManifestScanner().scanWithRefusals([caps]);
+      const thrown = await new CapabilityManifestScanner()
+        .parseManifest(path.join(linkedCapability, 'CAPABILITY.yaml'), linkedCapability)
+        .catch((err: unknown) => err);
+
+      expect(scanned).toEqual({ descriptors: [], refused: [] });
+      expect(thrown).toBeInstanceOf(CapabilityManifestRefusedError);
+      expect(thrown).toMatchObject({ code: 'CAPABILITY_MANIFEST_REFUSED', field: 'manifest', problem: 'link' });
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    "a capability's folder swapped for a link to a folder outside after its manifest is read refuses the capability, and nothing is read through it",
+    async () => {
+      const moved = capability('moved', { 'CAPABILITY.yaml': manifest('moved'), 'SKILL.md': '# Moved\n' });
+      const outsideFolder = path.join(root, 'outside-capability');
+      fs.mkdirSync(outsideFolder);
+      fs.writeFileSync(path.join(outsideFolder, 'SKILL.md'), SECRET);
+      const manifestFile = path.join(moved, 'CAPABILITY.yaml');
+      // Once the manifest is open, the capability's folder moves aside and a link to the folder outside takes its
+      // place. The folder moves within the scanned folder, so the open manifest still lies below it.
+      const realOpen = fsp.open.bind(fsp);
+      const swaps: string[] = [];
+      const open = vi.spyOn(fsp, 'open').mockImplementation(async (file, flags, mode) => {
+        const handle = await realOpen(file, flags, mode);
+        if (String(file) === manifestFile && swaps.length === 0) {
+          swaps.push(String(file));
+          fs.renameSync(moved, path.join(caps, 'moved-before'));
+          fs.symlinkSync(outsideFolder, moved, 'dir');
+        }
+        return handle;
+      });
+
+      const result = await new CapabilityManifestScanner().scanWithRefusals([caps]).finally(() => open.mockRestore());
+
+      expect(swaps).toEqual([manifestFile]);
+      expect(result.descriptors).toEqual([]);
+      expect(result.refused).toEqual([{ manifestPath: manifestFile, field: 'skillContent', problem: 'link' }]);
+      expect(JSON.stringify(result)).not.toContain(SECRET);
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'on Linux, a folder swapped for a link to a folder outside between its look and the open refuses the capability, and nothing is read through it',
+    async () => {
+      capability('good', { 'CAPABILITY.yaml': manifest('good'), 'SKILL.md': GOOD_SKILL });
+      const swapped = capability('swapped', {
+        'CAPABILITY.yaml': manifest('swapped', 'skillContent: docs/SKILL.md'),
+        'docs/SKILL.md': '# Swapped\n',
+      });
+      const outsideFolder = path.join(root, 'outside-docs');
+      fs.mkdirSync(outsideFolder);
+      fs.writeFileSync(path.join(outsideFolder, 'SKILL.md'), SECRET);
+      const docs = path.join(swapped, 'docs');
+      const skill = path.join(docs, 'SKILL.md');
+      // The looks find a folder at docs; then, just before docs/SKILL.md is opened, a link to the folder outside
+      // takes its place, so the open reaches the file outside.
+      const realOpen = fsp.open.bind(fsp);
+      const swaps: string[] = [];
+      const open = vi.spyOn(fsp, 'open').mockImplementation((file, flags, mode) => {
+        if (String(file) === skill && swaps.length === 0) {
+          swaps.push(String(file));
+          fs.renameSync(docs, path.join(swapped, 'docs-before'));
+          fs.symlinkSync(outsideFolder, docs, 'dir');
+        }
+        return realOpen(file, flags, mode);
+      });
+
+      const result = await new CapabilityManifestScanner().scanWithRefusals([caps]).finally(() => open.mockRestore());
+
+      expect(swaps).toEqual([skill]);
+      expect(result.descriptors.map((descriptor) => descriptor.id)).toEqual(['tool:good']);
+      expect(result.refused).toEqual([
+        { manifestPath: path.join(swapped, 'CAPABILITY.yaml'), field: 'skillContent', problem: 'link' },
+      ]);
+      expect(JSON.stringify(result)).not.toContain(SECRET);
+    },
   );
 });

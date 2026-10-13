@@ -394,9 +394,9 @@ export interface CapabilityManifestFile {
    * in it is empty, `.` or `..`, starts with a dot, starts or ends with a space or ends with a dot, or holds more
    * than 200 bytes in UTF-8, and it holds no backslash, no colon, none of `"`, `*`, `<`, `>`, `?` and `|` and no
    * control character, so it never leaves the folder. A value the manifest sets is held to the rule whatever it is, so
-   * an empty value, `null` (which the scanner reads as empty), `false` or a number is refused too. A manifest whose
-   * `skillContent` breaks the rule is refused, and the capability with it. When the manifest does not set it,
-   * `SKILL.md` beside the manifest is read when it is there.
+   * an empty value, YAML's null (no value, `null` or `~`, which the scanner reads as empty), `false` or a number is
+   * refused too. A manifest whose `skillContent` breaks the rule is refused, and the capability with it. When the
+   * manifest does not set it, `SKILL.md` beside the manifest is read when it is there.
    */
   skillContent?: string;
 }
@@ -419,7 +419,9 @@ export type CapabilityManifestField = 'manifest' | 'skillContent' | 'schema';
  *   it starts or ends with a slash or holds two together; a name starts with a dot; a name starts or ends with a
  *   space, or ends with a dot; or a name holds more than 200 bytes in UTF-8.
  * - `'outside'`: the file `skillContent` names would not lie inside the capability's folder.
- * - `'link'`: a symbolic link holds the place of the file, or of a folder on the way to it.
+ * - `'link'`: a symbolic link holds the place of the file, or of a folder on the way to it, the capability's own
+ *   folder among them. On Linux, also when the file the open reached lies outside the folder that holds the
+ *   capability's folder, as when a folder on the way is swapped for a link after it was looked at.
  * - `'special'`: something other than a regular file holds the file's place: a folder, a named pipe, a socket or a
  *   device.
  */

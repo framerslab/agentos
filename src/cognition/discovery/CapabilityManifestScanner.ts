@@ -24,10 +24,12 @@
  *
  * `skillContent` is optional: a path below the capability's folder, its names joined by `/` after an optional
  * leading `./` (`resolveSkillContentPath`). A manifest that sets `skillContent` to anything else, such as a path that
- * would leave the folder, an empty value or `false`, is refused, and the capability with it. The manifest, the
- * skill's content and `schema.json` are read never through a symbolic link below the capability's folder, never
- * waiting, and only when each is a regular file (`readFileOutsideLinks` in `core/utils/linkFreeWrite`). A refused
- * capability is left out with a warning, the scan goes on with the others, and `scanWithRefusals()` reports it.
+ * would leave the folder, an empty value, no value or `false`, is refused, and the capability with it. The manifest,
+ * the skill's content and `schema.json` are read never through a symbolic link at the capability's folder or below
+ * it, never waiting, and only when each is a regular file (`readFileOutsideLinks` in `core/utils/linkFreeWrite`,
+ * which on Linux also checks that the file it opened lies below the folder that holds the capability's folder). A
+ * refused capability is left out with a warning, the scan goes on with the others, and `scanWithRefusals()` reports
+ * it.
  *
  * Extends the existing workspace-discovery.ts pattern from agentos-skills-registry.
  */
@@ -96,7 +98,9 @@ function parseSimpleYaml(content: string): Record<string, unknown> {
       const value = rawValue.trim();
 
       if (!value) {
-        // Could be start of array or nested object
+        // A key with no value is YAML's null. Indented `- item` lines below it replace that with their list; the
+        // lines of a nested object are not read, so the key stays null.
+        result[key] = null;
         currentKey = key;
         continue;
       }
@@ -184,8 +188,8 @@ const PLACE_BROKEN: Record<OpenRefusal, string> = {
 /**
  * Thrown by `parseManifest`, and reported by `scanWithRefusals`, when a capability is refused: its `skillContent`
  * is not a path below its folder, or a symbolic link or something other than a regular file holds the place of its
- * manifest, its skill's content or its `schema.json`, or of a folder on the way to one. Nothing of the refused
- * capability is used.
+ * manifest, its skill's content or its `schema.json`, or of a folder on the way to one, its own folder among them.
+ * Nothing of the refused capability is used.
  */
 export class CapabilityManifestRefusedError extends Error {
   /** A stable code for callers that branch on the kind of failure. */
@@ -242,11 +246,13 @@ export function resolveSkillContentPath(
 }
 
 /**
- * Read `file`, a path inside `folder`, never through a symbolic link below the folder, never waiting, and only when
- * it is a regular file (`readFileOutsideLinks`).
+ * Read `file`, a path inside `folder`, never waiting, only when it is a regular file, and never through a symbolic
+ * link at the folder or below it (`readFileOutsideLinks`). The file is read below the folder's parent, the folder
+ * that holds every capability's folder when the scan reads it, so the capability's own folder is looked at too, and
+ * on Linux the file the open reached is checked to lie below that parent.
  *
- * @param folder - The folder the file is read below. It may itself be a link.
- * @param file - The file's path, absolute or relative to `folder`.
+ * @param folder - The capability's folder, which holds the file. It may not be a link.
+ * @param file - The file's path, absolute or relative to `folder`, inside `folder`.
  * @param field - What the file is, for a refusal.
  * @returns The file's text, or null when no file is there.
  * @throws CapabilityManifestRefusedError (`link` or `special`) when the file is not read through.
@@ -256,11 +262,24 @@ async function readCapabilityFile(
   file: string,
   field: CapabilityManifestField,
 ): Promise<string | null> {
-  const root = path.resolve(folder);
-  const target = path.resolve(root, file);
+  const dir = path.resolve(folder);
+  const target = path.resolve(dir, file);
+  const root = path.dirname(dir);
   const read = await readFileOutsideLinks(root, path.relative(root, target));
   if (typeof read === 'string') throw new CapabilityManifestRefusedError(field, read, target);
   return read === null ? null : read.text;
+}
+
+/**
+ * True when an entry of any kind is at `file`, looked at without following a link, so a link that leads nowhere
+ * counts. A look that fails for any other reason counts as no entry.
+ */
+function entryAt(file: string): boolean {
+  try {
+    return fs.lstatSync(file, { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 // ============================================================================
@@ -343,11 +362,9 @@ export class CapabilityManifestScanner {
         const yamlPath = path.join(capDir, 'CAPABILITY.yaml');
         const ymlPath = path.join(capDir, 'CAPABILITY.yml');
 
-        const manifestPath = fs.existsSync(yamlPath)
-          ? yamlPath
-          : fs.existsSync(ymlPath)
-            ? ymlPath
-            : null;
+        // An entry of any kind at a manifest's place selects it, a link that leads nowhere among them, so the read
+        // refuses and reports what is there rather than the scan passing over it.
+        const manifestPath = entryAt(yamlPath) ? yamlPath : entryAt(ymlPath) ? ymlPath : null;
 
         if (!manifestPath) continue;
 
@@ -374,15 +391,17 @@ export class CapabilityManifestScanner {
 
   /**
    * Parse a single CAPABILITY.yaml file into a CapabilityDescriptor. The manifest, the skill's content and
-   * `schema.json` are read never through a symbolic link below the capability's folder, never waiting, and only
-   * when each is a regular file; the file `skillContent` names is read only when it lies inside `capDir`
+   * `schema.json` are read never through a symbolic link at the capability's folder or below it, never waiting, and
+   * only when each is a regular file; the file `skillContent` names is read only when it lies inside `capDir`
    * ({@link resolveSkillContentPath}).
    *
    * @param yamlPath - The manifest's path.
-   * @param capDir - The capability's folder, which holds its files.
+   * @param capDir - The capability's folder, which holds its files. Its files are read below its parent folder, so
+   *   it may not be a link, as {@link scanWithRefusals} reads no folder that is one.
    * @returns The capability, or null when no manifest is at `yamlPath` or it lacks `name`, `kind` or `description`.
    * @throws CapabilityManifestRefusedError when `skillContent` is refused, or when a symbolic link or something
-   *   other than a regular file holds the place of the manifest, the skill's content or `schema.json`.
+   *   other than a regular file holds the place of the manifest, the skill's content or `schema.json`, or a link
+   *   holds the place of a folder on the way to one of them, the capability's folder among them.
    */
   async parseManifest(
     yamlPath: string,
@@ -406,8 +425,9 @@ export class CapabilityManifestScanner {
     // The skill's content: the file skillContent names, which must lie inside the capability's folder, or
     // SKILL.md beside the manifest when the manifest does not set skillContent. A value that is set is held to the
     // rule even when it is empty, false or a number, so a malformed manifest is refused rather than read as unset.
-    const skillFile =
-      parsed.skillContent === undefined ? 'SKILL.md' : resolveSkillContentPath(capDir, parsed.skillContent);
+    // YAML's null, written as no value, `null` or `~`, is read as the empty value.
+    const skillContent: unknown = parsed.skillContent === null ? '' : parsed.skillContent;
+    const skillFile = skillContent === undefined ? 'SKILL.md' : resolveSkillContentPath(capDir, skillContent);
     const fullContent = (await readCapabilityFile(capDir, skillFile, 'skillContent')) ?? undefined;
 
     // Load optional schema.json
@@ -440,7 +460,7 @@ export class CapabilityManifestScanner {
       requiredSecrets: (parsed.requiredSecrets as string[]) ?? [],
       requiredTools: (parsed.requiredTools as string[]) ?? [],
       available: true,
-      hasSideEffects: parsed.hasSideEffects as boolean | undefined,
+      hasSideEffects: (parsed.hasSideEffects ?? undefined) as boolean | undefined,
       fullSchema,
       fullContent,
       sourceRef: {

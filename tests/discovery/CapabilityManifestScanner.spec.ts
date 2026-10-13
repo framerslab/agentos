@@ -195,6 +195,39 @@ describe('CapabilityManifestScanner', () => {
       expect(result!.id).toBe('tool:minimal-tool');
     });
 
+    it('gives a key written with no value its default, and a list below such a key is read', async () => {
+      const dir = capability('blank', {
+        'CAPABILITY.yaml': [
+          'id:',
+          'kind: tool',
+          'name: blank-tool',
+          'displayName:',
+          'description: Keys written with no value',
+          'category:',
+          'tags:',
+          'requiredSecrets:',
+          'requiredTools:',
+          '  - curl',
+          'hasSideEffects:',
+          'inputSchema:',
+        ].join('\n'),
+        'schema.json': JSON.stringify({ type: 'object' }),
+      });
+
+      const result = await scanner.parseManifest(path.join(dir, 'CAPABILITY.yaml'), dir);
+
+      expect(result).toMatchObject({
+        id: 'tool:blank-tool',
+        displayName: 'blank-tool',
+        category: 'custom',
+        tags: [],
+        requiredSecrets: [],
+        requiredTools: ['curl'],
+        fullSchema: { type: 'object' },
+      });
+      expect(result!.hasSideEffects).toBeUndefined();
+    });
+
     it('defaults category to custom when not provided', async () => {
       const dir = capability('min', { 'CAPABILITY.yaml': YAML_MINIMAL });
 
