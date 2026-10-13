@@ -6,6 +6,7 @@
  * ## What is tested
  *
  * - Mode property returns 'heuristic'
+ * - The constructor refuses a silence timeout that is not a positive, finite number
  * - Terminal punctuation (., ?, !) triggers immediate turn_complete with reason 'punctuation'
  * - Correct transcript text and confidence are carried in the turn_complete event
  * - Backchannel phrases are detected, suppressed from accumulation, and emitted separately
@@ -77,6 +78,14 @@ describe('HeuristicEndpointDetector', () => {
 
   it('should report mode as "heuristic"', () => {
     expect(detector.mode).toBe('heuristic');
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1])('refuses a silenceTimeoutMs of %s', (silenceTimeoutMs) => {
+    expect(() => new HeuristicEndpointDetector({ silenceTimeoutMs })).toThrow(RangeError);
+  });
+
+  it('takes the default silence timeout when silenceTimeoutMs is undefined', () => {
+    expect(new HeuristicEndpointDetector({ silenceTimeoutMs: undefined }).turnCompletionTimeoutMs).toBe(1_500);
   });
 
   // -------------------------------------------------------------------------

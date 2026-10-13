@@ -129,7 +129,9 @@ export interface HeuristicEndpointDetectorOptions {
   /**
    * How long (ms) to wait after `speech_end` before emitting `turn_complete`
    * when no terminal punctuation is detected. Lower values reduce latency
-   * but risk firing mid-sentence during natural pauses.
+   * but risk firing mid-sentence during natural pauses. A positive, finite
+   * number: the constructor throws a `RangeError` for zero, a negative
+   * number, `NaN` or `Infinity`.
    * @defaultValue 1500
    */
   silenceTimeoutMs?: number;
@@ -259,10 +261,18 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * Create a new {@link HeuristicEndpointDetector}.
    *
    * @param options - Optional configuration overrides.
+   * @throws {RangeError} When `silenceTimeoutMs` is given and is not a positive, finite number.
    */
   constructor(options: HeuristicEndpointDetectorOptions = {}) {
     super();
-    this.silenceTimeoutMs = options.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS;
+    const silenceTimeoutMs = options.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS;
+    // NaN or Infinity never lets a waiting speech end expire, and zero or less never waits for a final.
+    if (!Number.isFinite(silenceTimeoutMs) || silenceTimeoutMs <= 0) {
+      throw new RangeError(
+        `HeuristicEndpointDetector: silenceTimeoutMs must be a positive, finite number, got ${String(silenceTimeoutMs)}`
+      );
+    }
+    this.silenceTimeoutMs = silenceTimeoutMs;
   }
 
   /** Maximum wait for a pending turn after speech ends, used when draining a listen session. */
