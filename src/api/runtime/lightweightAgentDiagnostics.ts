@@ -49,6 +49,11 @@ export function getDeferredCapabilities(
   });
 }
 
+/**
+ * The fields set on an `agent()` config that the agent without `runtime: 'gmi'`
+ * accepts and does not apply: {@link getDeferredCapabilities} for the `agent`
+ * surface.
+ */
 export function getDeferredLightweightAgentCapabilities(
   config: Partial<BaseAgentConfig>,
 ): CapabilityKey[] {
@@ -61,6 +66,14 @@ export function getDeferredLightweightAgentCapabilities(
  */
 const ENFORCED_ON_NO_SURFACE: ReadonlySet<CapabilityKey> = new Set<CapabilityKey>(['security', 'permissions']);
 
+/**
+ * Logs one warning through `warn` when `config` sets a field that
+ * {@link getDeferredLightweightAgentCapabilities} returns, and returns those
+ * fields. The message has one part per group: the fields it points to the
+ * full runtime or `agency()`, the memory settings other than the working
+ * callback, and `security` and `permissions`, which no surface enforces.
+ * `agent()` without `runtime: 'gmi'` calls it once at construction.
+ */
 export function warnOnDeferredLightweightAgentCapabilities(
   config: Partial<BaseAgentConfig>,
   warn: (message: string) => void = console.warn,
