@@ -90,8 +90,9 @@ Preferred providers receive priorities 50, 51, 52, … (lower number = higher pr
 | `azure-speech-stt` | Azure Speech STT | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | No | No | cloud, streaming |
 | `whisper-chunked` | Whisper Chunked Streaming | `OPENAI_API_KEY` | No | Yes | streaming, interim-results |
 | `openai-realtime-transcription` | OpenAI Realtime Transcription | `OPENAI_API_KEY` | No | Yes | streaming, interim-results, endpointing, item-ids, long-sessions |
-| `whisper-local` | Whisper.cpp | — | Yes | No | local, offline |
+| `whisper-local` | Whisper.cpp | — | Yes | No | local, offline _(unavailable: no implementation)_ |
 | `vosk` | Vosk | — | Yes | Yes | local, offline, streaming |
+| `moonshine-browser` | Moonshine (in the browser) | — | Yes | Yes | local, offline, streaming, browser |
 | `nvidia-nemo` | NVIDIA NeMo | — | Yes | No | local, offline _(unavailable — not yet integrated)_ |
 
 ### Text-to-Speech (TTS)
