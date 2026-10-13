@@ -435,6 +435,12 @@ export class MeetingManager {
         await this.recoverDispatch(run);
         continue;
       }
+      if (run.state !== 'requested' && run.state !== 'scheduled') {
+        // the bot is out and has reported, and its dispatcher lost the lease before it recorded the dispatch: it is
+        // recorded now, under this lease, so reconcile watches the run (a removed job would let its container die unseen)
+        await this.stores.jobs.markDispatched(run.runId, this.id, run.dispatch?.workerId);
+        continue;
+      }
       if (run.state === 'scheduled' && run.reservationId && !(await this.stores.entitlement.revalidate(run.reservationId))) {
         await this.stores.jobs.remove(job.runId);
         await this.fail(run, 'allowance');
@@ -457,7 +463,7 @@ export class MeetingManager {
       await this.fail(run, 'crashed', 'provider not registered');
       return;
     }
-    let alive = false;
+    let alive: boolean;
     try {
       alive = (await provider.usage({ runIds: [run.runId] })).some((u) => u.runId === run.runId && u.alive);
     } catch (err) {

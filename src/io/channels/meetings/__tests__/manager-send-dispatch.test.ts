@@ -288,4 +288,22 @@ describe('dispatch and the interlock', () => {
     expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stopped_by_owner' }]);
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stopped_by_owner' });
   });
+  it('records the dispatch of a bot that reported before its dispatcher lost the lease, so reconcile still watches the run', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    // a manager that stopped after the provider started the bot and before it recorded the dispatch; the bot reported since
+    await h.stores.runs.update(runId, { state: 'dispatching', dispatchedAt: h.clock.now(), dispatch: { roomName: `bot-${runId}`, workerTokenHash: MockMeetingBotProvider.hash('t') } }, 'requested');
+    await h.stores.jobs.lease('stopped-manager', h.clock.now(), 1);
+    await h.manager.processProviderEvent('mock', mockEventContext(runId, 'joining', {}, h.clock.now(), 't'));
+    h.provider.alive.set(runId, 5);
+    h.clock.advance(10);
+    await h.manager.tick();
+    expect(await h.stores.jobs.get(runId)).toMatchObject({ dispatched: true, leaseHolder: 'm1' });
+    // its container goes: the next reconcile ends the run
+    h.provider.alive.delete(runId);
+    h.clock.advance(60_000);
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed' });
+  });
 });
