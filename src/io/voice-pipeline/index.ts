@@ -143,6 +143,14 @@ export {
   type MoonshineProgressReport,
 } from './providers/MoonshineBrowserSTT.js';
 
+// The client transcript message's helpers: a client that transcribes on its
+// own device sends its transcripts in place of audio.
+export {
+  toClientTranscriptMessage,
+  isClientTranscriptMessage,
+  transcriptEventFromClient,
+} from './clientTranscript.js';
+
 // Concrete barge-in handler implementations
 export { HardCutBargeinHandler } from './HardCutBargeinHandler.js';
 export { SoftFadeBargeinHandler } from './SoftFadeBargeinHandler.js';

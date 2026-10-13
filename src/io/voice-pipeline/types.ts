@@ -1572,8 +1572,49 @@ export interface VoicePipelineSession extends EventEmitterLike {
 // ============================================================================
 
 /**
+ * A transcript the client made itself, sent in place of audio by a client
+ * that transcribes on its own device (for example with `MoonshineBrowserSTT`
+ * in a browser). It carries the {@link TranscriptEvent} fields a display and
+ * an endpoint detector read; every interim and the final of one line carry
+ * the same `itemId`, and the final comes once, when the line is complete.
+ * `toClientTranscriptMessage()` makes one from a `TranscriptEvent`;
+ * `isClientTranscriptMessage()` checks one a server received, and
+ * `transcriptEventFromClient()` turns it back into a `TranscriptEvent`.
+ *
+ * @example
+ * ```typescript
+ * sttSession.on('transcript', (event: TranscriptEvent) => {
+ *   socket.send(JSON.stringify(toClientTranscriptMessage(event)));
+ * });
+ * ```
+ */
+export interface ClientTranscriptMessage {
+  /** Discriminator of the client message. */
+  type: 'transcript';
+  /** The line's text so far (interim), or its whole text (final); at most 4,000 characters. */
+  text: string;
+  /** Identifier of the line, at most 128 characters; every interim and the final of one line carry the same one. */
+  itemId: string;
+  /** `true` once the line is complete and will not be revised. */
+  isFinal: boolean;
+  /** Aggregate confidence of `text` in [0, 1]; read as 1 when absent. */
+  confidence?: number;
+  /**
+   * Start of the line's audio, in milliseconds counted from the first frame
+   * the client transcribed in this session.
+   */
+  startMs?: number;
+  /** End of the line's audio, on the same clock as `startMs`. */
+  endMs?: number;
+  /** Language of `text` (for example `'en'`), at most 64 characters. */
+  language?: string;
+}
+
+/**
  * Messages sent from the client (browser/app) to the server over the transport.
  * All messages are JSON-serialised.
+ * A client that transcribes on its own device sends
+ * {@link ClientTranscriptMessage}s in place of audio.
  *
  * @see {@link ServerTextMessage} for the server-to-client counterpart.
  *
@@ -1602,7 +1643,8 @@ export type ClientTextMessage =
       type: 'control';
       /** The control action to perform. */
       action: TransportControlMessage;
-    };
+    }
+  | ClientTranscriptMessage;
 
 // ============================================================================
 // Section 11 -- Wire protocol: server -> client messages

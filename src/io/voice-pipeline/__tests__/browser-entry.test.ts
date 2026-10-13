@@ -100,6 +100,7 @@ describe.skipIf(!inCI && !existsSync(entry))('the browser entry of the voice pip
         'io/voice-pipeline/VoiceMetricsReporter.js',
         'io/voice-pipeline/HealthyProvider.js',
         'io/voice-pipeline/providers/MoonshineBrowserSTT.js',
+        'io/voice-pipeline/clientTranscript.js',
       ])
     );
   });
