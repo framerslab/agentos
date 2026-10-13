@@ -102,6 +102,18 @@ describe('InMemoryCheckpointStore', () => {
   });
 
   // -------------------------------------------------------------------------
+  it('latest, load and list put the checkpoint saved last first when timestamps are equal', async () => {
+    // The runtime can save several checkpoints of a run in one millisecond.
+    for (const id of ['cp-first', 'cp-second', 'cp-third']) {
+      await store.save(makeCheckpoint({ id, runId: 'run-1', timestamp: 5000 }));
+    }
+
+    expect((await store.latest('run-1'))!.id).toBe('cp-third');
+    expect((await store.load('run-1', 'node-a'))!.id).toBe('cp-third');
+    expect((await store.list('graph-1')).map((meta) => meta.id)).toEqual(['cp-third', 'cp-second', 'cp-first']);
+  });
+
+  // -------------------------------------------------------------------------
   it('list returns metadata for all checkpoints of a graphId', async () => {
     await store.save(makeCheckpoint({ id: 'cp-1', graphId: 'graph-1', runId: 'run-1' }));
     await store.save(makeCheckpoint({ id: 'cp-2', graphId: 'graph-1', runId: 'run-2' }));

@@ -1657,7 +1657,7 @@ function recordingModel(replies: Record<string, string>, late: string[] = []) {
     const call = calls.find((entry) => entry.instructions === instructions);
     return call && { scratch: call.scratch, artifacts: call.artifacts };
   }
-  return { providerCall, stateSeenBy };
+  return { providerCall, stateSeenBy, calls };
 }
 
 /** A graph of static edges, one per `[source, target]` pair. */
@@ -1947,15 +1947,10 @@ describe('GraphRuntime: a value a branch only carried never replaces what a sibl
 // to hold what every branch wrote.
 
 describe('GraphRuntime: the checkpoint after a parallel batch', () => {
-  it('holds every branch under the every_node policy, and a resume from it returns them all', async () => {
-    const store = new InMemoryCheckpointStore();
-    // notes, declared after draft, finishes after it, so draft has completed
-    // when notes saves its checkpoint.
-    const model = recordingModel({ [DRAFT]: DRAFTED, [NOTES]: NOTED }, [NOTES]);
-    const runtime = runtimeOver(store, model.providerCall);
-    // START fans out to draft and notes, which both end the run.
-    const graph = graphOf(
-      'g-batch-every-node',
+  // START fans out to draft and notes, which both end the run.
+  const terminalBatch = (id: string) =>
+    graphOf(
+      id,
       [draftNode(), notesNode()],
       [
         [START, 'draft'],
@@ -1966,11 +1961,39 @@ describe('GraphRuntime: the checkpoint after a parallel batch', () => {
       { checkpointPolicy: 'every_node' },
     );
 
+  it('holds every branch under the every_node policy, and a resume from it returns them all', async () => {
+    const store = new InMemoryCheckpointStore();
+    // notes, declared after draft, finishes after it, so draft has completed
+    // when notes saves its checkpoint.
+    const model = recordingModel({ [DRAFT]: DRAFTED, [NOTES]: NOTED }, [NOTES]);
+    const runtime = runtimeOver(store, model.providerCall);
+    const graph = terminalBatch('g-batch-every-node');
+
     const saved = (await readAll(runtime.stream(graph, {}))).filter((event) => event.type === 'checkpoint_saved');
     const last = saved[saved.length - 1];
     if (last?.type !== 'checkpoint_saved') throw new Error('the run saved no checkpoint');
 
     expect((await store.get(last.checkpointId))?.state.artifacts).toEqual({ draft: DRAFTED, notes: NOTED });
     expect(await runtime.resume(graph, last.checkpointId)).toEqual({ draft: DRAFTED, notes: NOTED });
+  });
+
+  it('is the checkpoint a resume by the run id continues from when every checkpoint has the same timestamp', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel({ [DRAFT]: DRAFTED, [NOTES]: NOTED }, [NOTES]);
+    const runtime = runtimeOver(store, model.providerCall);
+    const graph = terminalBatch('g-batch-every-node-same-ms');
+    // The branches' checkpoints and the one after the batch are saved in the
+    // same millisecond.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-13T12:00:00Z'));
+    try {
+      const runId = runIdOf(await readAll(runtime.stream(graph, {})));
+      const callsBeforeResume = model.calls.length;
+
+      expect(await runtime.resume(graph, runId)).toEqual({ draft: DRAFTED, notes: NOTED });
+      // The run had finished, so the resume runs no node again.
+      expect(model.calls.length).toBe(callsBeforeResume);
+    } finally {
+      clock.mockRestore();
+    }
   });
 });
