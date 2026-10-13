@@ -100,4 +100,70 @@ describe('fenced delivery', () => {
     expect(bodies).toEqual([]);
     expect(await outbox.listByRun(id)).toEqual([expect.objectContaining({ payload: '', purged: true })]);
   });
+
+  it('scrubs pending and delivered content at ordinary completion with keep none', async () => {
+    const h = harness();
+    const outbox = new FencedOutbox(h.stores.outbox, new MemoryDeliveryFence());
+    const manager = new MeetingManager({ managerId: 'cleanup', stores: { ...h.stores, outbox }, room: new MeetingRoom(h.rooms), scrubUnkeptOutbox: true, reportUrlFor: (id, p) => `https://example.test/${p}/${id}` });
+    manager.registerProvider(h.provider);
+    const sent = await manager.sendBot(h.request);
+    if (!sent.ok) throw new Error('send failed');
+    const id = sent.run.runId;
+    await outbox.enqueue({ ...row, runId: id }, h.clock.now());
+    await outbox.enqueue({ ...row, runId: id, id: 'delivered' }, h.clock.now());
+    await outbox.markDelivered('delivered');
+    await h.stores.transcript.append({ runId: id, seq: 1, turnId: `${id}:1`, at: 1, text: 'content-marker' });
+    await h.stores.events.append({ eventId: 'chat', runId: id, type: 'bot:chat_message', at: 1, data: { text: 'content-marker' } });
+    await h.stores.runs.update(id, { state: 'left', leftAt: h.clock.now(), cleanupPending: true });
+    await manager.tick();
+    expect((await h.stores.runs.get(id))?.state).toBe('done');
+    const snapshot = JSON.stringify({
+      run: await h.stores.runs.get(id),
+      outbox: await outbox.listByRun(id),
+      turns: await h.stores.transcript.read(id, 0),
+      events: await h.stores.events.read(id, 0),
+    });
+    expect(snapshot).not.toContain('content-marker');
+    expect((await outbox.listByRun(id)).every((d) => d.payload === '')).toBe(true);
+  });
+
+  it('leaves the outbox to its retries when the host turns the completion scrub off', async () => {
+    const h = harness();
+    const outbox = new FencedOutbox(h.stores.outbox, new MemoryDeliveryFence());
+    const manager = new MeetingManager({ managerId: 'retries', stores: { ...h.stores, outbox }, room: new MeetingRoom(h.rooms), scrubUnkeptOutbox: false, reportUrlFor: (id, p) => `https://example.test/${p}/${id}` });
+    manager.registerProvider(h.provider);
+    const sent = await manager.sendBot(h.request);
+    if (!sent.ok) throw new Error('send failed');
+    const id = sent.run.runId;
+    await outbox.enqueue({ ...row, runId: id }, h.clock.now());
+    await h.stores.transcript.append({ runId: id, seq: 1, turnId: `${id}:1`, at: 1, text: 'content-marker' });
+    await h.stores.runs.update(id, { state: 'left', leftAt: h.clock.now(), cleanupPending: true });
+    await manager.tick();
+    expect((await h.stores.runs.get(id))?.state).toBe('done');
+    // the delivery pending at completion still goes to its destination; the stored transcript is dropped all the same
+    expect(await outbox.listByRun(id)).toEqual([expect.objectContaining({ id: 'd1', payload: row.payload, state: 'pending', purged: false })]);
+    expect(await h.stores.transcript.read(id, 0)).toEqual([]);
+  });
+
+  it('lets the manager forget an unkept run of memory stores after the grace, its fence with it', async () => {
+    const h = harness();
+    const fence = new MemoryDeliveryFence();
+    const outbox = new FencedOutbox(h.stores.outbox, fence);
+    const manager = new MeetingManager({ managerId: 'evicts', stores: { ...h.stores, outbox }, room: new MeetingRoom(h.rooms), reportUrlFor: (id, p) => `https://example.test/${p}/${id}` });
+    manager.registerProvider(h.provider);
+    const sent = await manager.sendBot(h.request);
+    if (!sent.ok) throw new Error('send failed');
+    const id = sent.run.runId;
+    await outbox.enqueue({ ...row, runId: id }, h.clock.now());
+    await outbox.markDelivered('d1');
+    await h.stores.runs.update(id, { state: 'left', leftAt: h.clock.now(), cleanupPending: true });
+    await manager.tick();
+    expect((await h.stores.runs.get(id))?.state).toBe('done');
+    expect(await fence.isFenced(id)).toBe(true);
+    h.clock.advance(172_800_000);
+    await manager.tick();
+    expect(await h.stores.runs.get(id)).toBeUndefined();
+    expect(await outbox.listByRun(id)).toEqual([]);
+    expect(await fence.isFenced(id)).toBe(false);
+  });
 });
