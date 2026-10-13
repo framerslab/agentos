@@ -50,7 +50,7 @@ export interface MeetingRoomHandle {
   agentIdentity: string;
   /** The bot's token: it may publish and may not subscribe. */
   publishToken: string;
-  /** The agent's token: it may subscribe and may not publish. */
+  /** The agent's token: it may subscribe and may not publish. The manager does not hand it on; an agent that connects later takes one from {@link MeetingRoom.agentToken}. */
   subscribeToken: string;
 }
 
@@ -83,17 +83,35 @@ export class MeetingRoom {
   async create(runId: string): Promise<MeetingRoomHandle> {
     const name = `${this.prefix}${runId}`;
     await this.service.createRoom({ name, emptyTimeoutSeconds: this.emptyTimeoutSeconds, departureTimeoutSeconds: this.departureTimeoutSeconds, maxParticipants: 2 });
-    const publishToken = await this.service.mintToken({ room: name, identity: this.botIdentity, canPublish: true, canSubscribe: false, ttlSeconds: this.tokenTtlSeconds });
-    const subscribeToken = await this.service.mintToken({ room: name, identity: this.agentIdentity, canPublish: false, canSubscribe: true, ttlSeconds: this.tokenTtlSeconds });
-    return { url: this.service.url, name, botIdentity: this.botIdentity, agentIdentity: this.agentIdentity, publishToken, subscribeToken };
+    try {
+      const publishToken = await this.service.mintToken({ room: name, identity: this.botIdentity, canPublish: true, canSubscribe: false, ttlSeconds: this.tokenTtlSeconds });
+      const subscribeToken = await this.service.mintToken({ room: name, identity: this.agentIdentity, canPublish: false, canSubscribe: true, ttlSeconds: this.tokenTtlSeconds });
+      return { url: this.service.url, name, botIdentity: this.botIdentity, agentIdentity: this.agentIdentity, publishToken, subscribeToken };
+    } catch (err) {
+      // a room nobody can be given a token for is deleted again, not left open until its empty timeout; the mint's
+      // failure is the one passed on (a delete that fails too leaves the room to that timeout)
+      await this.delete(name).catch(() => undefined);
+      throw err;
+    }
   }
 
-  /** Deletes the room; a room that is already gone is not an error. The service reports a missing room with `status` 404; any other error is thrown. */
+  /**
+   * Mints the listening agent's subscribe-only token for a run's room, when the agent is about to connect. The manager
+   * keeps no token, and one minted at dispatch may have expired by the time the agent joins, since a run can wait in the
+   * waiting room longer than a token lives.
+   *
+   * @param roomName - The run's room, as its dispatch record names it (`run.dispatch.roomName`).
+   */
+  async agentToken(roomName: string): Promise<string> {
+    return this.service.mintToken({ room: roomName, identity: this.agentIdentity, canPublish: false, canSubscribe: true, ttlSeconds: this.tokenTtlSeconds });
+  }
+
+  /** Deletes the room; a room that is already gone is not an error. The service reports a missing room with `status` 404; any other rejection, an object or not, is passed on as it is. */
   async delete(name: string): Promise<void> {
     try {
       await this.service.deleteRoom(name);
     } catch (err) {
-      const status = (err as { status?: number }).status;
+      const status = typeof err === 'object' && err !== null ? (err as { status?: unknown }).status : undefined;
       if (status === 404) return;
       throw err;
     }
