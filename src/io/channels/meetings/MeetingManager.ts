@@ -92,6 +92,15 @@ export interface MeetingManagerConfig {
   dispatchRetryDelayMs?: number;
   /** How long after a leave command the bot is killed. Default 30000. */
   killAfterMs?: number;
+  /**
+   * End at the last durable usage after this silence. Omitted preserves the existing reconciliation policy. When set, a
+   * dispatching or dispatched run whose worker has sent no fresh usage report for this many milliseconds (counted from
+   * the manager's receipt of the last one, or from the dispatch when none came) is killed and ended `crashed`, at that
+   * receipt and at the total the reports gave, whatever the provider answers and whatever heartbeats arrive. Every pass of
+   * the upkeep checks it, and so does {@link MeetingManager.reconcile}. A value that is not a finite number of milliseconds
+   * above zero is refused with a `RangeError` when the manager is built.
+   */
+  usageSilenceMs?: number;
   /** In-memory terminal records live for this grace; default two days, beyond the outbox retry window. */
   forgetAfterMs?: number;
   /** The least a reservation may cover for a run to be sent, in seconds; a send under it is refused with `allowance`. Default 600. */
@@ -174,6 +183,8 @@ const ONCE_EVENTS: ReadonlySet<MeetingEventType> = new Set<MeetingEventType>([
 ]);
 
 const ACTIVE_STATES: readonly MeetingRunState[] = ['dispatching', 'joining', 'waiting_room', 'in_call_notice_pending', 'in_call', 'leaving', 'left', 'purging'];
+/** The states whose runs `usageSilenceMs` ends: from the dispatch until the bot has left. A run behind the fence has its kill deadline, and one that has left only its cleanup. */
+const SILENCE_STATES: readonly MeetingRunState[] = ['dispatching', 'joining', 'waiting_room', 'in_call_notice_pending', 'in_call', 'leaving'];
 /** States a purge may start from: everything that is not terminal. */
 const PURGEABLE_STATES: readonly MeetingRunState[] = ['requested', 'scheduled', ...ACTIVE_STATES.filter((s) => s !== 'purging')];
 /** Every state that is not terminal. */
@@ -222,6 +233,7 @@ export class MeetingManager {
   private readonly dispatchRetryMs: number;
   private readonly dispatchRetryDelayMs: number;
   private readonly killAfterMs: number;
+  private readonly usageSilenceMs: number | undefined;
   private readonly minReservationSeconds: number;
   private readonly purgeHooks: Array<(runId: string) => Promise<void>> = [];
   private lastReconcileAt = 0;
@@ -233,7 +245,12 @@ export class MeetingManager {
   /** When the terminal runs are next listed for eviction: when the first of them can go, and at least once a minute. */
   private nextCleanupAt = 0;
 
+  /** @throws RangeError when `usageSilenceMs` is given and is not a finite number of milliseconds above zero. */
   constructor(private readonly config: MeetingManagerConfig) {
+    // NaN or zero would end every run at once (no silence is ever shorter), and Infinity would end none
+    if (config.usageSilenceMs !== undefined && !(Number.isFinite(config.usageSilenceMs) && config.usageSilenceMs > 0)) {
+      throw new RangeError('usageSilenceMs must be a finite number of milliseconds above zero');
+    }
     this.id = config.managerId ?? randomUUID();
     this.leaseTtlMs = config.leaseTtlMs ?? 60_000;
     this.noticeConfirmMs = config.noticeConfirmMs ?? 30_000;
@@ -243,6 +260,7 @@ export class MeetingManager {
     this.dispatchRetryMs = config.dispatchRetryMs ?? 300_000;
     this.dispatchRetryDelayMs = config.dispatchRetryDelayMs ?? 15_000;
     this.killAfterMs = config.killAfterMs ?? 30_000;
+    this.usageSilenceMs = config.usageSilenceMs;
     this.minReservationSeconds = config.minReservationSeconds ?? 600;
     this.purgeHooks.push(...(config.purgeHooks ?? []));
   }
@@ -488,7 +506,11 @@ export class MeetingManager {
     if (failure) throw failure.error;
   }
 
-  /** The steps after the dispatches: the limits, the eviction and a reconcile every minute, each run even when an earlier one throws; the first error is thrown at the end. */
+  /**
+   * The steps after the dispatches: the usage silence (when the host sets `usageSilenceMs`), the limits, the eviction and
+   * a reconcile every minute, each run even when an earlier one throws; the first error is thrown at the end. The silence
+   * is checked on every pass, not on the reconcile's minute, so a run ends when its silence reaches the threshold.
+   */
   private async upkeep(): Promise<void> {
     let failure: { error: unknown } | undefined;
     const step = async (pass: () => Promise<void>): Promise<void> => {
@@ -498,6 +520,7 @@ export class MeetingManager {
         failure ??= { error };
       }
     };
+    await step(() => this.endSilentRuns());
     await step(() => this.enforceLimits());
     await step(() => this.cleanupExpired());
     if (this.now() - this.lastReconcileAt >= 60_000) {
@@ -727,6 +750,10 @@ export class MeetingManager {
       ? await this.recordSupplierTotals(run.runId, run.reservationId, event.data.supplierUsage)
       : undefined;
     const applied = await this.applyReport(run, event);
+    // written once the report is applied, never between its stored event and its effects: a write that failed there
+    // would leave the worker's retry a repeated report, which applies nothing again. A report applied before (a
+    // duplicate) applies nothing and moves it not at all
+    if (applied && run) await this.stores.runs.update(run.runId, { lastReportAt: this.now() });
     if (refused) throw refused.error;
     return applied;
   }
@@ -882,8 +909,24 @@ export class MeetingManager {
         }
         return true;
       case 'usage': {
-        const updated = await this.stores.runs.update(run.runId, { lastUsageAt: event.at });
-        if (run.reservationId && run.captureStartedAt !== undefined) await this.stores.entitlement.meter(run.reservationId, event.data?.seconds ?? 0);
+        if (this.usageSilenceMs === undefined) {
+          const updated = await this.stores.runs.update(run.runId, { lastUsageAt: event.at });
+          if (run.reservationId && run.captureStartedAt !== undefined) await this.stores.entitlement.meter(run.reservationId, event.data?.seconds ?? 0);
+          await this.deliver(stored, updated ?? run);
+          return true;
+        }
+        // With the silence rule, a report the worker made no later than the last one taken (one that arrives late, out of
+        // order) is not fresh usage: its event is delivered as stored, and neither the clock nor the total moves
+        if (run.lastUsageSourceAt !== undefined && event.at <= run.lastUsageSourceAt) {
+          await this.deliver(stored, run);
+          return false;
+        }
+        // the receipt, on the manager's clock, and the running total are written before the meter, so a manager that
+        // restarts measures the silence and settles from them; a count that is not a finite number never enters the total
+        const reported = event.data?.seconds;
+        const seconds = Math.max(run.reportedSeconds ?? 0, typeof reported === 'number' && Number.isFinite(reported) ? reported : 0);
+        const updated = await this.stores.runs.update(run.runId, { lastUsageAt: this.now(), lastUsageSourceAt: event.at, reportedSeconds: seconds });
+        if (run.reservationId && run.captureStartedAt !== undefined) await this.stores.entitlement.meter(run.reservationId, seconds);
         await this.deliver(stored, updated ?? run);
         return true;
       }
@@ -894,8 +937,9 @@ export class MeetingManager {
           await this.stores.runs.update(run.runId, { leftAt: run.leftAt ?? event.at, reason, reportedSeconds: this.countedSeconds(run.reportedSeconds, event.data?.seconds) });
           return true;
         }
-        // a bot that left on its own (not admitted, alone, the cap, a crash before a command) reaches `left` from any state after dispatch, with its own reason
-        const left = await this.move(run, 'left', { leftAt: event.at, reason, reportedSeconds: event.data?.seconds ?? run.reportedSeconds, cleanupPending: true }, 'bot:left', event.data?.message === undefined ? { reason } : { reason, message: event.data.message }, event);
+        // a bot that left on its own (not admitted, alone, the cap, a crash before a command) reaches `left` from any state
+        // after dispatch, with its own reason; the total it gives never lowers one its usage reports gave
+        const left = await this.move(run, 'left', { leftAt: event.at, reason, reportedSeconds: this.countedSeconds(run.reportedSeconds, event.data?.seconds), cleanupPending: true }, 'bot:left', event.data?.message === undefined ? { reason } : { reason, message: event.data.message }, event);
         if (left) await this.complete(left, event.data?.seconds);
         return true;
       }
@@ -1156,7 +1200,7 @@ export class MeetingManager {
     if (pending.dispatch?.roomName) await this.config.room.delete(pending.dispatch.roomName);
     await this.stores.jobs.remove(run.runId);
     const now = this.now();
-    const failed = await this.stores.runs.update(run.runId, { ...contentFreeRun(pending), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'failed', leftAt: now, doneAt: now, billedSeconds: 0, cleanupPending: false }, pending.state);
+    const failed = await this.stores.runs.update(run.runId, { ...contentFreeRun(pending), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'failed', leftAt: now, doneAt: now, billedSeconds: 0, cleanupPending: false }, pending.state);
     if (!failed) return;
     await this.emit('bot:left', failed, { reason: failed.reason, message });
     await this.emit('bot:done', failed, { reason: failed.reason, billedSeconds: 0 });
@@ -1207,7 +1251,7 @@ export class MeetingManager {
     }
     const free = contentFreeRun(run);
     const kept = run.keep === 'none' ? free : { ...free, botName: run.botName, notice: run.notice };
-    const done = await this.stores.runs.update(run.runId, { ...kept, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'done', doneAt: now, billedSeconds: billed, cleanupPending: false }, 'left');
+    const done = await this.stores.runs.update(run.runId, { ...kept, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'done', doneAt: now, billedSeconds: billed, cleanupPending: false }, 'left');
     if (!done) return;
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
   }
@@ -1310,7 +1354,7 @@ export class MeetingManager {
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
     // one write, `done` and the content-free row together as complete() and fail() write theirs: a failure after a first
     // write of `done` would leave a done row holding the url, the bot's name and the notice, and nothing returns to a done run
-    await this.stores.runs.update(runId, { ...done, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, cleanupPending: false }, 'purging');
+    await this.stores.runs.update(runId, { ...done, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, cleanupPending: false }, 'purging');
   }
 
   // ── The limits ──
@@ -1341,6 +1385,9 @@ export class MeetingManager {
           continue;
         }
         if (run.state === 'purging') {
+          // a fence written without its kill deadline (the process that wrote it stopped before the deadline's own write)
+          // is armed now, so a bot that never hears the leave is killed and the purge finishes: the kill counts from here
+          if (run.dispatch !== undefined && run.leftAt === undefined && run.leaveCommandedAt === undefined) await this.stores.runs.update(run.runId, { leaveCommandedAt: now }, 'purging');
           await this.continuePurge(run.runId);
           continue;
         }
@@ -1349,7 +1396,11 @@ export class MeetingManager {
           await this.complete(run, undefined);
           continue;
         }
-        if (run.state === 'leaving') continue;
+        if (run.state === 'leaving') {
+          // a leave written without its kill deadline is armed the same way, so it never waits for a bot that is gone
+          if (run.leaveCommandedAt === undefined) await this.stores.runs.update(run.runId, { leaveCommandedAt: now }, 'leaving');
+          continue;
+        }
         // a cancel that leaveBot wrote during a dispatch, with no dispatcher left to act on it: the dispatcher stopped, so the
         // cancelled job is never leased again and no markDispatched learns it. The leave goes from here, from whatever state
         // the bot's own reports have moved the run to; a dispatch still under a live lease learns it at markDispatched.
@@ -1456,20 +1507,55 @@ export class MeetingManager {
   // ── Reconcile ──
 
   /**
+   * With `usageSilenceMs`, ends as crashed each dispatching or dispatched run whose worker has sent no fresh usage report
+   * for that long: the bot is sent a kill, and the run ends at the manager's receipt of its last usage report (its
+   * dispatch, when none came, or its request) and at the total its reports gave, nothing when none did. The rule rests on
+   * what the stores hold alone, never on the provider's answer or the stop monitor's heartbeats, so a worker that cannot
+   * be reached, or one that answers and sends nothing, ends the same way, and a manager that restarted ends it too. A
+   * dispatching run whose job was never recorded dispatched (its dispatcher stopped first) is among them. A run whose
+   * step throws holds back no other, and the first error is thrown at the end. Without `usageSilenceMs` it does nothing.
+   */
+  private async endSilentRuns(): Promise<void> {
+    const silenceMs = this.usageSilenceMs;
+    if (silenceMs === undefined) return;
+    const now = this.now();
+    let failure: { error: unknown } | undefined;
+    for (const run of await this.stores.runs.list({ states: SILENCE_STATES, limit: Number.MAX_SAFE_INTEGER })) {
+      const heard = run.lastUsageAt ?? run.dispatchedAt ?? run.requestedAt;
+      if (now - heard < silenceMs) continue;
+      try {
+        this.config.logger?.warn(`[MeetingManager] ${run.runId}: no usage report for ${now - heard} ms; ending as crashed`);
+        await this.sendCommand(run, { name: 'kill' });
+        await this.crash(run, heard, run.reportedSeconds ?? 0);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+    if (failure) throw failure.error;
+  }
+
+  /**
    * Compares dispatched jobs with the providers' usage: a run whose container is gone is ended as crashed; an unfinished
    * purge is resumed; what a provider's supplier measured for a run is recorded through the entitlement hook's
    * `recordSupplierUsage`, when the hook has one. First, the supplier totals the hook refused before, kept in the stores'
-   * `supplierUsageInbox`, are handed to it again. An answer about a run the provider was not asked about is ignored and
-   * logged. A run still waiting for its dispatch whose job is missing (a send whose job could not be stored) is given its
-   * job again, and one a cancel left without its job (the cancel's reason is on the run) is ended, so neither waits for
-   * ever holding its reservation. As in the limits, a run whose step throws holds back no other, and the first error is
-   * thrown at the end.
+   * `supplierUsageInbox`, are handed to it again; then, with `usageSilenceMs`, each run gone silent for that long is ended
+   * at its last usage before any provider is asked, and a run whose container a provider reports gone ends at the total
+   * its usage reports gave. An answer about a run the provider was not asked about is ignored and logged. A run still
+   * waiting for its dispatch whose job is missing (a send whose job could not be stored) is given its job again, and one a
+   * cancel left without its job (the cancel's reason is on the run) is ended, so neither waits for ever holding its
+   * reservation. As in the limits, a run whose step throws holds back no other, and the first error is thrown at the end.
    */
   async reconcile(): Promise<void> {
     const now = this.now();
     let failure: { error: unknown } | undefined;
     try {
       await this.recordKeptSupplierUsage();
+    } catch (error) {
+      failure ??= { error };
+    }
+    // the usage silence before the providers are asked: a run it ends is over whatever a provider would answer
+    try {
+      await this.endSilentRuns();
     } catch (error) {
       failure ??= { error };
     }
@@ -1530,7 +1616,8 @@ export class MeetingManager {
           const run = await this.stores.runs.get(u.runId);
           if (run && (run.state === 'joining' || run.state === 'waiting_room' || run.state === 'in_call_notice_pending' || run.state === 'in_call' || run.state === 'leaving')) {
             this.config.logger?.warn(`[MeetingManager] ${run.runId}: worker reports no container; ending as crashed`);
-            await this.crash(run, now, u.seconds || undefined);
+            // with the silence rule a run bills only what its durable usage reports gave, never the provider's count
+            await this.crash(run, now, this.usageSilenceMs === undefined ? u.seconds || undefined : run.reportedSeconds ?? 0);
           }
         } catch (error) {
           failure ??= { error };

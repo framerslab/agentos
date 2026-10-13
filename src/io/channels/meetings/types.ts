@@ -185,9 +185,21 @@ export interface MeetingRunRecord {
   dispatch?: MeetingDispatchRecord;
   /** The last time the run's page was seen (a run sent from a page). */
   pageSeenAt?: number;
-  /** The last time a usage report arrived. */
+  /**
+   * When the last usage report was taken: on the manager's own clock when the host sets the manager's `usageSilenceMs`,
+   * which measures a run's silence from it, and otherwise the report's own time.
+   */
   lastUsageAt?: number;
-  /** The seconds the worker reported at `left` or `done`; what a purge bills from. */
+  /**
+   * The worker's own time on the last usage report taken, when the host sets the manager's `usageSilenceMs`: a usage
+   * report the worker made no later than it (a report sent again, or one that arrives late) moves neither `lastUsageAt`
+   * nor `reportedSeconds`.
+   */
+  lastUsageSourceAt?: number;
+  /**
+   * The largest running total of seconds the worker reported: at `left`, `done` or a crash, and on each usage report when
+   * the host sets the manager's `usageSilenceMs`. What a settlement bills from.
+   */
   reportedSeconds?: number;
   /** Set at `left`: the settlement, the cleanup and the room's deletion are still owed; cleared when `done` is written. */
   cleanupPending?: boolean;
@@ -201,6 +213,8 @@ export interface MeetingRunRecord {
   monitorSeenAt?: number;
   /** How many participants besides the bot the provider last reported. */
   participantCount?: number;
+  /** When the manager last accepted a report about the run, on the manager's own clock. */
+  lastReportAt?: number;
   /**
    * When the bot was last told to leave: a bot that has not left the manager's `killAfterMs` later is killed. This and
    * the two fields after it are the manager's timers, kept on the row so that any manager sharing the stores, or one
@@ -213,7 +227,11 @@ export interface MeetingRunRecord {
   aloneSince?: number;
 }
 
-/** The terminal, content-free form of a run: ids, the provider's connection reference, platform, times, reason, seconds, the notice version and the consent record. */
+/**
+ * The terminal, content-free form of a run: ids, the provider's connection reference, platform, times, reason, seconds,
+ * the notice version and the consent record. It keeps the usage evidence too (the last usage report's receipt and source
+ * times, the reported total and the last report's time), so a run ended at its last usage can be checked after it is over.
+ */
 export function contentFreeRun(run: MeetingRunRecord): MeetingRunRecord {
   return {
     runId: run.runId,
@@ -241,6 +259,10 @@ export function contentFreeRun(run: MeetingRunRecord): MeetingRunRecord {
     billedSeconds: run.billedSeconds,
     reservationId: run.reservationId,
     consentRecordId: run.consentRecordId,
+    lastUsageAt: run.lastUsageAt,
+    lastUsageSourceAt: run.lastUsageSourceAt,
+    reportedSeconds: run.reportedSeconds,
+    lastReportAt: run.lastReportAt,
   };
 }
 
