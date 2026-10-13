@@ -107,7 +107,8 @@ export class TwilioMediaStreamParser<P extends 'legacy' | 'carrier' = 'legacy'> 
         const digit = dtmf['digit'] as string | undefined;
         if (!digit) return null;
 
-        // Twilio reports DTMF key-hold duration in milliseconds.
+        // The legacy profile keeps a numeric `dtmf.duration` when one is present;
+        // the documented Twilio `dtmf` message carries only `track` and `digit`.
         const duration = typeof dtmf['duration'] === 'number'
           ? (dtmf['duration'] as number)
           : undefined;
