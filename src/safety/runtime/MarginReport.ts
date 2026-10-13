@@ -9,7 +9,7 @@
  * @module safety/runtime/MarginReport
  */
 import { componentMicro, type RationalRate } from './CreditRates.js';
-import type { ICompoundCreditStore } from './CompoundCreditStore.js';
+import type { CreditHoldRow, ICompoundCreditStore } from './CompoundCreditStore.js';
 import { creditDay } from './CompoundCreditStore.js';
 
 /** A report's query: one scope, a bounded UTC period, an allocation version. */
@@ -110,15 +110,22 @@ const inPeriod = (day: string, from: string, to: string): boolean => day >= from
 /**
  * Reads a scope's period from a store through the transaction reads every store implements: the holds settled or
  * released in the period (their settlement day), their allocations' consumption split by lot kind, and the period's
- * entries. Reads at most 100,000 settled holds of the scope.
+ * entries. The period's holds are the ones its settlement entries name, so however many holds the scope settled
+ * before the period, none of the period's own is left out.
  */
 export async function readMarginPeriod(store: ICompoundCreditStore, query: MarginReportQuery): Promise<MarginPeriodInput> {
   return store.withTransaction(async (trx) => {
     const entries = (await trx.listEntries({ scopeId: query.scopeId, fromDay: query.fromDay, toDay: query.toDay })).filter((e) => e.at <= query.asOf);
     const supplierEntries = entries.filter((e) => e.kind === 'supplier_settled');
-    const holds = (await trx.listHolds({ scopeId: query.scopeId, states: ['settled', 'released'], limit: 100_000 })).filter(
-      (h) => h.settledAt !== null && h.settledAt <= query.asOf && inPeriod(creditDay(h.settledAt), query.fromDay, query.toDay),
-    );
+    // Each settlement appends one hold_settled or hold_released entry on its own day, so the period's entries name every
+    // hold it settled; a read of the scope's settled holds, oldest first, could stop before them.
+    const settledIds = new Set(entries.flatMap((e) => ((e.kind === 'hold_settled' || e.kind === 'hold_released') && e.holdId !== null ? [e.holdId] : [])));
+    const holds: CreditHoldRow[] = [];
+    for (const holdId of settledIds) {
+      const hold = await trx.getHold(holdId);
+      if (!hold || hold.scopeId !== query.scopeId || hold.settledAt === null) continue;
+      if (hold.settledAt <= query.asOf && inPeriod(creditDay(hold.settledAt), query.fromDay, query.toDay)) holds.push(hold);
+    }
     const settlements: MarginSettlement[] = [];
     for (const hold of holds) {
       let paid = 0;
