@@ -112,6 +112,8 @@ interface StoredEvent {
   at: number;
   seq: number;
   data?: Record<string, unknown>;
+  /** Stored before under the same id: a report the worker sent again, or an emit tried again after a later step failed. */
+  repeated: boolean;
 }
 
 /** Thrown by a provider's `dispatch` when no worker has a slot. */
@@ -256,23 +258,35 @@ export class MeetingManager {
     await this.deliver(await this.storeEvent({ id, type, at: time, data }, run.runId), run);
   }
 
-  /** Stores the event in its run's sequence; undefined when an event with its id is stored already, which is then delivered no second time. */
-  private async storeEvent(event: Omit<StoredEvent, 'seq'>, runId: string): Promise<StoredEvent | undefined> {
+  /**
+   * Stores the event in its run's sequence and answers it as stored. An id stored before (a report the worker sent
+   * again, or an emit tried again after a later step failed) is not stored twice: it comes back `repeated`, with the
+   * time and payload of its first copy. An id that another run's event holds comes back undefined: nothing of this run.
+   */
+  private async storeEvent(event: Omit<StoredEvent, 'seq' | 'repeated'>, runId: string): Promise<StoredEvent | undefined> {
     const { inserted, seq } = await this.stores.events.append({ eventId: event.id, runId, type: event.type, at: event.at, data: event.data });
-    return inserted ? { ...event, seq } : undefined;
+    if (inserted) return { ...event, seq, repeated: false };
+    const [first] = await this.stores.events.read(runId, seq - 1, 1);
+    if (first?.eventId !== event.id) return undefined;
+    return { ...event, at: first.at, data: first.data, seq, repeated: true };
   }
 
-  /** Delivers a stored event, with the run as it stands: a delivery to each of the owner's destinations, then every handler. */
+  /**
+   * Delivers a stored event, with the run as it stands: a delivery to each of the owner's destinations, then every
+   * handler. A repeated event goes to the destinations again, which the outbox keeps once each (a delivery its first
+   * attempt never enqueued is enqueued now), and to no handler: a handler receives an event once.
+   */
   private async deliver(stored: StoredEvent | undefined, run: MeetingRunRecord): Promise<void> {
     if (!stored) return;
     const { id, type, at, seq, data } = stored;
-    const event: MeetingManagerEvent = { type, runId: run.runId, run, seq, data };
     if (this.config.destinationsFor) {
       const payload = JSON.stringify({ id, type, runId: run.runId, at, seq, data });
       for (const destinationRef of await this.config.destinationsFor(run.ownerRef)) {
         await this.stores.outbox.enqueue({ id: `${id}@${destinationRef}`, runId: run.runId, destinationRef, eventId: id, type, payload }, at);
       }
     }
+    if (stored.repeated) return;
+    const event: MeetingManagerEvent = { type, runId: run.runId, run, seq, data };
     for (const h of this.handlers) {
       try {
         const r = h(event);
@@ -609,13 +623,25 @@ export class MeetingManager {
       return false;
     }
     // One row per report, the event the destinations and the handlers receive. A report that is an event of its own is
-    // stored as that event before anything is applied, and the row is its record: a repeated one is stored nowhere and
-    // changes nothing. A state report stores the event of the move it makes, and a repeated one moves nothing; a
-    // heartbeat (360 rows an hour would be noise), capture_started, done and crashed store nothing, and applying one
-    // twice changes nothing.
+    // stored as that event before anything is applied, and the row is its record: a repeated one is stored nowhere, and
+    // of its application only its deliveries and a stop are tried again. A state report stores the event of the move it
+    // makes, and a repeated one moves nothing; a heartbeat (360 rows an hour would be noise), capture_started, done and
+    // crashed store nothing, and applying one twice changes nothing.
     const own = this.ownEvent(event);
     const stored = own ? await this.storeEvent({ id: `${event.eventId}#${own.type}`, type: own.type, at: event.at, data: own.data }, run.runId) : undefined;
-    if (own && !stored) return false;
+    if (own && (!stored || stored.repeated)) {
+      // A repeated report was applied when its row was stored: applied again, an older count or total would overwrite a
+      // newer one. Two parts of it are worth the worker's retry. Its deliveries go out again (the outbox keeps the first
+      // of each, so one the first attempt never enqueued is enqueued now), and a stop the first attempt did not carry
+      // out (the run is not behind the fence) is carried out now, whether or not the deliveries go out this time.
+      const stop = this.isStop(run, event);
+      try {
+        await this.deliver(stored, run);
+      } finally {
+        if (stop) await this.purge(run, 'stopped_by_participant');
+      }
+      return stop;
+    }
     switch (event.type) {
       case 'joining':
         await this.move(run, 'joining', {}, 'bot:joining', undefined, event);
@@ -658,14 +684,14 @@ export class MeetingManager {
         await this.deliver(stored, updated);
         return true;
       }
-      case 'chat_message': {
-        await this.deliver(stored, run);
-        if (!fenced && this.isStopPhrase(run, event.data?.text)) await this.purge(run, 'stopped_by_participant');
-        return true;
-      }
+      case 'chat_message':
       case 'stop_command':
-        await this.deliver(stored, run);
-        if (!fenced) await this.purge(run, 'stopped_by_participant');
+        // a stop goes ahead even when the message's delivery fails; the delivery's error is raised once the purge has run
+        try {
+          await this.deliver(stored, run);
+        } finally {
+          if (this.isStop(run, event)) await this.purge(run, 'stopped_by_participant');
+        }
         return true;
       case 'usage': {
         const updated = await this.stores.runs.update(run.runId, { lastUsageAt: event.at });
@@ -699,6 +725,11 @@ export class MeetingManager {
 
   private isStopPhrase(run: MeetingRunRecord, text: string | undefined): boolean {
     return !!text && text.toLowerCase().includes(run.stopPhrase.toLowerCase());
+  }
+
+  /** Whether a report asks the bot to stop: a stop command, or a chat message holding the stop phrase. */
+  private isStop(run: MeetingRunRecord, event: NormalizedMeetingEvent): boolean {
+    return event.type === 'stop_command' || (event.type === 'chat_message' && this.isStopPhrase(run, event.data?.text));
   }
 
   /** The alone timer's patch for a report of `count` participants besides the bot: started by the first report of none, kept while there is none, cleared when one is reported. */

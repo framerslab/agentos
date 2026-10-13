@@ -515,3 +515,58 @@ describe('a step that fails, or a race, on the way out', () => {
     expect(h.seen.filter((e) => e.type === 'bot:purged')).toHaveLength(1);
   });
 });
+
+describe('a report whose application fails, and the worker\'s retry of it', () => {
+  it('a stop whose purge fails is carried out on the retry of its report, and the message reaches the handlers once', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    const update = h.stores.runs.update.bind(h.stores.runs);
+    let refused = false;
+    vi.spyOn(h.stores.runs, 'update').mockImplementation(async (id, patch, expected) => {
+      if (!refused && patch.state === 'purging') {
+        refused = true;
+        throw new Error('run store unavailable');
+      }
+      return update(id, patch, expected);
+    });
+    const stop = mockEventContext(runId, 'chat_message', { text: 'please stop taking notes', sender: 'participant-1' }, h.clock.now(), h.provider.tokenOf(runId));
+    await expect(h.manager.processProviderEvent('mock', stop)).rejects.toThrow('run store unavailable');
+    expect((await h.stores.runs.get(runId))?.state).toBe('in_call');
+    expect(await h.manager.processProviderEvent('mock', stop)).toEqual({ accepted: true, applied: 1 });
+    expect((await h.stores.runs.get(runId))?.state).toBe('purging');
+    expect(h.provider.commands.get(runId)?.slice(-2)).toEqual([{ name: 'suspendCapture' }, { name: 'leave', reason: 'stopped_by_participant' }]);
+    expect(h.seen.filter((e) => e.type === 'bot:chat_message')).toHaveLength(1);
+  });
+  it('a stop goes ahead when the message\'s delivery fails, and the delivery\'s error is still raised', async () => {
+    let failing = false;
+    const h = harness({
+      destinationsFor: async () => {
+        if (failing) throw new Error('destinations unavailable');
+        return ['hook-1'];
+      },
+    });
+    const runId = await joined(h);
+    failing = true;
+    await expect(h.report(runId, 'chat_message', { text: 'stop taking notes', sender: 'participant-1' })).rejects.toThrow('destinations unavailable');
+    expect((await h.stores.runs.get(runId))?.state).toBe('purging');
+    expect(h.provider.commands.get(runId)?.slice(-2)).toEqual([{ name: 'suspendCapture' }, { name: 'leave', reason: 'stopped_by_participant' }]);
+  });
+  it('a report whose delivery failed is enqueued for its destination when the worker sends it again', async () => {
+    let failing = false;
+    const h = harness({
+      destinationsFor: async () => {
+        if (failing) throw new Error('destinations unavailable');
+        return ['hook-1'];
+      },
+    });
+    const runId = await joined(h);
+    const message = mockEventContext(runId, 'chat_message', { text: 'the agenda first', sender: 'participant-1' }, h.clock.now(), h.provider.tokenOf(runId));
+    failing = true;
+    await expect(h.manager.processProviderEvent('mock', message)).rejects.toThrow('destinations unavailable');
+    failing = false;
+    expect(await h.manager.processProviderEvent('mock', message)).toEqual({ accepted: true, applied: 0 });
+    const deliveries = (await h.stores.outbox.listByRun(runId)).filter((d) => d.type === 'bot:chat_message');
+    expect(deliveries).toHaveLength(1);
+    expect(JSON.parse(deliveries[0].payload)).toMatchObject({ type: 'bot:chat_message', data: { text: 'the agenda first', sender: 'participant-1' } });
+  });
+});
