@@ -482,11 +482,12 @@ export class SqlOutbox implements IOutbox {
   async markDelivered(id: string): Promise<void> {
     await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'delivered' WHERE id = ?`, [id]);
   }
-  /** Advances retry backoff, giving up a day after the first failed attempt. */
+  /** Advances retry backoff, giving up a day after the first failed attempt. A delivery no longer pending (delivered, or given up) is left as it is. */
   async markFailed(id: string, now: number): Promise<void> {
     await this.opts.db.transaction(async (trx) => {
-      const r = await trx.get<Record<string, unknown>>(`SELECT attempts, first_attempt_at FROM ${this.t.outbox} WHERE id = ? FOR UPDATE`, [id]);
-      if (!r) return;
+      const r = await trx.get<Record<string, unknown>>(`SELECT attempts, first_attempt_at, state FROM ${this.t.outbox} WHERE id = ? FOR UPDATE`, [id]);
+      // a late failure report from a sender that lost the race resurrects neither a delivery the destination took nor one given up
+      if (!r || r.state !== 'pending') return;
       const attempts = (num(r.attempts) ?? 0) + 1;
       const first = num(r.first_attempt_at) ?? now;
       const dead = now - first >= OUTBOX_GIVE_UP_MS;

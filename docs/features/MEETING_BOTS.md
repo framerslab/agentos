@@ -30,7 +30,7 @@ The store contracts are:
 | `IJobStore`, `MeetingJob` | Schedule, lease, renew, record dispatch, release, cancel, read, list dispatched and remove. Rescheduling preserves lease and cancellation state. Dispatch recording and release require the holder. A cancel during dispatch becomes a leave. |
 | `ITranscriptStore` | Append a numbered turn or atomically allocate one with `appendNext`; read after a sequence cursor, fence and purge. A repeated `(runId, seq)` keeps the first turn. A fenced append throws `FencedError`. Purging keeps the fence. `SqlTranscriptStore` keeps a turn's start and end in whole milliseconds, rounded. |
 | `IEventStore`, `MeetingEvent` | Store stable event ids and per-run sequence numbers; read after a cursor. Fenced content events keep their metadata with no payload and `purged: true`. `purgePayloads` strips content payloads. |
-| `IOutbox`, `OutboxDelivery` | Enqueue, read due deliveries, mark delivered/failed, replay, purge content and list by run. A repeated delivery id keeps its first copy. Due deliveries default to 100, ordered by `nextAt` then id. |
+| `IOutbox`, `OutboxDelivery` | Enqueue, read due deliveries, mark delivered/failed, replay, purge content and list by run. A repeated delivery id keeps its first copy. A failure recorded for a delivery that is no longer pending (delivered, or dead) changes nothing. Due deliveries default to 100, ordered by `nextAt` then id. |
 | `IEntitlementHook`, `ReserveResult` | Reserve, revalidate, meter a running total, settle or release; settlement and release must tolerate retries. |
 | `IClock` | Supply the manager's current time in milliseconds. |
 
