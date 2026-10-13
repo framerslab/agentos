@@ -78,6 +78,8 @@ export class CallManager {
   private readonly unsavedSpeech = new Map<CallId, TranscriptEntry[]>();
   /** The last of this manager's store transactions: they run one at a time, in the order requested. */
   private durableTail: Promise<void> = Promise.resolve();
+  /** Set by {@link dispose}: a store transaction still in flight then commits, but changes none of the manager's records. */
+  private disposed = false;
 
   constructor(config: VoiceCallConfig) {
     this.config = config;
@@ -239,7 +241,7 @@ export class CallManager {
       return;
     }
 
-    await this.requestCarrierHangup(call.provider, call.providerCallId);
+    await this.requestCarrierHangup(this.getProvider(call.provider), call.providerCallId);
     this.transitionState(call, 'hangup-bot');
     call.endedAt = Date.now();
     this.finalizeCall(call);
@@ -546,9 +548,11 @@ export class CallManager {
   }
   /**
    * Makes a committed record the manager's record of the call: the speech the commit took leaves the unsaved list,
-   * and speech recorded since stays on top until a later transaction commits it. An ended call keeps none.
+   * and speech recorded since stays on top until a later transaction commits it. An ended call keeps none. A disposed
+   * manager takes no record: a transaction in flight at {@link dispose} commits without refilling it.
    */
   private refreshDurable(call: CallRecord, store: ITelephonyCallStore, committed: TranscriptEntry[]): void {
+    if (this.disposed) return;
     const unsaved = TERMINAL_CALL_STATES.has(call.state) ? [] : (this.unsavedSpeech.get(call.callId) ?? []).filter((entry) => !committed.includes(entry));
     if (unsaved.length) this.unsavedSpeech.set(call.callId, unsaved); else this.unsavedSpeech.delete(call.callId);
     const local = structuredClone(call);
@@ -576,8 +580,10 @@ export class CallManager {
    * Ends a call held in a store. The end commits first, behind the manager's earlier store transactions, so the
    * completion callback the carrier sends for the hangup finds the call ended. The carrier is asked next, outside the
    * store queue and also when the commit failed, and `call:ended` follows the request. Rejects with the commit's error.
+   * The provider is resolved before the commit, so a {@link dispose} while it commits does not cancel the request.
    */
   private async hangupDurable(call: CallRecord, store: ITelephonyCallStore): Promise<void> {
+    const provider = this.getProvider(call.provider);
     const committed = await this.durable(async () => {
       const result = await store.withProvider(call.provider, async (tx) => {
         const stored = await tx.get(call.callId);
@@ -589,15 +595,14 @@ export class CallManager {
       this.refreshDurable(result.stored, store, result.speech);
       return result;
     }).catch(async (error: unknown) => {
-      await this.requestCarrierHangup(call.provider, call.providerCallId);
+      await this.requestCarrierHangup(provider, call.providerCallId);
       throw error;
     });
-    await this.requestCarrierHangup(call.provider, committed.stored.providerCallId);
+    await this.requestCarrierHangup(provider, committed.stored.providerCallId);
     if (committed.ended) this.emit({ type: 'call:ended', callId: call.callId, call: structuredClone(committed.stored) });
   }
   /** Asks the call's carrier to hang up. A failed request is written to the console; the call ends here regardless. */
-  private async requestCarrierHangup(providerName: VoiceProviderName, providerCallId: string | undefined): Promise<void> {
-    const provider = this.getProvider(providerName);
+  private async requestCarrierHangup(provider: IVoiceCallProvider | undefined, providerCallId: string | undefined): Promise<void> {
     if (!provider || !providerCallId) return;
     try {
       await provider.hangupCall({ providerCallId });
@@ -745,8 +750,14 @@ export class CallManager {
     return prov.config.fromNumber || '';
   }
 
-  /** Clean up all state (for shutdown). */
+  /**
+   * Clean up all state (for shutdown).
+   *
+   * A store transaction already in flight still commits, and a hangup whose end is committing still asks its
+   * carrier, but neither changes the records of a disposed manager.
+   */
   dispose(): void {
+    this.disposed = true;
     this.activeCalls.clear();
     this.providerCallIdMap.clear();
     this.processedEventIds.clear();
