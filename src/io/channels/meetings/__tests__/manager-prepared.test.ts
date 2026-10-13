@@ -132,6 +132,48 @@ describe('prepared creation', () => {
     expect(prepared).toBe(0);
   });
 
+  it('frees the hold of a creation whose end a cancel began before the hold was written on the run', async () => {
+    const h = harness();
+    // the cancel's end is held between its first write (cleanupPending) and its last, at the transcript's fence
+    let enterFence: () => void = () => undefined;
+    const atFence = new Promise<void>((resolve) => { enterFence = () => resolve(); });
+    let openFence: () => void = () => undefined;
+    const fenceOpen = new Promise<void>((resolve) => { openFence = () => resolve(); });
+    const fence = h.stores.transcript.fence.bind(h.stores.transcript);
+    vi.spyOn(h.stores.transcript, 'fence').mockImplementation(async (runId) => { enterFence(); await fenceOpen; await fence(runId); });
+    let manager: MeetingManager | undefined;
+    let cancelling: Promise<boolean> | undefined;
+    let prepared = 0;
+    const entitlement = Object.assign(h.entitlement, {
+      reserveOnce: async (input: { runId: string }): Promise<ReserveResult> => {
+        // the owner cancels the send while its hold is being taken
+        cancelling = manager?.leaveBot(input.runId);
+        await atFence;
+        return { ok: true, reservationId: `hold-${input.runId}`, maxSeconds: 14_400 };
+      },
+    });
+    manager = new MeetingManager({
+      managerId: 'cancelled', stores: { ...h.stores, entitlement }, room: new MeetingRoom(h.rooms),
+      reportUrlFor: (id, p) => `https://example.test/${p}/${id}`,
+      creation: { withOwnerLock: (_owner, work) => work(), prepare: () => { prepared += 1; return Promise.resolve(); } },
+    });
+    manager.registerProvider(h.provider);
+    const sent = await manager.sendBotPrepared(h.request, 'host-consent');
+    openFence();
+    expect(await cancelling).toBe(true);
+    if (!sent.ok) throw new Error('send refused');
+    expect(sent.repeated).toBe(false);
+    const runId = sent.run.runId;
+    expect(h.entitlement.released).toEqual([`hold-${runId}`]);
+    expect(prepared).toBe(0);
+    const ended = await h.stores.runs.get(runId);
+    expect(ended).toMatchObject({ state: 'failed', reason: 'stopped_by_owner', billedSeconds: 0 });
+    expect(ended?.creationPending).toBeFalsy();
+    await manager.tick();
+    expect(await h.stores.jobs.get(runId)).toBeUndefined();
+    expect(h.provider.dispatched.size).toBe(0);
+  });
+
   it('asks the grant again before a recovered dispatch sends another worker, and not for a bot that is out', async () => {
     const h = harness();
     const asked: string[] = [];

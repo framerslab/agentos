@@ -589,8 +589,9 @@ export class MeetingManager {
       return this.endCreation(run, held.ok ? 'allowance' : held.reason);
     }
     const reserved = await this.stores.runs.update(run.runId, { reservationId: held.reservationId, limits: { ...run.limits, totalMs: Math.min(run.limits.totalMs, held.maxSeconds * 1000) } }, ['requested', 'scheduled']);
-    if (!reserved) {
-      // a cancel or a purge took the run meanwhile: the hold it never saw is freed, and the run is answered as it stands
+    if (!reserved || reserved.cleanupPending) {
+      // a cancel or a purge took the run meanwhile, or its end had begun when the hold was written: that end read the run
+      // before the hold was on it and frees nothing for it. The hold is freed here, and the run is answered as it stands
       await this.stores.entitlement.release(held.reservationId);
       const current = await this.stores.runs.get(run.runId);
       if (!current) throw new Error('reserved run missing');
