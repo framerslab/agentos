@@ -1040,13 +1040,14 @@ export class MeetingManager {
     const refused = run?.reservationId && event.data?.supplierUsage !== undefined
       ? await this.recordSupplierTotals(run.runId, run.reservationId, event.data.supplierUsage)
       : undefined;
-    const applied = await this.applyReport(run, event);
-    // written once the report is applied, never between its stored event and its effects: a write that failed there
-    // would leave the worker's retry a repeated report, which applies nothing again. A report applied before (a
-    // duplicate) applies nothing and moves it not at all
-    if (applied && run) await this.stores.runs.update(run.runId, { lastReportAt: this.now() });
+    const outcome = await this.applyReport(run, event);
+    // written once the report is taken, never between its stored event and its effects: a write that failed there
+    // would leave the worker's retry a repeated report, which applies nothing again. A report applied moves it, and so
+    // does one taken without being applied (a usage report no later than the last one taken, stored and delivered); a
+    // report taken before (a duplicate) moves it only when it carries out a stop its first attempt did not
+    if (outcome !== false && run) await this.stores.runs.update(run.runId, { lastReportAt: this.now() });
     if (refused) throw refused.error;
-    return applied;
+    return outcome === true;
   }
 
   /**
@@ -1110,8 +1111,12 @@ export class MeetingManager {
     if (unacknowledged) throw unacknowledged.error;
   }
 
-  /** The report applied to its run as `apply` read it, whatever became of the report's supplier totals. */
-  private async applyReport(run: MeetingRunRecord | undefined, event: NormalizedMeetingEvent): Promise<boolean> {
+  /**
+   * The report applied to its run as `apply` read it, whatever became of the report's supplier totals: true when it
+   * applied, `'taken'` when its event was stored and delivered though it applied nothing (a usage report no later than
+   * the last one taken), false otherwise.
+   */
+  private async applyReport(run: MeetingRunRecord | undefined, event: NormalizedMeetingEvent): Promise<boolean | 'taken'> {
     if (!run || TERMINAL_RUN_STATES.has(run.state)) return false;
     const fenced = run.state === 'purging';
     // behind the fence nothing a person said or did is stored or forwarded: a late content report is dropped whole
@@ -1220,7 +1225,7 @@ export class MeetingManager {
             : { lastUsageAt: this.now(), lastUsageSourceAt: event.at, reportedSeconds: Math.max(current.reportedSeconds ?? 0, count) });
         if (!updated) {
           await this.deliver(stored, run);
-          return false;
+          return 'taken';
         }
         if (run.reservationId && run.captureStartedAt !== undefined) await this.stores.entitlement.meter(run.reservationId, updated.reportedSeconds ?? count);
         await this.deliver(stored, updated);

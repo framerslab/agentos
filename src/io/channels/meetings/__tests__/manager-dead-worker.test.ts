@@ -109,6 +109,18 @@ describe('a worker the manager cannot reach', () => {
     expect((await h.stores.runs.get(runId))?.lastReportAt).toBe(taken);
   });
 
+  it('stamps lastReportAt for a late usage report it stores and delivers, which moves neither the usage clock nor the total', async () => {
+    const h = harness({ usageSilenceMs: 120_000 });
+    const runId = await joined(h);
+    const at = h.clock.now();
+    await h.report(runId, 'usage', { seconds: 60 }, at);
+    h.clock.advance(5_000);
+    // a report the worker made before the last one taken, arriving late: a new event, stored and delivered, not metered
+    expect(await h.report(runId, 'usage', { seconds: 30 }, at - 30_000)).toEqual({ accepted: true, applied: 0 });
+    expect(h.seen.filter((e) => e.type === 'bot:usage')).toHaveLength(2);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ lastReportAt: h.clock.now(), lastUsageAt: at, lastUsageSourceAt: at, reportedSeconds: 60 });
+  });
+
   it.each(['alive', 'unreachable'] as const)('ends at durable usage after exactly two silent minutes with the provider %s', async (mode) => {
     const h = harness({ usageSilenceMs: 120_000 });
     const runId = await joined(h);
