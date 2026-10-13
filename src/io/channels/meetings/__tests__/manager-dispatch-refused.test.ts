@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { harness } from './manager-send-dispatch.test.js';
+import { harness } from './manager-harness.js';
 import { DispatchRefusedError, NoCapacityError } from '../MeetingManager.js';
 import { mockEventContext } from '../providers/mock.js';
 

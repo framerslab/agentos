@@ -4,7 +4,7 @@ import { MeetingManager, type MeetingManagerStores } from '../MeetingManager.js'
 import { MeetingRoom } from '../MeetingRoom.js';
 import { mockEventContext } from '../providers/mock.js';
 import { contentFreeRun, type PendingSupplierUsage, type SupplierUsage } from '../types.js';
-import { harness } from './manager-send-dispatch.test.js';
+import { harness } from './manager-harness.js';
 
 /** A manager as a host builds one with a logger, on the harness's stores (with any the test adds) and its provider. */
 function withLogger(h: ReturnType<typeof harness>, stores: Partial<MeetingManagerStores> = {}) {
