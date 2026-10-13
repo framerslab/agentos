@@ -180,6 +180,30 @@ describe('fenced delivery', () => {
     expect(steps).toEqual(['send ended', 'purged']);
   });
 
+  it('holds a purge that a send of its own run waits for, as its documentation says: the send is aborted and neither ends', async () => {
+    const outbox = new FencedOutbox(new InMemoryOutbox(), new MemoryDeliveryFence());
+    await outbox.enqueue(row, 0);
+    const [due] = await outbox.due(0);
+    if (!due) throw new Error('nothing due');
+    const called = deferred();
+    const signals: AbortSignal[] = [];
+    const ended: string[] = [];
+    // what the documentation forbids: the send's own callback waits for a purge of its run, which waits for that send
+    void outbox.sendClaimed(due, async (_fresh, signal) => {
+      signals.push(signal);
+      const purging = outbox.purgeContent('r1').then(() => { ended.push('purge'); });
+      called.resolve();
+      await purging;
+    }).then(() => { ended.push('send'); });
+    await called.promise;
+    // a bounded wait: a purge that did not wait for the send that called it would have ended within it
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    expect(ended).toEqual([]);
+    expect(signals.map((s) => s.aborted)).toEqual([true]);
+    // the purge waits for its run's sends before it scrubs, so the run's content is still stored
+    expect(JSON.stringify(await outbox.listByRun('r1'))).toContain('content-marker');
+  });
+
   it("carries out a participant's stop while a delivery of the run waits for its destination", async () => {
     const h = harness();
     const outbox = new FencedOutbox(h.stores.outbox, new MemoryDeliveryFence());
