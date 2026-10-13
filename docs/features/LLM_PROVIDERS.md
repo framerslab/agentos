@@ -305,7 +305,7 @@ Every provider reports each call's token usage. Whether the result also carries 
 | OpenAI, Anthropic, Gemini | Priced from the provider's own table of the vendor's list prices ([`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), [`AnthropicProvider.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/AnthropicProvider.ts), [`GeminiProvider.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiProvider.ts)). A model the table has no row for reports no cost. |
 | OpenRouter, Requesty | The cost the gateway returns with the response |
 | Ollama, Claude Code CLI, Gemini CLI | `0` |
-| Groq, Together, Mistral, xAI, LiteLLM | No cost: these providers send their calls through the OpenAI provider, which prices only the model ids in OpenAI's table |
+| Groq, Together, Mistral, xAI, LiteLLM | These providers send their calls through the OpenAI provider, which prices a call from OpenAI's table ([`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts)) by the model id the response names, exact or with a trailing `-YYYY-MM-DD` removed; an id the table has no row for reports no cost. The table lists only OpenAI's models, so a call to the default model of Groq, Together, Mistral or xAI reports no cost, and a LiteLLM call whose response names an OpenAI model, such as `gpt-4o-mini`, is priced at OpenAI's list price. |
 
 The list prices of the default text models, in USD per 1M tokens, as each vendor's page gave them on 2026-10-12. Each vendor's other models cost more or less; the linked pages list them.
 
