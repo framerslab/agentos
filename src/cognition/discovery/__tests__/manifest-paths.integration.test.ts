@@ -9,14 +9,14 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
 import { CapabilityManifestRefusedError, CapabilityManifestScanner } from '../CapabilityManifestScanner.js';
 
 // <root>/secret.txt and <root>/secret.json sit two levels above each capability's files: <root>/caps/<capability>/.
 let root: string;
 let caps: string;
-let warn: ReturnType<typeof vi.spyOn>;
+let warn: MockInstance<typeof console.warn>;
 
 const SECRET = 'A file outside every capability folder, which no capability may read.';
 const SECRET_JSON = '{"type":"object","description":"A schema outside every capability folder."}';
