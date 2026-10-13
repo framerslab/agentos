@@ -17,6 +17,7 @@ vi.mock('../../model.js', () => ({
 
 import { agent } from '../../agent.js';
 import { ObjectGenerationError } from '../../generateObject.js';
+import type { GenerationHookResult } from '../../generateText.js';
 import { resetLoggerFactory, setLoggerFactory } from '../../../core/logging/loggerFactory.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import { getCapabilitySupport } from '../capabilityContract.js';
@@ -165,16 +166,131 @@ describe('schema validation retries', () => {
     expect(hoisted.generateCompletion).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['text', 'parts'] as const)('repairs %s input using completed tool results without executing the tool again', async (inputKind) => {
+    const execute = vi.fn(async () => ({ count: 2 }));
+    const observe = vi.fn(async () => {});
+    const requests: Array<ReturnType<typeof messagesAt>> = [];
+    const toolCall = {
+      id: 'write-1', type: 'function',
+      function: { name: 'write_records', arguments: '{}' },
+    };
+    hoisted.generateCompletion.mockImplementation(async (_model, messages) => {
+      requests.push([...messages]);
+      if (!messages.some((message: { role: string }) => message.role === 'tool')) {
+        return {
+          ...completion(''),
+          choices: [{ message: { role: 'assistant', content: null, tool_calls: [toolCall] }, finishReason: 'tool_calls' }],
+        };
+      }
+      const repairing = messages.some((message: { role: string; content: unknown }) =>
+        message.role === 'user' && typeof message.content === 'string'
+          && message.content.startsWith('Your reply did not match the schema:'));
+      return completion(repairing ? '{"count":2}' : '{"count":"invalid"}');
+    });
+    const subject = agent({
+      ...base,
+      responseSchema: schema,
+      memoryProvider: { observe },
+      tools: {
+        write_records: {
+          description: 'Write two records and return their count.',
+          parameters: { type: 'object', properties: {} },
+          execute,
+        },
+      },
+    });
+    const input = inputKind === 'text' ? 'Write records.' : [{ type: 'text' as const, text: 'Write records.' }];
+    const result = await subject.generate(input, { toolChoice: 'required' });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(result.parsed).toEqual({ count: 2 });
+    expect(result.text).toBe('{"count":2}');
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(3);
+    expect(requests[2].filter((message) => message.role !== 'system')).toEqual([
+      { role: 'user', content: input },
+      { role: 'assistant', content: null, tool_calls: [toolCall] },
+      { role: 'tool', tool_call_id: 'write-1', content: '{"count":2}' },
+      { role: 'assistant', content: '{"count":"invalid"}' },
+      { role: 'user', content: expect.stringContaining('Your reply did not match the schema:') },
+    ]);
+    const repairOptions = hoisted.generateCompletion.mock.calls[2][2];
+    expect(repairOptions.tools).toBeUndefined();
+    expect(repairOptions.toolChoice).toBeUndefined();
+    expect(observe.mock.calls).toEqual([
+      ['user', 'Write records.'], ['assistant', '{"count":2}'],
+    ]);
+  });
+
+  it.each(['generate', 'send'] as const)('observes only the accepted %s exchange while recall and caller hooks run on every attempt', async (method) => {
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(completion('{"count":"invalid"}'))
+      .mockResolvedValueOnce(completion('{"count":1}'));
+    const observe = vi.fn(async () => {});
+    const getContext = vi.fn(async () => ({ contextText: 'Remember the count.' }));
+    const onBeforeGeneration = vi.fn(async () => {});
+    const onAfterGeneration = vi.fn(async (result: GenerationHookResult) => ({
+      ...result,
+      text: result.text === '{"count":1}' ? '{"count":2}' : result.text,
+    }));
+    const subject = agent({
+      ...base,
+      ...(method === 'generate' ? { responseSchema: schema } : {}),
+      memoryProvider: { getContext, observe },
+      onBeforeGeneration,
+      onAfterGeneration,
+    });
+    const result = method === 'generate'
+      ? await subject.generate('Count records.')
+      : await subject.session().send('Count records.', { responseSchema: schema, maxValidationRetries: 1 });
+    expect(result.text).toBe('{"count":2}');
+    expect(observe.mock.calls).toEqual([
+      ['user', 'Count records.'], ['assistant', '{"count":2}'],
+    ]);
+    expect(getContext).toHaveBeenCalledTimes(2);
+    expect(onBeforeGeneration).toHaveBeenCalledTimes(2);
+    expect(onAfterGeneration).toHaveBeenCalledTimes(2);
+    for (const index of [0, 1]) {
+      expect(getContext).toHaveBeenNthCalledWith(index + 1, 'Count records.', expect.any(Object));
+      expect(systemAt(index)).toContain('Remember the count.');
+    }
+  });
+
+  it.each(['generate', 'send'] as const)('observes nothing when %s exhausts its schema retries', async (method) => {
+    hoisted.generateCompletion.mockResolvedValue(completion('{"count":"invalid"}'));
+    const observe = vi.fn(async () => {});
+    const getContext = vi.fn(async () => null);
+    const onBeforeGeneration = vi.fn(async () => {});
+    const onAfterGeneration = vi.fn(async () => {});
+    const subject = agent({
+      ...base,
+      ...(method === 'generate' ? { responseSchema: schema } : {}),
+      memoryProvider: { getContext, observe },
+      onBeforeGeneration,
+      onAfterGeneration,
+    });
+    const session = subject.session();
+    const result = method === 'generate'
+      ? subject.generate('Count records.')
+      : session.send('Count records.', { responseSchema: schema, maxValidationRetries: 1 });
+    await expect(result).rejects.toBeInstanceOf(ObjectGenerationError);
+    expect(observe).not.toHaveBeenCalled();
+    expect(getContext).toHaveBeenCalledTimes(2);
+    expect(onBeforeGeneration).toHaveBeenCalledTimes(2);
+    expect(onAfterGeneration).toHaveBeenCalledTimes(2);
+    expect(session.messages()).toEqual([]);
+  });
+
   it('preserves multimodal input through send retries and stores it once', async () => {
     hoisted.generateCompletion
       .mockResolvedValueOnce(completion('{"count":"invalid"}'))
+      .mockResolvedValueOnce(completion('invalid JSON'))
       .mockResolvedValueOnce(completion('{"count":2}'));
     const input = [{ type: 'text' as const, text: 'Count these records.' }];
     const session = agent(base).session();
-    await session.send(input, { responseSchema: schema, maxValidationRetries: 1 });
-    expect(messagesAt(1)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ role: 'user', content: input }),
-    ]));
+    await session.send(input, { responseSchema: schema, maxValidationRetries: 2 });
+    for (const index of [1, 2]) {
+      expect(messagesAt(index).filter((message) => message.role === 'user' && Array.isArray(message.content)))
+        .toEqual([{ role: 'user', content: input }]);
+    }
     expect(session.messages().map(({ role, content }) => ({ role, content }))).toEqual([
       { role: 'user', content: input }, { role: 'assistant', content: '{"count":2}' },
     ]);

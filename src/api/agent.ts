@@ -235,7 +235,8 @@ export interface AgentOptions extends BaseAgentConfig {
    *
    * - `getContext` runs before each LLM call; result prepended as a system
    *   message.
-   * - `observe` runs after each LLM call as fire-and-forget.
+   * - `observe` runs as fire-and-forget after each LLM call, except schema
+   *   calls, which observe only the accepted exchange after validation.
    */
   memoryProvider?: AgentMemoryProvider;
   /**
@@ -686,6 +687,23 @@ function pickSendGenerationOverrides(
   return out;
 }
 
+/** Observe a validated exchange without letting memory failures reject it. */
+function observeValidatedExchange(
+  provider: AgentMemoryProvider | undefined,
+  userText: string,
+  replyText: string,
+): void {
+  if (!provider?.observe) return;
+  for (const [role, text] of [['user', userText], ['assistant', replyText]] as const) {
+    if (role === 'assistant' && !text) continue;
+    try {
+      void provider.observe(role, text).catch(() => { /* fire-and-forget */ });
+    } catch {
+      // A synchronous observation failure is also non-fatal.
+    }
+  }
+}
+
 /** Generate a reply with optional JSON validation and bounded repair turns. */
 async function generateWithValidation(
   options: GenerateTextOptions,
@@ -693,11 +711,17 @@ async function generateWithValidation(
   maxRetries: number,
   extract: boolean,
   onResult: (result: GenerateTextResult) => void,
+  memory: { provider?: AgentMemoryProvider; userText: string; options?: MemoryProviderHookOptions },
 ): Promise<{ result: GenerateTextResult; object: unknown; retried: boolean }> {
   if (schema && (!Number.isInteger(maxRetries) || maxRetries < 0)) {
     throw new RangeError('maxValidationRetries must be a non-negative integer');
   }
-  let request = options;
+  // Schema attempts retain recall and caller hooks, but only an accepted
+  // result may write to memory. Bind recall to preserve provider instances.
+  const attemptMemory = schema && memory.provider
+    ? { getContext: memory.provider.getContext?.bind(memory.provider) }
+    : memory.provider;
+  let request = applyMemoryProvider(options, attemptMemory, memory.userText, memory.options) as GenerateTextOptions;
   for (let attempt = 0; ; attempt++) {
     const result = await generateText(request);
     onResult(result);
@@ -707,7 +731,10 @@ async function generateWithValidation(
     try {
       const parsed = extract ? extractJson(result.text) : JSON.parse(result.text);
       const safe = schema.safeParse(parsed);
-      if (safe.success) return { result, object: safe.data, retried: attempt > 0 };
+      if (safe.success) {
+        observeValidatedExchange(memory.provider, memory.userText, result.text);
+        return { result, object: safe.data, retried: attempt > 0 };
+      }
       failure = new ObjectGenerationError('Response failed Zod validation', result.text, safe.error);
     } catch (err) {
       failure = new ObjectGenerationError(
@@ -717,13 +744,26 @@ async function generateWithValidation(
     }
     if (attempt >= maxRetries) throw failure;
     const feedback = failure.validationErrors?.message ?? failure.message;
+    const priorMessages = request.messages ?? [];
+    const repairMessages: Message[] = result.transcriptDelta
+      ? [
+          ...priorMessages.slice(0, priorMessages.length - (request._transcriptIncludeTrailingCallerMessages ?? 0)),
+          ...(result.transcriptDelta as unknown as Message[]),
+        ]
+      : [
+          ...priorMessages,
+          ...(request.prompt !== undefined ? [{ role: 'user' as const, content: request.prompt }] : []),
+          { role: 'assistant', content: result.text },
+        ];
     request = {
       ...request,
       prompt: undefined,
+      // Repair from completed tool results without permitting another action.
+      tools: undefined,
+      toolChoice: undefined,
+      _transcriptIncludeTrailingCallerMessages: 0,
       messages: [
-        ...(request.messages ?? []),
-        ...(request.prompt !== undefined ? [{ role: 'user' as const, content: request.prompt }] : []),
-        { role: 'assistant', content: result.text },
+        ...repairMessages,
         { role: 'user', content: `Your reply did not match the schema: ${feedback}. Reply again with JSON that matches it.` },
       ],
     };
@@ -887,17 +927,12 @@ export function agent(opts: AgentOptions): Agent {
       extra?: Partial<GenerateTextOptions>
     ): Promise<GenerateTextResult> {
       const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
-      const genOpts: Partial<GenerateTextOptions> = applyMemoryProvider(
-        {
-          ...callOptions(extra),
-          usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
-            source: extra?.usageLedger?.source ?? 'agent.generate',
-          }),
-        },
-        opts.memoryProvider,
-        userText,
-        opts.memoryProviderOptions,
-      );
+      const genOpts: Partial<GenerateTextOptions> = {
+        ...callOptions(extra),
+        usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
+          source: extra?.usageLedger?.source ?? 'agent.generate',
+        }),
+      };
       if (typeof prompt === 'string') {
         genOpts.prompt = prompt;
       } else {
@@ -912,6 +947,7 @@ export function agent(opts: AgentOptions): Agent {
         opts.controls?.maxValidationRetries ?? 1,
         true,
         (attempt) => accumulateUsage(agentUsageTally, attempt.usage),
+        { provider: opts.memoryProvider, userText, options: opts.memoryProviderOptions },
       );
       if (opts.responseSchema) result.parsed = object;
       if (opts.verifyCitations) {
@@ -1072,32 +1108,27 @@ export function agent(opts: AgentOptions): Agent {
             }
           }
 
-          const wrappedOpts = applyMemoryProvider(
-            {
-              ...baseForRequest,
-              ...pickSendGenerationOverrides(sendOpts),
-              system,
-              messages: requestMessages,
-              ...(inputIsString
-                ? { prompt: input as string }
-                : { _transcriptIncludeTrailingCallerMessages: 1 }),
-              usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, {
-                sessionId,
-                source: 'agent.session.send',
-              }),
-              ...(responseFormat ? { _responseFormat: responseFormat } : {}),
-              ...(responseFormatBuilder
-                ? { _responseFormatBuilder: responseFormatBuilder }
-                : {}),
-              ...(schemaInstruction ? { _schemaInstruction: schemaInstruction } : {}),
-            },
-            opts.memoryProvider,
-            textForMemory,
-            opts.memoryProviderOptions,
-          );
+          const generationOptions: GenerateTextOptions = {
+            ...baseForRequest,
+            ...pickSendGenerationOverrides(sendOpts),
+            system,
+            messages: requestMessages,
+            ...(inputIsString
+              ? { prompt: input as string }
+              : { _transcriptIncludeTrailingCallerMessages: 1 }),
+            usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, {
+              sessionId,
+              source: 'agent.session.send',
+            }),
+            ...(responseFormat ? { _responseFormat: responseFormat } : {}),
+            ...(responseFormatBuilder
+              ? { _responseFormatBuilder: responseFormatBuilder }
+              : {}),
+            ...(schemaInstruction ? { _schemaInstruction: schemaInstruction } : {}),
+          };
 
           const { result, object, retried } = await generateWithValidation(
-            wrappedOpts as GenerateTextOptions,
+            generationOptions,
             sendOpts?.responseSchema,
             sendOpts?.maxValidationRetries ?? 0,
             false,
@@ -1105,6 +1136,7 @@ export function agent(opts: AgentOptions): Agent {
               accumulateUsage(sessionUsageTally, attempt.usage);
               accumulateUsage(agentUsageTally, attempt.usage);
             },
+            { provider: opts.memoryProvider, userText: textForMemory, options: opts.memoryProviderOptions },
           );
           if (retried) {
             result.transcriptDelta = [

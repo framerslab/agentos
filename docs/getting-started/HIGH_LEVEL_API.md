@@ -596,6 +596,8 @@ final text with the supplied Zod schema and returns the value in `result.parsed`
 It can extract JSON from a code fence. `controls.maxValidationRetries` defaults
 to 1, so an invalid reply gets one more attempt. Set it to 0 to throw
 `ObjectGenerationError` on the first invalid reply.
+Repair attempts retain the completed transcript, including native tool calls
+and their results, and run without tools so they cannot repeat an action.
 
 For a session, pass the schema to `send()` and read `result.object`:
 
@@ -614,6 +616,11 @@ reply enter session history; an exhausted send adds nothing. Usage totals count
 every completed attempt. Retry counts must be non-negative integers. Schema
 sends omit configured tools and their chain-of-thought instruction, as before.
 These retry options apply to the default runtime.
+
+For schema calls, `memoryProvider.observe` records the original user input once
+and only the accepted answer, after caller hooks and validation. Failed attempts
+and exhausted retries record nothing. Memory retrieval and caller generation
+hooks remain active on every attempt.
 
 ### Working-memory block
 
