@@ -223,6 +223,32 @@ describe('the limits, the meter and the ends', () => {
     expect(h.entitlement.settled).toEqual([['res-1', 130]]);
     expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
   });
+  it('a left report the worker sends again after done does not lower the seconds a purge bills', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    await h.manager.purgeRun(runId, 'stopped_by_owner');
+    const left = mockEventContext(runId, 'left', { reason: 'stopped_by_owner', seconds: 20 }, h.clock.now(), h.provider.tokenOf(runId));
+    await h.manager.processProviderEvent('mock', left);
+    await h.report(runId, 'done', { seconds: 30 });
+    await h.manager.processProviderEvent('mock', left); // the worker's retry of its first report
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', billedSeconds: 30 });
+    expect(h.entitlement.settled).toEqual([['res-1', 30]]);
+  });
+  it('a crash reported after the bot left keeps the time it left and the seconds it counted', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    let fails = 1;
+    h.entitlement.settleThrows = () => fails-- > 0;
+    await h.report(runId, 'left', { reason: 'ended', seconds: 30 });
+    const left = await h.stores.runs.get(runId);
+    expect(left).toMatchObject({ state: 'left', cleanupPending: true, reportedSeconds: 30 });
+    h.clock.advance(5_000);
+    await h.report(runId, 'crashed', { seconds: 99 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'ended', leftAt: left?.leftAt, billedSeconds: 30 });
+    expect(h.entitlement.settled).toEqual([['res-1', 30]]);
+    expect(h.seen.filter((e) => e.type === 'bot:left')).toHaveLength(1);
+  });
   it('reconciles: a dispatched run whose worker has no container is ended as crashed', async () => {
     const h = harness();
     const runId = await joined(h);

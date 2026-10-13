@@ -712,7 +712,8 @@ export class MeetingManager {
       case 'left': {
         const reason = run.reason ?? event.data?.reason ?? 'ended';
         if (run.state === 'purging') {
-          await this.stores.runs.update(run.runId, { leftAt: event.at, reason, reportedSeconds: event.data?.seconds ?? run.reportedSeconds });
+          // behind the fence a left report only records the end: the first leaving time, and the largest total counted
+          await this.stores.runs.update(run.runId, { leftAt: run.leftAt ?? event.at, reason, reportedSeconds: this.countedSeconds(run.reportedSeconds, event.data?.seconds) });
           return true;
         }
         // a bot that left on its own (not admitted, alone, the cap, a crash before a command) reaches `left` from any state after dispatch, with its own reason
@@ -721,7 +722,7 @@ export class MeetingManager {
         return true;
       }
       case 'done':
-        if (run.state === 'purging') await this.stores.runs.update(run.runId, { reportedSeconds: event.data?.seconds ?? run.reportedSeconds });
+        if (run.state === 'purging') await this.stores.runs.update(run.runId, { reportedSeconds: this.countedSeconds(run.reportedSeconds, event.data?.seconds) });
         else if (run.state === 'left' || run.state === 'leaving') await this.complete(run, event.data?.seconds);
         return true;
       case 'crashed':
@@ -961,13 +962,13 @@ export class MeetingManager {
     const current = await this.stores.runs.get(run.runId);
     if (!current || (current.state !== 'left' && current.state !== 'leaving')) return;
     if (current.state === 'leaving') {
-      const left = await this.stores.runs.update(run.runId, { state: 'left', leftAt: current.leftAt ?? this.now(), cleanupPending: true, reportedSeconds: reportedSeconds ?? current.reportedSeconds }, 'leaving');
+      const left = await this.stores.runs.update(run.runId, { state: 'left', leftAt: current.leftAt ?? this.now(), cleanupPending: true, reportedSeconds: this.countedSeconds(current.reportedSeconds, reportedSeconds) }, 'leaving');
       if (!left) return;
       await this.emit('bot:left', left, { reason: left.reason });
       run = left;
     } else run = current;
     const now = this.now();
-    const seconds = reportedSeconds ?? run.reportedSeconds ?? Math.max(0, Math.round(((run.leftAt ?? now) - (run.dispatchedAt ?? run.joinAt)) / 1000));
+    const seconds = this.countedSeconds(run.reportedSeconds, reportedSeconds) ?? Math.max(0, Math.round(((run.leftAt ?? now) - (run.dispatchedAt ?? run.joinAt)) / 1000));
     const billed = isBilledEnd(run) ? seconds : 0;
     try {
       await this.stores.transcript.fence(run.runId);
@@ -995,20 +996,34 @@ export class MeetingManager {
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
   }
 
+  /**
+   * The seconds a worker counted, a running total: the largest of the stored total and a report's, so a report the
+   * worker sent again, or one that arrives late, never lowers what a later one gave. Undefined when neither gives one.
+   */
+  private countedSeconds(stored: number | undefined, reported: number | undefined): number | undefined {
+    if (reported === undefined) return stored;
+    return stored === undefined ? reported : Math.max(stored, reported);
+  }
+
   private async crash(run: MeetingRunRecord, at: number, seconds: number | undefined): Promise<void> {
     const current = await this.stores.runs.get(run.runId);
     if (!current || TERMINAL_RUN_STATES.has(current.state)) return;
     if (current.state === 'purging') {
-      await this.stores.runs.update(run.runId, { leftAt: at, reportedSeconds: seconds ?? current.reportedSeconds }, 'purging');
+      await this.stores.runs.update(run.runId, { leftAt: current.leftAt ?? at, reportedSeconds: this.countedSeconds(current.reportedSeconds, seconds) }, 'purging');
+      return;
+    }
+    if (current.state === 'left') {
+      // the bot left before: the time it left and the seconds it counted stand, and only the cleanup still owed is tried again
+      await this.complete(current, undefined);
       return;
     }
     const expected = ACTIVE_STATES.filter((state) => state !== 'purging');
     if (!expected.includes(current.state)) return;
     // The store re-reads under the anchor; a purge between get and update fails this exact-state guard.
-    const left = await this.stores.runs.update(run.runId, { state: 'left', leftAt: at, reason: current.reason ?? 'crashed', reportedSeconds: seconds ?? current.reportedSeconds, cleanupPending: true }, current.state);
+    const left = await this.stores.runs.update(run.runId, { state: 'left', leftAt: at, reason: current.reason ?? 'crashed', reportedSeconds: this.countedSeconds(current.reportedSeconds, seconds), cleanupPending: true }, current.state);
     if (!left) {
       const fenced = await this.stores.runs.get(run.runId);
-      if (fenced?.state === 'purging') await this.stores.runs.update(run.runId, { leftAt: at, reportedSeconds: seconds ?? fenced.reportedSeconds }, 'purging');
+      if (fenced?.state === 'purging') await this.stores.runs.update(run.runId, { leftAt: fenced.leftAt ?? at, reportedSeconds: this.countedSeconds(fenced.reportedSeconds, seconds) }, 'purging');
       return;
     }
     await this.emit('bot:left', left, { reason: left.reason });
