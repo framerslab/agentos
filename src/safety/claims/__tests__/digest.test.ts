@@ -19,6 +19,31 @@ describe('canonical JSON and its digest', () => {
     expect(digestOf(one)).toBe(digestOf([null]));
     expect(digestOf(one)).not.toBe(digestOf([]));
   });
+  it('reads an array length and each member once, as JSON does, so a getter cannot grow or change the text', () => {
+    const grown = (): unknown[] => {
+      const items: unknown[] = ['a', 'b'];
+      Object.defineProperty(items, 0, {
+        get() {
+          items.push('x');
+          return 'a';
+        },
+        enumerable: true,
+        configurable: true,
+      });
+      return items;
+    };
+    expect(canonicalJson(grown())).toBe('["a","b"]');
+    expect(canonicalJson(grown())).toBe(JSON.stringify(grown()));
+    let reads = 0;
+    const counted = {
+      get a() {
+        reads += 1;
+        return reads;
+      },
+    };
+    expect(canonicalJson(counted)).toBe('{"a":1}');
+    expect(reads).toBe(1);
+  });
   it('gives equal digests to equal values written in a different key order', () => {
     expect(digestOf({ x: 1, y: [true] })).toBe(digestOf({ y: [true], x: 1 }));
   });
