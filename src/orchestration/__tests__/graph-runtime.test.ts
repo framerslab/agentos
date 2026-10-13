@@ -1736,3 +1736,77 @@ describe('GraphRuntime: a parallel batch keeps the artifacts of every branch', (
     expect(artifacts).toEqual({ summary: DRAFTED, notes: NOTED, publish: 'Published.' });
   });
 });
+
+// ---------------------------------------------------------------------------
+// The checkpoint of a parallel batch that halts
+// ---------------------------------------------------------------------------
+//
+// When a branch of a batch interrupts or fails, the run stops there, and the
+// branches that completed are in the checkpoint's `visitedNodes`, so a resume
+// does not run them again: the checkpoint has to hold their state too. The
+// search extension's executor, like the model, is the host's and is scripted.
+
+const SOURCES = ['CHANGELOG.md', 'docs/importer.md'];
+
+/** An extension node whose output object the runtime merges into `scratch`. */
+function searchNode(): GraphNode {
+  return {
+    id: 'search',
+    type: 'extension',
+    executorConfig: { type: 'extension', extensionId: 'search', method: 'sources' },
+    executionMode: 'single_turn',
+    effectClass: 'read',
+    checkpoint: 'none',
+  };
+}
+
+function runtimeWithSearch(
+  store: InMemoryCheckpointStore,
+  providerCall: NodeExecutorDeps['providerCall'],
+): GraphRuntime {
+  return new GraphRuntime({
+    checkpointStore: store,
+    nodeExecutor: new NodeExecutor({
+      loopController: new LoopController(),
+      providerCall,
+      extensionExecutor: async () => ({ success: true, output: { sources: SOURCES } }),
+    }),
+  });
+}
+
+describe('GraphRuntime: the checkpoint of a parallel batch that halts', () => {
+  // START fans out to draft, approve and search, which all lead to publish.
+  // approve waits for a person; draft, declared before it, and search,
+  // declared after it, complete.
+  const haltingBatch = (id: string) =>
+    makeWideParallelJoinGraph(id, [draftNode(), approveNode(), searchNode()], publishNode());
+  const completed = {
+    scratch: { sources: SOURCES },
+    artifacts: { draft: DRAFTED, search: { sources: SOURCES } },
+  };
+
+  it('holds every branch that completed with the halting one, and a resume continues from all of them', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel({ [DRAFT]: DRAFTED, [PUBLISH]: 'Published.' });
+    const runtime = runtimeWithSearch(store, model.providerCall);
+    const graph = haltingBatch('g-batch-halt');
+
+    const runId = runIdOf(await readUntil(runtime.stream(graph, {}), 'interrupt'));
+
+    const checkpoint = await store.latest(runId);
+    expect(checkpoint?.nodeId).toBe('approve');
+    expect([...(checkpoint?.visitedNodes ?? [])].sort()).toEqual(['draft', 'search']);
+    expect({ scratch: checkpoint?.state.scratch, artifacts: checkpoint?.state.artifacts }).toEqual(completed);
+
+    const artifacts = await runtime.resume(graph, runId);
+    expect(model.stateSeenBy(PUBLISH)).toEqual(completed);
+    expect(artifacts).toEqual({ ...completed.artifacts, publish: 'Published.' });
+  });
+
+  it('ends the run with those artifacts when invoke() reads it to the end', async () => {
+    const model = recordingModel({ [DRAFT]: DRAFTED });
+    const runtime = runtimeWithSearch(new InMemoryCheckpointStore(), model.providerCall);
+
+    expect(await runtime.invoke(haltingBatch('g-batch-halt-invoke'), {})).toEqual(completed.artifacts);
+  });
+});
