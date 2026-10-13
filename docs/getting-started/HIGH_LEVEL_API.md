@@ -561,6 +561,81 @@ console.log(await session.usage());
 and `streamText({ tools })`: named tool maps, [`ExternalToolRegistry`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/externalToolRegistry.ts)
 (`Record`, `Map`, or iterable), and prompt-only `ToolDefinitionForLLM[]`.
 
+### Citation verification
+
+Set `verifyCitations: { embedFn, retrieve }` to check generated claims against
+sources retrieved for the original user input. `retrievalAugmentor` can supply
+both hooks instead. The reply is returned unchanged: verification adds verdicts,
+not a filter. Missing retrieval wiring, empty sources or verification failure
+leave grounding undefined.
+
+`generate()` returns these verdicts in `result.grounding`. On the default
+runtime, session `send()` does the same, including after a successful schema
+retry. Session `stream()` exposes `result.grounding` as a promise; consume the
+stream before awaiting it, because verification starts only after the text
+completes. Direct `stream()` and GMI session calls do not run this check.
+
+```ts
+const session = agent({
+  provider: 'openai',
+  verifyCitations: { embedFn, retrieve }, // Supply the embedding and retrieval functions.
+}).session();
+
+const reply = await session.send('Summarize the retrieved records.');
+const verdicts = reply.grounding?.claims;
+
+const streamed = session.stream('Explain the summary.');
+for await (const text of streamed.textStream) process.stdout.write(text);
+const streamedVerdicts = await streamed.grounding;
+```
+
+### Schema validation and retries
+
+On the default runtime, `agent({ responseSchema })` validates `generate()`'s
+final text with the supplied Zod schema and returns the value in `result.parsed`.
+It can extract JSON from a code fence. `controls.maxValidationRetries` defaults
+to 1, so an invalid reply gets one more attempt. Set it to 0 to throw
+`ObjectGenerationError` on the first invalid reply.
+Repair attempts retain the completed transcript, including native tool calls
+and their results, and run without tools so they cannot repeat an action.
+
+For a session, pass the schema to `send()` and read `result.object`:
+
+```ts
+import { z } from 'zod';
+
+const result = await session.send('Count the records.', {
+  responseSchema: z.object({ count: z.number() }),
+  maxValidationRetries: 1,
+});
+```
+
+Session sends default to zero extra attempts. Each retry includes the failed
+reply and validation feedback. Only the original user input and final valid
+reply enter session history; an exhausted send adds nothing. Usage totals count
+every completed attempt. Retry counts must be non-negative integers. Schema
+sends omit configured tools and their chain-of-thought instruction, as before.
+These retry options apply to the default runtime.
+
+For schema calls, `memoryProvider.observe` records the original user input once
+and only the accepted answer, after caller hooks and validation. Failed attempts
+and exhausted retries record nothing. Memory retrieval and caller generation
+hooks remain active on every attempt.
+
+### Working-memory block
+
+On the default runtime, `memory: { working: () => 'STATE: ...' }` supplies a
+system-text block for each session `send()`. The callback may return a promise.
+It runs once per send, including sends with schema retries, and its text precedes
+the configured system text. An empty block is skipped. A thrown error or rejected
+promise skips the block and warns through the configured logger factory, without
+logging the error or state text.
+
+The host owns the state. This callback creates no store and does not run on
+`generate()`, direct `stream()`, session `stream()` or the GMI runtime. The existing
+`working: { enabled, maxTokens, strategy }` buffer configuration remains accepted
+and deferred by the default runtime.
+
 ### Sessions served by GMIs: `runtime: 'gmi'`
 
 ```ts
@@ -578,7 +653,7 @@ await session.send('What is QUIC?');
 await tutor.close();
 ```
 
-With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), the same function under its own name), every session is a Generalized Mind Instance built from the agent's options, and `memory` turns on cognitive memory: one manager for the agent's sessions, scoped per user, embedding with `memory.embedding` (unset, a model picked from the global default provider or the environment's keys). `cognition: 'full'` adds sentiment tracking and the metaprompt presets. Of the `MemoryConfig` fields, this path reads `embedding` and `consolidation`; `types: ['episodic', 'semantic']`, `working` and `shared` are read by neither runtime of `agent()`, and without `runtime: 'gmi'` the agent reads no `memory` option at all. [GMIs from agent()](../GMI.md#gmis-from-agent) lists what each option does on this path.
+With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), the same function under its own name), every session is a Generalized Mind Instance built from the options, and `memory` turns on cognitive memory: one manager for the sessions, scoped per user, embedding with `memory.embedding` (unset, a model picked from the global default provider or the environment's keys). `cognition: 'full'` adds sentiment tracking and the metaprompt presets. Of the `MemoryConfig` fields, this path reads `embedding` and `consolidation`; it does not read `types`, `working` or `shared`. The default runtime reads only the `memory.working` callback described above. [GMIs from agent()](../GMI.md#gmis-from-agent) lists what each option does on this path.
 
 `learning: true`, or a `LearningConfig`, turns on the agent's learning layer: every GMI of the agent sends the persona's personality section as a system prompt of its own on every turn, in the words `agent()` writes, a session opened with a `userId` is bound to a learner, and `agent.learning.manifest()` says which loops run. Unset or `false` (the default), the agent builds no layer and the persona's base prompt carries the section; `agent()` without `runtime: 'gmi'` ignores the option. [Learning](../GMI.md#learning) has the rules.
 

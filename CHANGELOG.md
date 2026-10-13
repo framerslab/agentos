@@ -1,3 +1,26 @@
+## [0.13.85](https://github.com/framerslab/agentos/compare/v0.13.84...v0.13.85) (2026-10-13)
+
+### fix
+
+* **api:** embedText checks every input's size before the first request (#381) ([318d26a](https://github.com/framerslab/agentos/commit/318d26a7b4167beacf434faa2f59186de86651e8))
+
+## [0.13.84](https://github.com/framerslab/agentos/compare/v0.13.83...v0.13.84) (2026-10-13)
+
+### feat
+
+* **api:** embedText sends a long list in requests the provider takes (#379) ([35592b7](https://github.com/framerslab/agentos/commit/35592b7b2523943168308335e4d57d25377f6516))
+
+## [0.13.83](https://github.com/framerslab/agentos/compare/v0.13.82...v0.13.83) (2026-10-13)
+
+### feat
+
+* **api:** verify session citations, validate generate output and add working-memory blocks (#378) ([2d61bd6](https://github.com/framerslab/agentos/commit/2d61bd6e3618afba9a125758bbace32cd2bf4c8d))
+
+### docs
+
+* correct the GMI paper's data statement and its fallback memory endpoint (#374) ([4bd20b1](https://github.com/framerslab/agentos/commit/4bd20b11adc68c8e1fac6f34023a700aedfd60a0))
+* correct the GMI study's user-data and report lines (#372) ([ed49ab2](https://github.com/framerslab/agentos/commit/ed49ab2e97637be56a87888b6274ac9e7ea5cd74))
+
 ## [0.13.82](https://github.com/framerslab/agentos/compare/v0.13.81...v0.13.82) (2026-10-12)
 
 ### feat

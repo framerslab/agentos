@@ -28,16 +28,25 @@ export function isMeaningfullyConfigured(value: unknown): boolean {
 
 /**
  * The config fields that are set but that `surface` accepts without enforcing
- * (`accepted_but_deferred` in {@link BASE_AGENT_CONFIG_CAPABILITY_CONTRACT}).
+ * (`accepted_but_deferred` in {@link BASE_AGENT_CONFIG_CAPABILITY_CONTRACT}),
+ * plus memory settings beyond the default runtime's working callback.
  */
 export function getDeferredCapabilities(
   config: Partial<BaseAgentConfig>,
   surface: CapabilitySurface,
 ): CapabilityKey[] {
-  return CAPABILITY_KEYS.filter((key) =>
-    BASE_AGENT_CONFIG_CAPABILITY_CONTRACT[key][surface] === 'accepted_but_deferred'
-    && isMeaningfullyConfigured(config[key]),
-  );
+  return CAPABILITY_KEYS.filter((key) => {
+    if (key === 'memory' && surface === 'agent') {
+      const memory = config.memory;
+      if (typeof memory === 'object' && memory !== null && typeof memory.working === 'function') {
+        const { working: _working, ...deferred } = memory;
+        return isMeaningfullyConfigured(deferred);
+      }
+      return isMeaningfullyConfigured(memory);
+    }
+    return BASE_AGENT_CONFIG_CAPABILITY_CONTRACT[key][surface] === 'accepted_but_deferred'
+      && isMeaningfullyConfigured(config[key]);
+  });
 }
 
 export function getDeferredLightweightAgentCapabilities(
@@ -70,9 +79,9 @@ export function warnOnDeferredLightweightAgentCapabilities(
         + 'The lightweight helper preserves these fields for compatibility but does not actively enforce them.',
     );
   }
-  // agency() does not apply `memory` either: only the GMI path reads it.
+  // The default runtime consumes only the working callback, filtered above.
   if (deferredCapabilities.includes('memory')) {
-    parts.push("agent() applies memory only with runtime: 'gmi' (cognitive memory for its sessions); this agent does not apply it.");
+    parts.push("agent() applies memory settings other than the working callback only with runtime: 'gmi'; these settings are not applied here.");
   }
   if (enforcedNowhere.length > 0) {
     parts.push(

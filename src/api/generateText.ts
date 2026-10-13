@@ -936,8 +936,8 @@ export interface GenerateTextResult {
    */
   trace?: AgencyTraceEvent[];
   /**
-   * Parsed structured output produced when `BaseAgentConfig.output` is a Zod
-   * schema.  `undefined` when no output schema is configured.
+   * Parsed structured output from `BaseAgentConfig.output`, or from
+   * `agent().generate()` with `responseSchema`. Undefined without a schema.
    */
   parsed?: unknown;
   /**

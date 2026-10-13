@@ -23,7 +23,7 @@ AgentOS exposes two ways to run a model, and they do not share a runtime. The li
 | Option | `agent` | `generation` | `runtime` | `gmi` |
 |---|---|---|---|---|
 | `tools` | enforced | enforced | enforced | enforced |
-| `memory` | accepted but deferred | runtime only | enforced | enforced |
+| `memory` | partially enforced | runtime only | enforced | enforced |
 | `rag` | accepted but deferred | runtime only | enforced | accepted but deferred |
 | `discovery` | accepted but deferred | runtime only | enforced | accepted but deferred |
 | `guardrails` | accepted but deferred | partially enforced | enforced | accepted but deferred |
@@ -40,7 +40,7 @@ AgentOS exposes two ways to run a model, and they do not share a runtime. The li
 
 No surface acts on `security` or `permissions`: AgentOS ties no policy to a security tier and applies none of the permission fields ([`types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts), `SecurityTier` and `PermissionsConfig`), so the contract marks both deferred on every surface. `agent()`, `gmi()` and `agency()` accept them; the options of `generateText()` and `streamText()` and the runtime's `AgentOSConfig` do not declare them. To gate tools, use `hitl.approvals.beforeTool` on `agency()` or an `onBeforeToolExecution` hook; the full runtime's tool permission checks are set through its own `toolPermissionManagerConfig`.
 
-`agent()` and `gmi()` each log one warning naming the options set that their surface accepts but defers, and `gmi()` throws at construction for `voice` and `channels` (and for `avatar` and `budget`, which the contract does not list), unless the config sets only `enabled: false`. `agent()` without `runtime: 'gmi'` reads no part of `memory`, and its warning says that `runtime: 'gmi'` applies it. `agent()` without `runtime: 'gmi'` and `agency()` warn when they receive a `cognitiveMechanisms` config, because they run no cognitive memory manager; with `runtime: 'gmi'` and memory on, the agent's memory manager runs the mechanisms.
+`agent()` and `gmi()` each log one warning naming the options set that their surface accepts but defers, and `gmi()` throws at construction for `voice` and `channels` (and for `avatar` and `budget`, which the contract does not list), unless the config sets only `enabled: false`. The default runtime reads a `memory.working` callback once per session send and prepends its text to the configured system text; other memory settings remain deferred and produce a warning. `agent()` without `runtime: 'gmi'` and `agency()` warn when they receive a `cognitiveMechanisms` config, because they run no cognitive memory manager; with `runtime: 'gmi'` and memory on, the memory manager runs the mechanisms.
 
 ## Choosing
 
