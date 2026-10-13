@@ -1,3 +1,21 @@
+## [0.13.95](https://github.com/framerslab/agentos/compare/v0.13.94...v0.13.95) (2026-10-13)
+
+### fix
+
+* **voice-pipeline:** report transport sends that reject instead of leaving them unhandled (#399) ([a7f3175](https://github.com/framerslab/agentos/commit/a7f317509a49f326d1a8a2431434eb70157ec7cc))
+
+## [0.13.94](https://github.com/framerslab/agentos/compare/v0.13.93...v0.13.94) (2026-10-13)
+
+### fix
+
+* **voice-pipeline:** pair a speech end with the final that came before it, and drop a final left over from a completed turn (#396) ([97e2b3b](https://github.com/framerslab/agentos/commit/97e2b3b7897a67a9688732ef6fd1e28cc8ad7131))
+
+## [0.13.93](https://github.com/framerslab/agentos/compare/v0.13.92...v0.13.93) (2026-10-13)
+
+### feat
+
+* **voice-pipeline:** Deepgram's streaming price a minute (#402) ([6186e70](https://github.com/framerslab/agentos/commit/6186e70db76f3c3bbe055e20ef844590d48375d8))
+
 ## [0.13.92](https://github.com/framerslab/agentos/compare/v0.13.91...v0.13.92) (2026-10-13)
 
 ### fix
