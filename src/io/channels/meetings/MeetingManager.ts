@@ -685,7 +685,7 @@ export class MeetingManager {
     const current = await this.stores.runs.get(run.runId);
     if (current && !TERMINAL_RUN_STATES.has(current.state) && current.leftAt === undefined) return;
     this.config.logger?.warn(`[MeetingManager] ${run.runId}: the provider answered the dispatch after the run ended; its worker is killed`);
-    await this.sendCommand(run, { name: 'kill' });
+    this.kill(run);
   }
 
   /**
@@ -1215,6 +1215,15 @@ export class MeetingManager {
     }
   }
 
+  /**
+   * Sends the bot a kill without waiting for the provider's answer, so the end that follows is recorded at once: a kill
+   * that never answers (a scheduler that hangs) would otherwise hold the pass, and every run after it in the pass, for as
+   * long as it hangs. One that fails is logged, as `sendCommand` logs it.
+   */
+  private kill(run: MeetingRunRecord): void {
+    void this.sendCommand(run, { name: 'kill' });
+  }
+
   /** A run that ends before it joined (a failed revalidation, no capacity, a cancel): never billed. */
   private async fail(run: MeetingRunRecord, reason: MeetingLeaveReason, message?: string): Promise<void> {
     const current = await this.stores.runs.get(run.runId);
@@ -1412,9 +1421,9 @@ export class MeetingManager {
         const provider = this.providers.get(run.providerName);
         // the kill's deadline is on the run, so a bot that has not left is killed whichever manager told it to leave, after a
         // restart too, and the bot's leaving (`leftAt`) disarms it. The end is recorded whether or not the kill reaches the
-        // bot: the cleanup that follows deletes its room
+        // bot, and without waiting for the provider's answer: the cleanup that follows deletes its room
         if (run.leaveCommandedAt !== undefined && run.leftAt === undefined && now - run.leaveCommandedAt > this.killAfterMs) {
-          await this.sendCommand(run, { name: 'kill' });
+          this.kill(run);
           await this.crash(run, now, undefined);
           continue;
         }
@@ -1543,13 +1552,14 @@ export class MeetingManager {
   /**
    * With `usageSilenceMs`, ends as crashed each dispatching or dispatched run whose worker has sent no fresh usage report
    * for that long: the run ends at the manager's receipt of its last usage report (its dispatch, when none came, or its
-   * request) and at the total its reports gave, nothing when none did, and then the bot is sent a kill. The silence is
-   * decided again on the row as the store holds it, in the same write as the end, so a usage report taken after the runs
-   * were listed keeps its run and no kill goes to its worker. The rule rests on what the stores hold alone, never on the
-   * provider's answer or the stop monitor's heartbeats, so a worker that cannot be reached, or one that answers and sends
-   * nothing, ends the same way, and a manager that restarted ends it too. A dispatching run whose job was never recorded
-   * dispatched (its dispatcher stopped first) is among them. A run whose step throws holds back no other, and the first
-   * error is thrown at the end. Without `usageSilenceMs` it does nothing.
+   * request) and at the total its reports gave, nothing when none did, and then the bot is sent a kill, not waited for, so
+   * a kill the provider never answers holds back no settlement and no later run. The silence is decided again on the row
+   * as the store holds it, in the same write as the end, so a usage report taken after the runs were listed keeps its run
+   * and no kill goes to its worker. The rule rests on what the stores hold alone, never on the provider's answer or the
+   * stop monitor's heartbeats, so a worker that cannot be reached, or one that answers and sends nothing, ends the same
+   * way, and a manager that restarted ends it too. A dispatching run whose job was never recorded dispatched (its
+   * dispatcher stopped first) is among them. A run whose step throws holds back no other, and the first error is thrown
+   * at the end. Without `usageSilenceMs` it does nothing.
    */
   private async endSilentRuns(): Promise<void> {
     const silenceMs = this.usageSilenceMs;
@@ -1569,7 +1579,8 @@ export class MeetingManager {
         });
         if (!left) continue;
         this.config.logger?.warn(`[MeetingManager] ${left.runId}: no usage report for ${silentFor} ms; ended as crashed`);
-        await this.sendCommand(left, { name: 'kill' });
+        // not waited for: a kill that never answers holds neither this run's settlement nor the runs after it
+        this.kill(left);
         await this.emit('bot:left', left, { reason: left.reason });
         await this.complete(left, left.reportedSeconds);
       } catch (error) {

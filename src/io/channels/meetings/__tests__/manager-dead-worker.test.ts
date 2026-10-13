@@ -172,6 +172,25 @@ describe('a worker the manager cannot reach', () => {
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', billedSeconds: 90, reportedSeconds: 90 });
   });
 
+  it('ends every silent run though the provider never answers their kills', async () => {
+    const h = harness({ usageSilenceMs: 120_000 });
+    const runIds = [await joined(h, 'k1'), await joined(h, 'k2')];
+    const command = h.provider.command.bind(h.provider);
+    const sent = vi.spyOn(h.provider, 'command').mockImplementation((runId, c) => (c.name === 'kill' ? new Promise<void>(() => {}) : command(runId, c)));
+    h.clock.advance(120_000);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const held = new Promise<string>((resolve) => { timer = setTimeout(() => resolve('held by a kill'), 1_000); });
+    try {
+      expect(await Promise.race([h.manager.reconcile().then(() => 'returned'), held])).toBe('returned');
+    } finally {
+      clearTimeout(timer);
+    }
+    for (const runId of runIds) {
+      expect(sent).toHaveBeenCalledWith(runId, { name: 'kill' });
+      expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed' });
+    }
+  });
+
   it('refuses a usage silence that is not a finite number of milliseconds above zero', () => {
     const h = harness();
     for (const usageSilenceMs of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {
