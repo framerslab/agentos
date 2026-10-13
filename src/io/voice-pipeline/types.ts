@@ -329,6 +329,9 @@ export interface StreamingSTTConfig {
    * speaker adaptation models) without modifying the interface.
    */
   providerOptions?: Record<string, unknown>;
+
+  /** Call-profile identity; scoped adapters capture this and update it only through reset. */
+  call?: AudioIdentity;
 }
 
 /**
@@ -1839,6 +1842,14 @@ export interface IAudioEndpointDetector extends EventEmitter {
   reset(identity: AudioIdentity): Promise<void>;
   /** Releases the detector; it emits nothing afterwards. */
   dispose(): Promise<void>;
+}
+
+/** Call-profile STT explicitly binds asynchronous results to their admitted input identity. */
+export interface ScopedStreamingSTTSession extends StreamingSTTSession {
+  /** Admits one frame for recognition; resolves once it is admitted. Transcripts of it carry the frame's identity. The samples are read-only. */
+  pushAudioScoped(frame: ScopedAudioFrame): Promise<void>;
+  /** Resets recognition without replay; late results retain their old identity. */
+  reset(identity: AudioIdentity): Promise<void>;
 }
 
 /** Playback acknowledged by a transport, not merely queued or sent to a socket. */

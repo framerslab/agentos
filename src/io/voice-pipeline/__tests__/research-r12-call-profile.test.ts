@@ -1,6 +1,8 @@
 /**
  * The opt-in call profile: synthesis output of another scope is refused
- * before playback; a reply stays speaking until the transport acknowledges
+ * before playback; an audio send the transport refuses ends the call, as no
+ * failed send does on a session without the profile; a reply stays speaking
+ * until the transport acknowledges
  * its playback, and real PCM reaches both detector seams; a short click does
  * not interrupt while six successive 20 ms speech frames do, cancelling the
  * model, synthesis and playback behind the inference fence; and a transient
@@ -143,6 +145,19 @@ describe('call profile', () => {
     f.turn();
     await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
     expect(f.transport.sendAudio).not.toHaveBeenCalled();
+    await f.runtime.stopSession();
+  });
+
+  it('ends the call when the transport refuses its audio', async () => {
+    const f = await fixture();
+    f.transport.sendAudio = vi.fn(async () => {
+      throw new Error('send failed');
+    });
+    f.turn();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+    expect(f.profile.onFailure).toHaveBeenCalledOnce();
+    expect(f.transport.waitForPlayback).not.toHaveBeenCalled();
+    expect(f.transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_done' }));
     await f.runtime.stopSession();
   });
 

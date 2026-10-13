@@ -36,6 +36,8 @@ export interface AudioFanoutOptions {
   maxSamples: number;
   /** Synchronous invalidation only. It must not await this fan-out's drain. */
   onGap(event: AudioGapEvent): void;
+  /** Waits for the one VAD event's endpoint delivery before another frame can run. */
+  afterFrame?(): Promise<void>;
 }
 
 /** One sequenced, bounded input queue. Every consumer completes a frame before the next begins. */
@@ -168,6 +170,7 @@ export class AudioFanout {
         await this.options.endpoint.pushAudio(frame);
         if (revision !== this.revision || this.disposed) continue;
         await this.options.vad.pushAudio(frame);
+        await this.options.afterFrame?.();
       } finally {
         this.samples -= frame.samples.length;
         this.frames--;

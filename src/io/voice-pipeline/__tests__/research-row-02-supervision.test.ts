@@ -1,8 +1,11 @@
 /**
- * Call-local supervision: an error on the STT, TTS or transport session, a
- * reply whose agent stream rejects and an audio send that the transport
- * rejects each end their own call and no other, without an unhandled error,
- * and a pending waitForUserTurn() rejects when its call closes.
+ * Call-local supervision on a session without a call profile: an error on the
+ * STT, TTS or transport session and a reply whose agent stream rejects each
+ * end their own call and no other, without an unhandled error, and a pending
+ * waitForUserTurn() rejects when its call closes. An audio send that the
+ * transport rejects is caught too, and is reported as the orchestrator's
+ * 'error' while the turn goes on: a failed send ends neither the turn nor the
+ * session here, and only a call profile ends a call on one.
  */
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
@@ -54,12 +57,20 @@ describe('call-local supervision', () => {
     a.endpoint.emit('turn_complete', { transcript: 'hello', confidence: 1, durationMs: 20, reason: 'manual' });
     await vi.waitFor(() => expect(a.runtime.state).toBe('closed'));
     const b = await fixture();
+    const errors: unknown[] = [];
+    b.runtime.on('error', (error: unknown) => errors.push(error));
+    const refused = new Error('send failed');
     b.transport.sendAudio = vi.fn(async () => {
-      throw new Error('send failed');
+      throw refused;
     });
     b.endpoint.emit('turn_complete', { transcript: 'hello', confidence: 1, durationMs: 20, reason: 'manual' });
     await vi.waitFor(() => expect(b.runtime.state).toBe('speaking'));
     b.tts.emit('audio', { audio: Buffer.alloc(2), format: 'pcm', sampleRate: 16000, durationMs: 1, text: '' });
-    await vi.waitFor(() => expect(b.runtime.state).toBe('closed'));
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect(errors[0]).toBe(refused);
+    expect(b.runtime.state).toBe('speaking');
+    b.tts.emit('flush_complete');
+    expect(b.runtime.state).toBe('listening');
+    await b.runtime.stopSession();
   });
 });
