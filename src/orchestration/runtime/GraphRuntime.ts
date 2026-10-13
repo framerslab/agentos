@@ -392,14 +392,28 @@ export class GraphRuntime {
         // so save the checkpoint the run resumes from before yielding any of
         // the batch's events: a consumer that stops iterating at one of them
         // (`interrupt`, `error`) closes this generator at that `yield`, and
-        // the code after it never runs.
+        // the code after it never runs. The branches that completed are in
+        // `completedNodes`, so a resume does not run them again: the
+        // checkpoint holds what they wrote, merged with what the halting
+        // branch wrote, in batch order.
         const haltingOutcome = parallelOutcomes.find((outcome) => outcome?.earlyTermination);
-        const haltCheckpointId = haltingOutcome
-          ? await this.saveCheckpoint(
-              activeGraph, runId, haltingOutcome.nodeId, haltingOutcome.branchState,
-              nodeResults, completedNodes, skippedNodes, [],
-            )
-          : undefined;
+        let haltState: GraphState | undefined;
+        let haltCheckpointId: string | undefined;
+        if (haltingOutcome) {
+          const haltedBatch = parallelOutcomes.filter(
+            (outcome) => !!outcome && (!outcome.earlyTermination || outcome === haltingOutcome),
+          ) as Array<NonNullable<typeof haltingOutcome>>;
+          const merged = stateManager.mergeParallelBranches(
+            baseState,
+            haltedBatch.map((outcome) => outcome.branchState),
+            haltedBatch.map((outcome) => outcome.writes),
+          );
+          haltState = { ...haltingOutcome.branchState, scratch: merged.scratch, artifacts: merged.artifacts };
+          haltCheckpointId = await this.saveCheckpoint(
+            activeGraph, runId, haltingOutcome.nodeId, haltState,
+            nodeResults, completedNodes, skippedNodes, [],
+          );
+        }
 
         // Yield all collected events from parallel branches in order,
         // then merge branch states into the shared baseline.
@@ -419,9 +433,9 @@ export class GraphRuntime {
             for (const event of outcome.earlyTermination.events) {
               yield event;
             }
-            // This is the halting branch; its checkpoint was saved above.
+            // This is the halting branch; the batch's checkpoint was saved above.
             const checkpointId = haltCheckpointId!;
-            state = this.attachCheckpointMetadata(outcome.branchState, checkpointId);
+            state = this.attachCheckpointMetadata(haltState!, checkpointId);
             yield { type: 'checkpoint_saved', checkpointId, nodeId: outcome.nodeId };
             if (outcome.earlyTermination.type === 'interrupt') {
               yield { type: 'interrupt', nodeId: outcome.nodeId, reason: 'human_approval' };
