@@ -1,8 +1,12 @@
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { TelephonyStreamTransport } from '../TelephonyStreamTransport.js';
 import { TwilioMediaStreamParser } from '../parsers/TwilioMediaStreamParser.js';
 import { TelnyxMediaStreamParser } from '../parsers/TelnyxMediaStreamParser.js';
 import { PlivoMediaStreamParser } from '../parsers/PlivoMediaStreamParser.js';
+import { convertPcmToMulaw8k } from '../telephony-audio.js';
+import { VoicePipelineOrchestrator } from '../../../voice-pipeline/VoicePipelineOrchestrator.js';
+import type { EncodedAudioChunk } from '../../../voice-pipeline/types.js';
 import { CarrierSocket, startFrame, audioChunk } from './research-row-04-telephony-audio.test.js';
 
 describe('carrier playback and start authority', () => {
@@ -60,5 +64,90 @@ describe('carrier playback and start authority', () => {
       const closing = vi.fn(); timeout.on('close', closing); const work = timeout.sendAudio(audioChunk()); const check = expect(work).rejects.toThrow('playback timeout');
       await vi.advanceTimersByTimeAsync(101); await check; slow.emit('close'); expect(closing).toHaveBeenCalledOnce();
     } finally { vi.useRealTimers(); }
+  });
+});
+
+/** One 20 ms chunk of constant PCM16 at 16 kHz, unstamped, as a streaming TTS session emits it. */
+function speech(level: number): EncodedAudioChunk {
+  const audio = Buffer.alloc(640);
+  for (let i = 0; i < audio.length; i += 2) audio.writeInt16LE(level, i);
+  return { audio, format: 'pcm', container: 'raw', sampleRate: 16000, durationMs: 20, text: '' };
+}
+/** The PCMU payload a carrier receives for `speech(level)`. */
+const heard = (level: number): string => convertPcmToMulaw8k(speech(level).audio, 16000).toString('base64');
+/** The payload of each media frame written, in order. */
+const media = (sent: Array<Record<string, unknown>>): string[] => sent.filter((m) => m.event === 'media').map((m) => (m.media as { payload: string }).payload);
+/** The name of each checkpoint written, in order. */
+const marks = (sent: Array<Record<string, unknown>>): string[] => sent.filter((m) => m.event === 'mark').map((m) => (m.mark as { name: string }).name);
+/** Lets every promise reaction already queued run. */
+const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+const turn = () => ({ transcript: 'hello', confidence: 1, durationMs: 20, reason: 'manual' });
+
+/** The voice pipeline without a call profile over a carrier transport, as a host wires a phone call to it. */
+async function carrierPipeline() {
+  const ws = new CarrierSocket();
+  const transport = new TelephonyStreamTransport(ws, new TwilioMediaStreamParser({ protocol: 'carrier' }), { protocol: 'carrier', authorizeStart: () => true });
+  ws.emit('message', startFrame());
+  const stt = Object.assign(new EventEmitter(), { pushAudio() {}, flush: async () => {}, close: vi.fn() });
+  const tts = Object.assign(new EventEmitter(), { pushTokens() {}, flush: async () => {}, cancel() {}, close: vi.fn() });
+  const endpoint = Object.assign(new EventEmitter(), { mode: 'heuristic' as const, pushVadEvent() {}, pushTranscript() {}, reset() {} });
+  const runtime = new VoicePipelineOrchestrator({ stt: 'fake', tts: 'fake' });
+  const errors: unknown[] = [];
+  runtime.on('error', (error: unknown) => errors.push(error));
+  await runtime.startSession(transport, { async *sendText() { yield 'hello'; } }, {
+    streamingSTT: { providerId: 'fake', isStreaming: true, startSession: async () => stt },
+    streamingTTS: { providerId: 'fake', startSession: async () => tts },
+    endpointDetector: endpoint,
+    bargeinHandler: { mode: 'hard-cut', handleBargein: () => ({ type: 'cancel' }) },
+  });
+  const played: string[] = [];
+  transport.on('playback', (event: { name: string }) => played.push(event.name));
+  return { ws, stt, tts, endpoint, runtime, errors, played };
+}
+
+describe('carrier playback under the voice pipeline without a call profile', () => {
+  it('writes every chunk of a reply the pipeline does not wait for, in order, each completing at its own checkpoint', async () => {
+    const p = await carrierPipeline();
+    try {
+      p.endpoint.emit('turn_complete', turn());
+      expect(p.runtime.state).toBe('speaking');
+      for (const level of [1000, 2000, 3000]) p.tts.emit('audio', speech(level));
+      await settle();
+      expect(p.errors).toEqual([]);
+      expect(media(p.ws.sent)).toEqual([heard(1000), heard(2000), heard(3000)]);
+      const written = marks(p.ws.sent);
+      expect(written).toHaveLength(3);
+      for (const name of written) p.ws.emit('message', JSON.stringify({ event: 'mark', streamSid: 's', mark: { name } }));
+      expect(p.played).toEqual(written);
+      p.tts.emit('flush_complete');
+      expect(p.runtime.state).toBe('listening');
+      await settle();
+      expect(p.errors).toEqual([]);
+    } finally { await p.runtime.stopSession(); }
+  });
+  it('plays the reply that follows a barge-in', async () => {
+    const p = await carrierPipeline();
+    try {
+      p.endpoint.emit('turn_complete', turn());
+      p.tts.emit('audio', speech(1000));
+      await settle();
+      expect(marks(p.ws.sent)).toHaveLength(1);
+      p.stt.emit('speech_start');
+      await vi.waitFor(() => expect(p.runtime.state).toBe('listening'));
+      await settle();
+      const cleared = p.ws.sent.findIndex((m) => m.event === 'clear');
+      expect(cleared).toBeGreaterThan(0);
+      const before = p.errors.length;
+      p.endpoint.emit('turn_complete', turn());
+      expect(p.runtime.state).toBe('speaking');
+      p.tts.emit('audio', speech(2000));
+      await settle();
+      expect(p.errors.slice(before)).toEqual([]);
+      const after = p.ws.sent.slice(cleared + 1);
+      expect(media(after)).toEqual([heard(2000)]);
+      const [name] = marks(after);
+      p.ws.emit('message', JSON.stringify({ event: 'mark', streamSid: 's', mark: { name } }));
+      expect(p.played).toEqual([name]);
+    } finally { await p.runtime.stopSession(); }
   });
 });

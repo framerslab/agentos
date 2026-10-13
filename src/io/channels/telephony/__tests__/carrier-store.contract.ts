@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CallManager } from '../CallManager.js';
 import { TwilioVoiceProvider } from '../providers/twilio.js';
 import type { CallRecord, ITelephonyCallStore, WebhookContext } from '../types.js';
@@ -12,6 +12,12 @@ export function signedStatus(status: string): WebhookContext {
   const url = 'https://example.test/status'; const body = new URLSearchParams({ CallSid: 'remote', CallStatus: status }).toString();
   const params = new URLSearchParams(body); let signed = url; for (const key of [...params.keys()].sort()) signed += key + params.get(key);
   return { method: 'POST', url, body, headers: { 'x-twilio-signature': createHmac('sha1', 'fixture').update(signed).digest('base64') } };
+}
+/** A carrier-profile manager whose Twilio provider answers its REST requests without a network. */
+function carrierManager(): CallManager {
+  const m = new CallManager({ provider: { provider: 'mock' }, eventHandling: 'carrier' });
+  m.registerProvider(new TwilioVoiceProvider({ accountSid: 'account', authToken: 'fixture', protocol: 'carrier', fetchImpl: vi.fn<typeof fetch>(async () => new Response('{}')) }));
+  return m;
 }
 /** Tests persistent identity, state monotonicity, rollback, aliases and isolation. */
 export function carrierStoreContract(name: string, open: () => Promise<CarrierStoreFixture>): void {
@@ -43,6 +49,32 @@ export function carrierStoreContract(name: string, open: () => Promise<CarrierSt
         expect(await h.second.withProvider('twilio', (tx) => tx.get('local'))).toBeUndefined();
         await h.first.withProvider('twilio', (tx) => tx.put(storedCall()));
         expect(await m.processWebhookDurable('twilio', signedStatus('completed'), h.second)).toEqual({ accepted: true, applied: 1 });
+      } finally { m.dispose(); await h.close(); }
+    });
+    it('keeps the bot speech a manager records between callbacks, and commits it to the store', async () => {
+      const h = await open(); const m = carrierManager();
+      try {
+        await h.first.withProvider('twilio', (tx) => tx.put(storedCall()));
+        await m.processWebhookDurable('twilio', signedStatus('in-progress'), h.first);
+        m.speakText('local', 'one moment');
+        expect(await m.processWebhookDurable('twilio', signedStatus('in-progress'), h.second)).toEqual({ accepted: true, applied: 0 });
+        const spoken = { state: 'speaking', transcript: [{ speaker: 'bot', text: 'one moment', isFinal: true }] };
+        expect(m.getCall('local')).toMatchObject(spoken);
+        expect(await h.second.withProvider('twilio', (tx) => tx.get('local'))).toMatchObject(spoken);
+      } finally { m.dispose(); await h.close(); }
+    });
+    it('ends a call its manager hangs up once, in the store, so a later completion callback changes nothing', async () => {
+      const h = await open(); const m = carrierManager(); const ended: string[] = [];
+      m.on((e) => { if (e.type === 'call:ended') ended.push(e.call.state); });
+      try {
+        await h.first.withProvider('twilio', (tx) => tx.put(storedCall()));
+        await m.processWebhookDurable('twilio', signedStatus('in-progress'), h.first);
+        await m.hangupCall('local');
+        const completion = await m.processWebhookDurable('twilio', signedStatus('completed'), h.second);
+        expect(ended).toEqual(['hangup-bot']);
+        expect(m.getCall('local')?.state).toBe('hangup-bot');
+        expect((await h.second.withProvider('twilio', (tx) => tx.get('local')))?.state).toBe('hangup-bot');
+        expect(completion).toEqual({ accepted: true, applied: 0 });
       } finally { m.dispose(); await h.close(); }
     });
     it('rejects alias rebinding and keeps providers separate', async () => {
