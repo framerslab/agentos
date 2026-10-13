@@ -24,6 +24,9 @@ import {
   withBoundedRetry,
   type ISpendMeter,
   type SpendDenyReason,
+  type SpendExpiredReservation,
+  type SpendExpiryDecision,
+  type SpendFenceEvidence,
   type SpendMeterSnapshot,
   type SpendOutcome,
   type SpendReconcileResult,
@@ -188,10 +191,11 @@ export interface SqlSpendMeterOptions {
    */
   periodOf?(now: number, accountId: string): string | Promise<string>;
   /**
-   * A rolling window in milliseconds. The allowance then holds the units reserved or consumed in the `windowMs` before
-   * each reservation, counted from the reservations themselves under the account's row lock, and every row of the
-   * account carries the period `window`. A unit has left the window once more than `windowMs` have passed since its
-   * reservation; a released one never counts.
+   * A rolling window in milliseconds. The allowance then holds the units consumed in the `windowMs` before each
+   * reservation and every unit still reserved, counted from the reservations themselves under the account's row lock,
+   * and every row of the account carries the period `window`. A consumed unit has left the window once more than
+   * `windowMs` have passed since its reservation; one still reserved counts whatever its age, until it settles; a
+   * released one never counts.
    */
   windowMs?: number;
   /** How long a reservation lives without a heartbeat. Default 45 seconds. */
@@ -199,8 +203,17 @@ export interface SqlSpendMeterOptions {
   /** Reservations an operation may take in all, its retries after a release included. Default 3. */
   maxAttemptsPerOperation?: number;
   retry?: SpendRetryPolicy;
-  /** Asked by {@link SqlSpendMeter.reconcile} for each expired reservation. */
+  /**
+   * Asked by {@link SqlSpendMeter.reconcile} for each expired reservation on a meter without `resolveExpired`, except
+   * one made with `requireFence` or deferred before, which such a meter leaves reserved.
+   */
   resolveUnknown?(reservation: { operationId: string; accountId: string; period: string; units: number }): SpendUnknownResolution | Promise<SpendUnknownResolution>;
+  /**
+   * Asked by {@link SqlSpendMeter.reconcile} for each expired reservation, in place of `resolveUnknown` and
+   * `unknownAfterLease`: consumed, released, or deferred until `retryAt` with its evidence, which stays reserved and
+   * counted. A resolver that throws defers the reservation for one lease; it never falls through to a default outcome.
+   */
+  resolveExpired?(reservation: SpendExpiredReservation): SpendExpiryDecision | Promise<SpendExpiryDecision>;
   /** How an expired reservation settles when the product cannot tell. Default `release`: the person is not charged for a turn nobody saw finish. */
   unknownAfterLease?: 'release' | 'consume';
   /**
@@ -266,6 +279,18 @@ class AllowanceExhausted extends Error {
 }
 
 const num = (v: unknown): number => (typeof v === 'number' ? v : Number(v ?? 0));
+
+/** A reserved row's deferral record, from its `usage_json`. */
+function deferralOf(usageJson: unknown): { count: number; evidence?: SpendFenceEvidence } | undefined {
+  if (typeof usageJson !== 'string' || usageJson.length === 0) return undefined;
+  try {
+    const parsed = JSON.parse(usageJson) as { deferral?: { count?: unknown; evidence?: SpendFenceEvidence | null } };
+    if (!parsed.deferral) return undefined;
+    return { count: num(parsed.deferral.count), evidence: parsed.deferral.evidence ?? undefined };
+  } catch {
+    return undefined;
+  }
+}
 
 export class SqlSpendMeter implements ISpendMeter {
   private readonly db: StorageAdapter;
@@ -400,19 +425,20 @@ export class SqlSpendMeter implements ISpendMeter {
       try {
         return await this.db.transaction(async (trx): Promise<SpendReserveResult> => {
           // (a) the reservation row: new, or a retry of one that was released
+          const marker = req.requireFence ? 'fence_required' : null;
           const inserted = await trx.run(
-            `INSERT INTO ${reservations} (operation_id, account_id, period, units, state, attempts, reserved_at, expires_at)
-             VALUES (?, ?, ?, ?, 'reserved', 1, ?, ?) ON CONFLICT (operation_id) DO NOTHING`,
-            [req.operationId, req.accountId, period, units, now, expiresAt],
+            `INSERT INTO ${reservations} (operation_id, account_id, period, units, state, outcome, attempts, reserved_at, expires_at)
+             VALUES (?, ?, ?, ?, 'reserved', ?, 1, ?, ?) ON CONFLICT (operation_id) DO NOTHING`,
+            [req.operationId, req.accountId, period, units, marker, now, expiresAt],
           );
           let attempt = 1;
           if (!inserted.changes) {
             const retried = await trx.run(
               `UPDATE ${reservations}
                   SET state = 'reserved', attempts = attempts + 1, account_id = ?, period = ?, units = ?, reserved_at = ?, expires_at = ?,
-                      outcome = NULL, settled_at = NULL, usage_json = NULL
+                      outcome = ?, settled_at = NULL, usage_json = NULL
                 WHERE operation_id = ? AND state = 'released' AND attempts < ?`,
-              [req.accountId, period, units, now, expiresAt, req.operationId, this.maxAttempts],
+              [req.accountId, period, units, now, expiresAt, marker, req.operationId, this.maxAttempts],
             );
             const row = await trx.get<ReservationRow>(`SELECT state, attempts FROM ${reservations} WHERE operation_id = ?`, [req.operationId]);
             if (!retried.changes) {
@@ -470,8 +496,9 @@ export class SqlSpendMeter implements ISpendMeter {
   }
 
   /**
-   * The units an account's reservations hold inside the window that reaches back to `since`: the consumed ones and
-   * the ones still reserved, never a released one. `except` leaves one operation out: the reservation being decided.
+   * The units an account's reservations hold in the window that reaches back to `since`: the consumed ones reserved
+   * inside it, and every one still reserved whatever its age, since a hold stays committed until it settles. Never a
+   * released one. `except` leaves one operation out: the reservation being decided.
    */
   private async windowUnits(db: StorageAdapter, accountId: string, since: number, except?: string): Promise<{ used: number; reserved: number }> {
     // reserved_at has no upper bound here: a unit another process stamped a little ahead of this clock still counts
@@ -479,7 +506,7 @@ export class SqlSpendMeter implements ISpendMeter {
       `SELECT COALESCE(SUM(CASE WHEN state = 'consumed' THEN units ELSE 0 END), 0) AS used,
               COALESCE(SUM(CASE WHEN state = 'reserved' THEN units ELSE 0 END), 0) AS reserved
          FROM ${this.tables.reservations}
-        WHERE account_id = ? AND period = 'window' AND state <> 'released' AND reserved_at >= ?${except === undefined ? '' : ' AND operation_id <> ?'}`,
+        WHERE account_id = ? AND period = 'window' AND (state = 'reserved' OR (state = 'consumed' AND reserved_at >= ?))${except === undefined ? '' : ' AND operation_id <> ?'}`,
       except === undefined ? [accountId, since] : [accountId, since, except],
     );
     return { used: num(held?.used), reserved: num(held?.reserved) };
@@ -538,27 +565,68 @@ export class SqlSpendMeter implements ISpendMeter {
     );
   }
 
+  /**
+   * Settles the expired reservations, at most `limit` a pass (default 100), the earliest expiry first. With
+   * `resolveExpired` the host decides each one: consumed, released, or deferred, which keeps it reserved and counted
+   * with its evidence and its next check on its row. Without it an ordinary reservation settles as `resolveUnknown` and
+   * `unknownAfterLease` say, and one made with `requireFence`, or deferred before, stays reserved and counts as pending.
+   */
   async reconcile(opts: { now?: number; limit?: number } = {}): Promise<SpendReconcileResult> {
     const now = opts.now ?? Date.now();
     const limit = Math.max(1, Math.trunc(opts.limit ?? 100));
     const due = await this.run(() =>
-      this.db.all<ReservationRow>(
-        `SELECT operation_id, account_id, period, units, state FROM ${this.tables.reservations} WHERE state = 'reserved' AND expires_at <= ? ORDER BY expires_at LIMIT ${limit}`,
+      this.db.all<ReservationRow & { outcome: string | null; usage_json: string | null }>(
+        `SELECT operation_id, account_id, period, units, state, outcome, usage_json FROM ${this.tables.reservations}
+          WHERE state = 'reserved' AND expires_at <= ? ORDER BY expires_at LIMIT ${limit}`,
         [now],
       ),
     );
-    const out: SpendReconcileResult = { consumed: 0, released: 0, pending: 0 };
+    const resolveExpired = this.opts.resolveExpired;
+    const out: SpendReconcileResult = resolveExpired ? { consumed: 0, released: 0, pending: 0, deferred: 0 } : { consumed: 0, released: 0, pending: 0 };
     for (const r of due) {
-      let resolution: SpendUnknownResolution = 'unknown';
-      try {
-        if (this.opts.resolveUnknown) {
-          resolution = await this.opts.resolveUnknown({ operationId: r.operation_id, accountId: r.account_id, period: r.period, units: num(r.units) });
+      const fenced = r.outcome === 'fence_required' || r.outcome === 'deferred';
+      let outcome: SpendOutcome;
+      if (resolveExpired) {
+        const prior = deferralOf(r.usage_json);
+        let decision: SpendExpiryDecision;
+        try {
+          decision = await resolveExpired({ operationId: r.operation_id, accountId: r.account_id, period: r.period, units: num(r.units), requireFence: fenced, deferredCount: prior?.count ?? 0, evidence: prior?.evidence });
+        } catch {
+          decision = { outcome: 'deferred', retryAt: now + this.leaseMs, evidence: { transportClosed: false, inferenceTerminated: false, observedAt: now, note: 'resolver_failed' } };
         }
-      } catch {
-        resolution = 'unknown';
+        if (decision.outcome === 'deferred') {
+          const retryAt = Math.max(Math.trunc(decision.retryAt), now + 1);
+          const evidence = decision.evidence ?? prior?.evidence ?? null;
+          const deferred = await this.run(() =>
+            this.db.transaction((trx) =>
+              trx.run(`UPDATE ${this.tables.reservations} SET outcome = 'deferred', expires_at = ?, usage_json = ? WHERE operation_id = ? AND state = 'reserved'`, [
+                retryAt,
+                JSON.stringify({ deferral: { count: (prior?.count ?? 0) + 1, evidence } }),
+                r.operation_id,
+              ]),
+            ),
+          );
+          out.pending += 1;
+          if (deferred.changes) out.deferred = (out.deferred ?? 0) + 1;
+          continue;
+        }
+        outcome = decision.outcome;
+      } else {
+        if (fenced) {
+          // an opted-in hold: only a reconcile with resolveExpired, or an explicit settle, ends it
+          out.pending += 1;
+          continue;
+        }
+        let resolution: SpendUnknownResolution = 'unknown';
+        try {
+          if (this.opts.resolveUnknown) {
+            resolution = await this.opts.resolveUnknown({ operationId: r.operation_id, accountId: r.account_id, period: r.period, units: num(r.units) });
+          }
+        } catch {
+          resolution = 'unknown';
+        }
+        outcome = resolution === 'consumed' ? 'consumed' : resolution === 'released' ? 'released' : this.opts.unknownAfterLease === 'consume' ? 'consumed' : 'released';
       }
-      const outcome: SpendOutcome =
-        resolution === 'consumed' ? 'consumed' : resolution === 'released' ? 'released' : this.opts.unknownAfterLease === 'consume' ? 'consumed' : 'released';
       const settled = await this.settle({ operationId: r.operation_id, outcome, now });
       if (settled.status !== 'settled') out.pending += settled.state === 'reserved' ? 1 : 0;
       else if (outcome === 'consumed') out.consumed += 1;
