@@ -25,7 +25,7 @@
  * - A transport send that rejects is reported once as 'error' and the turn goes on; with nothing listening
  *   for 'error', or with an 'error' listener that throws, it is written as a console warning
  * - Of the audio chunks a transport refuses, the first of each reply is reported and the rest of that reply's
- *   are not; a refused control message is reported each time
+ *   are not, whatever order the replies' sends settle in; a refused control message is reported each time
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -542,6 +542,53 @@ describe('VoicePipelineOrchestrator', () => {
       expect(transport.sendAudio).toHaveBeenCalledTimes(6);
       expect(errors).toEqual([audioRefused, doneFailed, audioRefused, doneFailed]);
       expect(orchestrator.state).toBe('listening');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  /**
+   * Each reply keeps its own record of the refusal it reported, so the order in which the sends of different replies
+   * settle does not matter: a chunk of an earlier reply that is refused after a later reply's refusal was reported is
+   * still the earlier reply's first refused chunk, and is reported.
+   */
+  it("reports an earlier reply's first refused audio chunk when it is refused after a later reply's", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const firstRefused = new Error("the first reply's chunk was not sent");
+      const secondRefused = new Error("the second reply's chunk was not sent");
+      let refuseFirst: (err: Error) => void = () => undefined;
+      vi.mocked(transport.sendAudio)
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              refuseFirst = reject;
+            }),
+        )
+        .mockRejectedValueOnce(secondRefused);
+      await startSession();
+      const errors: unknown[] = [];
+      orchestrator.on('error', (err: unknown) => errors.push(err));
+
+      // Two replies of one chunk each; the first reply's chunk is still being sent when the second's is refused.
+      for (let reply = 0; reply < 2; reply++) {
+        endpoint.emit('turn_complete', makeTurnComplete());
+        await vi.advanceTimersByTimeAsync(0);
+        ttsSession.emit('audio', makeAudioChunk());
+        await vi.advanceTimersByTimeAsync(0);
+        ttsSession.emit('flush_complete');
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      refuseFirst(firstRefused);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(transport.sendAudio).toHaveBeenCalledTimes(2);
+      expect(errors).toEqual([secondRefused, firstRefused]);
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandled);

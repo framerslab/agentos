@@ -151,13 +151,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   private _currentPlayedMs = 0;
 
   /**
-   * Numbers the agent's replies: incremented as each reply starts to speak (PROCESSING -> SPEAKING). Each audio
-   * chunk's send carries the number of its reply, so that a reply's refused chunks are reported once.
+   * The reply being spoken: replaced as each reply starts to speak (PROCESSING -> SPEAKING). The send of each audio
+   * chunk holds the reply it belongs to, so that each reply's first refused chunk is reported and the rest are not.
    */
-  private _replyNumber = 0;
-
-  /** The last reply a refused audio chunk was reported for; that reply's later refusals are not reported. */
-  private _audioRefusalReportedFor = 0;
+  private _currentReply = { audioRefusalReported: false };
 
   // --------------------------------------------------------------------------
   // Public getters
@@ -535,8 +532,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // Begin streaming the agent's response
       const tokenStream = agentSession.sendText(event.transcript, metadata);
 
-      // PROCESSING -> SPEAKING: first tokens are about to flow. The reply is numbered before its audio can be sent.
-      this._replyNumber += 1;
+      // PROCESSING -> SPEAKING: first tokens are about to flow. The reply gets its record before its audio is sent.
+      this._currentReply = { audioRefusalReported: false };
       this._setState('speaking');
       this._currentTTSText = '';
       this._currentPlayedMs = 0;
@@ -616,15 +613,16 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * transport that does not publish audio, as `LiveKitStreamTransport` does not, refuses every chunk of every reply.
    *
    * @param send - The promise that `sendControl()` or `sendAudio()` returned.
-   * @param reply - For an audio chunk, the number of the reply it belongs to (`_replyNumber` when it was sent).
+   * @param reply - For an audio chunk, the reply it belongs to (`_currentReply` when it was sent).
    */
-  private _watchSend(send: Promise<void>, reply?: number): void {
+  private _watchSend(send: Promise<void>, reply?: { audioRefusalReported: boolean }): void {
     // Promise.resolve() also takes a transport whose send returns no promise, as a plain JavaScript one may.
     Promise.resolve(send).catch((err: unknown) => {
-      if (reply !== undefined) {
-        // Not the reply's first refusal, or an earlier reply's refusal that settled after a later reply's.
-        if (reply <= this._audioRefusalReportedFor) return;
-        this._audioRefusalReportedFor = reply;
+      if (reply) {
+        // The rest of a reply's refusals are not reported. Each reply keeps its own record, so the first refusal of
+        // an earlier reply is reported even when it settles after a later reply's.
+        if (reply.audioRefusalReported) return;
+        reply.audioRefusalReported = true;
       }
       this._reportError(err, 'a transport send failed');
     });
@@ -646,7 +644,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // Chunks arriving after a barge-in are silently dropped.
       if (this._state === 'speaking') {
         this._currentPlayedMs += chunk.durationMs;
-        this._watchSend(transport.sendAudio(chunk), this._replyNumber);
+        this._watchSend(transport.sendAudio(chunk), this._currentReply);
       }
     });
 
