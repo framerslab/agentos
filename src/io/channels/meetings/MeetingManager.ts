@@ -653,17 +653,17 @@ export class MeetingManager {
         await this.move(run, 'waiting_room', {}, 'bot:waiting_room', undefined, event);
         return true;
       case 'in_call':
-        await this.move(run, 'in_call_notice_pending', { joinedAt: event.at, participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) }, 'bot:in_call', undefined, event);
+        await this.move(run, 'in_call_notice_pending', { joinedAt: this.reportedAt(event.at), participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, this.reportedAt(event.at)) }, 'bot:in_call', undefined, event);
         return true;
       case 'notice_posted': {
         // the notice alone does not open capture: the stop monitor must report a real observation after it (the interlock)
-        const moved = await this.move(run, 'in_call', { noticePostedAt: event.at }, 'bot:notice_posted', { version: run.notice.version }, event);
+        const moved = await this.move(run, 'in_call', { noticePostedAt: this.reportedAt(event.at) }, 'bot:notice_posted', { version: run.notice.version }, event);
         if (moved) await this.startCaptureIfReady(moved);
         return true;
       }
       case 'monitor_heartbeat': {
         // the stop monitor's own observation: the first after the notice opens capture, one after a suspension resumes it (the method holds every guard)
-        const updated = await this.stores.runs.update(run.runId, { monitorSeenAt: event.at });
+        const updated = await this.stores.runs.update(run.runId, { monitorSeenAt: this.reportedAt(event.at) });
         if (updated) await this.startCaptureIfReady(updated);
         return true;
       }
@@ -674,7 +674,7 @@ export class MeetingManager {
         await this.deliver(stored, run);
         return true;
       case 'participant_joined': {
-        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) })) ?? run;
+        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, this.reportedAt(event.at)) })) ?? run;
         await this.deliver(stored, updated);
         const provider = this.providers.get(run.providerName);
         if (updated.state === 'in_call' && provider?.capabilities.postsChat && !fenced) {
@@ -683,7 +683,7 @@ export class MeetingManager {
         return true;
       }
       case 'participant_left': {
-        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) })) ?? run;
+        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, this.reportedAt(event.at)) })) ?? run;
         await this.deliver(stored, updated);
         return true;
       }
@@ -733,6 +733,16 @@ export class MeetingManager {
   /** Whether a report asks the bot to stop: a stop command, or a chat message holding the stop phrase. */
   private isStop(run: MeetingRunRecord, event: NormalizedMeetingEvent): boolean {
     return event.type === 'stop_command' || (event.type === 'chat_message' && this.isStopPhrase(run, event.data?.text));
+  }
+
+  /**
+   * A report's time as the limits read it: the worker's own, but no later than one heartbeat interval past the manager's
+   * clock. The limits compare these times with the manager's clock, so a worker whose clock runs ahead would otherwise
+   * keep a quiet stop monitor counted healthy, and the notice and alone limits unexpired, for as long as it runs ahead.
+   * Within the interval the worker's times keep their order, which the interlock reads (a heartbeat after the notice).
+   */
+  private reportedAt(at: number): number {
+    return Math.min(at, this.now() + this.monitorHeartbeatMs);
   }
 
   /** The alone timer's patch for a report of `count` participants besides the bot: started by the first report of none, kept while there is none, cleared when one is reported. */

@@ -154,6 +154,21 @@ describe('dispatch and the interlock', () => {
     await h.report(runId, 'monitor_heartbeat', {}, 13);
     expect(h.provider.commands.get(runId)).toEqual([{ name: 'startCapture' }]);
   });
+  it('a worker clock that runs ahead keeps a quiet stop monitor counted healthy for at most one heartbeat interval more', async () => {
+    const h = harness();
+    const ahead = 3_600_000; // the worker's clock runs an hour ahead of the manager's
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining', {}, h.clock.now() + ahead);
+    await h.report(runId, 'in_call', { participantCount: 2 }, h.clock.now() + ahead);
+    await h.report(runId, 'notice_posted', {}, h.clock.now() + ahead);
+    await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + ahead + 1);
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'startCapture' }]);
+    h.clock.advance(40_000); // the monitor's window and one interval more, with no heartbeat since
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'suspendCapture' });
+  });
   it('refuses a report with another token, and drops a repeated report', async () => {
     const h = harness();
     const r = await h.manager.sendBot(h.request);
