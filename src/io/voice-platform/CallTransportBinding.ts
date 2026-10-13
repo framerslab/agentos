@@ -104,6 +104,7 @@ export class CallTransportBinding extends EventEmitter implements IPlaybackTrans
       };
       physical.on('audio', audio); physical.on('gap', gap); physical.on('message', message); physical.on('close', loss); physical.on('error', loss);
       this.unlisten = () => { physical.off('audio', audio); physical.off('gap', gap); physical.off('message', message); physical.off('close', loss); physical.off('error', loss); physical.on('error', () => {}); };
+      await physical.readyForPlayback?.();
       const state = await this.options.manager.get(this.options.scopeId, this.options.callId);
       if (!state) throw new Error('attachment refused');
       const generation = { workerGeneration: this.options.workerGeneration, inferenceGeneration: state.inferenceGeneration, transportEpoch: epoch };

@@ -1870,6 +1870,8 @@ export interface IPlaybackTransport extends IStreamTransport {
   waitForPlayback(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt>;
   /** Resolves after the publisher has discarded this generation's pending audio. */
   clearPlayback(generation: VoiceGeneration): Promise<void>;
+  /** Optional physical setup barrier; completes before a call is considered connected. */
+  readyForPlayback?(): Promise<void>;
 }
 
 /** Cumulative supplier work for one synthesis request, including cancelled work. */
