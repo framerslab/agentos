@@ -477,6 +477,25 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
     expect(handler.mock.calls[0][0].transcript).toBe('Book a table for two. At seven tonight.');
   });
 
+  it('keeps clauses in the order they began around a final with words and no start', () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    for (let utterance = 0; utterance < 3; utterance++) {
+      detector.pushVadEvent(transcriberSpeech('speech_start'));
+      detector.pushVadEvent(transcriberSpeech('speech_end'));
+    }
+    detector.pushTranscript(itemFinal('at seven tonight.', 'item_C', 2_600));
+    detector.pushTranscript(itemFinal('on Friday', 'item_X')); // an item with no known start keeps its place
+    detector.pushTranscript(itemFinal('Book a table for two', 'item_A', 0));
+
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toMatchObject({
+      transcript: 'Book a table for two on Friday at seven tonight.',
+      reason: 'punctuation',
+    });
+  });
+
   it('lets a final without an itemId replace the turn of item-keyed finals', () => {
     const handler = vi.fn();
     detector.on('turn_complete', handler);

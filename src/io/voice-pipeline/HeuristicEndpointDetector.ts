@@ -526,22 +526,25 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
   /**
    * The turn's item-keyed finals as one text: the texts of those with words,
-   * each trimmed, in the order their items began (by `startMs`, or in the
-   * order their first finals arrived when one of them has none), with one
-   * space between them, so spaces a provider leaves around a final neither
-   * pile up between two texts nor hide the turn's terminal punctuation. A
-   * final with no words adds nothing, and its item's start plays no part in
-   * the order.
+   * each trimmed, with one space between them, so spaces a provider leaves
+   * around a final neither pile up between two texts nor hide the turn's
+   * terminal punctuation. The texts follow the order their items began: the
+   * finals whose items have a `startMs` take the places such finals hold in
+   * arrival order, sorted by that start, and a final whose item has none
+   * keeps its own place in the order the first finals arrived. A final with
+   * no words adds nothing, and its item's start plays no part in the order.
    */
   private _joinItemFinals(): string {
     const finals = [...this.itemFinals.values()]
       .map((final) => ({ text: final.text.trim(), startMs: final.startMs }))
       .filter((final) => final.text !== '');
-    if (finals.every((final) => final.startMs !== undefined)) {
-      // A stable sort: items that began at the same offset keep their arrival order.
-      finals.sort((a, b) => (a.startMs ?? 0) - (b.startMs ?? 0));
-    }
-    return finals.map((final) => final.text).join(' ');
+    // A stable sort: items that began at the same offset keep their arrival order.
+    const byStart = finals
+      .filter((final) => final.startMs !== undefined)
+      .sort((a, b) => (a.startMs ?? 0) - (b.startMs ?? 0));
+    return finals
+      .map((final) => (final.startMs === undefined ? final : (byStart.shift() ?? final)).text)
+      .join(' ');
   }
 
   /**
