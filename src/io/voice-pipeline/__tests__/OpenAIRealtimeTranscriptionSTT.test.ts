@@ -114,7 +114,14 @@ import { createVoiceProvidersFromEnv } from '../env-constructor.js';
 import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
 import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
 import { HardCutBargeinHandler } from '../HardCutBargeinHandler.js';
-import type { StreamingSTTSession, TranscriptEvent, StreamingSTTUsageEvent } from '../types.js';
+import { startListenSession } from '../ListenSession.js';
+import type {
+  ITranscriptInputSink,
+  StreamingSTTSession,
+  StreamingSTTUsageEvent,
+  TranscriptEvent,
+  TranscriptTurn,
+} from '../types.js';
 // Default import: the 'ws' types only expose WebSocket as the default export
 // under this tsconfig (TS2595 on a named import). vi.mock supplies the same
 // mock class for both the default and named bindings.
@@ -1906,6 +1913,56 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
     expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two.');
     expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
     await orchestrator.stopSession();
+  });
+});
+
+describe('OpenAIRealtimeTranscriptionSTT: turns in a listen session', () => {
+  it('stops at once on a final with terminal punctuation that the stop flushes, with client commits', async () => {
+    fakeClock();
+    const transport = new EventEmitter() as any;
+    transport.id = 'listen-test';
+    transport.state = 'open';
+    transport.sendAudio = vi.fn();
+    transport.sendControl = vi.fn();
+    transport.close = vi.fn();
+    const turns: TranscriptTurn[] = [];
+    const sink: ITranscriptInputSink = {
+      append: async (turn) => {
+        turns.push(turn);
+      },
+      appendNext: async (input) => {
+        const seq = turns.length + 1;
+        const turn = { ...input, seq, turnId: `${input.runId}:${seq}` };
+        turns.push(turn);
+        return turn;
+      },
+    };
+    const session = await startListenSession(transport, sink, {
+      streamingSTT: new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null }),
+      runId: 'run-1',
+      endpointDetector: new HeuristicEndpointDetector(), // 1.5 s of silence ends a turn without terminal punctuation
+      reconnect: false,
+    });
+    const socket = Sockets.instances[0];
+    // With turn detection off the server reports no speech, and the stop's flush commits the audio.
+    transport.emit('audio', frame(12_000));
+    let stopped = false;
+    const stopping = session.close('stopped').then(() => {
+      stopped = true;
+    });
+    expect(sentOfType(socket, 'input_audio_buffer.commit')).toHaveLength(1);
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'We start at nine.',
+    });
+    await vi.advanceTimersByTimeAsync(250); // the session's drainMs, and none of the silence timeout
+    await settle();
+    expect(turns.map((turn) => turn.text)).toEqual(['We start at nine.']);
+    expect(stopped).toBe(true);
+    await stopping;
+    expect(vi.getTimerCount()).toBe(0); // no silence timer was left to run
   });
 });
 
