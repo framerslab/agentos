@@ -13,10 +13,10 @@ export function signedStatus(status: string): WebhookContext {
   const params = new URLSearchParams(body); let signed = url; for (const key of [...params.keys()].sort()) signed += key + params.get(key);
   return { method: 'POST', url, body, headers: { 'x-twilio-signature': createHmac('sha1', 'fixture').update(signed).digest('base64') } };
 }
-/** A carrier-profile manager whose Twilio provider answers its REST requests without a network. */
-function carrierManager(): CallManager {
+/** A carrier-profile manager whose Twilio provider sends its REST requests to `fetchImpl`, which by default answers at once without a network. */
+function carrierManager(fetchImpl: typeof fetch = vi.fn<typeof fetch>(async () => new Response('{}'))): CallManager {
   const m = new CallManager({ provider: { provider: 'mock' }, eventHandling: 'carrier' });
-  m.registerProvider(new TwilioVoiceProvider({ accountSid: 'account', authToken: 'fixture', protocol: 'carrier', fetchImpl: vi.fn<typeof fetch>(async () => new Response('{}')) }));
+  m.registerProvider(new TwilioVoiceProvider({ accountSid: 'account', authToken: 'fixture', protocol: 'carrier', fetchImpl }));
   return m;
 }
 /** Tests persistent identity, state monotonicity, rollback, aliases and isolation. */
@@ -76,6 +76,24 @@ export function carrierStoreContract(name: string, open: () => Promise<CarrierSt
         expect((await h.second.withProvider('twilio', (tx) => tx.get('local')))?.state).toBe('hangup-bot');
         expect(completion).toEqual({ accepted: true, applied: 0 });
       } finally { m.dispose(); await h.close(); }
+    });
+    it('ends a call as hung up by its manager when the completion callback arrives before the carrier answers the hangup request', async () => {
+      let answer!: () => void; const answered = new Promise<Response>((resolve) => { answer = () => resolve(new Response('{}')); });
+      const fetchImpl = vi.fn<typeof fetch>(() => answered);
+      const h = await open(); const m = carrierManager(fetchImpl); const ended: string[] = [];
+      m.on((e) => { if (e.type === 'call:ended') ended.push(e.call.state); });
+      try {
+        await h.first.withProvider('twilio', (tx) => tx.put(storedCall()));
+        await m.processWebhookDurable('twilio', signedStatus('in-progress'), h.first);
+        const hangup = m.hangupCall('local');
+        await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+        const completion = await m.processWebhookDurable('twilio', signedStatus('completed'), h.second);
+        answer(); await hangup;
+        expect(ended).toEqual(['hangup-bot']);
+        expect((await h.second.withProvider('twilio', (tx) => tx.get('local')))?.state).toBe('hangup-bot');
+        expect(m.getCall('local')?.state).toBe('hangup-bot');
+        expect(completion).toEqual({ accepted: true, applied: 0 });
+      } finally { answer(); m.dispose(); await h.close(); }
     });
     it('rejects alias rebinding and keeps providers separate', async () => {
       const h = await open();
