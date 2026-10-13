@@ -52,10 +52,11 @@ export interface MeetingManagerStores {
   /** The clock the manager measures every limit on. */
   clock: IClock;
   /**
-   * Optional. Where the supplier totals of a report wait when the entitlement hook's `recordSupplierUsage` refuses
-   * them, until the next {@link MeetingManager.reconcile} hands them over again; a durable inbox (`SqlDurableInbox`)
-   * keeps them across a restart. The report is applied either way; without an inbox, the hook's error is thrown once
-   * the report is applied.
+   * Optional. Where supplier totals wait when the entitlement hook's `recordSupplierUsage` refuses them (a report's, or
+   * those a provider's usage answers at reconciliation), until the next {@link MeetingManager.reconcile} hands them over
+   * again; a durable inbox (`SqlDurableInbox`) keeps them across a restart. A refusal holds back no run either way: the
+   * report is applied, and a run whose worker is gone still ends. Without an inbox, the hook's error is thrown once the
+   * report is applied, or at the end of the reconcile pass.
    */
   supplierUsageInbox?: IDurableInbox<PendingSupplierUsage>;
 }
@@ -1290,11 +1291,14 @@ export class MeetingManager {
       }
       for (const u of answered) {
         if (u.supplierUsage !== undefined) {
-          // in a try of its own: a record that throws holds back neither this run's crash check nor any other run's
+          // in a try of its own: a record that throws holds back neither this run's crash check nor any other run's. Totals
+          // the hook refuses wait in the supplier usage inbox, so the crash below, whose cleanup removes the run's job and
+          // with it the run from every later pass, loses none of them
           try {
             const supplierRun = await this.stores.runs.get(u.runId);
             if (supplierRun?.reservationId !== undefined) {
-              await this.stores.entitlement.recordSupplierUsage?.(supplierRun.reservationId, u.supplierUsage);
+              const refused = await this.recordSupplierTotals(u.runId, supplierRun.reservationId, u.supplierUsage);
+              if (refused) failure ??= refused;
             }
           } catch (error) {
             failure ??= { error };

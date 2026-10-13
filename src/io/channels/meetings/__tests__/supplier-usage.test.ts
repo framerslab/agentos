@@ -101,3 +101,28 @@ it("with no inbox, applies a crashed report whose supplier totals the hook refus
   expect(h.entitlement.released).toEqual(['res-1']);
   expect(h.seen.map((e) => e.type)).toEqual(['bot:requested', 'bot:dispatching', 'bot:joining', 'bot:left', 'bot:done']);
 });
+
+it('ends a run whose worker is gone although the hook refuses its final supplier totals, and records them at the next reconcile', async () => {
+  const h = harness();
+  const recordSupplierUsage = vi.fn(async (_reservationId: string, _usage: SupplierUsage) => undefined);
+  recordSupplierUsage.mockRejectedValueOnce(new Error('billing is down'));
+  Object.assign(h.entitlement, { recordSupplierUsage });
+  const inbox = new MemoryDurableInbox<PendingSupplierUsage>();
+  const { manager } = withLogger(h, { supplierUsageInbox: inbox });
+  const sent = await manager.sendBot(h.request);
+  if (!sent.ok) throw new Error('send refused');
+  const runId = sent.run.runId;
+  await manager.tick();
+  await manager.processProviderEvent('mock', mockEventContext(runId, 'joining', {}, h.clock.now(), h.provider.tokenOf(runId)));
+  const usage = { streamSeconds: 300, captureSeconds: 240, final: true };
+  vi.spyOn(h.provider, 'usage').mockResolvedValue([{ runId, alive: false, seconds: 240, supplierUsage: usage }]);
+  await manager.reconcile();
+  // the worker is gone: the run ended as crashed, and its job went with the cleanup, so no later pass asks about it again
+  expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed' });
+  expect(await h.stores.jobs.get(runId)).toBeUndefined();
+  expect((await inbox.pending()).map((entry) => entry.value)).toEqual([{ runId, reservationId: 'res-1', usage }]);
+  await manager.reconcile();
+  expect(recordSupplierUsage).toHaveBeenCalledTimes(2);
+  expect(recordSupplierUsage).toHaveBeenLastCalledWith('res-1', usage);
+  expect(await inbox.pending()).toEqual([]);
+});
