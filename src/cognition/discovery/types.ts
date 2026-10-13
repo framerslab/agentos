@@ -393,8 +393,10 @@ export interface CapabilityManifestFile {
    * folder, its names joined by `/` after an optional leading `./`, such as `./SKILL.md` or `docs/skill.md`. No name
    * in it is empty, `.` or `..`, starts with a dot, starts or ends with a space or ends with a dot, or holds more
    * than 200 bytes in UTF-8, and it holds no backslash, no colon, none of `"`, `*`, `<`, `>`, `?` and `|` and no
-   * control character, so it never leaves the folder. A manifest whose `skillContent` breaks the rule is refused,
-   * and the capability with it. Without it, `SKILL.md` beside the manifest is read when it is there.
+   * control character, so it never leaves the folder. A value the manifest sets is held to the rule whatever it is, so
+   * an empty value, `null` (which the scanner reads as empty), `false` or a number is refused too. A manifest whose
+   * `skillContent` breaks the rule is refused, and the capability with it. When the manifest does not set it,
+   * `SKILL.md` beside the manifest is read when it is there.
    */
   skillContent?: string;
 }

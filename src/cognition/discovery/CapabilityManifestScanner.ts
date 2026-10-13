@@ -23,11 +23,11 @@
  *   skillContent: ./SKILL.md
  *
  * `skillContent` is optional: a path below the capability's folder, its names joined by `/` after an optional
- * leading `./` (`resolveSkillContentPath`). A manifest whose `skillContent` would leave the folder is refused, and
- * the capability with it. The manifest, the skill's content and `schema.json` are read never through a symbolic
- * link below the capability's folder, never waiting, and only when each is a regular file (`readFileOutsideLinks`
- * in `core/utils/linkFreeWrite`). A refused capability is left out with a warning, the scan goes on with the
- * others, and `scanWithRefusals()` reports it.
+ * leading `./` (`resolveSkillContentPath`). A manifest that sets `skillContent` to anything else, such as a path that
+ * would leave the folder, an empty value or `false`, is refused, and the capability with it. The manifest, the
+ * skill's content and `schema.json` are read never through a symbolic link below the capability's folder, never
+ * waiting, and only when each is a regular file (`readFileOutsideLinks` in `core/utils/linkFreeWrite`). A refused
+ * capability is left out with a warning, the scan goes on with the others, and `scanWithRefusals()` reports it.
  *
  * Extends the existing workspace-discovery.ts pattern from agentos-skills-registry.
  */
@@ -404,10 +404,10 @@ export class CapabilityManifestScanner {
     }
 
     // The skill's content: the file skillContent names, which must lie inside the capability's folder, or
-    // SKILL.md beside the manifest when it names none.
-    const skillFile = parsed.skillContent
-      ? resolveSkillContentPath(capDir, parsed.skillContent)
-      : 'SKILL.md';
+    // SKILL.md beside the manifest when the manifest does not set skillContent. A value that is set is held to the
+    // rule even when it is empty, false or a number, so a malformed manifest is refused rather than read as unset.
+    const skillFile =
+      parsed.skillContent === undefined ? 'SKILL.md' : resolveSkillContentPath(capDir, parsed.skillContent);
     const fullContent = (await readCapabilityFile(capDir, skillFile, 'skillContent')) ?? undefined;
 
     // Load optional schema.json

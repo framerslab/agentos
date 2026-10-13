@@ -91,6 +91,31 @@ describe('a capability is read only from its own folder', () => {
     expect(thrown).toMatchObject({ code: 'CAPABILITY_MANIFEST_REFUSED', field: 'skillContent', problem: 'dot' });
   });
 
+  it('a manifest that sets skillContent to an empty value, null, false or a number is refused and recorded, and one that leaves it out reads SKILL.md beside it', async () => {
+    capability('good', { 'CAPABILITY.yaml': manifest('good'), 'SKILL.md': GOOD_SKILL });
+    // Each of these holds a SKILL.md too, which a value read as unset would load.
+    const set: Array<[string, string, string]> = [
+      ['set-empty', 'skillContent: ""', 'empty'],
+      ['set-null', 'skillContent: null', 'empty'],
+      ['set-false', 'skillContent: false', 'type'],
+      ['set-zero', 'skillContent: 0', 'type'],
+    ];
+    for (const [name, line] of set) {
+      capability(name, { 'CAPABILITY.yaml': manifest(name, line), 'SKILL.md': `# ${name}\n` });
+    }
+
+    const result = await new CapabilityManifestScanner().scanWithRefusals([caps]);
+
+    expect(result.descriptors.map((descriptor) => descriptor.id)).toEqual(['tool:good']);
+    expect(result.descriptors[0].fullContent).toBe(GOOD_SKILL);
+    expect(result.refused).toHaveLength(set.length);
+    expect(result.refused).toEqual(
+      expect.arrayContaining(
+        set.map(([name, , problem]) => ({ manifestPath: path.join(caps, name, 'CAPABILITY.yaml'), field: 'skillContent', problem })),
+      ),
+    );
+  });
+
   it.skipIf(process.platform === 'win32')(
     'a link at a capability file, or at a folder on the way to one, to a file outside, refuses the capability, and nothing is read through it',
     async () => {
