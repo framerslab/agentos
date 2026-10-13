@@ -1,3 +1,9 @@
+## [0.13.82](https://github.com/framerslab/agentos/compare/v0.13.81...v0.13.82) (2026-10-12)
+
+### feat
+
+* **meetings:** export the meeting channel, the meeting-provider extension kind and its page (#373) ([cf49a2d](https://github.com/framerslab/agentos/commit/cf49a2d63339c198c5e869792c291cd8eab95924))
+
 ## [0.13.81](https://github.com/framerslab/agentos/compare/v0.13.80...v0.13.81) (2026-10-12)
 
 ### fix

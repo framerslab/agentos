@@ -127,7 +127,7 @@ The pilot revises the planning counts, and 0b fixes the final ones (Section 4.9)
 | G1, guard | Callback accuracy | T2, 180 per arm | none | must not be WORSE |
 | G2, guard | Confabulation rate on false premises, B − C (lower is better) | T2, 72 per arm | none | must not be WORSE |
 
-If T1 cannot run as designed and becomes report-only, G1 becomes the memory endpoint, with a sizing margin of +10 points and a non-inferiority margin of −10 points.
+If T1 cannot run as designed and becomes report-only, G1 takes R1's place as the memory endpoint: it becomes a primary endpoint in the decision rules and in the family of ten tests (Section 4.6), with a sizing margin of +10 points and a non-inferiority margin of −10 points.
 
 All tests are one-sided, on each endpoint's measure as the table orients it, so that a positive value favours the candidate (P1 and G2 read B − C). BETTER: the lower confidence bound of the measure is above 0, or above 0.5 for a pair score. NON-INFERIOR: the lower bound is above the non-inferiority margin, a bound on the measure as the table orients it: −5 points for R1, −5 points for P1 (a violation rate at most 5 points above B's), and 0.42 for a pair score. WORSE: the unadjusted two-sided 95% upper bound is below 0, or below 0.5 for a pair score. The margins size the study, and the verdicts read the bounds. A BETTER verdict on a judged endpoint also requires each judge's own mean to sit on the candidate's side.
 
@@ -173,7 +173,7 @@ A judgment is usable only with its full vote set: a pair with its four votes, a 
 
 Every comparison is paired within the item, with a seeded arm order whose seed 0a fixes. Intervals come from a cluster bootstrap with 10,000 resamples and a fixed seed [26]. On T1 the clusters are LongMemEval-S histories and LOCOMO conversations; on T2 and T3 the bootstrap resamples at two levels, card and then conversation or script; on T4 the clusters are cards. The analysis treats the questions as clustered and the arm comparisons as paired (sections 2.2 and 4.2 of [27]). On recall the bootstrap governs, and McNemar's test is reported beside it.
 
-Superiority uses a one-sided α of 0.015 at the full-sample look and 0.010 at the extension, with Holm's procedure [25] across one family of ten tests, R1, P1, Q1, S1 and X1 for C1 and for C0; a C0 and C1 pair served by reuse counts once. Non-inferiority uses the same α per endpoint, unadjusted, since GO requires every one. B − A and C − A are descriptions outside the family.
+Superiority uses a one-sided α of 0.015 at the full-sample look and 0.010 at the extension, with Holm's procedure [25] across one family of ten tests, R1, P1, Q1, S1 and X1 for C1 and for C0, where G1 takes R1's place when T1 is report-only (Section 4.4); a C0 and C1 pair served by reuse counts once. Non-inferiority uses the same α per endpoint, unadjusted, since GO requires every one. B − A and C − A are descriptions outside the family.
 
 An interim look at half the sample stops an axis for efficacy or harm at |z| ≥ 3.29, and for futility when the upper 95% bound sits below the sizing margin and the point estimate is at most 0. An axis that stops early keeps its interim verdict, and the interim output reveals only "stop" or "continue".
 
@@ -231,7 +231,7 @@ The study calls its vendors with keys of its own, on prepaid balances, with vend
 
 ### 5.3 Materials and data
 
-The main set has twelve persona cards. Eleven have at least two HEXACO traits above 0.7 or below 0.3, every trait appears at least once above 0.7 and at least once below 0.3 across the set, and one card is a control with every trait between 0.45 and 0.55. Each card carries ten checkable persona facts and three style rules a counter can check, and its six HEXACO values are recorded and not rendered into the prompt. Two more cards serve calibration only, and a neutral card with every trait at 0.5 serves T1. A model client with no repository access writes the cards, the scripts and the fixed contexts from a brief; the writers of the sentiment scripts never see the sentiment lexicon, and no script is edited after any firing result. No real user conversation goes to any vendor. 0a hashes the materials, and they stay private.
+The main set has twelve persona cards. Eleven have at least two HEXACO traits above 0.7 or below 0.3, every trait appears at least once above 0.7 and at least once below 0.3 across the set, and one card is a control with every trait between 0.45 and 0.55. Each card carries ten checkable persona facts and three style rules a counter can check, and its six HEXACO values are recorded and not rendered into the prompt. Two more cards serve calibration only, and a neutral card with every trait at 0.5 serves T1. A model client with no repository access writes the cards, the scripts and the fixed contexts from a brief; the writers of the sentiment scripts never see the sentiment lexicon, and no script is edited after any firing result. No conversation from the reference product's users goes to any vendor. T1 sends the vendors the histories of its two datasets, and LongMemEval-S draws its histories' sessions from simulated chats and from ShareGPT and UltraChat, publicly released chat data [2]. 0a hashes the materials, and they stay private.
 
 ### 5.4 Budget and sample size
 
