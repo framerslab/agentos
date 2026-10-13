@@ -102,6 +102,7 @@ export const SPEECH_PROVIDER_CATALOG: readonly SpeechProviderCatalogEntry[] = [
     local: true,
     description: 'Local Whisper.cpp offline transcription.',
     features: ['local', 'offline'],
+    available: false,
   },
   {
     id: 'vosk',
@@ -305,6 +306,17 @@ export const SPEECH_PROVIDER_CATALOG: readonly SpeechProviderCatalogEntry[] = [
     features: ['streaming', 'interim-results', 'endpointing', 'item-ids', 'long-sessions'],
   },
   {
+    id: 'moonshine-browser',
+    kind: 'stt',
+    label: 'Moonshine (in the browser)',
+    envVars: [],
+    local: true,
+    streaming: true,
+    description:
+      "On-device streaming STT in the browser: Moonshine's streaming models through @moonshine-ai/moonshine-wasm on the user's own processor, so the audio stays on the device.",
+    features: ['local', 'offline', 'streaming', 'browser'],
+  },
+  {
     id: 'openai-streaming-tts',
     kind: 'tts',
     label: 'OpenAI Streaming TTS',
@@ -346,9 +358,16 @@ export function findSpeechProviderCatalogEntry(
   return SPEECH_PROVIDER_CATALOG.find((entry) => entry.id === id);
 }
 
+/**
+ * Whether an entry can be used with the given environment: an entry marked
+ * unavailable (`available: false`, which nothing implements) never is, as
+ * `SpeechProviderResolver` already treats it; a local entry needs no key; any
+ * other needs every one of its environment variables.
+ */
 export function isSpeechProviderConfigured(
   entry: SpeechProviderCatalogEntry,
   env: Record<string, string | undefined> = process.env
 ): boolean {
+  if (entry.available === false) return false;
   return entry.local || entry.envVars.every((envVar) => Boolean(env[envVar]));
 }
