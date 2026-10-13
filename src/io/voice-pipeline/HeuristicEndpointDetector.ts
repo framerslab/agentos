@@ -51,8 +51,8 @@
  *    turn without that utterance's words. After a reset (each
  *    `turn_complete` makes one) of a turn in which speech started, an
  *    item-keyed final that arrives before speech starts or ends again is
- *    that turn's late final and is dropped instead of joining the next
- *    turn's text.
+ *    that turn's late final: it is dropped instead of joining the next
+ *    turn's text, and reported as `'late_final'`.
  *
  * ## Why heuristic over acoustic-only?
  *
@@ -166,6 +166,15 @@ export interface HeuristicEndpointDetectorOptions {
  * |--------------------------|--------------------------|------------------------------------|
  * | `'turn_complete'`        | {@link TurnCompleteEvent}| User turn has ended.               |
  * | `'backchannel_detected'` | `{ text: string }`       | Backchannel phrase was recognised.  |
+ * | `'late_final'`           | {@link TranscriptEvent}  | A completed turn's late final.     |
+ *
+ * `'late_final'` carries, as it was pushed, an item-keyed final that
+ * arrived after a reset ended its turn (each `turn_complete` makes one) and
+ * before speech started or ended again, once per such final. The detector
+ * drops it from its turns, so it never joins the next turn's text.
+ * `VoicePipelineOrchestrator` does not listen for it, so the conversation
+ * leaves those words out; `startListenSession` writes the final to its sink
+ * as a turn of its own.
  *
  * @see {@link IEndpointDetector} for the interface contract.
  * @see {@link AcousticEndpointDetector} for the purely acoustic alternative.
@@ -281,7 +290,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   /**
    * Set when a reset ends a turn in which speech started, and cleared by the
    * next `speech_start` or `speech_end`: an item-keyed final that arrives
-   * meanwhile is the late final of the turn that ended, and is dropped.
+   * meanwhile is the late final of the turn that ended, and is dropped and
+   * reported as `'late_final'`.
    */
   private awaitingNextSpeech = false;
 
@@ -340,8 +350,9 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * for what was merely an acknowledgement, not a real conversational turn.
    *
    * A final with an `itemId` is kept with the turn's other item-keyed finals,
-   * and the turn's text joins them; a final without one replaces the turn's
-   * text.
+   * and the turn's text joins them, unless it is a completed turn's late
+   * final, which is reported as `'late_final'` instead; a final without one
+   * replaces the turn's text.
    *
    * @param transcript - Transcript event from the STT session.
    */
@@ -498,7 +509,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * and by the orchestrator's flush_complete handler) to ensure clean state
    * before audio for the next turn begins to arrive. When speech started in
    * the turn it ends, an item-keyed final that arrives after it and before
-   * speech starts or ends again is that turn's late final, and is dropped.
+   * speech starts or ends again is that turn's late final, and is dropped and
+   * reported as `'late_final'`.
    */
   reset(): void {
     // A turn in which speech started can still get a final after it has ended.
@@ -552,14 +564,20 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * Once speech has ended in this turn, the turn is decided again. A
    * backchannel is announced last, so a `'backchannel_detected'` listener
    * that throws leaves the final recorded and the turn decided. A final that
-   * arrives while {@link awaitingNextSpeech} holds is dropped, with no event.
+   * arrives while {@link awaitingNextSpeech} holds is dropped and reported as
+   * `'late_final'`; the drop changes no state, so a listener that throws
+   * leaves the detector as it was.
    *
    * @param itemId - The provider input item the final belongs to.
    * @param transcript - The final transcript event.
    */
   private _pushItemFinal(itemId: string, transcript: TranscriptEvent): void {
-    // The late final of a turn that has ended stays out of the next turn.
-    if (this.awaitingNextSpeech) return;
+    // The late final of a turn that has ended stays out of the next turn. It is
+    // reported for a listener that keeps every final, such as a listen session.
+    if (this.awaitingNextSpeech) {
+      this.emit('late_final', transcript);
+      return;
+    }
 
     const normalised = transcript.text.trim().toLowerCase();
     const backchannel = BACKCHANNEL_PHRASES.has(normalised);
