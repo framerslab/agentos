@@ -1680,7 +1680,7 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
       endpointDetector: new HeuristicEndpointDetector(),
       bargeinHandler: new HardCutBargeinHandler(),
     });
-    return { orchestrator, agentSession, socket: Sockets.instances[Sockets.instances.length - 1] };
+    return { orchestrator, agentSession, ttsSession, socket: Sockets.instances[Sockets.instances.length - 1] };
   }
 
   /** One utterance as OpenAI reports it: its end of speech and its commit come before its transcript. */
@@ -1712,6 +1712,25 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
       item_id: 'item_B',
       transcript: second,
     });
+  }
+
+  /**
+   * A turn of two utterances whose second transcript is slow: the second end of speech waits the silence timeout
+   * for its final and stops waiting, and the turn ends on the first clause. The second final is left to the test.
+   */
+  async function turnWithSlowSecondFinal(socket: FakeSocket): Promise<void> {
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_300 });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Book a table for two.',
+    });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_B', audio_end_ms: 2_200 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_B', previous_item_id: 'item_A' });
+    await vi.advanceTimersByTimeAsync(1_500);
   }
 
   it('hands the agent a turn whose final comes after the end of speech', async () => {
@@ -1912,6 +1931,63 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
     expect(agentSession.sendText).toHaveBeenCalledOnce();
     expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two.');
     expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
+    await orchestrator.stopSession();
+  });
+
+  it("keeps a final that arrives after its turn has completed out of the user's next turn", async () => {
+    fakeClock();
+    const { orchestrator, agentSession, ttsSession, socket } = await pipeline();
+    await turnWithSlowSecondFinal(socket);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two.');
+    ttsSession.emit('flush_complete'); // the reply has played: the orchestrator resets the detector for the next turn
+
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'At seven tonight',
+    }); // the slow final, after its turn
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_C', audio_start_ms: 6_000 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_C', audio_end_ms: 7_000 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_C', previous_item_id: 'item_B' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_C',
+      transcript: 'What about Friday?',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(agentSession.sendText).toHaveBeenCalledTimes(2);
+    expect(agentSession.sendText.mock.calls[1][0]).toBe('What about Friday?');
+    await orchestrator.stopSession();
+  });
+
+  it('keeps the words of an utterance in progress when the reply ends, and drops the late final of the turn before it', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, ttsSession, socket } = await pipeline();
+    await turnWithSlowSecondFinal(socket);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+
+    // The user speaks again before the reply has finished, and the reply ends during that utterance:
+    // the orchestrator resets the detector between its start and its end of speech.
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_C', audio_start_ms: 6_000 });
+    ttsSession.emit('flush_complete');
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'At seven tonight',
+    }); // the first turn's slow final
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_C', audio_end_ms: 7_000 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_C', previous_item_id: 'item_B' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_C',
+      transcript: 'What about Friday?',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(agentSession.sendText).toHaveBeenCalledTimes(2);
+    expect(agentSession.sendText.mock.calls[1][0]).toBe('What about Friday?');
     await orchestrator.stopSession();
   });
 });
