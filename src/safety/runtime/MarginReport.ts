@@ -65,7 +65,10 @@ export interface MarginAllocationPolicy {
   version: string;
   /** The cost of occupied compute per measured unit of runtime (milliseconds); absent leaves compute unreconciled. */
   hostCostRate?: RationalRate;
-  /** Measured runtime of the period's operations, by hold. */
+  /**
+   * Measured runtime of the period's operations, by hold. Every hold settled in the period needs one, an explicit zero
+   * included: a hold without one leaves compute unreconciled, never priced at zero.
+   */
   computeRuntime: ReadonlyArray<{ holdId: string; runtimeMs: number }>;
   /** Every other cost: quantified, or excluded with its reason. */
   otherCosts: ReadonlyArray<{ label: string; micro?: number; excludedReason?: string }>;
@@ -90,6 +93,7 @@ export interface MarginReport {
   failedWorkSupplierCostMicro: number;
   /** Supplier liability still open: unreported attempts at their most. */
   openSupplierMicro: number;
+  /** Occupied compute at the host-cost rate; null without the rate or without a measured runtime for every settled hold. */
   computeAllocationMicro: number | null;
   otherCosts: Array<{ label: string; micro: number | null; excludedReason: string | null }>;
   platformLossMicro: number;
@@ -172,8 +176,13 @@ export function buildMarginReport(input: MarginPeriodInput, policy: MarginAlloca
   let compute: number | null = null;
   if (policy.hostCostRate) {
     const held = new Set(input.settlements.map((s) => s.holdId));
-    const runtime = policy.computeRuntime.filter((r) => held.has(r.holdId)).reduce((s, r) => s + r.runtimeMs, 0);
-    compute = componentMicro(runtime, policy.hostCostRate);
+    const measured = policy.computeRuntime.filter((r) => held.has(r.holdId));
+    // A settled hold with no measurement has an unknown compute cost, not a zero one.
+    if (new Set(measured.map((r) => r.holdId)).size === held.size) {
+      compute = componentMicro(measured.reduce((s, r) => s + r.runtimeMs, 0), policy.hostCostRate);
+    } else {
+      reasons.push('compute_runtime_missing');
+    }
   } else {
     reasons.push('compute_cost_missing');
   }
