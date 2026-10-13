@@ -114,6 +114,16 @@ describe('InMemoryCheckpointStore', () => {
   });
 
   // -------------------------------------------------------------------------
+  it('counts a checkpoint saved again under its id as the one saved last', async () => {
+    await store.save(makeCheckpoint({ id: 'cp-a', runId: 'run-1', timestamp: 5000 }));
+    await store.save(makeCheckpoint({ id: 'cp-b', runId: 'run-1', timestamp: 5000 }));
+    await store.save(makeCheckpoint({ id: 'cp-a', runId: 'run-1', timestamp: 5000 }));
+
+    expect((await store.latest('run-1'))!.id).toBe('cp-a');
+    expect((await store.list('graph-1')).map((meta) => meta.id)).toEqual(['cp-a', 'cp-b']);
+  });
+
+  // -------------------------------------------------------------------------
   it('list returns metadata for all checkpoints of a graphId', async () => {
     await store.save(makeCheckpoint({ id: 'cp-1', graphId: 'graph-1', runId: 'run-1' }));
     await store.save(makeCheckpoint({ id: 'cp-2', graphId: 'graph-1', runId: 'run-2' }));
