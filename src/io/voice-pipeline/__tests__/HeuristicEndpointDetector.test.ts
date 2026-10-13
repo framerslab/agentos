@@ -17,7 +17,7 @@
  * - speech_start cancels a pending silence timer
  * - reset() clears accumulated text and cancels pending timers
  * - Finals keyed by item, as OpenAI Realtime sends them after each end of speech
- * - An item final that comes before its end of speech, and one left over from a completed turn
+ * - An item final that comes before its end of speech, and one left over from a completed turn, reported as late_final
  *
  * The silence_timeout cases use a 100 ms detector instance and a short
  * setTimeout await -- fast enough for CI while remaining deterministic. The
@@ -566,9 +566,11 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
     expect(handler.mock.calls[0][0].transcript).toBe('Book a table for two. At seven tonight.');
   });
 
-  it('drops a final that arrives after its turn has completed, so the next turn holds only its own words', () => {
+  it('drops a final that arrives after its turn has completed and reports it as late_final, so the next turn holds only its own words', () => {
     const handler = vi.fn();
+    const late = vi.fn();
     detector.on('turn_complete', handler);
+    detector.on('late_final', late);
 
     detector.pushVadEvent(transcriberSpeech('speech_start'));
     detector.pushVadEvent(transcriberSpeech('speech_end'));
@@ -579,7 +581,10 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
     expect(handler).toHaveBeenCalledOnce();
     detector.reset(); // as the orchestrator does once the reply has played
 
-    detector.pushTranscript(itemFinal('At seven tonight', 'item_B', 1_300)); // the slow final, after its turn
+    const slow = itemFinal('At seven tonight', 'item_B', 1_300);
+    detector.pushTranscript(slow); // the slow final, after its turn
+    expect(late).toHaveBeenCalledOnce();
+    expect(late.mock.calls[0][0]).toBe(slow); // the final as it arrived, for a listener that keeps every final
     detector.pushVadEvent(transcriberSpeech('speech_start'));
     detector.pushVadEvent(transcriberSpeech('speech_end'));
     detector.pushTranscript(itemFinal('what about Friday', 'item_C', 6_000));
@@ -587,6 +592,7 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
 
     expect(handler).toHaveBeenCalledTimes(2);
     expect(handler.mock.calls[1][0]).toMatchObject({ transcript: 'what about Friday', reason: 'silence_timeout' });
+    expect(late).toHaveBeenCalledOnce(); // the next turn's own final is no late final
   });
 
   it("keeps the early final of the next turn's first utterance after a reset, and decides the turn at its end of speech", () => {
