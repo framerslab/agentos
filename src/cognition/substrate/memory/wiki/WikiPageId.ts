@@ -3,8 +3,7 @@ import * as path from 'node:path';
 import {
   MAX_PATH_NAME_BYTES,
   describeRefusedName,
-  isRefusedPathCharacter,
-  pathNameProblem,
+  relativePathProblem,
   resolveInsideFolder,
 } from '../../../../core/utils/pathName.js';
 
@@ -76,22 +75,14 @@ export class InvalidWikiPageIdError extends Error {
 }
 
 /**
- * The part of the id rule `id` breaks, or null when the rule accepts it. Each name between slashes is held to the
- * rule every name built from data is held to (`pathNameProblem`), after the whole id is checked.
+ * The part of the id rule `id` breaks, or null when the rule accepts it. After its length, the id is held to the
+ * rule every path built from data is held to (`relativePathProblem`), which holds each name between slashes to the
+ * rule every name built from data is held to.
  */
 function problemOf(id: unknown): WikiPageIdProblem | null {
   if (typeof id !== 'string') return 'type';
-  if (id.length === 0) return 'empty';
   if (id.length > MAX_WIKI_PAGE_ID_LENGTH) return 'length';
-  for (let i = 0; i < id.length; i++) {
-    if (isRefusedPathCharacter(id.charCodeAt(i))) return 'character';
-  }
-  for (const name of id.split('/')) {
-    const problem = pathNameProblem(name);
-    // An empty name sits between two slashes, or at the id's start or end.
-    if (problem) return problem === 'empty' ? 'segment' : problem;
-  }
-  return id.toLowerCase() === CATALOG_ID ? 'reserved' : null;
+  return relativePathProblem(id) ?? (id.toLowerCase() === CATALOG_ID ? 'reserved' : null);
 }
 
 /**

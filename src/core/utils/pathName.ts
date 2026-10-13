@@ -3,9 +3,10 @@
  * names lies inside its folder.
  *
  * The memory wiki builds a page's path from its id, the Markdown and Obsidian memory exporters build a trace's
- * path from its scope, type and id, and the skill exporter builds a forged tool's folder from its name. Those
- * values come from files, imports and models, so every name taken from them is checked against one rule here,
- * and every path built from them is checked to lie inside the folder it is written to.
+ * path from its scope, type and id, the skill exporter builds a forged tool's folder from its name, the capability
+ * manifest scanner reads the file a manifest's `skillContent` names, and an agent's workspace folder is named after
+ * its id. Those values come from files, imports and models, so every name taken from them is checked against one
+ * rule here, and every path built from them is checked to lie inside the folder it is read from or written to.
  *
  * @module agentos/core/utils/pathName
  */
@@ -89,6 +90,35 @@ export function pathNameProblem(name: string): PathNameProblem | null {
   if (name.startsWith(' ') || name.endsWith(' ') || name.endsWith('.')) return 'edge';
   // A string never has more UTF-16 code units than UTF-8 bytes, so a long one is refused before it is encoded.
   if (name.length > MAX_PATH_NAME_BYTES || utf8.encode(name).byteLength > MAX_PATH_NAME_BYTES) return 'length';
+  return null;
+}
+
+/**
+ * Why a path below a folder, built from data, was refused: the {@link PathNameProblem} of a name in it, or
+ * `'segment'` when a name between slashes is empty because the path starts or ends with `/` or holds `//`. An empty
+ * path is `'empty'`, and a character the name rule refuses anywhere in the path is `'character'`.
+ */
+export type RelativePathProblem = PathNameProblem | 'segment';
+
+/**
+ * The part of the rule `relative` breaks, or null when it may name a file or folder below a folder: one or more
+ * names joined by single slashes, each accepted by {@link pathNameProblem}, with no backslash, no colon, none of
+ * `"`, `*`, `<`, `>`, `?` and `|` and no control character anywhere. A path the rule accepts never starts at the
+ * root or at a drive, and no name in it is `.` or `..`, so it stays under the folder it is resolved from. The rule
+ * limits each name's length, not the whole path's.
+ *
+ * @param relative - The path to check, its names joined by `/`.
+ */
+export function relativePathProblem(relative: string): RelativePathProblem | null {
+  if (relative.length === 0) return 'empty';
+  for (let i = 0; i < relative.length; i++) {
+    if (isRefusedPathCharacter(relative.charCodeAt(i))) return 'character';
+  }
+  for (const name of relative.split('/')) {
+    const problem = pathNameProblem(name);
+    // An empty name sits between two slashes, or at the path's start or end.
+    if (problem) return problem === 'empty' ? 'segment' : problem;
+  }
   return null;
 }
 

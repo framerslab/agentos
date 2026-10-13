@@ -1,14 +1,17 @@
 /**
- * @fileoverview Writing below a folder whose contents another process may change: folders are made one name at a
- * time and never through a link, and a file is opened for writing never through a link, never waiting, and only
- * when it is a regular file with one name.
+ * @fileoverview Writing and reading below a folder whose contents another process may change: folders are made
+ * one name at a time and never through a link, a file is opened for writing never through a link, never waiting,
+ * and only when it is a regular file with one name, and a file is read never through a link below the folder,
+ * never waiting, and only when it is a regular file.
  *
  * The Markdown and Obsidian memory exporters write a file per trace below an export folder, and the skill exporter
  * writes a tool's files below a skills folder. Whoever can write below such a folder could put there a link that
  * leads elsewhere, a second name for a file elsewhere, or a named pipe that holds a writer up, so both write
- * through the functions here. The folder itself is the caller's and may be a link. The checks run as each folder
- * is made and each file opened; Node has no `openat`, so a process that swaps a folder for a link between a check
- * and the write is outside what they stop.
+ * through the functions here. The capability manifest scanner reads a capability's files below its folder, where
+ * a link could lead a read to a file elsewhere and a named pipe could hold the read up, so it reads through
+ * {@link readFileOutsideLinks}. The folder itself is the caller's and may be a link. The checks run as each folder
+ * is made or looked at and each file opened; Node has no `openat`, so a process that swaps a folder for a link
+ * between a check and the write or read is outside what they stop.
  *
  * @module agentos/core/utils/linkFreeWrite
  */
@@ -18,32 +21,39 @@ import { constants as fsConstants, type Stats } from 'node:fs';
 import path from 'node:path';
 
 /**
- * The flags a file is opened with: for writing, made when missing, and, where the platform has each flag (Windows
- * has neither), never through a symbolic link in the file's own place (`O_NOFOLLOW`) and never waiting
- * (`O_NONBLOCK`). Without `O_NONBLOCK`, an open for writing of a named pipe that no process reads waits for a
- * reader that may never come. The file is not emptied by the open: the caller empties it once the open file shows
- * it is a regular file with no second name.
+ * Where the platform has each flag (Windows has neither): open never through a symbolic link in the file's own
+ * place (`O_NOFOLLOW`) and never waiting (`O_NONBLOCK`). Without `O_NONBLOCK`, an open for writing of a named pipe
+ * that no process reads waits for a reader, and an open for reading of one that no process writes waits for a
+ * writer, and either may never come.
  */
-const OPEN_FLAGS: number =
-  fsConstants.O_WRONLY |
-  fsConstants.O_CREAT |
+const NO_LINK_NO_WAIT: number =
   (fsConstants.O_NOFOLLOW !== undefined ? fsConstants.O_NOFOLLOW : 0) |
   (fsConstants.O_NONBLOCK !== undefined ? fsConstants.O_NONBLOCK : 0);
+
+/**
+ * The flags a file is opened with for writing: write only, made when missing, never through a link in its own place
+ * and never waiting ({@link NO_LINK_NO_WAIT}). The file is not emptied by the open: the caller empties it once the
+ * open file shows it is a regular file with no second name.
+ */
+const OPEN_FLAGS: number = fsConstants.O_WRONLY | fsConstants.O_CREAT | NO_LINK_NO_WAIT;
+
+/** The flags a file is opened with for reading: read only, never through a link in its own place and never waiting. */
+const READ_FLAGS: number = fsConstants.O_RDONLY | NO_LINK_NO_WAIT;
 
 /** The codes an open with `O_NOFOLLOW` fails with when a symbolic link holds the file's place (EMLINK on FreeBSD). */
 const LINK_OPEN_CODES: ReadonlySet<string> = new Set(['ELOOP', 'EMLINK']);
 
 /**
- * The codes an open for writing fails with when something other than a regular file holds the file's place:
- * EISDIR for a folder; ENXIO for a named pipe that no process reads (under `O_NONBLOCK`), a device with no driver,
- * or, on Linux, a socket; EOPNOTSUPP for a socket on macOS.
+ * The codes an open fails with when something other than a regular file holds the file's place: EISDIR for a
+ * folder opened for writing; ENXIO for a named pipe that no process reads opened for writing (under `O_NONBLOCK`),
+ * a device with no driver, or, on Linux, a socket; EOPNOTSUPP for a socket on macOS.
  */
 const SPECIAL_OPEN_CODES: ReadonlySet<string> = new Set(['EISDIR', 'ENXIO', 'EOPNOTSUPP']);
 
 /**
  * Why a file was not opened: `link` when a symbolic link holds its place or the file has a second name (a hard
- * link), and `special` when something other than a regular file holds its place (a folder, a named pipe, a socket,
- * a device).
+ * link), or, for a read, when a symbolic link holds the place of a folder on the way to it; and `special` when
+ * something other than a regular file holds its place (a folder, a named pipe, a socket, a device).
  */
 export type OpenRefusal = 'link' | 'special';
 
@@ -135,6 +145,59 @@ export async function openFileOutsideLinks(file: string): Promise<OpenedFile | O
     return { handle, identity: stat.ino === 0n ? null : `${stat.dev}:${stat.ino}` };
   } finally {
     if (!handedOver) await handle.close();
+  }
+}
+
+/**
+ * Read the file that `relative` names under `root`, never through a symbolic link below `root`. Each folder on the
+ * way is looked at, and so is the file's place before the file is opened, so a link or something other than a
+ * regular file is refused before any open. The file is then opened never through a link in its own place and,
+ * where the platform has `O_NONBLOCK`, never waiting, and it is read only when the open file is a regular file. A
+ * regular file with a second name (a hard link) is read: a read changes nothing through the other name, and pnpm,
+ * by default on Linux, installs a package's files as hard links to its store, so each of them has a second name.
+ *
+ * @param root - The folder the file is read below. It may itself be a link.
+ * @param relative - The file's path under `root`, its names joined by the platform's separator, as `path.relative`
+ *   gives it. The caller checks that the path stays under `root` (`resolveInsideFolder`).
+ * @returns The file's text, read as UTF-8; `link` when a symbolic link holds the file's place or a folder's on the
+ *   way; `special` when something other than a regular file holds the file's place; or null when no file is there.
+ * @throws Any other error the looks, the open or the read meet.
+ */
+export async function readFileOutsideLinks(
+  root: string,
+  relative: string,
+): Promise<{ text: string } | OpenRefusal | null> {
+  const names = relative.split(path.sep).filter((part) => part.length > 0);
+  // With no name, the path is the root itself, a folder.
+  if (names.length === 0) return 'special';
+  let place = root;
+  for (let index = 0; index < names.length; index++) {
+    place = path.join(place, names[index]);
+    const entry = await lstatOrNull(place);
+    if (entry === null) return null;
+    if (entry.isSymbolicLink()) return 'link';
+    if (index === names.length - 1) {
+      if (!entry.isFile()) return 'special';
+    } else if (!entry.isDirectory()) {
+      // Something other than a folder on the way: no file is there.
+      return null;
+    }
+  }
+  const handle = await fs.open(place, READ_FLAGS).catch((err: unknown) => {
+    const code = String((err as NodeJS.ErrnoException).code);
+    // Taken away since the look.
+    if (code === 'ENOENT') return null;
+    if (LINK_OPEN_CODES.has(code)) return 'link' as const;
+    if (SPECIAL_OPEN_CODES.has(code)) return 'special' as const;
+    throw err;
+  });
+  if (handle === null || typeof handle === 'string') return handle;
+  try {
+    // Something put in the file's place since the look is refused here, before it is read.
+    if (!(await handle.stat()).isFile()) return 'special';
+    return { text: await handle.readFile('utf8') };
+  } finally {
+    await handle.close();
   }
 }
 

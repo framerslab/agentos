@@ -1,6 +1,6 @@
 /**
  * @file CapabilityManifestScanner.spec.ts
- * @description Unit tests for the CapabilityManifestScanner class.
+ * @description Unit tests for the CapabilityManifestScanner class, against manifests in a temp folder.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -8,8 +8,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-vi.mock('node:fs');
-vi.mock('node:os');
+// os.homedir is replaced, so the default folders are known; the rest of node:os, tmpdir among it, is the real module.
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
+  homedir: vi.fn(),
+}));
 
 // Import AFTER mocking
 import { CapabilityManifestScanner } from '../../src/cognition/discovery/CapabilityManifestScanner.js';
@@ -18,7 +21,6 @@ import { CapabilityManifestScanner } from '../../src/cognition/discovery/Capabil
 // HELPERS
 // ---------------------------------------------------------------------------
 
-const mockedFs = vi.mocked(fs);
 const mockedOs = vi.mocked(os);
 
 const YAML_FULL = `
@@ -58,17 +60,30 @@ skillContent: ./SKILL.md
 
 describe('CapabilityManifestScanner', () => {
   let scanner: CapabilityManifestScanner;
+  let root: string;
   const originalEnv = process.env;
+
+  /** Write a capability's files into `<root>/<name>/` and return that folder. */
+  function capability(name: string, files: Record<string, string>): string {
+    const dir = path.join(root, name);
+    fs.mkdirSync(dir, { recursive: true });
+    for (const [file, text] of Object.entries(files)) {
+      fs.writeFileSync(path.join(dir, file), text);
+    }
+    return dir;
+  }
 
   beforeEach(() => {
     scanner = new CapabilityManifestScanner();
     vi.resetAllMocks();
     process.env = { ...originalEnv };
     mockedOs.homedir.mockReturnValue('/home/testuser');
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'manifest-scanner-'));
   });
 
   afterEach(() => {
     process.env = originalEnv;
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   // =========================================================================
@@ -111,34 +126,14 @@ describe('CapabilityManifestScanner', () => {
 
   describe('scan', () => {
     it('returns empty for non-existent directories', async () => {
-      mockedFs.existsSync.mockReturnValue(false);
-
-      const result = await scanner.scan(['/nonexistent']);
+      const result = await scanner.scan([path.join(root, 'nonexistent')]);
       expect(result).toEqual([]);
     });
 
     it('scans directory with a CAPABILITY.yaml entry', async () => {
-      // Setup: /caps/my-tool/CAPABILITY.yaml exists
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
-        const s = p.toString();
-        if (s === '/caps') return true;
-        if (s === '/caps/my-tool/CAPABILITY.yaml') return true;
-        if (s === '/caps/my-tool/CAPABILITY.yml') return false;
-        if (s === '/caps/my-tool/SKILL.md') return false;
-        if (s === '/caps/my-tool/schema.json') return false;
-        return false;
-      });
+      capability('my-tool', { 'CAPABILITY.yaml': YAML_FULL });
 
-      mockedFs.readdirSync.mockReturnValue([
-        { name: 'my-tool', isDirectory: () => true, isFile: () => false } as unknown as fs.Dirent,
-      ] as fs.Dirent[]);
-
-      mockedFs.readFileSync.mockImplementation((p: fs.PathOrFileDescriptor) => {
-        if (p.toString().endsWith('CAPABILITY.yaml')) return YAML_FULL;
-        return '';
-      });
-
-      const result = await scanner.scan(['/caps']);
+      const result = await scanner.scan([root]);
 
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('custom:my-tool');
@@ -159,10 +154,9 @@ describe('CapabilityManifestScanner', () => {
 
   describe('parseManifest', () => {
     it('correctly parses a CAPABILITY.yaml with all fields', async () => {
-      mockedFs.readFileSync.mockReturnValue(YAML_FULL);
-      mockedFs.existsSync.mockReturnValue(false);
+      const dir = capability('my-tool', { 'CAPABILITY.yaml': YAML_FULL });
 
-      const result = await scanner.parseManifest('/caps/my-tool/CAPABILITY.yaml', '/caps/my-tool');
+      const result = await scanner.parseManifest(path.join(dir, 'CAPABILITY.yaml'), dir);
 
       expect(result).not.toBeNull();
       expect(result!.id).toBe('custom:my-tool');
@@ -177,78 +171,57 @@ describe('CapabilityManifestScanner', () => {
       expect(result!.hasSideEffects).toBe(true);
       expect(result!.sourceRef).toEqual({
         type: 'manifest',
-        manifestPath: '/caps/my-tool/CAPABILITY.yaml',
+        manifestPath: path.join(dir, 'CAPABILITY.yaml'),
         entryId: 'custom:my-tool',
       });
     });
 
     it('returns null for missing required fields', async () => {
-      mockedFs.readFileSync.mockReturnValue(YAML_MISSING_FIELDS);
-      mockedFs.existsSync.mockReturnValue(false);
+      const dir = capability('bad', { 'CAPABILITY.yaml': YAML_MISSING_FIELDS });
 
       const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const result = await scanner.parseManifest('/caps/bad/CAPABILITY.yaml', '/caps/bad');
+      const result = await scanner.parseManifest(path.join(dir, 'CAPABILITY.yaml'), dir);
 
       expect(result).toBeNull();
       consoleSpy.mockRestore();
     });
 
     it('generates id from kind:name when id not provided', async () => {
-      mockedFs.readFileSync.mockReturnValue(YAML_MINIMAL);
-      mockedFs.existsSync.mockReturnValue(false);
+      const dir = capability('min', { 'CAPABILITY.yaml': YAML_MINIMAL });
 
-      const result = await scanner.parseManifest('/caps/min/CAPABILITY.yaml', '/caps/min');
+      const result = await scanner.parseManifest(path.join(dir, 'CAPABILITY.yaml'), dir);
 
       expect(result).not.toBeNull();
       expect(result!.id).toBe('tool:minimal-tool');
     });
 
     it('defaults category to custom when not provided', async () => {
-      mockedFs.readFileSync.mockReturnValue(YAML_MINIMAL);
-      mockedFs.existsSync.mockReturnValue(false);
+      const dir = capability('min', { 'CAPABILITY.yaml': YAML_MINIMAL });
 
-      const result = await scanner.parseManifest('/caps/min/CAPABILITY.yaml', '/caps/min');
+      const result = await scanner.parseManifest(path.join(dir, 'CAPABILITY.yaml'), dir);
 
       expect(result!.category).toBe('custom');
     });
 
     it('loads optional SKILL.md content from skillContent reference', async () => {
-      mockedFs.readFileSync.mockImplementation((p: fs.PathOrFileDescriptor) => {
-        const s = p.toString();
-        if (s.endsWith('CAPABILITY.yaml')) return YAML_WITH_SKILL_REF;
-        if (s.endsWith('SKILL.md')) return '# My Skill\nInstructions here.';
-        return '';
+      const dir = capability('my-skill', {
+        'CAPABILITY.yaml': YAML_WITH_SKILL_REF,
+        'SKILL.md': '# My Skill\nInstructions here.',
       });
 
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
-        const s = p.toString();
-        if (s.endsWith('SKILL.md')) return true;
-        if (s.endsWith('schema.json')) return false;
-        return false;
-      });
-
-      const result = await scanner.parseManifest('/caps/my-skill/CAPABILITY.yaml', '/caps/my-skill');
+      const result = await scanner.parseManifest(path.join(dir, 'CAPABILITY.yaml'), dir);
 
       expect(result).not.toBeNull();
       expect(result!.fullContent).toBe('# My Skill\nInstructions here.');
     });
 
     it('loads default SKILL.md when skillContent not specified', async () => {
-      mockedFs.readFileSync.mockImplementation((p: fs.PathOrFileDescriptor) => {
-        const s = p.toString();
-        if (s.endsWith('CAPABILITY.yaml')) return YAML_MINIMAL;
-        if (s.endsWith('SKILL.md')) return '# Default Skill';
-        return '';
+      const dir = capability('min', {
+        'CAPABILITY.yaml': YAML_MINIMAL,
+        'SKILL.md': '# Default Skill',
       });
 
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
-        const s = p.toString();
-        if (s.endsWith('SKILL.md')) return true;
-        if (s.endsWith('schema.json')) return false;
-        return false;
-      });
-
-      const result = await scanner.parseManifest('/caps/min/CAPABILITY.yaml', '/caps/min');
+      const result = await scanner.parseManifest(path.join(dir, 'CAPABILITY.yaml'), dir);
 
       expect(result).not.toBeNull();
       expect(result!.fullContent).toBe('# Default Skill');
@@ -261,22 +234,12 @@ describe('CapabilityManifestScanner', () => {
           query: { type: 'string', description: 'Search query' },
         },
       });
-
-      mockedFs.readFileSync.mockImplementation((p: fs.PathOrFileDescriptor) => {
-        const s = p.toString();
-        if (s.endsWith('CAPABILITY.yaml')) return YAML_MINIMAL;
-        if (s.endsWith('schema.json')) return schemaJson;
-        return '';
+      const dir = capability('min', {
+        'CAPABILITY.yaml': YAML_MINIMAL,
+        'schema.json': schemaJson,
       });
 
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
-        const s = p.toString();
-        if (s.endsWith('SKILL.md')) return false;
-        if (s.endsWith('schema.json')) return true;
-        return false;
-      });
-
-      const result = await scanner.parseManifest('/caps/min/CAPABILITY.yaml', '/caps/min');
+      const result = await scanner.parseManifest(path.join(dir, 'CAPABILITY.yaml'), dir);
 
       expect(result).not.toBeNull();
       expect(result!.fullSchema).toEqual({

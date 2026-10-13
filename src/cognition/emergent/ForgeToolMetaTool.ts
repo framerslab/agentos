@@ -290,17 +290,18 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
     // Validate required fields before delegating to the engine.
     // The LLM may omit or mistype fields; catching this early produces
     // a clear error instead of a cryptic downstream failure.
-    if (!args.name || typeof args.name !== 'string') {
-      return { success: false, error: 'name is required and must be a string' };
-    }
     // The name names the tool's folder when the tool is exported as a skill, so a name the forge's rule refuses
-    // is refused here with its typed error, before the engine runs. The engine holds a direct forge to the same rule.
+    // is refused here with its typed details, before the engine runs. The engine holds a direct forge to the same
+    // rule. A missing, empty or non-string name keeps its own message, with the same details as any other refusal.
     const nameProblem = forgedToolNameProblem(args.name);
     if (nameProblem) {
       const refused = new InvalidToolNameError(nameProblem, args.name);
       return {
         success: false,
-        error: refused.message,
+        error:
+          nameProblem === 'type' || nameProblem === 'empty'
+            ? 'name is required and must be a string'
+            : refused.message,
         details: { code: refused.code, problem: refused.problem },
       };
     }
