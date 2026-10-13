@@ -4,6 +4,7 @@
  * Concrete provider implementations for the voice pipeline:
  * - {@link DeepgramStreamingSTT} — Deepgram WebSocket streaming STT
  * - {@link OpenAIRealtimeTranscriptionSTT}: OpenAI Realtime transcription streaming STT
+ * - {@link MoonshineBrowserSTT}: on-device streaming STT in the browser (Moonshine through WebAssembly)
  * - {@link ElevenLabsStreamingTTS} — ElevenLabs WebSocket streaming TTS
  * - {@link AgentSessionVoiceAdapter} — AgentOS session → voice pipeline adapter
  * - {@link OpenAIBatchTTS} — OpenAI batch (one-shot) TTS
@@ -23,6 +24,34 @@ export {
   type OpenAIRealtimeRolloverRequest,
   type OpenAIRealtimeTurnDetection,
 } from './OpenAIRealtimeTranscriptionSTT.js';
+export {
+  MoonshineBrowserSTT,
+  MOONSHINE_STREAMING_MODEL_FILES,
+  checkMoonshineBrowserSupport,
+  chooseMoonshineModel,
+  readMoonshineDeviceSignals,
+  loadMoonshineWasm,
+  type MoonshineBrowserSTTConfig,
+  type MoonshineLoadProgress,
+  type MoonshineModelSize,
+  type MoonshineModelChoice,
+  type MoonshineDeviceSignals,
+  type MoonshineBrowserScope,
+  type MoonshineBrowserSupport,
+  type MoonshineBrowserSupportOptions,
+  type MoonshineBrowserRequirement,
+  type MoonshineWasmModule,
+  type MoonshineTranscriberLike,
+  type MoonshineStreamLike,
+  type MoonshineWorkerHostLike,
+  type MoonshineLineLike,
+  type MoonshineLineEvent,
+  type MoonshineLineListener,
+  type MoonshineWordLike,
+  type MoonshineLoadOptionsLike,
+  type MoonshineModelSource,
+  type MoonshineProgressReport,
+} from './MoonshineBrowserSTT.js';
 export {
   ElevenLabsStreamingTTS,
   type ElevenLabsStreamingTTSConfig,

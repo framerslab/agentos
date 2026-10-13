@@ -78,3 +78,33 @@ export {
   type ProviderCapabilities,
   type HealthCheckResult,
 } from './HealthyProvider.js';
+
+// On-device streaming STT: Moonshine through WebAssembly.
+export {
+  MoonshineBrowserSTT,
+  MOONSHINE_STREAMING_MODEL_FILES,
+  checkMoonshineBrowserSupport,
+  chooseMoonshineModel,
+  readMoonshineDeviceSignals,
+  loadMoonshineWasm,
+  type MoonshineBrowserSTTConfig,
+  type MoonshineLoadProgress,
+  type MoonshineModelSize,
+  type MoonshineModelChoice,
+  type MoonshineDeviceSignals,
+  type MoonshineBrowserScope,
+  type MoonshineBrowserSupport,
+  type MoonshineBrowserSupportOptions,
+  type MoonshineBrowserRequirement,
+  type MoonshineWasmModule,
+  type MoonshineTranscriberLike,
+  type MoonshineStreamLike,
+  type MoonshineWorkerHostLike,
+  type MoonshineLineLike,
+  type MoonshineLineEvent,
+  type MoonshineLineListener,
+  type MoonshineWordLike,
+  type MoonshineLoadOptionsLike,
+  type MoonshineModelSource,
+  type MoonshineProgressReport,
+} from './providers/MoonshineBrowserSTT.js';
