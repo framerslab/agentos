@@ -102,7 +102,7 @@ export interface VoicePipelineOverrides {
  * |-------------------|----------------------------------------------|
  * | `'state_changed'` | `{ from: PipelineState, to: PipelineState }`  |
  * | `'turn_complete'` | {@link TurnCompleteEvent}                     |
- * | `'error'`         | `Error`: a `turn_complete` listener threw or rejected, or a transport send rejected; with no `'error'` listener it is written as a console warning instead |
+ * | `'error'`         | `Error`: a `turn_complete` listener threw or rejected, or a transport send rejected (of a reply's audio, the first refused chunk only); with no `'error'` listener it is written as a console warning instead |
  *
  * @see {@link VoicePipelineSession} for the public session interface returned by `startSession()`.
  */
@@ -149,6 +149,15 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Incremented as each {@link EncodedAudioChunk} is forwarded to the transport.
    */
   private _currentPlayedMs = 0;
+
+  /**
+   * Numbers the agent's replies: incremented as each reply starts to speak (PROCESSING -> SPEAKING). Each audio
+   * chunk's send carries the number of its reply, so that a reply's refused chunks are reported once.
+   */
+  private _replyNumber = 0;
+
+  /** The last reply a refused audio chunk was reported for; that reply's later refusals are not reported. */
+  private _audioRefusalReportedFor = 0;
 
   // --------------------------------------------------------------------------
   // Public getters
@@ -526,7 +535,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // Begin streaming the agent's response
       const tokenStream = agentSession.sendText(event.transcript, metadata);
 
-      // PROCESSING -> SPEAKING: first tokens are about to flow
+      // PROCESSING -> SPEAKING: first tokens are about to flow. The reply is numbered before its audio can be sent.
+      this._replyNumber += 1;
       this._setState('speaking');
       this._currentTTSText = '';
       this._currentPlayedMs = 0;
@@ -602,11 +612,22 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * and ends nothing; a send that resolves is left as it is. Unhandled, the rejection would end the process: Node
    * raises an unhandled rejection as an uncaught exception by default.
    *
+   * A refused control message is reported each time. Of a reply's audio chunks only the first refused is reported: a
+   * transport that does not publish audio, as `LiveKitStreamTransport` does not, refuses every chunk of every reply.
+   *
    * @param send - The promise that `sendControl()` or `sendAudio()` returned.
+   * @param reply - For an audio chunk, the number of the reply it belongs to (`_replyNumber` when it was sent).
    */
-  private _watchSend(send: Promise<void>): void {
+  private _watchSend(send: Promise<void>, reply?: number): void {
     // Promise.resolve() also takes a transport whose send returns no promise, as a plain JavaScript one may.
-    Promise.resolve(send).catch((err: unknown) => this._reportError(err, 'a transport send failed'));
+    Promise.resolve(send).catch((err: unknown) => {
+      if (reply !== undefined) {
+        // Not the reply's first refusal, or an earlier reply's refusal that settled after a later reply's.
+        if (reply <= this._audioRefusalReportedFor) return;
+        this._audioRefusalReportedFor = reply;
+      }
+      this._reportError(err, 'a transport send failed');
+    });
   }
 
   /**
@@ -625,7 +646,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // Chunks arriving after a barge-in are silently dropped.
       if (this._state === 'speaking') {
         this._currentPlayedMs += chunk.durationMs;
-        this._watchSend(transport.sendAudio(chunk));
+        this._watchSend(transport.sendAudio(chunk), this._replyNumber);
       }
     });
 

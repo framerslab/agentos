@@ -24,6 +24,8 @@
  * - A turn_complete listener that throws is reported; the listeners after it run and the turn is taken
  * - A transport send that rejects is reported once as 'error' and the turn goes on; with nothing listening
  *   for 'error', or with an 'error' listener that throws, it is written as a console warning
+ * - Of the audio chunks a transport refuses, the first of each reply is reported and the rest of that reply's
+ *   are not; a refused control message is reported each time
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -502,6 +504,47 @@ describe('VoicePipelineOrchestrator', () => {
     } finally {
       process.off('unhandledRejection', onUnhandled);
       warn.mockRestore();
+    }
+  });
+
+  /**
+   * A transport that does not publish audio, as LiveKitStreamTransport does not, refuses every chunk of every
+   * reply. The orchestrator reports the first refused chunk of each reply and not the rest of that reply's
+   * chunks, while each refused control message is still reported.
+   */
+  it('reports the first refused audio chunk of each reply, and each refused control message', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const audioRefused = new Error('this transport does not publish audio');
+      const doneFailed = new Error('agent_done was not sent');
+      vi.mocked(transport.sendAudio).mockRejectedValue(audioRefused);
+      vi.mocked(transport.sendControl).mockImplementation(async (message) => {
+        if (message.type === 'agent_done') throw doneFailed;
+      });
+      await startSession();
+      const errors: unknown[] = [];
+      orchestrator.on('error', (err: unknown) => errors.push(err));
+
+      // Two replies of three chunks each, every chunk refused.
+      for (let reply = 0; reply < 2; reply++) {
+        endpoint.emit('turn_complete', makeTurnComplete());
+        await vi.advanceTimersByTimeAsync(0);
+        for (let chunk = 0; chunk < 3; chunk++) ttsSession.emit('audio', makeAudioChunk());
+        await vi.advanceTimersByTimeAsync(0);
+        ttsSession.emit('flush_complete');
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      expect(transport.sendAudio).toHaveBeenCalledTimes(6);
+      expect(errors).toEqual([audioRefused, doneFailed, audioRefused, doneFailed]);
+      expect(orchestrator.state).toBe('listening');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
     }
   });
 });
