@@ -19,6 +19,24 @@ function carrierManager(fetchImpl: typeof fetch = vi.fn<typeof fetch>(async () =
   m.registerProvider(new TwilioVoiceProvider({ accountSid: 'account', authToken: 'fixture', protocol: 'carrier', fetchImpl }));
   return m;
 }
+/**
+ * Runs transactions on `inner`. Once `state.holding` is set, a transaction's work completes, sets `state.waiting` and
+ * waits for `release` before the transaction commits; `settled` resolves after that commit.
+ */
+function holdingStore(inner: ITelephonyCallStore): { store: ITelephonyCallStore; state: { holding: boolean; waiting: boolean }; release(): void; settled: Promise<void> } {
+  let release!: () => void; const released = new Promise<void>((resolve) => { release = resolve; });
+  let settle!: () => void; const settled = new Promise<void>((resolve) => { settle = resolve; });
+  const state = { holding: false, waiting: false };
+  const store: ITelephonyCallStore = {
+    withProvider: async (provider, work) => {
+      const held = state.holding;
+      const out = await inner.withProvider(provider, async (tx) => { const result = await work(tx); if (held) { state.waiting = true; await released; } return result; });
+      if (held) settle();
+      return out;
+    },
+  };
+  return { store, state, release, settled };
+}
 /** Tests persistent identity, state monotonicity, rollback, aliases and isolation. */
 export function carrierStoreContract(name: string, open: () => Promise<CarrierStoreFixture>): void {
   describe(name, () => {
@@ -94,6 +112,32 @@ export function carrierStoreContract(name: string, open: () => Promise<CarrierSt
         expect(m.getCall('local')?.state).toBe('hangup-bot');
         expect(completion).toEqual({ accepted: true, applied: 0 });
       } finally { answer(); m.dispose(); await h.close(); }
+    });
+    it('commits the speech a save had in flight when its manager is disposed, and leaves the disposed manager empty', async () => {
+      const h = await open(); const m = carrierManager(); const held = holdingStore(h.first);
+      try {
+        await h.first.withProvider('twilio', (tx) => tx.put(storedCall()));
+        await m.processWebhookDurable('twilio', signedStatus('in-progress'), held.store);
+        held.state.holding = true; m.speakText('local', 'one moment');
+        await vi.waitFor(() => expect(held.state.waiting).toBe(true));
+        m.dispose(); held.release(); await held.settled; await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(m.getCall('local')).toBeUndefined(); expect(m.getActiveCalls()).toEqual([]); expect(m.findCallByProviderCallId('remote')).toBeUndefined();
+        expect((await h.second.withProvider('twilio', (tx) => tx.get('local')))?.transcript).toMatchObject([{ speaker: 'bot', text: 'one moment' }]);
+      } finally { held.release(); m.dispose(); await h.close(); }
+    });
+    it('asks the carrier to hang up when its manager is disposed while the hangup commits', async () => {
+      const fetchImpl = vi.fn<typeof fetch>(async () => new Response('{}'));
+      const h = await open(); const m = carrierManager(fetchImpl); const held = holdingStore(h.first);
+      try {
+        await h.first.withProvider('twilio', (tx) => tx.put(storedCall()));
+        await m.processWebhookDurable('twilio', signedStatus('in-progress'), held.store);
+        held.state.holding = true; const hangup = m.hangupCall('local');
+        await vi.waitFor(() => expect(held.state.waiting).toBe(true));
+        m.dispose(); held.release(); await hangup;
+        expect(fetchImpl).toHaveBeenCalledTimes(1); expect(String(fetchImpl.mock.calls[0]![0])).toContain('/Calls/remote.json');
+        expect((await h.second.withProvider('twilio', (tx) => tx.get('local')))?.state).toBe('hangup-bot');
+        expect(m.getCall('local')).toBeUndefined();
+      } finally { held.release(); m.dispose(); await h.close(); }
     });
     it('rejects alias rebinding and keeps providers separate', async () => {
       const h = await open();
