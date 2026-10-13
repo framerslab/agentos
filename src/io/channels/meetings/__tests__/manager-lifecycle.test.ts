@@ -528,6 +528,36 @@ describe('the limits, the meter and the ends', () => {
     await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1); // capture opens
     expect((await sink.appendNext({ runId, at: 2, text: 'heard once capture opened' }))?.seq).toBe(1);
   });
+  it('keeps a final heard while startCapture is on its way to the bot, before the start is written on the run', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 2 });
+    await h.report(runId, 'notice_posted');
+    let answer: () => void = () => {};
+    let reached: () => void = () => {};
+    const commandReached = new Promise<void>((resolve) => { reached = resolve; });
+    const command = h.provider.command.bind(h.provider);
+    vi.spyOn(h.provider, 'command').mockImplementation(async (id, cmd) => {
+      if (cmd.name === 'startCapture') {
+        // the bot starts publishing as the command reaches it; its answer comes back later
+        reached();
+        await new Promise<void>((resolve) => { answer = resolve; });
+      }
+      return command(id, cmd);
+    });
+    const heartbeat = h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1); // the interlock holds: startCapture goes
+    await commandReached;
+    expect((await h.stores.runs.get(runId))?.captureStartedAt).toBeUndefined();
+    const sink = h.manager.transcriptSink(runId);
+    expect((await sink.appendNext({ runId, at: 2, text: 'the first words after the start' }))?.seq).toBe(1);
+    expect(h.seen.filter((e) => e.type === 'bot:transcript')).toHaveLength(1);
+    answer();
+    await heartbeat;
+    expect((await h.stores.runs.get(runId))?.captureStartedAt).toBeDefined();
+  });
   it('lists the terminal runs for eviction when the first can go and at least once a minute, not on every pass', async () => {
     const h = harness();
     const list = vi.spyOn(h.stores.runs, 'list');

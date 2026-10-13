@@ -1410,12 +1410,25 @@ export class MeetingManager {
   // ── The transcript ──
 
   /**
-   * A turn the listen session wrote: a `bot:transcript` event, stored and forwarded, unless the run is behind the fence
-   * or over, or its capture has not started (a provider that passed audio before `startCapture` is not taken at its word).
+   * Whether a run takes transcript turns now: it is not behind the fence or over, and its capture has started or the
+   * capture interlock holds. The start is written on the run once the bot has answered `startCapture`, and the bot can
+   * send its first audio, and so a first final, before that answer; a turn from audio a provider passed on before the
+   * interlock held is dropped (the interlock does not rest on the provider alone). The transcript sink reads it too.
+   *
+   * @param run - The run as just read from its store.
+   */
+  takesTurns(run: MeetingRunRecord): boolean {
+    if (run.state === 'purging' || TERMINAL_RUN_STATES.has(run.state)) return false;
+    return run.captureStartedAt !== undefined || this.captureReady(run);
+  }
+
+  /**
+   * A turn the listen session wrote: a `bot:transcript` event, stored and forwarded, unless the run takes no turns now
+   * ({@link MeetingManager.takesTurns}: behind the fence or over, or before its capture can start) or its transcript is fenced.
    */
   async recordTranscript(turn: TranscriptTurn): Promise<boolean> {
     const run = await this.stores.runs.get(turn.runId);
-    if (!run || run.state === 'purging' || TERMINAL_RUN_STATES.has(run.state) || run.captureStartedAt === undefined || await this.stores.transcript.isFenced(turn.runId)) return false;
+    if (!run || !this.takesTurns(run) || await this.stores.transcript.isFenced(turn.runId)) return false;
     await this.emit('bot:transcript', run, { seq: turn.seq, turnId: turn.turnId, text: turn.text, speaker: turn.speaker, startMs: turn.startMs, endMs: turn.endMs }, `${turn.runId}:transcript:${turn.seq}`, turn.at);
     return true;
   }
