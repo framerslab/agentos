@@ -138,6 +138,27 @@ describe('a worker the manager cannot reach', () => {
     expect(await h.stores.runs.get(runId)).toMatchObject({ lastUsageAt: h.clock.now(), reportedSeconds: 90 });
   });
 
+  it('of two usage reports applied at once, the older one never writes its time or a smaller total over the newer one\'s', async () => {
+    const h = harness({ usageSilenceMs: 120_000 });
+    const runId = await joined(h);
+    const older = h.clock.now();
+    h.clock.advance(60_000);
+    const newer = h.clock.now();
+    const append = h.stores.events.append.bind(h.stores.events);
+    let raced = false;
+    vi.spyOn(h.stores.events, 'append').mockImplementation(async (event) => {
+      if (!raced && event.type === 'bot:usage' && event.at === older) {
+        raced = true;
+        // the newer report is taken whole while the older one is between its read of the run and its write
+        await h.report(runId, 'usage', { seconds: 120 }, newer);
+      }
+      return append(event);
+    });
+    await h.report(runId, 'usage', { seconds: 60 }, older);
+    expect(raced).toBe(true);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ lastUsageAt: newer, lastUsageSourceAt: newer, reportedSeconds: 120 });
+  });
+
   it('refuses a usage silence that is not a finite number of milliseconds above zero', () => {
     const h = harness();
     for (const usageSilenceMs of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {

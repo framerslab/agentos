@@ -57,9 +57,9 @@ export interface IRunStore {
    * decided on the row as the store holds it when it writes, so a write another caller made since an earlier read is
    * never overwritten by a patch decided on that read. Nothing is written when `patchFor` answers undefined, and then
    * undefined is answered, as it is for a run that does not exist. `patchFor` runs while the row is held, so it is
-   * synchronous and does no I/O. The manager decides with it a silent run's end against the run's last usage, and,
-   * without it, reads the row and writes with `update` guarded by the state it read, which a write that keeps the
-   * state can slip between.
+   * synchronous and does no I/O. The manager decides with it a usage report's time and total against the last ones
+   * taken, and a silent run's end against the run's last usage; without it, the manager reads the row and writes with
+   * `update` guarded by the state it read, which a write that keeps the state can slip between.
    */
   updateWith?(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined>;
   /** Rewrites the whole row (the content-free form at the end of a purge). */

@@ -941,19 +941,24 @@ export class MeetingManager {
           await this.deliver(stored, updated ?? run);
           return true;
         }
-        // With the silence rule, a report the worker made no later than the last one taken (one that arrives late, out of
-        // order) is not fresh usage: its event is delivered as stored, and neither the clock nor the total moves
-        if (run.lastUsageSourceAt !== undefined && event.at <= run.lastUsageSourceAt) {
-          await this.deliver(stored, run);
-          return false;
-        }
         // the receipt, on the manager's clock, and the running total are written before the meter, so a manager that
         // restarts measures the silence and settles from them; a count that is not a finite number never enters the total
         const reported = event.data?.seconds;
-        const seconds = Math.max(run.reportedSeconds ?? 0, typeof reported === 'number' && Number.isFinite(reported) ? reported : 0);
-        const updated = await this.stores.runs.update(run.runId, { lastUsageAt: this.now(), lastUsageSourceAt: event.at, reportedSeconds: seconds });
-        if (run.reservationId && run.captureStartedAt !== undefined) await this.stores.entitlement.meter(run.reservationId, seconds);
-        await this.deliver(stored, updated ?? run);
+        const count = typeof reported === 'number' && Number.isFinite(reported) ? reported : 0;
+        // With the silence rule, a report the worker made no later than the last one taken (one that arrives late, out of
+        // order) is not fresh usage: its event is delivered as stored, and neither the clock nor the total moves. Both are
+        // decided on the row as the store holds it, in the write, so of two reports applied at once the older one never
+        // writes its time, or a smaller total, over the newer one's
+        const updated = await this.updateRunWith(run.runId, (current) =>
+          current.lastUsageSourceAt !== undefined && event.at <= current.lastUsageSourceAt
+            ? undefined
+            : { lastUsageAt: this.now(), lastUsageSourceAt: event.at, reportedSeconds: Math.max(current.reportedSeconds ?? 0, count) });
+        if (!updated) {
+          await this.deliver(stored, run);
+          return false;
+        }
+        if (run.reservationId && run.captureStartedAt !== undefined) await this.stores.entitlement.meter(run.reservationId, updated.reportedSeconds ?? count);
+        await this.deliver(stored, updated);
         return true;
       }
       case 'left': {
