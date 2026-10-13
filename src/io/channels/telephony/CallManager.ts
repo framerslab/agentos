@@ -254,7 +254,8 @@ export class CallManager {
    * On a call persisted with {@link persistCall} or read by {@link processWebhookDurable}, the entry and the speaking
    * state also commit to the call's store, after the manager's earlier store transactions; until one commits them,
    * every later transaction for the call carries them, so a callback does not drop them from the manager's record.
-   * A failed commit is written to the console and left to the next transaction.
+   * When another manager has ended the call in the store meanwhile, the entry still commits to its transcript and the
+   * call keeps its stored outcome. A failed commit is written to the console and left to the next transaction.
    */
   speakText(callId: CallId, text: string): void {
     const call = this.activeCalls.get(callId);
@@ -540,20 +541,23 @@ export class CallManager {
     this.durableTail = run.then(() => undefined, () => undefined);
     return run;
   }
-  /** Adds the call's unsaved bot speech to a stored record that has not ended, and returns the entries it took. */
+  /**
+   * Adds the call's unsaved bot speech to a stored record and returns the entries it took. A record another manager
+   * has ended takes them too and keeps its outcome, since `transitionState` leaves an ended state as it is.
+   */
   private applyUnsavedSpeech(call: CallRecord): TranscriptEntry[] {
     const speech = [...(this.unsavedSpeech.get(call.callId) ?? [])];
-    if (!TERMINAL_CALL_STATES.has(call.state)) for (const entry of speech) { call.transcript.push(structuredClone(entry)); this.transitionState(call, 'speaking'); }
+    for (const entry of speech) { call.transcript.push(structuredClone(entry)); this.transitionState(call, 'speaking'); }
     return speech;
   }
   /**
    * Makes a committed record the manager's record of the call: the speech the commit took leaves the unsaved list,
-   * and speech recorded since stays on top until a later transaction commits it. An ended call keeps none. A disposed
-   * manager takes no record: a transaction in flight at {@link dispose} commits without refilling it.
+   * and speech recorded since stays on top until a later transaction commits it, on an ended call too, which keeps its
+   * state. A disposed manager takes no record: a transaction in flight at {@link dispose} commits without refilling it.
    */
   private refreshDurable(call: CallRecord, store: ITelephonyCallStore, committed: TranscriptEntry[]): void {
     if (this.disposed) return;
-    const unsaved = TERMINAL_CALL_STATES.has(call.state) ? [] : (this.unsavedSpeech.get(call.callId) ?? []).filter((entry) => !committed.includes(entry));
+    const unsaved = (this.unsavedSpeech.get(call.callId) ?? []).filter((entry) => !committed.includes(entry));
     if (unsaved.length) this.unsavedSpeech.set(call.callId, unsaved); else this.unsavedSpeech.delete(call.callId);
     const local = structuredClone(call);
     for (const entry of unsaved) { local.transcript.push(structuredClone(entry)); this.transitionState(local, 'speaking'); }
