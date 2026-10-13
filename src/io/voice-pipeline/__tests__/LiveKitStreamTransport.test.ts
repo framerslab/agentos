@@ -219,6 +219,28 @@ describe('LiveKitStreamTransport', () => {
     transport.close();
   });
 
+  it('emits a transcript message the participant sends whole, every field kept', async () => {
+    const room = new FakeRoom();
+    const { transport, messages } = open(room);
+    const transcript = {
+      type: 'transcript',
+      text: 'Hello there.',
+      itemId: '7',
+      isFinal: true,
+      confidence: 0.8,
+      startMs: 1200,
+      endMs: 2100,
+      language: 'en',
+    };
+    room.textHandlers.get('agentos.voice')!(
+      { readAll: async () => JSON.stringify(transcript) },
+      { identity: 'user-1' }
+    );
+    await settle();
+    expect(messages).toEqual([transcript]);
+    transport.close();
+  });
+
   it('reports a message that is not JSON as an error and stays open', async () => {
     const room = new FakeRoom();
     const { transport, errors } = open(room);
