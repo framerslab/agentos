@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -42,6 +42,25 @@ describe('durable state files', () => {
       removeDurableJson(path);
       expect(readdirSync(dir)).toEqual([]);
       expect(() => removeDurableJson(path)).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('removes its temporary file when the write or the rename fails, and throws the error', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'meeting-state-'));
+    try {
+      const path = join(dir, 'state.json');
+      // a value JSON cannot hold fails the write after the temporary file is made
+      const circular: { self?: unknown } = {};
+      circular.self = circular;
+      expect(() => writeDurableJson(path, circular)).toThrow(TypeError);
+      expect(readdirSync(dir)).toEqual([]);
+      // a directory where the file belongs refuses the rename
+      mkdirSync(path);
+      expect(() => writeDurableJson(path, { runs: ['r1'] })).toThrow();
+      expect(readdirSync(dir)).toEqual(['state.json']);
+      expect(statSync(path).isDirectory()).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
