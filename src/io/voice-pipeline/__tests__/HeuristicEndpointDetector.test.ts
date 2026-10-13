@@ -17,7 +17,8 @@
  * - speech_start cancels a pending silence timer
  * - reset() clears accumulated text and cancels pending timers
  * - Finals keyed by item, as OpenAI Realtime sends them after each end of speech
- * - An item final that comes before its end of speech, and one left over from a completed turn, reported as late_final
+ * - An item final that comes before its end of speech, and one left over from a completed turn, reported as late_final,
+ *   also when it arrives while the next utterance is spoken
  *
  * The silence_timeout cases use a 100 ms detector instance and a short
  * setTimeout await -- fast enough for CI while remaining deterministic. The
@@ -595,24 +596,52 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
     expect(late).toHaveBeenCalledOnce(); // the next turn's own final is no late final
   });
 
-  it("keeps the early final of the next turn's first utterance after a reset, and decides the turn at its end of speech", () => {
+  it("drops a completed turn's final that arrives while the next utterance is spoken, and waits for that utterance's own final", () => {
     const handler = vi.fn();
+    const late = vi.fn();
     detector.on('turn_complete', handler);
+    detector.on('late_final', late);
 
     detector.pushVadEvent(transcriberSpeech('speech_start'));
     detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
     detector.pushTranscript(itemFinal('Book a table for two.', 'item_A', 0));
+    detector.pushVadEvent(transcriberSpeech('speech_end')); // the second utterance's final is slow
+    vi.advanceTimersByTime(1_000); // so the turn stops waiting for it and ends on the first clause
     expect(handler).toHaveBeenCalledOnce();
-    detector.reset();
+    detector.reset(); // as the orchestrator does once the reply has played
 
-    detector.pushVadEvent(transcriberSpeech('speech_start'));
-    detector.pushTranscript(itemFinal('what about Friday', 'item_B', 6_000)); // before its end of speech
+    detector.pushVadEvent(transcriberSpeech('speech_start')); // the user speaks again
+    const slow = itemFinal('At seven tonight.', 'item_B', 1_300);
+    detector.pushTranscript(slow); // the first turn's slow final, while the next utterance is spoken
+    expect(late).toHaveBeenCalledOnce();
+    expect(late.mock.calls[0][0]).toBe(slow);
     detector.pushVadEvent(transcriberSpeech('speech_end'));
-    vi.advanceTimersByTime(999);
+    // The slow final paid no end of speech: the turn waits for its own utterance's final.
     expect(handler).toHaveBeenCalledOnce();
-    vi.advanceTimersByTime(1); // the silence timeout, counted from the end of speech
+
+    detector.pushTranscript(itemFinal('What about Friday?', 'item_C', 6_000));
     expect(handler).toHaveBeenCalledTimes(2);
-    expect(handler.mock.calls[1][0]).toMatchObject({ transcript: 'what about Friday', reason: 'silence_timeout' });
+    expect(handler.mock.calls[1][0]).toMatchObject({ transcript: 'What about Friday?', reason: 'punctuation' });
+    expect(late).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a final that comes before its end of speech after a turn in which no speech started, and decides at that end', () => {
+    const handler = vi.fn();
+    const late = vi.fn();
+    detector.on('turn_complete', handler);
+    detector.on('late_final', late);
+
+    // A transcriber with client commits reports no speech; a listen session's stop supplies the end of speech.
+    detector.pushTranscript(itemFinal('We start at nine.', 'item_A', 0));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    expect(handler).toHaveBeenCalledOnce();
+
+    detector.pushTranscript(itemFinal('Then lunch.', 'item_B', 4_000)); // after that turn's reset
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(handler.mock.calls[1][0]).toMatchObject({ transcript: 'Then lunch.', reason: 'punctuation' });
+    expect(late).not.toHaveBeenCalled();
   });
 
   it("keeps an utterance's slow final when a reset came while the utterance was spoken", () => {
