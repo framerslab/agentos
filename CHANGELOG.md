@@ -1,3 +1,9 @@
+## [0.13.90](https://github.com/framerslab/agentos/compare/v0.13.89...v0.13.90) (2026-10-13)
+
+### fix
+
+* **voice-pipeline:** keep each clause of a turn whose finals arrive after the next utterance starts (#306) ([e58b14a](https://github.com/framerslab/agentos/commit/e58b14a1b267567e0a3f3ca50b3f57d1d911a996))
+
 ## [0.13.89](https://github.com/framerslab/agentos/compare/v0.13.88...v0.13.89) (2026-10-13)
 
 ### fix
