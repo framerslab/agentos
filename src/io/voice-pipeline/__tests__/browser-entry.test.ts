@@ -91,6 +91,14 @@ describe.skipIf(!inCI && !existsSync(entry))('the browser entry of the voice pip
         'io/voice-pipeline/phraseHeard.js',
         'io/voice-pipeline/sttEntries.js',
         'cognition/library/tokens.js',
+        'io/voice-pipeline/VoiceEventEmitter.js',
+        'io/voice-pipeline/providers/StreamingSTTChain.js',
+        'io/voice-pipeline/AudioRingBuffer.js',
+        'io/voice-pipeline/TranscriptDedupe.js',
+        'io/voice-pipeline/VoicePipelineError.js',
+        'io/voice-pipeline/CircuitBreaker.js',
+        'io/voice-pipeline/VoiceMetricsReporter.js',
+        'io/voice-pipeline/HealthyProvider.js',
       ])
     );
   });
