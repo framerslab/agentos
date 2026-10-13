@@ -1935,3 +1935,42 @@ describe('GraphRuntime: a value a branch only carried never replaces what a sibl
     expect(model.stateSeenBy(PUBLISH)?.scratch).toEqual({ sources: REFINED });
   });
 });
+
+// ---------------------------------------------------------------------------
+// The checkpoint after a parallel batch
+// ---------------------------------------------------------------------------
+//
+// A branch that saves a checkpoint after it runs (every node does under the
+// `every_node` policy of `workflow()` and `mission()`) saves its own copy of
+// the state, while the nodes it lists as completed can already include the
+// siblings that finished before it. The last checkpoint the batch saves has
+// to hold what every branch wrote.
+
+describe('GraphRuntime: the checkpoint after a parallel batch', () => {
+  it('holds every branch under the every_node policy, and a resume from it returns them all', async () => {
+    const store = new InMemoryCheckpointStore();
+    // notes, declared after draft, finishes after it, so draft has completed
+    // when notes saves its checkpoint.
+    const model = recordingModel({ [DRAFT]: DRAFTED, [NOTES]: NOTED }, [NOTES]);
+    const runtime = runtimeOver(store, model.providerCall);
+    // START fans out to draft and notes, which both end the run.
+    const graph = graphOf(
+      'g-batch-every-node',
+      [draftNode(), notesNode()],
+      [
+        [START, 'draft'],
+        [START, 'notes'],
+        ['draft', END],
+        ['notes', END],
+      ],
+      { checkpointPolicy: 'every_node' },
+    );
+
+    const saved = (await readAll(runtime.stream(graph, {}))).filter((event) => event.type === 'checkpoint_saved');
+    const last = saved[saved.length - 1];
+    if (last?.type !== 'checkpoint_saved') throw new Error('the run saved no checkpoint');
+
+    expect((await store.get(last.checkpointId))?.state.artifacts).toEqual({ draft: DRAFTED, notes: NOTED });
+    expect(await runtime.resume(graph, last.checkpointId)).toEqual({ draft: DRAFTED, notes: NOTED });
+  });
+});
