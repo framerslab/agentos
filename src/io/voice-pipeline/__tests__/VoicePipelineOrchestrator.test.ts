@@ -25,6 +25,7 @@
  * - A transport send that rejects is reported once as 'error' and the turn goes on; with nothing listening
  *   for 'error' it is written as a console warning that names the failure, as is an 'error' listener that
  *   throws or rejects, and the listeners after that one still get the failure
+ * - The errorMonitor listeners get each failure first, even when nothing listens for 'error'
  * - Of the audio chunks a transport refuses, the first of each reply is reported and the rest of that reply's
  *   are not, whatever order the replies' sends settle in; a refused control message is reported each time
  */
@@ -630,6 +631,42 @@ describe('VoicePipelineOrchestrator', () => {
         expect.stringMatching(/the socket is closing.*the second listener rejected/),
       ]);
       expect(orchestrator.state).toBe('listening');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      warn.mockRestore();
+    }
+  });
+
+  /**
+   * As emit('error') does, the orchestrator hands each failure to the errorMonitor listeners first, even when nothing
+   * listens for 'error'; a monitor that rejects is written as a console warning too.
+   */
+  it("hands a failed send to the errorMonitor listeners, even when nothing listens for 'error'", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const refused = new Error('the socket is closing');
+      vi.mocked(transport.sendControl).mockRejectedValue(refused);
+      await startSession();
+      const monitored: unknown[] = [];
+      orchestrator.on(EventEmitter.errorMonitor, (err: unknown) => monitored.push(err));
+      orchestrator.on(EventEmitter.errorMonitor, async () => {
+        throw new Error('the monitor rejected');
+      });
+
+      sttSession.emit('transcript', { text: 'hello', confidence: 0.9, words: [], isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(monitored).toEqual([refused]);
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
+        expect.stringMatching(/the socket is closing$/), // nothing listens for 'error'
+        expect.stringMatching(/the socket is closing.*the monitor rejected/),
+      ]);
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandled);

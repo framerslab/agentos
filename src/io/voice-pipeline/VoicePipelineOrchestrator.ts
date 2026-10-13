@@ -580,22 +580,18 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Reports a failure as `'error'` when something listens for it, and otherwise as a console warning: an `'error'`
-   * that nothing listens for would throw. The failure goes to the `errorMonitor` listeners and then to each `'error'`
-   * listener in order, as `emit('error')` hands it, except that a listener that throws or rejects is written as a
-   * console warning, with the failure it was handed, and the listeners after it still run: the failures are reported
-   * from an async event handler or a promise's rejection handler, where a listener's throw or rejection would become an
-   * unhandled rejection, and `emit()` does not hand back what a listener returns.
+   * that nothing listens for would throw. As `emit('error')` hands a failure, it goes first to the `errorMonitor`
+   * listeners, whether or not anything listens for `'error'`, and then to each `'error'` listener in order, except
+   * that a listener that throws or rejects is written as a console warning, with the failure it was handed, and the
+   * listeners after it still run: the failures are reported from an async event handler or a promise's rejection
+   * handler, where a listener's throw or rejection would become an unhandled rejection, and `emit()` does not hand back
+   * what a listener returns.
    *
    * @param err - The failure; anything other than an `Error` is wrapped in one.
    * @param what - What failed, for the console warning.
    */
   private _reportError(err: unknown, what: string): void {
     const error = err instanceof Error ? err : new Error(String(err));
-    const listeners = this.rawListeners('error');
-    if (listeners.length === 0) {
-      console.warn(`[voice-pipeline-orchestrator] ${what}:`, error.message);
-      return;
-    }
     const warnListenerFailed = (thrown: unknown): void => {
       const listenerFailure = thrown instanceof Error ? thrown.message : String(thrown);
       console.warn(
@@ -604,19 +600,22 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         `(an 'error' listener failed: ${listenerFailure})`
       );
     };
-    try {
-      this.emit(EventEmitter.errorMonitor, error);
-    } catch (thrown) {
-      warnListenerFailed(thrown);
-    }
-    for (const listener of listeners) {
-      try {
-        const result: unknown = (listener as (error: Error) => unknown).call(this, error);
-        if (result instanceof Promise) result.catch(warnListenerFailed);
-      } catch (thrown) {
-        warnListenerFailed(thrown);
+    const handToListeners = (event: string | symbol): void => {
+      for (const listener of this.rawListeners(event)) {
+        try {
+          const result: unknown = (listener as (error: Error) => unknown).call(this, error);
+          if (result instanceof Promise) result.catch(warnListenerFailed);
+        } catch (thrown) {
+          warnListenerFailed(thrown);
+        }
       }
+    };
+    handToListeners(EventEmitter.errorMonitor);
+    if (this.listenerCount('error') === 0) {
+      console.warn(`[voice-pipeline-orchestrator] ${what}:`, error.message);
+      return;
     }
+    handToListeners('error');
   }
 
   /**
