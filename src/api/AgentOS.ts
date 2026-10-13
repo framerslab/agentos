@@ -1501,7 +1501,9 @@ export class AgentOS implements IAgentOS {
   /**
    * The output guards' verdict on a stream. A block that withheld actionable tool calls drops the pause the
    * orchestrator saved for them, so neither `getPendingExternalToolRequest()` nor the stream offers them again; then
-   * a replaced or rewritten reply is written to the stored conversation. Nothing here throws into the stream.
+   * a replaced or rewritten reply is written to the stored conversation. A store that refuses the save of the dropped
+   * pause is logged: the stream is closed all the same, and the stored conversation keeps the pause until the
+   * conversation is saved again. Nothing here throws into the stream.
    */
   private async onOutputVerdict(conversationKey: string, verdict: GuardrailOutputVerdict): Promise<void> {
     const withheld = verdict.toolCallIds ?? [];
@@ -1513,7 +1515,7 @@ export class AgentOS implements IAgentOS {
           ...(verdict.guardrailId ? { guardrailId: verdict.guardrailId } : {}),
         });
       } catch (error) {
-        this.logger.warn('The pause saved for a blocked tool call could not be dropped', {
+        this.logger.warn('The refusal of a blocked tool call could not be saved: the stored conversation keeps its pause until it is saved again', {
           streamId: verdict.streamId,
           toolCallIds: withheld,
           error: error instanceof Error ? error.message : String(error),
