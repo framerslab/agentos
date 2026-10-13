@@ -2,7 +2,8 @@
  * @file manifest-paths.integration.test.ts
  * The capability manifest scanner against a temp folder: a capability is read only from its own folder, and one
  * whose manifest names a file elsewhere, or whose files are reached through a link or are not regular files, is
- * refused and recorded while the scan goes on with the others.
+ * refused and recorded while the scan goes on with the others. A skillContent in a folder below the capability's
+ * is read.
  */
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -90,6 +91,22 @@ describe('a capability is read only from its own folder', () => {
       .catch((err: unknown) => err);
     expect(thrown).toBeInstanceOf(CapabilityManifestRefusedError);
     expect(thrown).toMatchObject({ code: 'CAPABILITY_MANIFEST_REFUSED', field: 'skillContent', problem: 'dot' });
+  });
+
+  it("a manifest whose skillContent names docs/skill.md reads that file into the capability's fullContent", async () => {
+    const nested = "# Nested Tool\n\nRead from the capability's docs folder.\n";
+    capability('nested', {
+      'CAPABILITY.yaml': manifest('nested', 'skillContent: docs/skill.md'),
+      'docs/skill.md': nested,
+      // A SKILL.md beside the manifest, which a read that lost the docs folder would take instead.
+      'SKILL.md': '# Not this file\n',
+    });
+
+    const result = await new CapabilityManifestScanner().scanWithRefusals([caps]);
+
+    expect(result.refused).toEqual([]);
+    expect(result.descriptors).toHaveLength(1);
+    expect(result.descriptors[0]).toMatchObject({ id: 'tool:nested', fullContent: nested });
   });
 
   it('a manifest that sets skillContent to an empty value, null, no value, false or a number is refused and recorded, and one that leaves it out reads SKILL.md beside it', async () => {
