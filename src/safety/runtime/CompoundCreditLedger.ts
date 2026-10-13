@@ -74,11 +74,12 @@ function allocatableLots(lots: readonly CreditLotRow[], at: number, policy: Allo
 }
 
 /**
- * The supplier-day key every reservation locks before it reads the open supplier liability. That liability spans every
- * day, so admissions queue on this one platform-wide row: the row of the reservation's own day would let two
- * reservations on either side of midnight both read it before either holds.
+ * The supplier day every reservation locks before it reads the open supplier liability: the epoch's, `1970-01-01`, a UTC
+ * day like any other, so a store that keeps its days as dates accepts it. That liability spans every day, so admissions
+ * queue on this one platform-wide row: the row of the reservation's own day would let two reservations on either side
+ * of midnight both read it before either holds.
  */
-const SUPPLIER_ADMISSION_KEY = 'admission';
+const SUPPLIER_ADMISSION_DAY = creditDay(0);
 
 /** Throws unless `value` is a whole number at least `min`. */
 function whole(name: string, value: number, min = 0): void {
@@ -230,7 +231,7 @@ export async function reserveCompoundCredit(store: ICompoundCreditStore, input: 
     const availableMicro = ordered.reduce((sum, lot) => sum + lotFreeMicro(lot), 0);
     if (account.frozen) return { status: 'refused', reason: 'account_frozen', availableMicro, liability };
     if (availableMicro < liability.customerMicro) return { status: 'refused', reason: 'insufficient_credit', availableMicro, liability };
-    await trx.lockSupplierDay(SUPPLIER_ADMISSION_KEY);
+    await trx.lockSupplierDay(SUPPLIER_ADMISSION_DAY);
     const day = await trx.lockSupplierDay(creditDay(input.at));
     const open = await trx.openSupplierMicro();
     if (day.settledMicro + open + liability.supplierMicro > input.supplierDailyCapMicro) {
