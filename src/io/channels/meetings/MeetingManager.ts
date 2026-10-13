@@ -187,6 +187,8 @@ export class MeetingManager {
   private readonly purgeHooks: Array<(runId: string) => Promise<void>> = [];
   private lastReconcileAt = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
+  /** Whether a pass the timer started is still running. */
+  private ticking = false;
 
   constructor(private readonly config: MeetingManagerConfig) {
     this.id = config.managerId ?? randomUUID();
@@ -379,11 +381,20 @@ export class MeetingManager {
 
   // ── The loop ──
 
-  /** Runs `tick()` every second until `stop()`. A host with its own scheduler calls `tick()` itself. */
+  /**
+   * Runs `tick()` every second until `stop()`, one pass at a time: a pass still running when the next is due is not
+   * joined by it, so a slow store does not stack passes on each other. A host with its own scheduler calls `tick()` itself.
+   */
   start(intervalMs = 1_000): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.tick().catch((err) => this.config.logger?.error(`[MeetingManager] tick: ${String(err)}`));
+      if (this.ticking) return;
+      this.ticking = true;
+      void this.tick()
+        .catch((err) => this.config.logger?.error(`[MeetingManager] tick: ${String(err)}`))
+        .finally(() => {
+          this.ticking = false;
+        });
     }, intervalMs);
     this.timer.unref?.();
   }

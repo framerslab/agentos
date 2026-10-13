@@ -307,3 +307,23 @@ describe('dispatch and the interlock', () => {
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed' });
   });
 });
+
+describe('the loop', () => {
+  it('start() runs one pass at a time: a pass still running is not joined by the next one due', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      let finish: () => void = () => {};
+      const tick = vi.spyOn(h.manager, 'tick').mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+      h.manager.start(1_000);
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(tick).toHaveBeenCalledTimes(1);
+      finish();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(tick).toHaveBeenCalledTimes(2);
+    } finally {
+      h.manager.stop();
+      vi.useRealTimers();
+    }
+  });
+});
