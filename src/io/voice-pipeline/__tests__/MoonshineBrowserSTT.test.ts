@@ -10,18 +10,25 @@
  * peer.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type * as Moonshine from '@moonshine-ai/moonshine-wasm';
 import {
+  MoonshineBrowserSTT,
   checkMoonshineBrowserSupport,
   chooseMoonshineModel,
   loadMoonshineWasm,
   readMoonshineDeviceSignals,
+  type MoonshineBrowserSTTConfig,
   type MoonshineBrowserScope,
   type MoonshineDeviceSignals,
+  type MoonshineLoadProgress,
   type MoonshineModelSize,
   type MoonshineWasmModule,
 } from '../providers/MoonshineBrowserSTT.js';
+import { StreamingSTTChain } from '../providers/StreamingSTTChain.js';
+import { VoicePipelineError } from '../VoicePipelineError.js';
+import type { StreamingSTTSession, TranscriptEvent } from '../types.js';
+import { FakeStream, FakeTranscriber, FakeWorkerHost, fakeMoonshine, line } from './moonshine-fakes.js';
 
 // Checked by the type check: the real package satisfies the structural type
 // the provider accepts, so a host passes its import as it is.
@@ -204,5 +211,372 @@ describe('checkMoonshineBrowserSupport', () => {
   it("picks the model for the scope's device", () => {
     const phone = page({ navigator: { userAgent: CHROME_ANDROID, userAgentData: { mobile: true }, deviceMemory: 2 } });
     expect(checkMoonshineBrowserSupport({ scope: phone }).model).toBe('moonshine-tiny');
+  });
+});
+
+/** A mono frame of `ms` milliseconds at `sampleRate`. */
+function frame(ms: number, sampleRate = 16_000) {
+  return { samples: new Float32Array(Math.round((ms / 1000) * sampleRate)), sampleRate, timestamp: Date.now() };
+}
+
+/** Lets pending promise continuations and microtasks run. */
+async function settle(rounds = 5): Promise<void> {
+  for (let i = 0; i < rounds; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+/** Collects what a session emits, in order. */
+function record(session: StreamingSTTSession, options: { errorListener?: boolean } = {}) {
+  const transcripts: TranscriptEvent[] = [];
+  const errors: Error[] = [];
+  const events: string[] = [];
+  session.on('transcript', (event: TranscriptEvent) => {
+    transcripts.push(event);
+    events.push(`${event.isFinal ? 'final' : 'interim'} ${event.itemId} ${event.text}`);
+  });
+  if (options.errorListener !== false) {
+    session.on('error', (err: Error) => {
+      errors.push(err);
+      events.push('error');
+    });
+  }
+  session.on('close', () => events.push('close'));
+  return { transcripts, errors, events };
+}
+
+/** The stream the newest session opened. */
+function newestStream(): FakeStream {
+  return FakeStream.created[FakeStream.created.length - 1];
+}
+
+beforeEach(() => {
+  FakeStream.created.length = 0;
+  FakeTranscriber.loaded.length = 0;
+  FakeWorkerHost.created.length = 0;
+});
+
+const THREADS: Array<'calling' | 'worker'> = ['calling', 'worker'];
+
+for (const thread of THREADS) describe(`MoonshineBrowserSTT on the ${thread} thread`, () => {
+  async function open(config: MoonshineBrowserSTTConfig = {}, options: { errorListener?: boolean } = {}) {
+    const fake = fakeMoonshine();
+    const stt = new MoonshineBrowserSTT({ moonshine: fake, thread, model: 'moonshine-small', ...config });
+    const session = await stt.startSession();
+    return { stt, session, stream: newestStream(), log: record(session, options) };
+  }
+
+  it('emits interim text keyed by the line id, then the final, with offsets on the session clock', async () => {
+    const { session, stream, log } = await open();
+    stream.passes.push([line('101', 'Hello', 0.3, 0.4)]);
+    stream.passes.push([line('101', 'Hello there', 0.3, 0.9)]);
+    stream.passes.push([line('101', 'Hello there.', 0.3, 1.0, true)]);
+    session.pushAudio(frame(500));
+    session.pushAudio(frame(500));
+    session.pushAudio(frame(500));
+    await settle();
+    const shared = { confidence: 1, words: [], itemId: '101', startMs: 300, language: 'en' };
+    expect(log.transcripts).toEqual([
+      { ...shared, text: 'Hello', isFinal: false, endMs: 700 },
+      { ...shared, text: 'Hello there', isFinal: false, endMs: 1200 },
+      { ...shared, text: 'Hello there.', isFinal: true, endMs: 1300, durationMs: 1000 },
+    ]);
+    session.close();
+  });
+
+  it('emits one interim for a pass that changes the text and updates the line, and none for a bare update', async () => {
+    const { session, stream, log } = await open();
+    stream.passes.push([line('7', 'One', 0, 0.2)]);
+    stream.passes.push([line('7', 'One two', 0, 0.5)]);
+    stream.passes.push([line('7', 'One two', 0, 0.6)]);
+    for (let i = 0; i < 3; i++) session.pushAudio(frame(500));
+    await settle();
+    expect(log.events).toEqual(['interim 7 One', 'interim 7 One two']);
+    session.close();
+  });
+
+  it('keeps the interim text of two open lines apart', async () => {
+    const { session, stream, log } = await open();
+    stream.passes.push([line('1', 'First', 0, 0.5), line('2', 'Sec', 0.6, 0.2)]);
+    stream.passes.push([line('1', 'First line.', 0, 0.6, true), line('2', 'Second', 0.6, 0.4)]);
+    session.pushAudio(frame(500));
+    session.pushAudio(frame(500));
+    await settle();
+    expect(log.events).toEqual(['interim 1 First', 'interim 2 Sec', 'final 1 First line.', 'interim 2 Second']);
+    session.close();
+  });
+
+  it('completes the open line on flush and starts again, placing later lines after the audio already pushed', async () => {
+    const { session, stream, log } = await open();
+    stream.passes.push([line('a', 'Before', 0.2, 0.5)]);
+    session.pushAudio(frame(1000));
+    await settle();
+    await session.flush();
+    expect(stream.stops).toBe(1);
+    expect(stream.starts).toBe(2);
+    stream.passes.push([line('b', 'After', 0.1, 0.3)]);
+    session.pushAudio(frame(500));
+    await settle();
+    expect(log.events).toEqual(['interim a Before', 'final a Before', 'interim b After']);
+    expect(log.transcripts[1]).toMatchObject({ isFinal: true, startMs: 200, endMs: 700 });
+    expect(log.transcripts[2]).toMatchObject({ startMs: 1100, endMs: 1400 });
+    session.close();
+  });
+
+  it('holds the frames pushed during a flush and feeds them once the stream runs again', async () => {
+    const { session, stream, log } = await open();
+    session.pushAudio(frame(1000));
+    const flushing = session.flush();
+    session.pushAudio(frame(200));
+    expect(stream.audio).toHaveLength(1);
+    await flushing;
+    expect(stream.audio).toHaveLength(2);
+    stream.passes.push([line('c', 'Held', 0, 0.2)]);
+    session.pushAudio(frame(100));
+    await settle();
+    expect(log.errors).toEqual([]);
+    expect(log.transcripts[0]).toMatchObject({ itemId: 'c', startMs: 1000 });
+    session.close();
+  });
+
+  it('retracts shown interim text with an empty final, and sends nothing for an empty line never shown', async () => {
+    const { session, stream, log } = await open();
+    stream.passes.push([line('5', 'uh', 0, 0.2)]);
+    stream.passes.push([line('5', '', 0, 0.3, true)]);
+    stream.passes.push([line('6', '', 0.5, 0.1, true)]);
+    for (let i = 0; i < 3; i++) session.pushAudio(frame(500));
+    await settle();
+    expect(log.events).toEqual(['interim 5 uh', 'final 5 ']);
+    session.close();
+  });
+
+  it('closes at once with no last pass: an empty final retracts the open line, one close, and later frames dropped', async () => {
+    const { session, stream, log } = await open();
+    stream.passes.push([line('d', 'Open line', 0, 0.4)]);
+    session.pushAudio(frame(500));
+    await settle();
+    session.close();
+    session.close();
+    session.pushAudio(frame(100));
+    await settle();
+    expect(log.events).toEqual(['interim d Open line', 'final d ', 'close']);
+    expect(log.transcripts[1]).toMatchObject({ text: '', isFinal: true, itemId: 'd', startMs: 0, endMs: 400 });
+    expect(stream.stops).toBe(0);
+    expect(stream.closed).toBe(true);
+    expect(stream.audio).toHaveLength(1);
+  });
+
+  it('turns a failed pass into an error and then close, and pushAudio does not throw', async () => {
+    const { session, stream, log } = await open();
+    stream.failNextPass = new Error('ORT run failed: out of memory');
+    expect(() => session.pushAudio(frame(100))).not.toThrow();
+    await settle();
+    expect(log.events).toEqual(['error', 'close']);
+    expect(log.errors[0]).toBeInstanceOf(VoicePipelineError);
+    expect(log.errors[0]).toMatchObject({
+      kind: 'stt',
+      provider: 'moonshine-browser',
+      message: 'ORT run failed: out of memory',
+    });
+  });
+
+  it('logs a failure that no error listener takes, and still closes', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { session, stream, log } = await open({}, { errorListener: false });
+    stream.failNextPass = new Error('boom');
+    session.pushAudio(frame(100));
+    await settle();
+    expect(log.events).toEqual(['close']);
+    expect(warn).toHaveBeenCalledWith('[moonshine-browser-stt] error (no listener attached):', 'boom');
+    warn.mockRestore();
+  });
+
+  it('takes the confidence from the timed words, and their offsets from the line start', async () => {
+    const { session, stream, log } = await open();
+    const words = [
+      { text: 'Hello', start: 1.2, end: 1.5, confidence: 0.8 },
+      { text: 'there', start: 1.6, end: 1.9, confidence: 0.6 },
+    ];
+    stream.passes.push([line('w', 'Hello there', 1.2, 0.7, true, words)]);
+    session.pushAudio(frame(500));
+    await settle();
+    expect(log.transcripts[0].words).toEqual([
+      { word: 'Hello', start: 0, end: 300, confidence: 0.8 },
+      { word: 'there', start: 400, end: 700, confidence: 0.6 },
+    ]);
+    expect(log.transcripts[0].confidence).toBeCloseTo(0.7);
+    session.close();
+  });
+});
+
+describe('MoonshineBrowserSTT: the model, its loading and the provider', () => {
+  it('loads once, and every session is a stream on the one model', async () => {
+    const stt = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), thread: 'calling', model: 'moonshine-small' });
+    const [a, b] = await Promise.all([stt.startSession(), stt.startSession()]);
+    expect(FakeTranscriber.loaded).toHaveLength(1);
+    expect(FakeTranscriber.loaded[0].streams).toHaveLength(2);
+    a.close();
+    b.close();
+  });
+
+  it('runs in the package worker in a page, and on the calling thread elsewhere', async () => {
+    const inPage = new MoonshineBrowserSTT({ moonshine: fakeMoonshine({ workerSupported: true }), model: 'moonshine-small' });
+    await inPage.load();
+    expect(inPage.thread).toBe('worker');
+    expect(FakeWorkerHost.created).toHaveLength(1);
+    const inWorker = new MoonshineBrowserSTT({ moonshine: fakeMoonshine({ workerSupported: false }), model: 'moonshine-small' });
+    await inWorker.load();
+    expect(inWorker.thread).toBe('calling');
+    expect(FakeWorkerHost.created).toHaveLength(1);
+    inPage.dispose();
+    inWorker.dispose();
+  });
+
+  it('picks the size by device for auto, and loads its architecture', async () => {
+    const stt = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), device: { mobile: true, deviceMemoryGb: 2 } });
+    expect(stt.model).toBe('moonshine-tiny');
+    await stt.load();
+    expect(FakeWorkerHost.created[0].loads[0]).toMatchObject({ modelArch: 2, source: { kind: 'catalog', language: 'en' } });
+    stt.dispose();
+  });
+
+  it("loads from the package's CDN by default, and from the host's folder with modelBaseUrl", async () => {
+    const cdn = new MoonshineBrowserSTT({ moonshine: fakeMoonshine({ workerSupported: false }), model: 'moonshine-small' });
+    await cdn.load();
+    expect(FakeTranscriber.loaded[0].source).toEqual({ kind: 'catalog', language: 'en' });
+    const own = new MoonshineBrowserSTT({
+      moonshine: async () => fakeMoonshine({ workerSupported: false }),
+      model: 'moonshine-medium',
+      modelBaseUrl: 'https://models.example.test/moonshine/',
+    });
+    await own.load();
+    const folder = 'https://models.example.test/moonshine/medium-streaming-en';
+    expect(FakeTranscriber.loaded[1].source).toEqual({
+      kind: 'urls',
+      files: {
+        'adapter.ort': `${folder}/adapter.ort`,
+        'cross_kv.ort': `${folder}/cross_kv.ort`,
+        'decoder_kv.ort': `${folder}/decoder_kv.ort`,
+        'encoder.ort': `${folder}/encoder.ort`,
+        'frontend.ort': `${folder}/frontend.ort`,
+        'streaming_config.json': `${folder}/streaming_config.json`,
+        'tokenizer.bin': `${folder}/tokenizer.bin`,
+      },
+    });
+    expect(FakeTranscriber.loaded[1].options.modelArch).toBe(5);
+    cdn.dispose();
+    own.dispose();
+  });
+
+  it('passes the key terms and the context as transcriber options, and refuses a term with a comma', async () => {
+    const stt = new MoonshineBrowserSTT({
+      moonshine: fakeMoonshine(),
+      model: 'moonshine-small',
+      keyterms: ['Anushka Sharma', 'Kubernetes'],
+      context: 'Team offsite in Lisbon',
+      contextMaxTerms: 50,
+    });
+    await stt.load();
+    expect(FakeWorkerHost.created[0].loads[0].options).toEqual({
+      keyterms: 'Anushka Sharma,Kubernetes',
+      context: 'Team offsite in Lisbon',
+      context_max_terms: '50',
+    });
+    expect(() => new MoonshineBrowserSTT({ keyterms: ['Smith, John'] })).toThrow(RangeError);
+    stt.dispose();
+  });
+
+  it("reports progress with a fraction from the package's total, or from modelBytes for the host's files", async () => {
+    const seen: MoonshineLoadProgress[] = [];
+    const cdnFake = fakeMoonshine();
+    cdnFake.progress = [
+      [100, 400, 'encoder.ort'],
+      [400, 400, 'decoder_kv.ort'],
+    ];
+    const cdn = new MoonshineBrowserSTT({ moonshine: cdnFake, model: 'moonshine-tiny', onProgress: (p) => seen.push(p) });
+    await cdn.load();
+    expect(seen).toEqual([
+      { model: 'moonshine-tiny', loaded: 100, total: 400, fraction: 0.25, file: 'encoder.ort' },
+      { model: 'moonshine-tiny', loaded: 400, total: 400, fraction: 1, file: 'decoder_kv.ort' },
+    ]);
+    seen.length = 0;
+    const ownFake = fakeMoonshine();
+    ownFake.progress = [[150, undefined, 'encoder.ort']];
+    const own = new MoonshineBrowserSTT({
+      moonshine: ownFake,
+      model: 'moonshine-medium',
+      modelBaseUrl: 'https://models.example.test',
+      modelBytes: { 'moonshine-medium': 600 },
+      onProgress: (p) => seen.push(p),
+    });
+    await own.load();
+    expect(seen).toEqual([{ model: 'moonshine-medium', loaded: 150, total: 600, fraction: 0.25, file: 'encoder.ort' }]);
+    seen.length = 0;
+    const unsizedFake = fakeMoonshine();
+    unsizedFake.progress = [[150, undefined, 'encoder.ort']];
+    const unsized = new MoonshineBrowserSTT({
+      moonshine: unsizedFake,
+      model: 'moonshine-medium',
+      modelBaseUrl: 'https://models.example.test',
+      onProgress: (p) => seen.push(p),
+    });
+    await unsized.load();
+    expect(seen).toEqual([{ model: 'moonshine-medium', loaded: 150, file: 'encoder.ort' }]);
+    cdn.dispose();
+    own.dispose();
+    unsized.dispose();
+  });
+
+  it('refuses a session in a language the model does not stream, and takes a region of its own', async () => {
+    const stt = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), model: 'moonshine-small' });
+    await expect(stt.startSession({ language: 'fr-FR' })).rejects.toThrow(/the model is for "en"/);
+    const session = await stt.startSession({ language: 'en-US' });
+    session.close();
+    stt.dispose();
+  });
+
+  it('rejects the start when the model cannot load, releases the worker, and loads again on the next call', async () => {
+    const fake = fakeMoonshine();
+    fake.failLoad = new Error('Failed to download https://download.moonshine.ai/model/small-streaming-en/encoder.ort: 503');
+    const stt = new MoonshineBrowserSTT({ moonshine: fake, model: 'moonshine-small' });
+    await expect(stt.startSession()).rejects.toThrow(/503/);
+    expect(FakeWorkerHost.created[0].closed).toBe(true);
+    const session = await stt.startSession();
+    expect(FakeWorkerHost.created).toHaveLength(2);
+    session.close();
+    stt.dispose();
+  });
+
+  it('lets a chain fall back to a smaller size when the larger one cannot load', async () => {
+    const mediumFake = fakeMoonshine();
+    mediumFake.failLoad = new Error('Out of memory while building the model');
+    const chain = new StreamingSTTChain([
+      new MoonshineBrowserSTT({ moonshine: mediumFake, model: 'moonshine-medium', priority: 0 }),
+      new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), model: 'moonshine-small', priority: 1 }),
+    ]);
+    const session = await chain.startSession();
+    expect(FakeWorkerHost.created).toHaveLength(2);
+    expect(FakeWorkerHost.created[0].closed).toBe(true);
+    expect(FakeWorkerHost.created[1].loads[0].modelArch).toBe(4);
+    expect(FakeWorkerHost.created[1].streams.size).toBe(1);
+    session.close();
+  });
+
+  it('closes its open sessions on dispose, releases the model, and opens no more', async () => {
+    const stt = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), model: 'moonshine-small' });
+    const session = await stt.startSession();
+    const log = record(session);
+    stt.dispose();
+    expect(log.events).toEqual(['close']);
+    expect(FakeWorkerHost.created[0].closed).toBe(true);
+    await expect(stt.startSession()).rejects.toThrow(/disposed/);
+  });
+
+  it('reports in its health check what this scope lacks, and nothing once a single-thread build is served', async () => {
+    // Node 22 has WebAssembly SIMD and no cross-origin isolation.
+    expect(await new MoonshineBrowserSTT().healthCheck()).toEqual({
+      ok: false,
+      latencyMs: 0,
+      error: { class: 'unknown', message: 'MoonshineBrowserSTT: this page lacks cross-origin-isolation' },
+    });
+    expect(await new MoonshineBrowserSTT({ singleThreadBuild: true }).healthCheck()).toEqual({ ok: true, latencyMs: 0 });
   });
 });

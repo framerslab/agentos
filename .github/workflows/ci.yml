@@ -104,6 +104,28 @@ jobs:
       - name: Type check
         run: pnpm run typecheck
 
+      # The Moonshine browser provider's integration test runs the real
+      # @moonshine-ai/moonshine-wasm in Node on its tiny streaming model and a
+      # recorded clip, fetched once and kept in the cache.
+      - name: Cache the Moonshine test model
+        uses: actions/cache@v5
+        with:
+          path: .cache/moonshine
+          key: moonshine-test-tiny-streaming-en-quantized_26_07_30-cd95be77
+
+      - name: Fetch the Moonshine test model
+        run: |
+          set -euo pipefail
+          dir=.cache/moonshine
+          mkdir -p "$dir/tiny-streaming-en"
+          for f in adapter.ort cross_kv.ort decoder_kv.ort encoder.ort frontend.ort streaming_config.json tokenizer.bin; do
+            [ -s "$dir/tiny-streaming-en/$f" ] || curl -fsSL --retry 3 -o "$dir/tiny-streaming-en/$f" \
+              "https://download.moonshine.ai/model/tiny-streaming-en/quantized_26_07_30/$f"
+          done
+          [ -s "$dir/two_cities_16k.wav" ] || curl -fsSL --retry 3 -o "$dir/two_cities_16k.wav" \
+            "https://raw.githubusercontent.com/moonshine-ai/moonshine/cd95be7728c5141b581a3fb8837742687c06c6d1/test-assets/two_cities_16k.wav"
+          echo "AGENTOS_TEST_MOONSHINE_DIR=$PWD/$dir" >> "$GITHUB_ENV"
+
       - name: Test with coverage
         run: pnpm run test -- --coverage
 

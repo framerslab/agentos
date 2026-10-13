@@ -35,7 +35,7 @@ CI runs (job "Test & Lint" in [`.github/workflows/ci.yml`](https://github.com/fr
 2. `pnpm run build` (cleans `dist`, compiles, then rewrites path aliases and import specifiers in `dist`)
 3. `pnpm run lint`
 4. `pnpm run typecheck`
-5. `pnpm run test -- --coverage` (Postgres-backed tests run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI provides a Postgres service)
+5. `pnpm run test -- --coverage` (Postgres-backed tests run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI provides a Postgres service. The Moonshine browser provider's integration test runs only when `AGENTOS_TEST_MOONSHINE_DIR` names a folder with its model and clip; CI fetches them before this step)
 
 A second job, "Batch-1 gated tests", builds and runs a fixed list of test files with `pnpm vitest run`.
 
