@@ -489,7 +489,8 @@ export type RefundCreditLotResult =
 /**
  * Reserves a refund before the payment rail is asked for it: only the paid lot's free principal (neither held nor
  * consumed) can be refunded, so a refund of committed funds is refused with what can be refunded now. A refund id
- * reserved already answers `existing` only for its own scope, lot and amount. Confirm or revert it with
+ * reserved already answers `existing` only for its own scope, lot and amount; of two scopes racing for one id, one
+ * reserves it and the other is refused as `conflict`, its lot untouched. Confirm or revert it with
  * {@link completeLotRefund}.
  */
 export async function refundCreditLot(store: ICompoundCreditStore, input: RefundCreditLotInput): Promise<RefundCreditLotResult> {
@@ -509,7 +510,12 @@ export async function refundCreditLot(store: ICompoundCreditStore, input: Refund
     const free = lotFreeMicro(lot);
     if (input.amountMicro > free) return { status: 'refused', reason: 'insufficient_refundable', refundableMicro: free };
     await trx.putLot({ ...lot, refundedMicro: lot.refundedMicro + input.amountMicro, version: lot.version + 1 });
-    await trx.appendEntry({ entryId: `refund:${input.refundId}:reserved`, scopeId: input.scopeId, kind: 'refund_reserved', amountMicro: input.amountMicro, lotId: lot.lotId, holdId: null, ref: input.refundId, at: input.at, day: creditDay(input.at) });
+    const entryId = `refund:${input.refundId}:reserved`;
+    // The account lock serializes one scope only, so another scope can claim this id between the read above and this
+    // append. Losing the claim rolls the debit back, and the retry answers from the claim that won.
+    if (!(await trx.appendEntry({ entryId, scopeId: input.scopeId, kind: 'refund_reserved', amountMicro: input.amountMicro, lotId: lot.lotId, holdId: null, ref: input.refundId, at: input.at, day: creditDay(input.at) }))) {
+      throw new CreditConflictError('entries', entryId);
+    }
     return { status: 'reserved', refundableMicro: free - input.amountMicro };
   });
 }
