@@ -161,7 +161,11 @@ export class EvidenceClaimVerifier {
         resolve({ kind: 'timeout' });
       }, this.timeoutMs);
     });
-    const answer = adapter.check(record, claim, controller.signal).then(
+    // The executor calls `check` at once and turns a throw before it returns a promise into a rejection, so that throw
+    // refuses the claim like any other failure instead of escaping the verification.
+    const answer = new Promise<AdapterOutcome>((resolve) => {
+      resolve(adapter.check(record, claim, controller.signal));
+    }).then(
       (outcome): Run => (isOutcome(outcome) ? { kind: 'ok', outcome } : { kind: 'error', detail: 'the adapter answered without a known verdict and basis' }),
       (error: unknown): Run => ({ kind: 'error', detail: error instanceof Error ? error.message : String(error) }),
     );
