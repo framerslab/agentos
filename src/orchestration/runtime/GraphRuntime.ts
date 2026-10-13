@@ -437,9 +437,11 @@ export class GraphRuntime {
             const checkpointId = haltCheckpointId!;
             state = this.attachCheckpointMetadata(haltState!, checkpointId);
             yield { type: 'checkpoint_saved', checkpointId, nodeId: outcome.nodeId };
-            if (outcome.earlyTermination.type === 'interrupt') {
-              yield { type: 'interrupt', nodeId: outcome.nodeId, reason: 'human_approval' };
-            } else {
+            // An interrupting branch's termination events already hold its
+            // `interrupt`. A failing branch's hold its `error`, and the
+            // `interrupt` that stops the run follows the checkpoint, as for a
+            // node outside a batch.
+            if (outcome.earlyTermination.type === 'error') {
               const node = graph.nodes.find(n => n.id === outcome.nodeId);
               yield { type: 'interrupt', nodeId: outcome.nodeId, reason: node?.type === 'guardrail' ? 'guardrail_violation' : 'error' };
             }
