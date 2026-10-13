@@ -31,11 +31,11 @@
  * resolves only after the native queue has drained and the participant has
  * sent its playback receipt on the topic. The participant's text streams are
  * then read with bounds (4096 bytes, five seconds, four at once) and only a
- * playback receipt or a `control` message with `mute`, `unmute` or `stop` is
- * taken; anything else is reported as `'error'` and closes the transport, as
- * the participant leaving the room does. Outbound text is bounded too: 16384
- * bytes a message, four in flight, and a send not done within five seconds
- * closes the transport.
+ * playback or clear receipt or a `control` message with `mute`, `unmute` or
+ * `stop` is taken; anything else is reported as `'error'` and closes the
+ * transport. The participant leaving the room closes it too. Outbound text is
+ * bounded as well: 16384 bytes a message, four in flight, and a send not done
+ * within five seconds closes the transport.
  *
  * ## Lifetime
  * `close()` stops reading audio, drops the frames a pause held, unregisters
@@ -120,7 +120,7 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
  * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `control` message with `mute`, `unmute` or `stop`. |
  * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting or, with a publisher, the participant leaving or a refused message. |
- * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, or a failure to read audio (the peer missing among them); with a publisher, also a refused message and incomplete cleanup. |
+ * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message. |
  *
  * Without a publisher, an error that nothing listens for is written as a
  * console warning instead, since an `'error'` that nothing listens for would
