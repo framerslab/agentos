@@ -596,8 +596,9 @@ export class SqlSpendMeter implements ISpendMeter {
    * `resolveExpired` the host decides each one: consumed, released, or deferred, which keeps it reserved and counted
    * with its evidence and its next check on its row. Without it an ordinary reservation settles as `resolveUnknown` and
    * `unknownAfterLease` say, and one made with `requireFence`, or deferred before, stays reserved and counts as pending;
-   * such a pass takes the ordinary reservations into its page first, so the fenced holds it leaves never take the
-   * place of one it can settle.
+   * such a pass reads the ordinary reservations into its page first and the fenced holds only into the room they leave,
+   * each in expiry order, so the fenced holds it leaves never take the place of one it can settle, and no pass sorts
+   * every due row to find its page.
    *
    * Each decision is written to the reservation as the pass read it, in one conditional statement: the same attempt,
    * still reserved, still past its lease at `now` and, for a settlement without `resolveExpired`, still unfenced. So
@@ -610,16 +611,23 @@ export class SqlSpendMeter implements ISpendMeter {
     const now = opts.now ?? Date.now();
     const limit = Math.max(1, Math.trunc(opts.limit ?? 100));
     const resolveExpired = this.opts.resolveExpired;
-    // a pass without resolveExpired settles no fenced hold, so its fenced rows go to the end of the page: they keep
-    // their expiry from pass to pass, and first in the page they would hold back every ordinary reservation behind them
-    const order = resolveExpired ? 'expires_at' : `CASE WHEN ${UNFENCED} THEN 0 ELSE 1 END, expires_at`;
-    const due = await this.run(() =>
-      this.db.all<ReservationRow & { outcome: string | null; usage_json: string | null }>(
-        `SELECT operation_id, account_id, period, units, state, attempts, outcome, usage_json FROM ${this.tables.reservations}
-          WHERE state = 'reserved' AND expires_at <= ? ORDER BY ${order} LIMIT ${limit}`,
-        [now],
-      ),
-    );
+    // the due rows in expiry order, the order the (state, expires_at) index keeps, so a read stops at its page
+    const read = (filter: string, size: number) =>
+      this.run(() =>
+        this.db.all<ReservationRow & { outcome: string | null; usage_json: string | null }>(
+          `SELECT operation_id, account_id, period, units, state, attempts, outcome, usage_json FROM ${this.tables.reservations}
+            WHERE state = 'reserved' AND expires_at <= ?${filter} ORDER BY expires_at LIMIT ${size}`,
+          [now],
+        ),
+      );
+    let due = await read(resolveExpired ? '' : ` AND ${UNFENCED}`, limit);
+    if (!resolveExpired && due.length < limit) {
+      // a pass without resolveExpired settles no fenced hold, and its fenced rows keep their expiry from pass to pass:
+      // first in the page they would hold back every ordinary reservation behind them, so they only fill what the
+      // ordinary ones leave. A hold fenced between the two reads, in the page already as an ordinary one, is not taken twice.
+      const seen = new Set(due.map((r) => r.operation_id));
+      due = due.concat((await read(` AND NOT ${UNFENCED}`, limit - due.length)).filter((r) => !seen.has(r.operation_id)));
+    }
     const out: SpendReconcileResult = resolveExpired ? { consumed: 0, released: 0, pending: 0, deferred: 0 } : { consumed: 0, released: 0, pending: 0 };
     for (const r of due) {
       const fenced = r.outcome === 'fence_required' || r.outcome === 'deferred';
