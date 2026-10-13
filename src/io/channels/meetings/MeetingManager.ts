@@ -745,12 +745,11 @@ export class MeetingManager {
         await this.deliver(stored, run);
         return true;
       case 'participant_joined': {
+        // the short notice goes first, before the count is written and the event delivered: a write or a delivery that
+        // fails, after which the worker's retry applies nothing again, cannot keep it from the participant who arrived
+        await this.postLateNotice(run);
         const updated = (await this.updateParticipants(run, event)) ?? run;
         await this.deliver(stored, updated);
-        const provider = this.providers.get(run.providerName);
-        if (updated.state === 'in_call' && provider?.capabilities.postsChat && !fenced) {
-          await provider.command(run.runId, { name: 'postChat', text: run.notice.lateArrivalText });
-        }
         return true;
       }
       case 'participant_left': {
@@ -800,6 +799,16 @@ export class MeetingManager {
 
   private isStopPhrase(run: MeetingRunRecord, text: string | undefined): boolean {
     return !!text && text.toLowerCase().includes(run.stopPhrase.toLowerCase());
+  }
+
+  /**
+   * Posts the notice's short form for a participant who joined after the notice, when the run is in the call and its
+   * provider posts to chat: a late arrival does not see the chat's history, so the notice posted at the start never
+   * reached them (behind the fence the run is `purging`, and nothing is posted).
+   */
+  private async postLateNotice(run: MeetingRunRecord): Promise<void> {
+    const provider = this.providers.get(run.providerName);
+    if (run.state === 'in_call' && provider?.capabilities.postsChat) await provider.command(run.runId, { name: 'postChat', text: run.notice.lateArrivalText });
   }
 
   /** Whether a report asks the bot to stop: a stop command, or a chat message holding the stop phrase. */

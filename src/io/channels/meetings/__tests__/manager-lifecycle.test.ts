@@ -761,6 +761,31 @@ describe('a report whose application fails, and the worker\'s retry of it', () =
   });
 });
 
+describe('a participant who joins after the notice', () => {
+  it('is given the short notice even when the count\'s write or the event\'s delivery fails, and once, whatever the worker\'s retry', async () => {
+    let failing = false;
+    const h = harness({
+      destinationsFor: async () => {
+        if (failing) throw new Error('destinations unavailable');
+        return ['hook-1'];
+      },
+    });
+    const runId = await joined(h);
+    const notices = () => (h.provider.commands.get(runId) ?? []).filter((c) => c.name === 'postChat');
+    failing = true;
+    await expect(h.report(runId, 'participant_joined', { participantRef: 'p2', participantCount: 2 })).rejects.toThrow('destinations unavailable');
+    expect(notices()).toEqual([{ name: 'postChat', text: 'the short notice' }]);
+    failing = false;
+    // the next arrival's report fails at the run store's write of the count, and the worker sends it again
+    vi.spyOn(h.stores.runs, 'update').mockRejectedValueOnce(new Error('run store unavailable'));
+    const arrival = mockEventContext(runId, 'participant_joined', { participantRef: 'p3', participantCount: 3 }, h.clock.now(), h.provider.tokenOf(runId));
+    await expect(h.manager.processProviderEvent('mock', arrival)).rejects.toThrow('run store unavailable');
+    expect(notices()).toHaveLength(2);
+    await h.manager.processProviderEvent('mock', arrival);
+    expect(notices()).toHaveLength(2);
+  });
+});
+
 describe('the purge\'s last events', () => {
   it('a purge whose last events fail to go out stays purging, and the next pass sends them and writes done', async () => {
     let failing = false;
