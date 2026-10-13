@@ -513,7 +513,13 @@ function normalizePlatformName(raw: string): string {
   return lower;
 }
 
-/** Each skill and binary name already warned about, so a refused name is warned about once per skill. */
+/**
+ * The most skill and binary name pairs remembered as warned about. When the set is full it starts again, so a host
+ * that loads many skills over its life holds a bounded set and warns again at most once per pair each time.
+ */
+const MAX_WARNED_BINARY_NAMES = 1024;
+
+/** Each skill and refused binary name already warned about, so a refused name is warned about once per skill. */
 const warnedBinaryNames = new Set<string>();
 
 /**
@@ -527,15 +533,13 @@ const warnedBinaryNames = new Set<string>();
  * @param skillName - The skill that requires it, for the warning.
  */
 function hasBinary(bin: unknown, skillName: string): boolean {
-  const problem = typeof bin === 'string' ? pathNameProblem(bin) : 'type';
+  if (typeof bin !== 'string') {
+    warnRefusedBinaryName(skillName, bin, 'type');
+    return false;
+  }
+  const problem = pathNameProblem(bin);
   if (problem !== null) {
-    const key = `${skillName}\u0000${String(bin)}`;
-    if (!warnedBinaryNames.has(key)) {
-      warnedBinaryNames.add(key);
-      console.warn(
-        `[SkillRegistry] Skill '${skillName}': the binary name ${describeRefusedName(bin)} is not one file name (${problem}), so the binary counts as missing`,
-      );
-    }
+    warnRefusedBinaryName(skillName, bin, problem);
     return false;
   }
 
@@ -560,6 +564,26 @@ function hasBinary(bin: unknown, skillName: string): boolean {
   }
 
   return false;
+}
+
+/**
+ * Write the warning for a binary name the skill `skillName` requires and `hasBinary` refused, the first time for
+ * that skill and name.
+ *
+ * @param skillName - The skill that requires the binary.
+ * @param bin - The refused name, as the front matter gives it.
+ * @param problem - Why it was refused: the part of the name rule it breaks, or `type` when it is not a string.
+ */
+function warnRefusedBinaryName(skillName: string, bin: unknown, problem: string): void {
+  // The name as the warning shows it, cut short, so a long name holds no more memory here than in the line.
+  const shown = describeRefusedName(bin);
+  const key = `${skillName}\u0000${shown}`;
+  if (warnedBinaryNames.has(key)) return;
+  if (warnedBinaryNames.size >= MAX_WARNED_BINARY_NAMES) warnedBinaryNames.clear();
+  warnedBinaryNames.add(key);
+  console.warn(
+    `[SkillRegistry] Skill '${skillName}': the binary name ${shown} is not one file name (${problem}), so the binary counts as missing`,
+  );
 }
 
 function shouldIncludeSkillEntry(
