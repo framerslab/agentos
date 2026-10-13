@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { DestinationRefusedError, httpsSend, isPublicAddress, OutboxDispatcher, type DeliveryRequest } from '../delivery.js';
 import { FakeClock, InMemoryOutbox } from '../stores/memory.js';
 import { verifyEnvelope } from '../signing.js';
+import { harness } from './manager-harness.js';
 
 const names = { id: 'acme-hook-id', timestamp: 'acme-hook-ts', signature: 'acme-hook-sig' };
 
@@ -182,5 +183,43 @@ describe('OutboxDispatcher', () => {
     expect((await outbox.listByRun('r1'))[0]).toMatchObject({ state: 'pending', type: 'bot:purged', payload: '', purged: true });
     expect(await dispatcher.deliverDue()).toEqual({ delivered: 1, failed: 0 });
     expect(bodies).toEqual([JSON.stringify({ id: 'e1', type: 'bot:purged', runId: 'r1' })]);
+  });
+
+  it("sends the manager's own bot:purged event with its time, sequence and reason, and a delivery its purge emptied with the ids alone", async () => {
+    const h = harness({ destinationsFor: async () => ['hook-1'] });
+    const sent = await h.manager.sendBot(h.request);
+    if (!sent.ok) throw new Error('send failed');
+    const runId = sent.run.runId;
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 2 });
+    await h.report(runId, 'notice_posted');
+    await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1);
+    await h.report(runId, 'chat_message', { text: 'we start at nine', sender: 'participant-1' });
+    await h.manager.purgeRun(runId, 'stopped_by_owner');
+    await h.report(runId, 'left', { reason: 'stopped_by_owner', seconds: 20 });
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    const events = await h.stores.events.read(runId, 0);
+    const purged = events.find((e) => e.type === 'bot:purged');
+    const chat = events.find((e) => e.type === 'bot:chat_message');
+    if (!purged || !chat) throw new Error('an event is missing');
+    const bodies = new Map<string, unknown>();
+    const dispatcher = new OutboxDispatcher({
+      outbox: h.stores.outbox,
+      clock: h.clock,
+      resolve: async () => ({ url: 'https://hooks.example.test/in', secret: 'not-a-real-secret' }),
+      send: async (request) => {
+        const body = JSON.parse(request.body) as { id: string };
+        bodies.set(body.id, body);
+        return { status: 204 };
+      },
+    });
+    await dispatcher.deliverDue();
+    // the run-level event goes out as every other event does, with what the manager stored, which holds no content
+    expect(bodies.get(purged.eventId)).toEqual({ id: purged.eventId, type: 'bot:purged', runId, at: purged.at, seq: purged.seq, data: { reason: 'stopped_by_owner' } });
+    // a content delivery the purge emptied sends its ids alone
+    expect(bodies.get(chat.eventId)).toEqual({ id: chat.eventId, type: 'bot:purged', runId });
+    expect(JSON.stringify([...bodies.values()])).not.toContain('we start at nine');
   });
 });
