@@ -1,3 +1,9 @@
+## [0.13.91](https://github.com/framerslab/agentos/compare/v0.13.90...v0.13.91) (2026-10-13)
+
+### fix
+
+* **agency:** graph, review-loop and debate gate the input each agent receives, and a replaced final text meets the output check (#393) ([c1e716a](https://github.com/framerslab/agentos/commit/c1e716a2d57e529524dcc2f5ec7eef9570c4879b))
+
 ## [0.13.90](https://github.com/framerslab/agentos/compare/v0.13.89...v0.13.90) (2026-10-13)
 
 ### fix

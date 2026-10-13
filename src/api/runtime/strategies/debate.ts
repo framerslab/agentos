@@ -22,6 +22,14 @@
  * synthesis call. In each round, agents are called in declaration order.
  * Each agent receives the full argument history from all prior agents/rounds.
  *
+ * ## HITL integration
+ *
+ * Each turn is gated by {@link checkBeforeAgentInput} over the input the
+ * agent receives, the transcript of the arguments so far included, and the
+ * agent is sent the input the check read. An agent the handler rejects, or
+ * whose input the post-approval check blocks, sits that turn out; the
+ * synthesizer still rules on the arguments that were made.
+ *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileReviewLoop} -- an alternative iterative strategy with explicit approval.
  */
@@ -36,7 +44,7 @@ import type {
 import { AgencyConfigError } from '../types.js';
 import {
   resolveAgent,
-  checkBeforeAgent,
+  checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
 } from './shared.js';
@@ -106,15 +114,6 @@ export function compileDebate(
 
       for (let round = 0; round < maxRounds; round++) {
         for (const [name, agentOrConfig] of entries) {
-          // HITL: check beforeAgent gate before invoking this agent.
-          const decision = await checkBeforeAgent(name, prompt, agentCalls, agencyConfig);
-          if (decision && !decision.approved) {
-            // Agent was rejected -- skip this agent in this round.
-            continue;
-          }
-
-          const a = resolveAgent(agentOrConfig, agencyConfig);
-
           // Build the debate context: original task + transcript of prior
           // arguments. The framing is intentionally adversarial — agents are
           // told to take a side and rebut, not to "present a perspective" or
@@ -148,8 +147,19 @@ export function compileDebate(
                 `at most ~150 words. Do not produce a neutral summary.`,
               ].join('\n');
 
+          // HITL: check the beforeAgent gate over the input this agent
+          // receives, the transcript included. The agent is sent the input
+          // the check read.
+          const gate = await checkBeforeAgentInput(name, debateContext, agentCalls, agencyConfig);
+          if (gate.decision && !gate.decision.approved) {
+            // Agent was rejected -- skip this agent in this round.
+            continue;
+          }
+
+          const a = resolveAgent(agentOrConfig, agencyConfig);
+
           const start = Date.now();
-          const result = (await a.generate(debateContext, opts)) as Record<string, unknown>;
+          const result = (await a.generate(gate.input, opts)) as Record<string, unknown>;
           const durationMs = Date.now() - start;
 
           const resultText = (result.text as string) ?? '';

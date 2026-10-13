@@ -1507,13 +1507,31 @@ async function maybeApproveFinalResult(
     );
   }
 
+  // The text the caller receives when the approval replaces the final text:
+  // the replacement goes through the agency's output guardrails, as the
+  // strategy's text did in finalizeExecutionResult(), before the check below
+  // reads it.
+  const replacement =
+    typeof decision.modifications?.output === 'string'
+      ? await runGuardrails(
+          decision.modifications.output,
+          normalizeGuardrails(opts.guardrails)?.output ?? [],
+          'output',
+          opts.on,
+        )
+      : undefined;
+
   // --- Post-approval guardrail override ---
-  // Even after HITL approves, run guardrails as a final safety net.
+  // Even after HITL approves, run guardrails as a final safety net. The
+  // check reads the strategy's text, and the replacement beside it when the
+  // approval carries one, so a replacement the check blocks is refused as a
+  // blocked final text is.
   if (decision.approved && opts.hitl.guardrailOverride !== false) {
     const postGuardrails = opts.hitl.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'];
+    const output = (result.text as string) ?? '';
     const overrideResult = await runPostApprovalGuardrails(
       'return',
-      { output: (result.text as string) ?? '' },
+      replacement === undefined ? { output } : { output, returned: replacement },
       postGuardrails,
       opts.on,
     );
@@ -1530,11 +1548,7 @@ async function maybeApproveFinalResult(
     }
   }
 
-  if (typeof decision.modifications?.output === 'string') {
-    return { ...result, text: decision.modifications.output };
-  }
-
-  return result;
+  return replacement === undefined ? result : { ...result, text: replacement };
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,16 +1579,17 @@ export interface GuardrailHitlOverrideResult {
  * `Tool: <toolName>` and then `Arguments:` with `args` as JSON, and the
  * first that matches returns `passed: false` with its ID and reason; the
  * caller then overrides the approval. A check that throws is skipped. The
- * final output is checked as the strategy produced it, before the
- * approval's `modifications.output` replaces it, so a replacement is not
- * checked.
+ * final output is checked as the strategy produced it and, when the
+ * approval's `modifications.output` replaces it, as the replacement the
+ * caller receives, after the agency's output guardrails have read it.
  *
  * @param toolName - The approved tool's name, `agent:<name>` for an agent
  *   approval, or `return` for the final output.
  * @param args - The tool call's arguments; for an agent, `{ input }` with the
  *   strategy's input, plus `sent`, the text the agent is sent, when the
  *   approval's instructions were appended to it; for the final output,
- *   `{ output }` with the strategy's text.
+ *   `{ output }` with the strategy's text, plus `returned`, the approval's
+ *   replacement, when it carries one.
  * @param guardrailIds - Ordered list of check IDs to run.
  * @param callbacks - Optional event callback map; each check's result goes to
  *   `guardrailResult`.
