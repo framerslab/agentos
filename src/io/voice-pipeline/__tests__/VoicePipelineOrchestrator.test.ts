@@ -21,6 +21,7 @@
  * - VAD events are forwarded from STT speech_start/speech_end to endpoint detector
  * - turn_complete is re-emitted on the orchestrator, so waitForUserTurn() resolves
  * - A turn_complete listener that stops the session leaves it closed, and no turn is taken
+ * - A turn_complete listener that throws is reported; the listeners after it run and the turn is taken
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -373,7 +374,7 @@ describe('VoicePipelineOrchestrator', () => {
     const turn = orchestrator.waitForUserTurn();
     const event: TurnCompleteEvent = { transcript: 'hello there', confidence: 0.9, durationMs: 800, reason: 'punctuation' };
     detector.emit('turn_complete', event);
-    await expect(turn).resolves.toMatchObject({ transcript: 'hello there' });
+    await expect(turn).resolves.toBe(event); // the detector's own event, handed on as it is
   });
 
   /**
@@ -396,5 +397,31 @@ describe('VoicePipelineOrchestrator', () => {
     expect(states).toEqual(['closed']);
     expect(agentSession.sendText).not.toHaveBeenCalled();
     expect(transport.sendControl).not.toHaveBeenCalledWith({ type: 'agent_thinking' });
+  });
+
+  it('runs every turn_complete listener and still takes the turn when one of them throws', async () => {
+    await startSession();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const errors: Error[] = [];
+      orchestrator.on('error', (err: Error) => errors.push(err));
+      orchestrator.on('turn_complete', () => {
+        throw new Error('a listener failed');
+      });
+      const turn = orchestrator.waitForUserTurn(); // registered after the listener that throws
+      const event = makeTurnComplete();
+      endpoint.emit('turn_complete', event);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(turn).resolves.toBe(event);
+      expect(errors.map((err) => err.message)).toEqual(['a listener failed']);
+      expect(agentSession.sendText).toHaveBeenCalledWith('Hello there', expect.objectContaining({ endpointReason: 'silence_timeout' }));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });
