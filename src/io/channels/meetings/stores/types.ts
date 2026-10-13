@@ -58,8 +58,8 @@ export interface IRunStore {
    * never overwritten by a patch decided on that read. Nothing is written when `patchFor` answers undefined, and then
    * undefined is answered, as it is for a run that does not exist. `patchFor` runs while the row is held, so it is
    * synchronous and does no I/O. The manager decides with it a usage report's time and total against the last ones
-   * taken, and a silent run's end against the run's last usage; without it, the manager reads the row and writes with
-   * `update` guarded by the state it read, which a write that keeps the state can slip between.
+   * taken, and a silent run's end against the run's last usage, so a manager given `usageSilenceMs` refuses a run store
+   * without it: a read and a later `update` would let another write slip between them.
    */
   updateWith?(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined>;
   /** Rewrites the whole row (the content-free form at the end of a purge). */

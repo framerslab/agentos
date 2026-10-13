@@ -98,7 +98,9 @@ export interface MeetingManagerConfig {
    * the manager's receipt of the last one, or from the dispatch when none came) is killed and ended `crashed`, at that
    * receipt and at the total the reports gave, whatever the provider answers and whatever heartbeats arrive. Every pass of
    * the upkeep checks it, and so does {@link MeetingManager.reconcile}. A value that is not a finite number of milliseconds
-   * above zero is refused with a `RangeError` when the manager is built.
+   * above zero is refused with a `RangeError` when the manager is built, and so, with a `TypeError`, is a run store without
+   * `updateWith` ({@link IRunStore.updateWith}): the usage reports and the silence's ends are decided on the stored row in
+   * the write, which a read followed by an `update` cannot do.
    */
   usageSilenceMs?: number;
   /** In-memory terminal records live for this grace; default two days, beyond the outbox retry window. */
@@ -245,11 +247,19 @@ export class MeetingManager {
   /** When the terminal runs are next listed for eviction: when the first of them can go, and at least once a minute. */
   private nextCleanupAt = 0;
 
-  /** @throws RangeError when `usageSilenceMs` is given and is not a finite number of milliseconds above zero. */
+  /**
+   * @throws RangeError when `usageSilenceMs` is given and is not a finite number of milliseconds above zero.
+   * @throws TypeError when `usageSilenceMs` is given and the run store has no `updateWith`.
+   */
   constructor(private readonly config: MeetingManagerConfig) {
     // NaN or zero would end every run at once (no silence is ever shorter), and Infinity would end none
     if (config.usageSilenceMs !== undefined && !(Number.isFinite(config.usageSilenceMs) && config.usageSilenceMs > 0)) {
       throw new RangeError('usageSilenceMs must be a finite number of milliseconds above zero');
+    }
+    // the silence's writes rest on it: a read and a later update would let an older usage report lower a newer total,
+    // and a silence decided on a stale read end a run whose worker had just reported
+    if (config.usageSilenceMs !== undefined && !config.stores.runs.updateWith) {
+      throw new TypeError('usageSilenceMs needs a run store that implements updateWith');
     }
     this.id = config.managerId ?? randomUUID();
     this.leaseTtlMs = config.leaseTtlMs ?? 60_000;
@@ -1569,7 +1579,7 @@ export class MeetingManager {
       if (this.now() - this.lastHeard(listed) < silenceMs) continue;
       try {
         // decided again on the row as the store holds it, in the write that ends the run: a usage report taken since the
-        // list was read (while an earlier run's kill was on its way, say) keeps the run, and its worker is sent no kill
+        // list was read (while the pass was ending the runs before it, say) keeps the run, and its worker is sent no kill
         let silentFor = 0;
         const left = await this.updateRunWith(listed.runId, (current) => {
           const heard = this.lastHeard(current);
@@ -1596,22 +1606,14 @@ export class MeetingManager {
   }
 
   /**
-   * Writes the patch `patchFor` makes of the run's row as it stands: through the run store's `updateWith`, in one step
-   * with the read, when the store has it. Otherwise the row is read and written with `update` guarded by the state read,
-   * and read again when that state moved in between, three times at most; a write that keeps the state can still slip
-   * between the read and the write. Undefined when `patchFor` answers undefined or the run does not exist.
+   * Writes the patch `patchFor` makes of the run's row as it stands, through the run store's `updateWith`, in one step
+   * with the read. Only the usage silence's writes come here, and the constructor refuses `usageSilenceMs` over a run
+   * store without `updateWith`. Undefined when `patchFor` answers undefined or the run does not exist.
    */
   private async updateRunWith(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined> {
     const runs = this.stores.runs;
-    if (runs.updateWith) return runs.updateWith(runId, patchFor);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const current = await runs.get(runId);
-      const patch = current && patchFor(current);
-      if (!current || !patch) return undefined;
-      const updated = await runs.update(runId, patch, current.state);
-      if (updated) return updated;
-    }
-    return undefined;
+    if (!runs.updateWith) throw new TypeError('usageSilenceMs needs a run store that implements updateWith');
+    return runs.updateWith(runId, patchFor);
   }
 
   /**
