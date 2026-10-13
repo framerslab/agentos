@@ -4,6 +4,7 @@ import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
 import type { SecretBox } from '../signing.js';
 import { DuplicateIdempotencyKeyError, FencedError, nextAttemptAt, OUTBOX_GIVE_UP_MS, type IEventStore, type IJobStore, type IOutbox, type IRunStore, type ITranscriptStore, type MeetingJob, type OutboxDelivery, type RunFilter } from './types.js';
+import { abortClaimedSends, runClaimedSend, type ClaimedSends } from './claims.js';
 
 /** Default prefix for all meeting tables and indexes. */
 export const DEFAULT_TABLE_PREFIX = 'agentos_meeting';
@@ -469,6 +470,8 @@ export class SqlEventStore implements IEventStore {
 /** Durable outbound deliveries with retry backoff, manual replay and content scrubbing. */
 export class SqlOutbox implements IOutbox {
   private readonly t: MeetingStoreTables;
+  /** The sends `sendClaimed` has under way in this process, by run. */
+  private readonly claims: ClaimedSends = new Map();
   /** Checks the adapter capabilities and prefix without creating tables. */
   constructor(private readonly opts: SqlStoreOptions) {
     checkPostgres(opts.db, 'SqlOutbox');
@@ -509,17 +512,42 @@ export class SqlOutbox implements IOutbox {
   async replay(id: string, now: number): Promise<void> {
     await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'pending', attempts = 0, first_attempt_at = NULL, next_at = ? WHERE id = ?`, [now, id]);
   }
-  /** Fences new content and scrubs content deliveries, including delivered rows; content-free deliveries keep their type and payload. */
+  /**
+   * Fences new content and scrubs content deliveries, including delivered rows; content-free deliveries keep their type
+   * and payload. A send of the run that `sendClaimed` has under way in this process and that has not written its body
+   * yet stops.
+   */
   async purgeContent(runId: string): Promise<void> {
+    abortClaimedSends(this.claims, runId);
     await this.opts.db.transaction(async (trx) => {
       await lockRun(trx, this.t.locks, runId);
       await trx.run(`UPDATE ${this.t.locks} SET fenced_at = COALESCE(fenced_at, ?) WHERE run_id = ?`, [Date.now(), runId]);
       const types = [...CONTENT_EVENT_TYPES];
       await trx.run(`UPDATE ${this.t.outbox} SET payload = '', type = 'bot:purged', purged = TRUE WHERE run_id = ? AND type IN (${types.map(() => '?').join(', ')})`, [runId, ...types]);
     });
+    // again once the scrub has committed: a send claimed while it ran may have read the row before it was emptied
+    abortClaimedSends(this.claims, runId);
   }
   /** Lists all deliveries of a run, including delivered and dead ones. */
   async listByRun(runId: string): Promise<OutboxDelivery[]> {
     return (await this.opts.db.all<Record<string, unknown>>(`SELECT * FROM ${this.t.outbox} WHERE run_id = ? ORDER BY next_at, id`, [runId])).map((r) => this.fromRow(r));
+  }
+  /**
+   * Sends one delivery as the table holds it now, not as `due` returned it: one gone or no longer pending is skipped
+   * (false). The signal `send` gets aborts when this outbox's `purgeContent` purges the delivery's run, so a send that
+   * has not written its body yet stops (false); any other rejection is `send`'s. A purge committed through another
+   * instance or process reaches a send only through the re-read, so the manager that purges and the dispatcher take
+   * the same `SqlOutbox`.
+   *
+   * @param candidate - A delivery `due` returned.
+   * @param send - Sends the fresh copy under the signal.
+   */
+  async sendClaimed(candidate: OutboxDelivery, send: (fresh: OutboxDelivery, signal: AbortSignal) => Promise<void>): Promise<boolean> {
+    return runClaimedSend(this.claims, candidate.runId, async (signal) => {
+      const r = await this.opts.db.get<Record<string, unknown>>(`SELECT * FROM ${this.t.outbox} WHERE id = ?`, [candidate.id]);
+      if (!r || r.state !== 'pending') return false;
+      await send(this.fromRow(r), signal);
+      return true;
+    });
   }
 }

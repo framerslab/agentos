@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import { FakeClock } from '../stores/memory.js';
-import { DuplicateIdempotencyKeyError, FencedError, type IRunStore, type IJobStore, type ITranscriptStore, type IEventStore, type IOutbox } from '../stores/types.js';
+import { DuplicateIdempotencyKeyError, FencedError, type IRunStore, type IJobStore, type ITranscriptStore, type IEventStore, type IOutbox, type OutboxDelivery } from '../stores/types.js';
 import type { MeetingRunRecord } from '../types.js';
 
 /** The stores one contract case runs against, made fresh for each case, and how to close them. */
@@ -9,7 +9,7 @@ export interface ContractStores {
   jobs: IJobStore;
   transcript: ITranscriptStore & Required<Pick<ITranscriptStore, 'appendNext'>>;
   events: IEventStore;
-  outbox: IOutbox;
+  outbox: IOutbox & Required<Pick<IOutbox, 'sendClaimed'>>;
   close?: () => Promise<void>;
 }
 
@@ -171,6 +171,32 @@ export function meetingStoreContract(name: string, make: () => Promise<ContractS
         const rows = await o.listByRun('r1');
         expect(rows.find((d) => d.id === 'd1')).toMatchObject({ type: 'bot:purged', payload: '', purged: true });
         expect(rows.find((d) => d.id === 'd2')).toMatchObject({ type: 'bot:done', payload: '{"billedSeconds":90}', purged: false, state: 'pending' });
+      });
+      it('sendClaimed sends a delivery as it stands now, skips one no longer pending, and a purge of the run aborts the send', async () => {
+        const o = stores.outbox;
+        const delivery = (id: string, runId: string) => ({ id, runId, destinationRef: 'hook-1', eventId: id, type: 'bot:transcript' as const, payload: '{"text":"x"}' });
+        await o.enqueue(delivery('d1', 'r1'), 0);
+        await o.enqueue(delivery('d2', 'r2'), 0);
+        const [d1, d2] = await o.due(0);
+        await o.purgeContent('r1');
+        const sent: OutboxDelivery[] = [];
+        const record = async (fresh: OutboxDelivery): Promise<void> => { sent.push(fresh); };
+        // the row `due` returned still carries the content; the send gets the emptied one
+        expect(await o.sendClaimed(d1!, record)).toBe(true);
+        expect(sent).toEqual([expect.objectContaining({ id: 'd1', type: 'bot:purged', payload: '', purged: true })]);
+        await o.markDelivered('d1');
+        expect(await o.sendClaimed(d1!, record)).toBe(false);
+        expect(await o.sendClaimed({ ...d2!, id: 'gone' }, record)).toBe(false);
+        expect(sent).toHaveLength(1);
+        let signal: AbortSignal | undefined;
+        expect(await o.sendClaimed(d2!, async (fresh, s) => {
+          signal = s;
+          expect(fresh.payload).toBe('{"text":"x"}');
+          await o.purgeContent('r2');
+          s.throwIfAborted();
+        })).toBe(false);
+        expect(signal?.aborted).toBe(true);
+        await expect(o.sendClaimed(d2!, async () => { throw new Error('refused'); })).rejects.toThrow('refused');
       });
     });
 

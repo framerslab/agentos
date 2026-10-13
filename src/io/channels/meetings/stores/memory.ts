@@ -17,6 +17,7 @@ import {
   type OutboxDelivery,
   type RunFilter,
 } from './types.js';
+import { abortClaimedSends, runClaimedSend, type ClaimedSends } from './claims.js';
 
 /** The wall clock. */
 export class SystemClock implements IClock {
@@ -257,6 +258,8 @@ export class InMemoryOutbox implements IOutbox {
   private readonly deliveries = new Map<string, OutboxDelivery>();
   /** The runs whose content was purged: the outbox's fence. */
   private readonly purgedRuns = new Set<string>();
+  /** The sends `sendClaimed` has under way, by run. */
+  private readonly claims: ClaimedSends = new Map();
   async enqueue(d: Pick<OutboxDelivery, 'id' | 'runId' | 'destinationRef' | 'eventId' | 'type' | 'payload'>, now: number): Promise<void> {
     // behind the purge nothing a person said or did is taken for delivery
     if (this.purgedRuns.has(d.runId) && CONTENT_EVENT_TYPES.has(d.type)) return;
@@ -296,9 +299,27 @@ export class InMemoryOutbox implements IOutbox {
       d.type = 'bot:purged';
       d.purged = true;
     }
+    // a send of the run that has not written its body yet stops; the next one reads the emptied row
+    abortClaimedSends(this.claims, runId);
   }
   async listByRun(runId: string): Promise<OutboxDelivery[]> {
     return [...this.deliveries.values()].filter((d) => d.runId === runId).sort((a, b) => a.nextAt - b.nextAt || a.id.localeCompare(b.id)).map((d) => ({ ...d }));
+  }
+  /**
+   * Sends one delivery as the outbox holds it now, not as `due` returned it: one gone or no longer pending is skipped
+   * (false). The signal `send` gets aborts when `purgeContent` purges the delivery's run, so a send that has not written
+   * its body yet stops (false); any other rejection is `send`'s.
+   *
+   * @param candidate - A delivery `due` returned.
+   * @param send - Sends the fresh copy under the signal.
+   */
+  async sendClaimed(candidate: OutboxDelivery, send: (fresh: OutboxDelivery, signal: AbortSignal) => Promise<void>): Promise<boolean> {
+    return runClaimedSend(this.claims, candidate.runId, async (signal) => {
+      const d = this.deliveries.get(candidate.id);
+      if (!d || d.state !== 'pending') return false;
+      await send({ ...d }, signal);
+      return true;
+    });
   }
 }
 

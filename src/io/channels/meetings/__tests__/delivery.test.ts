@@ -78,4 +78,54 @@ describe('OutboxDispatcher', () => {
     expect(JSON.parse(t.sent[0]!.body)).toEqual({ id: 'e2', type: 'bot:purged', runId: 'r1' });
     expect(t.sent.length).toBe(1);
   });
+
+  it('sends the content-free body for a delivery the outbox purged while its destination resolved', async () => {
+    const outbox = new InMemoryOutbox();
+    await outbox.enqueue({ id: 'e1@hook-1', runId: 'r1', destinationRef: 'hook-1', eventId: 'e1', type: 'bot:transcript', payload: '{"text":"we start at nine"}' }, 0);
+    const bodies: string[] = [];
+    const dispatcher = new OutboxDispatcher({
+      outbox,
+      clock: new FakeClock(0),
+      resolve: async () => {
+        await outbox.purgeContent('r1');
+        return { url: 'https://hooks.example.test/in', secret: 'not-a-real-secret' };
+      },
+      send: async (request) => {
+        bodies.push(request.body);
+        return { status: 204 };
+      },
+    });
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 1, failed: 0 });
+    expect(bodies).toEqual([JSON.stringify({ id: 'e1', type: 'bot:purged', runId: 'r1' })]);
+  });
+
+  it('aborts a send still waiting to write when the outbox purges its run, and sends the content-free body next', async () => {
+    const outbox = new InMemoryOutbox();
+    await outbox.enqueue({ id: 'e1@hook-1', runId: 'r1', destinationRef: 'hook-1', eventId: 'e1', type: 'bot:chat_message', payload: '{"text":"hello"}' }, 0);
+    const bodies: string[] = [];
+    const signals: Array<AbortSignal | undefined> = [];
+    let purgeFirst = true;
+    const dispatcher = new OutboxDispatcher({
+      outbox,
+      clock: new FakeClock(0),
+      resolve: async () => ({ url: 'https://hooks.example.test/in', secret: 'not-a-real-secret' }),
+      send: async (request) => {
+        signals.push(request.signal);
+        if (purgeFirst) {
+          purgeFirst = false;
+          // the purge lands while the send resolves and connects, before its body is written
+          await outbox.purgeContent('r1');
+          request.signal?.throwIfAborted();
+        }
+        bodies.push(request.body);
+        return { status: 204 };
+      },
+    });
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 0, failed: 0 });
+    expect(signals[0]?.aborted).toBe(true);
+    expect(bodies).toEqual([]);
+    expect((await outbox.listByRun('r1'))[0]).toMatchObject({ state: 'pending', type: 'bot:purged', payload: '', purged: true });
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 1, failed: 0 });
+    expect(bodies).toEqual([JSON.stringify({ id: 'e1', type: 'bot:purged', runId: 'r1' })]);
+  });
 });
