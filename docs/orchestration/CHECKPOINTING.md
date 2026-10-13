@@ -295,6 +295,8 @@ class PostgresCheckpointStore implements ICheckpointStore {
 
 The runtime can save several checkpoints of one run in the same millisecond, such as the checkpoints of a parallel batch's nodes and the one it saves after the batch, so `load()` and `latest()` return the checkpoint saved last of those with the latest `timestamp`, and `list()` puts it first. The example's `checkpoints` table has a `seq bigserial` column to order them: it takes the next value at each insert, and `save()` sets it again (`seq = DEFAULT`) when it saves a checkpoint again under its id, so that save counts as the last. `InMemoryCheckpointStore` orders them by each checkpoint's last save.
 
+The order a store has to keep is that of saves that do not overlap. The runtime starts each save once the one before it has finished, except the saves of a parallel batch's nodes, which run together; a checkpoint it saves after them, such as the one after the batch or the one of a batch that halts, starts once they have all finished. In the example, a save that starts after another has finished takes the larger `seq`, since a sequence with the default `CACHE 1` hands out its values in the order they are asked for.
+
 Then pass it to any graph:
 
 ```typescript
