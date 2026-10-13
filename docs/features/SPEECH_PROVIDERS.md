@@ -168,7 +168,7 @@ sttEntryPricePerMinute('deepgram:nova-3'); // 0.0077 US dollars a minute
 sttEntryPricePerMinute('elevenlabs:scribe_v2'); // undefined: no price row
 ```
 
-**The entry.** An entry is `<vendor>:<model>`: a vendor of `STT_CHAIN_VENDORS` (`openai`, `deepgram`, `elevenlabs`), a colon, and the model's name in letters, digits, `.`, `_` and `-`. `parseSttEntry(entry)` returns `{ vendor, model }` and throws a `RangeError` for any other shape, a vendor outside the list included. Its module imports nothing, so the browser entry, `@framers/agentos/io/voice-pipeline/browser`, exports it as well, and a page can hold a list of entries to the rule the server builds them by.
+**The entry.** An entry is `<vendor>:<model>`: a vendor of `STT_CHAIN_VENDORS` (`openai`, `deepgram`, `elevenlabs`), a colon, and the model's name, 1 to 128 letters, digits, `.`, `_` and `-`. `parseSttEntry(entry)` returns `{ vendor, model }` and throws a `RangeError` for any other shape, a vendor outside the list included. `parseSttEntry(entry, registeredVendors)` reads the vendors a host registered instead, and no other, a built-in one included: a vendor there is a lower-case letter followed by up to 63 lower-case letters, digits or `-`, such as `local-stt`, and the result is a `RegisteredSttEntry`. Neither form puts the entry in its error message. Its module imports nothing, so the browser entry, `@framers/agentos/io/voice-pipeline/browser`, exports it as well, and a page can hold a list of entries to the rule the server builds them by.
 
 **The order is the priority.** The entries take the priorities 10, 20, 30 and so on, in the order given: a session starts on the first provider whose session opens, and the next entry is its fallback. `createSttChain` throws a `RangeError` for an empty list, an entry named twice, an entry `parseSttEntry` refuses, or an entry whose vendor has no options. Mid-utterance failover is off unless the third argument, the chain's `StreamingSTTChainOptions`, turns it on, so a session is the provider's own, with its `flush()` and its events; with failover on, a session is the chain's facade, which forwards transcripts, speech events, `'usage'` and `'warning'`, and whose `flush()` drains the provider session in use.
 
@@ -181,6 +181,17 @@ sttEntryPricePerMinute('elevenlabs:scribe_v2'); // undefined: no price row
 | `openai` | [`OpenAIRealtimeTranscriptionSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/OpenAIRealtimeTranscriptionSTT.ts) | `options.openai` |
 | `deepgram` | [`DeepgramStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/DeepgramStreamingSTT.ts) | `options.deepgram` |
 | `elevenlabs` | [`ElevenLabsStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/ElevenLabsStreamingSTT.ts) | `options.elevenlabs` |
+
+**Registered vendors.** `createRegisteredSttChain(entries, registry, options)`, beside `createSttChain` in `env-constructor.ts`, builds the chain from entries of vendors the host registers, through the host's own factories, and reads no environment:
+
+```typescript
+import { createRegisteredSttChain } from '@framers/agentos/io/voice-pipeline/env-constructor';
+
+const registry = new Map([['local-stt', (model: string, priority: number) => localSttProvider(model, priority)]]);
+const stt = createRegisteredSttChain(['local-stt:base-en'], registry, { policy });
+```
+
+Each entry's vendor must be a key of the registry. Its factory receives the model and the entry's priority (10, 20, 30 and so on, in the order given) and returns the provider, which holds what it needs, its credential among them, and does no work until a session opens. The third argument is the chain's `StreamingSTTChainOptions`, so a `ProviderPolicy` there decides which providers open and in what order ([Provider policy](./VOICE_PIPELINE.md#provider-policy)): the chain keeps only the provider ids the policy selects, and each must come from exactly one entry, so a factory gives each model a provider id of its own when two entries of one vendor are permitted. `createRegisteredSttChain` throws a `RangeError` for an empty list, an entry named twice, or an entry `parseSttEntry` refuses for the registry's vendors.
 
 **Prices.** `sttEntryPricePerMinute(entry)` gives the US dollars a minute of an entry's audio from the providers' price rows, and `undefined` for an entry with no row; ElevenLabs entries have none. Like `createSttChain`, it throws a `RangeError` for an entry `parseSttEntry` refuses, such as `device:moonshine-auto` (a vendor outside `STT_CHAIN_VENDORS`) or `openai` (no model). OpenAI's rows are `OPENAI_TRANSCRIPTION_PRICING` in [`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), from [OpenAI's pricing page](https://developers.openai.com/api/docs/pricing) as read on 8 October 2026:
 

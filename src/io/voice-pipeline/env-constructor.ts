@@ -9,7 +9,9 @@
  * STT chain alone, for a consumer with no speech output.
  * {@link createSttChain} builds an STT chain from a list of provider entries
  * the host chooses, such as `openai:gpt-4o-transcribe`, in place of the
- * environment's keys.
+ * environment's keys. {@link createRegisteredSttChain} builds one from
+ * entries of vendors the host registers, through the host's own factories,
+ * and reads no environment.
  */
 
 import {
@@ -43,6 +45,7 @@ import type { HealthyProvider } from './HealthyProvider.js';
 import { openAITranscriptionPricing } from '../../core/llm/providers/implementations/openaiPricing.js';
 import { deepgramStreamingPricing } from './providers/deepgramPricing.js';
 import { parseSttEntry } from './sttEntries.js';
+import { legacyProviderPolicy } from './ProviderPolicy.js';
 
 export class NoVoiceProvidersAvailableError extends Error {
   readonly checkedEnvVars: string[];
@@ -244,12 +247,14 @@ export function createVoiceProvidersFromEnv(
   const stt = new StreamingSTTChain(sttProviders, {
     breaker,
     metrics,
+    policy: legacyProviderPolicy,
     enableMidUtteranceFailover: config.enableMidUtteranceFailover ?? true,
     ringBufferCapacityMs: 3000,
   });
   const tts = new StreamingTTSChain(ttsProviders, {
     breaker,
     metrics,
+    policy: legacyProviderPolicy,
     enableMidSynthesisFailover: config.enableMidSynthesisFailover ?? true,
   });
 
@@ -329,6 +334,7 @@ export function createSttChainFromEnv(config: SttProviderEnvConfig = {}): SttPro
   const stt = new StreamingSTTChain(sttProviders, {
     breaker,
     metrics,
+    policy: legacyProviderPolicy,
     enableMidUtteranceFailover: config.enableMidUtteranceFailover ?? false,
   });
 
@@ -413,4 +419,41 @@ export function createSttChain(
     }
   });
   return new StreamingSTTChain(providers, chainOptions);
+}
+
+/** Host-supplied scoped factory for a registered model id. It must perform no work until its session is opened. */
+export type RegisteredSttFactory = (model: string, priority: number) => IStreamingSTT & HealthyProvider;
+
+/**
+ * Builds only explicit registered entries. Credentials and locality belong to the already-scoped factories/policy.
+ *
+ * Each entry is `<vendor>:<model>` with a vendor the registry holds; that vendor's factory is called with the model
+ * and the entry's priority (10, 20, 30 ... in the order given) and returns the provider the chain tries. The chain
+ * options apply as they are, so a `policy` in them decides which of these providers are opened and in what order:
+ * under a `ProviderPolicy` the chain keeps only the providers the policy selects, and each id it selects must belong
+ * to exactly one of them.
+ *
+ * @param entries - The entries; their order sets the priorities, the order the legacy policy tries them in.
+ * @param registry - Each registered vendor's factory.
+ * @param options - The chain's options, its policy among them.
+ * @returns The chain over the registered providers.
+ * @throws {RangeError} For no entry, an entry twice, or an entry {@link parseSttEntry} refuses for the registry's
+ *   vendors. The chain's own constructor throws as {@link StreamingSTTChain} documents.
+ *
+ * @example
+ * ```typescript
+ * const stt = createRegisteredSttChain(['local-stt:base-en'], new Map([['local-stt', (model, priority) => makeLocalStt(model, priority)]]), { policy });
+ * const session = await stt.startSession({ call: identity });
+ * ```
+ */
+export function createRegisteredSttChain(entries: readonly string[], registry: ReadonlyMap<string, RegisteredSttFactory>, options: StreamingSTTChainOptions): StreamingSTTChain {
+  if (!entries.length || new Set(entries).size !== entries.length) throw new RangeError('registered STT entries must be nonempty and unique');
+  const vendors = [...registry.keys()];
+  const providers = entries.map((entry, index) => {
+    const parsed = parseSttEntry(entry, vendors);
+    const factory = registry.get(parsed.vendor);
+    if (!factory) throw new RangeError('unregistered STT vendor');
+    return factory(parsed.model, (index + 1) * 10);
+  });
+  return new StreamingSTTChain(providers, options);
 }
