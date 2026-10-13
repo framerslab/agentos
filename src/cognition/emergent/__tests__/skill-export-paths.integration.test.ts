@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import YAML from 'yaml';
+import { CapabilityManifestScanner } from '../../discovery/CapabilityManifestScanner.js';
 import { SkillExportRefusedError, exportToolAsSkillPack, writeSkillFile } from '../SkillExporter.js';
 import { InvalidToolNameError } from '../ToolName.js';
 import type { EmergentTool, ForgeToolRequest } from '../types.js';
@@ -71,6 +73,17 @@ describe('a forged tool is exported as a skill only inside the skills folder', (
     expect(await host.orchestrator.getTool(name)).toBeUndefined();
   });
 
+  it('forge_tool refuses an empty name with its own message and the same typed details, before the judge runs', async () => {
+    const host = await makeForgeHost();
+
+    const forged = await callTool(host.orchestrator, 'forge_tool', doubleRequest(''));
+
+    expect(forged.isError).toBe(true);
+    expect(forged.errorDetails?.details).toEqual({ code: 'INVALID_TOOL_NAME', problem: 'empty' });
+    expect(String(forged.errorDetails?.message)).toContain('name is required and must be a string');
+    expect(host.judge).not.toHaveBeenCalled();
+  });
+
   it('a host that forges through the engine directly is refused the same name', async () => {
     const host = await makeForgeHost();
 
@@ -111,6 +124,24 @@ describe('a forged tool is exported as a skill only inside the skills folder', (
       [folderRel]: '(folder)',
       [path.join(folderRel, 'SKILL.md')]: expect.stringContaining('# Double It'),
       [path.join(folderRel, 'CAPABILITY.yaml')]: expect.stringContaining('tool:double_it'),
+    });
+  });
+
+  it('the skill pack the exporter writes is read back by the capability manifest scanner, its skillContent inside the folder', async () => {
+    const host = await makeForgeHost();
+    const forged = await callTool(host.orchestrator, 'forge_tool', doubleRequest('double_it'));
+    expect(forged.isError).toBeFalsy();
+    const pack = await exportToolAsSkillPack(forged.output.tool as EmergentTool, skillsDir);
+
+    const scanned = await new CapabilityManifestScanner().scanWithRefusals([skillsDir]);
+
+    expect(scanned.refused).toEqual([]);
+    expect(scanned.descriptors).toHaveLength(1);
+    expect(scanned.descriptors[0]).toMatchObject({
+      id: 'tool:double_it',
+      name: 'double_it',
+      fullContent: fs.readFileSync(pack.skillPath, 'utf8'),
+      sourceRef: { type: 'manifest', manifestPath: pack.capabilityPath },
     });
   });
 
@@ -210,6 +241,38 @@ describe('a skill export writes through no link below the skills folder', () => 
     }
     expect(fs.readFileSync(path.join(workspace, 'SKILL.md'), 'utf8')).toBe(ONE_LEVEL_UP);
     expect(fs.existsSync(path.join(folder, 'CAPABILITY.yaml'))).toBe(false);
+    expect(entries()).toEqual(before);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a named pipe at SKILL.md refuses the skill pack at once, at the look before any file is opened, so CAPABILITY.yaml is not made',
+    async () => {
+      const { tool, folder } = await forgedTool();
+      fs.mkdirSync(folder);
+      // A pipe that no process reads. entries() would wait on it, so the folder is listed instead.
+      execFileSync('mkfifo', [path.join(folder, 'SKILL.md')]);
+
+      const refused = await exportToolAsSkillPack(tool, skillsDir).catch((err: unknown) => err);
+
+      expect(refused).toBeInstanceOf(SkillExportRefusedError);
+      expect(refused).toMatchObject({ code: 'SKILL_EXPORT_REFUSED', problem: 'special', target: path.join(folder, 'SKILL.md') });
+      // An open of CAPABILITY.yaml would have made it: the pack was refused before any open.
+      expect(fs.readdirSync(folder)).toEqual(['SKILL.md']);
+      expect(fs.lstatSync(path.join(folder, 'SKILL.md')).isFIFO()).toBe(true);
+    },
+    15_000,
+  );
+
+  it('a folder at CAPABILITY.yaml refuses the skill pack as something other than a regular file, before SKILL.md is made', async () => {
+    const { tool, folder } = await forgedTool();
+    fs.mkdirSync(path.join(folder, 'CAPABILITY.yaml'), { recursive: true });
+    const before = entries();
+
+    const refused = await exportToolAsSkillPack(tool, skillsDir).catch((err: unknown) => err);
+
+    expect(refused).toBeInstanceOf(SkillExportRefusedError);
+    expect(refused).toMatchObject({ problem: 'special', target: path.join(folder, 'CAPABILITY.yaml') });
+    expect(fs.existsSync(path.join(folder, 'SKILL.md'))).toBe(false);
     expect(entries()).toEqual(before);
   });
 });

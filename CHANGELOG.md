@@ -1,3 +1,15 @@
+## [0.13.93](https://github.com/framerslab/agentos/compare/v0.13.92...v0.13.93) (2026-10-13)
+
+### feat
+
+* **voice-pipeline:** Deepgram's streaming price a minute (#402) ([6186e70](https://github.com/framerslab/agentos/commit/6186e70db76f3c3bbe055e20ef844590d48375d8))
+
+## [0.13.92](https://github.com/framerslab/agentos/compare/v0.13.91...v0.13.92) (2026-10-13)
+
+### fix
+
+* **discovery:** a capability's files are read only inside its folder, agent workspace folders stay inside the base folder, and follow-ups from the cold read of #338 (#392) ([5c6539b](https://github.com/framerslab/agentos/commit/5c6539b270c6f593b9437ea5fae83b209b2d5f96))
+
 ## [0.13.91](https://github.com/framerslab/agentos/compare/v0.13.90...v0.13.91) (2026-10-13)
 
 ### fix

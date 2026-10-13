@@ -12,6 +12,7 @@
  */
 
 import type { JSONSchemaObject } from '../../core/tools/ITool.js';
+import type { RelativePathProblem } from '../../core/utils/pathName.js';
 import type { EmergentTool } from '../emergent/types.js';
 
 // ============================================================================
@@ -387,7 +388,65 @@ export interface CapabilityManifestFile {
   requiredTools?: string[];
   hasSideEffects?: boolean;
   inputSchema?: JSONSchemaObject;
+  /**
+   * The file that holds the skill's content, read as the capability's `fullContent`: a path below the capability's
+   * folder, its names joined by `/` after an optional leading `./`, such as `./SKILL.md` or `docs/skill.md`. No name
+   * in it is empty, `.` or `..`, starts with a dot, starts or ends with a space or ends with a dot, or holds more
+   * than 200 bytes in UTF-8, and it holds no backslash, no colon, none of `"`, `*`, `<`, `>`, `?` and `|` and no
+   * control character, so it never leaves the folder. A value the manifest sets is held to the rule whatever it is, so
+   * an empty value, YAML's null (no value, `null` or `~`, which the scanner reads as empty), `false` or a number is
+   * refused too. A manifest whose `skillContent` breaks the rule is refused, and the capability with it. When the
+   * manifest does not set it, `SKILL.md` beside the manifest is read when it is there.
+   */
   skillContent?: string;
+}
+
+/**
+ * What a refused capability's refusal names:
+ * - `'manifest'`: the manifest file itself, `CAPABILITY.yaml` or `CAPABILITY.yml`.
+ * - `'skillContent'`: the skill's content: the manifest's `skillContent` value and the file it names, or
+ *   `SKILL.md` beside the manifest when it names none.
+ * - `'schema'`: `schema.json` beside the manifest, read when the manifest sets no `inputSchema`.
+ */
+export type CapabilityManifestField = 'manifest' | 'skillContent' | 'schema';
+
+/**
+ * Why a capability was refused:
+ * - `'type'`: `skillContent` is not a string.
+ * - `'empty'`, `'character'`, `'segment'`, `'dot'`, `'edge'` and `'length'`: `skillContent` breaks the rule for a
+ *   path below a folder built from data (`RelativePathProblem` in `core/utils/pathName`): it names no file; it holds
+ *   a backslash, a colon, one of `"`, `*`, `<`, `>`, `?` and `|`, or a control character; a name in it is empty, so
+ *   it starts or ends with a slash or holds two together; a name starts with a dot; a name starts or ends with a
+ *   space, or ends with a dot; or a name holds more than 200 bytes in UTF-8.
+ * - `'outside'`: the file `skillContent` names would not lie inside the capability's folder.
+ * - `'link'`: a symbolic link holds the place of the file, or of a folder on the way to it, the capability's own
+ *   folder among them. On Linux, also when the file the open reached lies outside the folder that holds the
+ *   capability's folder, as when a folder on the way is swapped for a link after it was looked at.
+ * - `'special'`: something other than a regular file holds the file's place: a folder, a named pipe, a socket or a
+ *   device.
+ */
+export type CapabilityManifestProblem = 'type' | RelativePathProblem | 'outside' | 'link' | 'special';
+
+/** A capability the manifest scanner left out, and why. */
+export interface RefusedCapabilityManifest {
+  /** The path of the capability's manifest. */
+  manifestPath: string;
+  /** What was refused. */
+  field: CapabilityManifestField;
+  /** Why it was refused. */
+  problem: CapabilityManifestProblem;
+}
+
+/** What `CapabilityManifestScanner.scanWithRefusals()` reports. */
+export interface CapabilityManifestScanResult {
+  /** The capabilities read, one for each manifest accepted. */
+  descriptors: CapabilityDescriptor[];
+  /**
+   * The capabilities left out because their `skillContent` or the place of one of their files was refused, each
+   * with its manifest and the reason. A manifest that lacks `name`, `kind` or `description`, or a file that fails to
+   * read for another reason, is left out with a warning and is not listed here.
+   */
+  refused: RefusedCapabilityManifest[];
 }
 
 // ============================================================================

@@ -168,7 +168,7 @@ const related = graph.getRelated('tool:web-search');
 
 ## CAPABILITY.yaml Format
 
-Place a folder with a `CAPABILITY.yaml` (or `CAPABILITY.yml`) under `~/.wunderland/capabilities/`, `./.wunderland/capabilities/` or a directory in `$WUNDERLAND_CAPABILITY_DIRS` (colon-separated); [`CapabilityManifestScanner`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityManifestScanner.ts) reads those by default, `scan(dirs)` and `watch(dirs, onChange)` take your own list, and `watch()` reports changes after a 500 ms debounce. The runtime does not run the scanner: a host scans and passes the descriptors to `turnPlanning.discovery.sources.manifests` or to `refreshIndex({ manifests })`.
+Place a folder with a `CAPABILITY.yaml` (or `CAPABILITY.yml`) under `~/.wunderland/capabilities/`, `./.wunderland/capabilities/` or a directory in `$WUNDERLAND_CAPABILITY_DIRS` (colon-separated); [`CapabilityManifestScanner`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityManifestScanner.ts) reads those by default, `scan(dirs)`, `scanWithRefusals(dirs)` and `watch(dirs, onChange)` take your own list, and `watch()` reports changes after a 500 ms debounce, passing `onChange` the capabilities read and the ones refused. The runtime does not run the scanner: a host scans and passes the descriptors to `turnPlanning.discovery.sources.manifests` or to `refreshIndex({ manifests })`.
 
 ```yaml
 # ~/.wunderland/capabilities/my-custom-search/CAPABILITY.yaml
@@ -190,7 +190,11 @@ inputSchema: {"type": "object", "properties": {"query": {"type": "string"}, "dep
 
 The fields read are `id`, `kind`, `name`, `displayName`, `description`, `category`, `tags`, `requiredSecrets`, `requiredTools`, `hasSideEffects`, `inputSchema` and `skillContent`. `name`, `kind` and `description` are required. `id` defaults to `${kind}:${name}`, `displayName` to the name and `category` to `custom`; a manifest capability is always `available`. The scanner reads a simple YAML subset: one-line scalars, lists (inline, or one indented `- item` per line), and objects written inline as JSON; folded (`>`) and nested block values are not read.
 
-Optionally, place a `SKILL.md` alongside the YAML for full prompt content (or point `skillContent` at another file), and a `schema.json` for the input schema when `inputSchema` is not set:
+Optionally, place a `SKILL.md` alongside the YAML for full prompt content (or point `skillContent` at another file in the capability's folder), and a `schema.json` for the input schema when `inputSchema` is not set.
+
+`skillContent` is a path inside the capability's folder: its names joined by `/` after an optional leading `./`, such as `./SKILL.md` or `docs/skill.md`. No name in it is empty, `.` or `..` or starts with a dot, so it never leaves the folder. A manifest that sets `skillContent` to an empty value, `null` or no value, `false` or a number breaks the rule too; one that leaves it out reads `SKILL.md`. The scanner reads the manifest, the skill's file and `schema.json` only when each is a regular file reached through no symbolic link at the capability's folder or below it; on Linux it also checks that the file it opened lies below the folder that holds the capability's folder. A capability that breaks either rule is left out with a warning and the scan goes on; `scanWithRefusals(dirs)` returns `{ descriptors, refused }`, each refusal with its `manifestPath`, `field` (`manifest`, `skillContent` or `schema`) and `problem` ([`CapabilityManifestProblem`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/types.ts)), and `parseManifest` throws a `CapabilityManifestRefusedError` (`code: 'CAPABILITY_MANIFEST_REFUSED'`).
+
+A `SKILL.md` for the capability above:
 
 ```markdown
 <!-- ~/.wunderland/capabilities/my-custom-search/SKILL.md -->

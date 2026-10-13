@@ -41,6 +41,7 @@ import { VoiceMetricsReporter } from './VoiceMetricsReporter.js';
 import type { IStreamingSTT, IStreamingTTS } from './types.js';
 import type { HealthyProvider } from './HealthyProvider.js';
 import { openAITranscriptionPricing } from '../../core/llm/providers/implementations/openaiPricing.js';
+import { deepgramStreamingPricing } from './providers/deepgramPricing.js';
 import { parseSttEntry } from './sttEntries.js';
 
 export class NoVoiceProvidersAvailableError extends Error {
@@ -360,7 +361,7 @@ export interface SttChainEntryOptions {
  */
 export function sttEntryPricePerMinute(entry: string): number | undefined {
   const { vendor, model } = parseSttEntry(entry);
-  const price = vendor === 'openai' ? openAITranscriptionPricing(model) : undefined;
+  const price = vendor === 'openai' ? openAITranscriptionPricing(model) : vendor === 'deepgram' ? deepgramStreamingPricing(model) : undefined;
   // A model named like a member every object inherits (`constructor`, `toString`)
   // has no row; the guard keeps the answer a number or undefined for it.
   return typeof price === 'number' ? price : undefined;
