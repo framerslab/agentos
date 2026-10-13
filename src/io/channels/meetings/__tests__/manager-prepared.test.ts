@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MeetingManager, type MeetingManagerConfig } from '../MeetingManager.js';
 import { MeetingRoom } from '../MeetingRoom.js';
-import type { ReserveResult } from '../stores/types.js';
+import { MockMeetingBotProvider } from '../providers/mock.js';
+import type { DispatchAllowance, ReserveResult } from '../stores/types.js';
 import { harness } from './manager-harness.js';
 
 describe('prepared creation', () => {
@@ -69,5 +70,119 @@ describe('prepared creation', () => {
     await manager.tick();
     expect((await h.stores.runs.get(sent.run.runId))?.limits.totalMs).toBe(600_000);
     expect(h.provider.dispatched.get(sent.run.runId)?.run.limits.totalMs).toBe(600_000);
+  });
+
+  it('ends a creation its host cannot prepare within the dispatch retry window: failed as crashed, its hold released, nothing dispatched', async () => {
+    const h = harness();
+    const entitlement = Object.assign(h.entitlement, {
+      reserveOnce: async (input: { runId: string }): Promise<ReserveResult> => ({ ok: true, reservationId: `hold-${input.runId}`, maxSeconds: 14_400 }),
+    });
+    let attempts = 0;
+    const manager = new MeetingManager({
+      managerId: 'stuck', stores: { ...h.stores, entitlement }, room: new MeetingRoom(h.rooms),
+      reportUrlFor: (id, p) => `https://example.test/${p}/${id}`,
+      creation: { withOwnerLock: (_owner, work) => work(), prepare: () => { attempts += 1; return Promise.reject(new Error('consent store unavailable')); } },
+    });
+    manager.registerProvider(h.provider);
+    const seen: string[] = [];
+    manager.on((e) => { seen.push(e.type); });
+    await expect(manager.sendBotPrepared(h.request, 'host-consent')).rejects.toThrow('consent store unavailable');
+    h.clock.advance(300_000); // the window's last moment: the pass tries again, and its reconcile gives the pending run no job
+    await manager.tick();
+    const [pending] = await h.stores.runs.list({});
+    if (!pending) throw new Error('pending run missing');
+    expect(pending).toMatchObject({ state: 'requested', creationPending: true, reservationId: `hold-${pending.runId}` });
+    expect(attempts).toBe(2);
+    expect(await h.stores.jobs.get(pending.runId)).toBeUndefined();
+    h.clock.advance(1);
+    await manager.tick();
+    const ended = await h.stores.runs.get(pending.runId);
+    expect(ended).toMatchObject({ state: 'failed', reason: 'crashed', billedSeconds: 0, creationPending: false });
+    expect(ended?.creationContext).toBeUndefined();
+    expect(attempts).toBe(2);
+    expect(h.entitlement.released).toContain(`hold-${pending.runId}`);
+    expect(h.provider.dispatched.size).toBe(0);
+    expect(seen).toEqual(['bot:left', 'bot:done']);
+  });
+
+  it('refuses a run store that does not keep the creation fields, and ends the run before anything can dispatch it', async () => {
+    const h = harness();
+    const insert = h.stores.runs.insert.bind(h.stores.runs);
+    // a store that writes only the columns it knows
+    vi.spyOn(h.stores.runs, 'insert').mockImplementation(async (r) => {
+      const { creationPending: _pending, creationContext: _context, ...known } = r;
+      await insert(known);
+    });
+    let reserved = 0;
+    let prepared = 0;
+    const entitlement = Object.assign(h.entitlement, {
+      reserveOnce: async (input: { runId: string }): Promise<ReserveResult> => { reserved += 1; return { ok: true, reservationId: input.runId, maxSeconds: 14_400 }; },
+    });
+    const manager = new MeetingManager({
+      managerId: 'dropping', stores: { ...h.stores, entitlement }, room: new MeetingRoom(h.rooms),
+      reportUrlFor: (id, p) => `https://example.test/${p}/${id}`,
+      creation: { withOwnerLock: (_owner, work) => work(), prepare: () => { prepared += 1; return Promise.resolve(); } },
+    });
+    manager.registerProvider(h.provider);
+    await expect(manager.sendBotPrepared(h.request, 'host-consent')).rejects.toThrow('prepared creation needs a run store that keeps creationPending and creationContext');
+    expect(await h.stores.runs.list({})).toEqual([expect.objectContaining({ state: 'failed', reason: 'crashed' })]);
+    await manager.tick();
+    expect(h.provider.dispatched.size).toBe(0);
+    expect(reserved).toBe(0);
+    expect(prepared).toBe(0);
+  });
+
+  it('asks the grant again before a recovered dispatch sends another worker, and not for a bot that is out', async () => {
+    const h = harness();
+    const asked: string[] = [];
+    const entitlement = Object.assign(h.entitlement, {
+      revalidateAllowance: async (reservationId: string): Promise<DispatchAllowance> => { asked.push(reservationId); return { ok: true, maxSeconds: 900 }; },
+    });
+    let reservations = 0;
+    vi.spyOn(h.entitlement, 'reserve').mockImplementation(async () => ({ ok: true, reservationId: `res-${++reservations}`, maxSeconds: 14_400 }));
+    const manager = new MeetingManager({ managerId: 'recovering', stores: { ...h.stores, entitlement }, room: new MeetingRoom(h.rooms), reportUrlFor: (id, p) => `https://example.test/${p}/${id}` });
+    manager.registerProvider(h.provider);
+    const out = await manager.sendBot(h.request);
+    const gone = await manager.sendBot({ ...h.request, idempotencyKey: 'k2' });
+    if (!out.ok || !gone.ok) throw new Error('send failed');
+    // a manager that stopped after it sent both bots and before it recorded either dispatch: one bot is out, the other never started
+    for (const run of [out.run, gone.run]) {
+      await h.stores.runs.update(run.runId, { state: 'dispatching', dispatchedAt: h.clock.now(), dispatch: { roomName: `bot-${run.runId}`, workerTokenHash: MockMeetingBotProvider.hash('t') } }, 'requested');
+      await h.stores.jobs.lease('stopped-manager', h.clock.now(), 1);
+    }
+    h.provider.alive.set(out.run.runId, 5);
+    h.clock.advance(10);
+    await manager.tick();
+    expect(asked).toEqual(['res-2']);
+    expect(h.provider.dispatched.has(out.run.runId)).toBe(false);
+    expect(await h.stores.jobs.get(out.run.runId)).toMatchObject({ dispatched: true, leaseHolder: 'recovering' });
+    expect((await h.stores.runs.get(gone.run.runId))?.limits.totalMs).toBe(900_000);
+    expect(h.provider.dispatched.get(gone.run.runId)?.run.limits.totalMs).toBe(900_000);
+  });
+
+  it('sends nothing the host\'s dispatch guard does not admit, and offers the dispatch again once its lease runs out', async () => {
+    const h = harness();
+    let admit = false;
+    const offered: string[] = [];
+    const manager = new MeetingManager({
+      managerId: 'guarded', stores: h.stores, room: new MeetingRoom(h.rooms), reportUrlFor: (id, p) => `https://example.test/${p}/${id}`,
+      dispatchGuard: async (run, work) => { offered.push(run.runId); if (admit) await work(); },
+    });
+    manager.registerProvider(h.provider);
+    const sent = await manager.sendBot(h.request);
+    if (!sent.ok) throw new Error('send failed');
+    await manager.tick();
+    expect(offered).toEqual([sent.run.runId]);
+    expect(h.provider.dispatched.size).toBe(0);
+    expect(await h.stores.runs.get(sent.run.runId)).toMatchObject({ state: 'requested' });
+    admit = true;
+    h.clock.advance(59_999); // the lease the guard did not admit still holds
+    await manager.tick();
+    expect(offered).toHaveLength(1);
+    h.clock.advance(1);
+    await manager.tick();
+    expect(offered).toEqual([sent.run.runId, sent.run.runId]);
+    expect(h.provider.dispatched.has(sent.run.runId)).toBe(true);
+    expect((await h.stores.runs.get(sent.run.runId))?.state).toBe('dispatching');
   });
 });

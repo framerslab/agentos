@@ -225,6 +225,14 @@ export interface MeetingRunRecord {
   captureSuspendedAt?: number;
   /** Since when the provider has reported no participant besides the bot; cleared when one is reported. */
   aloneSince?: number;
+  /**
+   * Set while the run's creation through `MeetingManager.sendBotPrepared` is unfinished: its reservation, the host's
+   * preparation or its job may still be owed. No job of such a run is dispatched. Cleared, with `creationContext`, once
+   * the run's job is scheduled, and by the run's terminal write.
+   */
+  creationPending?: boolean;
+  /** Opaque host preparation data, sealed at rest and removed before dispatch. */
+  creationContext?: string;
 }
 
 /**

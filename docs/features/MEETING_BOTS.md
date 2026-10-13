@@ -33,7 +33,7 @@ The store contracts are:
 | `ITranscriptStore` | Append a numbered turn or atomically allocate one with `appendNext`; read after a sequence cursor, fence and purge. A repeated `(runId, seq)` keeps the first turn. A fenced append throws `FencedError`. Purging keeps the fence. `SqlTranscriptStore` keeps a turn's start and end in whole milliseconds, rounded. |
 | `IEventStore`, `MeetingEvent` | Store stable event ids and per-run sequence numbers; read after a cursor. An id is unique across runs: an append of an id an event already holds answers that event's sequence, in `SqlEventStore` also when another run's append of it commits while this one waits. Fenced content events keep their metadata with no payload and `purged: true`. `purgePayloads` strips content payloads. |
 | `IOutbox`, `OutboxDelivery` | Enqueue, read due deliveries, mark delivered/failed, replay, purge content and list by run. A repeated delivery id keeps its first copy. A failure recorded for a delivery that is no longer pending (delivered, or dead) changes nothing. Due deliveries default to 100, ordered by `nextAt` then id. |
-| `IEntitlementHook`, `ReserveResult` | Reserve, revalidate, meter a running total, settle or release; settlement and release must tolerate retries. The optional `recordSupplierUsage` records a supplier's stream and capture totals and keeps the largest of each. |
+| `IEntitlementHook`, `ReserveResult`, `DispatchAllowance` | Reserve, revalidate, meter a running total, settle or release; settlement and release must tolerate retries. The optional `recordSupplierUsage` records a supplier's stream and capture totals and keeps the largest of each. The optional `reserveOnce` reserves for a run written pending, idempotently by its run id; the optional `revalidateAllowance` answers a `DispatchAllowance` before a worker is sent (see [Recoverable creation](#recoverable-creation)). |
 | `IClock` | Supply the manager's current time in milliseconds. |
 
 `nextAttemptAt(attempts, now)` schedules retries after 5 seconds, then 10, 20 and so on, capped at one hour. `OUTBOX_GIVE_UP_MS` is 86400000: a failure at least a day after the first failure marks the delivery dead. Manual `replay` resets its attempts. The host calls these methods from its delivery worker; the manager does not send HTTP deliveries.
@@ -84,11 +84,11 @@ async function sendMeetingBot(manager: MeetingManager) {
 }
 ```
 
-`SendBotRequest` supplies the owner, platform, meeting URL, name, Keep choice, notice and stop phrase. Optional fields select a provider, `joinAt`, limits, an idempotency key, transcriber and consent record id. `SendBotResult` returns the run and `repeated`, or a `SendBotRefusal` with a message. Repeating an owner's key returns its existing run even if the platform was paused meanwhile. Invalid nonfinite join times and negative or nonfinite limits throw before reserving. A reservation below ten minutes is refused by default; `minReservationSeconds` overrides that floor. Scheduled reservations are revalidated at dispatch. `NoCapacityError` from provider dispatch ends the run as `no_capacity`.
+`SendBotRequest` supplies the owner, platform, meeting URL, name, Keep choice, notice and stop phrase. Optional fields select a provider, `joinAt`, limits, an idempotency key, transcriber and consent record id. `SendBotResult` returns the run and `repeated`, or a `SendBotRefusal` with a message. Repeating an owner's key returns its existing run even if the platform was paused meanwhile. Invalid nonfinite join times and negative or nonfinite limits throw before reserving. A reservation below ten minutes is refused by default; `minReservationSeconds` overrides that floor. Scheduled reservations are revalidated at dispatch; with the hook's `revalidateAllowance`, every dispatch is (see [Recoverable creation](#recoverable-creation)). `NoCapacityError` from provider dispatch ends the run as `no_capacity`.
 
-`start(intervalMs = 1000)` schedules ticks, one at a time: a pass still running when the next is due is not joined by it. `stop()` stops that timer without stopping bots. Hosts may drive `tick()` themselves. Each tick dispatches due jobs, ends the runs gone silent when `usageSilenceMs` is set, enforces limits, resumes cleanup and periodically reconciles. `reconcile()` queries provider usage for dispatched runs, ends workers reported gone, resumes purges and restores missing jobs for waiting runs. It ignores, and logs, a provider's answer about a run it did not ask that provider about. A job whose dispatcher lost its lease after the bot had reported is recorded as dispatched when the next dispatcher leases it, so reconcile watches that run too. The manager stores leave, suspension and alone timers on `MeetingRunRecord`, so a replacement manager can continue them.
+`start(intervalMs = 1000)` schedules ticks, one at a time: a pass still running when the next is due is not joined by it. `stop()` stops that timer without stopping bots. Hosts may drive `tick()` themselves. Each tick finishes the creations an interruption left pending (with `creation` set), dispatches due jobs, ends the runs gone silent when `usageSilenceMs` is set, enforces limits, resumes cleanup and periodically reconciles. `reconcile()` queries provider usage for dispatched runs, ends workers reported gone, resumes purges and restores missing jobs for waiting runs. It ignores, and logs, a provider's answer about a run it did not ask that provider about. A job whose dispatcher lost its lease after the bot had reported is recorded as dispatched when the next dispatcher leases it, so reconcile watches that run too. The manager stores leave, suspension and alone timers on `MeetingRunRecord`, so a replacement manager can continue them.
 
-`start()` runs a tick's two passes apart from each other, the dispatches and the upkeep (the usage silence, the limits, kills, purges, eviction and the reconcile), so a dispatch a provider is slow to answer holds back no limit. A pass of either kind still running five intervals after it began is no longer waited for and the next one starts beside it, so a call that never answers, such as a command to a worker that froze, stops no later pass. `tick()` runs the two in turn.
+`start()` runs a tick's two passes apart from each other, the dispatches (with the pending creations before them) and the upkeep (the usage silence, the limits, kills, purges, eviction and the reconcile), so a dispatch a provider is slow to answer holds back no limit. A pass of either kind still running five intervals after it began is no longer waited for and the next one starts beside it, so a call that never answers, such as a command to a worker that froze, stops no later pass. `tick()` runs the two in turn.
 
 | Manager method | Purpose |
 | --- | --- |
@@ -115,6 +115,51 @@ A provider's `dispatch` throws `DispatchRefusedError(reason, message)` when the 
 A worker's report may arrive before the provider's `dispatch` returns. The manager writes the worker's id to the run in whatever active state the report left it, and a cancel that arrived in the same window still becomes a leave.
 
 A `left` report may carry a `message`: a provider's code word for why the run ended. `bot:left` carries it beside the reason, as it carries the message of a refused dispatch; a provider keeps it to a fixed list of words and never puts a word of the meeting there.
+
+### Recoverable creation
+
+A host that must commit its own record of a send (a consent record, a notice token) before any worker is sent for the run sends with `sendBotPrepared` and supplies `creation`, its entitlement hook's `reserveOnce`, and an idempotency key on every request. The example below locks per owner within one process; a host with several processes takes a database lock in `withOwnerLock` instead.
+
+```ts
+import {
+  MeetingManager, type MeetingManagerConfig, type SendBotRequest, type SendBotResult,
+} from '@framers/agentos/io/channels/meetings';
+
+/** Runs each owner's work one at a time, in this process. */
+const turns = new Map<string, Promise<unknown>>();
+function withOwnerLock<T>(ownerRef: string, work: () => Promise<T>): Promise<T> {
+  const turn = (turns.get(ownerRef) ?? Promise.resolve()).then(work, work);
+  turns.set(ownerRef, turn.catch(() => undefined));
+  return turn;
+}
+
+/** The host's own records of each send, written before the run's job exists. */
+const sendRecords = new Map<string, string>();
+
+/** The host's part in recoverable creation, and the guard that admits each dispatch under the same lock. */
+const hostCreation: Pick<MeetingManagerConfig, 'creation' | 'dispatchGuard'> = {
+  creation: {
+    withOwnerLock,
+    prepare: async (run, context) => {
+      sendRecords.set(run.runId, context); // idempotent: a recovery calls it again with the same run and context
+    },
+  },
+  dispatchGuard: (run, work) => withOwnerLock(run.ownerRef, work),
+};
+
+/** Sends through a manager built with `...hostCreation` in its config and a hook that has `reserveOnce`. */
+function sendRecorded(manager: MeetingManager, request: SendBotRequest & { idempotencyKey: string }): Promise<SendBotResult> {
+  return manager.sendBotPrepared(request, JSON.stringify({ accountId: request.ownerRef }));
+}
+```
+
+Under the host's lock for the owner, `sendBotPrepared(request, context)` answers the run an earlier send with the same key made, as `sendBot` does. A new send is checked as `sendBot` checks one, and `creation.admit`, when given, may refuse it by throwing before anything is written. The manager then writes the run with `creationPending: true` and the host's opaque `context` as `creationContext`, reserves through `reserveOnce` by the run's id, writes the reservation and cuts the run's limit to it, calls `creation.prepare(run, context)`, schedules the run's job, clears both fields and emits `bot:requested`. An interruption at any step leaves the run pending. A send repeated with the same key, or the next pass of the loop, finishes that same run from where it stopped, with the context first given and one reservation: `reserveOnce` must return the same committed reservation for a run id even after the caller lost its answer, and `prepare` must be idempotent. No job of a pending run is dispatched, and reconcile gives a pending run no job.
+
+A reservation `reserveOnce` refuses, or one under `minReservationSeconds`, is released, and the run is answered `{ ok: true }` in the state `failed`, with the refusal's reason (`allowance` for a short reservation). A creation still unfinished `dispatchRetryMs` after the run's join time, or after its request when that is later, ends the run `crashed`, unbilled, with its hold released; until then each pass tries again. The run store must keep both fields; `sendBotPrepared` re-reads the run it wrote, and when the store dropped them it ends the run `crashed` and throws. `SqlRunStore` keeps neither field. The run's terminal write clears both, whatever ends it.
+
+`dispatchGuard(run, work)` admits each dispatch of a leased job, a first one and a recovered one, under the host's own serialization: it calls `work` only when it admits the dispatch, and `work` reads the run again before it acts. A dispatch the guard does not admit keeps its lease and is offered again once the lease runs out (`leaseTtlMs`), or sooner when the host releases the job with `IJobStore.release` under the manager's `managerId`.
+
+With the hook's `revalidateAllowance`, the manager asks for the run's grant before every worker it sends: a run sent now, a scheduled run, and a run whose dispatch is tried again after its bot was found not running. A bot found running is not asked about. The answer, a `DispatchAllowance`, cuts the run's `limits.totalMs` to its `maxSeconds`, and the manager writes the cut limit on the run before the provider receives the run. `{ ok: false }`, or a grant that is not finite or is under `minReservationSeconds`, ends the run `allowance` before any dispatch. Without `revalidateAllowance`, a scheduled run is revalidated with the boolean `revalidate`, and a run sent now is not asked again. `sendBot`, `reserve` and `revalidate` keep their signatures.
 
 ## Capture, limits and billing
 
@@ -152,7 +197,7 @@ An active purge changes the run to `purging`, fences transcripts and event paylo
 
 `CONTENT_EVENT_TYPES` includes chat, transcript, participant-joined, participant-left and stop-command payloads. Their event metadata remains. A content event that reaches the event store behind a fence that went up while it was on its way is stored without its payload, and its delivery and its handlers receive it without one too. Outbox content is scrubbed even from delivered rows: its payload becomes empty and its type becomes `bot:purged`. Content-free deliveries keep their type and payload. The host's sender must honor the current purge state, including before replay; a previously fetched delivery is a copy and cannot be recalled by the store. The host implements deletion of listener history, output queues, kept summaries and client copies through its purge path and hooks.
 
-`contentFreeRun` clears the meeting URL, bot name, notice text and stop phrase. It retains ids and settings (owner, provider, the provider's connection reference, platform, state, Keep, limits, idempotency and reservation ids), lifecycle times, reason, billed seconds, notice version and consent record id, and the usage evidence: `lastUsageAt`, `lastUsageSourceAt`, `reportedSeconds` and `lastReportAt`. Terminal cleanup also clears dispatch and timer fields; it keeps the usage evidence. Ordinary completion with `keep: 'account'` retains the bot name, notice and stored content; `keep: 'none'` clears stored content.
+`contentFreeRun` clears the meeting URL, bot name, notice text and stop phrase. It retains ids and settings (owner, provider, the provider's connection reference, platform, state, Keep, limits, idempotency and reservation ids), lifecycle times, reason, billed seconds, notice version and consent record id, and the usage evidence: `lastUsageAt`, `lastUsageSourceAt`, `reportedSeconds` and `lastReportAt`. Terminal cleanup also clears dispatch and timer fields and the creation fields (`creationPending`, `creationContext`); it keeps the usage evidence. Ordinary completion with `keep: 'account'` retains the bot name, notice and stored content; `keep: 'none'` clears stored content.
 
 ## A worker that cannot be reached
 

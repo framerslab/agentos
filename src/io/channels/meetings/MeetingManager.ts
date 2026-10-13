@@ -105,6 +105,29 @@ export interface MeetingManagerConfig {
   forgetAfterMs?: number;
   /** The least a reservation may cover for a run to be sent, in seconds; a send under it is refused with `allowance`. Default 600. */
   minReservationSeconds?: number;
+  /**
+   * Optional: the host's part in {@link MeetingManager.sendBotPrepared}, which requires it. Absent, a run is sent with
+   * {@link MeetingManager.sendBot} alone.
+   */
+  creation?: {
+    /** Runs `work` while the host holds its lock for the owner: the lock its other sends, and its `dispatchGuard`, take. */
+    withOwnerLock: <T>(ownerRef: string, work: () => Promise<T>) => Promise<T>;
+    /** The host's admission of a new send, under that lock, before any run is written; it throws to refuse the send. A send its idempotency key repeats is not asked again. */
+    admit?: (request: SendBotRequest, context: string) => Promise<void>;
+    /**
+     * The host's preparation, committed before the run's job exists: called with the run once its reservation is
+     * written, and again, with the same run and context, when an interruption cut the creation short; so it is idempotent.
+     */
+    prepare: (run: MeetingRunRecord, context: string) => Promise<void>;
+  };
+  /**
+   * Host serializes dispatch admission with its other sends. It invokes work only when admitted. The manager calls it
+   * for each leased job of a run that waits for its dispatch, or whose dispatch is recovered, with the run as leased;
+   * `work` reads the run again and dispatches it. A dispatch it does not admit keeps its lease and is offered again once
+   * the lease runs out (`leaseTtlMs`), or sooner when the host releases the job (`IJobStore.release`, under the manager's
+   * `managerId`).
+   */
+  dispatchGuard?: (run: MeetingRunRecord, work: () => Promise<void>) => Promise<void>;
   /** Where the manager writes its warnings and errors. */
   logger?: { info(msg: string): void; warn(msg: string): void; error(msg: string): void };
 }
@@ -442,22 +465,170 @@ export class MeetingManager {
     return { ok: true, run, repeated: false };
   }
 
+  /**
+   * Sends a bot by recoverable creation, for a host that commits its own preparation (a consent record, for example)
+   * before any worker is sent for the run. Under the host's lock for the owner (`creation.withOwnerLock`), a send whose
+   * idempotency key an earlier send used answers that send's run, once that run's creation is finished when an
+   * interruption left it pending. A new send is checked as {@link MeetingManager.sendBot} checks one, admitted by the
+   * host (`creation.admit`) and written pending (`creationPending`, with `context` as its `creationContext`); then, in
+   * this order, its reservation is taken through the entitlement hook's `reserveOnce` by the run's id and written on the
+   * run with the run's limit cut to it, the host prepares the run (`creation.prepare`), its job is scheduled, the two
+   * fields are cleared and `bot:requested` is emitted. An interruption at any step leaves the run pending: a send
+   * repeated with the same key, or the next pass of the loop, resumes it with the context first given, and no job of a
+   * pending run is dispatched. A reservation refused, or one under `minReservationSeconds`, is released and the run is
+   * answered `failed`, with the refusal's reason (`allowance` for a short one). A creation still unfinished
+   * `dispatchRetryMs` after the run's join time, or after its request when that is later, ends `crashed`, unbilled,
+   * and its hold is released.
+   *
+   * @param request - The send; it must carry an idempotency key.
+   * @param context - The host's preparation data, opaque to the manager, handed to `admit` and `prepare`.
+   * @throws Error when the manager has no `creation`, the entitlement hook has no `reserveOnce` or the request has no idempotency key; and when the run store does not keep `creationPending` and `creationContext` as written, after the run is ended `crashed`.
+   * @throws RangeError when `joinAt` or a limit the request gives is not a finite number (a limit must also be zero or more); nothing is written.
+   */
+  async sendBotPrepared(request: SendBotRequest, context: string): Promise<SendBotResult> {
+    const creation = this.config.creation;
+    const key = request.idempotencyKey;
+    if (!creation || !this.stores.entitlement.reserveOnce || !key) throw new Error('prepared creation requires host locking, preparation, reserveOnce and a key');
+    return creation.withOwnerLock(request.ownerRef, async (): Promise<SendBotResult> => {
+      const previous = await this.stores.runs.findByIdempotencyKey(request.ownerRef, key);
+      if (previous) {
+        const recovered = previous.creationPending ? await this.finishCreation(previous) : previous;
+        return { ok: true, run: recovered, repeated: true };
+      }
+      const provider = this.providerFor(request.platform, request.providerName);
+      if (!provider) return { ok: false, reason: 'no_provider', message: `no provider for ${request.platform}` };
+      const url = provider.checkJoinUrl(request.meetingUrl);
+      if (!url.ok) return { ok: false, reason: 'invalid_url', message: url.message };
+      if (url.platform !== request.platform) return { ok: false, reason: 'invalid_url', message: `the link is a ${url.platform} link` };
+      if (this.paused.has(request.platform)) return { ok: false, reason: 'platform_paused', message: `${request.platform} is paused today` };
+      const at = this.now();
+      const joinAt = request.joinAt ?? at;
+      // a NaN join time is never due: the run would wait for ever with its reservation held
+      if (!Number.isFinite(joinAt)) throw new RangeError('joinAt must be a finite time in milliseconds');
+      const limits = runLimits(request.limits);
+      await creation.admit?.(request, context);
+      const run: MeetingRunRecord = {
+        runId: randomUUID(), ownerRef: request.ownerRef, providerName: provider.name,
+        platform: request.platform, state: joinAt > at ? 'scheduled' : 'requested', keep: request.keep,
+        meetingUrl: request.meetingUrl, botName: request.botName, notice: request.notice,
+        stopPhrase: request.stopPhrase, limits, requestedAt: at, joinAt, billedSeconds: 0,
+        idempotencyKey: key, transcriber: request.transcriber,
+        consentRecordId: request.consentRecordId, pageSeenAt: limits.pageAwayMs === undefined ? undefined : at,
+        creationPending: true, creationContext: context,
+      };
+      try {
+        await this.stores.runs.insert(run);
+      } catch (err) {
+        // another send with the key won the race (a host lock that does not hold across processes): its run is the answer
+        const existing = err instanceof DuplicateIdempotencyKeyError ? await this.stores.runs.findByIdempotencyKey(request.ownerRef, key) : undefined;
+        if (!existing) throw err;
+        return { ok: true, run: existing.creationPending ? await this.finishCreation(existing) : existing, repeated: true };
+      }
+      const stored = await this.stores.runs.get(run.runId);
+      if (stored?.creationPending !== true || stored.creationContext !== context) {
+        // a store that drops the two fields would leave a waiting run that reconcile gives its job: dispatched with no
+        // reservation and no preparation. It is ended before anything else can take it
+        if (stored) await this.fail(stored, 'crashed', 'the run store keeps no creation fields');
+        throw new Error('prepared creation needs a run store that keeps creationPending and creationContext');
+      }
+      return { ok: true, run: await this.finishCreation(stored), repeated: false };
+    });
+  }
+
+  /**
+   * Finishes a pending run's creation from wherever an interruption left it, each step safe to repeat: the reservation
+   * (`reserveOnce` answers the one it committed) and its write, the host's preparation, the job, the two fields cleared,
+   * then `bot:requested` (and `bot:scheduled`). Only a run that still waits for its dispatch is finished: a run a cancel
+   * or a purge took is answered as it stands.
+   */
+  private async finishCreation(input: MeetingRunRecord): Promise<MeetingRunRecord> {
+    const run = await this.stores.runs.get(input.runId);
+    if (!run) throw new Error('pending run missing');
+    if (!run.creationPending || run.cleanupPending || (run.state !== 'requested' && run.state !== 'scheduled')) return run;
+    const creation = this.config.creation;
+    const reserve = this.stores.entitlement.reserveOnce;
+    if (!creation || !reserve) throw new Error('creation configuration missing');
+    const reservation = { ownerRef: run.ownerRef, runId: run.runId, platform: run.platform, maxSeconds: Math.ceil(run.limits.totalMs / 1000) };
+    if (this.now() - Math.max(run.joinAt, run.requestedAt) > this.dispatchRetryMs) {
+      // as a dispatch not made within the window fails: a hold whose answer an interruption lost is asked for again
+      // (reserveOnce answers the one it committed) and freed with the run
+      if (run.reservationId === undefined) {
+        const lost = await reserve.call(this.stores.entitlement, reservation);
+        if (lost.ok) await this.stores.entitlement.release(lost.reservationId);
+      }
+      this.config.logger?.warn(`[MeetingManager] ${run.runId}: creation unfinished ${this.dispatchRetryMs} ms after its join time; ending as crashed`);
+      return this.endCreation(run, 'crashed');
+    }
+    const context = run.creationContext;
+    if (context === undefined) throw new Error('creation configuration missing');
+    const held = await reserve.call(this.stores.entitlement, reservation);
+    // written as "not at least" so that an answer that is not a number is refused too, rather than leaving the run without a cap
+    if (!held.ok || !(held.maxSeconds >= this.minReservationSeconds)) {
+      if (held.ok) await this.stores.entitlement.release(held.reservationId);
+      return this.endCreation(run, held.ok ? 'allowance' : held.reason);
+    }
+    const reserved = await this.stores.runs.update(run.runId, { reservationId: held.reservationId, limits: { ...run.limits, totalMs: Math.min(run.limits.totalMs, held.maxSeconds * 1000) } }, ['requested', 'scheduled']);
+    if (!reserved) {
+      // a cancel or a purge took the run meanwhile: the hold it never saw is freed, and the run is answered as it stands
+      await this.stores.entitlement.release(held.reservationId);
+      const current = await this.stores.runs.get(run.runId);
+      if (!current) throw new Error('reserved run missing');
+      return current;
+    }
+    await creation.prepare(reserved, context);
+    await this.stores.jobs.schedule({ runId: run.runId, dispatchAt: run.joinAt });
+    const ready = await this.stores.runs.update(run.runId, { creationPending: false, creationContext: undefined });
+    if (!ready) throw new Error('ready run missing');
+    // a run a cancel ended meanwhile has had its last events
+    if (ready.state === 'requested' || ready.state === 'scheduled') {
+      await this.emit('bot:requested', ready, { platform: ready.platform, joinAt: ready.joinAt });
+      if (ready.state === 'scheduled') await this.emit('bot:scheduled', ready, { joinAt: ready.joinAt });
+    }
+    return ready;
+  }
+
+  /** Ends a run whose creation cannot finish, as `fail` ends a run before its dispatch, and answers it with the creation fields cleared. */
+  private async endCreation(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<MeetingRunRecord> {
+    await this.fail(run, reason);
+    const ended = await this.stores.runs.update(run.runId, { creationPending: false, creationContext: undefined });
+    if (!ended) throw new Error('failed run missing');
+    return ended;
+  }
+
+  /**
+   * Finishes, under the host's lock for each owner, every creation an interruption left pending, when the host set
+   * `creation`. A creation whose step fails again stays pending for the next pass, and the next send with its key.
+   */
+  private async recoverCreations(): Promise<void> {
+    const creation = this.config.creation;
+    if (!creation) return;
+    for (const run of await this.stores.runs.list({ states: ['requested', 'scheduled'], limit: 100_000 })) {
+      if (!run.creationPending) continue;
+      try {
+        await creation.withOwnerLock(run.ownerRef, () => this.finishCreation(run));
+      } catch {
+        this.config.logger?.warn(`[MeetingManager] preparation pending for ${run.runId}`);
+      }
+    }
+  }
+
   // ── The loop ──
 
   /**
-   * Runs a tick's two passes every second until `stop()`, apart from each other: the dispatches, and the upkeep (the
-   * limits, the kills, the purges and cleanups resumed, the eviction and a reconcile every minute). Apart, a dispatch a
-   * provider is slow to answer (a worker pulling its image) holds back no limit: a quiet stop monitor is still suspended
-   * and an armed kill still fires while it waits. Each pass runs one at a time, so a slow store does not stack passes on
-   * each other, except that a pass still running five intervals after it began is no longer waited for and the next one
-   * starts beside it: a pass held by a call that never answers (a command to a worker that froze) would otherwise stop
-   * every later one. A host with its own scheduler calls `tick()` itself.
+   * Runs a tick's two passes every second until `stop()`, apart from each other: the dispatches (after the creations an
+   * interruption left pending are finished), and the upkeep (the limits, the kills, the purges and cleanups resumed, the
+   * eviction and a reconcile every minute). Apart, a dispatch a provider is slow to answer (a worker pulling its image)
+   * holds back no limit: a quiet stop monitor is still suspended and an armed kill still fires while it waits. Each pass
+   * runs one at a time, so a slow store does not stack passes on each other, except that a pass still running five
+   * intervals after it began is no longer waited for and the next one starts beside it: a pass held by a call that never
+   * answers (a command to a worker that froze) would otherwise stop every later one. A host with its own scheduler calls
+   * `tick()` itself.
    */
   start(intervalMs = 1_000): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
       this.loopIntervals += 1;
-      this.runPass('dispatch', () => this.dispatchDue());
+      this.runPass('dispatch', () => this.dispatchPass());
       this.runPass('upkeep', () => this.upkeep());
     }, intervalMs);
     this.timer.unref?.();
@@ -485,21 +656,41 @@ export class MeetingManager {
   }
 
   /**
-   * One pass: due jobs dispatched, then the upkeep (limits enforced, kills issued, purges resumed, a reconcile every
-   * minute). Each step runs even when an earlier one throws, so a dispatch that fails on one run never holds back the
-   * limits of the others (the stop monitor's suspension among them); the first error is thrown once the pass is over.
-   * The steps run in turn, so a dispatch that takes long holds this pass's limits back until it returns; `start()` runs
-   * the two apart.
+   * One pass: the creations an interruption left pending finished, due jobs dispatched, then the upkeep (limits
+   * enforced, kills issued, purges resumed, a reconcile every minute). Each step runs even when an earlier one throws, so
+   * a dispatch that fails on one run never holds back the limits of the others (the stop monitor's suspension among
+   * them); the first error is thrown once the pass is over. The steps run in turn, so a dispatch that takes long holds
+   * this pass's limits back until it returns; `start()` runs the dispatches and the upkeep apart.
    */
   async tick(): Promise<void> {
     let failure: { error: unknown } | undefined;
     try {
-      await this.dispatchDue();
+      await this.dispatchPass();
     } catch (error) {
       failure = { error };
     }
     try {
       await this.upkeep();
+    } catch (error) {
+      failure ??= { error };
+    }
+    if (failure) throw failure.error;
+  }
+
+  /**
+   * The dispatches: the creations an interruption left pending are finished first (with the host's `creation`), then
+   * the due jobs are dispatched. The dispatches run even when finishing the creations throws, and that error is thrown
+   * after them.
+   */
+  private async dispatchPass(): Promise<void> {
+    let failure: { error: unknown } | undefined;
+    try {
+      await this.recoverCreations();
+    } catch (error) {
+      failure = { error };
+    }
+    try {
+      await this.dispatchDue();
     } catch (error) {
       failure ??= { error };
     }
@@ -532,8 +723,7 @@ export class MeetingManager {
 
   private async dispatchDue(): Promise<void> {
     for (;;) {
-      const now = this.now();
-      const job = await this.stores.jobs.lease(this.id, now, this.leaseTtlMs);
+      const job = await this.stores.jobs.lease(this.id, this.now(), this.leaseTtlMs);
       if (!job) return;
       const run = await this.stores.runs.get(job.runId);
       if (!run || TERMINAL_RUN_STATES.has(run.state) || run.state === 'purging') {
@@ -544,30 +734,79 @@ export class MeetingManager {
         await this.fail(run, run.reason ?? 'crashed');
         continue;
       }
-      if (run.state === 'dispatching') {
-        // the lease of another manager expired in the middle of a dispatch: find out whether the bot is out
-        await this.recoverDispatch(run);
+      if (run.creationPending) {
+        // its creation (the reservation, the host's preparation) has not committed: no worker is sent for it yet
+        await this.stores.jobs.release(run.runId, this.id, this.now() + this.dispatchRetryDelayMs);
         continue;
       }
-      if (run.state !== 'requested' && run.state !== 'scheduled') {
+      if (run.state !== 'requested' && run.state !== 'scheduled' && run.state !== 'dispatching') {
         // the bot is out and has reported, and its dispatcher lost the lease before it recorded the dispatch: it is
         // recorded now, under this lease, so reconcile watches the run (a removed job would let its container die unseen)
         await this.stores.jobs.markDispatched(run.runId, this.id, run.dispatch?.workerId);
         continue;
       }
-      if (run.state === 'scheduled' && run.reservationId && !(await this.stores.entitlement.revalidate(run.reservationId))) {
-        await this.stores.jobs.remove(job.runId);
-        await this.fail(run, 'allowance');
-        continue;
-      }
-      const dispatching = await this.stores.runs.update(run.runId, { state: 'dispatching', dispatchedAt: now }, ['requested', 'scheduled']);
-      if (!dispatching) {
-        // cancelled or purged between the lease and now: the job is finished
-        await this.stores.jobs.remove(job.runId);
-        continue;
-      }
-      await this.dispatch(dispatching);
+      const work = (): Promise<void> => this.dispatchLeased(run.runId);
+      if (this.config.dispatchGuard) await this.config.dispatchGuard(run, work);
+      else await work();
     }
+  }
+
+  /**
+   * The dispatch of a leased job, once the host's `dispatchGuard`, when it has one, admits it. The run is read again,
+   * since the guard may have waited: a run that is over, behind the fence, being ended or still being created is left
+   * as it is. A run in `dispatching` is recovered (the lease of another manager expired in the middle of its dispatch); a
+   * waiting one has its reservation revalidated, then is dispatched.
+   */
+  private async dispatchLeased(runId: string): Promise<void> {
+    const run = await this.stores.runs.get(runId);
+    if (!run || run.creationPending || run.cleanupPending || TERMINAL_RUN_STATES.has(run.state) || run.state === 'purging') return;
+    if (run.state === 'dispatching') {
+      // the lease of another manager expired in the middle of a dispatch: find out whether the bot is out
+      await this.recoverDispatch(run);
+      return;
+    }
+    if (run.state !== 'requested' && run.state !== 'scheduled') {
+      // the bot reported while the guard held the dispatch: its dispatch is recorded under this lease, as the loop records it
+      await this.stores.jobs.markDispatched(runId, this.id, run.dispatch?.workerId);
+      return;
+    }
+    const admitted = await this.admitDispatch(run);
+    if (!admitted) return;
+    const dispatching = await this.stores.runs.update(runId, { state: 'dispatching', dispatchedAt: this.now() }, ['requested', 'scheduled']);
+    if (!dispatching) {
+      // cancelled or purged between the lease and now: the job is finished
+      await this.stores.jobs.remove(runId);
+      return;
+    }
+    await this.dispatch(dispatching);
+  }
+
+  /**
+   * Revalidates a run's reservation before a worker is sent for it. With the entitlement hook's `revalidateAllowance`,
+   * every such dispatch is asked: the run's `limits.totalMs` is cut to the grant and written on the run before the
+   * provider sees it, and a grant refused, not finite or under `minReservationSeconds` ends the run `allowance`.
+   * Without it, a scheduled run asks the boolean `revalidate`, and a run sent now is not asked again.
+   *
+   * @returns The run to dispatch, or undefined when it was ended or moved on meanwhile.
+   */
+  private async admitDispatch(run: MeetingRunRecord): Promise<MeetingRunRecord | undefined> {
+    if (!run.reservationId) return run;
+    const allowance = this.stores.entitlement.revalidateAllowance;
+    if (allowance) {
+      const answer = await allowance.call(this.stores.entitlement, run.reservationId);
+      if (!answer.ok || !Number.isFinite(answer.maxSeconds) || answer.maxSeconds < this.minReservationSeconds) {
+        await this.stores.jobs.remove(run.runId);
+        await this.fail(run, 'allowance');
+        return undefined;
+      }
+      return this.stores.runs.update(run.runId, { limits: { ...run.limits, totalMs: Math.min(run.limits.totalMs, answer.maxSeconds * 1000) } }, run.state);
+    }
+    if (run.state === 'scheduled' && !(await this.stores.entitlement.revalidate(run.reservationId))) {
+      await this.stores.jobs.remove(run.runId);
+      await this.fail(run, 'allowance');
+      return undefined;
+    }
+    return run;
   }
 
   /** A run left in `dispatching` by a lease that expired: the bot is out (the provider knows the run) or it is not (dispatch again). */
@@ -606,7 +845,11 @@ export class MeetingManager {
     }
     if (run.dispatch?.roomName) await this.config.room.delete(run.dispatch.roomName);
     const again = await this.stores.runs.update(run.runId, { dispatch: undefined }, 'dispatching');
-    if (again) await this.dispatch(again);
+    if (!again) return;
+    // another worker is about to be sent: the reservation is revalidated first, as for a first dispatch. A bot found
+    // out above is not asked about: it was sent under a grant, and failing its run would not tell it to leave
+    const admitted = await this.admitDispatch(again);
+    if (admitted) await this.dispatch(admitted);
   }
 
   private async dispatch(run: MeetingRunRecord): Promise<void> {
@@ -1200,7 +1443,7 @@ export class MeetingManager {
     if (pending.dispatch?.roomName) await this.config.room.delete(pending.dispatch.roomName);
     await this.stores.jobs.remove(run.runId);
     const now = this.now();
-    const failed = await this.stores.runs.update(run.runId, { ...contentFreeRun(pending), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'failed', leftAt: now, doneAt: now, billedSeconds: 0, cleanupPending: false }, pending.state);
+    const failed = await this.stores.runs.update(run.runId, { ...contentFreeRun(pending), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, creationPending: undefined, creationContext: undefined, state: 'failed', leftAt: now, doneAt: now, billedSeconds: 0, cleanupPending: false }, pending.state);
     if (!failed) return;
     await this.emit('bot:left', failed, { reason: failed.reason, message });
     await this.emit('bot:done', failed, { reason: failed.reason, billedSeconds: 0 });
@@ -1251,7 +1494,7 @@ export class MeetingManager {
     }
     const free = contentFreeRun(run);
     const kept = run.keep === 'none' ? free : { ...free, botName: run.botName, notice: run.notice };
-    const done = await this.stores.runs.update(run.runId, { ...kept, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'done', doneAt: now, billedSeconds: billed, cleanupPending: false }, 'left');
+    const done = await this.stores.runs.update(run.runId, { ...kept, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, creationPending: undefined, creationContext: undefined, state: 'done', doneAt: now, billedSeconds: billed, cleanupPending: false }, 'left');
     if (!done) return;
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
   }
@@ -1354,7 +1597,7 @@ export class MeetingManager {
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
     // one write, `done` and the content-free row together as complete() and fail() write theirs: a failure after a first
     // write of `done` would leave a done row holding the url, the bot's name and the notice, and nothing returns to a done run
-    await this.stores.runs.update(runId, { ...done, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, cleanupPending: false }, 'purging');
+    await this.stores.runs.update(runId, { ...done, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, creationPending: undefined, creationContext: undefined, cleanupPending: false }, 'purging');
   }
 
   // ── The limits ──
@@ -1541,9 +1784,10 @@ export class MeetingManager {
    * `supplierUsageInbox`, are handed to it again; then, with `usageSilenceMs`, each run gone silent for that long is ended
    * at its last usage before any provider is asked, and a run whose container a provider reports gone ends at the total
    * its usage reports gave. An answer about a run the provider was not asked about is ignored and logged. A run still
-   * waiting for its dispatch whose job is missing (a send whose job could not be stored) is given its job again, and one a
-   * cancel left without its job (the cancel's reason is on the run) is ended, so neither waits for ever holding its
-   * reservation. As in the limits, a run whose step throws holds back no other, and the first error is thrown at the end.
+   * waiting for its dispatch whose job is missing (a send whose job could not be stored) is given its job again, unless
+   * its creation is pending (its creation schedules the job), and one a cancel left without its job (the cancel's reason
+   * is on the run) is ended, so neither waits for ever holding its reservation. As in the limits, a run whose step throws
+   * holds back no other, and the first error is thrown at the end.
    */
   async reconcile(): Promise<void> {
     const now = this.now();
@@ -1625,12 +1869,13 @@ export class MeetingManager {
       }
     }
     // only a job is ever dispatched: a waiting run without one would hold its reservation for ever. A run whose end has
-    // begun (cleanupPending) is the limits pass's to finish.
+    // begun (cleanupPending) is the limits pass's to finish, and a run whose creation is pending is given its job by its
+    // creation, once the host's preparation has committed.
     for (const run of await this.stores.runs.list({ states: ['requested', 'scheduled'], limit: Number.MAX_SAFE_INTEGER })) {
       try {
         if (run.cleanupPending || (await this.stores.jobs.get(run.runId))) continue;
         if (run.reason !== undefined) await this.fail(run, run.reason);
-        else await this.stores.jobs.schedule({ runId: run.runId, dispatchAt: run.joinAt });
+        else if (!run.creationPending) await this.stores.jobs.schedule({ runId: run.runId, dispatchAt: run.joinAt });
       } catch (error) {
         failure ??= { error };
       }
