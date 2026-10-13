@@ -5,7 +5,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { removeDurableJson, writeDurableJson } from '../durableJson.js';
 import { MemoryDurableInbox, SqlDurableInbox, durableInboxDdl, type IDurableInbox } from '../DurableInbox.js';
-import { SqlRunStore, meetingStoresDdl } from '../stores/sql.js';
+import { SqlRunStore, meetingStoreTables, meetingStoresDdl } from '../stores/sql.js';
+import { InMemoryRunStore } from '../stores/memory.js';
 import { connectionRuns, meetingProvenanceDdl } from '../stores/provenance.js';
 import { SecretBox } from '../signing.js';
 import { DEFAULT_RUN_LIMITS, contentFreeRun, type MeetingRunRecord } from '../types.js';
@@ -73,6 +74,33 @@ describe('the in-memory durable inbox', () => {
   });
 });
 
+/** The message of the error the stores' own prefix check throws for `prefix`; the provenance helpers throw the same. */
+function storesRefusal(prefix: string): string {
+  try {
+    meetingStoreTables(prefix);
+  } catch (err) {
+    return (err as Error).message;
+  }
+  throw new Error(`the stores take the prefix ${JSON.stringify(prefix)}`);
+}
+
+describe('the provenance helpers', () => {
+  it('refuse a table prefix of 39 characters as the stores do, before any SQL reaches the database, and take one of 38', async () => {
+    // the stores' bound: a lower-case letter and at most 37 more
+    const longest = `p${'x'.repeat(37)}`;
+    const tooLong = `${longest}x`;
+    const statements: string[] = [];
+    const db = { all: async <T>(sql: string): Promise<T[]> => { statements.push(sql); return []; } };
+    const runs = new InMemoryRunStore();
+    expect(() => meetingProvenanceDdl(tooLong)).toThrow(storesRefusal(tooLong));
+    await expect(connectionRuns(db, runs, tooLong, 'acct_1', 'mock', 'generation-1')).rejects.toThrow(storesRefusal(tooLong));
+    expect(statements).toEqual([]);
+    expect(meetingProvenanceDdl(longest)).toBe(`ALTER TABLE ${longest}_runs ADD COLUMN IF NOT EXISTS provider_connection_ref TEXT;`);
+    expect(await connectionRuns(db, runs, longest, 'acct_1', 'mock', 'generation-1')).toEqual([]);
+    expect(statements).toEqual([`SELECT run_id FROM ${longest}_runs WHERE owner_ref = ? AND provider_name = ? AND provider_connection_ref = ? ORDER BY run_id`]);
+  });
+});
+
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 const describeIfPostgres = POSTGRES_URL ? describe : describe.skip;
 let prefixSeq = 0;
@@ -118,7 +146,7 @@ describeIfPostgres('run provenance and the durable inbox on Postgres', () => {
     const found = await connectionRuns(db, runs, prefix, 'acct_1', 'mock', 'generation-1');
     expect(found.map((r) => [r.runId, r.state])).toEqual([['r1', 'done'], ['r2', 'requested']]);
     expect(await connectionRuns(db, runs, prefix, 'acct_1', 'another-provider', 'generation-1')).toEqual([]);
-    await expect(connectionRuns(db, runs, 'Bad prefix', 'acct_1', 'mock', 'generation-1')).rejects.toThrow('invalid table prefix');
+    await expect(connectionRuns(db, runs, 'Bad prefix', 'acct_1', 'mock', 'generation-1')).rejects.toThrow(storesRefusal('Bad prefix'));
   });
 
   it('upgrades a runs table made before the column, and the upgrade applied twice changes nothing', async () => {
@@ -132,7 +160,7 @@ describeIfPostgres('run provenance and the durable inbox on Postgres', () => {
     await db.exec(meetingProvenanceDdl(prefix));
     await runs.insert(run('r1', 'acct_1', { providerConnectionRef: 'generation-1' }));
     expect((await runs.get('r1'))?.providerConnectionRef).toBe('generation-1');
-    expect(() => meetingProvenanceDdl('Bad prefix')).toThrow('invalid table prefix');
+    expect(() => meetingProvenanceDdl('Bad prefix')).toThrow(storesRefusal('Bad prefix'));
   });
 
   it('seals what it keeps, keeps it pending until it is acknowledged, and refuses a replay after a restart', async () => {

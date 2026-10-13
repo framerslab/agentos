@@ -1,4 +1,5 @@
 import type { MeetingRunRecord } from '../types.js';
+import { meetingStoreTables } from './sql.js';
 import type { IRunStore } from './types.js';
 
 /**
@@ -6,11 +7,13 @@ import type { IRunStore } from './types.js';
  * migration to apply before this version's `SqlRunStore` writes the column. Applying it twice changes nothing.
  *
  * @param prefix - The prefix the stores' tables were made under.
- * @throws Error when the prefix is not a lower-case letter followed by lower-case letters, digits or underscores.
+ * @throws Error, the one {@link meetingStoreTables} throws, when the prefix is not a lower-case letter followed by at
+ * most 37 lower-case letters, digits or underscores.
  */
 export function meetingProvenanceDdl(prefix: string): string {
-  if (!/^[a-z][a-z0-9_]*$/.test(prefix)) throw new Error('invalid table prefix');
-  return `ALTER TABLE ${prefix}_runs ADD COLUMN IF NOT EXISTS provider_connection_ref TEXT;`;
+  // the stores' own check, so a prefix they would refuse is refused here before any SQL is built
+  const table = meetingStoreTables(prefix).runs;
+  return `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS provider_connection_ref TEXT;`;
 }
 
 /**
@@ -24,15 +27,17 @@ export function meetingProvenanceDdl(prefix: string): string {
  * @param ownerRef - The owner whose runs are wanted.
  * @param provider - The provider the runs were sent through.
  * @param generation - The provider's connection reference ({@link MeetingRunRecord.providerConnectionRef}).
- * @throws Error when the prefix is not a lower-case letter followed by lower-case letters, digits or underscores.
+ * @throws Error, the one {@link meetingStoreTables} throws, when the prefix is not a lower-case letter followed by at
+ * most 37 lower-case letters, digits or underscores; nothing is read.
  */
 export async function connectionRuns(
   db: { all<T>(sql: string, args: unknown[]): Promise<T[]> },
   runs: IRunStore, prefix: string, ownerRef: string, provider: string, generation: string,
 ): Promise<MeetingRunRecord[]> {
-  if (!/^[a-z][a-z0-9_]*$/.test(prefix)) throw new Error('invalid table prefix');
+  // the stores' own check, so a prefix they would refuse is refused here before any SQL is built
+  const table = meetingStoreTables(prefix).runs;
   const rows = await db.all<{ run_id: string }>(
-    `SELECT run_id FROM ${prefix}_runs WHERE owner_ref = ? AND provider_name = ? AND provider_connection_ref = ? ORDER BY run_id`,
+    `SELECT run_id FROM ${table} WHERE owner_ref = ? AND provider_name = ? AND provider_connection_ref = ? ORDER BY run_id`,
     [ownerRef, provider, generation],
   );
   const found = await Promise.all(rows.map((row) => runs.get(row.run_id)));
