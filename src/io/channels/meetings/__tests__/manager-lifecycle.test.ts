@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { harness } from './manager-send-dispatch.test.js';
+import { harness } from './manager-harness.js';
 import { FencedError } from '../stores/types.js';
 import { MockMeetingBotProvider, mockEventContext } from '../providers/mock.js';
 
