@@ -48,7 +48,11 @@
  *    on the finals held. Finals answer the transcriber's `speech_end` events
  *    in the order they arrive, so a final that comes more than the silence
  *    timeout after its own `speech_end` can answer a later one and end the
- *    turn without that utterance's words.
+ *    turn without that utterance's words. After a reset (each
+ *    `turn_complete` makes one) of a turn in which speech started, an
+ *    item-keyed final that arrives before speech starts or ends again is
+ *    that turn's late final and is dropped instead of joining the next
+ *    turn's text.
  *
  * ## Why heuristic over acoustic-only?
  *
@@ -275,6 +279,13 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   private finalsWithoutSpeechEnd = 0;
 
   /**
+   * Set when a reset ends a turn in which speech started, and cleared by the
+   * next `speech_start` or `speech_end`: an item-keyed final that arrives
+   * meanwhile is the late final of the turn that ended, and is dropped.
+   */
+  private awaitingNextSpeech = false;
+
+  /**
    * The turn's latest `speech_end`: its timestamp, for the turn's duration,
    * and when it arrived on this detector's clock, for the silence since.
    * `null` before the turn's first `speech_end`.
@@ -418,6 +429,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
         this.speechActive = true;
         // A final that arrives from now on belongs to speech still in progress.
         this.speechEndWithoutText = null;
+        this.awaitingNextSpeech = false;
         // Cancel any pending silence timer -- the user is speaking again
         this._clearSilenceTimer();
         // Record turn start only once (first speech_start in this turn)
@@ -429,6 +441,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
       case 'speech_end': {
         this.speechActive = false;
+        // A final that arrives from now on can be this speech's.
+        this.awaitingNextSpeech = false;
         const at = Date.now();
         this.lastSpeechEnd = { timestamp: event.timestamp, at };
         // The transcriber's speech gets an item-keyed final: one that came
@@ -482,9 +496,13 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    *
    * Called by the pipeline after each `turn_complete` event (both internally
    * and by the orchestrator's flush_complete handler) to ensure clean state
-   * before audio for the next turn begins to arrive.
+   * before audio for the next turn begins to arrive. When speech started in
+   * the turn it ends, an item-keyed final that arrives after it and before
+   * speech starts or ends again is that turn's late final, and is dropped.
    */
   reset(): void {
+    // A turn in which speech started can still get a final after it has ended.
+    this.awaitingNextSpeech ||= this.turnStartMs !== null;
     this._clearSilenceTimer();
     this.accumulatedText = '';
     this.speechActive = false;
@@ -533,12 +551,16 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * backchannel or a final with no words answers one too and adds no text.
    * Once speech has ended in this turn, the turn is decided again. A
    * backchannel is announced last, so a `'backchannel_detected'` listener
-   * that throws leaves the final recorded and the turn decided.
+   * that throws leaves the final recorded and the turn decided. A final that
+   * arrives while {@link awaitingNextSpeech} holds is dropped, with no event.
    *
    * @param itemId - The provider input item the final belongs to.
    * @param transcript - The final transcript event.
    */
   private _pushItemFinal(itemId: string, transcript: TranscriptEvent): void {
+    // The late final of a turn that has ended stays out of the next turn.
+    if (this.awaitingNextSpeech) return;
+
     const normalised = transcript.text.trim().toLowerCase();
     const backchannel = BACKCHANNEL_PHRASES.has(normalised);
 
