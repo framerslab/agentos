@@ -241,11 +241,11 @@ The complete, assembled response emitted at the end of a turn.
 
 Emitted when the model requests a tool call. It carries `isFinal: false`, and `evaluateOutput` receives it only when the guardrail's `config.evaluateToolCalls` is `true`:
 
-- **`BLOCK`** ends the stream with the guardrail's verdict (the error chunk, or the final response holding `replacementText`) in place of the chunk, so the stream never hands the host an actionable call to execute. The pause the runtime saved for that call stays in `getPendingExternalToolRequest()` until the conversation's next turn ends.
+- **`BLOCK`** ends the stream with the guardrail's verdict (the error chunk, or the final response holding `replacementText`) in place of the chunk, so the stream never hands the host an actionable call to execute. AgentOS drops the pause the runtime saved for that call: `getPendingExternalToolRequest()` no longer returns it, and the conversation answers the call with a refused tool result.
 - **`SANITIZE`** cannot rewrite a tool call: it is applied as a `BLOCK` that keeps your reason and reason code.
 - **`FLAG`** and **`ALLOW`** pass the chunk on, with the evaluation in its `metadata.guardrail.output`.
 
-A call with `executionMode: 'internal'` is one the runtime executes itself, without waiting for the output guardrails: a block ends the stream but does not stop that call.
+A call with `executionMode: 'internal'` is one the runtime executes itself. AgentOS asks your guardrail about it before it runs, as a `TOOL_CALL_REQUEST` chunk holding that one call: a `BLOCK` (or a `SANITIZE`) refuses the call, the tool does not run, and the model reads a refused tool result. Your guardrail also receives the stream's chunk for the call, where a `BLOCK` ends the stream.
 
 ```typescript
 {
