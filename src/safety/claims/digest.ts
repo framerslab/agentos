@@ -2,8 +2,8 @@
  * @module safety/claims/digest
  *
  * Canonical JSON and SHA-256 digests for evidence: object keys sorted at every depth, `undefined` members dropped,
- * arrays kept in order, and anything JSON cannot hold refused rather than coerced, so two writers of the same value get
- * the same digest.
+ * arrays kept in order with a hole or an `undefined` item written as `null` (as `JSON.stringify` writes them), and
+ * anything else JSON cannot hold refused rather than coerced, so two writers of the same value get the same digest.
  */
 import { createHash } from 'node:crypto';
 
@@ -32,7 +32,15 @@ function encode(value: unknown, seen: Set<object>): string {
       if (seen.has(value)) throw new TypeError('canonicalJson: a cycle has no JSON form');
       seen.add(value);
       try {
-        if (Array.isArray(value)) return `[${value.map((item) => (item === undefined ? 'null' : encode(item, seen))).join(',')}]`;
+        if (Array.isArray(value)) {
+          // An index loop, not map: map skips holes, and join would then write each one as an empty string.
+          const items: string[] = [];
+          for (let index = 0; index < value.length; index += 1) {
+            const item: unknown = value[index];
+            items.push(item === undefined ? 'null' : encode(item, seen));
+          }
+          return `[${items.join(',')}]`;
+        }
         const proto = Object.getPrototypeOf(value) as unknown;
         if (proto !== Object.prototype && proto !== null) throw new TypeError('canonicalJson: only a plain object has a JSON form');
         const record = value as Record<string, unknown>;
