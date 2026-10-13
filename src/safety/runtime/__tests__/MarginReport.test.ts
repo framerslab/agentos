@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { InMemoryCompoundCreditStore } from '../CompoundCreditStore.js';
+import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
+import { InMemoryCompoundCreditStore, type ICompoundCreditStore } from '../CompoundCreditStore.js';
 import { completeLotRefund, grantCreditLot, refundCreditLot, reserveCompoundCredit, settleCompoundCredit, type AllocationPolicy } from '../CompoundCreditLedger.js';
 import { authorizeModelAttempt, recordAttemptUsage } from '../ModelAttemptBudget.js';
 import { buildMarginReport, marginReport, readMarginPeriod, type MarginAllocationPolicy } from '../MarginReport.js';
+import { SqlCompoundCreditStore } from '../SqlCompoundCreditStore.js';
 import { ATTEMPTS, FENCED, RATES } from './compoundCreditLedger.contract.js';
 
 /** 12 October 2026, 10:00 UTC: every settlement below lands on that day. */
 const D = Date.UTC(2026, 9, 12, 10, 0, 0);
 const DAY = '2026-10-12';
 
-async function call(store: InMemoryCompoundCreditStore, scopeId: string, op: string, durationSeconds: number, policy?: AllocationPolicy) {
+async function call(store: ICompoundCreditStore, scopeId: string, op: string, durationSeconds: number, policy?: AllocationPolicy) {
   const held = await reserveCompoundCredit(store, {
     scopeId, operationId: op, kind: 'call', requestHash: op, rates: { primary: RATES }, mediaComponent: 'media_second', durationSeconds,
     attempts: ATTEMPTS, supplierDailyCapMicro: 1e12, at: D, expiresAt: D + 3_660_000, policy,
@@ -73,6 +75,50 @@ describe('the margin report', () => {
     ]);
   });
 
+  it('states no contribution while a settled hold of the period has no runtime measurement, and counts an explicit zero as one', async () => {
+    const { store, a1, a2, a3 } = await twoWorkspaces();
+    const input = await readMarginPeriod(store, { scopeId: 'a', fromDay: DAY, toDay: DAY, allocationVersion: 'alloc-1', asOf: D + 10 });
+    const measured = [{ holdId: a1, runtimeMs: 60_000 }, { holdId: a2, runtimeMs: 120_000 }];
+    for (const computeRuntime of [[], measured]) {
+      const report = buildMarginReport(input, { ...complete, computeRuntime });
+      expect(report).toMatchObject({ status: 'unreconciled', computeAllocationMicro: null, contributionMicro: null, contributionRatio: null });
+      expect(report.unreconciledReasons).toEqual(['compute_runtime_missing']);
+    }
+    expect(buildMarginReport(input, { ...complete, computeRuntime: [...measured, { holdId: a3, runtimeMs: 0 }] })).toMatchObject({
+      status: 'reconciled',
+      computeAllocationMicro: 1_800,
+      contributionMicro: 166_234 - 75_150 - 1_800 - 3_000,
+    });
+  });
+
+  it('reads every settlement of the period, however many holds the scope settled before it', async () => {
+    const db = await resolveStorageAdapter({ filePath: ':memory:', priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    const store = new SqlCompoundCreditStore({ db, tablePrefix: 'margin_older', requireShared: false });
+    await grantCreditLot(store, { scopeId: 'a', lotId: 'a-paid', kind: 'paid', fundingRef: 'pay-a', principalMicro: 1_000_000, at: D });
+    // 100,000 holds the scope made and settled the day before, every one older than the period's own: as many as one
+    // read of the scope's settled holds returned.
+    const before = D - 86_400_000;
+    await db.run(
+      `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000)
+       INSERT INTO margin_older_holds (hold_id, scope_id, operation_id, kind, request_hash, customer_micro, supplier_micro, media_customer_micro,
+         media_supplier_micro, attempt_customer_micro, attempt_supplier_micro, max_attempts, attempt_limits, rate_version, rates, media_component,
+         state, charged_micro, supplier_settled_micro, supplier_open_micro, created_at, expires_at, settled_at, deferred_until, fence_evidence, version)
+       SELECT 'older-' || i, 'a', 'older-' || i, 'call', 'older', 0, 0, 0, 0, 0, 0, 0, '{}', 'older', '{}', 'media_second',
+         'released', 0, 0, 0, ?, ?, ?, NULL, NULL, 2 FROM n`,
+      [before, before + 60_000, before + 60_000],
+    );
+    const holdId = await call(store, 'a', 'recent', 60);
+    await settleCompoundCredit(store, { holdId, connectedMs: 60_000, fence: FENCED, at: D + 1 });
+    const report = await marginReport(store, { scopeId: 'a', fromDay: DAY, toDay: DAY, allocationVersion: 'alloc-1', asOf: D + 10 }, { ...complete, computeRuntime: [{ holdId, runtimeMs: 0 }] });
+    expect(report).toMatchObject({
+      settledUsageRefs: ['recent'],
+      paidFundedRevenueMicro: 83_117,
+      supplierCostMicro: 25_000,
+      status: 'reconciled',
+      contributionMicro: 83_117 - 25_000 - 3_000,
+    });
+  });
+
   it('keeps the other workspace apart, and states no contribution while a cost is missing', async () => {
     const { store } = await twoWorkspaces();
     const b = await marginReport(store, { scopeId: 'b', fromDay: DAY, toDay: DAY, allocationVersion: 'alloc-1', asOf: D + 10 }, { version: 'alloc-1', computeRuntime: [], otherCosts: [{ label: 'payment fees' }] });
@@ -106,7 +152,7 @@ describe('the margin report', () => {
         settlements: [{ holdId: 'h', operationId: 'op', kind: 'call', day: DAY, chargedMicro: 9_000, paidFundedMicro: 0, promotionalMicro: 9_000, supplierSettledMicro: 3_000, supplierOpenMicro: 1_537, failed: false }],
         lateSupplierMicro: 0, reversalsMicro: 0, refundsMicro: 0, platformLossMicro: 0,
       },
-      { ...complete, otherCosts: [] },
+      { ...complete, computeRuntime: [{ holdId: 'h', runtimeMs: 0 }], otherCosts: [] },
     );
     expect(report).toMatchObject({ paidFundedRevenueMicro: 0, promotionalUsageMicro: 9_000, openSupplierMicro: 1_537, status: 'unreconciled', contributionRatio: null });
     expect(report.unreconciledReasons).toEqual(['supplier_cost_open']);
