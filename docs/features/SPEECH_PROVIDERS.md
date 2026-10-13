@@ -95,6 +95,8 @@ Preferred providers receive priorities 50, 51, 52, … (lower number = higher pr
 | `moonshine-browser` | Moonshine (in the browser) | — | Yes | Yes | local, offline, streaming, browser |
 | `nvidia-nemo` | NVIDIA NeMo | — | Yes | No | local, offline _(unavailable — not yet integrated)_ |
 
+`moonshine-browser` is a streaming provider for a browser page or worker on the user's own device; [Speech-to-text in the browser](./VOICE_PIPELINE.md#speech-to-text-in-the-browser) shows it. An entry marked unavailable stays in the catalogue, so a lookup by its id finds it, and `isSpeechProviderConfigured()` reports it as not configured.
+
 ### Text-to-Speech (TTS)
 
 | ID | Label | Env Vars | Local | Streaming | Features |

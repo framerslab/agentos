@@ -311,6 +311,57 @@ A `flush()` during reconnect waits for the replacement and its replay and queued
 
 `@framers/agentos/io/voice-pipeline/browser` is the entry a browser bundle imports: its modules import no Node built-in and no package. `@framers/agentos/io/voice-pipeline` exports them as well.
 
+[`MoonshineBrowserSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/MoonshineBrowserSTT.ts) transcribes on the user's own device. It runs [Moonshine](https://github.com/moonshine-ai/moonshine)'s streaming models (MIT) in the browser through `@moonshine-ai/moonshine-wasm`, so the audio stays on the device and no service is paid per hour. It implements `IStreamingSTT`, so its sessions fit `StreamingSTTChain` like any other provider's, and the page sends the server text in place of audio (see the `transcript` message under [WebSocket Messages](#websocket-messages)).
+
+```bash
+npm install @framers/agentos @moonshine-ai/moonshine-wasm
+```
+
+The package is an optional peer dependency (MIT, with no dependencies of its own), so an install of AgentOS alone leaves it out.
+
+```typescript
+import {
+  MoonshineBrowserSTT,
+  checkMoonshineBrowserSupport,
+  toClientTranscriptMessage,
+} from '@framers/agentos/io/voice-pipeline/browser';
+
+if (checkMoonshineBrowserSupport().supported) {
+  const stt = new MoonshineBrowserSTT({
+    // index.js of the package's dist folder, served whole (see "Serving the package")
+    moonshine: () => import(/* webpackIgnore: true */ /* @vite-ignore */ moonshineIndexUrl),
+    context: noteTitles.join('\n'), // names and terms from the user's own notes
+    onProgress: ({ fraction }) => showProgress(fraction), // undefined until the total is known
+  });
+  await stt.load(); // downloads once, before the user starts; the browser caches the files
+
+  const session = await stt.startSession({ language: 'en' });
+  session.on('transcript', (event) => {
+    showLine(event.itemId, event.text, event.isFinal); // one line keeps one itemId
+    socket.send(JSON.stringify(toClientTranscriptMessage(event))); // the server gets text, not audio
+  });
+  session.pushAudio(frame); // mono Float32 at any sample rate
+  await session.flush(); // completes the open line; the session stays open
+  session.close();
+  stt.dispose(); // releases the model and the worker
+}
+```
+
+In a page the model runs in the package's own Web Worker, so a transcription pass never blocks the page; inside a worker of the host's it runs on that worker's thread. Every transcript carries `itemId` (Moonshine's line id), `startMs` and `endMs` on the session's audio clock, and `language`. `flush()` completes the open line and keeps the session open; `close()` ends it at once, and an open line gets an empty final, which retracts its interim text. A transcription failure emits `error`, or writes a console warning when nothing listens for `'error'`, then `close`. A model that cannot load rejects `startSession()`, so a `StreamingSTTChain` moves to its next provider, a smaller size (under a [`ProviderPolicy`](#provider-policy), only one the policy permits); to use the server's transcription instead, the page sends audio. Over a WebSocket the page sends each message as a text frame; in a LiveKit room it sends it as a text stream on `LiveKitStreamTransport`'s topic (`'agentos.voice'` unless the server names another).
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `model` | `'auto'` | `'moonshine-medium'`, `'moonshine-small'`, `'moonshine-tiny'`, or `'auto'` for the size the device runs. |
+| `language` | `'en'` | The model's language; a session that asks for another is refused. |
+| `modelBaseUrl`, `modelFileNames`, `modelBytes` | the package's CDN | The host's own copy of the files, at `<modelBaseUrl>/<size>-streaming-<language>/<file>` (the seven names in `MOONSHINE_STREAMING_MODEL_FILES`), and each size's total bytes, so progress has a fraction. |
+| `keyterms`, `context`, `contextMaxTerms` | none, none, `200` | Terms to bias the transcription towards (no term may contain a comma), and a passage whose unusual words become such terms. |
+| `onProgress` | none | `{ model, loaded, total, fraction, file }` as the model downloads; a cached file counts at once. |
+| `thread` | `'auto'` | `'worker'` (the package's Web Worker), `'calling'` (the calling thread), or `'auto'` (the worker in a page). |
+| `wasmBaseUrl` | the package's folder | Where the package's worker finds `moonshine.wasm`. |
+| `singleThreadBuild` | `false` | The page serves a single-thread build of the package, so `healthCheck()` asks for no cross-origin isolation. |
+| `moonshine` | imported on first use | The package, or a function that imports it from where the page serves its `dist` folder. |
+| `device` | read from the browser | The signals `'auto'` picks the size by. |
+
 ### Input level
 
 ```typescript
@@ -381,6 +432,47 @@ await copyFile(new URL('./capture-worklet.js', entry), 'public/audio/capture-wor
 ```
 
 `AudioProcessor` (in `@framers/agentos/io/hearing`) is the older capture: it reads the audio through a `ScriptProcessorNode` on the page's main thread, a node deprecated in favour of `AudioWorkletNode` ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/ScriptProcessorNode)), and feeds its frames to `EnvironmentalCalibrator` and `AdaptiveVAD`.
+
+### The browser entry
+
+The entry's modules import no Node built-in and no package: a test walks its built module graph and fails on any import that is not one of the library's own. It also exports every type of the streaming contracts (the voice pipeline's [`types.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)), `StreamingSTTChain` with its parts (`CircuitBreaker`, `VoiceMetricsReporter`, `VoicePipelineError`, `AggregateVoiceError`, `defaultCapabilities`, `supportsLanguage`), `VoiceEventEmitter` (an event emitter with Node's semantics; the contracts extend its interface, `EventEmitterLike`, which Node's `EventEmitter` satisfies), `MoonshineBrowserSTT` with its helpers, and `toClientTranscriptMessage()`, `isClientTranscriptMessage()` and `transcriptEventFromClient()`. `@framers/agentos/io/voice-pipeline` exports all of it too, beside the providers, transports and orchestrator that run on a server. The test holds the run-time graph, not the typings: `types.ts` names Node's global `Buffer` type (`EncodedAudioChunk.audio`, `BatchTTSResult.audio` and `IBatchSTT.transcribe()`), so a project that checks the library's typings with `skipLibCheck` off needs `@types/node`.
+
+### Serving the package
+
+`@moonshine-ai/moonshine-wasm` starts its Web Worker (`stt-worker.js`) and loads its WebAssembly (`moonshine.mjs`, `moonshine.wasm`) from files beside its own module, so the page serves the package's `dist` folder whole: copy `node_modules/@moonshine-ai/moonshine-wasm/dist` into the page's static files at build time, or take the published folder from a CDN as the package's own demos do, and import that folder's `index.js` by its URL (`moonshineIndexUrl` above, for example `'/moonshine/index.js'`), with the comments that tell webpack and Vite to leave the import as it is. A bundle that takes the package in does not build its worker: the worker's URL is held in a variable, and neither webpack nor Vite follows a `Worker` built that way ([webpack](https://webpack.js.org/guides/web-workers/), [Vite](https://vite.dev/guide/features.html#web-workers)).
+
+### What the page needs
+
+```text
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+The package's default build runs WebAssembly SIMD with threads. Threads need `SharedArrayBuffer`, which a browser gives only to a [cross-origin isolated](https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated) page, so the page is served with both headers ([the package's README](https://github.com/moonshine-ai/moonshine/blob/main/language-bindings/wasm/README.md#cross-origin-isolation-required-for-the-default-build)). Under `require-corp`, a cross-origin resource the page loads without CORS (an image, or a script without `crossorigin`) loads only when its server sends a `Cross-Origin-Resource-Policy` header that allows it, and one requested with CORS needs its server's CORS permission ([MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cross-Origin-Embedder-Policy)). The package fetches the model files with CORS, and its CDN allows any origin; a host's own copy on another origin allows the page's. Safari does not support `credentialless`, so `require-corp` is the value for every engine. The default build runs in Chrome 91, Firefox 114 and Safari 16.4 and later.
+
+A page that cannot be cross-origin isolated serves a single-thread build of the package, which needs SIMD alone: build it from the package's source with `scripts/build-wasm.sh single-thread`, as [its README](https://github.com/moonshine-ai/moonshine/blob/main/language-bindings/wasm/README.md#building-from-source) shows, and pass `singleThreadBuild: true`.
+
+`checkMoonshineBrowserSupport()` reports, with no download, whether the provider can run where it is called, before a host chooses it:
+
+```typescript
+const support = checkMoonshineBrowserSupport(); // { singleThreadBuild: true } for that build
+// support.supported: WebAssembly SIMD, and cross-origin isolation or a single-thread build
+// support.missing: [] or 'webassembly-simd' and 'cross-origin-isolation'
+// support.thread: 'worker' in a page, 'calling' in a worker
+// support.model: the size 'auto' picks here
+```
+
+### The model
+
+| Size | Download (package 0.1.5) | Picked by `'auto'` for |
+|------|--------------------------|------------------------|
+| `moonshine-medium` | 305 MB | a laptop or desktop |
+| `moonshine-small` | 165 MB | a phone, or a laptop or desktop that reports under 4 GB of memory or fewer than 4 logical cores |
+| `moonshine-tiny` | 51 MB | a phone that reports under 4 GB of memory |
+
+`'auto'` reads `navigator.userAgentData.mobile` where the browser has it (Chromium) and the user agent elsewhere, `navigator.deviceMemory` (Chromium) and `navigator.hardwareConcurrency` (which Safari reports as 4 or 8). A figure the browser does not report constrains nothing, so Safari gets Medium on a Mac and Small on an iPhone. `readMoonshineDeviceSignals()` and `chooseMoonshineModel()` are exported for a host that picks the size itself.
+
+The files come from the package's CDN (`https://download.moonshine.ai`) or from the host's own copy, and the browser keeps them with the Cache API, so a later visit downloads nothing. Safari deletes a site's script-written storage, the Cache API's included, after seven days of use without an interaction with the site ([WebKit](https://webkit.org/blog/10218/full-third-party-cookie-blocking-and-more/)), so on Safari the model can download again.
 
 
 ## Failures
