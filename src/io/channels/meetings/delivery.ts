@@ -13,7 +13,7 @@ import { isIP, type LookupFunction } from 'node:net';
 import { isPublicAddress } from '../../../cognition/memory/io/ingestion/guardedFetch.js';
 import { isPublicNetworkAddress, nat64PrefixesFrom } from '../../media/images/networkAddress.js';
 import { DEFAULT_ENVELOPE_HEADERS, envelopeHeaders, type EnvelopeHeaderNames } from './signing.js';
-import type { IClock, IOutbox } from './stores/types.js';
+import type { IClock, IOutbox, OutboxDelivery } from './stores/types.js';
 
 /**
  * Whether an address, as text, is public: the library's one rule for an address a server must not let a stranger's
@@ -176,16 +176,28 @@ export class OutboxDispatcher {
     return this.options.clock?.now() ?? Date.now();
   }
 
+  /** A delivery's destination; undefined when the host no longer holds it, or when `resolve` rejects, which is logged. */
+  private async destinationOf(d: OutboxDelivery): Promise<DeliveryDestination | undefined> {
+    try {
+      return await this.options.resolve(d.destinationRef);
+    } catch (err) {
+      // a lookup that fails (the host's store out of reach, say) fails this delivery for its backoff, not the whole pass
+      this.options.logger?.warn(`[OutboxDispatcher] ${d.id}: ${err instanceof Error ? err.name : 'error'}`);
+      return undefined;
+    }
+  }
+
   /**
-   * One pass over the due deliveries; answers how many were delivered and how many failed. When the outbox has
-   * `sendClaimed`, each delivery is sent through it, and one it skips (gone, no longer pending, or cancelled by a purge)
-   * counts as neither.
+   * One pass over the due deliveries; answers how many were delivered and how many failed. A delivery whose destination
+   * `resolve` does not give, or rejects for, is marked failed, and the pass goes on. When the outbox has `sendClaimed`,
+   * each delivery is sent through it, and one it skips (gone, no longer pending, or cancelled by a purge) counts as
+   * neither.
    */
   async deliverDue(): Promise<{ delivered: number; failed: number }> {
     let delivered = 0;
     let failed = 0;
     for (const d of await this.options.outbox.due(this.now(), this.options.batch ?? 50)) {
-      const destination = await this.options.resolve(d.destinationRef);
+      const destination = await this.destinationOf(d);
       if (!destination) {
         await this.options.outbox.markFailed(d.id, this.now());
         failed += 1;

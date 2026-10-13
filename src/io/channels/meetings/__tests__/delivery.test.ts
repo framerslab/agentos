@@ -108,6 +108,32 @@ describe('OutboxDispatcher', () => {
     expect(t.sent.length).toBe(1);
   });
 
+  it('marks a delivery failed when its destination lookup rejects, and goes on to the next in the pass', async () => {
+    const outbox = new InMemoryOutbox();
+    await outbox.enqueue({ id: 'e1@hook-down', runId: 'r1', destinationRef: 'hook-down', eventId: 'e1', type: 'bot:left', payload: '{}' }, 0);
+    await outbox.enqueue({ id: 'e2@hook-1', runId: 'r1', destinationRef: 'hook-1', eventId: 'e2', type: 'bot:left', payload: '{}' }, 0);
+    const sent: string[] = [];
+    const warned: string[] = [];
+    const dispatcher = new OutboxDispatcher({
+      outbox,
+      clock: new FakeClock(0),
+      names,
+      resolve: async (ref) => {
+        if (ref === 'hook-down') throw new Error('the destinations store is out of reach');
+        return { url: 'https://hooks.example.test/in', secret: 'not-a-real-secret' };
+      },
+      send: async (request) => {
+        sent.push(request.headers['acme-hook-id'] ?? '');
+        return { status: 204 };
+      },
+      logger: { warn: (msg) => warned.push(msg) },
+    });
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 1, failed: 1 });
+    expect(sent).toEqual(['e2@hook-1']);
+    expect(warned).toEqual(['[OutboxDispatcher] e1@hook-down: Error']);
+    expect((await outbox.listByRun('r1')).find((d) => d.id === 'e1@hook-down')).toMatchObject({ state: 'pending', attempts: 1, nextAt: 5_000 });
+  });
+
   it('sends the content-free body for a delivery the outbox purged while its destination resolved', async () => {
     const outbox = new InMemoryOutbox();
     await outbox.enqueue({ id: 'e1@hook-1', runId: 'r1', destinationRef: 'hook-1', eventId: 'e1', type: 'bot:transcript', payload: '{"text":"we start at nine"}' }, 0);
