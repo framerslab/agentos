@@ -26,6 +26,7 @@
  *   for 'error' it is written as a console warning that names the failure, as is an 'error' listener that
  *   throws or rejects, and the listeners after that one still get the failure
  * - The errorMonitor listeners get each failure first, even when nothing listens for 'error'
+ * - A listener's rejection is reported from a promise of another realm or library as from a native one
  * - Of the audio chunks a transport refuses, the first of each reply is reported and the rest of that reply's
  *   are not, whatever order the replies' sends settle in; a refused control message is reported each time
  */
@@ -666,6 +667,41 @@ describe('VoicePipelineOrchestrator', () => {
       expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
         expect.stringMatching(/the socket is closing$/), // nothing listens for 'error'
         expect.stringMatching(/the socket is closing.*the monitor rejected/),
+      ]);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      warn.mockRestore();
+    }
+  });
+
+  /**
+   * A listener can return a promise of another realm, such as a node:vm context, or of another promise library, which
+   * is not an instance of this realm's Promise. Its rejection is reported as a native promise's is.
+   */
+  it('reports a rejection from a promise of another library returned by a turn_complete or an error listener', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await startSession();
+      // A promise-compatible value that is not a Promise of this realm, and rejects.
+      const rejecting = (message: string) => ({
+        then(_resolve: (value: unknown) => void, reject: (reason: unknown) => void) {
+          reject(new Error(message));
+        },
+      });
+      orchestrator.on('turn_complete', () => rejecting('the turn_complete listener rejected'));
+      orchestrator.on('error', () => rejecting('the error listener rejected'));
+
+      endpoint.emit('turn_complete', makeTurnComplete());
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
+        expect.stringMatching(/the turn_complete listener rejected.*the error listener rejected/),
       ]);
       expect(unhandled).toEqual([]);
     } finally {

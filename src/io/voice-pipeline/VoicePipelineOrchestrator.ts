@@ -569,9 +569,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     for (const listener of this.rawListeners('turn_complete')) {
       try {
         const result: unknown = (listener as (turn: TurnCompleteEvent) => unknown).call(this, event);
-        if (result instanceof Promise) {
-          result.catch((err: unknown) => this._reportError(err, 'a turn_complete listener failed'));
-        }
+        // Promise.resolve() also takes a promise of another realm or library, and leaves any other value alone.
+        Promise.resolve(result).catch((err: unknown) => this._reportError(err, 'a turn_complete listener failed'));
       } catch (err) {
         this._reportError(err, 'a turn_complete listener failed');
       }
@@ -604,7 +603,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       for (const listener of this.rawListeners(event)) {
         try {
           const result: unknown = (listener as (error: Error) => unknown).call(this, error);
-          if (result instanceof Promise) result.catch(warnListenerFailed);
+          // As in _emitTurnComplete(), Promise.resolve() also takes a promise of another realm or library.
+          Promise.resolve(result).catch(warnListenerFailed);
         } catch (thrown) {
           warnListenerFailed(thrown);
         }
