@@ -91,6 +91,15 @@ export interface AudioFrame {
    * See `DiarizedSegment.speakerId` for the post-diarization label.
    */
   speakerHint?: string;
+
+  /** Validated wire packet sequence when supplied by the capture boundary. */
+  sequence?: number;
+
+  /** Channel count at the capture boundary; omitted means the legacy mono convention. */
+  channels?: number;
+
+  /** Optional call fence; required by {@link ScopedAudioFrame}. */
+  generation?: VoiceGeneration;
 }
 
 /**
@@ -145,6 +154,21 @@ export interface EncodedAudioChunk {
    * accurately when playback is cut short.
    */
   text: string;
+
+  /** Container of the declared codec; omitted preserves legacy metadata. */
+  container?: 'raw' | 'wav' | 'mp3' | 'ogg';
+
+  /** Captured tenant scope; required on call-profile output. */
+  scopeId?: string;
+
+  /** Captured call; required on call-profile output. */
+  callId?: string;
+
+  /** Call fence captured when this synthesis request started. */
+  generation?: VoiceGeneration;
+
+  /** Monotonic playback chunk sequence within the inference generation. */
+  sequence?: number;
 }
 
 // ============================================================================
@@ -981,6 +1005,12 @@ export interface StreamingTTSSession extends EventEmitter {
    * Terminate the session and release provider-side resources.
    */
   close(): void;
+
+  /** Opt-in pull contract. Await the sink before producing another chunk; never also emit that chunk as audio. */
+  setAudioSink?(sink: (chunk: EncodedAudioChunk) => Promise<void>): void;
+
+  /** Bounded text admission; the call profile requires this alongside setAudioSink. */
+  writeTokens?(tokens: string): Promise<void>;
 }
 
 /**
@@ -1363,6 +1393,9 @@ export interface VoiceTurnMetadata {
    * Aggregate STT confidence for the complete transcript, in the range [0, 1].
    */
   transcriptConfidence: number;
+
+  /** Required on call-profile reasoning requests; absent on legacy sessions. */
+  identity?: AudioIdentity;
 }
 
 // ============================================================================
@@ -1709,4 +1742,161 @@ export interface ITranscriptInputSink extends ITranscriptSink {
    * @returns The stored turn, or undefined when a fence or terminal run drops it.
    */
   appendNext(turn: TranscriptInput): Promise<TranscriptTurn | undefined>;
+}
+
+// ============================================================================
+// Section 13 -- Scoped call runtime seams
+// ============================================================================
+
+/** Independent worker, inference and physical-transport fences. */
+export interface VoiceGeneration {
+  /** Advances only when a fenced worker replaces the previous one. */
+  workerGeneration: number;
+  /** Advances on each interruption, so output of an earlier inference cannot play. */
+  inferenceGeneration: number;
+  /** Advances on each reattachment of a physical transport. */
+  transportEpoch: number;
+}
+
+/** Stable recognition identity captured at admission, never assigned to a delayed completion. */
+export interface AudioIdentity {
+  /** The scope the audio belongs to. */
+  scopeId: string;
+  /** The call the audio belongs to. */
+  callId: string;
+  /** The recognition turn the audio belongs to. */
+  turnId: string;
+  /** The fences in force when the audio was admitted. */
+  generation: Readonly<VoiceGeneration>;
+}
+
+/** One normalized mono frame; sequence increases for the lifetime of the call, across resets. */
+export interface ScopedAudioFrame extends AudioFrame, AudioIdentity {
+  /** Always 16 kHz. */
+  sampleRate: 16000;
+  /** Always mono. */
+  channels: 1;
+  /** The frame's position in the call's input, starting at 1. */
+  sequence: number;
+  /** The fences in force when the frame was admitted. */
+  generation: VoiceGeneration;
+}
+
+/** One classified frame, with duration measured from samples rather than wall-clock silence. */
+export interface VadFrameEvent extends VadEvent, AudioIdentity {
+  /** Always a voice activity model, never a recognizer's inference. */
+  source: 'vad';
+  /** The sequence of the classified frame. */
+  sequence: number;
+  /** Duration of the classified audio, from its sample count. */
+  durationMs: number;
+  /** Whether the frame was classified as speech. */
+  speech: boolean;
+}
+
+/** Scoped recognition result. The producer preserves the input turn and generation. */
+export interface ScopedTranscriptEvent extends TranscriptEvent, AudioIdentity {}
+
+/** Scoped endpoint result. The producer preserves the input turn and generation. */
+export interface ScopedTurnCompleteEvent extends TurnCompleteEvent, AudioIdentity {}
+
+/** Content-free loss record. Resets never convert a missing interval into silence or billable speech. */
+export interface AudioGapEvent extends AudioIdentity {
+  /** A full queue, the transport, the provider, or an out-of-order or skipped sequence. */
+  reason: 'overflow' | 'transport' | 'provider' | 'sequence';
+  /** Lost audio in milliseconds, including queued audio the gap discarded. */
+  lostMs: number;
+  /** The last sequence admitted before the gap. */
+  afterSequence: number;
+}
+
+/** Factory-owned VAD. Emits vad(VadFrameEvent), error(Error); reset fences all prior asynchronous work. */
+export interface IVadSession extends EventEmitter {
+  /** Classifies one frame; resolves once the frame is admitted. The samples are read-only. */
+  pushAudio(frame: ScopedAudioFrame): Promise<void>;
+  /** Discards retained audio and pending work, and labels later events with `identity`. */
+  reset(identity: AudioIdentity): Promise<void>;
+  /** Classifies retained audio and emits its events. */
+  flush(): Promise<void>;
+  /** Releases the session; it accepts no audio afterwards. */
+  dispose(): Promise<void>;
+}
+
+/** Audio-aware endpointing. Emits turn_complete(ScopedTurnCompleteEvent), error(Error). */
+export interface IAudioEndpointDetector extends EventEmitter {
+  /** Detection strategy, as {@link IEndpointDetector.mode}. */
+  readonly mode: 'acoustic' | 'heuristic' | 'semantic';
+  /** Retains one frame for the detector's window; resolves once admitted. The samples are read-only. */
+  pushAudio(frame: ScopedAudioFrame): Promise<void>;
+  /** Consumes one classified frame, which may ask the detector to evaluate its window. */
+  pushVadEvent(event: VadFrameEvent): Promise<void>;
+  /** Consumes one scoped recognition result. */
+  pushTranscript(event: ScopedTranscriptEvent): Promise<void>;
+  /** Discards the window and pending work, and labels later results with `identity`. */
+  reset(identity: AudioIdentity): Promise<void>;
+  /** Releases the detector; it emits nothing afterwards. */
+  dispose(): Promise<void>;
+}
+
+/** Playback acknowledged by a transport, not merely queued or sent to a socket. */
+export interface PlaybackReceipt {
+  /** The fences of the played chunk. */
+  generation: VoiceGeneration;
+  /** The played chunk's sequence within its inference generation. */
+  sequence: number;
+  /** Samples of the chunk that played. */
+  playedSamples: number;
+  /** Rate of `playedSamples`, in Hz. */
+  sampleRate: number;
+}
+
+/** Speaking transports implement these methods in addition to IStreamTransport. */
+export interface IPlaybackTransport extends IStreamTransport {
+  /** Resolves only when this chunk has played. Abort rejects the wait; clearPlayback discards physical queued data. */
+  waitForPlayback(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt>;
+  /** Resolves after the publisher has discarded this generation's pending audio. */
+  clearPlayback(generation: VoiceGeneration): Promise<void>;
+}
+
+/** Cumulative supplier work for one synthesis request, including cancelled work. */
+export interface StreamingTTSUsageEvent extends AudioIdentity {
+  /** Provider that synthesized (its `IStreamingTTS.providerId`). */
+  providerId: string;
+  /** The synthesis request the report counts. */
+  requestId: string;
+  /** Characters the provider accepted so far. */
+  acceptedCharacters: number;
+  /** Samples the provider generated so far, played or not. */
+  generatedSamples: number;
+  /** Rate of `generatedSamples`, in Hz. */
+  sampleRate: number;
+  /** The request's state at this report. */
+  status: 'running' | 'completed' | 'cancelled' | 'failed';
+  /** `true` on the request's last report. */
+  final: boolean;
+}
+
+/**
+ * Compares all fences; the caller separately checks scope and call.
+ *
+ * @param a - One generation.
+ * @param b - The other generation.
+ * @returns `true` when the worker generation, inference generation and transport epoch are all equal.
+ */
+export function sameVoiceGeneration(a: Readonly<VoiceGeneration>, b: Readonly<VoiceGeneration>): boolean {
+  return a.workerGeneration === b.workerGeneration && a.inferenceGeneration === b.inferenceGeneration && a.transportEpoch === b.transportEpoch;
+}
+
+/**
+ * Copies and validates a fence so a host cannot mutate an active request's identity.
+ *
+ * @param value - The identity to copy.
+ * @returns A frozen copy, with a frozen copy of its generation.
+ * @throws {Error} When an id is empty, longer than 128 characters or not a string, or a fence is not a positive safe integer.
+ */
+export function copyAudioIdentity(value: AudioIdentity): AudioIdentity {
+  if (![value.scopeId, value.callId, value.turnId].every((x) => typeof x === 'string' && x.length > 0 && x.length <= 128)) throw new Error('invalid audio identity');
+  const g = value.generation;
+  if (![g.workerGeneration, g.inferenceGeneration, g.transportEpoch].every((x) => Number.isSafeInteger(x) && x > 0)) throw new Error('invalid audio generation');
+  return Object.freeze({ scopeId: value.scopeId, callId: value.callId, turnId: value.turnId, generation: Object.freeze({ ...g }) });
 }
