@@ -120,11 +120,15 @@ export async function makeFoldersOutsideLinks(root: string, relative: string): P
 }
 
 /**
- * The synchronous form of {@link makeFoldersOutsideLinks}, for a caller that cannot wait on a promise.
+ * The synchronous form of {@link makeFoldersOutsideLinks}, for a caller that cannot wait on a promise. It also stops
+ * at anything other than a folder in a folder's place, such as a regular file or a named pipe, so that when it
+ * returns true every folder is in place; {@link makeFoldersOutsideLinks} goes on past such an entry and leaves the
+ * open of a file below it to fail.
  *
  * @param root     - The folder the others are made in. It may itself be a link.
  * @param relative - The folders' path under `root`.
- * @returns True when every folder is in place and none of them is a link.
+ * @returns True when every folder is in place and none of them is a link; false when a link, or anything other than
+ *   a folder, holds a folder's place.
  * @throws TypeError when `relative` is absolute or a name in it is `.` or `..`; nothing is looked at or made.
  */
 export function makeFoldersOutsideLinksSync(root: string, relative: string): boolean {
@@ -133,7 +137,8 @@ export function makeFoldersOutsideLinksSync(root: string, relative: string): boo
     dir = path.join(dir, name);
     const entry = lstatOrNullSync(dir);
     if (entry) {
-      if (entry.isSymbolicLink()) return false;
+      // A link not followed is no folder, so this stops at a link too.
+      if (!entry.isDirectory()) return false;
       continue;
     }
     try {
@@ -141,7 +146,7 @@ export function makeFoldersOutsideLinksSync(root: string, relative: string): boo
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       // Something was put there since the look: look again.
-      if (fsSync.lstatSync(dir).isSymbolicLink()) return false;
+      if (!fsSync.lstatSync(dir).isDirectory()) return false;
     }
   }
   return true;

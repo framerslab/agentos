@@ -166,9 +166,34 @@ describe('the memory folder a load starts is made without writing through a link
         expect(loaded.soulContent).toBe('You are Aria.');
         expect(loaded.wikiIndex).toBeUndefined();
       }
-      expect(warningsAbout(path.join(soul, 'memory'))).toContain(
-        `[ensureMemoryDir] Made nothing in ${path.join(soul, 'memory')}: a symbolic link holds the place of the workspace's folder, memory/ or memory/.meta`,
-      );
+      expect(warningsAbout(path.join(soul, 'memory'))).toContain(madeNothing(soul));
     },
   );
+
+  it('a memory/ or memory/.meta that is a file and not a folder is left as it is, with a warning, and the soul still loads', async () => {
+    // In aria, memory/.meta is a regular file; in bea, memory/ itself is one.
+    fs.mkdirSync(path.join(soul, 'memory'));
+    fs.writeFileSync(path.join(soul, 'memory', '.meta'), 'a file, not a folder');
+    const bea = path.join(base, 'souls', 'bea');
+    fs.mkdirSync(bea);
+    fs.writeFileSync(path.join(bea, 'SOUL.md'), SOUL);
+    fs.writeFileSync(path.join(bea, 'memory'), 'a file, not a folder');
+
+    for (const folder of [soul, bea]) {
+      for (const loaded of await loadBoth(folder)) {
+        expect(loaded.soulContent).toBe('You are Aria.');
+        expect(loaded.memoryDir).toBe(path.join(folder, 'memory'));
+        expect(loaded.wikiIndex).toBeUndefined();
+      }
+      expect(warningsAbout(path.join(folder, 'memory'))).toEqual(Array(2).fill(madeNothing(folder)));
+    }
+    expect(fs.readdirSync(path.join(soul, 'memory'))).toEqual(['.meta']);
+    expect(fs.readFileSync(path.join(soul, 'memory', '.meta'), 'utf8')).toBe('a file, not a folder');
+    expect(fs.readFileSync(path.join(bea, 'memory'), 'utf8')).toBe('a file, not a folder');
+  });
 });
+
+/** The warning a load writes when it makes nothing in the memory folder of the soul whose folder is `folder`. */
+function madeNothing(folder: string): string {
+  return `[ensureMemoryDir] Made nothing in ${path.join(folder, 'memory')}: a symbolic link, or something other than a folder, holds the place of the workspace's folder, memory/ or memory/.meta`;
+}

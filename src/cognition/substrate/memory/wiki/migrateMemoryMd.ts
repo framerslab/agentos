@@ -35,10 +35,10 @@ const PLACE_REFUSED: Record<OpenRefusal, string> = {
  * The workspace's own folder, `memory/` and `memory/.meta/` are made one name at a time below the folder that holds
  * the workspace, and `index.md` and `.meta/index.json` only in a place that nothing holds, so nothing is written
  * through a symbolic link and no file already there is opened. `MEMORY.md` is read never through a link and never
- * waiting. When a link holds the place of the workspace's folder, `memory/` or `.meta/`, nothing is made in them;
- * when a link or anything other than a regular file holds the place of `index.md`, `.meta/index.json` or
- * `MEMORY.md`, that place is left as it is and the file that would come from it is not made. Each of those writes
- * one warning, and the path is returned all the same.
+ * waiting. When a link, or anything other than a folder, holds the place of the workspace's folder, `memory/` or
+ * `.meta/`, nothing is made in them; when a link or anything other than a regular file holds the place of
+ * `index.md`, `.meta/index.json` or `MEMORY.md`, that place is left as it is and the file that would come from it
+ * is not made. Each of those writes one warning, and the path is returned all the same.
  *
  * @param workspaceDir - The per-agent workspace directory. It may not be a link; the folder that holds it may.
  * @returns The `memory/` directory's path: `memory` joined to `workspaceDir`, absolute when `workspaceDir` is.
@@ -53,7 +53,7 @@ export function ensureMemoryDir(workspaceDir: string): string {
   fs.mkdirSync(root, { recursive: true });
   if (!makeFoldersOutsideLinksSync(root, path.join(soul, 'memory', '.meta'))) {
     console.warn(
-      `[ensureMemoryDir] Made nothing in ${memoryDir}: a symbolic link holds the place of the workspace's folder, memory/ or memory/.meta`,
+      `[ensureMemoryDir] Made nothing in ${memoryDir}: a symbolic link, or something other than a folder, holds the place of the workspace's folder, memory/ or memory/.meta`,
     );
     return memoryDir;
   }
