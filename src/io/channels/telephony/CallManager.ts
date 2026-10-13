@@ -585,6 +585,8 @@ export class CallManager {
    * completion callback the carrier sends for the hangup finds the call ended. The carrier is asked next, outside the
    * store queue and also when the commit failed, and `call:ended` follows the request. Rejects with the commit's error.
    * The provider is resolved before the commit, so a {@link dispose} while it commits does not cancel the request.
+   * After a failed commit the request names the carrier call of the manager's current record, which a callback
+   * committed while the hangup waited may have bound to its call leg.
    */
   private async hangupDurable(call: CallRecord, store: ITelephonyCallStore): Promise<void> {
     const provider = this.getProvider(call.provider);
@@ -599,7 +601,7 @@ export class CallManager {
       this.refreshDurable(result.stored, store, result.speech);
       return result;
     }).catch(async (error: unknown) => {
-      await this.requestCarrierHangup(provider, call.providerCallId);
+      await this.requestCarrierHangup(provider, this.activeCalls.get(call.callId)?.providerCallId ?? call.providerCallId);
       throw error;
     });
     await this.requestCarrierHangup(provider, committed.stored.providerCallId);
