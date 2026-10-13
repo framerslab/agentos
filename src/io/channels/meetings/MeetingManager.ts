@@ -1166,10 +1166,11 @@ export class MeetingManager {
   /**
    * Compares dispatched jobs with the providers' usage: a run whose container is gone is ended as crashed; an unfinished
    * purge is resumed; what a provider's supplier measured for a run is recorded through the entitlement hook's
-   * `recordSupplierUsage`, when the hook has one. A run still waiting for its dispatch whose job is missing (a send
-   * whose job could not be stored) is given its job again, and one a cancel left without its job (the cancel's reason is
-   * on the run) is ended, so neither waits for ever holding its reservation. As in the limits, a run whose step throws
-   * holds back no other, and the first error is thrown at the end.
+   * `recordSupplierUsage`, when the hook has one. An answer about a run the provider was not asked about is ignored and
+   * logged. A run still waiting for its dispatch whose job is missing (a send whose job could not be stored) is given its
+   * job again, and one a cancel left without its job (the cancel's reason is on the run) is ended, so neither waits for
+   * ever holding its reservation. As in the limits, a run whose step throws holds back no other, and the first error is
+   * thrown at the end.
    */
   async reconcile(): Promise<void> {
     const now = this.now();
@@ -1204,7 +1205,14 @@ export class MeetingManager {
         this.config.logger?.warn(`[MeetingManager] usage of ${providerName} unavailable: ${String(err)}`);
         continue;
       }
-      for (const u of usage) {
+      // only the runs this pass asked about: an answer about another run (another provider's, or one not polled) is not
+      // the provider's to give, so neither its supplier totals nor its end are taken from it
+      const asked = new Set(runIds);
+      const answered = usage.filter((u) => asked.has(u.runId));
+      if (answered.length < usage.length) {
+        this.config.logger?.warn(`[MeetingManager] usage of ${providerName}: ${usage.length - answered.length} answer(s) about runs it was not asked about, ignored`);
+      }
+      for (const u of answered) {
         if (u.supplierUsage !== undefined) {
           // in a try of its own: a record that throws holds back neither this run's crash check nor any other run's
           try {
