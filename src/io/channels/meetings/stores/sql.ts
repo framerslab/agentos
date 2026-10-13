@@ -421,18 +421,27 @@ export class SqlEventStore implements IEventStore {
   }
   /**
    * One transaction: the run's anchor row is locked (so sequence numbers of one run are handed out one at a time and the
-   * fence is read under the same lock), a repeated event id answers its existing sequence, the counter advances, the row
-   * is written; behind the fence a content event is written without its payload.
+   * fence is read under the same lock), a repeated event id answers its existing sequence, the row is written with the
+   * run's next number and the counter advances; behind the fence a content event is written without its payload. Ids
+   * are unique across runs, and two runs' anchors do not order their appends: an append whose id another run's append
+   * writes and commits while this one waits on the index writes nothing and answers that event's sequence, as a
+   * repeated id does.
    */
   async append(event: Omit<MeetingEvent, 'seq'>): Promise<{ inserted: boolean; seq: number }> {
     return this.opts.db.transaction(async (trx) => {
-      const { fencedAt } = await lockRun(trx, this.t.locks, event.runId);
+      const { fencedAt, eventSeq } = await lockRun(trx, this.t.locks, event.runId);
       const existing = await trx.get<{ seq: unknown }>(`SELECT seq FROM ${this.t.events} WHERE event_id = ?`, [event.eventId]);
       if (existing) return { inserted: false, seq: num(existing.seq)! };
-      const next = await trx.get<{ event_seq: unknown }>(`UPDATE ${this.t.locks} SET event_seq = event_seq + 1 WHERE run_id = ? RETURNING event_seq`, [event.runId]);
-      const seq = num(next?.event_seq)!;
+      const seq = eventSeq + 1;
       const behindFence = fencedAt !== undefined && CONTENT_EVENT_TYPES.has(event.type);
-      await trx.run(`INSERT INTO ${this.t.events} (run_id, seq, event_id, type, at, data_json, purged) VALUES (?, ?, ?, ?, ?, ?, ?)`, [event.runId, seq, event.eventId, event.type, event.at, behindFence || event.data === undefined ? null : JSON.stringify(event.data), behindFence]);
+      const written = await trx.get<{ seq: unknown }>(`INSERT INTO ${this.t.events} (run_id, seq, event_id, type, at, data_json, purged) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING RETURNING seq`, [event.runId, seq, event.eventId, event.type, event.at, behindFence || event.data === undefined ? null : JSON.stringify(event.data), behindFence]);
+      if (!written) {
+        // read committed: this statement sees the row the other append committed while the insert waited for it
+        const holder = await trx.get<{ seq: unknown }>(`SELECT seq FROM ${this.t.events} WHERE event_id = ?`, [event.eventId]);
+        if (!holder) throw new Error(`SqlEventStore: event ${event.eventId} conflicted on its id and no event holds it`);
+        return { inserted: false, seq: num(holder.seq)! };
+      }
+      await trx.run(`UPDATE ${this.t.locks} SET event_seq = ? WHERE run_id = ?`, [seq, event.runId]);
       return { inserted: true, seq };
     });
   }

@@ -180,6 +180,32 @@ describeIfPostgres('the Postgres meeting stores', () => {
     expect((await turns.appendNext({ runId: 'r1', at: 2, text: 'two', startMs: 40.4, endMs: 1_000.6 })).seq).toBe(2);
     expect((await turns.read('r1', 0)).map((t) => [t.seq, t.startMs, t.endMs])).toEqual([[1, 13, 20], [2, 40, 1_001]]);
   });
+  it('an append of an id that another run\'s append writes meanwhile answers that event\'s sequence, not a unique-index error', async () => {
+    const events = new SqlEventStore({ db, tablePrefix: PREFIX });
+    let entered!: () => void;
+    let release!: () => void;
+    const written = new Promise<void>((resolve) => { entered = resolve; });
+    const unlock = new Promise<void>((resolve) => { release = resolve; });
+    // another run's append of the same id: its row is written and not yet committed
+    const other = db.transaction(async (trx) => {
+      await trx.run(`INSERT INTO ${PREFIX}_events (run_id, seq, event_id, type, at, data_json, purged) VALUES (?, ?, ?, ?, ?, ?, ?)`, ['r1', 1, 'shared', 'bot:in_call', 1, null, false]);
+      entered();
+      await unlock;
+    });
+    await written;
+    const second = events.append({ eventId: 'shared', runId: 'r2', type: 'bot:in_call', at: 2 });
+    // until the second append waits on the unique index for the first one's transaction
+    for (let i = 0; i < 200; i++) {
+      const waiting = await db.get<{ n: unknown }>(`SELECT count(*) AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE ?`, [`INSERT INTO ${PREFIX}_events%`]);
+      if (Number(waiting?.n) > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    release();
+    await other;
+    expect(await second).toEqual({ inserted: false, seq: 1 });
+    expect(await events.read('r2', 0)).toEqual([]);
+    expect(await events.append({ eventId: 'r2-own', runId: 'r2', type: 'bot:in_call', at: 3 })).toEqual({ inserted: true, seq: 1 }); // r2's counter did not move
+  });
   it('refuses an adapter that is not Postgres', () => {
     const notPostgres = { kind: 'sqlite', capabilities: new Set(['transactions', 'persistence']) } as unknown as StorageAdapter;
     expect(() => new SqlEventStore({ db: notPostgres, tablePrefix: PREFIX })).toThrow(/Postgres/);
