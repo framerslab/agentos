@@ -188,7 +188,8 @@ export class GraphRuntime {
    * followed by a terminal `run_end`. When a node interrupts or fails, the checkpoint
    * the run resumes from is saved before any event that reports the node's result is
    * yielded, so a consumer may stop iterating at `interrupt` or `error` and still
-   * resume the run.
+   * resume the run. The `checkpoint_saved` event for that checkpoint comes after
+   * `interrupt` or `error`, so such a consumer resumes by the `runId` of `run_start`.
    *
    * @param graph - Compiled execution graph to run.
    * @param input - Initial user-provided input; frozen into `GraphState.input`.

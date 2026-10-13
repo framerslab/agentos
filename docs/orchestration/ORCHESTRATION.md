@@ -81,7 +81,7 @@ A `gmi` node runs [`LoopController`](https://github.com/framerslab/agentos/blob/
 ### Scheduling
 
 - A node runs when every node with an edge into it has completed or been skipped, and it runs at most once per run. A router marks the targets it did not pick skipped; skipping goes no further, so a node whose incoming edges all come from skipped nodes still runs.
-- Nodes that become ready together run concurrently. After such a batch the runtime merges the branches' `scratch` with the reducers and keeps `artifacts` as they were before the batch, so the outputs of the nodes that ran in one batch are not in the result.
+- Nodes that become ready together run concurrently, each on its own copy of the state. After such a batch the runtime merges the keys each node wrote to `scratch` and `artifacts`, in the order the nodes are declared: a reducer registered for the key (`scratch.<key>` or `artifacts.<key>`) combines writes to the same key, and without one the node declared later wins. A node's copy of a key it did not write is not merged, so it never undoes another node's write. The outputs of every node in the batch reach the nodes after it and the result.
 - A node that fails stops the run: the runtime saves a checkpoint and emits `error`, `interrupt` and `run_end` (see [Checkpointing](./CHECKPOINTING.md)). `toolNode(name, { retryPolicy })` and a `workflow()` step's `retryPolicy` re-run a failed node first.
 
 ---
@@ -338,7 +338,7 @@ workflow('multi-source-research')
   });
 ```
 
-The three extension nodes become ready together and run concurrently. Each returns `{ results }`, which goes into its branch's `scratch`, and after the batch the `concat` reducer joins the three arrays into `scratch.results`. Their artifacts are not kept (see [Scheduling](#scheduling)), so `synthesize`, which runs after all three, reads the results from `state.scratch`. Parallel `tool` steps would give `synthesize` nothing: a tool node's output goes only to its artifact.
+The three extension nodes become ready together and run concurrently. Each returns `{ results }`, which goes into its branch's `scratch` and, as the node's output, into its artifact. After the batch the `concat` reducer joins the three arrays into `scratch.results` in the order the steps are declared, and each node's artifact stays under its id (see [Scheduling](#scheduling)), so `synthesize`, which runs after all three, finds the results in `state.scratch.results` and in `state.artifacts`. Parallel `tool` steps reach `synthesize` through `state.artifacts` alone: a tool node's output goes only to its artifact.
 
 ### Human step
 

@@ -159,7 +159,7 @@ wf.step('fetch', { tool: 'web_fetch' })
   .step('combine', { gmi: { instructions: 'Pick the best summary.' } })
 ```
 
-The parallel nodes become ready together and run concurrently, and the next step runs after all of them. `join.strategy`, `join.quorumCount` and `join.timeout` are stored and not read: the runtime always waits for every node. After the batch the runtime merges the nodes' `scratch` updates with the reducers and keeps `state.artifacts` as it was before the batch, so the outputs of the parallel steps are not in the result and `combine` does not see them in `state.artifacts`. A `gmi` or `tool` step writes no `scratch`; an `extension` step whose output is an object does.
+The parallel nodes become ready together and run concurrently, and the next step runs after all of them. `join.strategy`, `join.quorumCount` and `join.timeout` are stored and not read: the runtime always waits for every node. After the batch the runtime merges the keys each node wrote to `scratch` and `artifacts`, in the order the steps are declared: the reducers from `join.merge` combine writes to the same key, and without one the step declared later wins. Each parallel step's output stays in `state.artifacts` under its node id, or under its `outputAs` when the step sets one, so `combine` sees the three summaries there and the result holds them. A `gmi` or `tool` step writes no `scratch`; an `extension` step whose output is an object does.
 
 ## Cycles
 

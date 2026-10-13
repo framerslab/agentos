@@ -91,7 +91,7 @@ The graph-wide `checkpointPolicy` and each node's `checkpoint` setting decide wh
 | `explicit` | Save only around nodes with `checkpoint: 'before'`, `'after'`, or `'both'`. |
 | `none` | The same as `explicit`: the runtime saves around nodes that set `checkpoint`, and no others. The default of [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts). |
 
-Whatever the policy, the runtime also saves a checkpoint when a node fails (after its retries) and when a node interrupts the run for human approval, so a failed or interrupted run can always be resumed. It saves that checkpoint before it yields any event that reports the node's result, so a host that leaves its `for await` loop over `stream()` or `streamResume()` at `interrupt` or `error` can still resume the run.
+Whatever the policy, the runtime also saves a checkpoint when a node fails (after its retries) and when a node interrupts the run for human approval, so a failed or interrupted run can always be resumed. It saves that checkpoint before it yields any event that reports the node's result, so a host that leaves its `for await` loop over `stream()` or `streamResume()` at `interrupt` or `error` can still resume the run. The `checkpoint_saved` event for that checkpoint comes after `interrupt` or `error`, so such a host resumes by the run id from `run_start` (see [Resuming a Run](#resuming-a-run)).
 
 ```typescript
 // Graph-wide policy
@@ -134,6 +134,8 @@ toolNode('json_formatter', {}, { effectClass: 'pure' })
 toolNode('create_record', {}, { effectClass: 'write' })
 ```
 
+Nodes that become ready together run as one parallel batch (see [Scheduling](./ORCHESTRATION.md#scheduling)). When one of them interrupts or fails, the others in the batch have run too, and the ones that completed are in the checkpoint's `visitedNodes`, so a resume does not run them again. The checkpoint's `scratch` and `artifacts` hold what each of them wrote, merged with what the halting node wrote in the order the nodes are declared, so the nodes after the batch read their outputs when the run resumes.
+
 ## Resuming a Run
 
 ```typescript
@@ -153,6 +155,18 @@ for await (const event of graph.stream(input)) {
 // Resume after a failure, a human approval or a timeout.
 // Pass either the run id (its latest checkpoint) or an exact checkpoint id.
 const result = await graph.resume(lastCheckpointId!);
+```
+
+A host that stops reading at `interrupt` or `error` has not seen the `checkpoint_saved` that follows it, and resumes by the run id from `run_start`:
+
+```typescript
+let runId: string | undefined;
+for await (const event of graph.stream(input)) {
+  if (event.type === 'run_start') runId = event.runId;
+  if (event.type === 'interrupt' || event.type === 'error') break;
+}
+
+const result = await graph.resume(runId!);
 ```
 
 The same API applies to compiled `workflow()` and `mission()` graphs. The `resume()` of `AgentGraph` and `mission()` accepts a second `patch` argument and does not apply it; patch state with `fork()` instead:
