@@ -403,4 +403,96 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
     expect(handler).toHaveBeenCalledOnce();
     expect(handler.mock.calls[0][0].transcript).toBe('Book a table for two.');
   });
+
+  it("replaces an item's text with its next final without answering another end of speech", () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(itemFinal('Book a table', 'item_A', 0));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    // A second final for the first item: the second end of speech still waits for its own.
+    detector.pushTranscript(itemFinal('Book a table for two.', 'item_A', 0));
+    expect(handler).not.toHaveBeenCalled();
+
+    detector.pushTranscript(itemFinal('At seven tonight.', 'item_B', 1_300));
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0].transcript).toBe('Book a table for two. At seven tonight.');
+  });
+
+  it('keeps the words of a backchannel final out of the turn, and ends no turn on it alone', () => {
+    const handler = vi.fn();
+    const backchannel = vi.fn();
+    detector.on('turn_complete', handler);
+    detector.on('backchannel_detected', backchannel);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('yeah', 'item_A', 0));
+    expect(backchannel).toHaveBeenCalledWith({ text: 'yeah' });
+    expect(handler).not.toHaveBeenCalled();
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('What time is it?', 'item_B', 1_300));
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toMatchObject({ transcript: 'What time is it?', reason: 'punctuation' });
+  });
+
+  it('joins three utterances in the order they began when their finals arrive out of order', () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    for (let utterance = 0; utterance < 3; utterance++) {
+      detector.pushVadEvent(transcriberSpeech('speech_start'));
+      detector.pushVadEvent(transcriberSpeech('speech_end'));
+    }
+    detector.pushTranscript(itemFinal('at seven tonight.', 'item_C', 2_600));
+    detector.pushTranscript(itemFinal('Book a table', 'item_A', 0));
+    expect(handler).not.toHaveBeenCalled();
+
+    detector.pushTranscript(itemFinal('for two', 'item_B', 1_300));
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toMatchObject({
+      transcript: 'Book a table for two at seven tonight.',
+      reason: 'punctuation',
+    });
+  });
+
+  it('lets a final without an itemId replace the turn of item-keyed finals', () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(itemFinal('Book a table for two', 'item_A', 0));
+    // A provider without item keys takes over, as behind a failover chain: its final stands for the turn.
+    detector.pushTranscript(transcript('What time is it?'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toMatchObject({ transcript: 'What time is it?', reason: 'punctuation' });
+  });
+
+  it('starts the next turn with no item-keyed finals or waiting ends left after reset()', () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(itemFinal('Book a table', 'item_A', 0));
+    detector.pushVadEvent(transcriberSpeech('speech_end')); // waits for the second utterance's final
+    detector.reset();
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('What time is it?', 'item_C', 0));
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toMatchObject({ transcript: 'What time is it?', reason: 'punctuation' });
+
+    vi.advanceTimersByTime(5_000);
+    expect(handler).toHaveBeenCalledOnce();
+  });
 });
