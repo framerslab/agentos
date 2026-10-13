@@ -1,3 +1,10 @@
+## [0.13.88](https://github.com/framerslab/agentos/compare/v0.13.87...v0.13.88) (2026-10-13)
+
+### fix
+
+* **guardrails:** close a blocked stream even when its refusal cannot be saved (#387) ([864941b](https://github.com/framerslab/agentos/commit/864941bdf0d6dffaead55288dae3a618ea52c684))
+* **meetings:** the follow-ups' forward fixes: the interlock's order on the worker's clock, the loop's two passes, handlers before destinations, the late notice first, finals during startCapture (#388) ([16dce24](https://github.com/framerslab/agentos/commit/16dce2492f783f66446da18769254e005a62b57c))
+
 ## [0.13.87](https://github.com/framerslab/agentos/compare/v0.13.86...v0.13.87) (2026-10-13)
 
 ### fix

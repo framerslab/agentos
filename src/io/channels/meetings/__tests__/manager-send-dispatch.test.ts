@@ -169,6 +169,43 @@ describe('dispatch and the interlock', () => {
     await h.manager.tick();
     expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'suspendCapture' });
   });
+  it('a heartbeat the worker made before the notice opens no capture when the worker\'s clock runs far ahead, in the same moment as the notice or after it', async () => {
+    const h = harness();
+    const ahead = 3_600_000; // the worker's clock runs an hour ahead of the manager's
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    const t0 = h.clock.now();
+    await h.report(runId, 'joining', {}, t0 + ahead);
+    await h.report(runId, 'in_call', { participantCount: 2 }, t0 + ahead);
+    await h.report(runId, 'notice_posted', {}, t0 + ahead + 5_000);
+    // made a second before the notice by the worker's clock, applied in the same manager millisecond: both times bound
+    // to the manager's clock plus one interval, the same time
+    await h.report(runId, 'monitor_heartbeat', {}, t0 + ahead + 4_000);
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    h.clock.advance(2_000);
+    // still from before the notice by the worker's clock, delivered two seconds later: bound to a time after the notice's
+    await h.report(runId, 'monitor_heartbeat', {}, t0 + ahead + 4_500);
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    await h.report(runId, 'monitor_heartbeat', {}, t0 + ahead + 7_000); // the monitor's first heartbeat after the notice
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'startCapture' }]);
+  });
+  it('ends a run whose stop monitor never reports after the notice within the notice\'s confirmation window more, when the worker\'s clock runs an hour ahead', async () => {
+    const h = harness();
+    const ahead = 3_600_000;
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining', {}, h.clock.now() + ahead);
+    await h.report(runId, 'in_call', { participantCount: 2 }, h.clock.now() + ahead); // the call's time bounds to ten seconds from now
+    await h.report(runId, 'notice_posted', {}, h.clock.now() + ahead); // kept on the worker's clock, an hour ahead
+    h.clock.advance(100_000); // the bounded call time, the confirmation window, then the monitor's window and the recovery wait
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    h.clock.advance(1);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stop_monitor_failed' }]);
+  });
   it('refuses a report with another token, and drops a repeated report', async () => {
     const h = harness();
     const r = await h.manager.sendBot(h.request);
@@ -309,18 +346,78 @@ describe('dispatch and the interlock', () => {
 });
 
 describe('the loop', () => {
-  it('start() runs one pass at a time: a pass still running is not joined by the next one due', async () => {
+  it('start() runs each of its passes one at a time: a dispatch pass still running is not joined by the next one due, and the upkeep goes on beside it', async () => {
     vi.useFakeTimers();
     const h = harness();
     try {
       let finish: () => void = () => {};
-      const tick = vi.spyOn(h.manager, 'tick').mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+      const lease = vi.spyOn(h.stores.jobs, 'lease').mockImplementationOnce(() => new Promise<undefined>((resolve) => { finish = () => resolve(undefined); }));
+      const list = vi.spyOn(h.stores.runs, 'list');
+      const limitsPasses = () => list.mock.calls.filter(([filter]) => filter.states?.includes('in_call')).length;
       h.manager.start(1_000);
       await vi.advanceTimersByTimeAsync(3_500);
-      expect(tick).toHaveBeenCalledTimes(1);
+      expect(lease).toHaveBeenCalledTimes(1);
+      expect(limitsPasses()).toBe(3); // the limits ran in each of the three intervals while the dispatch pass waited
       finish();
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(tick).toHaveBeenCalledTimes(2);
+      expect(lease).toHaveBeenCalledTimes(2);
+    } finally {
+      h.manager.stop();
+      vi.useRealTimers();
+    }
+  });
+  it('a dispatch the provider is slow to answer holds back no limit: a stop monitor that goes quiet meanwhile is still suspended', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      const capturing = await h.manager.sendBot(h.request);
+      const capturingId = capturing.ok ? capturing.run.runId : '';
+      await h.manager.tick();
+      await h.report(capturingId, 'joining');
+      await h.report(capturingId, 'in_call', { participantCount: 2 });
+      await h.report(capturingId, 'notice_posted');
+      await h.report(capturingId, 'monitor_heartbeat', {}, h.clock.now() + 1);
+      expect(h.provider.commands.get(capturingId)).toEqual([{ name: 'startCapture' }]);
+      // the next run's dispatch does not return: its worker is still pulling the bot's image
+      h.provider.beforeDispatch = () => new Promise<void>(() => {});
+      await h.manager.sendBot({ ...h.request, idempotencyKey: 'k2' });
+      h.manager.start(1_000);
+      await vi.advanceTimersByTimeAsync(1_000); // the dispatch pass takes the second run and waits on its provider
+      h.clock.advance(30_001); // the first run's stop monitor has been quiet for its window
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.provider.commands.get(capturingId)?.at(-1)).toEqual({ name: 'suspendCapture' });
+    } finally {
+      h.manager.stop();
+      vi.useRealTimers();
+    }
+  });
+  it('a pass held by a call that never answers holds the next one back five intervals at most: another run\'s quiet monitor is still suspended', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      const first = await h.manager.sendBot(h.request);
+      const firstId = first.ok ? first.run.runId : '';
+      const second = await h.manager.sendBot({ ...h.request, idempotencyKey: 'k2' });
+      const secondId = second.ok ? second.run.runId : '';
+      await h.manager.tick();
+      for (const id of [firstId, secondId]) {
+        await h.report(id, 'joining');
+        await h.report(id, 'in_call', { participantCount: 2 });
+        await h.report(id, 'notice_posted');
+      }
+      await h.report(firstId, 'monitor_heartbeat', {}, h.clock.now() + 1);
+      h.clock.advance(20_000);
+      await h.report(secondId, 'monitor_heartbeat', {}, h.clock.now() + 1); // the second run's monitor reports twenty seconds later
+      // the first run's worker froze: a command to it never answers
+      const command = h.provider.command.bind(h.provider);
+      vi.spyOn(h.provider, 'command').mockImplementation((runId, cmd) => (runId === firstId ? new Promise<void>(() => {}) : command(runId, cmd)));
+      h.manager.start(1_000);
+      h.clock.advance(10_001); // the first run's monitor has been quiet for its window: the pass suspends it and waits on the command
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((await h.stores.runs.get(firstId))?.captureSuspendedAt).toBeDefined();
+      h.clock.advance(20_000); // the second run's monitor has now been quiet for its window too
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(h.provider.commands.get(secondId)?.at(-1)).toEqual({ name: 'suspendCapture' });
     } finally {
       h.manager.stop();
       vi.useRealTimers();

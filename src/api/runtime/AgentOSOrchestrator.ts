@@ -703,12 +703,15 @@ export class AgentOSOrchestrator {
    * `toolCallIds`). It waits for the stream's turn or resumed turn to end, since a turn can save its pause after it
    * streams the call; then, when the conversation's pending request is this stream's and holds one of the calls, it
    * records a refused tool result for each call of the pause, clears the pending request and closes the stream, so the
-   * call can be neither resumed after a restart nor continued on the stream. Anything else is left as it is.
+   * call can be neither continued on the stream nor resumed from the conversation. Anything else is left as it is.
+   * The stream is closed even when the store refuses the conversation's save; the stored conversation then keeps the
+   * pause until the conversation is saved again.
    *
    * @param agentOSStreamId - The stream the guardrail blocked.
    * @param toolCallIds - The ids of the calls the block withheld.
    * @param refusal - What the refused tool results say.
    * @returns Whether a pause was dropped.
+   * @throws The store's error when it refuses the save, after the pause is dropped in memory and the stream closed.
    */
   public async discardBlockedToolCalls(
     agentOSStreamId: StreamId,
@@ -721,21 +724,12 @@ export class AgentOSOrchestrator {
     if (!streamContext) {
       return false;
     }
-    const dropped = await this.toolResultHandler.discardPendingExternalToolRequest(
+    return this.toolResultHandler.discardPendingExternalToolRequest(
       agentOSStreamId,
       streamContext,
       toolCallIds,
       refusal
     );
-    if (!dropped) {
-      return false;
-    }
-    this.activeStreamContexts.delete(agentOSStreamId);
-    await this.dependencies.streamingManager.closeStream(
-      agentOSStreamId,
-      'An output guardrail blocked the tool call the stream stopped for.'
-    );
-    return true;
   }
 
   /**

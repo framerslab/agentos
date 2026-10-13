@@ -719,14 +719,19 @@ export class ExternalToolResultHandler {
    * from the caller. It acts only when the conversation's pending request was
    * saved by `agentOSStreamId` and holds one of `toolCallIds`: each call of the
    * pause is answered with a refused tool result, so the history answers every
-   * call the pause's assistant message declared, and the pending request is
-   * cleared. The conversation is saved when persistence is on.
+   * call the pause's assistant message declared, the pending request is
+   * cleared, and the stream's context is removed and the stream closed, so no
+   * result for the calls can continue it. The conversation is saved when
+   * persistence is on. The stream is closed whether or not the store takes the
+   * save: a refused save rejects once the stream is closed, and the stored
+   * conversation keeps the pause until the conversation is saved again.
    *
    * @param agentOSStreamId - The stream the guardrail blocked.
    * @param streamContext - The stream's context.
    * @param toolCallIds - The ids of the calls the block withheld.
    * @param refusal - What the refused tool results say.
    * @returns Whether the pause was dropped.
+   * @throws The store's error when it refuses the save, after the stream is closed.
    */
   async discardPendingExternalToolRequest(
     agentOSStreamId: string,
@@ -763,13 +768,22 @@ export class ExternalToolResultHandler {
       });
     }
     conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, undefined);
+    // the stream goes before the save, so a store that refuses the save cannot leave the calls open on it
+    this.activeStreamContexts.delete(agentOSStreamId);
 
-    if (this.enableConversationalPersistence) {
-      await withAgentOSSpan('agentos.conversation.save', async (span) => {
-        span?.setAttribute('agentos.stage', 'discard_blocked_external_tool_request');
-        span?.setAttribute('agentos.stream_id', agentOSStreamId);
-        await this.dependencies.conversationManager.saveConversation(conversationContext);
-      });
+    try {
+      if (this.enableConversationalPersistence) {
+        await withAgentOSSpan('agentos.conversation.save', async (span) => {
+          span?.setAttribute('agentos.stage', 'discard_blocked_external_tool_request');
+          span?.setAttribute('agentos.stream_id', agentOSStreamId);
+          await this.dependencies.conversationManager.saveConversation(conversationContext);
+        });
+      }
+    } finally {
+      await this.dependencies.streamingManager.closeStream(
+        agentOSStreamId,
+        'An output guardrail blocked the tool call the stream stopped for.',
+      );
     }
     return true;
   }

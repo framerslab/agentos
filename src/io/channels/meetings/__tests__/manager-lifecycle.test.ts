@@ -528,6 +528,36 @@ describe('the limits, the meter and the ends', () => {
     await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1); // capture opens
     expect((await sink.appendNext({ runId, at: 2, text: 'heard once capture opened' }))?.seq).toBe(1);
   });
+  it('keeps a final heard while startCapture is on its way to the bot, before the start is written on the run', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 2 });
+    await h.report(runId, 'notice_posted');
+    let answer: () => void = () => {};
+    let reached: () => void = () => {};
+    const commandReached = new Promise<void>((resolve) => { reached = resolve; });
+    const command = h.provider.command.bind(h.provider);
+    vi.spyOn(h.provider, 'command').mockImplementation(async (id, cmd) => {
+      if (cmd.name === 'startCapture') {
+        // the bot starts publishing as the command reaches it; its answer comes back later
+        reached();
+        await new Promise<void>((resolve) => { answer = resolve; });
+      }
+      return command(id, cmd);
+    });
+    const heartbeat = h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1); // the interlock holds: startCapture goes
+    await commandReached;
+    expect((await h.stores.runs.get(runId))?.captureStartedAt).toBeUndefined();
+    const sink = h.manager.transcriptSink(runId);
+    expect((await sink.appendNext({ runId, at: 2, text: 'the first words after the start' }))?.seq).toBe(1);
+    expect(h.seen.filter((e) => e.type === 'bot:transcript')).toHaveLength(1);
+    answer();
+    await heartbeat;
+    expect((await h.stores.runs.get(runId))?.captureStartedAt).toBeDefined();
+  });
   it('lists the terminal runs for eviction when the first can go and at least once a minute, not on every pass', async () => {
     const h = harness();
     const list = vi.spyOn(h.stores.runs, 'list');
@@ -739,7 +769,7 @@ describe('a report whose application fails, and the worker\'s retry of it', () =
     expect((await h.stores.runs.get(runId))?.state).toBe('purging');
     expect(h.provider.commands.get(runId)?.slice(-2)).toEqual([{ name: 'suspendCapture' }, { name: 'leave', reason: 'stopped_by_participant' }]);
   });
-  it('a report whose delivery failed is enqueued for its destination when the worker sends it again', async () => {
+  it('a report whose delivery failed reaches the handlers once, and is enqueued for its destination when the worker sends it again', async () => {
     let failing = false;
     const h = harness({
       destinationsFor: async () => {
@@ -751,11 +781,38 @@ describe('a report whose application fails, and the worker\'s retry of it', () =
     const message = mockEventContext(runId, 'chat_message', { text: 'the agenda first', sender: 'participant-1' }, h.clock.now(), h.provider.tokenOf(runId));
     failing = true;
     await expect(h.manager.processProviderEvent('mock', message)).rejects.toThrow('destinations unavailable');
+    expect(h.seen.filter((e) => e.type === 'bot:chat_message')).toHaveLength(1); // the handlers had it before the destinations failed
     failing = false;
     expect(await h.manager.processProviderEvent('mock', message)).toEqual({ accepted: true, applied: 0 });
+    expect(h.seen.filter((e) => e.type === 'bot:chat_message')).toHaveLength(1);
     const deliveries = (await h.stores.outbox.listByRun(runId)).filter((d) => d.type === 'bot:chat_message');
     expect(deliveries).toHaveLength(1);
     expect(JSON.parse(deliveries[0].payload)).toMatchObject({ type: 'bot:chat_message', data: { text: 'the agenda first', sender: 'participant-1' } });
+  });
+});
+
+describe('a participant who joins after the notice', () => {
+  it('is given the short notice even when the count\'s write or the event\'s delivery fails, and once, whatever the worker\'s retry', async () => {
+    let failing = false;
+    const h = harness({
+      destinationsFor: async () => {
+        if (failing) throw new Error('destinations unavailable');
+        return ['hook-1'];
+      },
+    });
+    const runId = await joined(h);
+    const notices = () => (h.provider.commands.get(runId) ?? []).filter((c) => c.name === 'postChat');
+    failing = true;
+    await expect(h.report(runId, 'participant_joined', { participantRef: 'p2', participantCount: 2 })).rejects.toThrow('destinations unavailable');
+    expect(notices()).toEqual([{ name: 'postChat', text: 'the short notice' }]);
+    failing = false;
+    // the next arrival's report fails at the run store's write of the count, and the worker sends it again
+    vi.spyOn(h.stores.runs, 'update').mockRejectedValueOnce(new Error('run store unavailable'));
+    const arrival = mockEventContext(runId, 'participant_joined', { participantRef: 'p3', participantCount: 3 }, h.clock.now(), h.provider.tokenOf(runId));
+    await expect(h.manager.processProviderEvent('mock', arrival)).rejects.toThrow('run store unavailable');
+    expect(notices()).toHaveLength(2);
+    await h.manager.processProviderEvent('mock', arrival);
+    expect(notices()).toHaveLength(2);
   });
 });
 
@@ -779,6 +836,8 @@ describe('the purge\'s last events', () => {
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', botName: '', billedSeconds: 20, purgedAt: expect.any(Number) });
     const ids = (await h.stores.outbox.listByRun(runId)).map((d) => d.id);
     expect(ids).toEqual(expect.arrayContaining([`${runId}:bot:purged@hook-1`, `${runId}:bot:done@hook-1`]));
+    // each reached the handlers once: bot:purged before its destinations failed, bot:done on the next pass
+    expect(h.seen.filter((e) => e.type === 'bot:purged')).toHaveLength(1);
     expect(h.seen.filter((e) => e.type === 'bot:done')).toHaveLength(1);
   });
 });

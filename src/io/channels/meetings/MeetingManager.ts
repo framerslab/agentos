@@ -180,6 +180,10 @@ const PURGEABLE_STATES: readonly MeetingRunState[] = ['requested', 'scheduled', 
 const OPEN_STATES: readonly MeetingRunState[] = ['requested', 'scheduled', ...ACTIVE_STATES];
 /** Reports that carry what a person said or did; behind the fence they are neither stored nor forwarded. */
 const CONTENT_REPORTS: ReadonlySet<ProviderEventType> = new Set<ProviderEventType>(['chat_message', 'stop_command', 'participant_joined', 'participant_left']);
+/** The two passes of the loop `start()` runs, apart from each other: the dispatches, and the upkeep. */
+type LoopPass = 'dispatch' | 'upkeep';
+/** How many of the loop's intervals a pass may run before the next one starts beside it: a pass this old is held by a call that does not answer. */
+const STUCK_PASS_INTERVALS = 5;
 
 /**
  * A run's limits: the defaults, each replaced by the request's own value where it gives one. A limit given as
@@ -222,8 +226,10 @@ export class MeetingManager {
   private readonly purgeHooks: Array<(runId: string) => Promise<void>> = [];
   private lastReconcileAt = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
-  /** Whether a pass the timer started is still running. */
-  private ticking = false;
+  /** How many intervals the loop has run: the clock its passes are timed on. */
+  private loopIntervals = 0;
+  /** The interval in which each of the loop's passes that is still running began. */
+  private readonly passStartedAt = new Map<LoopPass, number>();
   /** When the terminal runs are next listed for eviction: when the first of them can go, and at least once a minute. */
   private nextCleanupAt = 0;
 
@@ -316,27 +322,29 @@ export class MeetingManager {
   }
 
   /**
-   * Delivers a stored event, with the run as it stands: a delivery to each of the owner's destinations, then every
-   * handler. A repeated event goes to the destinations again, which the outbox keeps once each (a delivery its first
-   * attempt never enqueued is enqueued now), and to no handler: a handler receives an event once.
+   * Delivers a stored event, with the run as it stands: to every handler, then a delivery to each of the owner's
+   * destinations. The handlers come first, so a destination lookup or an enqueue that fails cannot keep an event from
+   * them: a handler receives an event once, and a repeated event goes to no handler. A repeated event goes to the
+   * destinations again, which the outbox keeps once each, so a delivery its first attempt never enqueued is enqueued now.
    */
   private async deliver(stored: StoredEvent | undefined, run: MeetingRunRecord): Promise<void> {
     if (!stored) return;
     const { id, type, at, seq, data } = stored;
+    if (!stored.repeated) {
+      const event: MeetingManagerEvent = { type, runId: run.runId, run, seq, data };
+      for (const h of this.handlers) {
+        try {
+          const r = h(event);
+          if (r instanceof Promise) r.catch((err) => this.config.logger?.error(`[MeetingManager] handler: ${String(err)}`));
+        } catch (err) {
+          this.config.logger?.error(`[MeetingManager] handler: ${String(err)}`);
+        }
+      }
+    }
     if (this.config.destinationsFor) {
       const payload = JSON.stringify({ id, type, runId: run.runId, at, seq, data });
       for (const destinationRef of await this.config.destinationsFor(run.ownerRef)) {
         await this.stores.outbox.enqueue({ id: `${id}@${destinationRef}`, runId: run.runId, destinationRef, eventId: id, type, payload }, at);
-      }
-    }
-    if (stored.repeated) return;
-    const event: MeetingManagerEvent = { type, runId: run.runId, run, seq, data };
-    for (const h of this.handlers) {
-      try {
-        const r = h(event);
-        if (r instanceof Promise) r.catch((err) => this.config.logger?.error(`[MeetingManager] handler: ${String(err)}`));
-      } catch (err) {
-        this.config.logger?.error(`[MeetingManager] handler: ${String(err)}`);
       }
     }
   }
@@ -419,21 +427,37 @@ export class MeetingManager {
   // ── The loop ──
 
   /**
-   * Runs `tick()` every second until `stop()`, one pass at a time: a pass still running when the next is due is not
-   * joined by it, so a slow store does not stack passes on each other. A host with its own scheduler calls `tick()` itself.
+   * Runs a tick's two passes every second until `stop()`, apart from each other: the dispatches, and the upkeep (the
+   * limits, the kills, the purges and cleanups resumed, the eviction and a reconcile every minute). Apart, a dispatch a
+   * provider is slow to answer (a worker pulling its image) holds back no limit: a quiet stop monitor is still suspended
+   * and an armed kill still fires while it waits. Each pass runs one at a time, so a slow store does not stack passes on
+   * each other, except that a pass still running five intervals after it began is no longer waited for and the next one
+   * starts beside it: a pass held by a call that never answers (a command to a worker that froze) would otherwise stop
+   * every later one. A host with its own scheduler calls `tick()` itself.
    */
   start(intervalMs = 1_000): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      if (this.ticking) return;
-      this.ticking = true;
-      void this.tick()
-        .catch((err) => this.config.logger?.error(`[MeetingManager] tick: ${String(err)}`))
-        .finally(() => {
-          this.ticking = false;
-        });
+      this.loopIntervals += 1;
+      this.runPass('dispatch', () => this.dispatchDue());
+      this.runPass('upkeep', () => this.upkeep());
     }, intervalMs);
     this.timer.unref?.();
+  }
+
+  /** Starts one of the loop's passes, unless the last one of it is still running and has not run for five intervals. */
+  private runPass(pass: LoopPass, work: () => Promise<void>): void {
+    const began = this.passStartedAt.get(pass);
+    if (began !== undefined && this.loopIntervals - began < STUCK_PASS_INTERVALS) return;
+    if (began !== undefined) this.config.logger?.warn(`[MeetingManager] the ${pass} pass begun ${this.loopIntervals - began} intervals ago has not finished; the next one starts beside it`);
+    const mark = this.loopIntervals;
+    this.passStartedAt.set(pass, mark);
+    void work()
+      .catch((err) => this.config.logger?.error(`[MeetingManager] ${pass} pass: ${String(err)}`))
+      .finally(() => {
+        // a pass that was stuck and finishes after a later one began leaves the later one's mark alone
+        if (this.passStartedAt.get(pass) === mark) this.passStartedAt.delete(pass);
+      });
   }
 
   /** Stops the loop `start()` began; a pass already running finishes. */
@@ -443,11 +467,29 @@ export class MeetingManager {
   }
 
   /**
-   * One pass: due jobs dispatched, limits enforced, kills issued, purges resumed, a reconcile every minute. Each step runs
-   * even when an earlier one throws, so a dispatch that fails on one run never holds back the limits of the others (the
-   * stop monitor's suspension among them); the first error is thrown once the pass is over.
+   * One pass: due jobs dispatched, then the upkeep (limits enforced, kills issued, purges resumed, a reconcile every
+   * minute). Each step runs even when an earlier one throws, so a dispatch that fails on one run never holds back the
+   * limits of the others (the stop monitor's suspension among them); the first error is thrown once the pass is over.
+   * The steps run in turn, so a dispatch that takes long holds this pass's limits back until it returns; `start()` runs
+   * the two apart.
    */
   async tick(): Promise<void> {
+    let failure: { error: unknown } | undefined;
+    try {
+      await this.dispatchDue();
+    } catch (error) {
+      failure = { error };
+    }
+    try {
+      await this.upkeep();
+    } catch (error) {
+      failure ??= { error };
+    }
+    if (failure) throw failure.error;
+  }
+
+  /** The steps after the dispatches: the limits, the eviction and a reconcile every minute, each run even when an earlier one throws; the first error is thrown at the end. */
+  private async upkeep(): Promise<void> {
     let failure: { error: unknown } | undefined;
     const step = async (pass: () => Promise<void>): Promise<void> => {
       try {
@@ -456,7 +498,6 @@ export class MeetingManager {
         failure ??= { error };
       }
     };
-    await step(() => this.dispatchDue());
     await step(() => this.enforceLimits());
     await step(() => this.cleanupExpired());
     if (this.now() - this.lastReconcileAt >= 60_000) {
@@ -794,15 +835,21 @@ export class MeetingManager {
         await this.move(run, 'in_call_notice_pending', { joinedAt: at, participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, at) }, 'bot:in_call', undefined, event);
         return true;
       }
-      case 'notice_posted': {
-        // the notice alone does not open capture: the stop monitor must report a real observation after it (the interlock)
-        const moved = await this.move(run, 'in_call', { noticePostedAt: this.reportedAt(event.at) }, 'bot:notice_posted', { version: run.notice.version }, event);
-        if (moved) await this.startCaptureIfReady(moved);
+      case 'notice_posted':
+        // The notice alone does not open capture: the stop monitor must report a real observation after it (the
+        // interlock). The notice's time is kept as the worker gave it, on the worker's clock, since the monitor's
+        // heartbeats are ordered against it on that clock; and a heartbeat time the run holds from before the
+        // confirmation, whose order against the notice is not known, is cleared, so the next heartbeat decides.
+        await this.move(run, 'in_call', { noticePostedAt: event.at, monitorSeenAt: undefined }, 'bot:notice_posted', { version: run.notice.version }, event);
         return true;
-      }
       case 'monitor_heartbeat': {
-        // the stop monitor's own observation: the first after the notice opens capture, one after a suspension resumes it (the method holds every guard)
-        const updated = await this.stores.runs.update(run.runId, { monitorSeenAt: this.reportedAt(event.at) });
+        // The stop monitor's own observation counts only once the notice is confirmed, and only when the worker made it at
+        // or after the notice, both read on the worker's clock: one from before the notice proves nothing about the chat
+        // being watched after it, and its time bounded on the manager's clock could equal the notice's or pass it. A
+        // counted heartbeat is kept at its bounded time, by which the limits measure the monitor's freshness. The first
+        // after the notice opens capture, one after a suspension resumes it (the method holds every guard).
+        if (run.state !== 'in_call' || run.noticePostedAt === undefined || event.at < run.noticePostedAt) return false;
+        const updated = await this.stores.runs.update(run.runId, { monitorSeenAt: this.reportedAt(event.at) }, 'in_call');
         if (updated) await this.startCaptureIfReady(updated);
         return true;
       }
@@ -813,12 +860,11 @@ export class MeetingManager {
         await this.deliver(stored, run);
         return true;
       case 'participant_joined': {
+        // the short notice goes first, before the count is written and the event delivered: a write or a delivery that
+        // fails, after which the worker's retry applies nothing again, cannot keep it from the participant who arrived
+        await this.postLateNotice(run);
         const updated = (await this.updateParticipants(run, event)) ?? run;
         await this.deliver(stored, updated);
-        const provider = this.providers.get(run.providerName);
-        if (updated.state === 'in_call' && provider?.capabilities.postsChat && !fenced) {
-          await provider.command(run.runId, { name: 'postChat', text: run.notice.lateArrivalText });
-        }
         return true;
       }
       case 'participant_left': {
@@ -870,6 +916,16 @@ export class MeetingManager {
     return !!text && text.toLowerCase().includes(run.stopPhrase.toLowerCase());
   }
 
+  /**
+   * Posts the notice's short form for a participant who joined after the notice, when the run is in the call and its
+   * provider posts to chat: a late arrival does not see the chat's history, so the notice posted at the start never
+   * reached them (behind the fence the run is `purging`, and nothing is posted).
+   */
+  private async postLateNotice(run: MeetingRunRecord): Promise<void> {
+    const provider = this.providers.get(run.providerName);
+    if (run.state === 'in_call' && provider?.capabilities.postsChat) await provider.command(run.runId, { name: 'postChat', text: run.notice.lateArrivalText });
+  }
+
   /** Whether a report asks the bot to stop: a stop command, or a chat message holding the stop phrase. */
   private isStop(run: MeetingRunRecord, event: NormalizedMeetingEvent): boolean {
     return event.type === 'stop_command' || (event.type === 'chat_message' && this.isStopPhrase(run, event.data?.text));
@@ -878,8 +934,10 @@ export class MeetingManager {
   /**
    * A report's time as the limits read it: the worker's own, but no later than one heartbeat interval past the manager's
    * clock. The limits compare these times with the manager's clock, so a worker whose clock runs ahead would otherwise
-   * keep a quiet stop monitor counted healthy, and the notice and alone limits unexpired, for as long as it runs ahead.
-   * Within the interval the worker's times keep their order, which the interlock reads (a heartbeat after the notice).
+   * keep a quiet stop monitor counted healthy, and the waiting-room, notice and alone limits unexpired, for as long as it
+   * runs ahead. Bounded times need not keep the worker's order (two reports of a worker far ahead can take one time, or
+   * a later report an earlier one's), so the interlock's order, a heartbeat at or after the notice, is read on the
+   * worker's own times, never on these.
    */
   private reportedAt(at: number): number {
     return Math.min(at, this.now() + this.monitorHeartbeatMs);
@@ -919,19 +977,24 @@ export class MeetingManager {
     return this.emit(type, run, data, `${event.eventId}#${type}`, event.at);
   }
 
+  /**
+   * The capture interlock holds: `in_call`, the notice confirmed, a heartbeat the stop monitor made after the notice and
+   * still fresh, and no suspension. `monitorSeenAt` is kept only for a heartbeat the worker made at or after the notice
+   * (read on the worker's clock as the heartbeat is applied; the notice's confirmation clears it), so its presence is that
+   * order; its bounded time is never compared with the notice's, which is on the worker's clock.
+   */
   private captureReady(run: MeetingRunRecord): boolean {
     return run.state === 'in_call'
       && run.noticePostedAt !== undefined
       && run.monitorSeenAt !== undefined
-      && run.monitorSeenAt >= run.noticePostedAt
       && this.now() - run.monitorSeenAt < this.monitorHeartbeatMs * this.monitorMissedBeats
       && run.captureSuspendedAt === undefined;
   }
 
   /** The capture interlock: `in_call`, the notice confirmed, and the stop monitor's own observation reported after the notice, no fence. */
   private async startCaptureIfReady(run: MeetingRunRecord): Promise<void> {
+    // a heartbeat from before the notice proves nothing about the chat being watched now, and none is kept (see captureReady)
     if (run.state !== 'in_call' || run.noticePostedAt === undefined || run.monitorSeenAt === undefined) return;
-    if (run.monitorSeenAt < run.noticePostedAt) return; // a heartbeat from before the notice proves nothing about the chat being watched now
     if (this.now() - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats) return;
     if (run.captureStartedAt !== undefined && run.captureSuspendedAt === undefined) return; // already capturing
     const provider = this.providers.get(run.providerName);
@@ -1308,11 +1371,17 @@ export class MeetingManager {
           continue;
         }
         if (run.state === 'in_call') {
-          // a stop monitor that has not reported once since the notice: capture never opened, and the run leaves when the
-          // window and the recovery wait have both passed, as it does for a monitor that went quiet and stayed quiet
-          if (run.monitorSeenAt === undefined && run.noticePostedAt !== undefined && now - run.noticePostedAt > this.monitorHeartbeatMs * this.monitorMissedBeats + this.monitorRecoverMs) {
-            await this.leave(run, 'stop_monitor_failed');
-            continue;
+          // A stop monitor that has not reported once since the notice: capture never opened, and the run leaves when the
+          // window and the recovery wait have both passed, as it does for a monitor that went quiet and stayed quiet. The
+          // notice's time is the worker's own, so the wait counts from it but from no later than the end of the notice's
+          // confirmation window after the bot entered the call (joinedAt, bounded on the manager's clock): a worker whose
+          // clock runs ahead does not keep the run in the call for as long as it runs ahead.
+          if (run.monitorSeenAt === undefined && run.noticePostedAt !== undefined) {
+            const noticeAt = run.joinedAt === undefined ? run.noticePostedAt : Math.min(run.noticePostedAt, run.joinedAt + this.noticeConfirmMs);
+            if (now - noticeAt > this.monitorHeartbeatMs * this.monitorMissedBeats + this.monitorRecoverMs) {
+              await this.leave(run, 'stop_monitor_failed');
+              continue;
+            }
           }
           // quiet once monitorMissedBeats intervals have passed since the last heartbeat, the boundary captureReady and startCaptureIfReady use
           const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats;
@@ -1485,12 +1554,25 @@ export class MeetingManager {
   // ── The transcript ──
 
   /**
-   * A turn the listen session wrote: a `bot:transcript` event, stored and forwarded, unless the run is behind the fence
-   * or over, or its capture has not started (a provider that passed audio before `startCapture` is not taken at its word).
+   * Whether a run takes transcript turns now: it is not behind the fence or over, and its capture has started or the
+   * capture interlock holds. The start is written on the run once the bot has answered `startCapture`, and the bot can
+   * send its first audio, and so a first final, before that answer; a turn from audio a provider passed on before the
+   * interlock held is dropped (the interlock does not rest on the provider alone). The transcript sink reads it too.
+   *
+   * @param run - The run as just read from its store.
+   */
+  takesTurns(run: MeetingRunRecord): boolean {
+    if (run.state === 'purging' || TERMINAL_RUN_STATES.has(run.state)) return false;
+    return run.captureStartedAt !== undefined || this.captureReady(run);
+  }
+
+  /**
+   * A turn the listen session wrote: a `bot:transcript` event, stored and forwarded, unless the run takes no turns now
+   * ({@link MeetingManager.takesTurns}: behind the fence or over, or before its capture can start) or its transcript is fenced.
    */
   async recordTranscript(turn: TranscriptTurn): Promise<boolean> {
     const run = await this.stores.runs.get(turn.runId);
-    if (!run || run.state === 'purging' || TERMINAL_RUN_STATES.has(run.state) || run.captureStartedAt === undefined || await this.stores.transcript.isFenced(turn.runId)) return false;
+    if (!run || !this.takesTurns(run) || await this.stores.transcript.isFenced(turn.runId)) return false;
     await this.emit('bot:transcript', run, { seq: turn.seq, turnId: turn.turnId, text: turn.text, speaker: turn.speaker, startMs: turn.startMs, endMs: turn.endMs }, `${turn.runId}:transcript:${turn.seq}`, turn.at);
     return true;
   }

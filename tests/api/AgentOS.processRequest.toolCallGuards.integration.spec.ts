@@ -477,6 +477,34 @@ describe('AgentOS output guards that evaluate tool calls', () => {
       expect(gmi.handleToolResult).not.toHaveBeenCalled();
     });
 
+    it('a block whose refusal the store fails to save still closes the stream, so the call cannot be continued on it', async () => {
+      const gmi = pausingGmi(SHELL_CALL);
+      const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-refusal-unsaved', shellGuard(BLOCK_SHELL));
+      // the store takes the turn's saves and refuses the save that records the refusal, as it does during an outage
+      let refusedSaves = 0;
+      vi.spyOn(agentos.getConversationManager(), 'saveConversation').mockImplementation(async (saved: ConversationContext) => {
+        if (saved.getAllMessages().some((m) => m.metadata?.source === 'agentos_tool_call_refused')) {
+          refusedSaves += 1;
+          throw new Error('The conversation store is unavailable.');
+        }
+      });
+
+      const responses = await collect(agentos.processRequest(input));
+
+      const last = responses.at(-1) as AgentOSErrorChunk;
+      expect(last.type).toBe(AgentOSResponseChunkType.ERROR);
+      expect(last.code).toBe('SHELL_DESTRUCTIVE');
+      // the verdict reaches the host after the pause is dropped, so the store has refused that save by now
+      expect(refusedSaves).toBe(1);
+      expect(await agentos.getPendingExternalToolRequest('conv-refusal-unsaved', 'user-1')).toBeNull();
+      expect(String(resultFor(context, SHELL_CALL.id)?.content)).toContain('AUTH_PERMISSION_DENIED');
+
+      // the stream is closed all the same: the blocked call cannot be continued on it
+      const resumed = await collect(agentos.handleToolResult(last.streamId, SHELL_CALL.id, SHELL_CALL.name, { exitCode: 0 }, true));
+      expect(resumed.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+      expect(gmi.handleToolResult).not.toHaveBeenCalled();
+    });
+
     it('a block on the call a continuation stops for drops that pause too', async () => {
       const gmi = pausingGmi(READ_CALL, { isFinal: false, responseText: 'Now a command.', toolCalls: [SHELL_CALL] });
       const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-continuation-block', shellGuard(BLOCK_SHELL));
