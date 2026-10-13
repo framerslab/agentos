@@ -898,14 +898,23 @@ export class MeetingManager {
   /**
    * Moves the run to `leaving` (a run behind the fence stays `purging`), arms the kill and tells the bot to leave. The
    * kill's deadline is armed on the run before the command goes, so a leave the bot never receives still ends in the
-   * kill, and whichever manager runs the limits, after a restart too, sends it.
+   * kill, and whichever manager runs the limits, after a restart too, sends it. A run already told to leave keeps the
+   * reason it was told, which decides its billing, and its deadline; a report that moves the run between the read this
+   * was given and the write is overtaken by trying again from the state the run is in now.
    */
   private async leave(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<boolean> {
-    if (!canTransition(run.state, 'leaving') && run.state !== 'purging') return false;
-    const armed: Partial<MeetingRunRecord> = run.state === 'purging' ? { leaveCommandedAt: this.now() } : { state: 'leaving', reason, leaveCommandedAt: this.now() };
-    if (!(await this.stores.runs.update(run.runId, armed, run.state))) return false;
-    await this.sendCommand(run, { name: 'leave', reason });
-    return true;
+    let current: MeetingRunRecord | undefined = run;
+    for (let attempt = 0; current !== undefined && attempt < 3; attempt += 1) {
+      if (current.state === 'leaving') return true;
+      if (!canTransition(current.state, 'leaving') && current.state !== 'purging') return false;
+      const armed: Partial<MeetingRunRecord> = current.state === 'purging' ? { leaveCommandedAt: current.leaveCommandedAt ?? this.now() } : { state: 'leaving', reason, leaveCommandedAt: this.now() };
+      if (await this.stores.runs.update(current.runId, armed, current.state)) {
+        await this.sendCommand(current, { name: 'leave', reason });
+        return true;
+      }
+      current = await this.stores.runs.get(current.runId);
+    }
+    return false;
   }
 
   /**

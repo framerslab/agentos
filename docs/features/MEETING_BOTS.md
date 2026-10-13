@@ -93,7 +93,7 @@ async function sendMeetingBot(provider: IMeetingBotProvider, roomService: IMeeti
 | `registerProvider`, `getProvider`, `providerFor` | Register by name, look up by name, or select the first provider declaring a platform unless a name is given. |
 | `pausePlatform`, `resumePlatform`, `isPaused` | Control new sends on this manager instance; existing runs continue. |
 | `getRun`, `listRuns` | Read a run or filtered runs. |
-| `leaveBot` | Leave while retaining content according to `keep`; cancel a pending send. |
+| `leaveBot` | Leave while retaining content according to `keep`; cancel a pending send. A run already told to leave keeps the reason it was told, which decides its billing, and its kill deadline. |
 | `purgeRun` | Leave and delete content; also delete a completed run's kept content. Returns false for missing or failed runs. |
 | `postChat` | Post only while `in_call` and the provider declares chat posting. |
 | `pageSeen` | Refresh the page-presence timestamp for an enabled `pageAwayMs` limit. |

@@ -132,6 +132,22 @@ describe('the limits, the meter and the ends', () => {
     await h.report(runId, 'left', { seconds: 61 });
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stop_monitor_failed', billedSeconds: 0 });
   });
+  it('a second leave keeps the first one\'s reason and kill deadline: a leave for a failed stop monitor stays unbilled', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    h.clock.advance(30_001);
+    await h.manager.tick(); // the monitor is quiet: capture suspended
+    h.clock.advance(30_001);
+    await h.manager.tick(); // still quiet: the bot is told to leave, unbilled
+    const leaving = await h.stores.runs.get(runId);
+    expect(leaving).toMatchObject({ state: 'leaving', reason: 'stop_monitor_failed' });
+    h.clock.advance(10_000);
+    expect(await h.manager.leaveBot(runId, 'stopped_by_owner')).toBe(true);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stop_monitor_failed', leaveCommandedAt: leaving?.leaveCommandedAt });
+    await h.report(runId, 'left', { seconds: 70 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stop_monitor_failed', billedSeconds: 0 });
+    expect(h.entitlement.settled).toEqual([]);
+  });
   it('a capture one manager suspended is resumed by the manager that hears the monitor recover, after a restart too', async () => {
     const h = harness();
     const runId = await joined(h);
@@ -512,6 +528,25 @@ describe('a step that fails, or a race, on the way out', () => {
     await h.manager.tick();
     expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'kill' });
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stopped_by_owner' });
+  });
+  it('a leave that a report overtakes is made from the state the report moved the run to', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    const update = h.stores.runs.update.bind(h.stores.runs);
+    let raced = false;
+    vi.spyOn(h.stores.runs, 'update').mockImplementation(async (id, patch, expected) => {
+      if (!raced && patch.state === 'leaving') {
+        raced = true;
+        await h.report(id, 'waiting_room'); // the bot's report lands between the owner's read and the leave's write
+      }
+      return update(id, patch, expected);
+    });
+    expect(await h.manager.leaveBot(runId, 'stopped_by_owner')).toBe(true);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stopped_by_owner' });
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stopped_by_owner' }]);
   });
   it('a cancel that finds the run already dispatched is a leave from the state the run is in now', async () => {
     const h = harness();
