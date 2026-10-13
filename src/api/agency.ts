@@ -1557,22 +1557,24 @@ export interface GuardrailHitlOverrideResult {
 
 /**
  * Runs the post-approval checks after an approval handler approves a tool
- * call, an agent run or the final output, to catch destructive text the
- * handler let through.
+ * call, an agent run or the final output.
  *
  * The checks are two fixed pattern checks inside `agency()`, `code-safety`
  * and `pii-redaction`, not the guardrail packs: any other ID passes. They
  * run in the order `guardrailIds` lists them, each over one text,
  * `Tool: <toolName>` and then `Arguments:` with `args` as JSON, and the
  * first that matches returns `passed: false` with its ID and reason; the
- * caller then overrides the approval. A check that throws is skipped.
+ * caller then overrides the approval. A check that throws is skipped. The
+ * final output is checked as the strategy produced it, before the
+ * approval's `modifications.output` replaces it, so a replacement is not
+ * checked.
  *
  * @param toolName - The approved tool's name, `agent:<name>` for an agent
  *   approval, or `return` for the final output.
  * @param args - The tool call's arguments; for an agent, `{ input }` with the
  *   strategy's input, plus `sent`, the text the agent is sent, when the
  *   approval's instructions were appended to it; for the final output,
- *   `{ output }`.
+ *   `{ output }` with the strategy's text.
  * @param guardrailIds - Ordered list of check IDs to run.
  * @param callbacks - Optional event callback map; each check's result goes to
  *   `guardrailResult`.
