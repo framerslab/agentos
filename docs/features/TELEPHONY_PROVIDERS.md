@@ -212,7 +212,7 @@ manager.on((event) => {
 });
 ```
 
-A DTMF event does not change the call's state. On a Twilio media stream, [`TelephonyStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/TelephonyStreamTransport.ts) also emits `dtmf` with the key-hold duration; the Telnyx and Plivo parsers produce no DTMF events, and their webhooks carry no duration.
+A DTMF event does not change the call's state. On a media stream, [`TelephonyStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/TelephonyStreamTransport.ts) also emits `dtmf` for each key press its parser reports. The Twilio parser reports key presses with the key-hold duration. The Telnyx and Plivo parsers report them only when constructed with `{ protocol: 'carrier' }`, and the Telnyx and Plivo webhooks carry no duration.
 
 ```typescript
 transport.on('dtmf', ({ digit, durationMs }) => {
