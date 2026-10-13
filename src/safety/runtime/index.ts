@@ -63,3 +63,4 @@ export {
   openAIModelPricing,
   openAITranscriptionPricing,
 } from '../../core/llm/providers/implementations/openaiPricing.js';
+export { DEEPGRAM_STREAMING_PRICING, deepgramStreamingPricing } from '../../io/voice-pipeline/providers/deepgramPricing.js';

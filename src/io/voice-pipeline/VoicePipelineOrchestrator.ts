@@ -102,7 +102,7 @@ export interface VoicePipelineOverrides {
  * |-------------------|----------------------------------------------|
  * | `'state_changed'` | `{ from: PipelineState, to: PipelineState }`  |
  * | `'turn_complete'` | {@link TurnCompleteEvent}                     |
- * | `'error'`         | `Error`: a `turn_complete` listener threw or rejected; with no `'error'` listener it is written as a console warning instead |
+ * | `'error'`         | `Error`: a `turn_complete` listener threw or rejected, or a transport send rejected (of a reply's audio, the first refused chunk only); with no `'error'` listener it is written as a console warning instead |
  *
  * @see {@link VoicePipelineSession} for the public session interface returned by `startSession()`.
  */
@@ -149,6 +149,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Incremented as each {@link EncodedAudioChunk} is forwarded to the transport.
    */
   private _currentPlayedMs = 0;
+
+  /**
+   * The reply being spoken: replaced as each reply starts to speak (PROCESSING -> SPEAKING). The send of each audio
+   * chunk holds the reply it belongs to, so that each reply's first refused chunk is reported and the rest are not.
+   */
+  private _currentReply = { audioRefusalReported: false };
 
   // --------------------------------------------------------------------------
   // Public getters
@@ -455,12 +461,14 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       endpointDetector.pushTranscript(transcript);
 
       // Relay to the client for real-time caption display
-      transport.sendControl({
-        type: 'transcript',
-        text: transcript.text,
-        isFinal: transcript.isFinal,
-        confidence: transcript.confidence,
-      });
+      this._watchSend(
+        transport.sendControl({
+          type: 'transcript',
+          text: transcript.text,
+          isFinal: transcript.isFinal,
+          confidence: transcript.confidence,
+        })
+      );
     });
   }
 
@@ -510,7 +518,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
       // LISTENING -> PROCESSING: agent is now generating a response
       this._setState('processing');
-      transport.sendControl({ type: 'agent_thinking' });
+      this._watchSend(transport.sendControl({ type: 'agent_thinking' }));
 
       // Build turn metadata for the agent so it can adapt its response
       const metadata: VoiceTurnMetadata = {
@@ -524,11 +532,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // Begin streaming the agent's response
       const tokenStream = agentSession.sendText(event.transcript, metadata);
 
-      // PROCESSING -> SPEAKING: first tokens are about to flow
+      // PROCESSING -> SPEAKING: first tokens are about to flow. The reply gets its record before its audio is sent.
+      this._currentReply = { audioRefusalReported: false };
       this._setState('speaking');
       this._currentTTSText = '';
       this._currentPlayedMs = 0;
-      transport.sendControl({ type: 'agent_speaking', text: '' });
+      this._watchSend(transport.sendControl({ type: 'agent_speaking', text: '' }));
 
       // Stream each LLM token to the TTS session. The loop breaks early
       // if a barge-in transitions us out of SPEAKING.
@@ -560,21 +569,78 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     for (const listener of this.rawListeners('turn_complete')) {
       try {
         const result: unknown = (listener as (turn: TurnCompleteEvent) => unknown).call(this, event);
-        if (result instanceof Promise) result.catch((err: unknown) => this._reportListenerError(err));
+        // Promise.resolve() also takes a promise of another realm or library, and leaves any other value alone.
+        Promise.resolve(result).catch((err: unknown) => this._reportError(err, 'a turn_complete listener failed'));
       } catch (err) {
-        this._reportListenerError(err);
+        this._reportError(err, 'a turn_complete listener failed');
       }
     }
   }
 
   /**
-   * Reports a listener's failure as `'error'` when something listens for it, and otherwise as a console warning: an
-   * `'error'` that nothing listens for would throw.
+   * Reports a failure as `'error'` when something listens for it, and otherwise as a console warning: an `'error'`
+   * that nothing listens for would throw. As `emit('error')` hands a failure, it goes first to the `errorMonitor`
+   * listeners, whether or not anything listens for `'error'`, and then to each `'error'` listener in order, except
+   * that a listener that throws or rejects is written as a console warning, with the failure it was handed, and the
+   * listeners after it still run: the failures are reported from an async event handler or a promise's rejection
+   * handler, where a listener's throw or rejection would become an unhandled rejection, and `emit()` does not hand back
+   * what a listener returns.
+   *
+   * @param err - The failure; anything other than an `Error` is wrapped in one.
+   * @param what - What failed, for the console warning.
    */
-  private _reportListenerError(err: unknown): void {
+  private _reportError(err: unknown, what: string): void {
     const error = err instanceof Error ? err : new Error(String(err));
-    if (this.listenerCount('error') > 0) this.emit('error', error);
-    else console.warn('[voice-pipeline-orchestrator] a turn_complete listener failed:', error.message);
+    const warnListenerFailed = (thrown: unknown): void => {
+      const listenerFailure = thrown instanceof Error ? thrown.message : String(thrown);
+      console.warn(
+        `[voice-pipeline-orchestrator] ${what}:`,
+        error.message,
+        `(an 'error' listener failed: ${listenerFailure})`
+      );
+    };
+    const handToListeners = (event: string | symbol): void => {
+      for (const listener of this.rawListeners(event)) {
+        try {
+          const result: unknown = (listener as (error: Error) => unknown).call(this, error);
+          // As in _emitTurnComplete(), Promise.resolve() also takes a promise of another realm or library.
+          Promise.resolve(result).catch(warnListenerFailed);
+        } catch (thrown) {
+          warnListenerFailed(thrown);
+        }
+      }
+    };
+    handToListeners(EventEmitter.errorMonitor);
+    if (this.listenerCount('error') === 0) {
+      console.warn(`[voice-pipeline-orchestrator] ${what}:`, error.message);
+      return;
+    }
+    handToListeners('error');
+  }
+
+  /**
+   * Handles the promise of a transport send that the orchestrator does not wait for. A send that rejects, as one does
+   * on a WebSocket that is closing or a LiveKit room that is disconnecting, is reported once through `_reportError()`
+   * and ends nothing; a send that resolves is left as it is. Unhandled, the rejection would end the process: Node
+   * raises an unhandled rejection as an uncaught exception by default.
+   *
+   * A refused control message is reported each time. Of a reply's audio chunks only the first refused is reported: a
+   * transport that does not publish audio, as `LiveKitStreamTransport` does not, refuses every chunk of every reply.
+   *
+   * @param send - The promise that `sendControl()` or `sendAudio()` returned.
+   * @param reply - For an audio chunk, the reply it belongs to (`_currentReply` when it was sent).
+   */
+  private _watchSend(send: Promise<void>, reply?: { audioRefusalReported: boolean }): void {
+    // Promise.resolve() also takes a transport whose send returns no promise, as a plain JavaScript one may.
+    Promise.resolve(send).catch((err: unknown) => {
+      if (reply) {
+        // The rest of a reply's refusals are not reported. Each reply keeps its own record, so the first refusal of
+        // an earlier reply is reported even when it settles after a later reply's.
+        if (reply.audioRefusalReported) return;
+        reply.audioRefusalReported = true;
+      }
+      this._reportError(err, 'a transport send failed');
+    });
   }
 
   /**
@@ -593,7 +659,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // Chunks arriving after a barge-in are silently dropped.
       if (this._state === 'speaking') {
         this._currentPlayedMs += chunk.durationMs;
-        transport.sendAudio(chunk);
+        this._watchSend(transport.sendAudio(chunk), this._currentReply);
       }
     });
 
@@ -605,11 +671,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         this._setState('listening');
 
         // Notify the client that the agent's response is complete
-        transport.sendControl({
-          type: 'agent_done',
-          text: this._currentTTSText,
-          durationMs: this._currentPlayedMs,
-        });
+        this._watchSend(
+          transport.sendControl({
+            type: 'agent_done',
+            text: this._currentTTSText,
+            durationMs: this._currentPlayedMs,
+          })
+        );
 
         // Reset the endpoint detector for the next user turn
         this._endpointDetector?.reset();
@@ -674,7 +742,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
           this._setState('interrupting');
           ttsSession.cancel();
           agentSession.abort?.();
-          transport.sendControl({ type: 'barge_in', action });
+          this._watchSend(transport.sendControl({ type: 'barge_in', action }));
 
           // INTERRUPTING -> LISTENING: ready for the user's next turn
           this._setState('listening');
@@ -683,7 +751,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         } else if (action.type === 'pause') {
           // Notify client of the pause but stay in SPEAKING state.
           // The TTS audio fade-out is handled client-side.
-          transport.sendControl({ type: 'barge_in', action });
+          this._watchSend(transport.sendControl({ type: 'barge_in', action }));
         }
         // 'ignore' and 'resume' actions require no pipeline-level response
       }

@@ -1,6 +1,6 @@
 /**
  * Barrel exports for the meeting-participant channel: the manager, the provider interface, the room helper, the stores,
- * the signing and the mock provider.
+ * the signing, the outbox's delivery and the mock provider.
  *
  * @module @framers/agentos/io/channels/meetings
  */
@@ -32,4 +32,6 @@ export { MemoryDurableInbox, SqlDurableInbox, durableInboxDdl, type IDurableInbo
 export { writeDurableJson, removeDurableJson } from './durableJson.js';
 export { signEnvelope, envelopeHeaders, verifyEnvelope, mintWorkerToken, hashWorkerToken, workerTokenMatches, SecretBox, DEFAULT_ENVELOPE_HEADERS, ENVELOPE_WINDOW_MS } from './signing.js';
 export type { EnvelopeHeaderNames } from './signing.js';
+export { OutboxDispatcher, httpsSend, isPublicAddress, DestinationRefusedError } from './delivery.js';
+export type { OutboxDispatcherOptions, DeliveryRequest, DeliverySend, DeliveryDestination, AddressLookup } from './delivery.js';
 export { MockMeetingBotProvider, mockEventContext } from './providers/mock.js';
