@@ -34,6 +34,7 @@ import {
   IGMI,
   GMIOutput,
   GMIOutputChunkType,
+  type GMIToolCallRefusal,
 } from '../../cognition/substrate/IGMI';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { ConversationContext } from '../../core/conversation/ConversationContext';
@@ -319,6 +320,12 @@ export class AgentOSOrchestrator {
    */
   private activeStreamContexts: Map<string, ActiveStreamContext> = new Map();
 
+  /**
+   * The run of each stream's turn or resumed turn, until it ends. A turn can save its pause after it streams the call
+   * it stops for, so a verdict on that call waits for the run before it reads the pause.
+   */
+  private readonly streamRuns: Map<string, Promise<void>> = new Map();
+
   constructor() {}
 
   /**
@@ -558,7 +565,7 @@ export class AgentOSOrchestrator {
 
     // Execute the turn processing asynchronously without awaiting it here,
     // so this method can return the streamId quickly.
-    promise
+    this.trackStreamRun(agentOSStreamId, promise
       .catch(async (criticalError: any) => {
         if (rootSpan) {
           try {
@@ -599,7 +606,7 @@ export class AgentOSOrchestrator {
         } catch {
           // ignore
         }
-      });
+      }));
 
     return agentOSStreamId;
   }
@@ -631,7 +638,7 @@ export class AgentOSOrchestrator {
       this.toolResultHandler.resumeToolResultsInternal(agentOSStreamId, pendingRequest, toolResults, options, guards.toolCallGate);
 
     const promise = rootSpan ? runWithSpanContext(rootSpan, run) : run();
-    promise
+    this.trackStreamRun(agentOSStreamId, promise
       .catch(async (criticalError: any) => {
         if (rootSpan) {
           try {
@@ -672,9 +679,63 @@ export class AgentOSOrchestrator {
         } catch {
           // ignore
         }
-      });
+      }));
 
     return agentOSStreamId;
+  }
+
+  /** Keeps a stream's run until it ends, for the verdicts that wait for it (see {@link discardBlockedToolCalls}). */
+  private trackStreamRun(streamId: StreamId, run: Promise<unknown>): void {
+    const settled = run.then(
+      () => undefined,
+      () => undefined
+    );
+    this.streamRuns.set(streamId, settled);
+    void settled.then(() => {
+      if (this.streamRuns.get(streamId) === settled) {
+        this.streamRuns.delete(streamId);
+      }
+    });
+  }
+
+  /**
+   * Drops the pause a stream saved for tool calls an output guardrail withheld from the caller (the verdict's
+   * `toolCallIds`). It waits for the stream's turn or resumed turn to end, since a turn can save its pause after it
+   * streams the call; then, when the conversation's pending request is this stream's and holds one of the calls, it
+   * records a refused tool result for each call of the pause, clears the pending request and closes the stream, so the
+   * call can be neither resumed after a restart nor continued on the stream. Anything else is left as it is.
+   *
+   * @param agentOSStreamId - The stream the guardrail blocked.
+   * @param toolCallIds - The ids of the calls the block withheld.
+   * @param refusal - What the refused tool results say.
+   * @returns Whether a pause was dropped.
+   */
+  public async discardBlockedToolCalls(
+    agentOSStreamId: StreamId,
+    toolCallIds: readonly string[],
+    refusal: GMIToolCallRefusal
+  ): Promise<boolean> {
+    this.ensureInitialized();
+    await this.streamRuns.get(agentOSStreamId);
+    const streamContext = this.activeStreamContexts.get(agentOSStreamId);
+    if (!streamContext) {
+      return false;
+    }
+    const dropped = await this.toolResultHandler.discardPendingExternalToolRequest(
+      agentOSStreamId,
+      streamContext,
+      toolCallIds,
+      refusal
+    );
+    if (!dropped) {
+      return false;
+    }
+    this.activeStreamContexts.delete(agentOSStreamId);
+    await this.dependencies.streamingManager.closeStream(
+      agentOSStreamId,
+      'An output guardrail blocked the tool call the stream stopped for.'
+    );
+    return true;
   }
 
   /**
@@ -1247,6 +1308,7 @@ export class AgentOSOrchestrator {
       }
     }
     this.activeStreamContexts.clear();
+    this.streamRuns.clear();
     this.telemetry?.kpiWindows.clear();
     this.telemetry?.alertState.clear();
     this.initialized = false;

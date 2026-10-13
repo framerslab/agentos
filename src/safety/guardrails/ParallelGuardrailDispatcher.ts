@@ -285,6 +285,15 @@ async function evaluateToolCallGuards(
   return { outcome: 'pass', evaluations };
 }
 
+/**
+ * The verdict field naming the calls a block withheld from the caller: the
+ * calls of an actionable tool-call chunk (`executionMode: 'external'`), which
+ * the runtime saved a pause for. Any other chunk names none.
+ */
+function withheldCallsOf(chunk: AgentOSResponse): Pick<GuardrailOutputVerdict, 'toolCallIds'> {
+  return isActionableToolCallRequestChunk(chunk) ? { toolCallIds: chunk.toolCalls.map((call) => call.id) } : {};
+}
+
 // ---------------------------------------------------------------------------
 // ParallelGuardrailDispatcher
 // ---------------------------------------------------------------------------
@@ -510,7 +519,10 @@ export class ParallelGuardrailDispatcher {
    * `evaluateToolCalls` run in parallel on the chunk as the stream carries it.
    * A SANITIZE is applied as a BLOCK, since a tool call cannot be rewritten; a
    * BLOCK ends the stream with the verdict in place of the chunk. Services
-   * without the flag never receive a tool-call chunk.
+   * without the flag never receive a tool-call chunk. A block that withholds
+   * an actionable call (`executionMode: 'external'`), on its chunk or, in hold
+   * mode, on the text before it, names the call ids in the verdict's
+   * `toolCallIds`.
    *
    * A BLOCK in either phase terminates the stream immediately with an error
    * chunk, or with a final response holding the guard's `replacementText`.
@@ -897,7 +909,7 @@ export class ParallelGuardrailDispatcher {
         const verdict = await evaluateToolCall(currentChunk);
         if (verdict.outcome === 'block') {
           held = [];
-          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: null });
+          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: null, ...withheldCallsOf(chunk) });
           yield* blockedOutput(context, verdict.evaluation, options);
           return;
         }
@@ -921,7 +933,7 @@ export class ParallelGuardrailDispatcher {
         const verdict = await evaluateFinal(synthetic);
         if (verdict.outcome === 'block') {
           held = [];
-          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: text });
+          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: text, ...withheldCallsOf(chunk) });
           yield* blockedOutput(context, verdict.evaluation, options);
           return;
         }

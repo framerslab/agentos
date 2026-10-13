@@ -265,10 +265,11 @@ export interface GuardrailConfig {
    * - BLOCK ends the stream with the guard's verdict (the error chunk, or the
    *   final response holding `replacementText`) in place of the chunk, so the
    *   stream never hands the host an actionable call
-   *   (`executionMode: 'external'`) to execute. The pause the runtime saved
-   *   for that call before the chunk went out stays in
-   *   `getPendingExternalToolRequest()` until the conversation's next turn
-   *   ends.
+   *   (`executionMode: 'external'`) to execute. AgentOS drops the pause it
+   *   saved for that call before the chunk went out:
+   *   `getPendingExternalToolRequest()` no longer returns it, the
+   *   conversation answers the call with a refused tool result, and the
+   *   stream cannot be continued with a result for it.
    * - SANITIZE cannot rewrite a tool call; it is applied as a BLOCK that keeps
    *   the guard's reason and reason code.
    * - FLAG and ALLOW pass the chunk on with the evaluation in its

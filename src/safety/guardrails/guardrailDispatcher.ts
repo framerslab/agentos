@@ -133,6 +133,13 @@ export interface GuardrailOutputVerdict {
   finalText: string | null;
   /** The reply's text as the guards judged it, before any rewrite; null for a verdict on a streamed delta, which judged no whole reply. */
   originalText: string | null;
+  /**
+   * The ids of the actionable tool calls (`executionMode: 'external'`) a block withheld from the caller: the calls of
+   * the tool-call chunk it ended the stream in place of, or, in hold mode, of the tool-call chunk after the text it
+   * blocked. The runtime saved a pause for them before the chunk went out; AgentOS drops it. Unset when a verdict
+   * withheld no actionable call.
+   */
+  toolCallIds?: string[];
 }
 
 /**

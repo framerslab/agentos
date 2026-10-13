@@ -28,10 +28,12 @@ import { MessageRole } from '../../core/conversation/ConversationMessage';
 import type {
   IGMI,
   GMIOutput,
+  GMIToolCallRefusal,
   GMIToolResultOptions,
   ToolCallRequest,
   ToolResultPayload,
 } from '../../cognition/substrate/IGMI';
+import { refusedToolCallResult } from '../../cognition/substrate/toolCallGate';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { gmiToolCallGateFor } from './toolCallGate';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
@@ -710,6 +712,66 @@ export class ExternalToolResultHandler {
     }
 
     return pendingRequest;
+  }
+
+  /**
+   * Drops the pause a stream saved for tool calls an output guardrail withheld
+   * from the caller. It acts only when the conversation's pending request was
+   * saved by `agentOSStreamId` and holds one of `toolCallIds`: each call of the
+   * pause is answered with a refused tool result, so the history answers every
+   * call the pause's assistant message declared, and the pending request is
+   * cleared. The conversation is saved when persistence is on.
+   *
+   * @param agentOSStreamId - The stream the guardrail blocked.
+   * @param streamContext - The stream's context.
+   * @param toolCallIds - The ids of the calls the block withheld.
+   * @param refusal - What the refused tool results say.
+   * @returns Whether the pause was dropped.
+   */
+  async discardPendingExternalToolRequest(
+    agentOSStreamId: string,
+    streamContext: ActiveStreamContext,
+    toolCallIds: readonly string[],
+    refusal: GMIToolCallRefusal,
+  ): Promise<boolean> {
+    const { conversationContext, personaId } = streamContext;
+    const pending = conversationContext.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+      | AgentOSPendingExternalToolRequest
+      | undefined;
+    if (
+      !pending ||
+      pending.streamId !== agentOSStreamId ||
+      !Array.isArray(pending.toolCalls) ||
+      !pending.toolCalls.some((call) => toolCallIds.includes(call.id))
+    ) {
+      return false;
+    }
+
+    for (const call of pending.toolCalls) {
+      const refused = refusedToolCallResult(call, refusal);
+      conversationContext.addMessage({
+        role: MessageRole.TOOL,
+        // worded as the GMI words a refused result in its own history
+        content: `Error from tool '${call.name}': ${JSON.stringify(refused.errorDetails)}`,
+        tool_call_id: call.id,
+        name: call.name,
+        metadata: {
+          agentPersonaId: personaId,
+          source: 'agentos_tool_call_refused',
+          isSuccess: false,
+        },
+      });
+    }
+    conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, undefined);
+
+    if (this.enableConversationalPersistence) {
+      await withAgentOSSpan('agentos.conversation.save', async (span) => {
+        span?.setAttribute('agentos.stage', 'discard_blocked_external_tool_request');
+        span?.setAttribute('agentos.stream_id', agentOSStreamId);
+        await this.dependencies.conversationManager.saveConversation(conversationContext);
+      });
+    }
+    return true;
   }
 
   /**

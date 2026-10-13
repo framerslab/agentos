@@ -1499,6 +1499,31 @@ export class AgentOS implements IAgentOS {
   }
 
   /**
+   * The output guards' verdict on a stream. A block that withheld actionable tool calls drops the pause the
+   * orchestrator saved for them, so neither `getPendingExternalToolRequest()` nor the stream offers them again; then
+   * a replaced or rewritten reply is written to the stored conversation. Nothing here throws into the stream.
+   */
+  private async onOutputVerdict(conversationKey: string, verdict: GuardrailOutputVerdict): Promise<void> {
+    const withheld = verdict.toolCallIds ?? [];
+    if (verdict.action === GuardrailAction.BLOCK && withheld.length > 0) {
+      try {
+        await this.agentOSOrchestrator.discardBlockedToolCalls(verdict.streamId, withheld, {
+          reason: 'An output guardrail blocked this tool call, so it was not run.',
+          ...(verdict.reasonCode ? { reasonCode: verdict.reasonCode } : {}),
+          ...(verdict.guardrailId ? { guardrailId: verdict.guardrailId } : {}),
+        });
+      } catch (error) {
+        this.logger.warn('The pause saved for a blocked tool call could not be dropped', {
+          streamId: verdict.streamId,
+          toolCallIds: withheld,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    await this.recordGuardedReply(conversationKey, verdict);
+  }
+
+  /**
    * With conversational persistence on, the orchestrator stores the model's reply before the output guards run. When
    * a guard replaced or rewrote it, the stored message is made to hold what the person saw, so the history never
    * carries a reply the guards refused. A reply blocked with no replacement is emptied, with the reason recorded.
@@ -2066,7 +2091,7 @@ export class AgentOS implements IAgentOS {
           personaId: effectivePersonaId,
           inputEvaluations: guardrailInputOutcome.evaluations ?? [],
           holdUntilFinal: this.holdsOutputUntilFinal(),
-          onVerdict: (verdict) => this.recordGuardedReply(orchestratorInput.conversationId || orchestratorInput.sessionId, verdict),
+          onVerdict: (verdict) => this.onOutputVerdict(orchestratorInput.conversationId || orchestratorInput.sessionId, verdict),
         }
       );
       if (orchestratorInput.workflowRequest) {
@@ -2297,7 +2322,7 @@ export class AgentOS implements IAgentOS {
         streamId,
         personaId: identity?.personaId,
         holdUntilFinal: this.holdsOutputUntilFinal(),
-        onVerdict: (verdict) => this.recordGuardedReply(continuationKey, verdict),
+        onVerdict: (verdict) => this.onOutputVerdict(continuationKey, verdict),
       });
       for await (const chunk of guardedContinuation) {
         yield chunk;
@@ -2542,7 +2567,7 @@ export class AgentOS implements IAgentOS {
         streamId: streamIdToListen,
         personaId: pendingRequest.personaId,
         holdUntilFinal: this.holdsOutputUntilFinal(),
-        onVerdict: (verdict) => this.recordGuardedReply(pendingRequest.conversationId, verdict),
+        onVerdict: (verdict) => this.onOutputVerdict(pendingRequest.conversationId, verdict),
       });
       for await (const chunk of guardedResume) {
         yield chunk;
