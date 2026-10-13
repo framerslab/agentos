@@ -39,7 +39,11 @@
  *    utterance the provider found no words in gets none) stops holding the
  *    turn. A `speech_end` with `source: 'vad'` (a standalone VAD, or the
  *    orchestrator's turn-duration watchdog) is none of the provider's
- *    utterances, so it decides the turn on the finals held.
+ *    utterances, so it decides the turn on the finals held. Finals answer
+ *    the transcriber's `speech_end` events in the order they arrive, so a
+ *    final that comes more than the silence timeout after its own
+ *    `speech_end` can answer a later one and end the turn without that
+ *    utterance's words.
  *
  * ## Why heuristic over acoustic-only?
  *
