@@ -1865,3 +1865,73 @@ describe('GraphRuntime: the events of a parallel branch that halts the run', () 
     expect(inBatch.slice(-4)).toEqual(inLine.slice(-4));
   });
 });
+
+// ---------------------------------------------------------------------------
+// A value a branch only carried never replaces what a sibling wrote
+// ---------------------------------------------------------------------------
+//
+// Each branch of a batch starts from a copy of the state before the batch, so
+// it also holds every key it did not write. A branch that leaves a key alone
+// must not undo a sibling's write to it, in the state the nodes after the
+// batch read and in the checkpoint of a batch that halts. The search
+// extension's executor, like the model, is the host's and is scripted.
+
+const REFINED = ['docs/importer.md'];
+
+/** A node that calls `method` on the search extension. */
+function extensionNode(id: string, method: string): GraphNode {
+  return { ...searchNode(), id, executorConfig: { type: 'extension', extensionId: 'search', method } };
+}
+
+/** A runtime whose search extension answers each method with the output listed for it. */
+function runtimeWithExtension(
+  store: InMemoryCheckpointStore,
+  providerCall: NodeExecutorDeps['providerCall'],
+  outputs: Record<string, unknown>,
+): GraphRuntime {
+  return new GraphRuntime({
+    checkpointStore: store,
+    nodeExecutor: new NodeExecutor({
+      loopController: new LoopController(),
+      providerCall,
+      extensionExecutor: async (_extensionId, method) => ({ success: true, output: outputs[method] }),
+    }),
+  });
+}
+
+describe('GraphRuntime: a value a branch only carried never replaces what a sibling wrote', () => {
+  // outline writes `sources`; refine rewrites it in a batch with a sibling
+  // declared after it, which leaves it alone.
+  const searches = { list: { sources: SOURCES }, refine: { sources: REFINED } };
+  const outlineThenBatch = (id: string, sibling: GraphNode) =>
+    graphOf(id, [extensionNode('outline', 'list'), extensionNode('refine', 'refine'), sibling, publishNode()], [
+      [START, 'outline'],
+      ['outline', 'refine'],
+      ['outline', sibling.id],
+      ['refine', 'publish'],
+      [sibling.id, 'publish'],
+      ['publish', END],
+    ]);
+
+  it('gives the node after the batch the scratch a branch wrote', async () => {
+    const model = recordingModel({ [NOTES]: NOTED, [PUBLISH]: 'Published.' });
+    const runtime = runtimeWithExtension(new InMemoryCheckpointStore(), model.providerCall, searches);
+
+    await runtime.invoke(outlineThenBatch('g-batch-carried-scratch', notesNode()), {});
+
+    expect(model.stateSeenBy(PUBLISH)?.scratch).toEqual({ sources: REFINED });
+  });
+
+  it('keeps the scratch a branch wrote in the checkpoint when the sibling halts, and a resume reads it', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel({ [PUBLISH]: 'Published.' });
+    const runtime = runtimeWithExtension(store, model.providerCall, searches);
+    const graph = outlineThenBatch('g-batch-halt-carried-scratch', approveNode());
+
+    const runId = runIdOf(await readUntil(runtime.stream(graph, {}), 'interrupt'));
+
+    expect((await store.latest(runId))?.state.scratch).toEqual({ sources: REFINED });
+    await runtime.resume(graph, runId);
+    expect(model.stateSeenBy(PUBLISH)?.scratch).toEqual({ sources: REFINED });
+  });
+});
