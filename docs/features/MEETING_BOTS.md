@@ -40,7 +40,7 @@ Memory stores implement optional whole-run `forget` methods. The manager evicts 
 
 ## A run
 
-This factory takes the host's provider and room service and uses memory storage. Replace its entitlement hook and stores for a durable deployment.
+A host builds one manager when it starts and sends every run through it, so the runs it sends and the reports its events route applies meet in the same stores. This factory takes the host's provider and room service and uses memory storage; replace its entitlement hook and stores for a durable deployment.
 
 ```ts
 import {
@@ -50,7 +50,7 @@ import {
   type IMeetingBotProvider, type IMeetingRoomService,
 } from '@framers/agentos/io/channels/meetings';
 
-/** Builds a single-process meeting manager with host-supplied infrastructure. */
+/** Builds the host's one meeting manager, once, when the host starts. */
 function createMeetingManager(provider: IMeetingBotProvider, roomService: IMeetingRoomService) {
   const manager = new MeetingManager({
     stores: {
@@ -63,14 +63,13 @@ function createMeetingManager(provider: IMeetingBotProvider, roomService: IMeeti
     reportUrlFor: (runId, providerName) => `https://example.test/events/${providerName}/${runId}`,
   });
   manager.registerProvider(provider);
+  manager.start();
   return manager;
 }
 
-/** Sends a bot using infrastructure configured by the host. */
-async function sendMeetingBot(provider: IMeetingBotProvider, roomService: IMeetingRoomService) {
-  const manager = createMeetingManager(provider, roomService);
-  manager.start();
-  const sent = await manager.sendBot({
+/** Sends a bot through the host's manager, the one its events route hands reports to. */
+async function sendMeetingBot(manager: MeetingManager) {
+  return manager.sendBot({
     ownerRef: 'acct_1', platform: 'google_meet',
     meetingUrl: 'https://meet.google.com/abc-defg-hij', botName: 'Meeting notes',
     keep: 'account', idempotencyKey: 'meeting-1', stopPhrase: 'stop taking notes',
@@ -80,7 +79,6 @@ async function sendMeetingBot(provider: IMeetingBotProvider, roomService: IMeeti
       lateArrivalText: 'Meeting notes is taking notes. Type stop taking notes to stop and delete them.',
     },
   });
-  return { manager, sent };
 }
 ```
 
@@ -114,7 +112,7 @@ With default manager options, an unconfirmed notice times out after 30 seconds. 
 
 `DEFAULT_RUN_LIMITS` gives ten minutes in the waiting room, five minutes alone and four hours total. Total time starts at dispatch; the waiting-room limit counts from the bot's arrival in the waiting room (`joinedAt`, which admission then moves to the time the bot entered the call), or from dispatch when no waiting room was reported. The alone timer follows reports of zero participants besides the bot. There is no default page-away limit: a page host can pass `limits: { pageAwayMs: 120000 }` and call `pageSeen`. API clients can omit it.
 
-`MeetingRunState`, `RUN_TRANSITIONS`, `TERMINAL_RUN_STATES` and `canTransition` expose the state graph. `MeetingRunLimits`, `MeetingLeaveReason`, `MeetingNotice` and `MeetingDispatchRecord` type run policy and metadata. `isBilledEnd` requires capture and excludes every `UNBILLED_REASONS` entry: `not_admitted`, `notice_failed`, `stop_monitor_failed`, `permission_denied` and `no_capacity`, even after capture. Otherwise settlement uses the largest total the worker reported (a report sent again, or one that arrives late, never lowers it), or elapsed seconds from dispatch when no total was reported. A crash reported after the bot left changes neither its leaving time nor that total. Usage reports drive `bot:usage` and `entitlement.meter`; providers supply their periodic cadence. The manager does not generate a separate minute meter event without a report.
+`MeetingRunState`, `RUN_TRANSITIONS`, `TERMINAL_RUN_STATES` and `canTransition` expose the state graph. `MeetingRunLimits`, `MeetingLeaveReason`, `MeetingNotice` and `MeetingDispatchRecord` type run policy and metadata. `isBilledEnd` requires capture and excludes every `UNBILLED_REASONS` entry: `not_admitted`, `notice_failed`, `stop_monitor_failed`, `permission_denied` and `no_capacity`, even after capture. Otherwise settlement uses the largest total the worker reported (a report sent again, or one that arrives late, never lowers it), or elapsed seconds from dispatch when no total was reported. A crash reported after the bot left changes neither its leaving time nor that total. Each usage report emits `bot:usage`, and it is metered through `entitlement.meter` when the run holds a reservation and its capture has started: a usage report before capture emits `bot:usage` alone. The provider's reports set the cadence; the manager emits no `bot:usage` of its own between them.
 
 ## Rooms and listening
 
