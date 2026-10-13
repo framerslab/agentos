@@ -528,6 +528,19 @@ describe('the limits, the meter and the ends', () => {
     await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1); // capture opens
     expect((await sink.appendNext({ runId, at: 2, text: 'heard once capture opened' }))?.seq).toBe(1);
   });
+  it('lists the terminal runs for eviction when the first can go and at least once a minute, not on every pass', async () => {
+    const h = harness();
+    const list = vi.spyOn(h.stores.runs, 'list');
+    const terminalListings = () => list.mock.calls.filter(([filter]) => filter.states?.includes('done')).length;
+    await h.manager.tick();
+    await h.manager.tick();
+    h.clock.advance(59_999);
+    await h.manager.tick();
+    expect(terminalListings()).toBe(1);
+    h.clock.advance(1);
+    await h.manager.tick();
+    expect(terminalListings()).toBe(2);
+  });
   it('the transcript sink writes the turn and the manager records bot:transcript; behind the fence it drops the turn', async () => {
     const h = harness();
     const runId = await joined(h);

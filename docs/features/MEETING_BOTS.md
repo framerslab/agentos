@@ -36,7 +36,7 @@ The store contracts are:
 
 `nextAttemptAt(attempts, now)` schedules retries after 5 seconds, then 10, 20 and so on, capped at one hour. `OUTBOX_GIVE_UP_MS` is 86400000: a failure at least a day after the first failure marks the delivery dead. Manual `replay` resets its attempts. The host calls these methods from its delivery worker; the manager does not send HTTP deliveries.
 
-Memory stores implement optional whole-run `forget` methods. The manager evicts eligible terminal runs after `forgetAfterMs` (two days by default, at least one day), only when no delivery is pending. Unpurged kept runs remain. Durable stores omit eviction. Forgetting also removes fences, so producers must have stopped.
+Memory stores implement optional whole-run `forget` methods. The manager evicts eligible terminal runs after `forgetAfterMs` (two days by default, at least one day), only when no delivery is pending; it lists them when the first can go and at least once a minute, not on every tick. Unpurged kept runs remain. Durable stores omit eviction. Forgetting also removes fences, so producers must have stopped.
 
 ## A run
 

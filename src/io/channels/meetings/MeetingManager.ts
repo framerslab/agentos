@@ -189,6 +189,8 @@ export class MeetingManager {
   private timer: ReturnType<typeof setInterval> | undefined;
   /** Whether a pass the timer started is still running. */
   private ticking = false;
+  /** When the terminal runs are next listed for eviction: when the first of them can go, and at least once a minute. */
+  private nextCleanupAt = 0;
 
   constructor(private readonly config: MeetingManagerConfig) {
     this.id = config.managerId ?? randomUUID();
@@ -1231,13 +1233,26 @@ export class MeetingManager {
     return job !== undefined && job.leaseHolder !== undefined && job.leaseExpiresAt !== undefined && job.leaseExpiresAt > now;
   }
 
-  /** Evicts completed in-memory runs after the grace. Durable stores omit forget and keep their terminal records. */
+  /**
+   * Evicts completed in-memory runs after the grace. Durable stores omit forget and keep their terminal records. The
+   * terminal runs are listed when the first of them can go, and at least once a minute (for a run that ended since, or
+   * one a pending delivery held back), not on every pass.
+   */
   private async cleanupExpired(): Promise<void> {
     const { runs, jobs, transcript, events, outbox, entitlement } = this.stores;
     if (!runs.forget || !jobs.forget || !transcript.forget || !events.forget || !outbox.forget) return;
+    const now = this.now();
+    if (now < this.nextCleanupAt) return;
     const grace = Math.max(86_400_000, this.config.forgetAfterMs ?? 172_800_000);
+    // a run that ends from now on can go no sooner than a grace from now, at least a day, so a minute's wait misses none
+    let next = now + 60_000;
     for (const run of await runs.list({ states: ['done', 'failed'], limit: Number.MAX_SAFE_INTEGER })) {
-      if (run.doneAt === undefined || this.now() - Math.max(run.doneAt, run.purgedAt ?? 0) < grace) continue;
+      if (run.doneAt === undefined) continue;
+      const forgetAt = Math.max(run.doneAt, run.purgedAt ?? 0) + grace;
+      if (now < forgetAt) {
+        next = Math.min(next, forgetAt);
+        continue;
+      }
       if (run.keep === 'account' && run.purgedAt === undefined && run.state !== 'failed') continue;
       const deliveries = await outbox.listByRun(run.runId);
       if (deliveries.some((d) => d.state === 'pending')) continue;
@@ -1248,6 +1263,7 @@ export class MeetingManager {
       await entitlement.forget?.(run.runId);
       await runs.forget(run.runId);
     }
+    this.nextCleanupAt = next;
   }
 
   // ── Reconcile ──
