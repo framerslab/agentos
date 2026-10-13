@@ -222,8 +222,10 @@ export class CallManager {
    * Hang up a call. Transitions to 'hangup-bot' terminal state.
    *
    * A call persisted with {@link persistCall} or read by {@link processWebhookDurable} ends in its store: the
-   * end, with any bot speech not yet committed, commits there before `call:ended` is emitted, so a carrier callback
-   * after it finds the call ended and changes nothing. The promise rejects when that commit fails. A call the store
+   * end, with any bot speech not yet committed, commits there before the carrier is asked to hang up, so the
+   * completion callback the hangup causes, like any callback after the commit, finds the call ended and changes
+   * nothing, whichever manager processes it. `call:ended` is emitted after the carrier request returns. The carrier
+   * is asked even when that commit fails, and the promise then rejects with the commit's error. A call the store
    * already holds as ended keeps its stored outcome and emits nothing.
    */
   async hangupCall(callId: CallId): Promise<void> {
@@ -231,31 +233,13 @@ export class CallManager {
     if (!call) return;
     if (TERMINAL_CALL_STATES.has(call.state)) return;
 
-    const provider = this.getProvider(call.provider);
-    if (provider && call.providerCallId) {
-      try {
-        await provider.hangupCall({ providerCallId: call.providerCallId });
-      } catch (err) {
-        console.error('[CallManager] Hangup failed:', err);
-      }
-    }
-
     const store = this.durableStores.get(callId);
     if (store) {
-      await this.durable(async () => {
-        const committed = await store.withProvider(call.provider, async (tx) => {
-          const stored = await tx.get(callId);
-          if (!stored) throw new Error('unknown durable call');
-          const speech = this.applyUnsavedSpeech(stored); const ended = !TERMINAL_CALL_STATES.has(stored.state);
-          if (ended) { this.transitionState(stored, 'hangup-bot'); stored.endedAt = Date.now(); }
-          await tx.put(stored); return { stored, speech, ended };
-        });
-        this.refreshDurable(committed.stored, store, committed.speech);
-        if (committed.ended) this.emit({ type: 'call:ended', callId, call: structuredClone(committed.stored) });
-      });
+      await this.hangupDurable(call, store);
       return;
     }
 
+    await this.requestCarrierHangup(call.provider, call.providerCallId);
     this.transitionState(call, 'hangup-bot');
     call.endedAt = Date.now();
     this.finalizeCall(call);
@@ -586,6 +570,39 @@ export class CallManager {
       });
     } catch (err) {
       console.error('[CallManager] Saving bot speech failed:', err);
+    }
+  }
+  /**
+   * Ends a call held in a store. The end commits first, behind the manager's earlier store transactions, so the
+   * completion callback the carrier sends for the hangup finds the call ended. The carrier is asked next, outside the
+   * store queue and also when the commit failed, and `call:ended` follows the request. Rejects with the commit's error.
+   */
+  private async hangupDurable(call: CallRecord, store: ITelephonyCallStore): Promise<void> {
+    const committed = await this.durable(async () => {
+      const result = await store.withProvider(call.provider, async (tx) => {
+        const stored = await tx.get(call.callId);
+        if (!stored) throw new Error('unknown durable call');
+        const speech = this.applyUnsavedSpeech(stored); const ended = !TERMINAL_CALL_STATES.has(stored.state);
+        if (ended) { this.transitionState(stored, 'hangup-bot'); stored.endedAt = Date.now(); }
+        await tx.put(stored); return { stored, speech, ended };
+      });
+      this.refreshDurable(result.stored, store, result.speech);
+      return result;
+    }).catch(async (error: unknown) => {
+      await this.requestCarrierHangup(call.provider, call.providerCallId);
+      throw error;
+    });
+    await this.requestCarrierHangup(call.provider, committed.stored.providerCallId);
+    if (committed.ended) this.emit({ type: 'call:ended', callId: call.callId, call: structuredClone(committed.stored) });
+  }
+  /** Asks the call's carrier to hang up. A failed request is written to the console; the call ends here regardless. */
+  private async requestCarrierHangup(providerName: VoiceProviderName, providerCallId: string | undefined): Promise<void> {
+    const provider = this.getProvider(providerName);
+    if (!provider || !providerCallId) return;
+    try {
+      await provider.hangupCall({ providerCallId });
+    } catch (err) {
+      console.error('[CallManager] Hangup failed:', err);
     }
   }
 
