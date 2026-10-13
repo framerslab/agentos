@@ -1810,3 +1810,58 @@ describe('GraphRuntime: the checkpoint of a parallel batch that halts', () => {
     expect(await runtime.invoke(haltingBatch('g-batch-halt-invoke'), {})).toEqual(completed.artifacts);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The events of a parallel branch that halts the run
+// ---------------------------------------------------------------------------
+//
+// A host opens one approval per `interrupt` event, so a branch that waits for
+// a person reports it once, with the events a node outside a batch yields.
+
+describe('GraphRuntime: the events of a parallel branch that halts the run', () => {
+  it('yields interrupt once when the branch waits for a person, in the order a node outside a batch does', async () => {
+    const model = scriptedModel({ [DRAFT]: DRAFTED });
+    // START fans out to draft and approve, which both lead to publish.
+    const batch = makeParallelJoinGraph('g-batch-interrupt', draftNode(), approveNode(), publishNode());
+    const line = makeLinearGraph('g-line-interrupt', [draftNode(), approveNode(), publishNode()]);
+
+    const inBatch = trace(await readAll(runtimeOver(new InMemoryCheckpointStore(), model.providerCall).stream(batch, {})));
+    const inLine = trace(await readAll(runtimeOver(new InMemoryCheckpointStore(), model.providerCall).stream(line, {})));
+
+    expect(inBatch.filter((step) => step.startsWith('interrupt'))).toEqual(['interrupt:approve']);
+    expect(inBatch).toEqual([
+      'run_start',
+      'node_start:draft',
+      'node_end:draft',
+      'edge_transition:draft->publish',
+      'node_start:approve',
+      'node_end:approve',
+      'interrupt:approve',
+      'checkpoint_saved:approve',
+      'run_end',
+    ]);
+    expect(inBatch.slice(-4)).toEqual(inLine.slice(-4));
+  });
+
+  it('yields error, checkpoint_saved and one interrupt when the branch fails, as a node outside a batch does', async () => {
+    const model = scriptedModel({ [DRAFT]: DRAFTED, [NOTES]: new Error('provider unavailable') });
+    const batch = makeParallelJoinGraph('g-batch-error', draftNode(), notesNode(), publishNode());
+    const line = makeLinearGraph('g-line-error', [draftNode(), notesNode(), publishNode()]);
+
+    const inBatch = trace(await readAll(runtimeOver(new InMemoryCheckpointStore(), model.providerCall).stream(batch, {})));
+    const inLine = trace(await readAll(runtimeOver(new InMemoryCheckpointStore(), model.providerCall).stream(line, {})));
+
+    expect(inBatch).toEqual([
+      'run_start',
+      'node_start:draft',
+      'node_end:draft',
+      'edge_transition:draft->publish',
+      'node_start:notes',
+      'error:notes',
+      'checkpoint_saved:notes',
+      'interrupt:notes',
+      'run_end',
+    ]);
+    expect(inBatch.slice(-4)).toEqual(inLine.slice(-4));
+  });
+});
