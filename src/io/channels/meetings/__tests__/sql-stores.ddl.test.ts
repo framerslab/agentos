@@ -16,7 +16,7 @@ describe('meetingStoresDdl', () => {
   it('keeps identifiers within 63 bytes and includes nullable timer columns in record order', () => {
     const ddl = meetingStoresDdl('a'.repeat(38));
     const names = [...ddl.matchAll(/CREATE (?:UNIQUE )?(?:TABLE|INDEX) IF NOT EXISTS (\w+)/g)].map((match) => match[1]);
-    expect(names).toHaveLength(13);
+    expect(names).toHaveLength(14);
     for (const name of names) expect(Buffer.byteLength(name)).toBeLessThanOrEqual(63);
     expect(ddl).toContain('  participant_count INTEGER,\n  leave_commanded_at BIGINT,\n  capture_suspended_at BIGINT,\n  alone_since BIGINT,');
     expect(ddl).toContain('last_report_at BIGINT');

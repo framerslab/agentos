@@ -1,7 +1,7 @@
 import { inspect } from 'node:util';
 import type { TranscriptInput } from '../../../voice-pipeline/types.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
-import { CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
+import { assertMeetingFundingChange, CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
 import type { SecretBox } from '../signing.js';
 import { DuplicateIdempotencyKeyError, FencedError, nextAttemptAt, OUTBOX_GIVE_UP_MS, type IEventStore, type IJobStore, type IOutbox, type IRunStore, type ITranscriptStore, type MeetingJob, type OutboxDelivery, type RunFilter } from './types.js';
 import { abortClaimedSends, runClaimedSend, type ClaimedSends } from './claims.js';
@@ -85,7 +85,11 @@ CREATE TABLE IF NOT EXISTS ${t.runs} (
   last_report_at BIGINT,
   last_usage_source_at BIGINT,
   creation_pending BOOLEAN NOT NULL DEFAULT FALSE,
-  creation_context TEXT
+  creation_context TEXT,
+  funding_json TEXT,
+  funding_reservation_id TEXT,
+  funding_settlement_json TEXT,
+  funding_cleanup_json TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_${p}_runs_idem ON ${t.runs} (owner_ref, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_${p}_runs_owner ON ${t.runs} (owner_ref, requested_at DESC);
@@ -144,6 +148,8 @@ CREATE TABLE IF NOT EXISTS ${t.outbox} (
 );
 CREATE INDEX IF NOT EXISTS idx_${p}_outbox_due ON ${t.outbox} (next_at) WHERE state = 'pending';
 CREATE INDEX IF NOT EXISTS idx_${p}_outbox_run ON ${t.outbox} (run_id);
+CREATE INDEX IF NOT EXISTS idx_${p}_funding_pending ON ${t.runs} (run_id)
+WHERE funding_cleanup_json IS NOT NULL AND (funding_cleanup_json::jsonb->>'complete') = 'false';
 `;
 }
 
@@ -153,9 +159,9 @@ export const MEETING_STORES_DDL = meetingStoresDdl();
 /**
  * The upgrade that brings tables an earlier version's {@link meetingStoresDdl} made to this version's columns: one
  * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for each column of the runs and run-lock tables that such tables may lack,
- * each made as the fresh schema makes it. Applied twice, or to tables this version made, it changes nothing. The stores
- * read and write every column, so a host runs it in its migration, in one transaction
- * (`db.transaction((tx) => tx.exec(meetingStoresUpgradeDdl(prefix)))`), before it constructs them.
+ * each made as the fresh schema makes it, then the partial index the funding scan reads. Applied twice, or to tables this
+ * version made, it changes nothing. The stores read and write every column, so a host runs it in its migration, in one
+ * transaction (`db.transaction((tx) => tx.exec(meetingStoresUpgradeDdl(prefix)))`), before it constructs them.
  *
  * @param tablePrefix - The prefix the tables were made under.
  * @throws Error, the one {@link meetingStoreTables} throws, when the prefix is not a lower-case letter followed by at
@@ -172,8 +178,36 @@ ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS last_report_at BIGINT;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS last_usage_source_at BIGINT;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS creation_pending BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS creation_context TEXT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_json TEXT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_reservation_id TEXT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_settlement_json TEXT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_cleanup_json TEXT;
 ALTER TABLE ${t.locks} ADD COLUMN IF NOT EXISTS turn_seq INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE ${t.locks} ADD COLUMN IF NOT EXISTS outbox_fenced_at BIGINT;
+CREATE INDEX IF NOT EXISTS idx_${tablePrefix}_funding_pending ON ${t.runs} (run_id)
+WHERE funding_cleanup_json IS NOT NULL AND (funding_cleanup_json::jsonb->>'complete') = 'false';
+`;
+}
+
+/**
+ * Idempotently upgrades existing meeting stores, including the prepared-creation prerequisite. It composes
+ * {@link meetingStoresUpgradeDdl}, then adds the funding columns and the funding scan's partial index again, each guarded
+ * by `IF NOT EXISTS`, so tables an earlier version made, or tables this version made, end with the fresh schema's columns
+ * and that index. A host applies it in its migration, in one transaction, before it constructs the stores.
+ *
+ * @param tablePrefix - The prefix the tables were made under.
+ * @throws Error, the one {@link meetingStoreTables} throws, when the prefix is not a lower-case letter followed by at
+ * most 37 lower-case letters, digits or underscores; no SQL is built.
+ */
+export function meetingFundingUpgradeDdl(tablePrefix: string = DEFAULT_TABLE_PREFIX): string {
+  const t = meetingStoreTables(tablePrefix);
+  return `${meetingStoresUpgradeDdl(tablePrefix)}
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_json TEXT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_reservation_id TEXT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_settlement_json TEXT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_cleanup_json TEXT;
+CREATE INDEX IF NOT EXISTS idx_${tablePrefix}_funding_pending ON ${t.runs} (run_id)
+WHERE funding_cleanup_json IS NOT NULL AND (funding_cleanup_json::jsonb->>'complete') = 'false';
 `;
 }
 
@@ -243,9 +277,9 @@ export class SqlRunStore implements IRunStore {
   toJSON(): string {
     return '[SqlRunStore redacted]';
   }
-  private static readonly COLUMNS = 'run_id, owner_ref, provider_name, platform, state, keep, meeting_url, bot_name, notice_text, notice_version, notice_late_text, stop_phrase, limits_json, idempotency_key, transcriber, requested_at, join_at, dispatched_at, joined_at, notice_posted_at, capture_started_at, left_at, done_at, reason, billed_seconds, reservation_id, consent_record_id, dispatch_json, page_seen_at, last_usage_at, monitor_seen_at, participant_count, leave_commanded_at, capture_suspended_at, alone_since, reported_seconds, cleanup_pending, purged_at, provider_connection_ref, last_report_at, last_usage_source_at, creation_pending, creation_context';
+  private static readonly COLUMNS = 'run_id, owner_ref, provider_name, platform, state, keep, meeting_url, bot_name, notice_text, notice_version, notice_late_text, stop_phrase, limits_json, idempotency_key, transcriber, requested_at, join_at, dispatched_at, joined_at, notice_posted_at, capture_started_at, left_at, done_at, reason, billed_seconds, reservation_id, consent_record_id, dispatch_json, page_seen_at, last_usage_at, monitor_seen_at, participant_count, leave_commanded_at, capture_suspended_at, alone_since, reported_seconds, cleanup_pending, purged_at, provider_connection_ref, last_report_at, last_usage_source_at, creation_pending, creation_context, funding_json, funding_reservation_id, funding_settlement_json, funding_cleanup_json';
   private row(run: MeetingRunRecord): unknown[] {
-    return [run.runId, run.ownerRef, run.providerName, run.platform, run.state, run.keep, run.meetingUrl === '' ? '' : this.opts.box.seal(run.meetingUrl, run.runId), run.botName, run.notice.text, run.notice.version, run.notice.lateArrivalText, run.stopPhrase, JSON.stringify(run.limits), run.idempotencyKey ?? null, run.transcriber ?? null, run.requestedAt, run.joinAt, run.dispatchedAt ?? null, run.joinedAt ?? null, run.noticePostedAt ?? null, run.captureStartedAt ?? null, run.leftAt ?? null, run.doneAt ?? null, run.reason ?? null, run.billedSeconds, run.reservationId ?? null, run.consentRecordId ?? null, run.dispatch ? JSON.stringify(run.dispatch) : null, run.pageSeenAt ?? null, run.lastUsageAt ?? null, run.monitorSeenAt ?? null, run.participantCount ?? null, run.leaveCommandedAt ?? null, run.captureSuspendedAt ?? null, run.aloneSince ?? null, run.reportedSeconds ?? null, run.cleanupPending ?? false, run.purgedAt ?? null, run.providerConnectionRef ?? null, run.lastReportAt ?? null, run.lastUsageSourceAt ?? null, run.creationPending ?? false, run.creationContext === undefined ? null : this.opts.box.seal(run.creationContext, creationContextAad(run.runId))];
+    return [run.runId, run.ownerRef, run.providerName, run.platform, run.state, run.keep, run.meetingUrl === '' ? '' : this.opts.box.seal(run.meetingUrl, run.runId), run.botName, run.notice.text, run.notice.version, run.notice.lateArrivalText, run.stopPhrase, JSON.stringify(run.limits), run.idempotencyKey ?? null, run.transcriber ?? null, run.requestedAt, run.joinAt, run.dispatchedAt ?? null, run.joinedAt ?? null, run.noticePostedAt ?? null, run.captureStartedAt ?? null, run.leftAt ?? null, run.doneAt ?? null, run.reason ?? null, run.billedSeconds, run.reservationId ?? null, run.consentRecordId ?? null, run.dispatch ? JSON.stringify(run.dispatch) : null, run.pageSeenAt ?? null, run.lastUsageAt ?? null, run.monitorSeenAt ?? null, run.participantCount ?? null, run.leaveCommandedAt ?? null, run.captureSuspendedAt ?? null, run.aloneSince ?? null, run.reportedSeconds ?? null, run.cleanupPending ?? false, run.purgedAt ?? null, run.providerConnectionRef ?? null, run.lastReportAt ?? null, run.lastUsageSourceAt ?? null, run.creationPending ?? false, run.creationContext === undefined ? null : this.opts.box.seal(run.creationContext, creationContextAad(run.runId)), run.funding === undefined ? null : JSON.stringify(run.funding), run.fundingReservationId ?? null, run.fundingSettlement === undefined ? null : JSON.stringify(run.fundingSettlement), run.fundingCleanup === undefined ? null : JSON.stringify(run.fundingCleanup)];
   }
   private fromRow(r: Record<string, unknown>): MeetingRunRecord {
     const sealed = String(r.meeting_url ?? '');
@@ -260,22 +294,27 @@ export class SqlRunStore implements IRunStore {
     opt('providerConnectionRef', r.provider_connection_ref as string | null);
     run.creationPending = bool(r.creation_pending);
     opt('creationContext', r.creation_context ? this.opts.box.open(String(r.creation_context), creationContextAad(run.runId)) : undefined);
+    opt('funding', r.funding_json === null || r.funding_json === undefined ? undefined : JSON.parse(String(r.funding_json)));
+    opt('fundingReservationId', r.funding_reservation_id as string | null);
+    opt('fundingSettlement', r.funding_settlement_json === null || r.funding_settlement_json === undefined ? undefined : JSON.parse(String(r.funding_settlement_json)));
+    opt('fundingCleanup', r.funding_cleanup_json === null || r.funding_cleanup_json === undefined ? undefined : JSON.parse(String(r.funding_cleanup_json)));
+    // a row whose funding is corrupt or incomplete fails closed on every read
+    assertMeetingFundingChange(undefined, run);
     return run;
   }
-  /** Inserts a run, mapping an owner's repeated idempotency key to the public conflict error. */
+  /** Inserts a run, its funding snapshot validated first when it has one, retaining the existing idempotency conflict contract. */
   async insert(run: MeetingRunRecord): Promise<void> {
+    const next = structuredClone(run); assertMeetingFundingChange(undefined, next);
     const marks = SqlRunStore.COLUMNS.split(', ').map(() => '?').join(', ');
     try {
       await this.opts.db.transaction(async (trx) => {
-        await lockRun(trx, this.t.locks, run.runId);
-        await trx.run(`INSERT INTO ${this.t.runs} (${SqlRunStore.COLUMNS}) VALUES (${marks})`, this.row(run));
+        await lockRun(trx, this.t.locks, next.runId);
+        await trx.run(`INSERT INTO ${this.t.runs} (${SqlRunStore.COLUMNS}) VALUES (${marks})`, this.row(next));
       });
     } catch (err) {
       const conflict = err as { code?: string; constraint?: string };
       const index = `idx_${this.opts.tablePrefix ?? DEFAULT_TABLE_PREFIX}_runs_idem`;
-      if (conflict.code === '23505' && conflict.constraint === index && run.idempotencyKey !== undefined) {
-        throw new DuplicateIdempotencyKeyError(run.ownerRef, run.idempotencyKey);
-      }
+      if (conflict.code === '23505' && conflict.constraint === index && next.idempotencyKey !== undefined) throw new DuplicateIdempotencyKeyError(next.ownerRef, next.idempotencyKey);
       throw err;
     }
   }
@@ -284,41 +323,51 @@ export class SqlRunStore implements IRunStore {
     const r = await this.opts.db.get<Record<string, unknown>>(`SELECT * FROM ${this.t.runs} WHERE run_id = ?`, [runId]);
     return r ? this.fromRow(r) : undefined;
   }
-  /** Re-reads and patches under the anchor, setting the content fence atomically on entry to purging. */
+  /** Patches under the shared anchor, setting the content fence atomically on entry to purging, and refuses changes to immutable funding fields. */
   async update(runId: string, patch: Partial<MeetingRunRecord>, expectState?: MeetingRunState | readonly MeetingRunState[]): Promise<MeetingRunRecord | undefined> {
+    const captured = structuredClone(patch);
     return this.updateWith(runId, (current) => {
       if (expectState !== undefined) {
         const allowed = Array.isArray(expectState) ? expectState : [expectState as MeetingRunState];
         if (!allowed.includes(current.state)) return undefined;
       }
-      return patch;
+      return captured;
     });
   }
-  /** Re-reads the row under the anchor and writes the patch `patchFor` makes of it in the same transaction, setting the content fence there too on entry to purging. */
+  /**
+   * Re-reads the row under the anchor and writes the patch `patchFor` makes of it in the same transaction, setting the
+   * content fence there too on entry to purging. A patch that would change the run's persisted funding is refused before
+   * anything is written, and the transaction rolls back.
+   */
   async updateWith(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined> {
     return this.opts.db.transaction(async (trx) => {
       await lockRun(trx, this.t.locks, runId);
       const r = await trx.get<Record<string, unknown>>(`SELECT * FROM ${this.t.runs} WHERE run_id = ? FOR UPDATE`, [runId]);
       if (!r) return undefined;
       const current = this.fromRow(r);
-      const patch = patchFor(current);
+      const patch = patchFor(structuredClone(current));
       if (patch === undefined) return undefined;
+      const next: MeetingRunRecord = { ...current, ...patch };
+      assertMeetingFundingChange(current, next);
       if (patch.state === 'purging') {
         await trx.run(`UPDATE ${this.t.locks} SET fenced_at = COALESCE(fenced_at, ?) WHERE run_id = ?`, [Date.now(), runId]);
       }
-      const next: MeetingRunRecord = { ...current, ...patch };
       const row = this.row(next);
       const sets = SqlRunStore.COLUMNS.split(', ').map((c) => `${c} = ?`).join(', ');
       await trx.run(`UPDATE ${this.t.runs} SET ${sets} WHERE run_id = ?`, [...row, runId]);
       return next;
     });
   }
-  /** Rewrites an existing row under the anchor, including its content-free form after a purge. */
+  /** Rereads before replacement, including content-free replacement after cleanup, so a stale replacement cannot overwrite a newer funding settlement intent. */
   async replace(run: MeetingRunRecord): Promise<void> {
+    const next = structuredClone(run);
     const sets = SqlRunStore.COLUMNS.split(', ').map((c) => `${c} = ?`).join(', ');
     await this.opts.db.transaction(async (trx) => {
-      await lockRun(trx, this.t.locks, run.runId);
-      await trx.run(`UPDATE ${this.t.runs} SET ${sets} WHERE run_id = ?`, [...this.row(run), run.runId]);
+      await lockRun(trx, this.t.locks, next.runId);
+      const r = await trx.get<Record<string, unknown>>(`SELECT * FROM ${this.t.runs} WHERE run_id = ? FOR UPDATE`, [next.runId]);
+      if (!r) return;
+      assertMeetingFundingChange(this.fromRow(r), next);
+      await trx.run(`UPDATE ${this.t.runs} SET ${sets} WHERE run_id = ?`, [...this.row(next), next.runId]);
     });
   }
   /** Lists matching runs by requested time descending, then run id ascending. */
@@ -335,6 +384,12 @@ export class SqlRunStore implements IRunStore {
   async findByIdempotencyKey(ownerRef: string, key: string): Promise<MeetingRunRecord | undefined> {
     const r = await this.opts.db.get<Record<string, unknown>>(`SELECT * FROM ${this.t.runs} WHERE owner_ref = ? AND idempotency_key = ?`, [ownerRef, key]);
     return r ? this.fromRow(r) : undefined;
+  }
+  /** At most `limit` (1 to 64) runs whose funding cleanup is unfinished, after `afterRunId`, ordered by run id, over the funding scan's partial index. */
+  async listFundingPending(limit: number, afterRunId?: string): Promise<MeetingRunRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64) throw new Error('funding scan bound');
+    const rows = await this.opts.db.all<Record<string, unknown>>(`SELECT * FROM ${this.t.runs} WHERE funding_cleanup_json IS NOT NULL AND (funding_cleanup_json::jsonb->>'complete') = 'false' AND run_id > ? ORDER BY run_id LIMIT ?`, [afterRunId ?? '', limit]);
+    return rows.map((r) => this.fromRow(r));
   }
 }
 

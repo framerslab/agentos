@@ -7,6 +7,9 @@
  * ({@link IMeetingBotProvider}) owns one way of joining.
  */
 
+import { z } from 'zod';
+import { quoteCompoundLiability } from '../../../safety/runtime/CreditRates.js';
+
 /** The platforms a provider may declare. */
 export type MeetingPlatform = 'google_meet' | 'microsoft_teams' | 'zoom';
 
@@ -145,6 +148,72 @@ export interface MeetingDispatchRecord {
   providerRunRef?: string;
 }
 
+const wholeFunding = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const positiveFunding = wholeFunding.refine((value) => value > 0);
+const fundingId = z.string().min(1).max(512);
+const fundingRate = z.object({ unit: z.enum(['second', 'millisecond', 'token', 'character', 'sample', 'request']), micro: wholeFunding, per: positiveFunding }).strict();
+const fundingRates = z.object({ version: fundingId, currency: z.literal('USD'), reasoningInOutput: z.boolean(),
+  components: z.record(z.string().min(1).max(128), z.object({ customer: fundingRate, supplier: fundingRate }).strict()),
+  attemptMinimum: z.object({ customerMicro: wholeFunding, supplierMicro: wholeFunding }).strict().optional() }).strict();
+const fundingBase = { accountRef: fundingId, policyVersion: fundingId, reservationRef: fundingId, maxSeconds: positiveFunding, expiresAt: positiveFunding };
+/** Closed, additive funding snapshot; authority and prices are server-selected before the first run insert. */
+export const MeetingFundingSnapshotSchema = z.discriminatedUnion('fundingMode', [
+  z.object({ ...fundingBase, fundingMode: z.literal('bot_blocks'), blockSeconds: positiveFunding, maxLiability: z.object({ blocks: positiveFunding }).strict() }).strict(),
+  z.object({ ...fundingBase, fundingMode: z.literal('developer_credit'), rates: fundingRates, mediaComponent: fundingId,
+    maxLiability: z.object({ customerMicro: wholeFunding, supplierMicro: wholeFunding }).strict() }).strict(),
+]);
+/** Stable account, tariff, cap and branch for the lifetime of a run. */
+export type MeetingFundingSnapshot = z.infer<typeof MeetingFundingSnapshotSchema>;
+/** Terminal billing decision persisted before a possibly interrupted fence or settlement. */
+export interface MeetingFundingSettlement {
+  /** The seconds the run is billed: zero for an unbilled end, otherwise the measured connection rounded up to the second. */
+  billedSeconds: number;
+  /** Whether the run ends unbilled. */
+  unbilled: boolean;
+  /** The measured connection, in milliseconds, when the decision was taken from it. */
+  connectedMs?: number;
+}
+/** Points where host authority and the original allocation must still be valid. */
+export type MeetingFundingPhase = 'reserve' | 'revalidate' | 'dispatch' | 'heartbeat' | 'recovery';
+
+/**
+ * Canonical text for comparison: object keys sorted at every depth and arrays kept in order, so two equal values compare
+ * equal whatever order their keys were written in. `undefined` is written as a marker, not dropped.
+ */
+function fundingJson(value: unknown): string {
+  if (value === undefined) return "undefined"; if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(fundingJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${fundingJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+}
+/** Canonical validated snapshot text for immutable comparison and reservation identity. */
+export function meetingFundingIdentity(snapshot: MeetingFundingSnapshot): string {
+  return fundingJson(MeetingFundingSnapshotSchema.parse(snapshot));
+}
+/** Validates a new row and refuses any change to already persisted funding identity or terminal intent. */
+export function assertMeetingFundingChange(previous: MeetingRunRecord | undefined, next: MeetingRunRecord): void {
+  const snapshot = next.funding === undefined ? undefined : MeetingFundingSnapshotSchema.parse(next.funding);
+  if (previous && (previous.funding !== undefined || snapshot !== undefined) && (previous.runId !== next.runId || previous.ownerRef !== next.ownerRef || (previous.funding === undefined) !== (snapshot === undefined) || (previous.funding && snapshot && meetingFundingIdentity(previous.funding) !== meetingFundingIdentity(snapshot)))) throw new Error('immutable funding');
+  if (previous?.fundingReservationId !== undefined && previous.fundingReservationId !== next.fundingReservationId) throw new Error('immutable funding reservation');
+  if (previous?.funding && previous.reportedSeconds !== undefined && next.reportedSeconds !== undefined && next.reportedSeconds < previous.reportedSeconds) throw new Error('meeting funding usage refused');
+  if (previous?.fundingSettlement !== undefined && fundingJson(previous.fundingSettlement) !== fundingJson(next.fundingSettlement)) throw new Error('immutable funding settlement');
+  if (previous?.fundingCleanup && (!next.fundingCleanup || previous.fundingCleanup.unbilled !== next.fundingCleanup.unbilled || (previous.fundingCleanup.complete && !next.fundingCleanup.complete))) throw new Error('immutable funding cleanup');
+  if (!snapshot) {
+    if (next.fundingReservationId !== undefined || next.fundingSettlement !== undefined) throw new Error('funding snapshot missing');
+    return;
+  }
+  if (snapshot.accountRef !== next.ownerRef || snapshot.reservationRef !== `meeting-funding:${next.runId}` || snapshot.expiresAt <= next.requestedAt || !Number.isSafeInteger(snapshot.maxSeconds * 1000) || snapshot.maxSeconds * 1000 < next.limits.totalMs) throw new Error('invalid funding identity or bound');
+  if (snapshot.fundingMode === 'developer_credit') {
+    if (snapshot.policyVersion !== snapshot.rates.version) throw new Error('funding tariff version mismatch');
+    const quote = quoteCompoundLiability({ rates: snapshot.rates, mediaComponent: snapshot.mediaComponent, durationSeconds: snapshot.maxSeconds, attempts: { maxAttempts: 0, perAttempt: {} } });
+    if (quote.customerMicro !== snapshot.maxLiability.customerMicro || quote.supplierMicro !== snapshot.maxLiability.supplierMicro) throw new Error('funding liability mismatch');
+  } else if (snapshot.maxLiability.blocks < Math.ceil(snapshot.maxSeconds / snapshot.blockSeconds)) throw new Error('funding block bound too small');
+  if (next.fundingReservationId !== undefined) fundingId.parse(next.fundingReservationId);
+  if (next.fundingSettlement !== undefined) {
+    const settlement = z.object({ billedSeconds: wholeFunding, unbilled: z.boolean(), connectedMs: wholeFunding.optional() }).strict().parse(next.fundingSettlement);
+    if ((settlement.unbilled && settlement.billedSeconds !== 0) || (settlement.connectedMs !== undefined && !settlement.unbilled && settlement.billedSeconds !== Math.ceil(settlement.connectedMs / 1000))) throw new Error('invalid funding settlement');
+  }
+}
+
 /** A run's row. The run store seals `meetingUrl` at rest with the product's key and opens it on read. */
 export interface MeetingRunRecord {
   runId: string;
@@ -233,6 +302,14 @@ export interface MeetingRunRecord {
   creationPending?: boolean;
   /** Opaque host preparation data, sealed at rest and removed before dispatch. */
   creationContext?: string;
+  /** Immutable server-selected funding. Absence preserves legacy entitlement callers. */
+  funding?: MeetingFundingSnapshot;
+  /** Write-once actual block reservation or compound hold id. */
+  fundingReservationId?: string;
+  /** Write-once terminal decision; retained after content purge for idempotent recovery. */
+  fundingSettlement?: MeetingFundingSettlement;
+  /** Durable cleanup policy and completion; completion prevents repeated external close effects. */
+  fundingCleanup?: { unbilled: boolean; complete: boolean };
 }
 
 /**
@@ -266,6 +343,10 @@ export function contentFreeRun(run: MeetingRunRecord): MeetingRunRecord {
     reason: run.reason,
     billedSeconds: run.billedSeconds,
     reservationId: run.reservationId,
+    funding: run.funding === undefined ? undefined : structuredClone(run.funding),
+    fundingReservationId: run.fundingReservationId,
+    fundingSettlement: run.fundingSettlement === undefined ? undefined : structuredClone(run.fundingSettlement),
+    fundingCleanup: run.fundingCleanup === undefined ? undefined : structuredClone(run.fundingCleanup),
     consentRecordId: run.consentRecordId,
     lastUsageAt: run.lastUsageAt,
     lastUsageSourceAt: run.lastUsageSourceAt,

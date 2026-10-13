@@ -1,5 +1,5 @@
 import type { TranscriptInput } from '../../../voice-pipeline/types.js';
-import { CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
+import { assertMeetingFundingChange, CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
 import {
   DuplicateIdempotencyKeyError,
   FencedError,
@@ -51,39 +51,48 @@ export class InMemoryRunStore implements IRunStore {
 
   private readonly runs = new Map<string, MeetingRunRecord>();
   async insert(run: MeetingRunRecord): Promise<void> {
-    if (this.runs.has(run.runId)) throw new Error(`run ${run.runId} exists`);
+    const next = structuredClone(run);
+    assertMeetingFundingChange(undefined, next);
+    if (this.runs.has(next.runId)) throw new Error(`run ${next.runId} exists`);
     // one run per owner and key, with no await between the check and the write: of two sends racing with one key, the second insert fails and the sender finds the first
-    const key = run.idempotencyKey;
-    if (key !== undefined && [...this.runs.values()].some((r) => r.ownerRef === run.ownerRef && r.idempotencyKey === key)) {
-      throw new DuplicateIdempotencyKeyError(run.ownerRef, key);
-    }
-    this.runs.set(run.runId, structuredClone(run));
+    const key = next.idempotencyKey;
+    if (key !== undefined && [...this.runs.values()].some((r) => r.ownerRef === next.ownerRef && r.idempotencyKey === key)) throw new DuplicateIdempotencyKeyError(next.ownerRef, key);
+    this.runs.set(next.runId, next);
   }
   async get(runId: string): Promise<MeetingRunRecord | undefined> {
     const r = this.runs.get(runId);
     return r ? structuredClone(r) : undefined;
   }
   async update(runId: string, patch: Partial<MeetingRunRecord>, expectState?: MeetingRunState | readonly MeetingRunState[]): Promise<MeetingRunRecord | undefined> {
-    const r = this.runs.get(runId);
-    if (!r) return undefined;
+    const current = this.runs.get(runId);
+    if (!current) return undefined;
     if (expectState !== undefined) {
       const allowed = Array.isArray(expectState) ? expectState : [expectState as MeetingRunState];
-      if (!allowed.includes(r.state)) return undefined;
+      if (!allowed.includes(current.state)) return undefined;
     }
-    Object.assign(r, structuredClone(patch));
-    return structuredClone(r);
+    const next = { ...current, ...structuredClone(patch) };
+    assertMeetingFundingChange(current, next);
+    this.runs.set(runId, next);
+    return structuredClone(next);
   }
-  /** Decides the patch on a copy of the stored row and applies it with no await between them, so no other write lands in between. */
+  /**
+   * Decides the patch on a copy of the stored row and applies it with no await between them, so no other write lands in
+   * between. A patch that would change the run's persisted funding is refused, as `update` refuses it, and nothing is written.
+   */
   async updateWith(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined> {
-    const r = this.runs.get(runId);
-    if (!r) return undefined;
-    const patch = patchFor(structuredClone(r));
+    const current = this.runs.get(runId);
+    if (!current) return undefined;
+    const patch = patchFor(structuredClone(current));
     if (patch === undefined) return undefined;
-    Object.assign(r, structuredClone(patch));
-    return structuredClone(r);
+    const next = { ...current, ...structuredClone(patch) };
+    assertMeetingFundingChange(current, next);
+    this.runs.set(runId, next);
+    return structuredClone(next);
   }
   async replace(run: MeetingRunRecord): Promise<void> {
-    this.runs.set(run.runId, structuredClone(run));
+    const next = structuredClone(run);
+    assertMeetingFundingChange(this.runs.get(next.runId), next);
+    this.runs.set(next.runId, next);
   }
   async list(filter: RunFilter): Promise<MeetingRunRecord[]> {
     const out: MeetingRunRecord[] = [];
@@ -99,6 +108,13 @@ export class InMemoryRunStore implements IRunStore {
   async findByIdempotencyKey(ownerRef: string, key: string): Promise<MeetingRunRecord | undefined> {
     for (const r of this.runs.values()) if (r.ownerRef === ownerRef && r.idempotencyKey === key) return structuredClone(r);
     return undefined;
+  }
+  /** At most `limit` (1 to 64) runs whose funding cleanup is unfinished, after `afterRunId`, ordered by run id. */
+  async listFundingPending(limit: number, afterRunId?: string): Promise<MeetingRunRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64) throw new Error('funding scan bound');
+    // ordered as `>` compares (UTF-16 code units), so the last run id of a page is a cursor that skips and repeats no run
+    return structuredClone([...this.runs.values()].filter((r) => r.fundingCleanup && !r.fundingCleanup.complete && (afterRunId === undefined || r.runId > afterRunId))
+      .sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0)).slice(0, limit));
   }
 }
 

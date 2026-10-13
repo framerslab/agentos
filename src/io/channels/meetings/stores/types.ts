@@ -1,5 +1,5 @@
 import type { TranscriptInput } from '../../../voice-pipeline/types.js';
-import type { MeetingEvent, MeetingEventType, MeetingPlatform, MeetingRunRecord, MeetingRunState, SupplierUsage, TranscriptTurn } from '../types.js';
+import type { MeetingEvent, MeetingEventType, MeetingFundingPhase, MeetingPlatform, MeetingRunRecord, MeetingRunState, SupplierUsage, TranscriptTurn } from '../types.js';
 
 /** Thrown by a store that refuses content for a run behind the fence. */
 export class FencedError extends Error {
@@ -68,6 +68,8 @@ export interface IRunStore {
   list(filter: RunFilter): Promise<MeetingRunRecord[]>;
   /** The run an owner sent with this idempotency key, if there is one (there is at most one: see `insert`). */
   findByIdempotencyKey(ownerRef: string, key: string): Promise<MeetingRunRecord | undefined>;
+  /** Bounded keyset scan of unfinished funding cleanup, ordered by run id. */
+  listFundingPending?(limit: number, afterRunId?: string): Promise<MeetingRunRecord[]>;
 }
 
 /** A run's dispatch job: when it is due, who holds its lease, and whether it was dispatched or cancelled. */
@@ -266,6 +268,16 @@ export interface IEntitlementHook {
    * at the next reconcile. Absent, nothing is recorded, and `meter`, `settle` and `release` behave as they do without it.
    */
   recordSupplierUsage?(reservationId: string, usage: SupplierUsage): Promise<void>;
+}
+
+/** Optional lifecycle extension for hosts opting into persisted funding. */
+export interface IEntitlementHook {
+  /** Checks original funding and current authority without selecting a new source. */
+  checkRun?(runId: string, phase: MeetingFundingPhase): Promise<DispatchAllowance>;
+  /** Resumes a durable terminal settlement intent; never derives a new source from current plans. */
+  recover?(runId: string): Promise<void>;
+  /** Optional authoritative finalization; billing policy is distinct from measured duration. */
+  finalize?(reference: string, decision: { unbilled: boolean }): Promise<void>;
 }
 
 /** The manager's clock; a test passes a fake. */
