@@ -20,6 +20,7 @@ import type {
   CallMode,
   CallRecord,
   CallState,
+  ITelephonyCallStore,
   NormalizedCallEvent,
   TranscriptEntry,
   VoiceCallConfig,
@@ -197,6 +198,7 @@ export class CallManager {
       }
 
       call.providerCallId = result.providerCallId;
+      call.providerRequestId = result.providerRequestId;
       this.providerCallIdMap.set(result.providerCallId, callId);
       this.emit({ type: 'call:initiated', callId, call });
     } catch (err) {
@@ -271,14 +273,29 @@ export class CallManager {
     const { events } = provider.parseWebhookEvent(ctx);
 
     for (const event of events) {
-      this.processNormalizedEvent(event);
+      this.processNormalizedEvent({ ...event, provider: providerName });
     }
   }
 
   /**
    * Process a single normalized call event.
+   *
+   * With `eventHandling: 'carrier'` the event is matched to a call by its
+   * provider and call id (or its request id), bound to that call's carrier
+   * identity and applied once per record: a state the call has passed emits
+   * nothing, a call emits one terminal notification, and the record stays in
+   * the manager. This repairs transitions in process and adds no restart
+   * durability; see {@link processWebhookDurable}. Otherwise the original
+   * handling below applies.
    */
   processNormalizedEvent(event: NormalizedCallEvent): void {
+    if (this.config.eventHandling === 'carrier') {
+      const call = [...this.activeCalls.values()].find((candidate) => (!event.provider || candidate.provider === event.provider) && (candidate.providerCallId === event.providerCallId || (event.providerRequestId !== undefined && candidate.providerRequestId === event.providerRequestId)));
+      if (!call) return;
+      this.bindCarrierIdentity(call, event);
+      for (const notification of this.applyCarrierEvent(call, event)) this.emit(notification);
+      return;
+    }
     // Idempotency check
     if (this.processedEventIds.has(event.eventId)) return;
     this.processedEventIds.add(event.eventId);
@@ -399,8 +416,9 @@ export class CallManager {
         // subscribes to the 'call:dtmf' event to react to caller input.
         //
         // The `digit` field contains '0'-'9', '*', '#', or rarely 'A'-'D'.
-        // The `durationMs` field is provider-dependent: Twilio's media stream
-        // includes key-hold duration, but Telnyx and Plivo webhooks omit it.
+        // The `durationMs` field is set only when the provider's message carries
+        // one: Twilio's documented media-stream `dtmf` message does not, and
+        // Telnyx and Plivo webhooks omit it.
         this.emit({
           type: 'call:dtmf',
           callId: call.callId,
@@ -409,6 +427,82 @@ export class CallManager {
         });
         break;
     }
+  }
+
+  /** Checks an event against the record's carrier identity, binding a pending `request:` identity to its call leg once. */
+  private bindCarrierIdentity(call: CallRecord, event: NormalizedCallEvent): void {
+    if (event.provider && event.provider !== call.provider) throw new Error('carrier provider mismatch');
+    if (event.providerRequestId !== undefined && call.providerRequestId !== event.providerRequestId) throw new Error('carrier request mismatch');
+    if (call.providerCallId !== event.providerCallId) {
+      if (!call.providerRequestId || !event.providerRequestId || call.providerCallId !== `request:${call.providerRequestId}`) throw new Error('carrier call identity conflict');
+      call.providerCallId = event.providerCallId;
+    }
+  }
+  /** Applies one stable event to the record and returns its notifications; a processed id or a terminal record yields none. */
+  private applyCarrierEvent(call: CallRecord, event: NormalizedCallEvent): CallManagerEvent[] {
+    if (call.processedEventIds.includes(event.eventId) || TERMINAL_CALL_STATES.has(call.state)) return [];
+    if (call.processedEventIds.length >= 10000) throw new Error('carrier event retention bound');
+    call.processedEventIds.push(event.eventId);
+    const out: CallManagerEvent[] = [];
+    const emit = (type: CallManagerEventType, data?: unknown): void => { out.push({ type, callId: call.callId, call: structuredClone(call), data }); };
+    const move = (state: CallState, type: CallManagerEventType): boolean => { const old = call.state; this.transitionState(call, state); if (old === call.state) return false; emit(type); return true; };
+    const end = (state: CallState, error?: string): void => { this.transitionState(call, state); call.endedAt = event.timestamp; if (error) call.errorMessage = error; emit(error ? 'call:error' : 'call:ended', error ? { error } : undefined); };
+    switch (event.kind) {
+      case 'call-ringing': move('ringing', 'call:ringing'); break;
+      case 'call-answered':
+        if (move('answered', 'call:answered') && call.mode === 'conversation') { move('active', 'call:active'); move('listening', 'call:listening'); }
+        break;
+      case 'call-completed': end('completed'); break;
+      case 'call-failed': end('failed', event.reason ?? 'call failed'); break;
+      case 'call-busy': end('busy'); break;
+      case 'call-no-answer': end('no-answer'); break;
+      case 'call-voicemail': end('voicemail'); break;
+      case 'call-hangup-user': end('hangup-user'); break;
+      case 'call-error': end('error', event.error); break;
+      case 'transcript':
+        if (event.isFinal) { call.transcript.push({ timestamp: event.timestamp, speaker: 'user', text: event.text, isFinal: true }); this.transitionState(call, 'listening'); }
+        emit('call:transcript', { text: event.text, isFinal: event.isFinal }); break;
+      case 'speech-start': emit('call:speech-start'); break;
+      case 'media-stream-connected': call.streamSid = event.streamSid; emit('media:connected', { streamSid: event.streamSid }); break;
+      case 'call-dtmf': emit('call:dtmf', { digit: event.digit, durationMs: event.durationMs }); break;
+    }
+    return out;
+  }
+  /** Inserts an admitted call once. A callback that races admission must be retried, never acknowledged. */
+  async persistCall(callId: CallId, store: ITelephonyCallStore): Promise<CallRecord> {
+    const local = this.activeCalls.get(callId);
+    if (!local) throw new Error('unknown local call'); const snapshot = structuredClone(local);
+    const saved = await store.withProvider(snapshot.provider, async (tx) => {
+      const existing = await tx.get(callId); if (existing) return existing;
+      await tx.put(snapshot); return snapshot;
+    });
+    this.activeCalls.set(callId, structuredClone(saved)); return saved;
+  }
+  /**
+   * Verifies, binds and applies callbacks in the store transaction. State and dedupe commit together.
+   * Unknown admission throws so the host returns a retryable response. Notifications happen only after
+   * commit and are best-effort; financial/external effects must consume durable records, not handlers.
+   */
+  async processWebhookDurable(providerName: VoiceProviderName, context: WebhookContext, store: ITelephonyCallStore): Promise<{ accepted: boolean; applied: number }> {
+    const provider = this.providers.get(providerName);
+    if (!provider || provider.webhookIdentity !== 'stable-v1') throw new Error('stable carrier provider required');
+    if (!provider.verifyWebhook(context).valid) return { accepted: false, applied: 0 };
+    const events = provider.parseWebhookEvent(context).events;
+    const committed = await store.withProvider(providerName, async (tx) => {
+      const notifications: CallManagerEvent[] = []; const calls = new Map<string, CallRecord>(); let applied = 0;
+      for (const event of events) {
+        if (event.provider !== providerName || !event.eventId.startsWith(`${providerName}:v1:`)) throw new Error('unstable carrier event');
+        const call = await tx.find(event.providerCallId) ?? (event.providerRequestId ? await tx.find(`request:${event.providerRequestId}`) : undefined);
+        if (!call) throw new Error('unknown carrier call');
+        this.bindCarrierIdentity(call, event);
+        const changed = this.applyCarrierEvent(call, event); if (changed.length) applied += 1;
+        await tx.put(call); calls.set(call.callId, call); notifications.push(...changed);
+      }
+      return { applied, notifications, calls: [...calls.values()] };
+    });
+    for (const call of committed.calls) { this.activeCalls.set(call.callId, structuredClone(call)); if (call.providerCallId) this.providerCallIdMap.set(call.providerCallId, call.callId); }
+    for (const event of committed.notifications) this.emit(event);
+    return { accepted: true, applied: committed.applied };
   }
 
   // ── Query ──
@@ -556,4 +650,43 @@ export class CallManager {
     this.providers.clear();
     this.handlers.length = 0;
   }
+}
+
+// ============================================================================
+// Host manager binding
+// ============================================================================
+
+/** Minimal typed tool target shared by carrier packs and a host-owned manager. */
+export interface VoiceCallToolHandler {
+  /** Starts a call through the binding's provider. */
+  initiateCall(toNumber: string, message?: string, mode?: CallMode): Promise<CallRecord>;
+  /** Adds the bot's text to the manager's conversation; media synthesis remains host wiring. */
+  speakText(callId: string, text: string): void;
+  /** Hangs up the selected call. */
+  hangupCall(callId: string): Promise<void>;
+  /** Returns the host manager's current record. */
+  getCallStatus(callId: string): CallRecord | undefined;
+  /** Returns the host manager's retained records. */
+  getActiveCalls(): CallRecord[];
+}
+/** Public carrier binding; tools and webhook hosts share the actual manager instance. */
+export interface VoiceProviderBinding {
+  /** The provider registered on the selected manager. */
+  readonly provider: IVoiceCallProvider;
+  /** The current host-owned manager. */
+  readonly manager: CallManager;
+  /** Stable proxy object whose operations use the current manager. */
+  readonly toolHandler: VoiceCallToolHandler;
+  /** Explicitly rebinds tools; the caller disposes the old manager when it owns its lifetime. */
+  setManager(manager: CallManager): void;
+}
+/** Registers the provider and exposes a replaceable manager binding without a private hidden instance. */
+export function bindVoiceProvider(provider: IVoiceCallProvider, initial: CallManager): VoiceProviderBinding {
+  let manager = initial; manager.registerProvider(provider);
+  const toolHandler: VoiceCallToolHandler = {
+    initiateCall: (toNumber, message, mode) => manager.initiateCall({ toNumber, message, mode, providerName: provider.name }),
+    speakText: (id, text) => manager.speakText(id, text), hangupCall: (id) => manager.hangupCall(id),
+    getCallStatus: (id) => manager.getCall(id), getActiveCalls: () => manager.getActiveCalls(),
+  };
+  return { provider, get manager() { return manager; }, toolHandler, setManager: (next) => { next.registerProvider(provider); manager = next; } };
 }

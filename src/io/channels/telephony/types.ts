@@ -195,6 +195,8 @@ export interface CallRecord {
   callId: CallId;
   /** Provider-assigned call ID (e.g., Twilio CallSid). */
   providerCallId?: string;
+  /** Creation request identity when distinct from the actual call leg. */
+  providerRequestId?: string;
   /** Which provider is handling this call. */
   provider: VoiceProviderName;
   /** Current state in the call lifecycle. */
@@ -268,6 +270,10 @@ interface NormalizedEventBase {
   providerCallId: string;
   /** Unix timestamp (ms). */
   timestamp: number;
+  /** Provider namespace attached by stable carrier parsing. */
+  provider?: VoiceProviderName;
+  /** Creation request identity when distinct from the actual call leg. */
+  providerRequestId?: string;
 }
 
 /** The destination phone is ringing. */
@@ -350,13 +356,10 @@ export interface NormalizedMediaStreamConnected extends NormalizedEventBase {
  * informational events so higher-level logic (e.g., IVR menus, PIN entry)
  * can react to caller key-presses.
  *
- * ## Provider behavior differences
- * - **Twilio**: DTMF arrives both via `<Gather>` webhook callbacks (as `Digits`
- *   param) and via the media stream WebSocket (as `dtmf` events with duration).
- * - **Telnyx**: DTMF arrives only via `call.dtmf.received` HTTP webhooks --
- *   never over the media stream WebSocket.
- * - **Plivo**: DTMF arrives via `<GetDigits>` XML callback (as `Digits` param)
- *   in webhook POST bodies.
+ * ## Delivery paths
+ * All three carriers have webhook and media-stream DTMF paths. A webhook
+ * occurrence identity and a media-stream sequence belong to their own
+ * delivery channels; hosts choose one input path for an IVR action.
  *
  * @example
  * ```typescript
@@ -375,10 +378,11 @@ export interface NormalizedDtmfReceived extends NormalizedEventBase {
    */
   digit: string;
   /**
-   * How long the key was pressed in milliseconds, when available.
+   * How long the key was pressed in milliseconds, when the message carries it.
    *
-   * Not all providers report duration -- Twilio's media stream includes it,
-   * but Telnyx and Plivo webhook payloads typically omit it.
+   * Most messages omit it: Twilio's documented media-stream `dtmf` message
+   * carries only the track and the digit, and Telnyx and Plivo webhook
+   * payloads typically omit it.
    */
   durationMs?: number;
 }
@@ -508,4 +512,25 @@ export interface VoiceCallConfig {
     /** WebSocket path for media streams (default: /voice/media-stream). */
     wsPath?: string;
   };
+  /** Opt-in in-process transition repair; durable callbacks use the repaired reducer regardless. */
+  eventHandling?: 'legacy' | 'carrier';
+}
+
+/** One provider/account partition's locked call state and alias index. */
+export interface TelephonyCallTransaction {
+  /** Reads a detached record by its internal id. */
+  get(callId: string): Promise<CallRecord | undefined>;
+  /** Finds by call id or the namespaced request alias. */
+  find(providerIdentity: string): Promise<CallRecord | undefined>;
+  /** Atomically stores state, processed ids and unique request/call aliases. */
+  put(call: CallRecord): Promise<void>;
+}
+/**
+ * Rolls back all writes on rejection and serializes the provider partition across instances.
+ * A store instance belongs to one configured carrier account namespace. Retain terminal state
+ * and processed ids through the host's callback retention window; this API never evicts them.
+ */
+export interface ITelephonyCallStore {
+  /** Holds the transaction until work returns; work performs no network I/O or event delivery. */
+  withProvider<T>(provider: VoiceProviderName, work: (tx: TelephonyCallTransaction) => Promise<T>): Promise<T>;
 }

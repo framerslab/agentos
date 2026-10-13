@@ -42,7 +42,7 @@ export interface InitiateCallInput {
   statusCallbackUrl?: string;
   /** Media stream WebSocket URL (for 'conversation' mode). */
   mediaStreamUrl?: string;
-  /** Auth token appended to media stream URL for validation. */
+  /** Host-issued stream credential; carrier-specific XML determines its transport, including Twilio custom parameters. */
   mediaStreamToken?: string;
 }
 
@@ -50,6 +50,8 @@ export interface InitiateCallInput {
 export interface InitiateCallResult {
   /** Provider-assigned call ID. */
   providerCallId: string;
+  /** Creation request identity when distinct from the actual call leg. */
+  providerRequestId?: string;
   /** Whether the call was accepted by the provider. */
   success: boolean;
   /** Error message if not successful. */
@@ -117,6 +119,9 @@ export interface StopListeningInput {
 export interface IVoiceCallProvider {
   /** Provider identifier. */
   readonly name: VoiceProviderName;
+
+  /** Stable normalized identity contract required by durable callback processing. */
+  readonly webhookIdentity?: 'legacy' | 'stable-v1';
 
   // ── Webhook Processing ──
 

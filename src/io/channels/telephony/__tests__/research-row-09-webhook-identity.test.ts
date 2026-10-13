@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TwilioVoiceProvider } from '../providers/twilio.js';
 import { TelnyxVoiceProvider } from '../providers/telnyx.js';
 import { PlivoVoiceProvider } from '../providers/plivo.js';
@@ -39,4 +39,14 @@ describe('stable carrier events', () => {
     expect(p.parseWebhookEvent(context('CallSid=c&CallStatus=completed')).events[0]!.eventId).not.toBe(p.parseWebhookEvent(context('CallSid=c&CallStatus=completed')).events[0]!.eventId);
     expect(providers[1]!.provider.parseWebhookEvent(context('null')).events).toEqual([]);
   });
+});
+it('requests Telnyx bidirectional PCMU only in carrier mode', async () => {
+  const fetcher = vi.fn<typeof fetch>(async () => new Response('{"data":{"call_control_id":"call","call_session_id":"session"}}'));
+  const input = { callId: 'local', fromNumber: '+15550000001', toNumber: '+15550000002', mode: 'conversation' as const, webhookUrl: 'https://example.test/callback', mediaStreamUrl: 'wss://example.test/media' };
+  const carrier = new TelnyxVoiceProvider({ apiKey: 'fixture', connectionId: 'connection', fetchImpl: fetcher, protocol: 'carrier' });
+  await carrier.initiateCall(input);
+  expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toMatchObject({ stream_url: input.mediaStreamUrl, stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' });
+  expect(carrier.verifyWebhook(context('{}')).valid).toBe(false);
+  const legacy = new TelnyxVoiceProvider({ apiKey: 'fixture', connectionId: 'connection', fetchImpl: fetcher, protocol: 'legacy' });
+  await legacy.initiateCall(input); expect(JSON.parse(String(fetcher.mock.calls[1]![1]!.body))).not.toHaveProperty('stream_url');
 });
