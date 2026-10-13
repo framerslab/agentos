@@ -22,6 +22,8 @@
  * - turn_complete is re-emitted on the orchestrator, so waitForUserTurn() resolves
  * - A turn_complete listener that stops the session leaves it closed, and no turn is taken
  * - A turn_complete listener that throws is reported; the listeners after it run and the turn is taken
+ * - A transport send that rejects is reported once as 'error' and the turn goes on; with nothing listening
+ *   for 'error', or with an 'error' listener that throws, it is written as a console warning
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -422,6 +424,84 @@ describe('VoicePipelineOrchestrator', () => {
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  /**
+   * The orchestrator does not wait for its sends, and a transport's send can reject: the WebSocket
+   * transport rejects with the error ws.send() reports for a socket that is closing, and the LiveKit
+   * transport rejects a control message its room cannot send while it disconnects. Each rejection is
+   * reported once as 'error', with the rejection itself, and the turn goes on.
+   */
+  it('reports each transport send that rejects as error, once, and goes on with the turn', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const thinkingFailed = new Error('agent_thinking was not sent');
+      const speakingFailed = new Error('agent_speaking was not sent');
+      const audioFailed = new Error('the first chunk was not sent');
+      vi.mocked(transport.sendControl).mockRejectedValueOnce(thinkingFailed).mockRejectedValueOnce(speakingFailed);
+      vi.mocked(transport.sendAudio).mockRejectedValueOnce(audioFailed);
+      await startSession();
+      const errors: unknown[] = [];
+      orchestrator.on('error', (err: unknown) => errors.push(err));
+
+      endpoint.emit('turn_complete', makeTurnComplete());
+      await vi.advanceTimersByTimeAsync(0);
+      const second = makeAudioChunk();
+      ttsSession.emit('audio', makeAudioChunk());
+      ttsSession.emit('audio', second);
+      await vi.advanceTimersByTimeAsync(0);
+      ttsSession.emit('flush_complete');
+      await vi.advanceTimersByTimeAsync(0);
+
+      const failures = [thinkingFailed, speakingFailed, audioFailed];
+      expect(errors).toEqual(failures);
+      errors.forEach((err, i) => expect(err).toBe(failures[i])); // the rejection itself, not a copy
+      // The sends after the failed ones go out, and the turn ends as a turn without a failure does.
+      expect(transport.sendAudio).toHaveBeenLastCalledWith(second);
+      expect(transport.sendControl).toHaveBeenLastCalledWith(
+        expect.objectContaining({ type: 'agent_done', text: 'Hello world' }),
+      );
+      expect(orchestrator.state).toBe('listening');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('writes a failed send as a console warning when nothing listens for error, or when the error listener throws', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      vi.mocked(transport.sendControl).mockRejectedValue(new Error('the socket is closing'));
+      await startSession();
+      const transcript = { text: 'hello', confidence: 0.9, words: [], isFinal: true };
+
+      sttSession.emit('transcript', transcript); // nothing listens for 'error' yet
+      await vi.advanceTimersByTimeAsync(0);
+      orchestrator.on('error', () => {
+        throw new Error('the error listener failed');
+      });
+      sttSession.emit('transcript', transcript);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
+        expect.stringContaining('the socket is closing'),
+        expect.stringContaining('the error listener failed'),
+      ]);
+      expect(orchestrator.state).toBe('listening');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      warn.mockRestore();
     }
   });
 });
