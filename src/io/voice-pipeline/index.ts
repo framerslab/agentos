@@ -108,6 +108,10 @@ export * from './types.js';
 // Canonical provider-family taxonomy (see provider-family.ts).
 export { ttsProviderFamily, type TtsProviderFamily } from './provider-family.js';
 
+// The voice pipeline's event emitter (Node's semantics, no import) and the
+// emitter interface the streaming contracts extend.
+export { VoiceEventEmitter, type EventEmitterLike, type VoiceEventListener } from './VoiceEventEmitter.js';
+
 // Concrete barge-in handler implementations
 export { HardCutBargeinHandler } from './HardCutBargeinHandler.js';
 export { SoftFadeBargeinHandler } from './SoftFadeBargeinHandler.js';

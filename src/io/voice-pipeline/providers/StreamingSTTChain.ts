@@ -21,7 +21,7 @@
  * replays that audio and the frames pushed meanwhile, and goes on.
  */
 
-import { EventEmitter } from 'node:events';
+import { VoiceEventEmitter } from '../VoiceEventEmitter.js';
 import type { IStreamingSTT, StreamingSTTSession, ScopedStreamingSTTSession, StreamingSTTConfig, AudioFrame, AudioIdentity, TranscriptEvent } from '../types.js';
 import type { HealthyProvider } from '../HealthyProvider.js';
 import { VoicePipelineError, AggregateVoiceError, type HealthErrorClass } from '../VoicePipelineError.js';
@@ -198,11 +198,12 @@ export class StreamingSTTChain implements IStreamingSTT {
    * provider already gave for the same audio is dropped. A close the caller asks for ends the session: it starts no
    * backup, and a backup still opening then is closed when it opens. When the session was opened with
    * `config.call`, every frame goes to the provider session's `pushAudioScoped()`, and the facade has
-   * `pushAudioScoped()` and `reset()` when the first session has them.
+   * `pushAudioScoped()` and `reset()` when the first session has them. The facade is a `VoiceEventEmitter`, so the
+   * chain imports nothing from `node:events`.
    */
   private wrap(initial: StreamingSTTSession, first: STTProvider, candidates: STTProvider[], config?: StreamingSTTConfig): StreamingSTTSession {
     if (!this.opts.enableMidUtteranceFailover) return initial;
-    const facade = new EventEmitter();
+    const facade = new VoiceEventEmitter();
     const ring = new AudioRingBuffer({ capacityMs: this.opts.ringBufferCapacityMs ?? 3000, sampleRate: 16000 });
     const dedupe = new TranscriptDedupe();
     let current: StreamingSTTSession | undefined = initial;

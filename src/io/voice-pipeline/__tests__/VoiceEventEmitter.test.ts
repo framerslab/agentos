@@ -53,6 +53,23 @@ for (const { name, make } of EMITTERS) describe(name, () => {
     expect(emitter.listenerCount('ping')).toBe(0);
   });
 
+  it('calls a once listener once, even when an earlier listener emits the event again', () => {
+    const emitter = make();
+    let count = 0;
+    let nested = false;
+    emitter.on('ping', () => {
+      if (nested) return;
+      nested = true;
+      emitter.emit('ping');
+    });
+    emitter.once('ping', () => {
+      count += 1;
+    });
+    emitter.emit('ping');
+    expect(count).toBe(1);
+    expect(emitter.listenerCount('ping')).toBe(1);
+  });
+
   it('removes the most recently added instance of a listener, and a once listener by the function added', () => {
     const emitter = make();
     const calls: string[] = [];

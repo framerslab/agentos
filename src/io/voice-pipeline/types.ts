@@ -32,7 +32,7 @@
  * is handled at the transport level rather than per-callback.
  */
 
-import type { EventEmitter } from 'node:events';
+import type { EventEmitterLike } from './VoiceEventEmitter.js';
 
 // ============================================================================
 // Section 1 -- Raw audio types
@@ -230,7 +230,7 @@ export type TransportControlMessage =
  *
  * @see {@link WebSocketStreamTransport} for the canonical WebSocket implementation.
  */
-export interface IStreamTransport extends EventEmitter {
+export interface IStreamTransport extends EventEmitterLike {
   /**
    * Stable identifier for this transport connection (e.g. a UUID or socket ID).
    * Used as a correlation key in logs and metrics.
@@ -513,7 +513,7 @@ export interface StreamingSTTUsageEvent {
  *
  * See `IStreamingSTT.startSession()` for the factory method that creates these sessions.
  */
-export interface StreamingSTTSession extends EventEmitter {
+export interface StreamingSTTSession extends EventEmitterLike {
   /**
    * Push a raw audio frame into the recognition stream. Frames must arrive
    * in capture order; gaps or out-of-order frames degrade accuracy.
@@ -706,7 +706,7 @@ export interface TurnCompleteEvent {
  * @see {@link HeuristicEndpointDetector} for the rule-based implementation.
  * @see {@link AcousticEndpointDetector} for the purely acoustic implementation.
  */
-export interface IEndpointDetector extends EventEmitter {
+export interface IEndpointDetector extends EventEmitterLike {
   /**
    * Active detection strategy:
    * - `'acoustic'` -- pure silence-timeout based (no transcript analysis).
@@ -848,7 +848,7 @@ export interface DiarizedSegment extends TranscriptSegment {
  *
  * See `IDiarizationEngine.startSession()` for the factory method that creates these sessions.
  */
-export interface DiarizationSession extends EventEmitter {
+export interface DiarizationSession extends EventEmitterLike {
   /**
    * Push a raw audio frame for diarization analysis.
    *
@@ -985,7 +985,7 @@ export interface StreamingTTSConfig {
  *
  * See `IStreamingTTS.startSession()` for the factory method that creates these sessions.
  */
-export interface StreamingTTSSession extends EventEmitter {
+export interface StreamingTTSSession extends EventEmitterLike {
   /**
    * Push one or more LLM output tokens into the synthesis buffer.
    * The session will chunk and synthesise them according to `StreamingTTSConfig.chunkingMode`.
@@ -1540,7 +1540,7 @@ export type PipelineState =
  *
  * See `VoicePipelineOrchestrator.startSession()` for the factory method that creates these sessions.
  */
-export interface VoicePipelineSession extends EventEmitter {
+export interface VoicePipelineSession extends EventEmitterLike {
   /**
    * Unique, stable identifier for this session (UUID).
    */
@@ -1817,7 +1817,7 @@ export interface AudioGapEvent extends AudioIdentity {
 }
 
 /** Factory-owned VAD. Emits vad(VadFrameEvent), error(Error); reset fences all prior asynchronous work. */
-export interface IVadSession extends EventEmitter {
+export interface IVadSession extends EventEmitterLike {
   /** Classifies one frame; resolves once the frame is admitted. The samples are read-only. */
   pushAudio(frame: ScopedAudioFrame): Promise<void>;
   /** Discards retained audio and pending work, and labels later events with `identity`. */
@@ -1829,7 +1829,7 @@ export interface IVadSession extends EventEmitter {
 }
 
 /** Audio-aware endpointing. Emits turn_complete(ScopedTurnCompleteEvent), error(Error). */
-export interface IAudioEndpointDetector extends EventEmitter {
+export interface IAudioEndpointDetector extends EventEmitterLike {
   /** Detection strategy, as {@link IEndpointDetector.mode}. */
   readonly mode: 'acoustic' | 'heuristic' | 'semantic';
   /** Retains one frame for the detector's window; resolves once admitted. The samples are read-only. */
