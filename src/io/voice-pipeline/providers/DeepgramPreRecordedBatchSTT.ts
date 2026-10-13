@@ -40,7 +40,9 @@ export interface DeepgramPreRecordedBatchSTTConfig {
   /**
    * Opt requests out of Deepgram's Model Improvement Program by sending
    * `mip_opt_out=true`: Deepgram keeps an opted-out request's data only for
-   * the duration necessary to process the request.
+   * the duration necessary to process the request. Off by default: Deepgram's
+   * API reference asks callers to refer to its docs for pricing impacts before
+   * setting it.
    * @default false
    */
   mipOptOut?: boolean;

@@ -86,8 +86,10 @@ export interface DeepgramStreamingSTTConfig {
   /**
    * Opt every session out of Deepgram's Model Improvement Program by sending
    * `mip_opt_out=true`: Deepgram keeps an opted-out request's data only for
-   * the duration necessary to process the request. A single session can opt
-   * out with `providerOptions.mip_opt_out: true`.
+   * the duration necessary to process the request. Off by default: Deepgram's
+   * API reference asks callers to refer to its docs for pricing impacts before
+   * setting it. A single session can opt out with
+   * `providerOptions.mip_opt_out: true`.
    * @default false
    */
   mipOptOut?: boolean;
