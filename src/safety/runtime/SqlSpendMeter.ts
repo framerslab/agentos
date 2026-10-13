@@ -214,9 +214,9 @@ export interface SqlSpendMeterOptions {
    * Asked by {@link SqlSpendMeter.reconcile} for each expired reservation, in place of `resolveUnknown` and
    * `unknownAfterLease`: consumed, released, or deferred until `retryAt` with its evidence, which stays reserved and
    * counted. A resolver that throws defers the reservation for one lease; it never falls through to a default outcome.
-   * An answer is written only to the attempt it was asked about, so an operation released and retried while it is
-   * asked keeps the retry reserved under its own lease; a consumed or released answer is also dropped when a heartbeat
-   * renewed the lease meanwhile.
+   * An answer is written only to the attempt it was asked about and only while that attempt's lease is still out at the
+   * pass's `now`, so an operation released and retried while it is asked keeps the retry reserved under its own lease,
+   * and a lease a heartbeat renewed, or a deferral another pass made to a next check after `now`, stands meanwhile.
    */
   resolveExpired?(reservation: SpendExpiredReservation): SpendExpiryDecision | Promise<SpendExpiryDecision>;
   /** How an expired reservation settles when the product cannot tell. Default `release`: the person is not charged for a turn nobody saw finish. */
@@ -600,10 +600,11 @@ export class SqlSpendMeter implements ISpendMeter {
    * place of one it can settle.
    *
    * Each decision is written to the reservation as the pass read it, in one conditional statement: the same attempt,
-   * still reserved and, for a settlement, still past its lease at `now` and, without `resolveExpired`, still unfenced.
-   * So a deferral never lands on a newer attempt of the operation, and a settlement never takes a reservation that was
-   * retried, renewed by a heartbeat, or, on a meter without `resolveExpired`, fenced by an opted-in pass while the
-   * resolver was asked; the pass drops that decision.
+   * still reserved, still past its lease at `now` and, for a settlement without `resolveExpired`, still unfenced. So
+   * no decision lands on a newer attempt of the operation, and none replaces a lease that a heartbeat renewed, or a
+   * next check after `now` that another pass deferred it to, while the resolver was asked; on a meter without
+   * `resolveExpired` a settlement also never takes a reservation an opted-in pass fenced meanwhile. The pass drops
+   * such a decision.
    */
   async reconcile(opts: { now?: number; limit?: number } = {}): Promise<SpendReconcileResult> {
     const now = opts.now ?? Date.now();
@@ -636,14 +637,14 @@ export class SqlSpendMeter implements ISpendMeter {
         if (decision.outcome === 'deferred') {
           const retryAt = Math.max(Math.trunc(decision.retryAt), now + 1);
           const evidence = decision.evidence ?? prior?.evidence ?? null;
+          // only onto the attempt read and while its lease is still out at now: a lease a heartbeat renewed while the
+          // resolver was asked stands, and so does another pass's deferral to a next check after now, with its evidence
           const deferred = await this.run(() =>
             this.db.transaction((trx) =>
-              trx.run(`UPDATE ${this.tables.reservations} SET outcome = 'deferred', expires_at = ?, usage_json = ? WHERE operation_id = ? AND state = 'reserved' AND attempts = ?`, [
-                retryAt,
-                JSON.stringify({ deferral: { count: (prior?.count ?? 0) + 1, evidence } }),
-                r.operation_id,
-                attempt,
-              ]),
+              trx.run(
+                `UPDATE ${this.tables.reservations} SET outcome = 'deferred', expires_at = ?, usage_json = ? WHERE operation_id = ? AND state = 'reserved' AND attempts = ? AND expires_at <= ?`,
+                [retryAt, JSON.stringify({ deferral: { count: (prior?.count ?? 0) + 1, evidence } }), r.operation_id, attempt, now],
+              ),
             ),
           );
           out.pending += 1;
