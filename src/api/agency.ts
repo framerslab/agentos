@@ -1587,7 +1587,9 @@ export interface GuardrailHitlOverrideResult {
  *   approval, or `return` for the final output.
  * @param args - The tool call's arguments; for an agent, `{ input }` with the
  *   strategy's input, plus `sent`, the text the agent is sent, when the
- *   approval's instructions were appended to it; for the final output,
+ *   approval's instructions were appended to it, and `parts`, the task and
+ *   the other agents' output the strategy built the input from, each on its
+ *   own, under graph, review-loop and debate; for the final output,
  *   `{ output }` with the strategy's text, plus `returned`, the approval's
  *   replacement, when it carries one.
  * @param guardrailIds - Ordered list of check IDs to run.

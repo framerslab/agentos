@@ -26,9 +26,10 @@
  *
  * Each turn is gated by {@link checkBeforeAgentInput} over the input the
  * agent receives, the transcript of the arguments so far included, and the
- * agent is sent the input the check read. An agent the handler rejects, or
- * whose input the post-approval check blocks, sits that turn out; the
- * synthesizer still rules on the arguments that were made.
+ * agent is sent the input the check read. The post-approval check also reads
+ * the motion and each argument so far on its own. An agent the handler
+ * rejects, or whose input the post-approval check blocks, sits that turn out;
+ * the synthesizer still rules on the arguments that were made.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileReviewLoop} -- an alternative iterative strategy with explicit approval.
@@ -148,9 +149,13 @@ export function compileDebate(
               ].join('\n');
 
           // HITL: check the beforeAgent gate over the input this agent
-          // receives, the transcript included. The agent is sent the input
-          // the check read.
-          const gate = await checkBeforeAgentInput(name, debateContext, agentCalls, agencyConfig);
+          // receives, the transcript included, and over the motion and each
+          // argument so far on its own, since the input puts more text after
+          // each of them. The agent is sent the input the check read.
+          const gate = await checkBeforeAgentInput(name, debateContext, agentCalls, agencyConfig, [
+            prompt,
+            ...collectedArguments,
+          ]);
           if (gate.decision && !gate.decision.approved) {
             // Agent was rejected -- skip this agent in this round.
             continue;

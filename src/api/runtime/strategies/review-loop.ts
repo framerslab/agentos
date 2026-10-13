@@ -24,9 +24,11 @@
  *
  * The producer and the reviewer are each gated by {@link checkBeforeAgentInput}
  * over the input they receive: the producer's carries its previous draft and
- * the reviewer's feedback, the reviewer's carries the draft. Each is sent the
- * input the check read. A refused producer ends the loop with the draft it
- * already has; a refused reviewer leaves the current draft as the result.
+ * the reviewer's feedback, the reviewer's carries the draft. The post-approval
+ * check also reads the task, the draft and the feedback each on its own. Each
+ * agent is sent the input the check read. A refused producer ends the loop
+ * with the draft it already has; a refused reviewer leaves the current draft
+ * as the result.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileDebate} -- an alternative iterative strategy for adversarial discourse.
@@ -163,8 +165,14 @@ export function compileReviewLoop(
 
         // ---- HITL: check beforeAgent gate for the producer ----
         // The gate reads the producer's input, the reviewer's feedback
-        // included, and the producer is sent the input the check read.
-        const prodGate = await checkBeforeAgentInput(producerName, prodPrompt, agentCalls, agencyConfig);
+        // included, and the task, the draft and the feedback each on its
+        // own, since the input puts more text after each of them. The
+        // producer is sent the input the check read.
+        const prodGate = await checkBeforeAgentInput(producerName, prodPrompt, agentCalls, agencyConfig, [
+          prompt,
+          draft,
+          feedback,
+        ]);
         if (prodGate.decision && !prodGate.decision.approved) {
           // Producer rejected -- terminate the loop early.
           // The current draft (empty or from a prior round) becomes the final output.
@@ -203,8 +211,12 @@ export function compileReviewLoop(
 
         // ---- HITL: check beforeAgent gate for the reviewer ----
         // The gate reads the reviewer's input, the draft included, and the
-        // reviewer is sent the input the check read.
-        const revGate = await checkBeforeAgentInput(reviewerName, revPrompt, agentCalls, agencyConfig);
+        // task and the draft each on its own. The reviewer is sent the input
+        // the check read.
+        const revGate = await checkBeforeAgentInput(reviewerName, revPrompt, agentCalls, agencyConfig, [
+          prompt,
+          draft,
+        ]);
         if (revGate.decision && !revGate.decision.approved) {
           // Reviewer rejected -- accept the current draft and break.
           break;

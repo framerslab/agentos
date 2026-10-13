@@ -13,9 +13,10 @@
  *
  * Each agent is gated by {@link checkBeforeAgentInput} over the input it
  * receives, its dependencies' outputs included, and is sent the input the
- * check read. An agent the handler rejects, or whose input the post-approval
- * check blocks, does not run, and `[skipped by HITL]` stands as its output
- * for the agents that depend on it.
+ * check read. The post-approval check also reads the task and each
+ * dependency's output on its own. An agent the handler rejects, or whose
+ * input the post-approval check blocks, does not run, and `[skipped by HITL]`
+ * stands as its output for the agents that depend on it.
  *
  * @example
  * ```ts
@@ -167,9 +168,14 @@ export function compileGraph(
             }
 
             /* HITL: check the beforeAgent gate over the input this agent
-               receives, its dependencies' outputs included. The agent is sent
-               the input the check read, the approver's instructions with it. */
-            const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig);
+               receives, its dependencies' outputs included, and over the task
+               and each of those outputs on its own, since the input puts more
+               text after them. The agent is sent the input the check read,
+               the approver's instructions with it. */
+            const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig, [
+              prompt,
+              ...depNames.map((d) => outputs.get(d) ?? ''),
+            ]);
             if (gate.decision && !gate.decision.approved) {
               outputs.set(name, '[skipped by HITL]');
               return null;
@@ -243,8 +249,12 @@ export function compileGraph(
             }
 
             // HITL: the beforeAgent gate reads the input this agent receives,
-            // as under execute(), and the agent is sent the input it read.
-            const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig);
+            // and the task and each dependency's output on its own, as under
+            // execute(), and the agent is sent the input it read.
+            const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig, [
+              prompt,
+              ...depNames.map((d) => outputs.get(d) ?? ''),
+            ]);
             if (gate.decision && !gate.decision.approved) {
               outputs.set(name, '[skipped by HITL]');
               continue;
