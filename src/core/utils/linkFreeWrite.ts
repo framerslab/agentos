@@ -396,8 +396,8 @@ function namesBelow(caller: string, relative: string): string[] {
 }
 
 /**
- * How many of `names`, the names on the way to a file below `root`, lead from `root` to the folder `within`: none
- * when `within` is not given or is `root` itself.
+ * The first of `names`, the names on the way to a file below `root`, that lead from `root` to the folder `within`:
+ * none when `within` is not given or is `root` itself.
  *
  * @param caller - The function given the folder, for the error message.
  * @param root - The folder the file is read below.
@@ -405,13 +405,18 @@ function namesBelow(caller: string, relative: string): string[] {
  * @param within - The folder the file must lie below, when the caller names one.
  * @throws TypeError when `within` is neither `root` nor a folder on the way to the file.
  */
-function namesToWithin(caller: string, root: string, names: readonly string[], within: string | undefined): number {
-  if (within === undefined) return 0;
+function namesToWithin(
+  caller: string,
+  root: string,
+  names: readonly string[],
+  within: string | undefined,
+): string[] {
+  if (within === undefined) return [];
   const relative = path.relative(path.resolve(root), path.resolve(within));
   const withinNames = relative.split(NAME_SEPARATORS).filter((name) => name.length > 0);
   // The file's own name is not a folder on the way to it.
   if (withinNames.length < names.length && withinNames.every((name, index) => name === names[index])) {
-    return withinNames.length;
+    return names.slice(0, withinNames.length);
   }
   throw new TypeError(
     `${caller}: the folder ${describeRefusedName(within)} is neither the folder read below nor a folder on the way ` +
