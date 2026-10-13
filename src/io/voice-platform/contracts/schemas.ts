@@ -266,3 +266,95 @@ export const VOICE_CONTRACT_SCHEMAS = {
   CallEvent: CallEventSchema, UsageRecord: UsageRecordSchema, CallEndedPayload: CallEndedPayloadSchema,
   ReasoningConfig: ReasoningConfigSchema,
 } as const;
+
+/** Stable safe HTTP error; provider exceptions and caller content are never copied into message. */
+export const VoiceApiErrorSchema = z.strictObject({
+  kind: z.enum(['invalid_request', 'unauthenticated', 'forbidden', 'not_found', 'conflict', 'gone', 'payload_too_large', 'policy_refused', 'rate_limited', 'internal_error', 'capacity_unavailable']),
+  message: z.string().min(1).max(256), requestId: id, retryable: z.boolean(), retryAfterMs: count.nullable(),
+});
+/** Bounded paging input after the HTTP adapter supplies the host's default limit. */
+export const ListQuerySchema = z.strictObject({ limit: z.number().int().min(1).max(100), cursor: CursorSchema.optional() });
+/** Agent page, scoped by authentication and the store's opaque cursor. */
+export const AgentListSchema = z.strictObject({ items: z.array(VoiceAgentSchema).max(100), nextCursor: CursorSchema.nullable() });
+/** Call metadata page; transcript content remains on its separately authorized route. */
+export const CallListSchema = z.strictObject({ items: z.array(VoiceCallSchema).max(100), nextCursor: CursorSchema.nullable() });
+/** Quantity-only usage page. A host may compose a separate monetary response. */
+export const UsageListSchema = z.strictObject({ items: z.array(UsageRecordSchema).max(100), nextCursor: CursorSchema.nullable() });
+/** Public P-256 key and P1363 proof. No private JWK member can pass the closed object. */
+export const BrowserProofSchema = z.strictObject({
+  publicKey: z.strictObject({
+    kty: z.literal('EC'), crv: z.literal('P-256'),
+    x: z.string().regex(/^[A-Za-z0-9_-]{43}$/), y: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  }),
+  signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/), issuedAt: count, nonce: id,
+});
+/** Short-lived call grant issued after preparation; its opaque token grants no account authority. */
+export const CallGrantSchema = z.strictObject({
+  kind: z.literal('call_grant'), grantId: id, callId: id, agentId: id, agentRevision: positive,
+  transport: CallTransportSchema, token, expiresAt: count,
+});
+/** Reauthorization for the same nonterminal call, never a second reservation or dispatch. */
+export const RenewCallGrantSchema = z.strictObject({
+  clientOrigin: ClientOriginSchema, proofKeyThumbprint: ProofKeyThumbprintSchema, idempotencyKey: id,
+});
+/** Idempotent exchange body; the grant is carried in Authorization and the origin is independently checked. */
+export const ConnectWebCallSchema = z.strictObject({
+  exchangeKey: id, requestHash: z.string().regex(/^[a-f0-9]{64}$/), proof: BrowserProofSchema,
+});
+/** Stable stop operation. Browser proof is required for control credentials, optional for a server key. */
+export const StopCallSchema = z.strictObject({ idempotencyKey: id, proof: BrowserProofSchema.optional() });
+/** Content-free receipt persisted once per authenticated stop operation, stable across response retries. */
+export const StopReceiptSchema = z.strictObject({ callId: id, stopId: id, state: z.enum(['ending', 'ended', 'failed']) });
+/** Renew control authority for the same active call using its current credential and proof. */
+export const RenewCallControlSchema = z.strictObject({ idempotencyKey: id, proof: BrowserProofSchema });
+/** Idempotent purge request; only account authority may submit it. */
+export const PurgeCallSchema = z.strictObject({ idempotencyKey: id });
+/** Pending means cleanup is incomplete; only completed denotes the acknowledged deletion fence and cleanup. */
+export const PurgeReceiptSchema = z.strictObject({ callId: id, operationId: id, state: z.enum(['pending', 'completed']) });
+/** Archive is revision-checked and does not implicitly stop active calls. */
+export const ArchiveAgentSchema = z.strictObject({ expectedRevision: positive });
+/** Authorized transcript response with explicit unavailability. */
+export const TranscriptResultSchema = z.strictObject({ callId: id, transcript: TranscriptAvailabilitySchema });
+/** First bounded WebSocket frame, consumed once before any audio or inference is accepted. */
+export const MediaAuthenticationSchema = z.strictObject({ type: z.literal('authenticate'), callId: id, token, transportEpoch: positive });
+
+/** Safe HTTP error shape. */
+export type VoiceApiError = z.infer<typeof VoiceApiErrorSchema>;
+/** Paging query. */
+export type ListQuery = z.infer<typeof ListQuerySchema>;
+/** Public browser proof, verified by the credential service. */
+export type BrowserProof = z.infer<typeof BrowserProofSchema>;
+/** Call creation or renewal result. */
+export type CallGrant = z.infer<typeof CallGrantSchema>;
+/** Grant replacement request. */
+export type RenewCallGrant = z.infer<typeof RenewCallGrantSchema>;
+/** Recoverable credential exchange request. */
+export type ConnectWebCall = z.infer<typeof ConnectWebCallSchema>;
+/** Stop request. */
+export type StopCall = z.infer<typeof StopCallSchema>;
+/** Stable stop response. */
+export type StopReceipt = z.infer<typeof StopReceiptSchema>;
+/** Control renewal request. */
+export type RenewCallControl = z.infer<typeof RenewCallControlSchema>;
+/** Purge request. */
+export type PurgeCall = z.infer<typeof PurgeCallSchema>;
+/** Purge progress response. */
+export type PurgeReceipt = z.infer<typeof PurgeReceiptSchema>;
+/** Archive request. */
+export type ArchiveAgent = z.infer<typeof ArchiveAgentSchema>;
+/** Authorized transcript response. */
+export type TranscriptResult = z.infer<typeof TranscriptResultSchema>;
+/** First-frame WebSocket credential. */
+export type MediaAuthentication = z.infer<typeof MediaAuthenticationSchema>;
+
+/** HTTP envelopes share the canonical schema authority with the domain contracts. */
+export const VOICE_HTTP_SCHEMAS = {
+  VoiceApiError: VoiceApiErrorSchema, ListQuery: ListQuerySchema, AgentList: AgentListSchema,
+  CallList: CallListSchema, UsageList: UsageListSchema, BrowserProof: BrowserProofSchema,
+  CallControlCredential: CallControlCredentialSchema,
+
+  CallGrant: CallGrantSchema, RenewCallGrant: RenewCallGrantSchema, ConnectWebCall: ConnectWebCallSchema,
+  StopCall: StopCallSchema, StopReceipt: StopReceiptSchema, RenewCallControl: RenewCallControlSchema,
+  PurgeCall: PurgeCallSchema, PurgeReceipt: PurgeReceiptSchema, ArchiveAgent: ArchiveAgentSchema,
+  TranscriptResult: TranscriptResultSchema, MediaAuthentication: MediaAuthenticationSchema,
+} as const;
