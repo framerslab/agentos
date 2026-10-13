@@ -174,6 +174,12 @@ describeIfPostgres('the Postgres meeting stores', () => {
     for (const d of deliveries.filter((d) => d.id !== 'd3')) expect(d).toMatchObject({ payload: '', type: 'bot:purged', purged: true });
     expect(deliveries.find((d) => d.id === 'd3')).toMatchObject({ type: 'bot:done', payload: '{"billedSeconds":90}', purged: false });
   });
+  it('stores a turn whose bounds are fractional milliseconds, rounded to whole ones, through append and appendNext', async () => {
+    const turns = new SqlTranscriptStore({ db, tablePrefix: PREFIX });
+    await turns.append({ runId: 'r1', seq: 1, turnId: 'r1:1', at: 1, text: 'one', startMs: 12.5, endMs: 20.25 });
+    expect((await turns.appendNext({ runId: 'r1', at: 2, text: 'two', startMs: 40.4, endMs: 1_000.6 })).seq).toBe(2);
+    expect((await turns.read('r1', 0)).map((t) => [t.seq, t.startMs, t.endMs])).toEqual([[1, 13, 20], [2, 40, 1_001]]);
+  });
   it('refuses an adapter that is not Postgres', () => {
     const notPostgres = { kind: 'sqlite', capabilities: new Set(['transactions', 'persistence']) } as unknown as StorageAdapter;
     expect(() => new SqlEventStore({ db: notPostgres, tablePrefix: PREFIX })).toThrow(/Postgres/);

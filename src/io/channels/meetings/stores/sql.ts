@@ -157,6 +157,8 @@ function checkPostgres(db: StorageAdapter, what: string): void {
 }
 
 const num = (v: unknown): number | undefined => (v === null || v === undefined ? undefined : typeof v === 'number' ? v : Number(v));
+/** A turn's bound for its INTEGER column: whole milliseconds, rounded (a transcriber's clock, moved by a reconnect, can give fractions), or null. */
+const wholeMs = (v: number | undefined): number | null => (v === undefined || !Number.isFinite(v) ? null : Math.round(v));
 const bool = (v: unknown): boolean => v === true || v === 1 || v === '1' || v === 't' || v === 'true';
 
 /**
@@ -354,7 +356,7 @@ export class SqlJobStore implements IJobStore {
   }
 }
 
-/** Durable transcript turns, allocated and written under the same anchor as the content fence. */
+/** Durable transcript turns, allocated and written under the same anchor as the content fence. A turn's start and end are kept in whole milliseconds, rounded. */
 export class SqlTranscriptStore implements ITranscriptStore {
   private readonly t: MeetingStoreTables;
   /** Checks the adapter capabilities and prefix without creating tables. */
@@ -367,7 +369,7 @@ export class SqlTranscriptStore implements ITranscriptStore {
     await this.opts.db.transaction(async (trx) => {
       const { fencedAt } = await lockRun(trx, this.t.locks, turn.runId);
       if (fencedAt !== undefined) throw new FencedError(turn.runId);
-      await trx.run(`INSERT INTO ${this.t.turns} (run_id, seq, turn_id, at, text, speaker, start_ms, end_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (run_id, seq) DO NOTHING`, [turn.runId, turn.seq, turn.turnId, turn.at, turn.text, turn.speaker ?? null, turn.startMs ?? null, turn.endMs ?? null]);
+      await trx.run(`INSERT INTO ${this.t.turns} (run_id, seq, turn_id, at, text, speaker, start_ms, end_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (run_id, seq) DO NOTHING`, [turn.runId, turn.seq, turn.turnId, turn.at, turn.text, turn.speaker ?? null, wholeMs(turn.startMs), wholeMs(turn.endMs)]);
       await trx.run(`UPDATE ${this.t.locks} SET turn_seq = GREATEST(turn_seq, ?) WHERE run_id = ?`, [turn.seq, turn.runId]);
     });
   }
@@ -382,7 +384,7 @@ export class SqlTranscriptStore implements ITranscriptStore {
       );
       const seq = num(row?.turn_seq)!;
       const turn: TranscriptTurn = { ...input, seq, turnId: `${input.runId}:${seq}` };
-      await trx.run(`INSERT INTO ${this.t.turns} (run_id, seq, turn_id, at, text, speaker, start_ms, end_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [turn.runId, seq, turn.turnId, turn.at, turn.text, turn.speaker ?? null, turn.startMs ?? null, turn.endMs ?? null]);
+      await trx.run(`INSERT INTO ${this.t.turns} (run_id, seq, turn_id, at, text, speaker, start_ms, end_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [turn.runId, seq, turn.turnId, turn.at, turn.text, turn.speaker ?? null, wholeMs(turn.startMs), wholeMs(turn.endMs)]);
       return turn;
     });
   }
