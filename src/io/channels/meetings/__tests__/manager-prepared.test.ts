@@ -105,6 +105,67 @@ describe('prepared creation', () => {
     expect(seen).toEqual(['bot:left', 'bot:done']);
   });
 
+  it('sends no worker for a pending run whose job is due, and the loop finishes its creation under the owner lock before the job goes out', async () => {
+    const h = harness();
+    const holds = new Map<string, ReserveResult>();
+    const locked: string[] = [];
+    let lockHeld = false;
+    let failPrepares = 0;
+    let prepared = 0;
+    // the job is written and the creation stops before the run is marked ready: a due job of a run still pending
+    let interrupt = true;
+    const schedule = h.stores.jobs.schedule.bind(h.stores.jobs);
+    vi.spyOn(h.stores.jobs, 'schedule').mockImplementation(async (j) => { await schedule(j); if (interrupt) { interrupt = false; throw new Error('interrupted'); } });
+    const entitlement = Object.assign(h.entitlement, {
+      reserveOnce: async (input: { runId: string }): Promise<ReserveResult> => {
+        const answer = holds.get(input.runId) ?? { ok: true as const, reservationId: `hold-${input.runId}`, maxSeconds: 14_400 };
+        holds.set(input.runId, answer);
+        return answer;
+      },
+    });
+    const manager = new MeetingManager({
+      managerId: 'pending', stores: { ...h.stores, entitlement }, room: new MeetingRoom(h.rooms),
+      reportUrlFor: (id, p) => `https://example.test/${p}/${id}`,
+      creation: {
+        withOwnerLock: (owner, work) => {
+          locked.push(owner);
+          lockHeld = true;
+          return work().finally(() => { lockHeld = false; });
+        },
+        // the host's record of the send is written only under the owner's lock, by the send and by the loop alike
+        prepare: () => {
+          if (!lockHeld) return Promise.reject(new Error('prepared outside the owner lock'));
+          if (failPrepares > 0) { failPrepares -= 1; return Promise.reject(new Error('consent store unavailable')); }
+          prepared += 1;
+          return Promise.resolve();
+        },
+      },
+    });
+    manager.registerProvider(h.provider);
+    const seen: string[] = [];
+    manager.on((e) => { seen.push(e.type); });
+    await expect(manager.sendBotPrepared(h.request, 'host-consent')).rejects.toThrow('interrupted');
+    const [pending] = await h.stores.runs.list({});
+    if (!pending) throw new Error('pending run missing');
+    expect(pending).toMatchObject({ state: 'requested', creationPending: true });
+    expect(await h.stores.jobs.get(pending.runId)).toMatchObject({ dispatchAt: pending.joinAt, dispatched: false, cancelled: false });
+    // the loop's own try at the creation fails too: the run stays pending, and its due job sends no worker and stays
+    failPrepares = 1;
+    await manager.tick();
+    expect(h.provider.dispatched.size).toBe(0);
+    expect(await h.stores.runs.get(pending.runId)).toMatchObject({ state: 'requested', creationPending: true });
+    expect(await h.stores.jobs.get(pending.runId)).toMatchObject({ dispatched: false, cancelled: false });
+    expect(seen).toEqual([]);
+    // the next pass finishes the creation with the hold it took, and only then is the worker sent
+    await manager.tick();
+    expect(h.provider.dispatched.has(pending.runId)).toBe(true);
+    expect(await h.stores.runs.get(pending.runId)).toMatchObject({ state: 'dispatching', creationPending: false, reservationId: `hold-${pending.runId}` });
+    expect(holds.size).toBe(1);
+    expect(prepared).toBe(2);
+    expect(locked).toEqual(['acct_1', 'acct_1', 'acct_1']);
+    expect(seen).toEqual(['bot:requested', 'bot:dispatching']);
+  });
+
   it('refuses a run store that does not keep the creation fields, and ends the run before anything can dispatch it', async () => {
     const h = harness();
     const insert = h.stores.runs.insert.bind(h.stores.runs);
