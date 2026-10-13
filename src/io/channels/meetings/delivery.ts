@@ -141,8 +141,8 @@ export class OutboxDispatcher {
   /**
    * One pass over the due deliveries; answers how many were delivered and how many failed. A delivery whose destination
    * `resolve` does not give, or rejects for, is marked failed, and the pass goes on. When the outbox has `sendClaimed`,
-   * each delivery is sent through it, and one it skips (gone, no longer pending, or cancelled by a purge) counts as
-   * neither.
+   * each delivery is sent through it, and one it skips (gone, no longer pending, being sent already, or cancelled by a
+   * purge) counts as neither.
    */
   async deliverDue(): Promise<{ delivered: number; failed: number }> {
     let delivered = 0;

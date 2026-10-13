@@ -207,9 +207,10 @@ export interface IOutbox {
   /**
    * Optional. Sends one delivery under the outbox's own guard: re-reads `candidate` (a row `due` returned, which a purge
    * may have emptied since) and, when it is still pending, calls `send` with the fresh row and a signal that a purge of
-   * its run aborts. Answers true when `send` resolved, false when the delivery was skipped (gone, no longer pending, or
-   * cancelled by a purge), and rejects with `send`'s error otherwise. `OutboxDispatcher` sends through it when an outbox
-   * has it (`InMemoryOutbox`, `SqlOutbox` and `FencedOutbox` do), and sends the row `due` returned when it has not.
+   * its run aborts. Answers true when `send` resolved, false when the delivery was skipped (gone, no longer pending, being
+   * sent already, or cancelled by a purge), and rejects with `send`'s error otherwise. `OutboxDispatcher` sends through
+   * it when an outbox has it (`InMemoryOutbox`, `SqlOutbox` and `FencedOutbox` do), and sends the row `due` returned when
+   * it has not.
    */
   sendClaimed?(candidate: OutboxDelivery, send: (fresh: OutboxDelivery, signal: AbortSignal) => Promise<void>): Promise<boolean>;
 }

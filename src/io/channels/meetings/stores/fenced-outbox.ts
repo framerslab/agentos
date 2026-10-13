@@ -3,10 +3,11 @@
  *
  * An outbox that holds a run's deliveries behind a fence across its purge, in the process that owns delivery: the
  * manager that purges, the dispatcher that sends and the host's purge path share one `FencedOutbox` over one outbox. A
- * purge aborts the run's send under way before it writes the fence, waits for that send to settle and then scrubs the
- * wrapped outbox; a send re-reads its delivery under the same per-run guard, after its destination was resolved; and once
- * the run is fenced, every delivery enqueued for it is stored content-free. The fence is kept in a {@link DeliveryFence},
- * which a durable implementation keeps across a restart and between processes.
+ * purge aborts the run's sends under way before it writes the fence, waits for them to end and then scrubs the wrapped
+ * outbox; a send re-reads its delivery under a per-run guard, after its destination was resolved, and goes out once the
+ * guard is released, so no enqueue waits for a destination; and once the run is fenced, every delivery enqueued for it
+ * is stored content-free. The fence is kept in a {@link DeliveryFence}, which a durable implementation keeps across a
+ * restart and between processes.
  */
 import type { IOutbox, OutboxDelivery } from './types.js';
 
@@ -48,30 +49,41 @@ export class MemoryDeliveryFence implements DeliveryFence {
   }
 }
 
+/** A send {@link FencedOutbox.sendClaimed} has under way: the delivery, the controller a purge of its run aborts, and its end. */
+interface SendUnderWay {
+  readonly deliveryId: string;
+  readonly controller: AbortController;
+  /** Resolves once the send has ended, however it ended. */
+  readonly ended: Promise<void>;
+}
+
 /**
  * Wraps an {@link IOutbox} so that a purge of a run reaches its deliveries in flight, not only its stored rows.
  *
- * - `purgeContent` aborts the run's send under way before it writes the fence, waits for that send to settle, then
- *   empties the run's content deliveries in the wrapped outbox, delivered ones included.
- * - `sendClaimed` sends one delivery under the run's guard: behind the fence it scrubs the run's content first, then reads
- *   the delivery again, so a purge that landed while the dispatcher resolved its destination sends the content-free
- *   `bot:purged` body in its place.
+ * - `purgeContent` aborts the run's sends under way before it writes the fence, waits for them to end, then empties the
+ *   run's content deliveries in the wrapped outbox, delivered ones included.
+ * - `sendClaimed` claims one delivery under the run's guard: behind the fence it scrubs the run's content first, then
+ *   reads the delivery again, so a purge that landed while the dispatcher resolved its destination sends the
+ *   content-free `bot:purged` body in its place. The send itself goes out once the guard is released.
  * - Once the run is fenced, every delivery enqueued for it is stored as `bot:purged` with an empty payload, whatever its
  *   type (`bot:done` included): its destination learns only the delivery's ids and the run's.
  *
  * Wrap each outbox once per process and give that one wrapper to the manager and to the `OutboxDispatcher`: a second
  * wrapper of the same outbox does not see the first one's sends, so a purge through one cannot cancel a send through the
- * other. The operations of one run run one at a time, so an enqueue for a run waits for that run's send under way.
- * Over an outbox that evicts whole runs (an in-memory one) the wrapper has `forget` too, which forgets the run's fence
- * with its deliveries, so the manager's eviction after the retention grace goes on as it does without the wrapper.
+ * other. A run's enqueues, claims, scrubs and `forget` run one at a time, and a send runs outside that guard: an enqueue
+ * for a run, and with it the manager's handling of the run's events (a participant's stop among them), never waits for a
+ * destination; only a purge waits for the run's sends, once it has cancelled them. A delivery is sent once at a time
+ * here: a pass that takes a delivery another pass is still sending skips it. Over an outbox that evicts whole runs (an
+ * in-memory one) the wrapper has `forget` too, which forgets the run's fence with its deliveries, so the manager's
+ * eviction after the retention grace goes on as it does without the wrapper.
  */
 export class FencedOutbox implements IOutbox {
   /** The runs fenced in this process: seen at once, before the fence's write resolves. */
   private readonly fenced = new Set<string>();
   /** The last operation queued for each run, which the next one for that run waits for. */
   private readonly tails = new Map<string, Promise<void>>();
-  /** The send under way for each run, which a purge of the run aborts. */
-  private readonly active = new Map<string, AbortController>();
+  /** The sends under way for each run, which a purge of the run aborts and then waits for. */
+  private readonly active = new Map<string, Set<SendUnderWay>>();
 
   /**
    * Present when the wrapped outbox has `forget`: forgets the run's deliveries there, and its fence here and in the
@@ -132,47 +144,81 @@ export class FencedOutbox implements IOutbox {
   }
 
   /**
-   * Sends one delivery under the run's guard. Behind the fence the run's content is scrubbed first; then the delivery is
-   * read again (a purge may have emptied it since `due` returned it) and, while it is still pending, `send` gets the fresh
-   * row and a signal that a purge of the run aborts. True when `send` resolved; false when the delivery is gone or no
-   * longer pending, or a purge cancelled the send; rejects with `send`'s own error otherwise.
+   * Claims one delivery under the run's guard and sends it once the guard is released, so no enqueue or claim for the
+   * run waits for its destination. Under the guard, behind the fence, the run's content is scrubbed first; then the
+   * delivery is read again (a purge may have emptied it since `due` returned it) and, while it is still pending and no
+   * other send of it is under way here, `send` gets the fresh row and a signal that a purge of the run aborts. True when
+   * `send` resolved; false when the delivery is gone, no longer pending or being sent already, or a purge cancelled the
+   * send; rejects with `send`'s own error otherwise.
    *
    * @param candidate - A delivery `due` returned.
    * @param send - Sends the fresh copy; it stops at the signal before it writes the body.
    */
   async sendClaimed(candidate: OutboxDelivery, send: (fresh: OutboxDelivery, signal: AbortSignal) => Promise<void>): Promise<boolean> {
-    return this.locked(candidate.runId, async () => {
-      const controller = new AbortController();
-      this.active.set(candidate.runId, controller);
-      try {
+    const controller = new AbortController();
+    let end!: () => void;
+    const underWay: SendUnderWay = {
+      deliveryId: candidate.id,
+      controller,
+      ended: new Promise<void>((resolve) => {
+        end = resolve;
+      }),
+    };
+    try {
+      const fresh = await this.locked(candidate.runId, async () => {
+        const sends = this.sendsOf(candidate.runId);
+        // a second pass that took the row while another pass sends it leaves it to that one
+        if ([...sends].some((other) => other.deliveryId === candidate.id)) return undefined;
+        // kept before the fence is read, so a purge that lands from here on aborts this send
+        sends.add(underWay);
         if (await this.isFenced(candidate.runId)) await this.inner.purgeContent(candidate.runId);
-        const fresh = (await this.inner.listByRun(candidate.runId)).find((row) => row.id === candidate.id);
-        if (!fresh || fresh.state !== 'pending') return false;
-        controller.signal.throwIfAborted();
-        await send(fresh, controller.signal);
-        return true;
-      } catch (error) {
-        if (controller.signal.aborted) return false;
-        throw error;
-      } finally {
-        this.active.delete(candidate.runId);
-      }
-    });
+        return (await this.inner.listByRun(candidate.runId)).find((row) => row.id === candidate.id);
+      });
+      if (!fresh || fresh.state !== 'pending') return false;
+      controller.signal.throwIfAborted();
+      await send(fresh, controller.signal);
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted) return false;
+      throw error;
+    } finally {
+      const sends = this.active.get(candidate.runId);
+      sends?.delete(underWay);
+      if (sends?.size === 0) this.active.delete(candidate.runId);
+      end();
+    }
   }
 
   /**
    * Fences the run's deliveries and empties its content deliveries in the wrapped outbox, delivered ones included. The
-   * run's send under way here is aborted at once, before the fence's write, and again once the fence is written; the
-   * purge then waits for that send to settle before it scrubs, so when it resolves no send of the run's content is still
-   * in progress in this process. A send must therefore never wait for a purge of its own run.
+   * run's sends under way here are aborted at once, before the fence's write, and again once the fence is written; the
+   * purge then waits for them to end before it scrubs, so when it resolves no send of the run's content is still in
+   * progress in this process. A send must therefore never wait for a purge of its own run.
    */
   async purgeContent(runId: string): Promise<void> {
     this.fenced.add(runId);
     // abort before the fence's asynchronous write; a send claimed after it finds the run in `fenced`
-    this.active.get(runId)?.abort();
+    this.abortSends(runId);
     await this.fences.fence(runId);
-    this.active.get(runId)?.abort();
+    this.abortSends(runId);
+    // a cancelled send may still be closing its connection: the scrub waits until every one has ended
+    await Promise.all([...(this.active.get(runId) ?? [])].map((underWay) => underWay.ended));
     await this.locked(runId, () => this.inner.purgeContent(runId));
+  }
+
+  /** The run's sends under way: its set in `active`, made when the run has none. */
+  private sendsOf(runId: string): Set<SendUnderWay> {
+    let sends = this.active.get(runId);
+    if (!sends) {
+      sends = new Set<SendUnderWay>();
+      this.active.set(runId, sends);
+    }
+    return sends;
+  }
+
+  /** Aborts every send of the run under way here. */
+  private abortSends(runId: string): void {
+    for (const underWay of this.active.get(runId) ?? []) underWay.controller.abort();
   }
 
   /** The wrapped outbox's pending deliveries due at `now`. */
