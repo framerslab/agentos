@@ -72,6 +72,12 @@ export class CallManager {
   private readonly providers = new Map<VoiceProviderName, IVoiceCallProvider>();
   private readonly handlers: CallManagerEventHandler[] = [];
   private readonly config: VoiceCallConfig;
+  /** The store each call was last persisted to or read from: the manager's own changes to the call commit there. */
+  private readonly durableStores = new Map<CallId, ITelephonyCallStore>();
+  /** Bot speech recorded on such a call and not yet committed to its store, oldest first. */
+  private readonly unsavedSpeech = new Map<CallId, TranscriptEntry[]>();
+  /** The last of this manager's store transactions: they run one at a time, in the order requested. */
+  private durableTail: Promise<void> = Promise.resolve();
 
   constructor(config: VoiceCallConfig) {
     this.config = config;
@@ -214,6 +220,11 @@ export class CallManager {
 
   /**
    * Hang up a call. Transitions to 'hangup-bot' terminal state.
+   *
+   * A call persisted with {@link persistCall} or read by {@link processWebhookDurable} ends in its store: the
+   * end, with any bot speech not yet committed, commits there before `call:ended` is emitted, so a carrier callback
+   * after it finds the call ended and changes nothing. The promise rejects when that commit fails. A call the store
+   * already holds as ended keeps its stored outcome and emits nothing.
    */
   async hangupCall(callId: CallId): Promise<void> {
     const call = this.activeCalls.get(callId);
@@ -229,6 +240,22 @@ export class CallManager {
       }
     }
 
+    const store = this.durableStores.get(callId);
+    if (store) {
+      await this.durable(async () => {
+        const committed = await store.withProvider(call.provider, async (tx) => {
+          const stored = await tx.get(callId);
+          if (!stored) throw new Error('unknown durable call');
+          const speech = this.applyUnsavedSpeech(stored); const ended = !TERMINAL_CALL_STATES.has(stored.state);
+          if (ended) { this.transitionState(stored, 'hangup-bot'); stored.endedAt = Date.now(); }
+          await tx.put(stored); return { stored, speech, ended };
+        });
+        this.refreshDurable(committed.stored, store, committed.speech);
+        if (committed.ended) this.emit({ type: 'call:ended', callId, call: structuredClone(committed.stored) });
+      });
+      return;
+    }
+
     this.transitionState(call, 'hangup-bot');
     call.endedAt = Date.now();
     this.finalizeCall(call);
@@ -237,13 +264,23 @@ export class CallManager {
 
   /**
    * Add a bot speech entry to the transcript and transition to speaking.
+   *
+   * On a call persisted with {@link persistCall} or read by {@link processWebhookDurable}, the entry and the speaking
+   * state also commit to the call's store, after the manager's earlier store transactions; until one commits them,
+   * every later transaction for the call carries them, so a callback does not drop them from the manager's record.
+   * A failed commit is written to the console and left to the next transaction.
    */
   speakText(callId: CallId, text: string): void {
     const call = this.activeCalls.get(callId);
     if (!call || TERMINAL_CALL_STATES.has(call.state)) return;
 
-    this.addTranscriptEntry(call, 'bot', text);
+    const entry = this.addTranscriptEntry(call, 'bot', text);
     this.transitionState(call, 'speaking');
+    const store = this.durableStores.get(callId);
+    if (store) {
+      this.unsavedSpeech.set(callId, [...(this.unsavedSpeech.get(callId) ?? []), entry]);
+      void this.saveSpeech(call.provider, callId, store);
+    }
     this.emit({ type: 'call:speaking', callId, call, data: { text } });
   }
 
@@ -470,39 +507,86 @@ export class CallManager {
   }
   /** Inserts an admitted call once. A callback that races admission must be retried, never acknowledged. */
   async persistCall(callId: CallId, store: ITelephonyCallStore): Promise<CallRecord> {
-    const local = this.activeCalls.get(callId);
-    if (!local) throw new Error('unknown local call'); const snapshot = structuredClone(local);
-    const saved = await store.withProvider(snapshot.provider, async (tx) => {
-      const existing = await tx.get(callId); if (existing) return existing;
-      await tx.put(snapshot); return snapshot;
+    return this.durable(async () => {
+      const local = this.activeCalls.get(callId);
+      if (!local) throw new Error('unknown local call'); const snapshot = structuredClone(local);
+      const saved = await store.withProvider(snapshot.provider, async (tx) => {
+        const existing = await tx.get(callId); if (existing) return existing;
+        await tx.put(snapshot); return snapshot;
+      });
+      this.refreshDurable(saved, store, []); return saved;
     });
-    this.activeCalls.set(callId, structuredClone(saved)); return saved;
   }
   /**
    * Verifies, binds and applies callbacks in the store transaction. State and dedupe commit together.
    * Unknown admission throws so the host returns a retryable response. Notifications happen only after
    * commit and are best-effort; financial/external effects must consume durable records, not handlers.
+   * A call's bot speech not yet committed commits first, and the manager's record of each call becomes the
+   * committed one with the speech recorded since on top; the manager's store transactions run one at a time.
    */
   async processWebhookDurable(providerName: VoiceProviderName, context: WebhookContext, store: ITelephonyCallStore): Promise<{ accepted: boolean; applied: number }> {
     const provider = this.providers.get(providerName);
     if (!provider || provider.webhookIdentity !== 'stable-v1') throw new Error('stable carrier provider required');
     if (!provider.verifyWebhook(context).valid) return { accepted: false, applied: 0 };
     const events = provider.parseWebhookEvent(context).events;
-    const committed = await store.withProvider(providerName, async (tx) => {
-      const notifications: CallManagerEvent[] = []; const calls = new Map<string, CallRecord>(); let applied = 0;
-      for (const event of events) {
-        if (event.provider !== providerName || !event.eventId.startsWith(`${providerName}:v1:`)) throw new Error('unstable carrier event');
-        const call = await tx.find(event.providerCallId) ?? (event.providerRequestId ? await tx.find(`request:${event.providerRequestId}`) : undefined);
-        if (!call) throw new Error('unknown carrier call');
-        this.bindCarrierIdentity(call, event);
-        const changed = this.applyCarrierEvent(call, event); if (changed.length) applied += 1;
-        await tx.put(call); calls.set(call.callId, call); notifications.push(...changed);
-      }
-      return { applied, notifications, calls: [...calls.values()] };
+    return this.durable(async () => {
+      const committed = await store.withProvider(providerName, async (tx) => {
+        const notifications: CallManagerEvent[] = []; const calls = new Map<string, CallRecord>(); const speech = new Map<string, TranscriptEntry[]>(); let applied = 0;
+        for (const event of events) {
+          if (event.provider !== providerName || !event.eventId.startsWith(`${providerName}:v1:`)) throw new Error('unstable carrier event');
+          const call = await tx.find(event.providerCallId) ?? (event.providerRequestId ? await tx.find(`request:${event.providerRequestId}`) : undefined);
+          if (!call) throw new Error('unknown carrier call');
+          if (!speech.has(call.callId)) speech.set(call.callId, this.applyUnsavedSpeech(call));
+          this.bindCarrierIdentity(call, event);
+          const changed = this.applyCarrierEvent(call, event); if (changed.length) applied += 1;
+          await tx.put(call); calls.set(call.callId, call); notifications.push(...changed);
+        }
+        return { applied, notifications, calls: [...calls.values()], speech };
+      });
+      for (const call of committed.calls) this.refreshDurable(call, store, committed.speech.get(call.callId) ?? []);
+      for (const event of committed.notifications) this.emit(event);
+      return { accepted: true, applied: committed.applied };
     });
-    for (const call of committed.calls) { this.activeCalls.set(call.callId, structuredClone(call)); if (call.providerCallId) this.providerCallIdMap.set(call.providerCallId, call.callId); }
-    for (const event of committed.notifications) this.emit(event);
-    return { accepted: true, applied: committed.applied };
+  }
+  /** Runs `work` once this manager's earlier store transactions, and the refreshes after them, have finished. */
+  private durable<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.durableTail.then(work);
+    this.durableTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+  /** Adds the call's unsaved bot speech to a stored record that has not ended, and returns the entries it took. */
+  private applyUnsavedSpeech(call: CallRecord): TranscriptEntry[] {
+    const speech = [...(this.unsavedSpeech.get(call.callId) ?? [])];
+    if (!TERMINAL_CALL_STATES.has(call.state)) for (const entry of speech) { call.transcript.push(structuredClone(entry)); this.transitionState(call, 'speaking'); }
+    return speech;
+  }
+  /**
+   * Makes a committed record the manager's record of the call: the speech the commit took leaves the unsaved list,
+   * and speech recorded since stays on top until a later transaction commits it. An ended call keeps none.
+   */
+  private refreshDurable(call: CallRecord, store: ITelephonyCallStore, committed: TranscriptEntry[]): void {
+    const unsaved = TERMINAL_CALL_STATES.has(call.state) ? [] : (this.unsavedSpeech.get(call.callId) ?? []).filter((entry) => !committed.includes(entry));
+    if (unsaved.length) this.unsavedSpeech.set(call.callId, unsaved); else this.unsavedSpeech.delete(call.callId);
+    const local = structuredClone(call);
+    for (const entry of unsaved) { local.transcript.push(structuredClone(entry)); this.transitionState(local, 'speaking'); }
+    this.activeCalls.set(call.callId, local); this.durableStores.set(call.callId, store);
+    if (local.providerCallId) this.providerCallIdMap.set(local.providerCallId, local.callId);
+  }
+  /** Commits the call's unsaved bot speech after the manager's earlier store transactions; a failure leaves it unsaved. */
+  private async saveSpeech(provider: VoiceProviderName, callId: CallId, store: ITelephonyCallStore): Promise<void> {
+    try {
+      await this.durable(async () => {
+        if (!this.unsavedSpeech.get(callId)?.length) return;
+        const committed = await store.withProvider(provider, async (tx) => {
+          const stored = await tx.get(callId);
+          if (!stored) throw new Error('unknown durable call');
+          const speech = this.applyUnsavedSpeech(stored); await tx.put(stored); return { stored, speech };
+        });
+        this.refreshDurable(committed.stored, store, committed.speech);
+      });
+    } catch (err) {
+      console.error('[CallManager] Saving bot speech failed:', err);
+    }
   }
 
   // ── Query ──
@@ -609,14 +693,16 @@ export class CallManager {
     }
   }
 
-  /** Add a transcript entry. */
-  private addTranscriptEntry(call: CallRecord, speaker: 'bot' | 'user', text: string): void {
-    call.transcript.push({
+  /** Add a transcript entry and return it. */
+  private addTranscriptEntry(call: CallRecord, speaker: 'bot' | 'user', text: string): TranscriptEntry {
+    const entry: TranscriptEntry = {
       timestamp: Date.now(),
       speaker,
       text,
       isFinal: true,
-    });
+    };
+    call.transcript.push(entry);
+    return entry;
   }
 
   /** Move a call from active tracking after terminal state. */
@@ -649,6 +735,8 @@ export class CallManager {
     this.processedEventIds.clear();
     this.providers.clear();
     this.handlers.length = 0;
+    this.durableStores.clear();
+    this.unsavedSpeech.clear();
   }
 }
 
