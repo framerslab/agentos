@@ -1542,32 +1542,41 @@ async function maybeApproveFinalResult(
 // ---------------------------------------------------------------------------
 
 /**
- * Result of a post-approval guardrail check.
+ * Result of a post-approval check.
  *
- * Contains the blocking guardrail's ID and reason when the override fires.
+ * Contains the blocking check's ID and reason when the override fires.
  */
 export interface GuardrailHitlOverrideResult {
-  /** Whether the guardrails passed (tool call may proceed). */
+  /** Whether every check passed (the approved action may proceed). */
   passed: boolean;
-  /** The guardrail ID that triggered the block (when `passed` is `false`). */
+  /** The ID of the check that blocked (when `passed` is `false`). */
   guardrailId?: string;
   /** Human-readable reason for the block. */
   reason?: string;
 }
 
 /**
- * Runs post-approval guardrails against tool call arguments to catch
- * destructive actions that slipped past the HITL handler.
+ * Runs the post-approval checks after an approval handler approves a tool
+ * call, an agent run or the final output, to catch destructive text the
+ * handler let through.
  *
- * This is the core safety net: even when auto-approve, LLM judge, or a
- * human approves a tool call, the configured guardrails get a final say.
- * If any guardrail returns `action: 'block'`, the approval is overridden.
+ * The checks are two fixed pattern checks inside `agency()`, `code-safety`
+ * and `pii-redaction`, not the guardrail packs: any other ID passes. They
+ * run in the order `guardrailIds` lists them, each over one text,
+ * `Tool: <toolName>` and then `Arguments:` with `args` as JSON, and the
+ * first that matches returns `passed: false` with its ID and reason; the
+ * caller then overrides the approval. A check that throws is skipped.
  *
- * @param toolName - The tool that was approved.
- * @param args - The arguments the tool would be called with.
- * @param guardrailIds - Ordered list of guardrail IDs to evaluate.
- * @param callbacks - Optional event callback map for emitting override events.
- * @returns A result indicating whether the guardrails passed.
+ * @param toolName - The approved tool's name, `agent:<name>` for an agent
+ *   approval, or `return` for the final output.
+ * @param args - The tool call's arguments; for an agent, `{ input }` with the
+ *   strategy's input, plus `sent`, the text the agent is sent, when the
+ *   approval's instructions were appended to it; for the final output,
+ *   `{ output }`.
+ * @param guardrailIds - Ordered list of check IDs to run.
+ * @param callbacks - Optional event callback map; each check's result goes to
+ *   `guardrailResult`.
+ * @returns A result indicating whether every check passed.
  */
 export async function runPostApprovalGuardrails(
   toolName: string,
@@ -1652,19 +1661,18 @@ export async function runPostApprovalGuardrails(
 }
 
 /**
- * Built-in post-approval guardrail evaluator.
+ * The built-in post-approval checks.
  *
- * Ships with two default guardrails:
- * - `code-safety` — blocks shell commands containing destructive patterns
- *   (e.g., `rm -rf`, `DROP TABLE`, `format C:`).
- * - `pii-redaction` — blocks payloads that appear to contain unredacted PII
- *   (SSNs, credit card numbers).
+ * - `code-safety` — blocks a payload that matches one of its destructive
+ *   command and statement patterns (e.g., `rm -rf /`, `DROP TABLE`,
+ *   `format C:`).
+ * - `pii-redaction` — blocks a payload that contains what looks like an
+ *   unredacted SSN or credit card number.
  *
- * Additional guardrail IDs are treated as pass-through (allow) until a
- * registry-based resolver is wired.
+ * Any other ID passes (allow).
  *
- * @param guardId - The guardrail identifier.
- * @param payload - Serialized tool call context to evaluate.
+ * @param guardId - The check's identifier.
+ * @param payload - The serialized text to check.
  * @returns An action/reason pair.
  */
 function evaluatePostApprovalGuardrail(
