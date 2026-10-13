@@ -681,7 +681,7 @@ export class MeetingManager {
         await this.deliver(stored, run);
         return true;
       case 'participant_joined': {
-        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, this.reportedAt(event.at)) })) ?? run;
+        const updated = (await this.updateParticipants(run, event)) ?? run;
         await this.deliver(stored, updated);
         const provider = this.providers.get(run.providerName);
         if (updated.state === 'in_call' && provider?.capabilities.postsChat && !fenced) {
@@ -690,7 +690,7 @@ export class MeetingManager {
         return true;
       }
       case 'participant_left': {
-        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, this.reportedAt(event.at)) })) ?? run;
+        const updated = (await this.updateParticipants(run, event)) ?? run;
         await this.deliver(stored, updated);
         return true;
       }
@@ -751,6 +751,17 @@ export class MeetingManager {
    */
   private reportedAt(at: number): number {
     return Math.min(at, this.now() + this.monitorHeartbeatMs);
+  }
+
+  /**
+   * Writes a participant report's count and the alone timer it implies, decided on the row as it stands now, read after
+   * the report's event was stored: decided on the row read before it, while another report cleared the timer, it could
+   * put back a timer that had run out, and the next pass would end the run as alone with a participant in the call.
+   */
+  private async updateParticipants(run: MeetingRunRecord, event: NormalizedMeetingEvent): Promise<MeetingRunRecord | undefined> {
+    const current = (await this.stores.runs.get(run.runId)) ?? run;
+    const count = event.data?.participantCount;
+    return this.stores.runs.update(run.runId, { participantCount: count, ...this.aloneTimer(current, count, this.reportedAt(event.at)) });
   }
 
   /** The alone timer's patch for a report of `count` participants besides the bot: started by the first report of none, kept while there is none, cleared when one is reported. */

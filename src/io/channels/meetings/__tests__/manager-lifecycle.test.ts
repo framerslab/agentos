@@ -211,6 +211,23 @@ describe('the limits, the meter and the ends', () => {
     await h.manager.tick();
     expect(h.provider.commands.get(id2)?.some((c) => c.name === 'leave')).toBe(false);
   });
+  it('a report that no one is left, overtaken by one that someone joined, does not bring back an alone timer that had run out', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    await h.report(runId, 'participant_left', { participantRef: 'p1', participantCount: 0 }); // alone from now
+    h.clock.advance(300_001); // the alone limit has passed, and no pass has run since
+    const append = h.stores.events.append.bind(h.stores.events);
+    vi.spyOn(h.stores.events, 'append').mockImplementationOnce(async (event) => {
+      // a participant joins while the next report's event is being stored
+      await h.report(runId, 'participant_joined', { participantRef: 'p2', participantCount: 1 }, h.clock.now() + 1);
+      return append(event);
+    });
+    await h.report(runId, 'participant_left', { participantRef: 'p3', participantCount: 0 });
+    await h.report(runId, 'monitor_heartbeat');
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)?.some((c) => c.name === 'leave')).toBe(false);
+    expect((await h.stores.runs.get(runId))?.aloneSince).toBe(h.clock.now());
+  });
   it('meters usage, settles at done, drops the turns of a run that is not kept, and bills a crash after capture', async () => {
     const h = harness();
     const runId = await joined(h);
