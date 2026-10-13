@@ -25,7 +25,8 @@ import {
   type ToolCallHookInfo,
 } from './generateText.js';
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
-import { buildSchemaInstructionText } from './runtime/structuredReply.js';
+import { buildSchemaInstructionText, extractJson } from './runtime/structuredReply.js';
+import { createLogger } from '../core/logging/loggerFactory.js';
 import { resolveModelOption } from './model.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
@@ -203,7 +204,7 @@ export interface AgentOptions extends BaseAgentConfig {
    *
    * When provided, the agent's `generate()` result includes a `parsed` field
    * with the Zod-validated and typed output. JSON extraction and validation
-   * happen automatically in the `onAfterGeneration` hook. On validation failure,
+   * happen after generation. On validation failure,
    * the agent retries internally (up to `controls.maxValidationRetries ?? 1`).
    *
    * When omitted, behavior is unchanged — `result.parsed` is undefined.
@@ -365,6 +366,8 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * Sanitized to /[a-zA-Z0-9_]/ and truncated to 64 chars.
    */
   schemaName?: string;
+  /** Extra schema-validation attempts on the default runtime. Defaults to 0. */
+  maxValidationRetries?: number;
   /**
    * Telemetry + eviction-boundary label for this send's transcript block
    * (spec §1c(iv)). Labels are markers, not pins.
@@ -428,7 +431,7 @@ export interface AgentSession {
    *
    * @throws {ObjectGenerationError} If the provider returns
    *         schema-enforced JSON that nonetheless fails Zod validation
-   *         (real provider bug; not retried).
+   *         after `maxValidationRetries` extra attempts (default 0).
    *
    * @param input - User message as text string or MessageContent array.
    * @param opts - Must include `responseSchema`.
@@ -683,6 +686,50 @@ function pickSendGenerationOverrides(
   return out;
 }
 
+/** Generate a reply with optional JSON validation and bounded repair turns. */
+async function generateWithValidation(
+  options: GenerateTextOptions,
+  schema: ZodType | undefined,
+  maxRetries: number,
+  extract: boolean,
+  onResult: (result: GenerateTextResult) => void,
+): Promise<{ result: GenerateTextResult; object: unknown; retried: boolean }> {
+  if (schema && (!Number.isInteger(maxRetries) || maxRetries < 0)) {
+    throw new RangeError('maxValidationRetries must be a non-negative integer');
+  }
+  let request = options;
+  for (let attempt = 0; ; attempt++) {
+    const result = await generateText(request);
+    onResult(result);
+    if (!schema) return { result, object: undefined, retried: false };
+
+    let failure: ObjectGenerationError;
+    try {
+      const parsed = extract ? extractJson(result.text) : JSON.parse(result.text);
+      const safe = schema.safeParse(parsed);
+      if (safe.success) return { result, object: safe.data, retried: attempt > 0 };
+      failure = new ObjectGenerationError('Response failed Zod validation', result.text, safe.error);
+    } catch (err) {
+      failure = new ObjectGenerationError(
+        `Response is not valid JSON (${err instanceof Error ? err.message : String(err)})`,
+        result.text,
+      );
+    }
+    if (attempt >= maxRetries) throw failure;
+    const feedback = failure.validationErrors?.message ?? failure.message;
+    request = {
+      ...request,
+      prompt: undefined,
+      messages: [
+        ...(request.messages ?? []),
+        ...(request.prompt !== undefined ? [{ role: 'user' as const, content: request.prompt }] : []),
+        { role: 'assistant', content: result.text },
+        { role: 'user', content: `Your reply did not match the schema: ${feedback}. Reply again with JSON that matches it.` },
+      ],
+    };
+  }
+}
+
 /**
  * Creates a lightweight stateful agent backed by in-memory session storage.
  *
@@ -856,8 +903,17 @@ export function agent(opts: AgentOptions): Agent {
       } else {
         genOpts.messages = [...(genOpts.messages ?? []), { role: 'user', content: prompt }];
       }
-      const result = await generateText(genOpts as GenerateTextOptions);
-      accumulateUsage(agentUsageTally, result.usage);
+      if (opts.responseSchema) {
+        genOpts._schemaInstruction = buildSchemaInstructionText(lowerZodToJsonSchema(opts.responseSchema), 'response');
+      }
+      const { result, object } = await generateWithValidation(
+        genOpts as GenerateTextOptions,
+        opts.responseSchema,
+        opts.controls?.maxValidationRetries ?? 1,
+        true,
+        (attempt) => accumulateUsage(agentUsageTally, attempt.usage),
+      );
+      if (opts.responseSchema) result.parsed = object;
       if (opts.verifyCitations) {
         result.grounding = await runCitationVerification(
           result.text,
@@ -1001,10 +1057,26 @@ export function agent(opts: AgentOptions): Agent {
               })()
             : baseOpts;
 
+          let system = baseForRequest.system;
+          const working = typeof opts.memory === 'object' ? opts.memory?.working : undefined;
+          if (typeof working === 'function') {
+            try {
+              const block = await working();
+              if (block) {
+                system = Array.isArray(system)
+                  ? [{ text: block }, ...system]
+                  : [block, system].filter(Boolean).join('\n\n');
+              }
+            } catch {
+              createLogger('api').warn('memory.working failed; continuing without the working-memory block.');
+            }
+          }
+
           const wrappedOpts = applyMemoryProvider(
             {
               ...baseForRequest,
               ...pickSendGenerationOverrides(sendOpts),
+              system,
               messages: requestMessages,
               ...(inputIsString
                 ? { prompt: input as string }
@@ -1024,34 +1096,24 @@ export function agent(opts: AgentOptions): Agent {
             opts.memoryProviderOptions,
           );
 
-          const result = await generateText(wrappedOpts as GenerateTextOptions);
-          accumulateUsage(sessionUsageTally, result.usage);
-          accumulateUsage(agentUsageTally, result.usage);
-
-          // Validate + parse when a schema was supplied. Native enforcement
-          // guarantees a valid shape on every successful response, so a
-          // parse/validation failure here is a real provider bug rather
-          // than retry-worthy. Throw with the rawText + Zod error attached.
-          let object: unknown;
-          if (sendOpts?.responseSchema) {
-            try {
-              const parsed = JSON.parse(result.text);
-              const safe = sendOpts.responseSchema.safeParse(parsed);
-              if (!safe.success) {
-                throw new ObjectGenerationError(
-                  'session.send: provider-enforced JSON failed Zod validation',
-                  result.text,
-                  safe.error,
-                );
-              }
-              object = safe.data;
-            } catch (err) {
-              if (err instanceof ObjectGenerationError) throw err;
-              throw new ObjectGenerationError(
-                `session.send: provider response is not valid JSON despite enforcement (${err instanceof Error ? err.message : String(err)})`,
-                result.text,
-              );
-            }
+          const { result, object, retried } = await generateWithValidation(
+            wrappedOpts as GenerateTextOptions,
+            sendOpts?.responseSchema,
+            sendOpts?.maxValidationRetries ?? 0,
+            false,
+            (attempt) => {
+              accumulateUsage(sessionUsageTally, attempt.usage);
+              accumulateUsage(agentUsageTally, attempt.usage);
+            },
+          );
+          if (retried) {
+            result.transcriptDelta = [
+              userMessage as unknown as SessionTranscriptMessage,
+              { role: 'assistant', content: result.text },
+            ];
+          }
+          if (opts.verifyCitations) {
+            result.grounding = await runCitationVerification(result.text, textForMemory, opts.verifyCitations);
           }
 
           if (historyBuffer) {
@@ -1101,6 +1163,13 @@ export function agent(opts: AgentOptions): Agent {
           );
 
           const result = streamText(wrappedOpts as GenerateTextOptions);
+          if (opts.verifyCitations) {
+            const verification = opts.verifyCitations;
+            result.grounding = result.text.then(
+              (text) => runCitationVerification(text, textForMemory, verification),
+              () => undefined,
+            );
+          }
           void result.usage
             .then((usage) => {
               accumulateUsage(sessionUsageTally, usage);

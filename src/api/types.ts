@@ -72,7 +72,11 @@ export interface MemoryConfig {
   shared?: boolean;
   /** Which memory subsystems to activate. */
   types?: MemoryType[];
-  /** Configuration for the short-lived working-memory buffer. */
+  /**
+   * Buffer configuration, or a block read once before each default-runtime
+   * session send and prepended to its system text. Callback failures warn and
+   * skip the block. The callback does not create a memory store.
+   */
   working?: {
     /** Whether the working-memory buffer is active. */
     enabled: boolean;
@@ -80,7 +84,7 @@ export interface MemoryConfig {
     maxTokens?: number;
     /** Eviction / summarisation strategy identifier. */
     strategy?: string;
-  };
+  } | (() => string | Promise<string>);
   /**
    * Configuration for periodic background consolidation of episodic → semantic memory.
    * On the GMI path (`agent({ runtime: 'gmi' })`), `enabled: true` starts the memory
@@ -690,6 +694,8 @@ export interface ResourceControls {
    *
    * Defaults to `1` (one extra attempt = two total calls). Set to `0` to
    * disable retries entirely.
+   * Also used by default-runtime `agent().generate()` with `responseSchema`.
+   * Session sends take their own `maxValidationRetries`, defaulting to 0.
    */
   maxValidationRetries?: number;
   /**
@@ -1535,14 +1541,17 @@ export interface BaseAgentConfig {
   cognitiveMechanisms?: import('../cognition/memory/mechanisms/types.js').CognitiveMechanismsConfig;
 
   /**
-   * Verify citations after each `generate()` call of an `agent()`.
+   * Verify citations after `generate()` and default-runtime session calls.
    *
    * When set, `generate()` produces the answer, then fetches sources for the
    * user's input with the configured retriever and scores each atomic claim
    * of the answer against them via `CitationVerifier`. The resulting
    * `VerifiedResponse` is attached to the result's `grounding` field — no
-   * separate `verifier.verify(text, sources)` call needed. `stream()` and a
-   * session's `send()` do not verify. When the retriever returns no sources,
+   * separate `verifier.verify(text, sources)` call needed. On the default
+   * runtime, `session.send()` also checks its reply and `session.stream()`
+   * exposes a `grounding` promise that runs after its text completes.
+   * Direct `stream()` and GMI session calls do not verify.
+   * When the retriever returns no sources,
    * or retrieval or the verifier fails, `grounding` stays unset and the
    * answer is returned as generated.
    *
