@@ -2,6 +2,7 @@ import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, it } from
 import { createPostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { SqlDeliveryFence, SqlEventStore, SqlJobStore, SqlOutbox, SqlRunStore, SqlTranscriptStore, meetingStoresDdl, meetingStoresUpgradeDdl } from '../stores/sql.js';
 import { SecretBox } from '../signing.js';
+import { SealedSecretError } from '../../../../core/llm/auth/sealing.js';
 import { DuplicateIdempotencyKeyError, FencedError } from '../stores/types.js';
 import { meetingStoreContract } from './store-contract.js';
 import { legacyMeetingStoresDdl } from './fixtures/legacy-meeting-ddl.js';
@@ -240,16 +241,31 @@ describeIfPostgres('the Postgres meeting stores', () => {
       expect(await columnsOf(prefix)).toEqual(await columnsOf(PREFIX));
       const runs = new SqlRunStore({ db, tablePrefix: prefix, box });
       expect((await runs.get('old'))?.botName).toBe('Notes');
-      await runs.update('old', { lastReportAt: 100, lastUsageAt: 90, lastUsageSourceAt: 80, reportedSeconds: 60, creationPending: true, creationContext: 'opaque-host-data' });
-      expect(await runs.get('old')).toMatchObject({ lastReportAt: 100, lastUsageAt: 90, lastUsageSourceAt: 80, reportedSeconds: 60, creationPending: true, creationContext: 'opaque-host-data' });
+      // every run field the upgrade adds a column for, written to and read back from the row the earlier version wrote
+      const added = { providerConnectionRef: 'connection-1', leaveCommandedAt: 70, captureSuspendedAt: 71, aloneSince: 72, lastReportAt: 100, lastUsageSourceAt: 80, creationPending: true, creationContext: 'opaque-host-data' };
+      await runs.update('old', { ...added, lastUsageAt: 90, reportedSeconds: 60 });
+      expect(await runs.get('old')).toMatchObject({ ...added, lastUsageAt: 90, reportedSeconds: 60 });
       const raw = await db.get<{ creation_context: string }>(`SELECT creation_context FROM ${prefix}_runs WHERE run_id = ?`, ['old']);
       expect(raw?.creation_context).not.toContain('opaque-host-data');
+      // the turn counter the upgrade adds to the run anchors numbers the run's turns
+      const transcript = new SqlTranscriptStore({ db, tablePrefix: prefix });
+      expect((await transcript.appendNext({ runId: 'old', at: 5, text: 'first' })).seq).toBe(1);
+      expect((await transcript.appendNext({ runId: 'old', at: 6, text: 'second' })).seq).toBe(2);
       const fences = new SqlDeliveryFence({ db, tablePrefix: prefix });
+      // no fence until one is written: not on the run, whose anchor row exists, nor on a run that has no row
+      expect(await fences.isFenced('old')).toBe(false);
+      expect(await fences.isFenced('never-sent')).toBe(false);
       await fences.fence('old');
       expect(await new SqlDeliveryFence({ db, tablePrefix: prefix }).isFenced('old')).toBe(true);
-      // the sealed context is bound to its column as well as its run: moved into the url's place, it does not open
+      // the deliveries' fence is not the content fence on the same row
+      expect(await transcript.isFenced('old')).toBe(false);
+      // the sealed context is bound to its run: copied into another run's row, it does not open there
+      await runs.insert({ ...run('other'), creationPending: true, creationContext: 'other-host-data' });
+      await db.run(`UPDATE ${prefix}_runs SET creation_context = (SELECT creation_context FROM ${prefix}_runs WHERE run_id = ?) WHERE run_id = ?`, ['old', 'other']);
+      await expect(runs.get('other')).rejects.toThrow(SealedSecretError);
+      // and to its column: moved into the url's place, it does not open
       await db.run(`UPDATE ${prefix}_runs SET meeting_url = creation_context WHERE run_id = ?`, ['old']);
-      await expect(runs.get('old')).rejects.toThrow();
+      await expect(runs.get('old')).rejects.toThrow(SealedSecretError);
       expect(() => meetingStoresUpgradeDdl('Bad prefix')).toThrow();
     } finally {
       for (const name of ['runs', 'jobs', 'turns', 'events', 'outbox', 'run_locks']) await db.exec(`DROP TABLE IF EXISTS ${prefix}_${name}`);
