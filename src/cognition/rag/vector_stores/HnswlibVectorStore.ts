@@ -34,6 +34,7 @@ import type {
   MetadataValue,
 } from '../IVectorStore.js';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
+import { describeRefusedName, resolveInsideFolder } from '../../../core/utils/pathName.js';
 
 /**
  * Configuration for HnswlibVectorStore
@@ -220,6 +221,12 @@ export class HnswlibVectorStore implements IVectorStore {
     return value === 'cosine' || value === 'euclidean' || value === 'dotproduct';
   }
 
+  /**
+   * Make the persist folder and read its manifest. An entry is taken only when its `fileBase` is the one the store
+   * names a collection's files with (`deriveFileBase`), as in every manifest the store writes; any other entry
+   * is skipped with a warning, since its `fileBase` is joined into the paths of files the store reads, writes and
+   * removes.
+   */
   private async ensurePersistenceReady(): Promise<void> {
     if (!this.persistDirectory) return;
 
@@ -242,6 +249,15 @@ export class HnswlibVectorStore implements IVectorStore {
         const dimension = typeof entry?.dimension === 'number' ? entry.dimension : 0;
         const similarityMetric = entry?.similarityMetric;
         if (!name || !fileBase) continue;
+        const ownFileBase = this.deriveFileBase(name);
+        if (fileBase !== ownFileBase) {
+          console.warn(
+            `[HnswlibVectorStore:${this.providerId}] Skipped collection ${describeRefusedName(name)} in ` +
+              `${this.persistManifestPath}: its fileBase ${describeRefusedName(fileBase)} is not the name the ` +
+              `store gives its files, ${describeRefusedName(ownFileBase)}`,
+          );
+          continue;
+        }
         if (!Number.isFinite(dimension) || dimension <= 0) continue;
         if (!this.isMetric(similarityMetric)) continue;
 
@@ -281,6 +297,12 @@ export class HnswlibVectorStore implements IVectorStore {
     await this.writeJsonAtomic(this.persistManifestPath, manifest);
   }
 
+  /**
+   * The paths of a collection's index and metadata files, each checked, as written, to lie in the persist folder.
+   *
+   * @throws GMIError (`VALIDATION_ERROR`) when persistence is off, or when either path would lie outside the folder,
+   *   which a warning names.
+   */
   private async getPersistPaths(entry: PersistedCollectionEntry): Promise<{ indexPath: string; metaPath: string }> {
     if (!this.persistDirectory) {
       throw new GMIError(
@@ -290,11 +312,21 @@ export class HnswlibVectorStore implements IVectorStore {
         'HnswlibVectorStore',
       );
     }
-    const path = await this.getPath();
-    return {
-      indexPath: path.join(this.persistDirectory, `${entry.fileBase}.hnsw`),
-      metaPath: path.join(this.persistDirectory, `${entry.fileBase}.meta.json`),
-    };
+    const indexPath = resolveInsideFolder(this.persistDirectory, [`${entry.fileBase}.hnsw`]);
+    const metaPath = resolveInsideFolder(this.persistDirectory, [`${entry.fileBase}.meta.json`]);
+    if (indexPath === null || metaPath === null) {
+      console.warn(
+        `[HnswlibVectorStore:${this.providerId}] Refused the files of collection ${describeRefusedName(entry.name)}: ` +
+          `they would lie outside ${this.persistDirectory}`,
+      );
+      throw new GMIError(
+        `The files of collection ${describeRefusedName(entry.name)} would lie outside the persist directory.`,
+        GMIErrorCode.VALIDATION_ERROR,
+        { collectionName: entry.name },
+        'HnswlibVectorStore',
+      );
+    }
+    return { indexPath, metaPath };
   }
 
   private markDirty(collectionName: string): void {
