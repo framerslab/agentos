@@ -2,7 +2,8 @@
  * @file HnswlibVectorStore.paths.integration.test.ts
  * The Hnswlib store's persistence against a temp folder: a manifest entry whose `fileBase` is not the name the store
  * gives a collection's files is skipped with a warning, so no query, delete or flush of that collection touches a
- * file outside the persist folder, and a manifest the store wrote itself loads again.
+ * file outside the persist folder; such an entry does not keep the entries after it from loading; and a manifest the
+ * store wrote itself loads again.
  *
  * hnswlib-node is replaced, as in HnswlibVectorStore.test.ts, by a fake whose index files are real files at the
  * paths the store gives it: CI does not build the native module, and the paths are what is tested here.
@@ -146,6 +147,25 @@ describe("the Hnswlib store's files stay in its persist folder", () => {
     expect(fs.readdirSync(persist).sort()).toEqual(['docs.hnsw', 'docs.meta.json', 'hnswlib.manifest.json']);
     const manifest = JSON.parse(fs.readFileSync(path.join(persist, 'hnswlib.manifest.json'), 'utf8'));
     expect(manifest.collections).toEqual([{ name: 'docs', fileBase: 'docs', dimension: 3, similarityMetric: 'cosine' }]);
+  });
+
+  it('an entry whose name the store cannot encode is skipped with a warning, and the entries after it still load', async () => {
+    const writer = await openStore();
+    await writer.upsert('notes', [{ id: 'doc', embedding: [0.1, 0.2, 0.3], textContent: 'kept' }]);
+    await writer.shutdown();
+    // Before the store's own entry goes one whose name holds a lone surrogate, which URI encoding refuses.
+    const manifestPath = path.join(persist, 'hnswlib.manifest.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    manifest.collections.unshift({ name: '\ud800', fileBase: 'x', dimension: 3, similarityMetric: 'cosine' });
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+
+    const reader = await openStore();
+
+    expect(skippedLines()).toHaveLength(1);
+    expect(await reader.collectionExists('notes')).toBe(true);
+    const result = await reader.query('notes', [0.1, 0.2, 0.3], { includeTextContent: true });
+    expect(result.documents.map((document) => document.textContent)).toEqual(['kept']);
+    await reader.shutdown();
   });
 
   it('a manifest the store wrote itself loads again, for collection names it encodes and for a long one it shortens', async () => {

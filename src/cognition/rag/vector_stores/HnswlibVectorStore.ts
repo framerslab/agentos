@@ -217,6 +217,18 @@ export class HnswlibVectorStore implements IVectorStore {
     return `${encoded.slice(0, 80)}_${this.fnv1a32(collectionName)}`;
   }
 
+  /**
+   * The name `deriveFileBase` gives the files of the collection `collectionName`, or null when it gives none: a name
+   * holding a lone UTF-16 surrogate cannot be URI-encoded, so the store never makes files for such a collection.
+   */
+  private fileBaseOrNull(collectionName: string): string | null {
+    try {
+      return this.deriveFileBase(collectionName);
+    } catch {
+      return null;
+    }
+  }
+
   private isMetric(value: unknown): value is 'cosine' | 'euclidean' | 'dotproduct' {
     return value === 'cosine' || value === 'euclidean' || value === 'dotproduct';
   }
@@ -249,12 +261,13 @@ export class HnswlibVectorStore implements IVectorStore {
         const dimension = typeof entry?.dimension === 'number' ? entry.dimension : 0;
         const similarityMetric = entry?.similarityMetric;
         if (!name || !fileBase) continue;
-        const ownFileBase = this.deriveFileBase(name);
+        const ownFileBase = this.fileBaseOrNull(name);
         if (fileBase !== ownFileBase) {
+          const own = ownFileBase === null ? 'none, as the name cannot be encoded' : describeRefusedName(ownFileBase);
           console.warn(
             `[HnswlibVectorStore:${this.providerId}] Skipped collection ${describeRefusedName(name)} in ` +
               `${this.persistManifestPath}: its fileBase ${describeRefusedName(fileBase)} is not the name the ` +
-              `store gives its files, ${describeRefusedName(ownFileBase)}`,
+              `store gives its files (${own})`,
           );
           continue;
         }
