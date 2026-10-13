@@ -103,7 +103,8 @@ describe('cumulative attempt accounting', () => {
     await authorizeModelAttempt(store, { holdId: hold.holdId, attemptId: 'a', purpose: 'initial', at: T });
     const record = (usage: Record<string, number>, final: boolean) => recordAttemptUsage(store, { holdId: hold.holdId, attemptId: 'a', usage, final, at: T + 1 });
     expect(await record({ input_token: 100, output_token: 2 }, false)).toMatchObject({ status: 'recorded' });
-    for (const usage of [{ input_token: 1, output_token: 2 }, {}, { input_token: 100 }]) {
+    const regressions: Record<string, number>[] = [{ input_token: 1, output_token: 2 }, {}, { input_token: 100 }];
+    for (const usage of regressions) {
       expect(await record(usage, true)).toEqual({ status: 'refused', reason: 'usage_regression' });
     }
     expect(await record({ output_token: 2, input_token: 100 }, true)).toMatchObject({ status: 'recorded' });
