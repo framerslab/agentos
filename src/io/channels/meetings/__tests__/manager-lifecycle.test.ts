@@ -684,8 +684,19 @@ describe('a step that fails, or a race, on the way out', () => {
     const runId = await joined(h);
     await h.manager.purgeRun(runId, 'stopped_by_owner');
     await h.report(runId, 'left', { reason: 'stopped_by_owner', seconds: 20 });
-    vi.spyOn(h.stores.runs, 'replace').mockRejectedValueOnce(new Error('run store unavailable'));
-    await h.manager.tick().catch(() => undefined); // a pass that throws is the next pass's to retry
+    // the purge's last write is the update from purging to done: it fails once
+    const update = h.stores.runs.update.bind(h.stores.runs);
+    let failed = false;
+    vi.spyOn(h.stores.runs, 'update').mockImplementation(async (id, patch, expected) => {
+      if (!failed && patch.state === 'done') {
+        failed = true;
+        throw new Error('run store unavailable');
+      }
+      return update(id, patch, expected);
+    });
+    await expect(h.manager.tick()).rejects.toThrow('run store unavailable'); // a pass that throws is the next pass's to retry
+    expect(failed).toBe(true);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'purging', meetingUrl: h.request.meetingUrl });
     expect(await h.manager.purgeRun(runId)).toBe(true); // the product's one purge path, tried again
     await h.manager.tick();
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', meetingUrl: '', botName: '', stopPhrase: '', notice: { text: '', lateArrivalText: '' }, purgedAt: expect.any(Number) });
