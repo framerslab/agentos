@@ -739,7 +739,7 @@ describe('a report whose application fails, and the worker\'s retry of it', () =
     expect((await h.stores.runs.get(runId))?.state).toBe('purging');
     expect(h.provider.commands.get(runId)?.slice(-2)).toEqual([{ name: 'suspendCapture' }, { name: 'leave', reason: 'stopped_by_participant' }]);
   });
-  it('a report whose delivery failed is enqueued for its destination when the worker sends it again', async () => {
+  it('a report whose delivery failed reaches the handlers once, and is enqueued for its destination when the worker sends it again', async () => {
     let failing = false;
     const h = harness({
       destinationsFor: async () => {
@@ -751,8 +751,10 @@ describe('a report whose application fails, and the worker\'s retry of it', () =
     const message = mockEventContext(runId, 'chat_message', { text: 'the agenda first', sender: 'participant-1' }, h.clock.now(), h.provider.tokenOf(runId));
     failing = true;
     await expect(h.manager.processProviderEvent('mock', message)).rejects.toThrow('destinations unavailable');
+    expect(h.seen.filter((e) => e.type === 'bot:chat_message')).toHaveLength(1); // the handlers had it before the destinations failed
     failing = false;
     expect(await h.manager.processProviderEvent('mock', message)).toEqual({ accepted: true, applied: 0 });
+    expect(h.seen.filter((e) => e.type === 'bot:chat_message')).toHaveLength(1);
     const deliveries = (await h.stores.outbox.listByRun(runId)).filter((d) => d.type === 'bot:chat_message');
     expect(deliveries).toHaveLength(1);
     expect(JSON.parse(deliveries[0].payload)).toMatchObject({ type: 'bot:chat_message', data: { text: 'the agenda first', sender: 'participant-1' } });
@@ -779,6 +781,8 @@ describe('the purge\'s last events', () => {
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', botName: '', billedSeconds: 20, purgedAt: expect.any(Number) });
     const ids = (await h.stores.outbox.listByRun(runId)).map((d) => d.id);
     expect(ids).toEqual(expect.arrayContaining([`${runId}:bot:purged@hook-1`, `${runId}:bot:done@hook-1`]));
+    // each reached the handlers once: bot:purged before its destinations failed, bot:done on the next pass
+    expect(h.seen.filter((e) => e.type === 'bot:purged')).toHaveLength(1);
     expect(h.seen.filter((e) => e.type === 'bot:done')).toHaveLength(1);
   });
 });

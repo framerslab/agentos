@@ -287,27 +287,29 @@ export class MeetingManager {
   }
 
   /**
-   * Delivers a stored event, with the run as it stands: a delivery to each of the owner's destinations, then every
-   * handler. A repeated event goes to the destinations again, which the outbox keeps once each (a delivery its first
-   * attempt never enqueued is enqueued now), and to no handler: a handler receives an event once.
+   * Delivers a stored event, with the run as it stands: to every handler, then a delivery to each of the owner's
+   * destinations. The handlers come first, so a destination lookup or an enqueue that fails cannot keep an event from
+   * them: a handler receives an event once, and a repeated event goes to no handler. A repeated event goes to the
+   * destinations again, which the outbox keeps once each, so a delivery its first attempt never enqueued is enqueued now.
    */
   private async deliver(stored: StoredEvent | undefined, run: MeetingRunRecord): Promise<void> {
     if (!stored) return;
     const { id, type, at, seq, data } = stored;
+    if (!stored.repeated) {
+      const event: MeetingManagerEvent = { type, runId: run.runId, run, seq, data };
+      for (const h of this.handlers) {
+        try {
+          const r = h(event);
+          if (r instanceof Promise) r.catch((err) => this.config.logger?.error(`[MeetingManager] handler: ${String(err)}`));
+        } catch (err) {
+          this.config.logger?.error(`[MeetingManager] handler: ${String(err)}`);
+        }
+      }
+    }
     if (this.config.destinationsFor) {
       const payload = JSON.stringify({ id, type, runId: run.runId, at, seq, data });
       for (const destinationRef of await this.config.destinationsFor(run.ownerRef)) {
         await this.stores.outbox.enqueue({ id: `${id}@${destinationRef}`, runId: run.runId, destinationRef, eventId: id, type, payload }, at);
-      }
-    }
-    if (stored.repeated) return;
-    const event: MeetingManagerEvent = { type, runId: run.runId, run, seq, data };
-    for (const h of this.handlers) {
-      try {
-        const r = h(event);
-        if (r instanceof Promise) r.catch((err) => this.config.logger?.error(`[MeetingManager] handler: ${String(err)}`));
-      } catch (err) {
-        this.config.logger?.error(`[MeetingManager] handler: ${String(err)}`);
       }
     }
   }
