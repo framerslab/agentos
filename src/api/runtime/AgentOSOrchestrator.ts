@@ -35,6 +35,7 @@ import {
   GMIOutput,
   GMIOutputChunkType,
 } from '../../cognition/substrate/IGMI';
+import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { ConversationContext } from '../../core/conversation/ConversationContext';
 import { MessageRole } from '../../core/conversation/ConversationMessage';
 // IToolOrchestrator — referenced via AgentOSOrchestratorDependencies
@@ -66,6 +67,7 @@ import {
 import { ExternalToolResultHandler } from './ExternalToolResultHandler';
 import { GMIChunkTransformer } from './GMIChunkTransformer';
 import { TurnExecutionPipeline } from './TurnExecutionPipeline';
+import { gmiToolCallGateFor } from './toolCallGate';
 
 // Public config types extracted to types/OrchestratorConfig.ts
 export type {
@@ -265,6 +267,15 @@ function buildToolCallChunkMetadata(
   }
 
   return metadata;
+}
+
+/** What AgentOS hands a turn, a continuation or a resumed turn from its output guardrails. */
+export interface AgentOSOrchestratorGuards {
+  /**
+   * Judges each call the GMI runs itself before the call runs, as the TOOL_CALL_REQUEST chunk the stream carries for
+   * it; a blocking evaluation refuses the call. Unset when no output guardrail sets `config.evaluateToolCalls`.
+   */
+  toolCallGate?: GuardrailToolCallGate;
 }
 
 type ResolvedAgentOSOrchestratorConfig = Required<
@@ -524,7 +535,7 @@ export class AgentOSOrchestrator {
    * @returns {Promise<StreamId>} The ID of the stream to which responses will be pushed.
    * @throws {GMIError} If critical initialization or setup fails.
    */
-  public async orchestrateTurn(input: AgentOSInput): Promise<StreamId> {
+  public async orchestrateTurn(input: AgentOSInput, guards: AgentOSOrchestratorGuards = {}): Promise<StreamId> {
     this.ensureInitialized();
     const agentOSStreamId = await this.dependencies.streamingManager.createStream();
     console.log(
@@ -541,7 +552,7 @@ export class AgentOSOrchestrator {
       },
     });
 
-    const run = async () => this._processTurnInternal(agentOSStreamId, input);
+    const run = async () => this._processTurnInternal(agentOSStreamId, input, guards.toolCallGate);
 
     const promise = rootSpan ? runWithSpanContext(rootSpan, run) : run();
 
@@ -596,7 +607,8 @@ export class AgentOSOrchestrator {
   public async orchestrateResumedToolResults(
     pendingRequest: AgentOSPendingExternalToolRequest,
     toolResults: AgentOSToolResultInput[],
-    options: AgentOSResumeExternalToolRequestOptions = {}
+    options: AgentOSResumeExternalToolRequestOptions = {},
+    guards: AgentOSOrchestratorGuards = {}
   ): Promise<StreamId> {
     this.ensureInitialized();
     const agentOSStreamId = await this.dependencies.streamingManager.createStream();
@@ -616,7 +628,7 @@ export class AgentOSOrchestrator {
     });
 
     const run = async () =>
-      this.toolResultHandler.resumeToolResultsInternal(agentOSStreamId, pendingRequest, toolResults, options);
+      this.toolResultHandler.resumeToolResultsInternal(agentOSStreamId, pendingRequest, toolResults, options, guards.toolCallGate);
 
     const promise = rootSpan ? runWithSpanContext(rootSpan, run) : run();
     promise
@@ -671,7 +683,8 @@ export class AgentOSOrchestrator {
    */
   private async _processTurnInternal(
     agentOSStreamId: StreamId,
-    input: AgentOSInput
+    input: AgentOSInput,
+    toolCallGate?: GuardrailToolCallGate
   ): Promise<void> {
     const turnStartedAt = Date.now();
     let turnMetricsStatus: 'ok' | 'error' = 'ok';
@@ -714,6 +727,12 @@ export class AgentOSOrchestrator {
 
       const { gmiInput, streamContext } = prepared;
       const longTermMemoryFeedbackPayload = prepared.longTermMemoryFeedbackPayload;
+
+      // The output guardrails' tool-call gate, which the GMI asks before each call it runs itself.
+      const gmiToolCallGate = gmiToolCallGateFor(toolCallGate, agentOSStreamId, gmiInstanceIdForChunks, streamContext);
+      if (gmiToolCallGate) {
+        gmiInput.metadata = { ...(gmiInput.metadata ?? {}), toolCallGate: gmiToolCallGate };
+      }
 
       let currentToolCallIteration = 0;
       let continueProcessing = true;
@@ -1193,10 +1212,11 @@ export class AgentOSOrchestrator {
    */
   public async orchestrateToolResults(
     agentOSStreamId: StreamId,
-    toolResults: AgentOSToolResultInput[]
+    toolResults: AgentOSToolResultInput[],
+    guards: AgentOSOrchestratorGuards = {}
   ): Promise<void> {
     this.ensureInitialized();
-    return this.toolResultHandler.orchestrateToolResults(agentOSStreamId, toolResults);
+    return this.toolResultHandler.orchestrateToolResults(agentOSStreamId, toolResults, guards.toolCallGate);
   }
 
   // processGMIOutput, transformAndPushGMIChunk, constructGMITurnInput, and

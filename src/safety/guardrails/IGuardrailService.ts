@@ -274,9 +274,13 @@ export interface GuardrailConfig {
    * - FLAG and ALLOW pass the chunk on with the evaluation in its
    *   `metadata.guardrail.output`.
    *
-   * A call the runtime executes itself (`executionMode: 'internal'`) does not
-   * wait for the output guards: a block ends the stream but does not stop
-   * that call.
+   * AgentOS also asks the guard about each call the runtime executes itself
+   * (`executionMode: 'internal'`) before the call runs, as a
+   * TOOL_CALL_REQUEST chunk holding that one call. A BLOCK (or a SANITIZE)
+   * refuses the call: the tool does not run, and the model receives a
+   * refused tool result (code `AUTH_PERMISSION_DENIED`), as it does for a
+   * permission refusal. The guard also judges the stream's chunk for that
+   * call, where a block ends the stream.
    *
    * When `false` (default), the guard never receives a tool-call chunk. The
    * flag is opt-in because a guard written for text may read any chunk it is

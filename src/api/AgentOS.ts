@@ -142,6 +142,7 @@ import { GuardrailAction } from '../safety/guardrails/IGuardrailService';
 import {
   evaluateInputGuardrails,
   createGuardrailBlockedStream,
+  createToolCallGate,
   wrapOutputGuardrails,
 } from '../safety/guardrails/guardrailDispatcher';
 import type { IPersonaLoader } from '../cognition/substrate/personas/IPersonaLoader';
@@ -2045,10 +2046,14 @@ export class AgentOS implements IAgentOS {
 
       // The orchestrator creates/manages the actual stream and starts pushing chunks to StreamingManager.
       // We get the streamId it uses so our bridge can listen to it.
-      streamIdToListen = await this.agentOSOrchestrator.orchestrateTurn({
-        ...orchestratorInput,
-        languageNegotiation,
-      } as any);
+      // the output guards that evaluate tool calls also judge each call the runtime runs itself, before it runs
+      streamIdToListen = await this.agentOSOrchestrator.orchestrateTurn(
+        {
+          ...orchestratorInput,
+          languageNegotiation,
+        } as any,
+        { toolCallGate: createToolCallGate(guardrailServices, guardrailContext) }
+      );
       await this.streamingManager.registerClient(streamIdToListen, bridge);
       this.logger.debug?.('Bridge registered', { bridgeId: bridge.id, streamId: streamIdToListen });
 
@@ -2277,14 +2282,18 @@ export class AgentOS implements IAgentOS {
         yield this.requiredGuardrailMissingChunk(continuationReport, streamId, identity?.personaId ?? 'unknown_persona');
         return;
       }
+      const continuationServices = this.getActiveGuardrailServices();
 
       // This call is `async Promise<void>`; it triggers the orchestrator to process the tool result(s)
-      // and push new chunks to the StreamingManager for the given streamId.
-      await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults);
+      // and push new chunks to the StreamingManager for the given streamId. The output guards that evaluate tool
+      // calls judge each call the continuation runs itself, before it runs.
+      await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults, {
+        toolCallGate: createToolCallGate(continuationServices, continuationContext),
+      });
 
       // Yield new chunks received by our bridge client on the same stream, through the same output guards a turn has
       const continuationKey = identity?.conversationId || identity?.sessionId || streamId;
-      const guardedContinuation = wrapOutputGuardrails(this.getActiveGuardrailServices(), continuationContext, bridge.consume(), {
+      const guardedContinuation = wrapOutputGuardrails(continuationServices, continuationContext, bridge.consume(), {
         streamId,
         personaId: identity?.personaId,
         holdUntilFinal: this.holdsOutputUntilFinal(),
@@ -2513,20 +2522,23 @@ export class AgentOS implements IAgentOS {
         yield this.requiredGuardrailMissingChunk(resumeReport, pendingRequest.streamId, pendingRequest.personaId);
         return;
       }
-      streamIdToListen = await this.agentOSOrchestrator.orchestrateResumedToolResults(
-        pendingRequest,
-        toolResults,
-        options
-      );
-      await this.streamingManager.registerClient(streamIdToListen, bridge);
-
       const resumeContext: GuardrailContext = {
         userId: pendingRequest.userId,
         sessionId: pendingRequest.sessionId,
         personaId: pendingRequest.personaId,
         conversationId: pendingRequest.conversationId,
       };
-      const guardedResume = wrapOutputGuardrails(this.getActiveGuardrailServices(), resumeContext, bridge.consume(), {
+      const resumeServices = this.getActiveGuardrailServices();
+      // the output guards that evaluate tool calls judge each call the resumed turn runs itself, before it runs
+      streamIdToListen = await this.agentOSOrchestrator.orchestrateResumedToolResults(
+        pendingRequest,
+        toolResults,
+        options,
+        { toolCallGate: createToolCallGate(resumeServices, resumeContext) }
+      );
+      await this.streamingManager.registerClient(streamIdToListen, bridge);
+
+      const guardedResume = wrapOutputGuardrails(resumeServices, resumeContext, bridge.consume(), {
         streamId: streamIdToListen,
         personaId: pendingRequest.personaId,
         holdUntilFinal: this.holdsOutputUntilFinal(),

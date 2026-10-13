@@ -28,9 +28,12 @@ import { MessageRole } from '../../core/conversation/ConversationMessage';
 import type {
   IGMI,
   GMIOutput,
+  GMIToolResultOptions,
   ToolCallRequest,
   ToolResultPayload,
 } from '../../cognition/substrate/IGMI';
+import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
+import { gmiToolCallGateFor } from './toolCallGate';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { normalizeUsage, snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import {
@@ -182,11 +185,14 @@ export class ExternalToolResultHandler {
    *
    * @param agentOSStreamId - The orchestrator stream ID.
    * @param toolResults - Array of tool results to process.
+   * @param toolCallGate - The output guardrails' tool-call gate, which the GMI asks before each call it runs itself in
+   *   the continuation.
    * @throws {GMIError} If the stream context is missing or processing fails.
    */
   async orchestrateToolResults(
     agentOSStreamId: StreamId,
     toolResults: AgentOSToolResultInput[],
+    toolCallGate?: GuardrailToolCallGate,
   ): Promise<void> {
     const startedAt = Date.now();
     if (!Array.isArray(toolResults) || toolResults.length === 0) {
@@ -212,6 +218,10 @@ export class ExternalToolResultHandler {
 
     const { gmi, userId, personaId, conversationContext, userApiKeys } = streamContext;
     const gmiInstanceIdForChunks = gmi.getGMIId();
+    const continuationGate = gmiToolCallGateFor(toolCallGate, agentOSStreamId, gmiInstanceIdForChunks, streamContext);
+    const continuationOptions: GMIToolResultOptions | undefined = continuationGate
+      ? { toolCallGate: continuationGate }
+      : undefined;
     const metricToolName =
       toolResults.length === 1 ? toolResults[0].toolName : '__batch_external_tools__';
     const metricToolSuccess = toolResults.every((tr) => tr.isSuccess);
@@ -346,6 +356,7 @@ export class ExternalToolResultHandler {
                   })),
                   userId,
                   userApiKeys || {},
+                  continuationOptions,
                 );
               }
 
@@ -369,6 +380,7 @@ export class ExternalToolResultHandler {
                 toolResultPayload,
                 userId,
                 userApiKeys || {},
+                continuationOptions,
               );
             },
           );
@@ -529,12 +541,14 @@ export class ExternalToolResultHandler {
    * @param pendingRequest - The persisted pending request snapshot.
    * @param toolResults - Tool results to feed back.
    * @param options - Runtime-only options for resumption (API keys, model prefs).
+   * @param toolCallGate - The output guardrails' tool-call gate, passed on to the continuation.
    */
   async resumeToolResultsInternal(
     agentOSStreamId: StreamId,
     pendingRequest: AgentOSPendingExternalToolRequest,
     toolResults: AgentOSToolResultInput[],
     options: AgentOSResumeExternalToolRequestOptions,
+    toolCallGate?: GuardrailToolCallGate,
   ): Promise<void> {
     if (!Array.isArray(toolResults) || toolResults.length === 0) {
       throw new GMIError(
@@ -610,7 +624,7 @@ export class ExternalToolResultHandler {
       },
     );
 
-    await this.orchestrateToolResults(agentOSStreamId, toolResults);
+    await this.orchestrateToolResults(agentOSStreamId, toolResults, toolCallGate);
   }
 
   // ---------------------------------------------------------------------------

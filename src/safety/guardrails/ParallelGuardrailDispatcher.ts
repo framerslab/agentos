@@ -40,6 +40,7 @@ import {
   GuardrailAction,
   type GuardrailContext,
   type GuardrailEvaluationResult,
+  type GuardrailOutputPayload,
   type IGuardrailService,
 } from './IGuardrailService';
 import type { GuardrailInputOutcome, GuardrailOutputOptions, GuardrailOutputVerdict } from './guardrailDispatcher';
@@ -213,6 +214,75 @@ function sanitizeOfToolCallAsBlock(
       ? `${evaluation.reason} [SANITIZE of a tool call applied as BLOCK]`
       : 'SANITIZE of a tool call applied as BLOCK: a tool call cannot be rewritten',
   };
+}
+
+/** A guardrail that evaluates tool calls, with its place in the registration order. */
+interface ToolCallGuard {
+  svc: IGuardrailService;
+  registrationIndex: number;
+}
+
+/**
+ * The verdict of the guardrails that evaluate tool calls on one TOOL_CALL_REQUEST chunk: the blocking evaluation, or
+ * every evaluation of a chunk they pass.
+ */
+export type GuardrailToolCallVerdict =
+  | { outcome: 'block'; evaluation: GuardrailEvaluationResult }
+  | { outcome: 'pass'; evaluations: GuardrailEvaluationResult[] };
+
+/** The services that evaluate tool calls: they implement `evaluateOutput` and set `config.evaluateToolCalls`. */
+function toolCallGuardsOf(services: IGuardrailService[]): ToolCallGuard[] {
+  const guards: ToolCallGuard[] = [];
+  services.forEach((svc, registrationIndex) => {
+    if (hasEvaluateOutput(svc) && svc.config?.evaluateToolCalls === true) {
+      guards.push({ svc, registrationIndex });
+    }
+  });
+  return guards;
+}
+
+/**
+ * The tool-call guards over one TOOL_CALL_REQUEST chunk, in parallel. Returns
+ * the first BLOCK by registration order (a SANITIZE counts as one), or every
+ * evaluation of a chunk they pass.
+ */
+async function evaluateToolCallGuards(
+  guards: ToolCallGuard[],
+  context: GuardrailContext,
+  chunk: AgentOSResponse,
+  ragSources: GuardrailOutputPayload['ragSources'],
+): Promise<GuardrailToolCallVerdict> {
+  const results = await Promise.allSettled(
+    guards.map(({ svc }) =>
+      callWithTimeout(
+        () => svc.evaluateOutput!({ context, chunk, ragSources }),
+        svc.config?.timeoutMs,
+        svc.config?.failClosed,
+      ),
+    ),
+  );
+
+  const evaluations: GuardrailEvaluationResult[] = [];
+  for (let j = 0; j < results.length; j++) {
+    const result = results[j];
+    if (result.status === 'rejected') {
+      console.warn('[AgentOS][Guardrails] Tool-call evaluateOutput rejected.', result.reason);
+      continue;
+    }
+    if (!result.value) {
+      continue;
+    }
+
+    const { svc, registrationIndex } = guards[j];
+    const evaluation = stampGuardrailId(sanitizeOfToolCallAsBlock(result.value, registrationIndex), svc);
+    evaluations.push(evaluation);
+
+    if (evaluation.action === GuardrailAction.BLOCK) {
+      return { outcome: 'block', evaluation };
+    }
+  }
+
+  return { outcome: 'pass', evaluations };
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +460,32 @@ export class ParallelGuardrailDispatcher {
   }
 
   // -----------------------------------------------------------------------
+  // evaluateToolCall
+  // -----------------------------------------------------------------------
+
+  /**
+   * Evaluate one TOOL_CALL_REQUEST chunk with the guardrails that evaluate
+   * tool calls (`config.evaluateToolCalls`), as {@link wrapOutput} evaluates
+   * the tool-call chunks of a stream: in parallel, a SANITIZE applied as a
+   * BLOCK, the first BLOCK in registration order the verdict. Services without
+   * the flag are not called.
+   *
+   * @param services   - Array of guardrail services (already normalized)
+   * @param context    - Conversational context for policy decisions
+   * @param chunk      - The tool-call chunk to evaluate
+   * @param ragSources - RAG sources to pass to the guardrails, when the caller has them
+   * @returns The blocking evaluation, or every evaluation of a chunk the guardrails pass
+   */
+  static async evaluateToolCall(
+    services: IGuardrailService[],
+    context: GuardrailContext,
+    chunk: AgentOSResponse,
+    ragSources?: GuardrailOutputPayload['ragSources'],
+  ): Promise<GuardrailToolCallVerdict> {
+    return evaluateToolCallGuards(toolCallGuardsOf(services), context, chunk, ragSources);
+  }
+
+  // -----------------------------------------------------------------------
   // wrapOutput
   // -----------------------------------------------------------------------
 
@@ -446,16 +542,12 @@ export class ParallelGuardrailDispatcher {
     /** Final classifiers: Phase 2 for isFinal chunks */
     const finalParallel: { svc: IGuardrailService; registrationIndex: number }[] = [];
     /** Tool-call guards: the services that opted in to TOOL_CALL_REQUEST chunks */
-    const toolCallGuards: { svc: IGuardrailService; registrationIndex: number }[] = [];
+    const toolCallGuards = toolCallGuardsOf(services);
 
     for (let i = 0; i < services.length; i++) {
       const svc = services[i];
       if (!hasEvaluateOutput(svc)) {
         continue;
-      }
-
-      if (svc.config?.evaluateToolCalls === true) {
-        toolCallGuards.push({ svc, registrationIndex: i });
       }
 
       const isStreaming = svc.config?.evaluateStreamingChunks === true;
@@ -630,39 +722,14 @@ export class ParallelGuardrailDispatcher {
       | { outcome: 'block'; evaluation: GuardrailEvaluationResult }
       | { outcome: 'pass'; chunk: AgentOSResponse }
     > => {
-      const results = await Promise.allSettled(
-        toolCallGuards.map(({ svc }) =>
-          callWithTimeout(
-            () => svc.evaluateOutput!({ context, chunk: chunkIn, ragSources: currentRagSources }),
-            svc.config?.timeoutMs,
-            svc.config?.failClosed,
-          ),
-        ),
-      );
-
-      const outputEvaluations: GuardrailEvaluationResult[] = [];
-      for (let j = 0; j < results.length; j++) {
-        const result = results[j];
-        if (result.status === 'rejected') {
-          console.warn('[AgentOS][Guardrails] Tool-call evaluateOutput rejected.', result.reason);
-          continue;
-        }
-        if (!result.value) {
-          continue;
-        }
-
-        const { svc, registrationIndex } = toolCallGuards[j];
-        const evaluation = stampGuardrailId(sanitizeOfToolCallAsBlock(result.value, registrationIndex), svc);
-        outputEvaluations.push(evaluation);
-
-        if (evaluation.action === GuardrailAction.BLOCK) {
-          return { outcome: 'block', evaluation };
-        }
+      const verdict = await evaluateToolCallGuards(toolCallGuards, context, chunkIn, currentRagSources);
+      if (verdict.outcome === 'block') {
+        return verdict;
       }
 
       const chunk =
-        outputEvaluations.length > 0
-          ? withGuardrailMetadata(chunkIn, { output: outputEvaluations.map(serializeEvaluation) })
+        verdict.evaluations.length > 0
+          ? withGuardrailMetadata(chunkIn, { output: verdict.evaluations.map(serializeEvaluation) })
           : chunkIn;
       return { outcome: 'pass', chunk };
     };
