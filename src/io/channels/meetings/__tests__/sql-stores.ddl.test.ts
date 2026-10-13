@@ -19,6 +19,8 @@ describe('meetingStoresDdl', () => {
     expect(names).toHaveLength(13);
     for (const name of names) expect(Buffer.byteLength(name)).toBeLessThanOrEqual(63);
     expect(ddl).toContain('  participant_count INTEGER,\n  leave_commanded_at BIGINT,\n  capture_suspended_at BIGINT,\n  alone_since BIGINT,');
+    expect(ddl).toContain('last_report_at BIGINT');
+    expect(ddl).toContain('last_usage_source_at BIGINT');
     expect(() => meetingStoresDdl('a'.repeat(39))).toThrow();
   });
   it.each(['transactions', 'persistence', 'concurrent'] as const)('refuses every store when the adapter lacks %s', (missing) => {

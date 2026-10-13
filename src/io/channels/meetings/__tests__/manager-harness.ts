@@ -55,11 +55,12 @@ export class FakeEntitlement implements IEntitlementHook {
   }
 }
 
-/** What a test may give the harness's manager besides its stores. */
-export interface HarnessOptions {
-  /** The owner's destinations; without it, nothing is enqueued in the outbox. */
-  destinationsFor?: MeetingManagerConfig['destinationsFor'];
-}
+/**
+ * What a test may give the harness's manager besides the stores, the room and the route the harness makes: the owner's
+ * destinations (without them, nothing is enqueued in the outbox) and any other option of the manager, such as
+ * `usageSilenceMs`. The manager and every `peer` take them as given; a test that gives none gets the manager's defaults.
+ */
+export type HarnessOptions = Partial<Omit<MeetingManagerConfig, 'stores' | 'room' | 'reportUrlFor'>>;
 
 /** A manager on fresh in-memory stores with the mock provider registered, a clock at 1000000 and its events collected. */
 export function harness(options: HarnessOptions = {}) {
@@ -68,7 +69,7 @@ export function harness(options: HarnessOptions = {}) {
   const entitlement = new FakeEntitlement();
   const rooms = new FakeRooms();
   const stores = { runs: new InMemoryRunStore(), jobs: new InMemoryJobStore(), transcript: new InMemoryTranscriptStore(), events: new InMemoryEventStore(), outbox: new InMemoryOutbox(), entitlement, clock };
-  const manager = new MeetingManager({ managerId: 'm1', stores, room: new MeetingRoom(rooms), reportUrlFor: (runId, p) => `https://product.test/events/${p}/${runId}`, destinationsFor: options.destinationsFor });
+  const manager = new MeetingManager({ managerId: 'm1', stores, room: new MeetingRoom(rooms), reportUrlFor: (runId, p) => `https://product.test/events/${p}/${runId}`, ...options });
   manager.registerProvider(provider);
   const seen: MeetingManagerEvent[] = [];
   manager.on((e) => {
@@ -79,7 +80,7 @@ export function harness(options: HarnessOptions = {}) {
     manager.processProviderEvent('mock', mockEventContext(runId, type, data, at, provider.tokenOf(runId)));
   /** Another manager on the same stores and provider: a second process, or the first one after a restart, with nothing of its memory. */
   const peer = (managerId: string) => {
-    const other = new MeetingManager({ managerId, stores, room: new MeetingRoom(rooms), reportUrlFor: (runId, p) => `https://product.test/events/${p}/${runId}`, destinationsFor: options.destinationsFor });
+    const other = new MeetingManager({ ...options, managerId, stores, room: new MeetingRoom(rooms), reportUrlFor: (runId, p) => `https://product.test/events/${p}/${runId}` });
     other.registerProvider(provider);
     return other;
   };
