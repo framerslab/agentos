@@ -1885,6 +1885,28 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
     expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
     await orchestrator.stopSession();
   });
+
+  it("ends the turn on the finals it holds when the turn-duration watchdog's end of speech comes", async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_300 });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Book a table for two.',
+    });
+    // The second utterance runs on: the server reports no end of speech for it.
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); // maxTurnDurationMs (30 s by default) without a turn
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two.');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
+    await orchestrator.stopSession();
+  });
 });
 
 describe('OpenAIRealtimeTranscriptionSTT: behind the failover chain of createVoiceProvidersFromEnv()', () => {
