@@ -119,3 +119,21 @@ describe.skipIf(!inCI && !existsSync(captureEntry))('the capture entry of hearin
     expect(graph.get(captureWorklet), `${fromDist(captureWorklet)} imports`).toEqual([]);
   });
 });
+
+/** Contracts permit Zod alone; all library edges stay inside the contracts directory. */
+const contractsEntry = path.join(distRoot, 'io', 'voice-platform', 'contracts', 'index.js');
+
+describe.skipIf(!inCI && !existsSync(contractsEntry))('the browser entry of voice contracts', () => {
+  it('imports only contract modules and Zod, never a server, provider or native entry', () => {
+    expect(existsSync(contractsEntry), `${fromDist(contractsEntry)} is not built`).toBe(true);
+    const graph = walk(contractsEntry);
+    const outside = [...graph].flatMap(([file, imports]) => imports
+      .filter((specifier) => !specifier.startsWith('./') && !specifier.startsWith('../') && specifier !== 'zod')
+      .map((specifier) => `${fromDist(file)} imports ${specifier}`));
+    expect(outside).toEqual([]);
+    for (const file of graph.keys()) expect(fromDist(file)).toMatch(/^io\/voice-platform\/contracts\//);
+    expect([...graph.keys()].map(fromDist)).toEqual(expect.arrayContaining([
+      'io/voice-platform/contracts/index.js', 'io/voice-platform/contracts/schemas.js', 'io/voice-platform/contracts/openapi.js',
+    ]));
+  });
+});
