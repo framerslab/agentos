@@ -46,6 +46,12 @@ export function getDeferredLightweightAgentCapabilities(
   return getDeferredCapabilities(config, 'agent');
 }
 
+/**
+ * The fields no surface enforces (see the capability contract), so the
+ * warning names neither the full runtime nor `agency()` for them.
+ */
+const ENFORCED_ON_NO_SURFACE: ReadonlySet<CapabilityKey> = new Set<CapabilityKey>(['security', 'permissions']);
+
 export function warnOnDeferredLightweightAgentCapabilities(
   config: Partial<BaseAgentConfig>,
   warn: (message: string) => void = console.warn,
@@ -56,10 +62,8 @@ export function warnOnDeferredLightweightAgentCapabilities(
   }
 
   const parts: string[] = [];
-  // No surface enforces `security` or `permissions`, so the runtime and
-  // agency() are not named for them.
-  const enforcedNowhere = deferredCapabilities.filter((key) => key === 'security' || key === 'permissions');
-  const others = deferredCapabilities.filter((key) => key !== 'memory' && !enforcedNowhere.includes(key));
+  const enforcedNowhere = deferredCapabilities.filter((key) => ENFORCED_ON_NO_SURFACE.has(key));
+  const others = deferredCapabilities.filter((key) => key !== 'memory' && !ENFORCED_ON_NO_SURFACE.has(key));
   if (others.length > 0) {
     parts.push(
       `agent() accepted config that requires the full AgentOS runtime or agency(): ${others.join(', ')}. `
