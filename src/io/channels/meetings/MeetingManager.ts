@@ -828,7 +828,7 @@ export class MeetingManager {
     return true;
   }
 
-  /** A kept run's content removed after `done`: the fences, the stores, the hooks, the provider's copies, the content-free row, `bot:purged`. A step that throws is the caller's to retry (the product's one purge path retries). */
+  /** A kept run's content removed after `done`: the fences, the stores, the hooks, the provider's copies, `bot:purged`, the content-free row. A step that throws is the caller's to retry (the product's one purge path retries). */
   private async purgeKept(run: MeetingRunRecord): Promise<boolean> {
     if (run.purgedAt !== undefined) return true;
     await this.stores.transcript.fence(run.runId);
@@ -840,8 +840,10 @@ export class MeetingManager {
     for (const hook of this.purgeHooks) await hook(run.runId);
     await this.providers.get(run.providerName)?.deleteRun({ runId: run.runId });
     const free = { ...contentFreeRun(run), purgedAt: this.now() };
-    await this.stores.runs.replace(free);
+    // the event goes out before the row is rewritten, the last step: a call whose event fails to go out leaves purgedAt
+    // unset, so the caller's retry runs the steps again and sends it, where after the rewrite a retry returns at once
     await this.emit('bot:purged', free, { reason: 'deleted' });
+    await this.stores.runs.replace(free);
     return true;
   }
 
@@ -1042,12 +1044,16 @@ export class MeetingManager {
       else await this.stores.entitlement.release(run.reservationId);
     }
     await this.stores.jobs.remove(runId);
-    // one write, `done` and the content-free row together as complete() and fail() write theirs: a failure after a first
-    // write of `done` would leave a done row holding the url, the bot's name and the notice, and nothing returns to a done run
-    const done = await this.stores.runs.update(runId, { ...contentFreeRun(run), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'done', doneAt: now, purgedAt: now, billedSeconds: billed, cleanupPending: false }, 'purging');
-    if (!done) return;
+    // The events go out before the last write: events that fail to go out leave the run purging, and the next pass runs
+    // these steps again, the events (stored once, delivered again) and the write with them. After the write nothing
+    // would return to a done run to send them, and no other path writes this run's end, so the events cannot announce
+    // an end that does not come.
+    const done: MeetingRunRecord = { ...contentFreeRun(run), state: 'done', doneAt: now, purgedAt: now, billedSeconds: billed };
     await this.emit('bot:purged', done, { reason: done.reason });
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
+    // one write, `done` and the content-free row together as complete() and fail() write theirs: a failure after a first
+    // write of `done` would leave a done row holding the url, the bot's name and the notice, and nothing returns to a done run
+    await this.stores.runs.update(runId, { ...done, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, cleanupPending: false }, 'purging');
   }
 
   // ── The limits ──

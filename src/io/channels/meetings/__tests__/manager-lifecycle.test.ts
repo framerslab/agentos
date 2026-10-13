@@ -571,6 +571,30 @@ describe('a report whose application fails, and the worker\'s retry of it', () =
   });
 });
 
+describe('the purge\'s last events', () => {
+  it('a purge whose last events fail to go out stays purging, and the next pass sends them and writes done', async () => {
+    let failing = false;
+    const h = harness({
+      destinationsFor: async () => {
+        if (failing) throw new Error('destinations unavailable');
+        return ['hook-1'];
+      },
+    });
+    const runId = await joined(h);
+    await h.manager.purgeRun(runId, 'stopped_by_owner');
+    await h.report(runId, 'left', { reason: 'stopped_by_owner', seconds: 20 });
+    failing = true;
+    await expect(h.manager.tick()).rejects.toThrow('destinations unavailable');
+    expect((await h.stores.runs.get(runId))?.state).toBe('purging');
+    failing = false;
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', botName: '', billedSeconds: 20, purgedAt: expect.any(Number) });
+    const ids = (await h.stores.outbox.listByRun(runId)).map((d) => d.id);
+    expect(ids).toEqual(expect.arrayContaining([`${runId}:bot:purged@hook-1`, `${runId}:bot:done@hook-1`]));
+    expect(h.seen.filter((e) => e.type === 'bot:done')).toHaveLength(1);
+  });
+});
+
 describe('an event on its way when the fence goes up', () => {
   it('a transcript stored behind a fence that went up on its way reaches the handlers without its words', async () => {
     const h = harness();
