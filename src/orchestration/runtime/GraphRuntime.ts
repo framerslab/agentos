@@ -26,7 +26,7 @@ import type {
   MissionGraphPatch,
 } from '../events/GraphEvent.js';
 import type { ICheckpointStore, Checkpoint } from '../checkpoint/ICheckpointStore.js';
-import { StateManager } from './StateManager.js';
+import { StateManager, type ParallelBranchWrites } from './StateManager.js';
 import { NodeScheduler } from './NodeScheduler.js';
 import { NodeExecutor, type NodeExecutionResult } from './NodeExecutor.js';
 import { safeEvaluateExpression } from './safeExpressionEvaluator.js';
@@ -218,10 +218,11 @@ export class GraphRuntime {
 
       // ── Parallel execution ───────────────────────────────────────────────
       // When multiple nodes are ready simultaneously (e.g. fan-out from START),
-      // execute them in parallel via Promise.all and merge their scratch updates
-      // using StateManager.mergeParallelBranches(). This is the key optimisation
-      // that makes fan-out/fan-in graphs like the parallel agency strategy
-      // actually run concurrently instead of sequentially.
+      // execute them in parallel via Promise.all and merge what they write to
+      // scratch and artifacts using StateManager.mergeParallelBranches(). This
+      // is the key optimisation that makes fan-out/fan-in graphs like the
+      // parallel agency strategy actually run concurrently instead of
+      // sequentially.
       //
       // Single-node batches fall through to the same code path (Promise.all
       // with a single element) so the logic is unified.
@@ -240,8 +241,8 @@ export class GraphRuntime {
       if (parallelBatchSize > 1) {
         const parallelReadyNodes = readyNodes.slice(0, parallelBatchSize);
         // Snapshot the state before fan-out so each branch starts from the
-        // same baseline. After all branches complete, we merge their scratch
-        // updates back into this baseline.
+        // same baseline. After all branches complete, we merge what each one
+        // wrote to scratch and artifacts back into this baseline.
         const baseState = state;
 
         // Collect events from parallel branches so we can yield them in order
@@ -305,17 +306,22 @@ export class GraphRuntime {
             if (result.scratchUpdate) {
               branchState = stateManager.updateScratch(branchState, result.scratchUpdate);
             }
-            if (result.artifactsUpdate) {
-              branchState = stateManager.updateArtifacts(branchState, result.artifactsUpdate);
-            } else if (result.success && result.output !== undefined && !result.routeTarget) {
+            let artifactsWrite: Record<string, unknown> | undefined = result.artifactsUpdate;
+            if (!artifactsWrite && result.success && result.output !== undefined && !result.routeTarget) {
               // Same default artifact promotion as the sequential path —
               // see the comment at the matching block below for context.
               const artifactKey =
                 typeof node.metadata?.outputAs === 'string' && node.metadata.outputAs.length > 0
                   ? node.metadata.outputAs
                   : nodeId;
-              branchState = stateManager.updateArtifacts(branchState, { [artifactKey]: result.output });
+              artifactsWrite = { [artifactKey]: result.output };
             }
+            if (artifactsWrite) {
+              branchState = stateManager.updateArtifacts(branchState, artifactsWrite);
+            }
+            // What this branch wrote: the merge after the batch takes these
+            // keys from its state, and none it only carried from `baseState`.
+            const writes: ParallelBranchWrites = { scratch: result.scratchUpdate, artifacts: artifactsWrite };
             events.push(...getResultEvents(result));
 
             // Check for interrupt / error in the parallel branch.
@@ -324,7 +330,7 @@ export class GraphRuntime {
               const terminationEvents: GraphEvent[] = [
                 { type: 'interrupt', nodeId, reason: 'human_approval' },
               ];
-              return { nodeId, events, branchState, earlyTermination: { type: 'interrupt' as const, events: terminationEvents } };
+              return { nodeId, events, branchState, writes, earlyTermination: { type: 'interrupt' as const, events: terminationEvents } };
             }
 
             if (!result.success) {
@@ -338,7 +344,7 @@ export class GraphRuntime {
                 type: 'error', nodeId,
                 error: { code: timeoutMs !== null ? 'NODE_TIMEOUT' : 'NODE_EXECUTION_FAILED', message: errorMessage },
               });
-              return { nodeId, events, branchState, earlyTermination: { type: 'error' as const, events: terminationEvents } };
+              return { nodeId, events, branchState, writes, earlyTermination: { type: 'error' as const, events: terminationEvents } };
             }
 
             events.push({ type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata });
@@ -375,6 +381,7 @@ export class GraphRuntime {
               nodeId,
               events,
               branchState,
+              writes,
               expansionRequests: [...(result.expansionRequests ?? [])],
             };
           }),
@@ -396,7 +403,7 @@ export class GraphRuntime {
 
         // Yield all collected events from parallel branches in order,
         // then merge branch states into the shared baseline.
-        const successfulBranches: GraphState[] = [];
+        const successfulBranches: Array<{ branchState: GraphState; writes: ParallelBranchWrites }> = [];
         let earlyTermination = false;
 
         for (const outcome of parallelOutcomes) {
@@ -427,17 +434,22 @@ export class GraphRuntime {
             break;
           }
 
-          successfulBranches.push(outcome.branchState);
+          successfulBranches.push(outcome);
         }
 
         if (earlyTermination) return;
 
         // Merge all branch states back into the baseline using StateManager.
-        // This is the merge step that makes parallel execution correct:
-        // each branch may have written to different scratch keys, and the
-        // reducer configuration determines how conflicts are resolved.
+        // This is the merge step that makes parallel execution correct: each
+        // branch contributes the scratch and artifacts keys it wrote, in batch
+        // order, and the reducer configuration determines how writes to the
+        // same key combine.
         if (successfulBranches.length > 0) {
-          state = stateManager.mergeParallelBranches(baseState, successfulBranches);
+          state = stateManager.mergeParallelBranches(
+            baseState,
+            successfulBranches.map((branch) => branch.branchState),
+            successfulBranches.map((branch) => branch.writes),
+          );
         }
 
         if (this.config.expansionHandler) {

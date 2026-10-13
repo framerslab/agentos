@@ -24,6 +24,18 @@ import type {
   MemoryView,
 } from '../ir/types.js';
 
+/**
+ * What one branch of a parallel batch wrote: the patches its node applied to
+ * `scratch` and `artifacts`. {@link StateManager.mergeParallelBranches} reads
+ * only their keys.
+ */
+export interface ParallelBranchWrites {
+  /** The patch the branch applied to `scratch`. */
+  scratch?: Readonly<Record<string, unknown>>;
+  /** The patch the branch applied to `artifacts`. */
+  artifacts?: Readonly<Record<string, unknown>>;
+}
+
 // ---------------------------------------------------------------------------
 // StateManager
 // ---------------------------------------------------------------------------
@@ -146,45 +158,82 @@ export class StateManager {
   }
 
   /**
-   * Merge the `scratch` partitions of one or more parallel branch states back into
-   * a single `GraphState`.
+   * Merge the `scratch` and `artifacts` partitions of one or more parallel branch
+   * states back into a single `GraphState`.
    *
-   * The algorithm walks every key present in any branch's scratch object and applies
-   * the registered reducer for that key (if any) against the accumulator.  When no
-   * reducer is registered, the last branch's value wins.
+   * Each branch started from `baseState`, so its state also holds every key it did
+   * not write. A branch contributes only the keys it wrote, so a value it carried
+   * from `baseState` never replaces another branch's write. The branches are merged
+   * in the order given: for each key a branch wrote, the reducer registered at
+   * `scratch.<key>` or `artifacts.<key>` (if any) combines the branch's value with
+   * the value merged so far, when there is one; otherwise the branch's value
+   * replaces it, so the last branch to write a key wins.
    *
-   * The `artifacts`, `memory`, `diagnostics`, `visitedNodes`, and `iteration` fields
-   * of `baseState` are preserved unchanged — the caller is responsible for merging
+   * The `memory`, `diagnostics`, `visitedNodes`, and `iteration` fields of
+   * `baseState` are preserved unchanged — the caller is responsible for merging
    * those separately if needed.
    *
-   * @param baseState    - State prior to the parallel fan-out (provides the baseline scratch).
+   * @param baseState    - State prior to the parallel fan-out (provides the baseline
+   *                       scratch and artifacts).
    * @param branchStates - States produced by each parallel branch.
-   * @returns New `GraphState` with the merged scratch partition.
+   * @param writes       - What each branch wrote, at the index of its state in
+   *                       `branchStates`: the `scratch` and `artifacts` patches its
+   *                       node applied. Only their keys are read; the values come from
+   *                       the branch states. A branch with no entry wrote nothing.
+   *                       Without `writes`, a branch's writes are the keys
+   *                       whose value differs from `baseState`'s (compared with
+   *                       `Object.is`), so a branch that writes the value a key held
+   *                       before the fan-out is taken as leaving the key alone.
+   * @returns New `GraphState` with the merged scratch and artifacts partitions.
    */
-  mergeParallelBranches(baseState: GraphState, branchStates: GraphState[]): GraphState {
-    const merged = { ...(baseState.scratch as any) };
-
-    for (const branch of branchStates) {
-      const branchScratch = branch.scratch as any;
-
-      for (const key of Object.keys(branchScratch)) {
-        const reducerKey = `scratch.${key}`;
-        const reducer = this.reducers[reducerKey];
-
-        if (reducer !== undefined && merged[key] !== undefined) {
-          merged[key] = this.applyReducer(reducer, merged[key], branchScratch[key]);
-        } else {
-          merged[key] = branchScratch[key];
-        }
-      }
-    }
-
-    return { ...baseState, scratch: merged };
+  mergeParallelBranches(
+    baseState: GraphState,
+    branchStates: GraphState[],
+    writes?: ReadonlyArray<ParallelBranchWrites | undefined>,
+  ): GraphState {
+    return {
+      ...baseState,
+      scratch: this.mergePartition('scratch', baseState, branchStates, writes),
+      artifacts: this.mergePartition('artifacts', baseState, branchStates, writes),
+    };
   }
 
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Merge one partition of the branch states onto `baseState`'s, as described on
+   * {@link mergeParallelBranches}.
+   */
+  private mergePartition(
+    partition: 'scratch' | 'artifacts',
+    baseState: GraphState,
+    branchStates: GraphState[],
+    writes: ReadonlyArray<ParallelBranchWrites | undefined> | undefined,
+  ): Record<string, unknown> {
+    const base = (baseState[partition] ?? {}) as Record<string, unknown>;
+    const merged: Record<string, unknown> = { ...base };
+
+    branchStates.forEach((branch, index) => {
+      const values = (branch[partition] ?? {}) as Record<string, unknown>;
+      const written = writes
+        ? Object.keys(writes[index]?.[partition] ?? {})
+        : Object.keys(values).filter((key) => !Object.is(values[key], base[key]));
+
+      for (const key of written) {
+        const reducer = this.reducers[`${partition}.${key}`];
+
+        if (reducer !== undefined && merged[key] !== undefined) {
+          merged[key] = this.applyReducer(reducer, merged[key], values[key]);
+        } else {
+          merged[key] = values[key];
+        }
+      }
+    });
+
+    return merged;
+  }
 
   /**
    * Dispatch to a {@link BuiltinReducer} strategy or call a custom {@link ReducerFn}.
