@@ -159,6 +159,19 @@ describe('a worker the manager cannot reach', () => {
     expect(await h.stores.runs.get(runId)).toMatchObject({ lastUsageAt: newer, lastUsageSourceAt: newer, reportedSeconds: 120 });
   });
 
+  it('keeps on the done row the total a done report gave after a left report that gave none, the total it settled', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    h.clock.advance(60_000);
+    let fails = 1;
+    h.entitlement.settleThrows = () => fails-- > 0;
+    await h.report(runId, 'left', { reason: 'ended' }); // no total: the cleanup bills the time in the call, and its settle fails
+    expect((await h.stores.runs.get(runId))?.state).toBe('left');
+    await h.report(runId, 'done', { seconds: 90 });
+    expect(h.entitlement.settled).toEqual([['res-1', 90]]);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', billedSeconds: 90, reportedSeconds: 90 });
+  });
+
   it('refuses a usage silence that is not a finite number of milliseconds above zero', () => {
     const h = harness();
     for (const usageSilenceMs of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {
