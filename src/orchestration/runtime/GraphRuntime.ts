@@ -369,13 +369,16 @@ export class GraphRuntime {
             }
 
             // Checkpoint AFTER (parallel branch).
+            const pendingEdges = this.resolvePendingEdgeIds(outEdges, targets);
+            let checkpointedAfter = false;
             if (node.checkpoint === 'after' || node.checkpoint === 'both' || graph.checkpointPolicy === 'every_node') {
               const checkpointId = await this.saveCheckpoint(
                 activeGraph, runId, nodeId, branchState, nodeResults,
-                completedNodes, skippedNodes, this.resolvePendingEdgeIds(outEdges, targets),
+                completedNodes, skippedNodes, pendingEdges,
               );
               branchState = this.attachCheckpointMetadata(branchState, checkpointId);
               events.push({ type: 'checkpoint_saved', checkpointId, nodeId });
+              checkpointedAfter = true;
             }
 
             return {
@@ -383,6 +386,8 @@ export class GraphRuntime {
               events,
               branchState,
               writes,
+              pendingEdges,
+              checkpointedAfter,
               expansionRequests: [...(result.expansionRequests ?? [])],
             };
           }),
@@ -418,7 +423,13 @@ export class GraphRuntime {
 
         // Yield all collected events from parallel branches in order,
         // then merge branch states into the shared baseline.
-        const successfulBranches: Array<{ branchState: GraphState; writes: ParallelBranchWrites }> = [];
+        const successfulBranches: Array<{
+          nodeId: string;
+          branchState: GraphState;
+          writes: ParallelBranchWrites;
+          pendingEdges?: string[];
+          checkpointedAfter?: boolean;
+        }> = [];
         let earlyTermination = false;
 
         for (const outcome of parallelOutcomes) {
@@ -467,6 +478,22 @@ export class GraphRuntime {
             successfulBranches.map((branch) => branch.branchState),
             successfulBranches.map((branch) => branch.writes),
           );
+
+          // A branch that saved a checkpoint after it ran saved its own copy of
+          // the state, and the nodes that checkpoint lists as completed can
+          // include siblings that finished before it. Save the merged state as
+          // well, so the last checkpoint of the batch holds what every branch
+          // wrote.
+          if (successfulBranches.some((branch) => branch.checkpointedAfter)) {
+            const checkpointNodeId = successfulBranches[successfulBranches.length - 1]!.nodeId;
+            const checkpointId = await this.saveCheckpoint(
+              activeGraph, runId, checkpointNodeId, state, nodeResults,
+              completedNodes, skippedNodes,
+              successfulBranches.flatMap((branch) => branch.pendingEdges ?? []),
+            );
+            state = this.attachCheckpointMetadata(state, checkpointId);
+            yield { type: 'checkpoint_saved', checkpointId, nodeId: checkpointNodeId };
+          }
         }
 
         if (this.config.expansionHandler) {
