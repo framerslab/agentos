@@ -62,6 +62,7 @@ export class CallTransportBinding extends EventEmitter implements IPlaybackTrans
       s.call.inferenceGeneration = g.inferenceGeneration; await tx.put('calls', row.id, s, row.version);
       this.current = { ...g };
     });
+    this.emit('generation', this.generation);
   }
   private async admission(binding: CredentialBinding): Promise<void> {
     await this.options.manager.tick(this.options.scopeId, this.options.callId);
