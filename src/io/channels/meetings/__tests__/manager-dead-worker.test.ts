@@ -89,6 +89,25 @@ describe('a worker the manager cannot reach', () => {
     expect(h.entitlement.released).toEqual(['res-1']);
   });
 
+  it('kills the worker a dispatch starts after the silence ended its run while the provider was answering', async () => {
+    const h = harness({ usageSilenceMs: 120_000 });
+    const sent = await h.manager.sendBot(h.request);
+    if (!sent.ok) throw new Error('send failed');
+    const runId = sent.run.runId;
+    let commandsBefore = -1;
+    h.provider.beforeDispatch = async () => {
+      // the provider takes the threshold to answer, and the upkeep ends the run meanwhile, before its worker exists
+      h.clock.advance(120_000);
+      await h.manager.reconcile();
+      commandsBefore = h.provider.commands.get(runId)?.length ?? 0;
+    };
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed' });
+    expect(h.provider.alive.has(runId)).toBe(true); // the provider started the worker after the run ended
+    expect(commandsBefore).toBeGreaterThanOrEqual(0);
+    expect(h.provider.commands.get(runId)?.slice(commandsBefore)).toEqual([{ name: 'kill' }]);
+  });
+
   it('a duplicate usage event and stop-monitor heartbeats cannot extend the usage clock', async () => {
     const h = harness({ usageSilenceMs: 120_000 });
     const runId = await joined(h);

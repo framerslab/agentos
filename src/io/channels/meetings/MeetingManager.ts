@@ -652,14 +652,40 @@ export class MeetingManager {
       clearInterval(timer);
     }
     await renewal;
-    if (leaseLost) return;
+    // a run that ended while the provider's call was in flight had its job removed, so the lease is lost or the dispatch
+    // is not recorded: the worker the provider started is killed, since nothing watches it any more
+    if (leaseLost) {
+      await this.killIfEnded(run);
+      return;
+    }
     const { recorded, cancelled } = await this.stores.jobs.markDispatched(run.runId, this.id, result.workerId);
-    if (!recorded) return;
+    if (!recorded) {
+      await this.killIfEnded(run);
+      return;
+    }
     // a report may have moved the run on while the provider's call was in flight: the worker's id is written whatever active state the run reached
     const dispatched = await this.stores.runs.update(run.runId, { dispatch: { ...withDispatch.dispatch!, workerId: result.workerId, providerRunRef: result.providerRunRef } }, ACTIVE_STATES);
-    if (dispatched?.state === 'dispatching') await this.emit('bot:dispatching', dispatched, { workerId: result.workerId });
+    if (!dispatched || dispatched.leftAt !== undefined) {
+      // an end recorded during the call whose cleanup has not removed the job yet: the same
+      await this.killIfEnded(run);
+      return;
+    }
+    if (dispatched.state === 'dispatching') await this.emit('bot:dispatching', dispatched, { workerId: result.workerId });
     // A cancellation received during dispatch becomes a leave in whichever active state the report reached.
     if (cancelled) await this.leaveCancelled(run.runId);
+  }
+
+  /**
+   * After the provider answered a dispatch: when the run ended while the call was in flight (the usage silence, a purge's
+   * kill deadline, or any other end that recorded the bot gone or removed the job), the worker the provider started has
+   * no report taken and no reconcile watching it, and is killed. A run still going keeps its worker, and so does one whose
+   * job another dispatcher took over when this one's lease ran out: that dispatcher finds the worker and records it.
+   */
+  private async killIfEnded(run: MeetingRunRecord): Promise<void> {
+    const current = await this.stores.runs.get(run.runId);
+    if (current && !TERMINAL_RUN_STATES.has(current.state) && current.leftAt === undefined) return;
+    this.config.logger?.warn(`[MeetingManager] ${run.runId}: the provider answered the dispatch after the run ended; its worker is killed`);
+    await this.sendCommand(run, { name: 'kill' });
   }
 
   /**
