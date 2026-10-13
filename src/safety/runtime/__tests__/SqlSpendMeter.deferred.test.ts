@@ -195,6 +195,50 @@ function suite(name: string, open: () => Promise<{ db: StorageAdapter; prefix: s
       expect(row?.state).toBe('reserved');
       expect(Number(row!.attempts)).toBe(2);
     });
+
+    it('drops a deferral when a heartbeat renews the lease while resolveExpired is asked, so the renewed lease stands', async () => {
+      const { db, prefix } = await open();
+      const optedIn: SqlSpendMeter = meter(db, prefix, {
+        resolveExpired: async (r): Promise<SpendExpiryDecision> => {
+          // the turn was alive after all: its heartbeat renews the lease to at(1, 1_000) while the pass waits on its resolver
+          await optedIn.heartbeat(r.operationId, at(1));
+          return { outcome: 'deferred', retryAt: at(1, 500), evidence };
+        },
+      });
+      await optedIn.reserve({ accountId: 'a', operationId: 'turn', now: at(0) });
+      expect(await optedIn.reconcile({ now: at(1) })).toEqual({ consumed: 0, released: 0, pending: 1, deferred: 0 });
+      // the row keeps the heartbeat's lease, with no fence and no deferral record
+      const row = await db.get<{ state: string; outcome: string | null; expires_at: number | string; usage_json: string | null }>(
+        `SELECT state, outcome, expires_at, usage_json FROM ${prefix}_reservations WHERE operation_id = 'turn'`,
+      );
+      expect(row).toMatchObject({ state: 'reserved', outcome: null, usage_json: null });
+      expect(Number(row!.expires_at)).toBe(at(1, 1_000));
+      // the deferral's next check would have come before the renewed lease ran out; nothing is due then
+      expect(await optedIn.reconcile({ now: at(1, 500) })).toEqual({ consumed: 0, released: 0, pending: 0, deferred: 0 });
+    });
+
+    it('keeps the later next check and evidence of a deferral another pass made while resolveExpired was asked', async () => {
+      const { db, prefix } = await open();
+      const first = { ...evidence, note: 'first pass' };
+      const other = meter(db, prefix, { resolveExpired: async (): Promise<SpendExpiryDecision> => ({ outcome: 'deferred', retryAt: at(5), evidence: first }) });
+      let meanwhile: SpendReconcileResult | undefined;
+      const optedIn = meter(db, prefix, {
+        resolveExpired: async (): Promise<SpendExpiryDecision> => {
+          // another opted-in pass reads the same hold and defers it to at(5) while this one waits on its resolver
+          meanwhile = await other.reconcile({ now: at(1) });
+          return { outcome: 'deferred', retryAt: at(2), evidence };
+        },
+      });
+      await optedIn.reserve({ accountId: 'a', operationId: 'call', requireFence: true, now: at(0) });
+      expect(await optedIn.reconcile({ now: at(1) })).toEqual({ consumed: 0, released: 0, pending: 1, deferred: 0 });
+      expect(meanwhile).toEqual({ consumed: 0, released: 0, pending: 1, deferred: 1 });
+      const row = await db.get<{ state: string; outcome: string | null; expires_at: number | string; usage_json: string | null }>(
+        `SELECT state, outcome, expires_at, usage_json FROM ${prefix}_reservations WHERE operation_id = 'call'`,
+      );
+      expect(row).toMatchObject({ state: 'reserved', outcome: 'deferred' });
+      expect(Number(row!.expires_at)).toBe(at(5));
+      expect(JSON.parse(row!.usage_json!)).toEqual({ deferral: { count: 1, evidence: first } });
+    });
   });
 }
 
