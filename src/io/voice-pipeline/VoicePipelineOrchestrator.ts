@@ -580,28 +580,42 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Reports a failure as `'error'` when something listens for it, and otherwise as a console warning: an `'error'`
-   * that nothing listens for would throw. An `'error'` listener that throws is written as a console warning too, with
-   * the failure it was handed, since the failures are reported from an async event handler or a promise's rejection
-   * handler, where a throw would become an unhandled rejection.
+   * that nothing listens for would throw. The failure goes to the `errorMonitor` listeners and then to each `'error'`
+   * listener in order, as `emit('error')` hands it, except that a listener that throws or rejects is written as a
+   * console warning, with the failure it was handed, and the listeners after it still run: the failures are reported
+   * from an async event handler or a promise's rejection handler, where a listener's throw or rejection would become an
+   * unhandled rejection, and `emit()` does not hand back what a listener returns.
    *
    * @param err - The failure; anything other than an `Error` is wrapped in one.
    * @param what - What failed, for the console warning.
    */
   private _reportError(err: unknown, what: string): void {
     const error = err instanceof Error ? err : new Error(String(err));
-    if (this.listenerCount('error') === 0) {
+    const listeners = this.rawListeners('error');
+    if (listeners.length === 0) {
       console.warn(`[voice-pipeline-orchestrator] ${what}:`, error.message);
       return;
     }
-    try {
-      this.emit('error', error);
-    } catch (thrown) {
+    const warnListenerFailed = (thrown: unknown): void => {
       const listenerFailure = thrown instanceof Error ? thrown.message : String(thrown);
       console.warn(
         `[voice-pipeline-orchestrator] ${what}:`,
         error.message,
-        `(an 'error' listener threw: ${listenerFailure})`
+        `(an 'error' listener failed: ${listenerFailure})`
       );
+    };
+    try {
+      this.emit(EventEmitter.errorMonitor, error);
+    } catch (thrown) {
+      warnListenerFailed(thrown);
+    }
+    for (const listener of listeners) {
+      try {
+        const result: unknown = (listener as (error: Error) => unknown).call(this, error);
+        if (result instanceof Promise) result.catch(warnListenerFailed);
+      } catch (thrown) {
+        warnListenerFailed(thrown);
+      }
     }
   }
 

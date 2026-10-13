@@ -23,7 +23,8 @@
  * - A turn_complete listener that stops the session leaves it closed, and no turn is taken
  * - A turn_complete listener that throws is reported; the listeners after it run and the turn is taken
  * - A transport send that rejects is reported once as 'error' and the turn goes on; with nothing listening
- *   for 'error', or with an 'error' listener that throws, it is written as a console warning that names the failure
+ *   for 'error' it is written as a console warning that names the failure, as is an 'error' listener that
+ *   throws or rejects, and the listeners after that one still get the failure
  * - Of the audio chunks a transport refuses, the first of each reply is reported and the rest of that reply's
  *   are not, whatever order the replies' sends settle in; a refused control message is reported each time
  */
@@ -592,6 +593,47 @@ describe('VoicePipelineOrchestrator', () => {
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  /**
+   * The failures are reported from an async event handler or a promise's rejection handler, where an 'error'
+   * listener's throw or rejection would become an unhandled rejection. Each is written as a console warning instead,
+   * and the listeners after it still get the failure.
+   */
+  it("hands a failed send to every 'error' listener and writes one that throws or rejects as a console warning", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const refused = new Error('the socket is closing');
+      vi.mocked(transport.sendControl).mockRejectedValue(refused);
+      await startSession();
+      const seen: unknown[] = [];
+      orchestrator.on('error', () => {
+        throw new Error('the first listener threw');
+      });
+      orchestrator.on('error', async () => {
+        throw new Error('the second listener rejected');
+      });
+      orchestrator.on('error', (err: unknown) => seen.push(err));
+
+      sttSession.emit('transcript', { text: 'hello', confidence: 0.9, words: [], isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(seen).toEqual([refused]);
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
+        expect.stringMatching(/the socket is closing.*the first listener threw/),
+        expect.stringMatching(/the socket is closing.*the second listener rejected/),
+      ]);
+      expect(orchestrator.state).toBe('listening');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      warn.mockRestore();
     }
   });
 });
