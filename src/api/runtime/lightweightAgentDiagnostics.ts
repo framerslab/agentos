@@ -56,7 +56,10 @@ export function warnOnDeferredLightweightAgentCapabilities(
   }
 
   const parts: string[] = [];
-  const others = deferredCapabilities.filter((key) => key !== 'memory');
+  // No surface enforces `security` or `permissions`, so the runtime and
+  // agency() are not named for them.
+  const enforcedNowhere = deferredCapabilities.filter((key) => key === 'security' || key === 'permissions');
+  const others = deferredCapabilities.filter((key) => key !== 'memory' && !enforcedNowhere.includes(key));
   if (others.length > 0) {
     parts.push(
       `agent() accepted config that requires the full AgentOS runtime or agency(): ${others.join(', ')}. `
@@ -66,6 +69,12 @@ export function warnOnDeferredLightweightAgentCapabilities(
   // agency() does not apply `memory` either: only the GMI path reads it.
   if (deferredCapabilities.includes('memory')) {
     parts.push("agent() applies memory only with runtime: 'gmi' (cognitive memory for its sessions); this agent does not apply it.");
+  }
+  if (enforcedNowhere.length > 0) {
+    parts.push(
+      `agent() accepted ${enforcedNowhere.join(' and ')}, which no AgentOS surface enforces; `
+        + 'gate tools with hitl.approvals.beforeTool on agency() or an onBeforeToolExecution hook.',
+    );
   }
   warn(`[AgentOS] ${parts.join(' ')}`);
 
