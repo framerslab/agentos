@@ -148,7 +148,11 @@ export class DispatchRefusedError extends Error {
   }
 }
 
-/** Thrown by a provider's `dispatch` when no worker has a slot. */
+/**
+ * Thrown by a provider's `dispatch` when no worker has a slot. As with any {@link DispatchRefusedError}, the manager
+ * ends the run at once with `no_capacity`, and the message reaches the host as the `message` of the run's `bot:left`
+ * event, so it carries nothing of the meeting.
+ */
 export class NoCapacityError extends DispatchRefusedError {
   /** @param message - Why no worker took the run. */
   constructor(message = 'no worker has a free slot') {
