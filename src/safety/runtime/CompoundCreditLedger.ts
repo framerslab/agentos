@@ -65,6 +65,13 @@ export const promotionsFirstPolicy: AllocationPolicy = (lots, at) => {
   return [...promotions, ...paid];
 };
 
+/**
+ * The supplier-day key every reservation locks before it reads the open supplier liability. That liability spans every
+ * day, so admissions queue on this one platform-wide row: the row of the reservation's own day would let two
+ * reservations on either side of midnight both read it before either holds.
+ */
+const SUPPLIER_ADMISSION_KEY = 'admission';
+
 /** Throws unless `value` is a whole number at least `min`. */
 function whole(name: string, value: number, min = 0): void {
   if (!Number.isSafeInteger(value) || value < min) throw new RangeError(`${name} must be a whole number of at least ${min}, not ${value}`);
@@ -193,7 +200,9 @@ export type ReserveCompoundCreditResult =
 /**
  * Reserves a call's most before any room, dispatch or model work: the liability is quoted here from the rates and
  * limits, the customer's side is allocated to lots in the policy's order, and the supplier's side is checked against
- * the platform's daily cap together with every hold still open, whatever day it was made on. Idempotent per operation.
+ * the platform's daily cap together with every hold still open, whatever day it was made on. Reservations that reach
+ * that check take it one at a time, on one platform-wide lock, so two on different UTC days never both read the open
+ * liability before either holds. Idempotent per operation.
  */
 export async function reserveCompoundCredit(store: ICompoundCreditStore, input: ReserveCompoundCreditInput): Promise<ReserveCompoundCreditResult> {
   whole('supplierDailyCapMicro', input.supplierDailyCapMicro, 0);
@@ -213,6 +222,7 @@ export async function reserveCompoundCredit(store: ICompoundCreditStore, input: 
     const availableMicro = ordered.reduce((sum, lot) => sum + lotFreeMicro(lot), 0);
     if (account.frozen) return { status: 'refused', reason: 'account_frozen', availableMicro, liability };
     if (availableMicro < liability.customerMicro) return { status: 'refused', reason: 'insufficient_credit', availableMicro, liability };
+    await trx.lockSupplierDay(SUPPLIER_ADMISSION_KEY);
     const day = await trx.lockSupplierDay(creditDay(input.at));
     const open = await trx.openSupplierMicro();
     if (day.settledMicro + open + liability.supplierMicro > input.supplierDailyCapMicro) {
