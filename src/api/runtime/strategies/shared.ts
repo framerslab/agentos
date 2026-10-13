@@ -2,11 +2,12 @@
  * @file shared.ts
  * Shared utilities for strategy compilers.
  *
- * Centralises `isAgent()`, `mergeDefaults()`, `resolveAgent()`, and
- * `checkBeforeAgent()` so every strategy compiler uses a single implementation.
- * This avoids subtle divergence in how configs are merged or how HITL gates
- * are evaluated across sequential, parallel, debate, review-loop, and
- * hierarchical strategies.
+ * Centralises `isAgent()`, `mergeDefaults()`, `resolveAgent()`, and the
+ * `beforeAgent` gate, `checkBeforeAgentInput()` (with `checkBeforeAgent()`
+ * beside it for a caller that sends the input as given), so every strategy
+ * compiler uses a single implementation. This avoids subtle divergence in how
+ * configs are merged or how HITL gates are evaluated across the sequential,
+ * parallel, debate, review-loop, hierarchical and graph strategies.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects and invokes strategy compilers.
  */
