@@ -376,4 +376,22 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
     expect(handler).toHaveBeenCalledOnce();
     expect(handler.mock.calls[0][0]).toMatchObject({ transcript: 'Book a table for two.', reason: 'punctuation' });
   });
+
+  it('waits at most the silence timeout for a missing final after the clock is set back', () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end')); // this utterance's final never comes
+    vi.setSystemTime(Date.now() - 60_000); // the clock is set back a minute
+    detector.pushTranscript(itemFinal('Book a table for two.', 'item_A', 0));
+
+    vi.advanceTimersByTime(999);
+    expect(handler).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0].transcript).toBe('Book a table for two.');
+  });
 });

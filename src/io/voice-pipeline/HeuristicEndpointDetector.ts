@@ -545,11 +545,15 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
   /**
    * Drop the `speech_end` events that have waited the silence timeout for an
-   * item-keyed final.
+   * item-keyed final. A clock set back counts as no silence yet, as in
+   * `_startSilenceTimer`: a `speech_end` recorded later than `now` waits
+   * from `now`, so a step back delays the turn by at most one more silence
+   * timeout, not by the size of the step.
    *
    * @param now - The current time on this detector's clock.
    */
   private _dropExpiredSpeechEnds(now: number): void {
+    this.unansweredSpeechEnds = this.unansweredSpeechEnds.map((at) => Math.min(at, now));
     while (
       this.unansweredSpeechEnds.length > 0 &&
       now - this.unansweredSpeechEnds[0] >= this.silenceTimeoutMs
