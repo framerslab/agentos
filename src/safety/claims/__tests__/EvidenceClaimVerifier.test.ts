@@ -85,4 +85,15 @@ describe('the evidence-claim contract', () => {
     expect(() => new EvidenceClaimVerifier({ adapters: [supported('route'), supported('route')] })).toThrow(/two adapters/);
     expect(() => new EvidenceClaimVerifier({ adapters: [supported('similarity' as EvidenceKind)] })).toThrow(/unknown kind/);
   });
+
+  it('refuses a claim whose adapter throws before it returns a promise, and still checks the claims after it', async () => {
+    const eager: EvidenceAdapter = { kind: 'route', check: () => { throw new Error('no read'); } };
+    const verifier = new EvidenceClaimVerifier({ adapters: [eager, supported('test')] });
+    const report = await verifier.verify(
+      [claim('a.primary', ['route', 'r']), claim('b.primary', ['test', 't'])],
+      [record('route', 'r', {}), record('test', 't', {})],
+    );
+    expect(report.results.map((r) => r.failures.map((f) => [f.code, f.detail]))).toEqual([[['adapter_error', 'no read']], []]);
+    expect(report.results.map((r) => r.authorized)).toEqual([false, true]);
+  });
 });
