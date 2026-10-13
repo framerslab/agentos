@@ -698,9 +698,10 @@ export interface TurnCompleteEvent {
  * A detector that drops such a final from its turns emits `'late_final'`
  * with the final as it was pushed, once per final it drops
  * ({@link HeuristicEndpointDetector} does, for an item-keyed final that
- * arrives after a reset ended its turn and before speech ends again, while
- * the next utterance is spoken included). `VoicePipelineOrchestrator` does
- * not listen for it, so the conversation leaves those words out;
+ * arrives after a reset ended its turn and before the next `speech_end` or a
+ * standalone VAD's next `speech_start`, while the transcriber's next
+ * utterance is spoken included). `VoicePipelineOrchestrator` does not
+ * listen for it, so the conversation leaves those words out;
  * `startListenSession` writes the final to its sink as a turn of its own.
  *
  * @see {@link HeuristicEndpointDetector} for the rule-based implementation.

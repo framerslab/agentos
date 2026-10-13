@@ -18,7 +18,8 @@
  * - reset() clears accumulated text and cancels pending timers
  * - Finals keyed by item, as OpenAI Realtime sends them after each end of speech
  * - An item final that comes before its end of speech, and one left over from a completed turn, reported as late_final,
- *   also when it arrives while the next utterance is spoken
+ *   also when it arrives while the transcriber reports the next utterance; a standalone VAD's start of speech ends
+ *   that window
  *
  * The silence_timeout cases use a 100 ms detector instance and a short
  * setTimeout await -- fast enough for CI while remaining deterministic. The
@@ -642,6 +643,26 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
     expect(handler).toHaveBeenCalledTimes(2);
     expect(handler.mock.calls[1][0]).toMatchObject({ transcript: 'Then lunch.', reason: 'punctuation' });
     expect(late).not.toHaveBeenCalled();
+  });
+
+  it("keeps an utterance's final that comes before a standalone VAD reports the end of speech, after a completed turn", () => {
+    const handler = vi.fn();
+    const late = vi.fn();
+    detector.on('turn_complete', handler);
+    detector.on('late_final', late);
+
+    // The host drives the detector with its own VAD (source 'vad'), whose speech events pair with no final.
+    detector.pushVadEvent(speechStart());
+    detector.pushTranscript(itemFinal('Book a table for two.', 'item_A', 0));
+    detector.pushVadEvent(speechEnd());
+    expect(handler).toHaveBeenCalledOnce();
+
+    detector.pushVadEvent(speechStart());
+    detector.pushTranscript(itemFinal('What about Friday?', 'item_B', 6_000)); // before the VAD reports the end
+    detector.pushVadEvent(speechEnd());
+    expect(late).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(handler.mock.calls[1][0]).toMatchObject({ transcript: 'What about Friday?', reason: 'punctuation' });
   });
 
   it("keeps an utterance's slow final when a reset came while the utterance was spoken", () => {
