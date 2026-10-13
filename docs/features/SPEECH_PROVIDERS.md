@@ -164,7 +164,8 @@ const stt = createSttChain(['openai:gpt-4o-transcribe', 'openai:gpt-4o-mini-tran
 const session = await stt.startSession({ language: 'en' });
 
 sttEntryPricePerMinute('openai:gpt-4o-transcribe'); // 0.006 US dollars a minute
-sttEntryPricePerMinute('deepgram:nova-3'); // undefined: no price row
+sttEntryPricePerMinute('deepgram:nova-3'); // 0.0077 US dollars a minute
+sttEntryPricePerMinute('elevenlabs:scribe_v2'); // undefined: no price row
 ```
 
 **The entry.** An entry is `<vendor>:<model>`: a vendor of `STT_CHAIN_VENDORS` (`openai`, `deepgram`, `elevenlabs`), a colon, and the model's name in letters, digits, `.`, `_` and `-`. `parseSttEntry(entry)` returns `{ vendor, model }` and throws a `RangeError` for any other shape, a vendor outside the list included. Its module imports nothing, so the browser entry, `@framers/agentos/io/voice-pipeline/browser`, exports it as well, and a page can hold a list of entries to the rule the server builds them by.
@@ -181,7 +182,7 @@ sttEntryPricePerMinute('deepgram:nova-3'); // undefined: no price row
 | `deepgram` | [`DeepgramStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/DeepgramStreamingSTT.ts) | `options.deepgram` |
 | `elevenlabs` | [`ElevenLabsStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/ElevenLabsStreamingSTT.ts) | `options.elevenlabs` |
 
-**Prices.** `sttEntryPricePerMinute(entry)` gives the US dollars a minute of an entry's audio from the providers' price rows, and `undefined` for an entry with no row; Deepgram and ElevenLabs entries have none. Like `createSttChain`, it throws a `RangeError` for an entry `parseSttEntry` refuses, such as `device:moonshine-auto` (a vendor outside `STT_CHAIN_VENDORS`) or `openai` (no model). OpenAI's rows are `OPENAI_TRANSCRIPTION_PRICING` in [`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), from [OpenAI's pricing page](https://developers.openai.com/api/docs/pricing) as read on 8 October 2026:
+**Prices.** `sttEntryPricePerMinute(entry)` gives the US dollars a minute of an entry's audio from the providers' price rows, and `undefined` for an entry with no row; ElevenLabs entries have none. Like `createSttChain`, it throws a `RangeError` for an entry `parseSttEntry` refuses, such as `device:moonshine-auto` (a vendor outside `STT_CHAIN_VENDORS`) or `openai` (no model). OpenAI's rows are `OPENAI_TRANSCRIPTION_PRICING` in [`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), from [OpenAI's pricing page](https://developers.openai.com/api/docs/pricing) as read on 8 October 2026:
 
 | Model | US dollars a minute |
 |---|---|
@@ -192,6 +193,14 @@ sttEntryPricePerMinute('deepgram:nova-3'); // undefined: no price row
 | `gpt-realtime-whisper` | 0.017 |
 
 A dated snapshot without a row of its own (the model's name followed by `-YYYY-MM-DD`) takes its base model's price.
+
+Deepgram's rows are `DEEPGRAM_STREAMING_PRICING` in [`deepgramPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/deepgramPricing.ts): the pay-as-you-go price a minute of streamed audio that [Deepgram's pricing page](https://deepgram.com/pricing) lists, as read on 12 October 2026. The page shows a lower current price for a limited time beside the regular price; the row holds the regular price, so a spending bound read from it still holds when the offer ends:
+
+| Model | US dollars a minute |
+|---|---|
+| `nova-3` | 0.0077 |
+
+The row is the price of Nova-3 Monolingual. Deepgram's pricing page lists Nova-3 Multilingual higher, and a `nova-3` session started with `language: 'multi'` transcribes several languages ([multilingual code switching](https://developers.deepgram.com/docs/multilingual-code-switching)): a host that runs a Deepgram entry that way prices it from Deepgram's page, not from the row. Any other Deepgram model, `nova-2` among them, has no row. `deepgramStreamingPricing(model)` reads only the table's own rows, so a model named after a property every object inherits, such as `constructor`, has none, and the table is frozen. `DEEPGRAM_STREAMING_PRICING` and `deepgramStreamingPricing` are exported from `@framers/agentos/io/voice-pipeline`, from `@framers/agentos/safety/runtime` and from `@framers/agentos`.
 
 ---
 
