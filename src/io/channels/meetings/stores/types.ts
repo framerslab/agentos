@@ -181,7 +181,7 @@ export interface IOutbox {
   due(now: number, limit?: number): Promise<OutboxDelivery[]>;
   /** Records that the destination took the delivery. */
   markDelivered(id: string): Promise<void>;
-  /** Records a failed attempt: due again after the backoff of {@link nextAttemptAt}, or `dead` a day after the first failed attempt. */
+  /** Records a failed attempt: due again after the backoff of {@link nextAttemptAt}, or `dead` a day after the first failed attempt. A delivery that is no longer pending, delivered or dead, is left as it is. */
   markFailed(id: string, now: number): Promise<void>;
   /** Makes a delivery pending again, due at `now`, with its attempts counted afresh (a manual replay). */
   replay(id: string, now: number): Promise<void>;

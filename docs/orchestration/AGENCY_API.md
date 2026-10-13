@@ -74,7 +74,9 @@ run limits (the token, cost, time and call limits on `controls`, checked when a
 run ends and before the next one starts) and structured Zod output (`output`).
 These apply to the team rather than per-agent. `agency()` accepts
 `guardrails`, `security`, `permissions`, `observability`, `rag` and `memory`
-without applying them; the full runtime configures each of these itself.
+without applying them. The full runtime sets guardrails, observability,
+retrieval and memory through its own config, and no surface acts on
+`security` or `permissions`.
 
 ```mermaid
 graph TB

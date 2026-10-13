@@ -33,13 +33,18 @@ export type CapabilityKey = (typeof CAPABILITY_KEYS)[number];
 
 export const BASE_AGENT_CONFIG_CAPABILITY_CONTRACT = {
   tools: { agent: 'enforced', generation: 'enforced', runtime: 'enforced', gmi: 'enforced' },
-  // agent() reads `memory` only with runtime: 'gmi', which is the `gmi` surface.
-  memory: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'enforced' },
+  // The default runtime reads the working callback; store settings remain deferred.
+  memory: { agent: 'partially_enforced', generation: 'runtime_only', runtime: 'enforced', gmi: 'enforced' },
   rag: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
   discovery: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
   guardrails: { agent: 'accepted_but_deferred', generation: 'partially_enforced', runtime: 'enforced', gmi: 'accepted_but_deferred' },
-  security: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
-  permissions: { agent: 'accepted_but_deferred', generation: 'partially_enforced', runtime: 'enforced', gmi: 'accepted_but_deferred' },
+  // Nothing in AgentOS reads `security` or `permissions` (see SecurityTier and
+  // PermissionsConfig in types.ts), so no surface enforces them, and both rows
+  // are deferred on every surface. GenerateTextOptions and AgentOSConfig do not
+  // declare either field: the full runtime's own tool permission checks are
+  // configured through `toolPermissionManagerConfig`.
+  security: { agent: 'accepted_but_deferred', generation: 'accepted_but_deferred', runtime: 'accepted_but_deferred', gmi: 'accepted_but_deferred' },
+  permissions: { agent: 'accepted_but_deferred', generation: 'accepted_but_deferred', runtime: 'accepted_but_deferred', gmi: 'accepted_but_deferred' },
   hitl: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
   emergent: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
   voice: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'runtime_only' },

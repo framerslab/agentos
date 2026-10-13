@@ -78,8 +78,9 @@ export interface ListenSession extends EventEmitter {
   /** The counts so far. */
   stats(): ListenSessionStats;
   /**
-   * `stopped` flushes the transcriber, waits `drainMs`, then waits for a pending detector turn up to
-   * its `turnCompletionTimeoutMs` (3250 ms if omitted), plus one timer tick, before resetting. `purged` drops everything
+   * `stopped` first releases a transport pause the session asked for, so the frames the transport held reach the
+   * transcriber, then flushes it, waits `drainMs`, then waits for a pending detector turn up to its
+   * `turnCompletionTimeoutMs` (3250 ms if omitted), plus one timer tick, before resetting. `purged` drops everything
    * queued without draining. Every end releases an outstanding transport pause; resolves at `ended`.
    */
   close(reason?: ListenEndReason): Promise<void>;
@@ -169,6 +170,9 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
     endPromise = new Promise<void>((resolve, reject) => { resolveEnd = resolve; rejectEnd = reject; });
     void (async () => {
       if (reason === 'stopped') {
+        // a pause the session asked for is released first, while audio is still taken: the frames the transport held
+        // reach the transcriber before its flush, not after the session has stopped listening
+        resume();
         // the transcriber is flushed and its last finals are still written
         state = 'draining';
         try {

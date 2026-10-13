@@ -137,6 +137,21 @@ export function meetingStoreContract(name: string, make: () => Promise<ContractS
         for (let i = 0; i < 20; i++) await o.markFailed('d1', 86_400_000 + i);
         expect((await o.listByRun('r1')).find((d) => d.id === 'd1')?.state).toBe('dead');
       });
+      it('a failure reported after the destination took a delivery, or after it was given up, changes nothing', async () => {
+        const o = stores.outbox;
+        await o.enqueue({ id: 'd1', runId: 'r1', destinationRef: 'hook-1', eventId: 'e1', type: 'bot:done', payload: '{}' }, 0);
+        await o.markDelivered('d1');
+        await o.markFailed('d1', 10); // a sender that lost the race reports its attempt late
+        const delivered = (await o.listByRun('r1')).find((d) => d.id === 'd1');
+        expect(delivered).toMatchObject({ state: 'delivered', attempts: 0, nextAt: 0 });
+        expect(delivered?.firstAttemptAt).toBeUndefined();
+        expect(await o.due(10)).toEqual([]);
+        await o.enqueue({ id: 'd2', runId: 'r1', destinationRef: 'hook-1', eventId: 'e2', type: 'bot:done', payload: '{}' }, 0);
+        await o.markFailed('d2', 0);
+        await o.markFailed('d2', 86_400_000); // a day after the first failure: given up
+        await o.markFailed('d2', 86_400_001);
+        expect((await o.listByRun('r1')).find((d) => d.id === 'd2')).toMatchObject({ state: 'dead', attempts: 2 });
+      });
       it('after a purge refuses a content delivery for the run and takes a content-free one', async () => {
         const o = stores.outbox;
         await o.purgeContent('r1');

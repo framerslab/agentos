@@ -272,7 +272,8 @@ export class InMemoryOutbox implements IOutbox {
   }
   async markFailed(id: string, now: number): Promise<void> {
     const d = this.deliveries.get(id);
-    if (!d) return;
+    // a delivery no longer pending (delivered, or given up) is left as it is
+    if (!d || d.state !== 'pending') return;
     d.attempts += 1;
     d.firstAttemptAt ??= now;
     if (now - d.firstAttemptAt >= OUTBOX_GIVE_UP_MS) d.state = 'dead';

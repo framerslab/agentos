@@ -265,18 +265,23 @@ export interface GuardrailConfig {
    * - BLOCK ends the stream with the guard's verdict (the error chunk, or the
    *   final response holding `replacementText`) in place of the chunk, so the
    *   stream never hands the host an actionable call
-   *   (`executionMode: 'external'`) to execute. The pause the runtime saved
-   *   for that call before the chunk went out stays in
-   *   `getPendingExternalToolRequest()` until the conversation's next turn
-   *   ends.
+   *   (`executionMode: 'external'`) to execute. AgentOS drops the pause the
+   *   runtime saved for that call when the turn stopped for it:
+   *   `getPendingExternalToolRequest()` no longer returns it, the
+   *   conversation answers the call with a refused tool result, and the
+   *   stream cannot be continued with a result for it.
    * - SANITIZE cannot rewrite a tool call; it is applied as a BLOCK that keeps
    *   the guard's reason and reason code.
    * - FLAG and ALLOW pass the chunk on with the evaluation in its
    *   `metadata.guardrail.output`.
    *
-   * A call the runtime executes itself (`executionMode: 'internal'`) does not
-   * wait for the output guards: a block ends the stream but does not stop
-   * that call.
+   * AgentOS also asks the guard about each call the runtime executes itself
+   * (`executionMode: 'internal'`) before the call runs, as a
+   * TOOL_CALL_REQUEST chunk holding that one call. A BLOCK (or a SANITIZE)
+   * refuses the call: the tool does not run, and the model receives a
+   * refused tool result (code `AUTH_PERMISSION_DENIED`), as it does for a
+   * permission refusal. The guard also judges the stream's chunk for that
+   * call, where a block ends the stream.
    *
    * When `false` (default), the guard never receives a tool-call chunk. The
    * flag is opt-in because a guard written for text may read any chunk it is

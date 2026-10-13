@@ -196,6 +196,8 @@ export function normalizeStreamFinishReason(
  * results once the stream has drained.
  */
 export interface StreamTextResult {
+  /** Citation verdicts after text completes, when enabled on a default-runtime session. */
+  grounding?: Promise<import('../cognition/rag/citation/types.js').VerifiedResponse | undefined>;
   /** Async iterable that yields only raw text-delta strings (filters out non-text parts). */
   textStream: AsyncIterable<string>;
   /** Async iterable that yields all {@link StreamPart} events in order. */

@@ -64,6 +64,22 @@ describe('agent', () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
+  it('warns that no surface enforces security and permissions, without naming the runtime or agency()', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    agent({
+      model: 'openai:gpt-4.1-mini',
+      security: { tier: 'strict' },
+      permissions: { tools: ['search'] },
+    });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const message = String(warn.mock.calls[0]?.[0]);
+    expect(message).toContain('agent() accepted security and permissions, which no AgentOS surface enforces');
+    expect(message).toContain('hitl.approvals.beforeTool');
+    expect(message).not.toContain('requires the full AgentOS runtime');
+  });
+
   it('does not warn for lightweight-supported fields', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 

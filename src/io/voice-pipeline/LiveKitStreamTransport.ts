@@ -28,9 +28,10 @@
  * with its speech, raises no unhandled rejection.
  *
  * ## Lifetime
- * `close()` stops reading audio, closes the text streams still arriving,
- * unregisters the topic and emits `'close'`; the room stays connected, because
- * it belongs to the caller. A room that disconnects closes the transport.
+ * `close()` stops reading audio, drops the frames a pause held, closes the text
+ * streams still arriving, unregisters the topic and emits `'close'`; the room
+ * stays connected, because it belongs to the caller. A room that disconnects
+ * closes the transport. A closed transport replays nothing on `'resume'`.
  */
 
 import { EventEmitter } from 'node:events';
@@ -51,6 +52,9 @@ import {
 
 /** The text stream topic of the control messages when none is configured. */
 export const LIVEKIT_TRANSPORT_DEFAULT_TOPIC = 'agentos.voice';
+
+/** A frame's length in milliseconds. */
+const frameMs = (frame: AudioFrame): number => (frame.samples.length / frame.sampleRate) * 1000;
 
 /** Options of {@link LiveKitStreamTransport}. */
 export interface LiveKitStreamTransportOptions {
@@ -96,7 +100,7 @@ function closeTextReader(reader: LiveKitTextStreamReaderLike): void {
  * | Event       | Payload                   | Description                                   |
  * |-------------|---------------------------|-----------------------------------------------|
  * | `'audio'`   | `AudioFrame`              | The participant's audio, mono Float32.        |
- * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames. |
+ * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
  * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic. |
  * | `'close'`   | *(none)*                  | The transport closed (or the room disconnected). |
  * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, or a failure to read audio (the peer missing among them). |
@@ -143,12 +147,19 @@ export class LiveKitStreamTransport extends EventEmitter implements IStreamTrans
     });
     this.on('resume', () => {
       this.paused = false;
+      // a transport that has closed replays nothing: what it held went with it
+      if (this._state !== 'open') return;
       if (this.droppedMs > 0) {
         this.emit('gap', { droppedMs: this.droppedMs, reason: 'paused' });
         this.droppedMs = 0;
       }
-      for (const f of this.held.splice(0)) this.emit('audio', f);
-      this.heldMs = 0;
+      // one frame at a time: a listener that asks for a pause again while it takes a frame stops the replay there, and
+      // the frames not yet emitted stay held, in order, with their length
+      while (this.held.length > 0 && !this.paused && this._state === 'open') {
+        const frame = this.held.shift()!;
+        this.heldMs = this.held.length > 0 ? this.heldMs - frameMs(frame) : 0;
+        this.emit('audio', frame);
+      }
     });
     // The source checks the options before the topic is taken, so a refused
     // option leaves the topic free; until it is read, the source holds nothing.
@@ -205,12 +216,17 @@ export class LiveKitStreamTransport extends EventEmitter implements IStreamTrans
   }
 
   /**
-   * Stops reading audio, closes the text streams still arriving, unregisters
-   * the topic and emits `'close'`. The room stays connected. Idempotent.
+   * Stops reading audio, drops the frames a pause held, closes the text streams
+   * still arriving, unregisters the topic and emits `'close'`. The room stays
+   * connected. Idempotent.
    */
   close(_code?: number, _reason?: string): void {
     if (this._state === 'closing' || this._state === 'closed') return;
     this._state = 'closing';
+    // what a pause held goes with the transport: a resume after the close emits none of it, and no gap
+    this.held.length = 0;
+    this.heldMs = 0;
+    this.droppedMs = 0;
     this.options.room.unregisterTextStreamHandler(this.topic);
     this.source.close();
     for (const reader of this.readers) closeTextReader(reader);
@@ -227,12 +243,10 @@ export class LiveKitStreamTransport extends EventEmitter implements IStreamTrans
           this.emit('audio', frame);
           continue;
         }
-        const ms = (frame.samples.length / frame.sampleRate) * 1000;
         this.held.push(frame);
-        this.heldMs += ms;
+        this.heldMs += frameMs(frame);
         while (this.heldMs > this.bufferMs && this.held.length) {
-          const old = this.held.shift()!;
-          const oldMs = (old.samples.length / old.sampleRate) * 1000;
+          const oldMs = frameMs(this.held.shift()!);
           this.heldMs -= oldMs;
           this.droppedMs += oldMs;
         }

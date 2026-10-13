@@ -39,7 +39,8 @@ import {
   UICommand, // Assuming UICommand is used internally if GMI constructs them
   // AudioOutputConfig, ImageOutputConfig are part of GMIOutput
 } from './IGMI';
-import type { StepFinishedChunkPayload, ToolResultChunkPayload } from './IGMI';
+import type { GMIToolCallGate, GMIToolCallRefusal, GMIToolResultOptions, StepFinishedChunkPayload, ToolResultChunkPayload } from './IGMI';
+import { refusedToolCallResult } from './toolCallGate';
 import {
   IPersonaDefinition,
   PersonaRagConfigIngestionTrigger, // Ensure this type definition exists and is correctly imported
@@ -189,6 +190,12 @@ function memoryScopeOf(turnInput: GMITurnInput): TurnMemoryScope | undefined {
   return { ...(userId ? { userId } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
+/** The tool-call gate a turn names in `metadata.toolCallGate`; undefined when it names none. */
+function toolCallGateOf(turnInput: GMITurnInput): GMIToolCallGate | undefined {
+  const gate = turnInput.metadata?.toolCallGate;
+  return typeof gate === 'function' ? gate : undefined;
+}
+
 /** Adds one provider usage report to the turn's total. */
 function addUsage(total: CostAggregator, usage: ModelUsage): void {
   total.promptTokens += usage.promptTokens || 0;
@@ -275,6 +282,13 @@ export class GMI implements IGMI {
    * a tool continuation keeps the scope of the turn it continues.
    */
   private turnMemoryScope: TurnMemoryScope | undefined;
+
+  /**
+   * The gate the turn's tool round asks before each call runs, when the turn
+   * named one (`metadata.toolCallGate`). Set when a user turn starts; a tool
+   * continuation that names no gate asks this one.
+   */
+  private turnToolCallGate: GMIToolCallGate | undefined;
 
   /** The learner session the host passed (`GMIBaseConfig.learning`), when its learning option is on. */
   private learnerSession: ILearnerSession | undefined;
@@ -820,6 +834,20 @@ export class GMI implements IGMI {
   }
 
   /**
+   * Asks the turn's tool-call gate about one call. A gate that throws refuses
+   * the call, so a check that fails never lets a call through.
+   */
+  private async askToolCallGate(gate: GMIToolCallGate, call: ToolCallRequest): Promise<GMIToolCallRefusal | null> {
+    try {
+      return await gate(call);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.addTraceEntry(ReasoningEntryType.WARNING, `The tool-call gate failed on '${call.name}'; the call is refused.`, { reqId: call.id, error: message });
+      return { reason: `The call to '${call.name}' was refused because its check failed: ${message}`, reasonCode: 'TOOL_CALL_GATE_ERROR' };
+    }
+  }
+
+  /**
    * The user context as cognitive memory reads it: the turn's memory scope user
    * in place of the turn's user when the turn named one, so memory files and
    * recalls under that id while tools and prompts keep the turn's user.
@@ -1136,7 +1164,11 @@ export class GMI implements IGMI {
       this.turnResolution = undefined;
       this.turnMemoryScope = memoryScopeOf(turnInput);
       this.turnLearning = undefined;
+      this.turnToolCallGate = toolCallGateOf(turnInput);
     }
+    // The gate this turn's tool round asks before each call: the one the input names; a continuation that names none
+    // asks the gate of the turn it continues.
+    const toolCallGate = toolCallGateOf(turnInput) ?? this.turnToolCallGate;
     this.stateOwnerTurn = turnNumber;
     // False once a newer turn has started; lifecycle writes below check it.
     const ownsState = (): boolean => this.stateOwnerTurn === turnNumber;
@@ -1926,7 +1958,11 @@ export class GMI implements IGMI {
               };
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;
-              const result = await this.toolOrchestrator.processToolCall(requestDetails);
+              // A call the gate refuses is recorded as a refused result the model reads; the tool is not called.
+              const refusal = toolCallGate ? await this.askToolCallGate(toolCallGate, toolCallReq) : null;
+              const result = refusal
+                ? refusedToolCallResult(toolCallReq, refusal)
+                : await this.toolOrchestrator.processToolCall(requestDetails);
               callInFlight = undefined;
               toolExecutionResults.push(result);
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_RESULT, `Tool '${toolCallReq.name}' result. Success: ${!result.isError}`, { result });
@@ -2055,7 +2091,8 @@ export class GMI implements IGMI {
     toolName: string,
     resultPayload: ToolResultPayload,
     userId: string,
-    // userApiKeys?: Record<string, string> // Not directly used by GMI, providers handle keys
+    _userApiKeys?: Record<string, string>, // Not used by the GMI: providers handle keys
+    options?: GMIToolResultOptions,
   ): Promise<GMIOutput> {
     return this.handleToolResults(
       [
@@ -2068,6 +2105,8 @@ export class GMI implements IGMI {
         },
       ],
       userId,
+      undefined,
+      options,
     );
   }
 
@@ -2075,7 +2114,8 @@ export class GMI implements IGMI {
   public async handleToolResults(
     toolResults: ToolCallResult[],
     _userId: string,
-    // userApiKeys?: Record<string, string> // Not directly used by GMI, providers handle keys
+    _userApiKeys?: Record<string, string>, // Not used by the GMI: providers handle keys
+    options?: GMIToolResultOptions,
   ): Promise<GMIOutput> {
     if (!this.isInitialized) {
         throw new GMIError("GMI is not initialized. Cannot handle tool result.", GMIErrorCode.NOT_INITIALIZED);
@@ -2144,6 +2184,7 @@ export class GMI implements IGMI {
             ...(this.reasoningTrace?.organizationId
               ? { organizationId: this.reasoningTrace.organizationId }
               : {}),
+            ...(options?.toolCallGate ? { toolCallGate: options.toolCallGate } : {}),
         }
     };
     

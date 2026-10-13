@@ -40,4 +40,42 @@ describe('MeetingRoom', () => {
       await expect(new MeetingRoom(service).delete('bot-x')).rejects.toBe(failure);
     }
   });
+  it('passes on a rejection of a delete that is not an object as it is', async () => {
+    for (const failure of [undefined, null, 'unavailable']) {
+      const service: IMeetingRoomService = {
+        url: 'wss://lk.test',
+        async createRoom() {},
+        async deleteRoom() { throw failure; },
+        async mintToken() { return 'jwt'; },
+      };
+      await expect(new MeetingRoom(service).delete('bot-x')).rejects.toBe(failure);
+    }
+  });
+  it('deletes the room again when a token for it cannot be minted, and passes the failure on', async () => {
+    const calls: unknown[] = [];
+    const failure = new Error('token service unavailable');
+    const service: IMeetingRoomService = {
+      url: 'wss://lk.test',
+      async createRoom(input) { calls.push(['create', input.name]); },
+      async deleteRoom(name) { calls.push(['delete', name]); },
+      async mintToken(input) {
+        if (input.identity === 'agent') throw failure;
+        return `jwt:${input.identity}`;
+      },
+    };
+    await expect(new MeetingRoom(service).create('r1')).rejects.toBe(failure);
+    expect(calls).toEqual([['create', 'bot-r1'], ['delete', 'bot-r1']]);
+  });
+  it('mints the listening agent a subscribe-only token for a run\'s room when it connects', async () => {
+    const minted: unknown[] = [];
+    const service: IMeetingRoomService = {
+      url: 'wss://lk.test',
+      async createRoom() {},
+      async deleteRoom() {},
+      async mintToken(input) { minted.push(input); return `jwt:${input.room}:${input.identity}`; },
+    };
+    const rooms = new MeetingRoom(service, { tokenTtlSeconds: 300, agentIdentity: 'listener' });
+    expect(await rooms.agentToken('bot-r1')).toBe('jwt:bot-r1:listener');
+    expect(minted).toEqual([{ room: 'bot-r1', identity: 'listener', canPublish: false, canSubscribe: true, ttlSeconds: 300 }]);
+  });
 });

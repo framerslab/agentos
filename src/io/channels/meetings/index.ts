@@ -1,3 +1,10 @@
+/**
+ * Barrel exports for the meeting-participant channel: the manager, the provider interface, the room helper, the stores,
+ * the signing and the mock provider.
+ *
+ * @module @framers/agentos/io/channels/meetings
+ */
+
 export * from './types.js';
 export type { ITranscriptInputSink, TranscriptInput } from '../../voice-pipeline/types.js';
 export type {

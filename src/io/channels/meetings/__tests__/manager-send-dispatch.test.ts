@@ -1,77 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { MeetingManager, type MeetingManagerEvent } from '../MeetingManager.js';
-import { FakeClock, InMemoryEventStore, InMemoryJobStore, InMemoryOutbox, InMemoryRunStore, InMemoryTranscriptStore } from '../stores/memory.js';
 import { MockMeetingBotProvider, mockEventContext } from '../providers/mock.js';
-import type { IEntitlementHook, ReserveResult } from '../stores/types.js';
-import { MeetingRoom, type IMeetingRoomService } from '../MeetingRoom.js';
-
-class FakeRooms implements IMeetingRoomService {
-  readonly url = 'wss://lk.test';
-  readonly created: string[] = [];
-  readonly deleted: string[] = [];
-  /** When set, createRoom rejects with it (a room service that is down). */
-  createError: Error | undefined;
-  async createRoom(input: { name: string }): Promise<void> {
-    if (this.createError) throw this.createError;
-    this.created.push(input.name);
-  }
-  async deleteRoom(name: string): Promise<void> {
-    this.deleted.push(name);
-  }
-  async mintToken(input: { room: string; identity: string; canPublish: boolean }): Promise<string> {
-    return `jwt:${input.room}:${input.identity}:${input.canPublish ? 'pub' : 'sub'}`;
-  }
-}
-
-class FakeEntitlement implements IEntitlementHook {
-  reserveAnswer: ReserveResult = { ok: true, reservationId: 'res-1', maxSeconds: 14_400 };
-  revalidateAnswer = true;
-  /** When it answers true, the next settle throws (a billing store that is down for a moment). */
-  settleThrows: (() => boolean) | undefined;
-  readonly metered: Array<[string, number]> = [];
-  readonly settled: Array<[string, number]> = [];
-  readonly released: string[] = [];
-  async reserve(): Promise<ReserveResult> {
-    return this.reserveAnswer;
-  }
-  async revalidate(): Promise<boolean> {
-    return this.revalidateAnswer;
-  }
-  async meter(id: string, s: number): Promise<void> {
-    this.metered.push([id, s]);
-  }
-  async settle(id: string, s: number): Promise<void> {
-    if (this.settleThrows?.()) throw new Error('billing is down');
-    if (!this.settled.some(([i]) => i === id)) this.settled.push([id, s]); // idempotent, as the interface asks
-  }
-  async release(id: string): Promise<void> {
-    this.released.push(id);
-  }
-}
-
-export function harness() {
-  const clock = new FakeClock(1_000_000);
-  const provider = new MockMeetingBotProvider();
-  const entitlement = new FakeEntitlement();
-  const rooms = new FakeRooms();
-  const stores = { runs: new InMemoryRunStore(), jobs: new InMemoryJobStore(), transcript: new InMemoryTranscriptStore(), events: new InMemoryEventStore(), outbox: new InMemoryOutbox(), entitlement, clock };
-  const manager = new MeetingManager({ managerId: 'm1', stores, room: new MeetingRoom(rooms), reportUrlFor: (runId, p) => `https://product.test/events/${p}/${runId}` });
-  manager.registerProvider(provider);
-  const seen: MeetingManagerEvent[] = [];
-  manager.on((e) => {
-    seen.push(e);
-  });
-  const request = { ownerRef: 'acct_1', platform: 'google_meet' as const, meetingUrl: 'https://meet.google.com/abc-defg-hij', botName: "Dana's notes", keep: 'none' as const, notice: { text: 'the notice', version: '1', lateArrivalText: 'the short notice' }, stopPhrase: 'stop taking notes', idempotencyKey: 'k1' };
-  const report = (runId: string, type: Parameters<typeof mockEventContext>[1], data: Parameters<typeof mockEventContext>[2] = {}, at = clock.now()) =>
-    manager.processProviderEvent('mock', mockEventContext(runId, type, data, at, provider.tokenOf(runId)));
-  /** Another manager on the same stores and provider: a second process, or the first one after a restart, with nothing of its memory. */
-  const peer = (managerId: string) => {
-    const other = new MeetingManager({ managerId, stores, room: new MeetingRoom(rooms), reportUrlFor: (runId, p) => `https://product.test/events/${p}/${runId}` });
-    other.registerProvider(provider);
-    return other;
-  };
-  return { clock, provider, entitlement, rooms, stores, manager, seen, request, report, peer };
-}
+import { harness } from './manager-harness.js';
 
 describe('sendBot', () => {
   it('reserves, inserts the run, schedules the job and repeats on the same idempotency key', async () => {
@@ -225,6 +154,21 @@ describe('dispatch and the interlock', () => {
     await h.report(runId, 'monitor_heartbeat', {}, 13);
     expect(h.provider.commands.get(runId)).toEqual([{ name: 'startCapture' }]);
   });
+  it('a worker clock that runs ahead keeps a quiet stop monitor counted healthy for at most one heartbeat interval more', async () => {
+    const h = harness();
+    const ahead = 3_600_000; // the worker's clock runs an hour ahead of the manager's
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining', {}, h.clock.now() + ahead);
+    await h.report(runId, 'in_call', { participantCount: 2 }, h.clock.now() + ahead);
+    await h.report(runId, 'notice_posted', {}, h.clock.now() + ahead);
+    await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + ahead + 1);
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'startCapture' }]);
+    h.clock.advance(40_000); // the monitor's window and one interval more, with no heartbeat since
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'suspendCapture' });
+  });
   it('refuses a report with another token, and drops a repeated report', async () => {
     const h = harness();
     const r = await h.manager.sendBot(h.request);
@@ -343,5 +287,43 @@ describe('dispatch and the interlock', () => {
     await h.manager.tick();
     expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stopped_by_owner' }]);
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stopped_by_owner' });
+  });
+  it('records the dispatch of a bot that reported before its dispatcher lost the lease, so reconcile still watches the run', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    // a manager that stopped after the provider started the bot and before it recorded the dispatch; the bot reported since
+    await h.stores.runs.update(runId, { state: 'dispatching', dispatchedAt: h.clock.now(), dispatch: { roomName: `bot-${runId}`, workerTokenHash: MockMeetingBotProvider.hash('t') } }, 'requested');
+    await h.stores.jobs.lease('stopped-manager', h.clock.now(), 1);
+    await h.manager.processProviderEvent('mock', mockEventContext(runId, 'joining', {}, h.clock.now(), 't'));
+    h.provider.alive.set(runId, 5);
+    h.clock.advance(10);
+    await h.manager.tick();
+    expect(await h.stores.jobs.get(runId)).toMatchObject({ dispatched: true, leaseHolder: 'm1' });
+    // its container goes: the next reconcile ends the run
+    h.provider.alive.delete(runId);
+    h.clock.advance(60_000);
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed' });
+  });
+});
+
+describe('the loop', () => {
+  it('start() runs one pass at a time: a pass still running is not joined by the next one due', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      let finish: () => void = () => {};
+      const tick = vi.spyOn(h.manager, 'tick').mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+      h.manager.start(1_000);
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(tick).toHaveBeenCalledTimes(1);
+      finish();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(tick).toHaveBeenCalledTimes(2);
+    } finally {
+      h.manager.stop();
+      vi.useRealTimers();
+    }
   });
 });

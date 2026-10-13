@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import { describe, it, expect, vi } from 'vitest';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { SecretBox } from '../signing.js';
@@ -38,6 +39,8 @@ describe('meetingStoresDdl', () => {
     const runs = new SqlRunStore({ db, box });
     expect(JSON.stringify(runs)).toBe('"[SqlRunStore redacted]"');
     expect(JSON.stringify({ runs })).toBe('{"runs":"[SqlRunStore redacted]"}');
+    expect(inspect(runs)).toBe('[SqlRunStore redacted]');
+    expect(inspect({ runs }, { depth: 5 })).toBe('{ runs: [SqlRunStore redacted] }');
     expect(serialiseBox).not.toHaveBeenCalled();
     expect(serialiseDb).not.toHaveBeenCalled();
   });

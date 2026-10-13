@@ -34,7 +34,9 @@ import {
   IGMI,
   GMIOutput,
   GMIOutputChunkType,
+  type GMIToolCallRefusal,
 } from '../../cognition/substrate/IGMI';
+import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { ConversationContext } from '../../core/conversation/ConversationContext';
 import { MessageRole } from '../../core/conversation/ConversationMessage';
 // IToolOrchestrator — referenced via AgentOSOrchestratorDependencies
@@ -66,6 +68,7 @@ import {
 import { ExternalToolResultHandler } from './ExternalToolResultHandler';
 import { GMIChunkTransformer } from './GMIChunkTransformer';
 import { TurnExecutionPipeline } from './TurnExecutionPipeline';
+import { gmiToolCallGateFor } from './toolCallGate';
 
 // Public config types extracted to types/OrchestratorConfig.ts
 export type {
@@ -267,6 +270,15 @@ function buildToolCallChunkMetadata(
   return metadata;
 }
 
+/** What AgentOS hands a turn, a continuation or a resumed turn from its output guardrails. */
+export interface AgentOSOrchestratorGuards {
+  /**
+   * Judges each call the GMI runs itself before the call runs, as the TOOL_CALL_REQUEST chunk the stream carries for
+   * it; a blocking evaluation refuses the call. Unset when no output guardrail sets `config.evaluateToolCalls`.
+   */
+  toolCallGate?: GuardrailToolCallGate;
+}
+
 type ResolvedAgentOSOrchestratorConfig = Required<
   Omit<
     AgentOSOrchestratorConfig,
@@ -307,6 +319,12 @@ export class AgentOSOrchestrator {
    * @private
    */
   private activeStreamContexts: Map<string, ActiveStreamContext> = new Map();
+
+  /**
+   * The run of each stream's turn or resumed turn, until it ends. A turn can save its pause after it streams the call
+   * it stops for, so a verdict on that call waits for the run before it reads the pause.
+   */
+  private readonly streamRuns: Map<string, Promise<void>> = new Map();
 
   constructor() {}
 
@@ -524,7 +542,7 @@ export class AgentOSOrchestrator {
    * @returns {Promise<StreamId>} The ID of the stream to which responses will be pushed.
    * @throws {GMIError} If critical initialization or setup fails.
    */
-  public async orchestrateTurn(input: AgentOSInput): Promise<StreamId> {
+  public async orchestrateTurn(input: AgentOSInput, guards: AgentOSOrchestratorGuards = {}): Promise<StreamId> {
     this.ensureInitialized();
     const agentOSStreamId = await this.dependencies.streamingManager.createStream();
     console.log(
@@ -541,13 +559,13 @@ export class AgentOSOrchestrator {
       },
     });
 
-    const run = async () => this._processTurnInternal(agentOSStreamId, input);
+    const run = async () => this._processTurnInternal(agentOSStreamId, input, guards.toolCallGate);
 
     const promise = rootSpan ? runWithSpanContext(rootSpan, run) : run();
 
     // Execute the turn processing asynchronously without awaiting it here,
     // so this method can return the streamId quickly.
-    promise
+    this.trackStreamRun(agentOSStreamId, promise
       .catch(async (criticalError: any) => {
         if (rootSpan) {
           try {
@@ -588,7 +606,7 @@ export class AgentOSOrchestrator {
         } catch {
           // ignore
         }
-      });
+      }));
 
     return agentOSStreamId;
   }
@@ -596,7 +614,8 @@ export class AgentOSOrchestrator {
   public async orchestrateResumedToolResults(
     pendingRequest: AgentOSPendingExternalToolRequest,
     toolResults: AgentOSToolResultInput[],
-    options: AgentOSResumeExternalToolRequestOptions = {}
+    options: AgentOSResumeExternalToolRequestOptions = {},
+    guards: AgentOSOrchestratorGuards = {}
   ): Promise<StreamId> {
     this.ensureInitialized();
     const agentOSStreamId = await this.dependencies.streamingManager.createStream();
@@ -616,10 +635,10 @@ export class AgentOSOrchestrator {
     });
 
     const run = async () =>
-      this.toolResultHandler.resumeToolResultsInternal(agentOSStreamId, pendingRequest, toolResults, options);
+      this.toolResultHandler.resumeToolResultsInternal(agentOSStreamId, pendingRequest, toolResults, options, guards.toolCallGate);
 
     const promise = rootSpan ? runWithSpanContext(rootSpan, run) : run();
-    promise
+    this.trackStreamRun(agentOSStreamId, promise
       .catch(async (criticalError: any) => {
         if (rootSpan) {
           try {
@@ -660,9 +679,63 @@ export class AgentOSOrchestrator {
         } catch {
           // ignore
         }
-      });
+      }));
 
     return agentOSStreamId;
+  }
+
+  /** Keeps a stream's run until it ends, for the verdicts that wait for it (see {@link discardBlockedToolCalls}). */
+  private trackStreamRun(streamId: StreamId, run: Promise<unknown>): void {
+    const settled = run.then(
+      () => undefined,
+      () => undefined
+    );
+    this.streamRuns.set(streamId, settled);
+    void settled.then(() => {
+      if (this.streamRuns.get(streamId) === settled) {
+        this.streamRuns.delete(streamId);
+      }
+    });
+  }
+
+  /**
+   * Drops the pause a stream saved for tool calls an output guardrail withheld from the caller (the verdict's
+   * `toolCallIds`). It waits for the stream's turn or resumed turn to end, since a turn can save its pause after it
+   * streams the call; then, when the conversation's pending request is this stream's and holds one of the calls, it
+   * records a refused tool result for each call of the pause, clears the pending request and closes the stream, so the
+   * call can be neither resumed after a restart nor continued on the stream. Anything else is left as it is.
+   *
+   * @param agentOSStreamId - The stream the guardrail blocked.
+   * @param toolCallIds - The ids of the calls the block withheld.
+   * @param refusal - What the refused tool results say.
+   * @returns Whether a pause was dropped.
+   */
+  public async discardBlockedToolCalls(
+    agentOSStreamId: StreamId,
+    toolCallIds: readonly string[],
+    refusal: GMIToolCallRefusal
+  ): Promise<boolean> {
+    this.ensureInitialized();
+    await this.streamRuns.get(agentOSStreamId);
+    const streamContext = this.activeStreamContexts.get(agentOSStreamId);
+    if (!streamContext) {
+      return false;
+    }
+    const dropped = await this.toolResultHandler.discardPendingExternalToolRequest(
+      agentOSStreamId,
+      streamContext,
+      toolCallIds,
+      refusal
+    );
+    if (!dropped) {
+      return false;
+    }
+    this.activeStreamContexts.delete(agentOSStreamId);
+    await this.dependencies.streamingManager.closeStream(
+      agentOSStreamId,
+      'An output guardrail blocked the tool call the stream stopped for.'
+    );
+    return true;
   }
 
   /**
@@ -671,7 +744,8 @@ export class AgentOSOrchestrator {
    */
   private async _processTurnInternal(
     agentOSStreamId: StreamId,
-    input: AgentOSInput
+    input: AgentOSInput,
+    toolCallGate?: GuardrailToolCallGate
   ): Promise<void> {
     const turnStartedAt = Date.now();
     let turnMetricsStatus: 'ok' | 'error' = 'ok';
@@ -714,6 +788,12 @@ export class AgentOSOrchestrator {
 
       const { gmiInput, streamContext } = prepared;
       const longTermMemoryFeedbackPayload = prepared.longTermMemoryFeedbackPayload;
+
+      // The output guardrails' tool-call gate, which the GMI asks before each call it runs itself.
+      const gmiToolCallGate = gmiToolCallGateFor(toolCallGate, agentOSStreamId, gmiInstanceIdForChunks, streamContext);
+      if (gmiToolCallGate) {
+        gmiInput.metadata = { ...(gmiInput.metadata ?? {}), toolCallGate: gmiToolCallGate };
+      }
 
       let currentToolCallIteration = 0;
       let continueProcessing = true;
@@ -1193,10 +1273,11 @@ export class AgentOSOrchestrator {
    */
   public async orchestrateToolResults(
     agentOSStreamId: StreamId,
-    toolResults: AgentOSToolResultInput[]
+    toolResults: AgentOSToolResultInput[],
+    guards: AgentOSOrchestratorGuards = {}
   ): Promise<void> {
     this.ensureInitialized();
-    return this.toolResultHandler.orchestrateToolResults(agentOSStreamId, toolResults);
+    return this.toolResultHandler.orchestrateToolResults(agentOSStreamId, toolResults, guards.toolCallGate);
   }
 
   // processGMIOutput, transformAndPushGMIChunk, constructGMITurnInput, and
@@ -1227,6 +1308,7 @@ export class AgentOSOrchestrator {
       }
     }
     this.activeStreamContexts.clear();
+    this.streamRuns.clear();
     this.telemetry?.kpiWindows.clear();
     this.telemetry?.alertState.clear();
     this.initialized = false;

@@ -4,6 +4,8 @@ import { startListenSession } from '../ListenSession.js';
 import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
 import { AcousticEndpointDetector } from '../AcousticEndpointDetector.js';
 import { WebSocketStreamTransport } from '../WebSocketStreamTransport.js';
+import { LiveKitStreamTransport } from '../LiveKitStreamTransport.js';
+import { FakeAudioStream, FakePublication, FakeRoom, FakeTrack, fakeRtc, rtcFrame, settle } from '../../hearing/__tests__/livekit-fakes.js';
 import type { AudioFrame, IStreamTransport, IStreamingSTT, ITranscriptInputSink, StreamingSTTSession, TranscriptEvent, TranscriptInput, TranscriptTurn } from '../types.js';
 
 function transport(): IStreamTransport & EventEmitter {
@@ -348,5 +350,44 @@ describe('startListenSession', () => {
     expect(sink.turns.map((x) => x.text)).toEqual(['the last words']);
     expect(sessions.length).toBe(1);
     expect(reconnected).not.toHaveBeenCalled();
+  });
+  it('a stop while a slow sink holds the LiveKit transport paused hands the held audio to the transcriber before its flush', async () => {
+    FakeAudioStream.opened.length = 0;
+    const room = new FakeRoom();
+    room.addParticipant('bot', new FakePublication(new FakeTrack('TR_1')));
+    const t = new LiveKitStreamTransport({ room, participantIdentity: 'bot', sampleRate: 16_000, frameSizeMs: 20, rtc: fakeRtc() });
+    const pushed: number[] = [];
+    let pushedBeforeFlush = -1;
+    const sttSession = Object.assign(new EventEmitter(), {
+      pushAudio: (f: AudioFrame) => {
+        pushed.push(Math.round(f.samples[0] * 32768));
+      },
+      flush: async () => {
+        pushedBeforeFlush = pushed.length;
+      },
+      close: () => undefined,
+    }) as StreamingSTTSession;
+    const provider: IStreamingSTT = { providerId: 'held-audio', isStreaming: true, startSession: async () => sttSession };
+    let release: () => void = () => {};
+    const slow = new Promise<void>((resolve) => { release = resolve; });
+    const sink = new ArraySink();
+    const appendNext = sink.appendNext.bind(sink);
+    sink.appendNext = async (turn) => {
+      await slow;
+      return appendNext(turn);
+    };
+    const session = await startListenSession(t, sink, { streamingSTT: provider, runId: 'r1', reconnect: false, sinkQueueLimit: 1, drainMs: 0 });
+    await settle(); // the source opens its stream on its first read
+    sttSession.emit('transcript', final('queued words', 0, 500)); // the sink falls behind: the session pauses the transport
+    for (let i = 1; i <= 3; i++) FakeAudioStream.opened[0].push(rtcFrame(new Array(320).fill(i), 16_000, 1));
+    await settle();
+    expect(pushed).toEqual([]); // held by the transport while paused
+    const closing = session.close('stopped');
+    expect(pushed).toEqual([1, 2, 3]);
+    expect(pushedBeforeFlush).toBe(3);
+    release();
+    await closing;
+    expect(sink.turns.map((turn) => turn.text)).toEqual(['queued words']);
+    t.close();
   });
 });

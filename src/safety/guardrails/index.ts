@@ -60,10 +60,12 @@ export {
 // Guardrail dispatcher functions
 export {
   createGuardrailBlockedStream,
+  createToolCallGate,
   evaluateInputGuardrails,
   type GuardrailInputOutcome,
   type GuardrailOutputOptions,
   type GuardrailOutputVerdict,
+  type GuardrailToolCallGate,
   wrapOutputGuardrails,
 } from './guardrailDispatcher';
 
@@ -79,7 +81,7 @@ export {
 } from './requiredGuardrails';
 
 // Two-phase parallel guardrail dispatcher
-export { ParallelGuardrailDispatcher } from './ParallelGuardrailDispatcher';
+export { ParallelGuardrailDispatcher, type GuardrailToolCallVerdict } from './ParallelGuardrailDispatcher';
 
 // A guard over a reviewed phrase list, with a judge behind it and a fixed reply per rule
 export {

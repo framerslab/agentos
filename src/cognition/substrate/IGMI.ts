@@ -112,6 +112,36 @@ export interface ToolCallResult {
 }
 
 /**
+ * Why a {@link GMIToolCallGate} refused a call.
+ * @interface GMIToolCallRefusal
+ */
+export interface GMIToolCallRefusal {
+  /** Why the call was refused. The model reads it in the refused tool result. */
+  reason: string;
+  /** A machine-readable code for the rule that refused the call. */
+  reasonCode?: string;
+  /** The id of the guardrail that refused the call, when it has one. */
+  guardrailId?: string;
+}
+
+/**
+ * Asked before the GMI runs a call of its own tool round. Resolving to null lets the call run. A refusal turns the call
+ * into a refused tool result that the model reads (an error with the code `AUTH_PERMISSION_DENIED`, as a permission
+ * refusal is recorded), and the tool is not called; a gate that throws refuses the call too. AgentOS builds one from its
+ * output guardrails that set `config.evaluateToolCalls`.
+ */
+export type GMIToolCallGate = (call: ToolCallRequest) => Promise<GMIToolCallRefusal | null>;
+
+/**
+ * Options for the continuation a tool result starts.
+ * @interface GMIToolResultOptions
+ */
+export interface GMIToolResultOptions {
+  /** Asked before each call of the continuation's own tool round. Unset, the continuation asks the gate of the turn it continues. */
+  toolCallGate?: GMIToolCallGate;
+}
+
+/**
  * Payload for providing tool results, abstracting success/error.
  * @export
  * @interface ToolResultPayload
@@ -290,6 +320,11 @@ export interface GMITurnInput {
      * uses the turn's ids.
      */
     memoryScope?: { userId?: string; sessionId?: string } | null;
+    /**
+     * Asked before each call of this turn's tool round runs (see {@link GMIToolCallGate}). A tool continuation that names
+     * none asks the gate of the turn it continues.
+     */
+    toolCallGate?: GMIToolCallGate;
     /**
      * Optional conversation history snapshot to use for prompt construction.
      * When provided, the GMI should prefer this over any internal ephemeral history so
@@ -669,13 +704,15 @@ export interface IGMI {
     toolName: string,
     resultPayload: ToolResultPayload,
     userId: string,
-    userApiKeys?: Record<string, string>
+    userApiKeys?: Record<string, string>,
+    options?: GMIToolResultOptions,
   ): Promise<GMIOutput>;
 
   handleToolResults?(
     toolResults: ToolCallResult[],
     userId: string,
-    userApiKeys?: Record<string, string>
+    userApiKeys?: Record<string, string>,
+    options?: GMIToolResultOptions,
   ): Promise<GMIOutput>;
 
   hydrateConversationHistory?(

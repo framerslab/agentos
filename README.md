@@ -185,7 +185,7 @@ await session.send('Explain recursion with an analogy.');
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
 | **Multi-Agent Teams** | 6 coordination strategies * manager delegation and specialist spawning * panel quorum on the parallel strategy * HITL approval gates |
 | **Orchestration** | `workflow()` DAGs * `AgentGraph` router, personality and discovery edges * `mission()` graphs from plan templates * checkpointing |
-| **Guardrails** | 5 security tiers * 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
+| **Guardrails** | 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
 | **Emergent Capabilities** | Runtime tool forging * 4 self-improvement tools * tiered promotion * skill export |
 | **Voice & Telephony** | ElevenLabs, Deepgram, Whisper * Twilio, Telnyx, Plivo |
 | **Channels** | 37 platform adapters (Telegram, Discord, Slack, WhatsApp, webchat, ...) |
@@ -259,7 +259,7 @@ Provider fallback is on by default for `generateText()`, `streamText()`, `agent(
 - **[Architecture](https://docs.agentos.sh/architecture/system-architecture)**: system design, layer breakdown
 - **[Cognitive Memory](https://docs.agentos.sh/features/cognitive-memory)**: 8 mechanisms with 30+ APA citations
 - **[RAG Configuration](https://docs.agentos.sh/features/rag-memory)**: vector stores, embeddings, sources
-- **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: 5 tiers, 6 packs
+- **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, fail-open and fail-closed guards
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
 - **[Blog](https://docs.agentos.sh/blog)**: engineering posts, benchmark publications, transparency audits
 - **[Discord](https://wilds.ai/discord)** * **[GitHub Issues](https://github.com/framerslab/agentos/issues)** * **[Wilds.ai](https://wilds.ai)** (AI game worlds powered by AgentOS)

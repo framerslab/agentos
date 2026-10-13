@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import type { TranscriptInput } from '../../../voice-pipeline/types.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
@@ -157,6 +158,8 @@ function checkPostgres(db: StorageAdapter, what: string): void {
 }
 
 const num = (v: unknown): number | undefined => (v === null || v === undefined ? undefined : typeof v === 'number' ? v : Number(v));
+/** A turn's bound for its INTEGER column: whole milliseconds, rounded (a transcriber's clock, moved by a reconnect, can give fractions), or null. */
+const wholeMs = (v: number | undefined): number | null => (v === undefined || !Number.isFinite(v) ? null : Math.round(v));
 const bool = (v: unknown): boolean => v === true || v === 1 || v === '1' || v === 't' || v === 'true';
 
 /**
@@ -188,6 +191,10 @@ export class SqlRunStore implements IRunStore {
   constructor(private readonly opts: SqlRunStoreOptions) {
     checkPostgres(opts.db, 'SqlRunStore');
     this.t = meetingStoreTables(opts.tablePrefix);
+  }
+  /** What `util.inspect`, and so `console.log`, prints: a redacted marker, neither the box nor the database's options. */
+  [inspect.custom](): string {
+    return '[SqlRunStore redacted]';
   }
   /** Serialises no options, database or box; persistence uses only the explicit row fields. */
   toJSON(): string {
@@ -351,7 +358,7 @@ export class SqlJobStore implements IJobStore {
   }
 }
 
-/** Durable transcript turns, allocated and written under the same anchor as the content fence. */
+/** Durable transcript turns, allocated and written under the same anchor as the content fence. A turn's start and end are kept in whole milliseconds, rounded. */
 export class SqlTranscriptStore implements ITranscriptStore {
   private readonly t: MeetingStoreTables;
   /** Checks the adapter capabilities and prefix without creating tables. */
@@ -364,7 +371,7 @@ export class SqlTranscriptStore implements ITranscriptStore {
     await this.opts.db.transaction(async (trx) => {
       const { fencedAt } = await lockRun(trx, this.t.locks, turn.runId);
       if (fencedAt !== undefined) throw new FencedError(turn.runId);
-      await trx.run(`INSERT INTO ${this.t.turns} (run_id, seq, turn_id, at, text, speaker, start_ms, end_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (run_id, seq) DO NOTHING`, [turn.runId, turn.seq, turn.turnId, turn.at, turn.text, turn.speaker ?? null, turn.startMs ?? null, turn.endMs ?? null]);
+      await trx.run(`INSERT INTO ${this.t.turns} (run_id, seq, turn_id, at, text, speaker, start_ms, end_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (run_id, seq) DO NOTHING`, [turn.runId, turn.seq, turn.turnId, turn.at, turn.text, turn.speaker ?? null, wholeMs(turn.startMs), wholeMs(turn.endMs)]);
       await trx.run(`UPDATE ${this.t.locks} SET turn_seq = GREATEST(turn_seq, ?) WHERE run_id = ?`, [turn.seq, turn.runId]);
     });
   }
@@ -379,7 +386,7 @@ export class SqlTranscriptStore implements ITranscriptStore {
       );
       const seq = num(row?.turn_seq)!;
       const turn: TranscriptTurn = { ...input, seq, turnId: `${input.runId}:${seq}` };
-      await trx.run(`INSERT INTO ${this.t.turns} (run_id, seq, turn_id, at, text, speaker, start_ms, end_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [turn.runId, seq, turn.turnId, turn.at, turn.text, turn.speaker ?? null, turn.startMs ?? null, turn.endMs ?? null]);
+      await trx.run(`INSERT INTO ${this.t.turns} (run_id, seq, turn_id, at, text, speaker, start_ms, end_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [turn.runId, seq, turn.turnId, turn.at, turn.text, turn.speaker ?? null, wholeMs(turn.startMs), wholeMs(turn.endMs)]);
       return turn;
     });
   }
@@ -416,18 +423,27 @@ export class SqlEventStore implements IEventStore {
   }
   /**
    * One transaction: the run's anchor row is locked (so sequence numbers of one run are handed out one at a time and the
-   * fence is read under the same lock), a repeated event id answers its existing sequence, the counter advances, the row
-   * is written; behind the fence a content event is written without its payload.
+   * fence is read under the same lock), a repeated event id answers its existing sequence, the row is written with the
+   * run's next number and the counter advances; behind the fence a content event is written without its payload. Ids
+   * are unique across runs, and two runs' anchors do not order their appends: an append whose id another run's append
+   * writes and commits while this one waits on the index writes nothing and answers that event's sequence, as a
+   * repeated id does.
    */
   async append(event: Omit<MeetingEvent, 'seq'>): Promise<{ inserted: boolean; seq: number }> {
     return this.opts.db.transaction(async (trx) => {
-      const { fencedAt } = await lockRun(trx, this.t.locks, event.runId);
+      const { fencedAt, eventSeq } = await lockRun(trx, this.t.locks, event.runId);
       const existing = await trx.get<{ seq: unknown }>(`SELECT seq FROM ${this.t.events} WHERE event_id = ?`, [event.eventId]);
       if (existing) return { inserted: false, seq: num(existing.seq)! };
-      const next = await trx.get<{ event_seq: unknown }>(`UPDATE ${this.t.locks} SET event_seq = event_seq + 1 WHERE run_id = ? RETURNING event_seq`, [event.runId]);
-      const seq = num(next?.event_seq)!;
+      const seq = eventSeq + 1;
       const behindFence = fencedAt !== undefined && CONTENT_EVENT_TYPES.has(event.type);
-      await trx.run(`INSERT INTO ${this.t.events} (run_id, seq, event_id, type, at, data_json, purged) VALUES (?, ?, ?, ?, ?, ?, ?)`, [event.runId, seq, event.eventId, event.type, event.at, behindFence || event.data === undefined ? null : JSON.stringify(event.data), behindFence]);
+      const written = await trx.get<{ seq: unknown }>(`INSERT INTO ${this.t.events} (run_id, seq, event_id, type, at, data_json, purged) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING RETURNING seq`, [event.runId, seq, event.eventId, event.type, event.at, behindFence || event.data === undefined ? null : JSON.stringify(event.data), behindFence]);
+      if (!written) {
+        // read committed: this statement sees the row the other append committed while the insert waited for it
+        const holder = await trx.get<{ seq: unknown }>(`SELECT seq FROM ${this.t.events} WHERE event_id = ?`, [event.eventId]);
+        if (!holder) throw new Error(`SqlEventStore: event ${event.eventId} conflicted on its id and no event holds it`);
+        return { inserted: false, seq: num(holder.seq)! };
+      }
+      await trx.run(`UPDATE ${this.t.locks} SET event_seq = ? WHERE run_id = ?`, [seq, event.runId]);
       return { inserted: true, seq };
     });
   }
@@ -477,11 +493,12 @@ export class SqlOutbox implements IOutbox {
   async markDelivered(id: string): Promise<void> {
     await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'delivered' WHERE id = ?`, [id]);
   }
-  /** Advances retry backoff, giving up a day after the first failed attempt. */
+  /** Advances retry backoff, giving up a day after the first failed attempt. A delivery no longer pending (delivered, or given up) is left as it is. */
   async markFailed(id: string, now: number): Promise<void> {
     await this.opts.db.transaction(async (trx) => {
-      const r = await trx.get<Record<string, unknown>>(`SELECT attempts, first_attempt_at FROM ${this.t.outbox} WHERE id = ? FOR UPDATE`, [id]);
-      if (!r) return;
+      const r = await trx.get<Record<string, unknown>>(`SELECT attempts, first_attempt_at, state FROM ${this.t.outbox} WHERE id = ? FOR UPDATE`, [id]);
+      // a late failure report from a sender that lost the race resurrects neither a delivery the destination took nor one given up
+      if (!r || r.state !== 'pending') return;
       const attempts = (num(r.attempts) ?? 0) + 1;
       const first = num(r.first_attempt_at) ?? now;
       const dead = now - first >= OUTBOX_GIVE_UP_MS;

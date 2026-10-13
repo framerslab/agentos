@@ -102,6 +102,7 @@ export interface VoicePipelineOverrides {
  * |-------------------|----------------------------------------------|
  * | `'state_changed'` | `{ from: PipelineState, to: PipelineState }`  |
  * | `'turn_complete'` | {@link TurnCompleteEvent}                     |
+ * | `'error'`         | `Error`: a `turn_complete` listener threw or rejected; with no `'error'` listener it is written as a console warning instead |
  *
  * @see {@link VoicePipelineSession} for the public session interface returned by `startSession()`.
  */
@@ -497,7 +498,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       if (this._state !== 'listening') return;
 
       // Re-emit for waitForUserTurn() and for hosts that listen on the orchestrator (the class comment lists it).
-      this.emit('turn_complete', event);
+      this._emitTurnComplete(event);
 
       // Listeners run inside emit(), and one may have stopped the session:
       // only a session still LISTENING takes the turn. The cast is needed
@@ -545,6 +546,35 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         await ttsSession.flush();
       }
     });
+  }
+
+  /**
+   * Hands a turn to each of the orchestrator's own `turn_complete` listeners, in order, as `emit()` would, except that
+   * a listener that throws or rejects is reported and the listeners after it still run. `emit()` stops at a throw,
+   * which would skip the listeners after it (`waitForUserTurn()`'s among them) and reject the detector's handler with
+   * nothing to catch it.
+   *
+   * @param event - The turn the endpoint detector completed.
+   */
+  private _emitTurnComplete(event: TurnCompleteEvent): void {
+    for (const listener of this.rawListeners('turn_complete')) {
+      try {
+        const result: unknown = (listener as (turn: TurnCompleteEvent) => unknown).call(this, event);
+        if (result instanceof Promise) result.catch((err: unknown) => this._reportListenerError(err));
+      } catch (err) {
+        this._reportListenerError(err);
+      }
+    }
+  }
+
+  /**
+   * Reports a listener's failure as `'error'` when something listens for it, and otherwise as a console warning: an
+   * `'error'` that nothing listens for would throw.
+   */
+  private _reportListenerError(err: unknown): void {
+    const error = err instanceof Error ? err : new Error(String(err));
+    if (this.listenerCount('error') > 0) this.emit('error', error);
+    else console.warn('[voice-pipeline-orchestrator] a turn_complete listener failed:', error.message);
   }
 
   /**

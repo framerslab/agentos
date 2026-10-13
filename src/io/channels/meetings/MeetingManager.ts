@@ -17,6 +17,7 @@ import { hashWorkerToken, mintWorkerToken } from './signing.js';
 import { DuplicateIdempotencyKeyError, type IClock, type IEntitlementHook, type IEventStore, type IJobStore, type IOutbox, type IRunStore, type ITranscriptStore } from './stores/types.js';
 import {
   canTransition,
+  CONTENT_EVENT_TYPES,
   contentFreeRun,
   DEFAULT_RUN_LIMITS,
   isBilledEnd,
@@ -123,6 +124,8 @@ interface StoredEvent {
   at: number;
   seq: number;
   data?: Record<string, unknown>;
+  /** Stored before under the same id: a report the worker sent again, or an emit tried again after a later step failed. */
+  repeated: boolean;
 }
 
 /**
@@ -169,6 +172,8 @@ const ONCE_EVENTS: ReadonlySet<MeetingEventType> = new Set<MeetingEventType>([
 const ACTIVE_STATES: readonly MeetingRunState[] = ['dispatching', 'joining', 'waiting_room', 'in_call_notice_pending', 'in_call', 'leaving', 'left', 'purging'];
 /** States a purge may start from: everything that is not terminal. */
 const PURGEABLE_STATES: readonly MeetingRunState[] = ['requested', 'scheduled', ...ACTIVE_STATES.filter((s) => s !== 'purging')];
+/** Every state that is not terminal. */
+const OPEN_STATES: readonly MeetingRunState[] = ['requested', 'scheduled', ...ACTIVE_STATES];
 /** Reports that carry what a person said or did; behind the fence they are neither stored nor forwarded. */
 const CONTENT_REPORTS: ReadonlySet<ProviderEventType> = new Set<ProviderEventType>(['chat_message', 'stop_command', 'participant_joined', 'participant_left']);
 
@@ -213,6 +218,10 @@ export class MeetingManager {
   private readonly purgeHooks: Array<(runId: string) => Promise<void>> = [];
   private lastReconcileAt = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
+  /** Whether a pass the timer started is still running. */
+  private ticking = false;
+  /** When the terminal runs are next listed for eviction: when the first of them can go, and at least once a minute. */
+  private nextCleanupAt = 0;
 
   constructor(private readonly config: MeetingManagerConfig) {
     this.id = config.managerId ?? randomUUID();
@@ -287,23 +296,37 @@ export class MeetingManager {
     await this.deliver(await this.storeEvent({ id, type, at: time, data }, run.runId), run);
   }
 
-  /** Stores the event in its run's sequence; undefined when an event with its id is stored already, which is then delivered no second time. */
-  private async storeEvent(event: Omit<StoredEvent, 'seq'>, runId: string): Promise<StoredEvent | undefined> {
+  /**
+   * Stores the event in its run's sequence and answers it as stored. An id stored before (a report the worker sent
+   * again, or an emit tried again after a later step failed) is not stored twice: it comes back `repeated`, with the
+   * time and payload of its first copy. An id that another run's event holds comes back undefined: nothing of this run.
+   * A content event comes back as the store holds it, so a fence that went up while it was on its way, which left the
+   * stored row no payload, leaves its delivery and its handlers none either.
+   */
+  private async storeEvent(event: Omit<StoredEvent, 'seq' | 'repeated'>, runId: string): Promise<StoredEvent | undefined> {
     const { inserted, seq } = await this.stores.events.append({ eventId: event.id, runId, type: event.type, at: event.at, data: event.data });
-    return inserted ? { ...event, seq } : undefined;
+    if (inserted && !CONTENT_EVENT_TYPES.has(event.type)) return { ...event, seq, repeated: false };
+    const [first] = await this.stores.events.read(runId, seq - 1, 1);
+    if (first?.eventId !== event.id) return inserted ? { ...event, seq, repeated: false } : undefined;
+    return { ...event, at: first.at, data: first.data, seq, repeated: !inserted };
   }
 
-  /** Delivers a stored event, with the run as it stands: a delivery to each of the owner's destinations, then every handler. */
+  /**
+   * Delivers a stored event, with the run as it stands: a delivery to each of the owner's destinations, then every
+   * handler. A repeated event goes to the destinations again, which the outbox keeps once each (a delivery its first
+   * attempt never enqueued is enqueued now), and to no handler: a handler receives an event once.
+   */
   private async deliver(stored: StoredEvent | undefined, run: MeetingRunRecord): Promise<void> {
     if (!stored) return;
     const { id, type, at, seq, data } = stored;
-    const event: MeetingManagerEvent = { type, runId: run.runId, run, seq, data };
     if (this.config.destinationsFor) {
       const payload = JSON.stringify({ id, type, runId: run.runId, at, seq, data });
       for (const destinationRef of await this.config.destinationsFor(run.ownerRef)) {
         await this.stores.outbox.enqueue({ id: `${id}@${destinationRef}`, runId: run.runId, destinationRef, eventId: id, type, payload }, at);
       }
     }
+    if (stored.repeated) return;
+    const event: MeetingManagerEvent = { type, runId: run.runId, run, seq, data };
     for (const h of this.handlers) {
       try {
         const r = h(event);
@@ -391,11 +414,20 @@ export class MeetingManager {
 
   // ── The loop ──
 
-  /** Runs `tick()` every second until `stop()`. A host with its own scheduler calls `tick()` itself. */
+  /**
+   * Runs `tick()` every second until `stop()`, one pass at a time: a pass still running when the next is due is not
+   * joined by it, so a slow store does not stack passes on each other. A host with its own scheduler calls `tick()` itself.
+   */
   start(intervalMs = 1_000): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.tick().catch((err) => this.config.logger?.error(`[MeetingManager] tick: ${String(err)}`));
+      if (this.ticking) return;
+      this.ticking = true;
+      void this.tick()
+        .catch((err) => this.config.logger?.error(`[MeetingManager] tick: ${String(err)}`))
+        .finally(() => {
+          this.ticking = false;
+        });
     }, intervalMs);
     this.timer.unref?.();
   }
@@ -449,6 +481,12 @@ export class MeetingManager {
         await this.recoverDispatch(run);
         continue;
       }
+      if (run.state !== 'requested' && run.state !== 'scheduled') {
+        // the bot is out and has reported, and its dispatcher lost the lease before it recorded the dispatch: it is
+        // recorded now, under this lease, so reconcile watches the run (a removed job would let its container die unseen)
+        await this.stores.jobs.markDispatched(run.runId, this.id, run.dispatch?.workerId);
+        continue;
+      }
       if (run.state === 'scheduled' && run.reservationId && !(await this.stores.entitlement.revalidate(run.reservationId))) {
         await this.stores.jobs.remove(job.runId);
         await this.fail(run, 'allowance');
@@ -471,7 +509,7 @@ export class MeetingManager {
       await this.fail(run, 'crashed', 'provider not registered');
       return;
     }
-    let alive = false;
+    let alive: boolean;
     try {
       alive = (await provider.usage({ runIds: [run.runId] })).some((u) => u.runId === run.runId && u.alive);
     } catch (err) {
@@ -711,32 +749,47 @@ export class MeetingManager {
       return false;
     }
     // One row per report, the event the destinations and the handlers receive. A report that is an event of its own is
-    // stored as that event before anything is applied, and the row is its record: a repeated one is stored nowhere and
-    // changes nothing. A state report stores the event of the move it makes, and a repeated one moves nothing; a
-    // heartbeat (360 rows an hour would be noise), capture_started, done and crashed store nothing, and applying one
-    // twice changes nothing.
+    // stored as that event before anything is applied, and the row is its record: a repeated one is stored nowhere, and
+    // of its application only its deliveries and a stop are tried again. A state report stores the event of the move it
+    // makes, and a repeated one moves nothing; a heartbeat (360 rows an hour would be noise), capture_started, done and
+    // crashed store nothing, and applying one twice changes nothing.
     const own = this.ownEvent(event);
     const stored = own ? await this.storeEvent({ id: `${event.eventId}#${own.type}`, type: own.type, at: event.at, data: own.data }, run.runId) : undefined;
-    if (own && !stored) return false;
+    if (own && (!stored || stored.repeated)) {
+      // A repeated report was applied when its row was stored: applied again, an older count or total would overwrite a
+      // newer one. Two parts of it are worth the worker's retry. Its deliveries go out again (the outbox keeps the first
+      // of each, so one the first attempt never enqueued is enqueued now), and a stop the first attempt did not carry
+      // out (the run is not behind the fence) is carried out now, whether or not the deliveries go out this time.
+      const stop = this.isStop(run, event);
+      try {
+        await this.deliver(stored, run);
+      } finally {
+        if (stop) await this.purge(run, 'stopped_by_participant');
+      }
+      return stop;
+    }
     switch (event.type) {
       case 'joining':
         await this.move(run, 'joining', {}, 'bot:joining', undefined, event);
         return true;
       case 'waiting_room':
-        await this.move(run, 'waiting_room', {}, 'bot:waiting_room', undefined, event);
+        // the waiting-room limit counts from here, the bot's arrival in the waiting room; admission moves joinedAt on to the call
+        await this.move(run, 'waiting_room', { joinedAt: this.reportedAt(event.at) }, 'bot:waiting_room', undefined, event);
         return true;
-      case 'in_call':
-        await this.move(run, 'in_call_notice_pending', { joinedAt: event.at, participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) }, 'bot:in_call', undefined, event);
+      case 'in_call': {
+        const at = this.reportedAt(event.at);
+        await this.move(run, 'in_call_notice_pending', { joinedAt: at, participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, at) }, 'bot:in_call', undefined, event);
         return true;
+      }
       case 'notice_posted': {
         // the notice alone does not open capture: the stop monitor must report a real observation after it (the interlock)
-        const moved = await this.move(run, 'in_call', { noticePostedAt: event.at }, 'bot:notice_posted', { version: run.notice.version }, event);
+        const moved = await this.move(run, 'in_call', { noticePostedAt: this.reportedAt(event.at) }, 'bot:notice_posted', { version: run.notice.version }, event);
         if (moved) await this.startCaptureIfReady(moved);
         return true;
       }
       case 'monitor_heartbeat': {
         // the stop monitor's own observation: the first after the notice opens capture, one after a suspension resumes it (the method holds every guard)
-        const updated = await this.stores.runs.update(run.runId, { monitorSeenAt: event.at });
+        const updated = await this.stores.runs.update(run.runId, { monitorSeenAt: this.reportedAt(event.at) });
         if (updated) await this.startCaptureIfReady(updated);
         return true;
       }
@@ -747,7 +800,7 @@ export class MeetingManager {
         await this.deliver(stored, run);
         return true;
       case 'participant_joined': {
-        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) })) ?? run;
+        const updated = (await this.updateParticipants(run, event)) ?? run;
         await this.deliver(stored, updated);
         const provider = this.providers.get(run.providerName);
         if (updated.state === 'in_call' && provider?.capabilities.postsChat && !fenced) {
@@ -756,18 +809,18 @@ export class MeetingManager {
         return true;
       }
       case 'participant_left': {
-        const updated = (await this.stores.runs.update(run.runId, { participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, event.at) })) ?? run;
+        const updated = (await this.updateParticipants(run, event)) ?? run;
         await this.deliver(stored, updated);
         return true;
       }
-      case 'chat_message': {
-        await this.deliver(stored, run);
-        if (!fenced && this.isStopPhrase(run, event.data?.text)) await this.purge(run, 'stopped_by_participant');
-        return true;
-      }
+      case 'chat_message':
       case 'stop_command':
-        await this.deliver(stored, run);
-        if (!fenced) await this.purge(run, 'stopped_by_participant');
+        // a stop goes ahead even when the message's delivery fails; the delivery's error is raised once the purge has run
+        try {
+          await this.deliver(stored, run);
+        } finally {
+          if (this.isStop(run, event)) await this.purge(run, 'stopped_by_participant');
+        }
         return true;
       case 'usage': {
         const updated = await this.stores.runs.update(run.runId, { lastUsageAt: event.at });
@@ -778,7 +831,8 @@ export class MeetingManager {
       case 'left': {
         const reason = run.reason ?? event.data?.reason ?? 'ended';
         if (run.state === 'purging') {
-          await this.stores.runs.update(run.runId, { leftAt: event.at, reason, reportedSeconds: event.data?.seconds ?? run.reportedSeconds });
+          // behind the fence a left report only records the end: the first leaving time, and the largest total counted
+          await this.stores.runs.update(run.runId, { leftAt: run.leftAt ?? event.at, reason, reportedSeconds: this.countedSeconds(run.reportedSeconds, event.data?.seconds) });
           return true;
         }
         // a bot that left on its own (not admitted, alone, the cap, a crash before a command) reaches `left` from any state after dispatch, with its own reason
@@ -787,7 +841,7 @@ export class MeetingManager {
         return true;
       }
       case 'done':
-        if (run.state === 'purging') await this.stores.runs.update(run.runId, { reportedSeconds: event.data?.seconds ?? run.reportedSeconds });
+        if (run.state === 'purging') await this.stores.runs.update(run.runId, { reportedSeconds: this.countedSeconds(run.reportedSeconds, event.data?.seconds) });
         else if (run.state === 'left' || run.state === 'leaving') await this.complete(run, event.data?.seconds);
         return true;
       case 'crashed':
@@ -801,6 +855,32 @@ export class MeetingManager {
 
   private isStopPhrase(run: MeetingRunRecord, text: string | undefined): boolean {
     return !!text && text.toLowerCase().includes(run.stopPhrase.toLowerCase());
+  }
+
+  /** Whether a report asks the bot to stop: a stop command, or a chat message holding the stop phrase. */
+  private isStop(run: MeetingRunRecord, event: NormalizedMeetingEvent): boolean {
+    return event.type === 'stop_command' || (event.type === 'chat_message' && this.isStopPhrase(run, event.data?.text));
+  }
+
+  /**
+   * A report's time as the limits read it: the worker's own, but no later than one heartbeat interval past the manager's
+   * clock. The limits compare these times with the manager's clock, so a worker whose clock runs ahead would otherwise
+   * keep a quiet stop monitor counted healthy, and the notice and alone limits unexpired, for as long as it runs ahead.
+   * Within the interval the worker's times keep their order, which the interlock reads (a heartbeat after the notice).
+   */
+  private reportedAt(at: number): number {
+    return Math.min(at, this.now() + this.monitorHeartbeatMs);
+  }
+
+  /**
+   * Writes a participant report's count and the alone timer it implies, decided on the row as it stands now, read after
+   * the report's event was stored: decided on the row read before it, while another report cleared the timer, it could
+   * put back a timer that had run out, and the next pass would end the run as alone with a participant in the call.
+   */
+  private async updateParticipants(run: MeetingRunRecord, event: NormalizedMeetingEvent): Promise<MeetingRunRecord | undefined> {
+    const current = (await this.stores.runs.get(run.runId)) ?? run;
+    const count = event.data?.participantCount;
+    return this.stores.runs.update(run.runId, { participantCount: count, ...this.aloneTimer(current, count, this.reportedAt(event.at)) });
   }
 
   /** The alone timer's patch for a report of `count` participants besides the bot: started by the first report of none, kept while there is none, cleared when one is reported. */
@@ -886,17 +966,20 @@ export class MeetingManager {
     return this.leave(run, reason);
   }
 
-  /** The bot leaves and everything it took is deleted (the purge sequence). On a run that is already done, the kept content is deleted (a session's deletion). */
+  /**
+   * The bot leaves and everything it took is deleted (the purge sequence). On a run that is over, done or failed before
+   * it joined, what is kept is deleted and the host's purge hooks run (a session's deletion). False for a run that does
+   * not exist.
+   */
   async purgeRun(runId: string, reason: MeetingLeaveReason = 'stopped_by_owner'): Promise<boolean> {
     const run = await this.stores.runs.get(runId);
     if (!run) return false;
-    if (run.state === 'done') return this.purgeKept(run);
-    if (run.state === 'failed') return false;
+    if (run.state === 'done' || run.state === 'failed') return this.purgeKept(run);
     await this.purge(run, reason);
     return true;
   }
 
-  /** A kept run's content removed after `done`: the fences, the stores, the hooks, the provider's copies, the content-free row, `bot:purged`. A step that throws is the caller's to retry (the product's one purge path retries). */
+  /** A run's kept content removed after it ended (`done`, or `failed`, which kept none): the fences, the stores, the hooks, the provider's copies, `bot:purged`, the content-free row. A step that throws is the caller's to retry (the product's one purge path retries). */
   private async purgeKept(run: MeetingRunRecord): Promise<boolean> {
     if (run.purgedAt !== undefined) return true;
     await this.stores.transcript.fence(run.runId);
@@ -908,8 +991,10 @@ export class MeetingManager {
     for (const hook of this.purgeHooks) await hook(run.runId);
     await this.providers.get(run.providerName)?.deleteRun({ runId: run.runId });
     const free = { ...contentFreeRun(run), purgedAt: this.now() };
-    await this.stores.runs.replace(free);
+    // the event goes out before the row is rewritten, the last step: a call whose event fails to go out leaves purgedAt
+    // unset, so the caller's retry runs the steps again and sends it, where after the rewrite a retry returns at once
     await this.emit('bot:purged', free, { reason: 'deleted' });
+    await this.stores.runs.replace(free);
     return true;
   }
 
@@ -922,9 +1007,9 @@ export class MeetingManager {
     return true;
   }
 
-  /** A run sent from a page: the page is still there. */
+  /** A run sent from a page: the page is still there. A run that is over keeps its terminal row as it was written. */
   async pageSeen(runId: string): Promise<void> {
-    await this.stores.runs.update(runId, { pageSeenAt: this.now() });
+    await this.stores.runs.update(runId, { pageSeenAt: this.now() }, OPEN_STATES);
   }
 
   /** Adds a step to the purge sequence, as {@link MeetingManagerConfig.purgeHooks} does. */
@@ -947,14 +1032,23 @@ export class MeetingManager {
   /**
    * Moves the run to `leaving` (a run behind the fence stays `purging`), arms the kill and tells the bot to leave. The
    * kill's deadline is armed on the run before the command goes, so a leave the bot never receives still ends in the
-   * kill, and whichever manager runs the limits, after a restart too, sends it.
+   * kill, and whichever manager runs the limits, after a restart too, sends it. A run already told to leave keeps the
+   * reason it was told, which decides its billing, and its deadline; a report that moves the run between the read this
+   * was given and the write is overtaken by trying again from the state the run is in now.
    */
   private async leave(run: MeetingRunRecord, reason: MeetingLeaveReason): Promise<boolean> {
-    if (!canTransition(run.state, 'leaving') && run.state !== 'purging') return false;
-    const armed: Partial<MeetingRunRecord> = run.state === 'purging' ? { leaveCommandedAt: this.now() } : { state: 'leaving', reason, leaveCommandedAt: this.now() };
-    if (!(await this.stores.runs.update(run.runId, armed, run.state))) return false;
-    await this.sendCommand(run, { name: 'leave', reason });
-    return true;
+    let current: MeetingRunRecord | undefined = run;
+    for (let attempt = 0; current !== undefined && attempt < 3; attempt += 1) {
+      if (current.state === 'leaving') return true;
+      if (!canTransition(current.state, 'leaving') && current.state !== 'purging') return false;
+      const armed: Partial<MeetingRunRecord> = current.state === 'purging' ? { leaveCommandedAt: current.leaveCommandedAt ?? this.now() } : { state: 'leaving', reason, leaveCommandedAt: this.now() };
+      if (await this.stores.runs.update(current.runId, armed, current.state)) {
+        await this.sendCommand(current, { name: 'leave', reason });
+        return true;
+      }
+      current = await this.stores.runs.get(current.runId);
+    }
+    return false;
   }
 
   /**
@@ -994,20 +1088,27 @@ export class MeetingManager {
 
   /**
    * After `left` (no purge): settle or release, drop what is not kept, delete the room, remove the job, and only then
-   * `done`. A step that throws leaves the run in `left` with `cleanupPending`, and the next tick calls this again; the
-   * entitlement hook's `settle` and `release` are idempotent, so a retry after a half-done cleanup changes nothing twice.
+   * `done`. A run that ended with `permission_denied` is purged instead, whatever its Keep. A step that throws leaves the
+   * run in `left` with `cleanupPending`, and the next tick calls this again; the entitlement hook's `settle` and
+   * `release` are idempotent, so a retry after a half-done cleanup changes nothing twice.
    */
   private async complete(run: MeetingRunRecord, reportedSeconds: number | undefined): Promise<void> {
     const current = await this.stores.runs.get(run.runId);
     if (!current || (current.state !== 'left' && current.state !== 'leaving')) return;
     if (current.state === 'leaving') {
-      const left = await this.stores.runs.update(run.runId, { state: 'left', leftAt: current.leftAt ?? this.now(), cleanupPending: true, reportedSeconds: reportedSeconds ?? current.reportedSeconds }, 'leaving');
+      const left = await this.stores.runs.update(run.runId, { state: 'left', leftAt: current.leftAt ?? this.now(), cleanupPending: true, reportedSeconds: this.countedSeconds(current.reportedSeconds, reportedSeconds) }, 'leaving');
       if (!left) return;
       await this.emit('bot:left', left, { reason: left.reason });
       run = left;
     } else run = current;
+    if (run.reason === 'permission_denied') {
+      // the platform refused the bot the meeting's permission: what the run took is deleted whatever its Keep, through
+      // the purge sequence and the host's purge hooks, rather than kept as a completed run's content is
+      await this.purge(run, 'permission_denied');
+      return;
+    }
     const now = this.now();
-    const seconds = reportedSeconds ?? run.reportedSeconds ?? Math.max(0, Math.round(((run.leftAt ?? now) - (run.dispatchedAt ?? run.joinAt)) / 1000));
+    const seconds = this.countedSeconds(run.reportedSeconds, reportedSeconds) ?? Math.max(0, Math.round(((run.leftAt ?? now) - (run.dispatchedAt ?? run.joinAt)) / 1000));
     const billed = isBilledEnd(run) ? seconds : 0;
     try {
       await this.stores.transcript.fence(run.runId);
@@ -1035,20 +1136,34 @@ export class MeetingManager {
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
   }
 
+  /**
+   * The seconds a worker counted, a running total: the largest of the stored total and a report's, so a report the
+   * worker sent again, or one that arrives late, never lowers what a later one gave. Undefined when neither gives one.
+   */
+  private countedSeconds(stored: number | undefined, reported: number | undefined): number | undefined {
+    if (reported === undefined) return stored;
+    return stored === undefined ? reported : Math.max(stored, reported);
+  }
+
   private async crash(run: MeetingRunRecord, at: number, seconds: number | undefined): Promise<void> {
     const current = await this.stores.runs.get(run.runId);
     if (!current || TERMINAL_RUN_STATES.has(current.state)) return;
     if (current.state === 'purging') {
-      await this.stores.runs.update(run.runId, { leftAt: at, reportedSeconds: seconds ?? current.reportedSeconds }, 'purging');
+      await this.stores.runs.update(run.runId, { leftAt: current.leftAt ?? at, reportedSeconds: this.countedSeconds(current.reportedSeconds, seconds) }, 'purging');
+      return;
+    }
+    if (current.state === 'left') {
+      // the bot left before: the time it left and the seconds it counted stand, and only the cleanup still owed is tried again
+      await this.complete(current, undefined);
       return;
     }
     const expected = ACTIVE_STATES.filter((state) => state !== 'purging');
     if (!expected.includes(current.state)) return;
     // The store re-reads under the anchor; a purge between get and update fails this exact-state guard.
-    const left = await this.stores.runs.update(run.runId, { state: 'left', leftAt: at, reason: current.reason ?? 'crashed', reportedSeconds: seconds ?? current.reportedSeconds, cleanupPending: true }, current.state);
+    const left = await this.stores.runs.update(run.runId, { state: 'left', leftAt: at, reason: current.reason ?? 'crashed', reportedSeconds: this.countedSeconds(current.reportedSeconds, seconds), cleanupPending: true }, current.state);
     if (!left) {
       const fenced = await this.stores.runs.get(run.runId);
-      if (fenced?.state === 'purging') await this.stores.runs.update(run.runId, { leftAt: at, reportedSeconds: seconds ?? fenced.reportedSeconds }, 'purging');
+      if (fenced?.state === 'purging') await this.stores.runs.update(run.runId, { leftAt: fenced.leftAt ?? at, reportedSeconds: this.countedSeconds(fenced.reportedSeconds, seconds) }, 'purging');
       return;
     }
     await this.emit('bot:left', left, { reason: left.reason });
@@ -1110,12 +1225,16 @@ export class MeetingManager {
       else await this.stores.entitlement.release(run.reservationId);
     }
     await this.stores.jobs.remove(runId);
-    // one write, `done` and the content-free row together as complete() and fail() write theirs: a failure after a first
-    // write of `done` would leave a done row holding the url, the bot's name and the notice, and nothing returns to a done run
-    const done = await this.stores.runs.update(runId, { ...contentFreeRun(run), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, state: 'done', doneAt: now, purgedAt: now, billedSeconds: billed, cleanupPending: false }, 'purging');
-    if (!done) return;
+    // The events go out before the last write: events that fail to go out leave the run purging, and the next pass runs
+    // these steps again, the events (stored once, delivered again) and the write with them. After the write nothing
+    // would return to a done run to send them, and no other path writes this run's end, so the events cannot announce
+    // an end that does not come.
+    const done: MeetingRunRecord = { ...contentFreeRun(run), state: 'done', doneAt: now, purgedAt: now, billedSeconds: billed };
     await this.emit('bot:purged', done, { reason: done.reason });
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
+    // one write, `done` and the content-free row together as complete() and fail() write theirs: a failure after a first
+    // write of `done` would leave a done row holding the url, the bot's name and the notice, and nothing returns to a done run
+    await this.stores.runs.update(runId, { ...done, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, lastUsageAt: undefined, reportedSeconds: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, cleanupPending: false }, 'purging');
   }
 
   // ── The limits ──
@@ -1176,6 +1295,12 @@ export class MeetingManager {
           continue;
         }
         if (run.state === 'in_call') {
+          // a stop monitor that has not reported once since the notice: capture never opened, and the run leaves when the
+          // window and the recovery wait have both passed, as it does for a monitor that went quiet and stayed quiet
+          if (run.monitorSeenAt === undefined && run.noticePostedAt !== undefined && now - run.noticePostedAt > this.monitorHeartbeatMs * this.monitorMissedBeats + this.monitorRecoverMs) {
+            await this.leave(run, 'stop_monitor_failed');
+            continue;
+          }
           // quiet once monitorMissedBeats intervals have passed since the last heartbeat, the boundary captureReady and startCaptureIfReady use
           const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats;
           if (monitorStale) {
@@ -1213,13 +1338,26 @@ export class MeetingManager {
     return job !== undefined && job.leaseHolder !== undefined && job.leaseExpiresAt !== undefined && job.leaseExpiresAt > now;
   }
 
-  /** Evicts completed in-memory runs after the grace. Durable stores omit forget and keep their terminal records. */
+  /**
+   * Evicts completed in-memory runs after the grace. Durable stores omit forget and keep their terminal records. The
+   * terminal runs are listed when the first of them can go, and at least once a minute (for a run that ended since, or
+   * one a pending delivery held back), not on every pass.
+   */
   private async cleanupExpired(): Promise<void> {
     const { runs, jobs, transcript, events, outbox, entitlement } = this.stores;
     if (!runs.forget || !jobs.forget || !transcript.forget || !events.forget || !outbox.forget) return;
+    const now = this.now();
+    if (now < this.nextCleanupAt) return;
     const grace = Math.max(86_400_000, this.config.forgetAfterMs ?? 172_800_000);
+    // a run that ends from now on can go no sooner than a grace from now, at least a day, so a minute's wait misses none
+    let next = now + 60_000;
     for (const run of await runs.list({ states: ['done', 'failed'], limit: Number.MAX_SAFE_INTEGER })) {
-      if (run.doneAt === undefined || this.now() - Math.max(run.doneAt, run.purgedAt ?? 0) < grace) continue;
+      if (run.doneAt === undefined) continue;
+      const forgetAt = Math.max(run.doneAt, run.purgedAt ?? 0) + grace;
+      if (now < forgetAt) {
+        next = Math.min(next, forgetAt);
+        continue;
+      }
       if (run.keep === 'account' && run.purgedAt === undefined && run.state !== 'failed') continue;
       const deliveries = await outbox.listByRun(run.runId);
       if (deliveries.some((d) => d.state === 'pending')) continue;
@@ -1230,6 +1368,7 @@ export class MeetingManager {
       await entitlement.forget?.(run.runId);
       await runs.forget(run.runId);
     }
+    this.nextCleanupAt = next;
   }
 
   // ── Reconcile ──
@@ -1332,10 +1471,13 @@ export class MeetingManager {
 
   // ── The transcript ──
 
-  /** A turn the listen session wrote: a `bot:transcript` event, stored and forwarded, unless the run is behind the fence or over. */
+  /**
+   * A turn the listen session wrote: a `bot:transcript` event, stored and forwarded, unless the run is behind the fence
+   * or over, or its capture has not started (a provider that passed audio before `startCapture` is not taken at its word).
+   */
   async recordTranscript(turn: TranscriptTurn): Promise<boolean> {
     const run = await this.stores.runs.get(turn.runId);
-    if (!run || run.state === 'purging' || TERMINAL_RUN_STATES.has(run.state) || await this.stores.transcript.isFenced(turn.runId)) return false;
+    if (!run || run.state === 'purging' || TERMINAL_RUN_STATES.has(run.state) || run.captureStartedAt === undefined || await this.stores.transcript.isFenced(turn.runId)) return false;
     await this.emit('bot:transcript', run, { seq: turn.seq, turnId: turn.turnId, text: turn.text, speaker: turn.speaker, startMs: turn.startMs, endMs: turn.endMs }, `${turn.runId}:transcript:${turn.seq}`, turn.at);
     return true;
   }

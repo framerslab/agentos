@@ -88,6 +88,7 @@ export * from './extensions';
 export * from './io/channels';
 // Voice Calls (telephony providers)
 export * from './io/channels/telephony';
+// Meeting bots (the meeting-participant channel)
 export * from './io/channels/meetings/index.js';
 // Unified speech runtime (STT/TTS/VAD/wake-word)
 export * from './io/speech';

@@ -171,6 +171,7 @@ export interface MeetingRunRecord {
   requestedAt: number;
   joinAt: number;
   dispatchedAt?: number;
+  /** When the bot reached the meeting: its waiting room, then the call itself once it is admitted. The waiting-room limit counts from the first, the notice's confirmation from the second. */
   joinedAt?: number;
   noticePostedAt?: number;
   captureStartedAt?: number;
