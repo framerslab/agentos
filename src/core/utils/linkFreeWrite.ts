@@ -79,6 +79,39 @@ const NAME_SEPARATORS: RegExp = path.sep === '\\' ? /[\\/]/ : /\//;
  */
 export type OpenRefusal = 'link' | 'special';
 
+/**
+ * Why, on Linux, a file was read without the full check of the path the kernel gives for it (see
+ * {@link readFileOutsideLinks}), the read standing on the looks alone or on a looser bound:
+ * - `'realpath'`: a real path the check compares with could not be had. When the real path of the folder read below
+ *   could be had and only that of {@link ReadOutsideLinksOptions.within} could not, the file was still checked to
+ *   lie below the folder read below; otherwise it was not checked.
+ * - `'proc'`: `/proc` gave no path for the open file, as when it is not mounted, so the file was not checked.
+ *
+ * Elsewhere than Linux no such check is made, and none is reported.
+ */
+export type UncheckedOpenPath = 'realpath' | 'proc';
+
+/** A file that {@link readFileOutsideLinks} or {@link readFileOutsideLinksSync} read. */
+export interface FileReadOutsideLinks {
+  /** The file's text, read as UTF-8. */
+  text: string;
+  /** Set only on Linux, when the path of the file the open reached was not fully checked: why. */
+  unchecked?: UncheckedOpenPath;
+}
+
+/** What {@link readFileOutsideLinks} and {@link readFileOutsideLinksSync} check the file the open reached against. */
+export interface ReadOutsideLinksOptions {
+  /**
+   * The folder that, on Linux, the file the open reached must lie below: the folder read below, or a folder on the
+   * way to the file; the folder read below when not given. A caller that reads the files of many folders below one
+   * folder, such as each capability's files below the folder that holds every capability's folder, names the
+   * file's own folder here, so a folder on the way swapped for a link into a sibling folder is refused too. Its real
+   * path is taken before the looks and must be the real path of the folder read below followed by the names on the
+   * way to it, so a link at any of those names is refused before any look.
+   */
+  within?: string;
+}
+
 /** A file open for writing and checked, and the identity of the file the open reached. */
 export interface OpenedFile {
   /** The open file. Nothing has been emptied or written. */
@@ -241,29 +274,37 @@ export function createFileOutsideLinksSync(file: string, text: string): boolean 
  * by default on Linux, installs a package's files as hard links to its store, so each of them has a second name.
  *
  * On Linux, where `/proc` reports the path of an open file, the file the open reached must also lie below the real
- * path `root` had before the looks, so a folder on the way that is swapped for a link after its look and before the
- * open is refused too. Elsewhere Node can neither open a file relative to a folder held open nor ask an open file
+ * path that `options.within`, or `root` when it is not given, had before the looks, so a folder on the way that is
+ * swapped for a link after its look and before the open is refused too. When a real path or the open file's path
+ * cannot be had there, the file is read without that check, or checked against `root` alone, and the result's
+ * `unchecked` says why. Elsewhere Node can neither open a file relative to a folder held open nor ask an open file
  * for its path, and such a swap is outside what the looks stop.
  *
  * @param root - The folder the file is read below. It may itself be a link.
  * @param relative - The file's path under `root`, its names joined by the platform's separator, as `path.relative`
  *   gives it. An absolute path, or one with a name that is `.` or `..`, is refused before any look, since the walk
  *   would start elsewhere or leave `root`.
- * @returns The file's text, read as UTF-8; `link` when a symbolic link holds the file's place or a folder's on the
- *   way, or, on Linux, when the file the open reached lies outside `root`; `special` when something other than a
- *   regular file holds the file's place; or null when no file is there.
- * @throws TypeError when `relative` is absolute or a name in it is `.` or `..`; nothing is looked at or read.
+ * @param options - The folder the file must lie below on Linux ({@link ReadOutsideLinksOptions}).
+ * @returns The file's text, read as UTF-8, with `unchecked` when the check of its path did not run in full; `link`
+ *   when a symbolic link holds the file's place or a folder's on the way, or, on Linux, when the file the open
+ *   reached lies outside the folder it must lie below or a link is on the way from `root` to `options.within`;
+ *   `special` when something other than a regular file holds the file's place; or null when no file is there.
+ * @throws TypeError when `relative` is absolute or a name in it is `.` or `..`, or when `options.within` is neither
+ *   `root` nor a folder on the way to the file; nothing is looked at or read.
  * @throws Any other error the looks, the open or the read meet.
  */
 export async function readFileOutsideLinks(
   root: string,
   relative: string,
-): Promise<{ text: string } | OpenRefusal | null> {
+  options: ReadOutsideLinksOptions = {},
+): Promise<FileReadOutsideLinks | OpenRefusal | null> {
   const names = namesBelow('readFileOutsideLinks', relative);
   // With no name, the path is the root itself, a folder.
   if (names.length === 0) return 'special';
+  const toWithin = namesToWithin('readFileOutsideLinks', root, names, options.within);
   // Taken before the looks: a link put on the way after them does not move it.
-  const realRoot = await realPathWhereOpenPathsShow(root);
+  const bound = await openPathBound(root, toWithin);
+  if (bound === 'link') return 'link';
   let place = root;
   for (let index = 0; index < names.length; index++) {
     place = path.join(place, names[index]);
@@ -276,8 +317,9 @@ export async function readFileOutsideLinks(
     // Something put in the file's place since the look is refused here, before it is read.
     if (!(await handle.stat()).isFile()) return 'special';
     // So is a file the open reached through a folder swapped for a link since its look.
-    if (realRoot !== null && !(await openedBelow(handle, realRoot))) return 'link';
-    return { text: await handle.readFile('utf8') };
+    const check = checkOpenedPath(bound, bound.real === null ? null : await openedPath(handle));
+    if (check === 'link') return 'link';
+    return readResult(await handle.readFile('utf8'), check);
   } finally {
     await handle.close();
   }
@@ -289,16 +331,24 @@ export async function readFileOutsideLinks(
  *
  * @param root - The folder the file is read below. It may itself be a link.
  * @param relative - The file's path under `root`, as {@link readFileOutsideLinks} takes it.
+ * @param options - The folder the file must lie below on Linux, as {@link readFileOutsideLinks} takes it.
  * @returns What {@link readFileOutsideLinks} returns.
- * @throws TypeError when `relative` is absolute or a name in it is `.` or `..`; nothing is looked at or read.
+ * @throws TypeError when `relative` is absolute or a name in it is `.` or `..`, or when `options.within` is neither
+ *   `root` nor a folder on the way to the file; nothing is looked at or read.
  * @throws Any other error the looks, the open or the read meet.
  */
-export function readFileOutsideLinksSync(root: string, relative: string): { text: string } | OpenRefusal | null {
+export function readFileOutsideLinksSync(
+  root: string,
+  relative: string,
+  options: ReadOutsideLinksOptions = {},
+): FileReadOutsideLinks | OpenRefusal | null {
   const names = namesBelow('readFileOutsideLinksSync', relative);
   // With no name, the path is the root itself, a folder.
   if (names.length === 0) return 'special';
+  const toWithin = namesToWithin('readFileOutsideLinksSync', root, names, options.within);
   // Taken before the looks: a link put on the way after them does not move it.
-  const realRoot = realPathWhereOpenPathsShowSync(root);
+  const bound = openPathBoundSync(root, toWithin);
+  if (bound === 'link') return 'link';
   let place = root;
   for (let index = 0; index < names.length; index++) {
     place = path.join(place, names[index]);
@@ -315,8 +365,9 @@ export function readFileOutsideLinksSync(root: string, relative: string): { text
     // Something put in the file's place since the look is refused here, before it is read.
     if (!fsSync.fstatSync(fd).isFile()) return 'special';
     // So is a file the open reached through a folder swapped for a link since its look.
-    if (realRoot !== null && !openedBelowSync(fd, realRoot)) return 'link';
-    return { text: fsSync.readFileSync(fd, 'utf8') };
+    const check = checkOpenedPath(bound, bound.real === null ? null : openedPathSync(fd));
+    if (check === 'link') return 'link';
+    return readResult(fsSync.readFileSync(fd, 'utf8'), check);
   } finally {
     fsSync.closeSync(fd);
   }
@@ -342,6 +393,30 @@ function namesBelow(caller: string, relative: string): string[] {
     );
   }
   return names;
+}
+
+/**
+ * How many of `names`, the names on the way to a file below `root`, lead from `root` to the folder `within`: none
+ * when `within` is not given or is `root` itself.
+ *
+ * @param caller - The function given the folder, for the error message.
+ * @param root - The folder the file is read below.
+ * @param names - The names from `root` to the file, the file's own name last.
+ * @param within - The folder the file must lie below, when the caller names one.
+ * @throws TypeError when `within` is neither `root` nor a folder on the way to the file.
+ */
+function namesToWithin(caller: string, root: string, names: readonly string[], within: string | undefined): number {
+  if (within === undefined) return 0;
+  const relative = path.relative(path.resolve(root), path.resolve(within));
+  const withinNames = relative.split(NAME_SEPARATORS).filter((name) => name.length > 0);
+  // The file's own name is not a folder on the way to it.
+  if (withinNames.length < names.length && withinNames.every((name, index) => name === names[index])) {
+    return withinNames.length;
+  }
+  throw new TypeError(
+    `${caller}: the folder ${describeRefusedName(within)} is neither the folder read below nor a folder on the way ` +
+      'to the file',
+  );
 }
 
 /**
@@ -379,59 +454,118 @@ function readOpenRefusal(err: unknown): OpenRefusal | null {
 const OPEN_FILE_PATHS: string | null = process.platform === 'linux' ? '/proc/self/fd' : null;
 
 /**
- * The real path of `root`, as bytes, where the path of an open file can be had (Linux); null elsewhere, or when
- * the real path cannot be had.
+ * What a read checks the file its open reached against: the real path, as bytes, of the folder the file must lie
+ * below, or null when the file is not checked; and, when the check is not the one asked for, why.
  */
-async function realPathWhereOpenPathsShow(root: string): Promise<Buffer | null> {
-  if (OPEN_FILE_PATHS === null) return null;
+interface OpenPathBound {
+  real: Buffer | null;
+  unchecked?: UncheckedOpenPath;
+}
+
+/**
+ * The real paths a read below `root` checks the file its open reached against, taken before the looks, where the
+ * path of an open file can be had (Linux): `root`'s, and that of the folder the names `toWithin` lead to below it.
+ * `link` when the latter is not the former followed by those names, as when a link holds the place of one of them.
+ */
+async function openPathBound(root: string, toWithin: readonly string[]): Promise<OpenPathBound | 'link'> {
+  if (OPEN_FILE_PATHS === null) return { real: null };
+  const realRoot = await realPathOrNull(root);
+  const realWithin =
+    realRoot === null || toWithin.length === 0 ? null : await realPathOrNull(path.join(root, ...toWithin));
+  return boundFromRealPaths(realRoot, realWithin, toWithin);
+}
+
+/** The synchronous form of {@link openPathBound}. */
+function openPathBoundSync(root: string, toWithin: readonly string[]): OpenPathBound | 'link' {
+  if (OPEN_FILE_PATHS === null) return { real: null };
+  const realRoot = realPathOrNullSync(root);
+  const realWithin =
+    realRoot === null || toWithin.length === 0 ? null : realPathOrNullSync(path.join(root, ...toWithin));
+  return boundFromRealPaths(realRoot, realWithin, toWithin);
+}
+
+/**
+ * The bound from the real path of the folder read below and that of the folder the names `toWithin` lead to below
+ * it, each null when it could not be had: the latter's when it is the former followed by those names, `link` when it
+ * is anything else, and the former's, or none, when a real path could not be had.
+ */
+function boundFromRealPaths(
+  realRoot: Buffer | null,
+  realWithin: Buffer | null,
+  toWithin: readonly string[],
+): OpenPathBound | 'link' {
+  if (realRoot === null) return { real: null, unchecked: 'realpath' };
+  if (toWithin.length === 0) return { real: realRoot };
+  // The inner folder's real path could not be had: the file is still checked against the outer one.
+  if (realWithin === null) return { real: realRoot, unchecked: 'realpath' };
+  const expected = Buffer.concat([withSeparator(realRoot), Buffer.from(toWithin.join(path.sep))]);
+  return realWithin.equals(expected) ? { real: realWithin } : 'link';
+}
+
+/** The real path of `folder`, as bytes, or null when it cannot be had. */
+async function realPathOrNull(folder: string): Promise<Buffer | null> {
   try {
-    return await fs.realpath(root, { encoding: 'buffer' });
+    return await fs.realpath(folder, { encoding: 'buffer' });
   } catch {
     return null;
   }
 }
 
-/** The synchronous form of {@link realPathWhereOpenPathsShow}. */
-function realPathWhereOpenPathsShowSync(root: string): Buffer | null {
-  if (OPEN_FILE_PATHS === null) return null;
+/** The synchronous form of {@link realPathOrNull}. */
+function realPathOrNullSync(folder: string): Buffer | null {
   try {
-    return fsSync.realpathSync(root, { encoding: 'buffer' });
+    return fsSync.realpathSync(folder, { encoding: 'buffer' });
+  } catch {
+    return null;
+  }
+}
+
+/** The path the kernel gives for the open file `handle`, as bytes, or null when it gives none (no `/proc` mounted). */
+async function openedPath(handle: FileHandle): Promise<Buffer | null> {
+  try {
+    return await fs.readlink(`${OPEN_FILE_PATHS}/${handle.fd}`, { encoding: 'buffer' });
+  } catch {
+    return null;
+  }
+}
+
+/** The synchronous form of {@link openedPath}, for the open file descriptor `fd`. */
+function openedPathSync(fd: number): Buffer | null {
+  try {
+    return fsSync.readlinkSync(`${OPEN_FILE_PATHS}/${fd}`, { encoding: 'buffer' });
   } catch {
     return null;
   }
 }
 
 /**
- * True when the path the kernel gives for the open file `handle` lies below `realRoot`, or when it gives none (no
- * `/proc` mounted), where the looks alone stand; false when it lies anywhere else.
+ * What the path the kernel gave for an open file means for a read checked against `bound`: `link` when the file lies
+ * outside the folder it must lie below; otherwise why the check did not run in full, or undefined when it did or
+ * none is made here. `opened` is null when the kernel gave no path, or when `bound` asks for no check.
  */
-async function openedBelow(handle: FileHandle, realRoot: Buffer): Promise<boolean> {
-  let opened: Buffer;
-  try {
-    opened = await fs.readlink(`${OPEN_FILE_PATHS}/${handle.fd}`, { encoding: 'buffer' });
-  } catch {
-    return true;
-  }
-  return liesBelow(opened, realRoot);
+function checkOpenedPath(bound: OpenPathBound, opened: Buffer | null): 'link' | UncheckedOpenPath | undefined {
+  if (bound.real === null) return bound.unchecked;
+  // The looks alone stand.
+  if (opened === null) return 'proc';
+  return liesBelow(opened, bound.real) ? bound.unchecked : 'link';
 }
 
-/** The synchronous form of {@link openedBelow}, for the open file descriptor `fd`. */
-function openedBelowSync(fd: number, realRoot: Buffer): boolean {
-  let opened: Buffer;
-  try {
-    opened = fsSync.readlinkSync(`${OPEN_FILE_PATHS}/${fd}`, { encoding: 'buffer' });
-  } catch {
-    return true;
-  }
-  return liesBelow(opened, realRoot);
+/** A read's result: the file's text, and why the check of its path did not run in full when it did not. */
+function readResult(text: string, unchecked: UncheckedOpenPath | undefined): FileReadOutsideLinks {
+  return unchecked === undefined ? { text } : { text, unchecked };
 }
 
-/** True when the path `opened` lies below the folder `realRoot`, both as bytes; the folder itself is not below. */
-function liesBelow(opened: Buffer, realRoot: Buffer): boolean {
+/** `folder`, a path as bytes, ending with the separator. */
+function withSeparator(folder: Buffer): Buffer {
   const separator = Buffer.from(path.sep);
-  const below = realRoot.subarray(realRoot.length - separator.length).equals(separator)
-    ? realRoot
-    : Buffer.concat([realRoot, separator]);
+  return folder.subarray(folder.length - separator.length).equals(separator)
+    ? folder
+    : Buffer.concat([folder, separator]);
+}
+
+/** True when the path `opened` lies below the folder whose real path is `real`, both as bytes; that folder is not. */
+function liesBelow(opened: Buffer, real: Buffer): boolean {
+  const below = withSeparator(real);
   return opened.length > below.length && opened.subarray(0, below.length).equals(below);
 }
 

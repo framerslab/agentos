@@ -420,8 +420,8 @@ export type CapabilityManifestField = 'manifest' | 'skillContent' | 'schema';
  *   space, or ends with a dot; or a name holds more than 200 bytes in UTF-8.
  * - `'outside'`: the file `skillContent` names would not lie inside the capability's folder.
  * - `'link'`: a symbolic link holds the place of the file, or of a folder on the way to it, the capability's own
- *   folder among them. On Linux, also when the file the open reached lies outside the folder that holds the
- *   capability's folder, as when a folder on the way is swapped for a link after it was looked at.
+ *   folder among them. On Linux, also when the file the open reached lies outside the capability's own folder, as
+ *   when a folder on the way is swapped for a link after it was looked at.
  * - `'special'`: something other than a regular file holds the file's place: a folder, a named pipe, a socket or a
  *   device.
  */

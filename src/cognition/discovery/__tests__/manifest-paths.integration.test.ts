@@ -221,23 +221,29 @@ describe('a capability is read only from its own folder', () => {
       fs.mkdirSync(outsideFolder);
       fs.writeFileSync(path.join(outsideFolder, 'SKILL.md'), SECRET);
       const manifestFile = path.join(moved, 'CAPABILITY.yaml');
-      // Once the manifest is open, the capability's folder moves aside and a link to the folder outside takes its
-      // place. The folder moves within the scanned folder, so the open manifest still lies below it.
-      const realOpen = fsp.open.bind(fsp);
+      // Once the manifest is read, as the skill's file is looked for, the capability's folder moves aside and a link
+      // to the folder outside takes its place, just before the look at the capability's folder. The swap comes after
+      // the real paths a read takes on Linux, so on every platform it is the look, which starts at the scanned
+      // folder, that finds the link.
+      const realLstat = fsp.lstat.bind(fsp);
+      const looks: string[] = [];
       const swaps: string[] = [];
-      const open = vi.spyOn(fsp, 'open').mockImplementation(async (file, flags, mode) => {
-        const handle = await realOpen(file, flags, mode);
-        if (String(file) === manifestFile && swaps.length === 0) {
-          swaps.push(String(file));
-          fs.renameSync(moved, path.join(caps, 'moved-before'));
-          fs.symlinkSync(outsideFolder, moved, 'dir');
+      const lstat = vi.spyOn(fsp, 'lstat').mockImplementation(async (file, options) => {
+        if (String(file) === moved) {
+          looks.push(String(file));
+          // The first look at the folder is on the way to the manifest, the second on the way to SKILL.md.
+          if (looks.length === 2) {
+            swaps.push(String(file));
+            fs.renameSync(moved, path.join(caps, 'moved-before'));
+            fs.symlinkSync(outsideFolder, moved, 'dir');
+          }
         }
-        return handle;
+        return realLstat(file, options);
       });
 
-      const result = await new CapabilityManifestScanner().scanWithRefusals([caps]).finally(() => open.mockRestore());
+      const result = await new CapabilityManifestScanner().scanWithRefusals([caps]).finally(() => lstat.mockRestore());
 
-      expect(swaps).toEqual([manifestFile]);
+      expect(swaps).toEqual([moved]);
       expect(result.descriptors).toEqual([]);
       expect(result.refused).toEqual([{ manifestPath: manifestFile, field: 'skillContent', problem: 'link' }]);
       expect(JSON.stringify(result)).not.toContain(SECRET);
@@ -278,6 +284,66 @@ describe('a capability is read only from its own folder', () => {
         { manifestPath: path.join(swapped, 'CAPABILITY.yaml'), field: 'skillContent', problem: 'link' },
       ]);
       expect(JSON.stringify(result)).not.toContain(SECRET);
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    "on Linux, a folder swapped for a link into another capability's folder between its look and the open refuses the capability, and the other capability's file is not read as its own",
+    async () => {
+      const otherSkill = "# Other Tool\n\nThe other capability's own file.\n";
+      const other = capability('other', { 'CAPABILITY.yaml': manifest('other'), 'SKILL.md': otherSkill });
+      const swapped = capability('swapped', {
+        'CAPABILITY.yaml': manifest('swapped', 'skillContent: docs/SKILL.md'),
+        'docs/SKILL.md': '# Swapped\n',
+      });
+      const docs = path.join(swapped, 'docs');
+      const skill = path.join(docs, 'SKILL.md');
+      // The looks find a folder at docs; then, just before docs/SKILL.md is opened, a link to the other capability's
+      // folder takes its place, so the open reaches a file inside the scanned folder but outside this capability's.
+      const realOpen = fsp.open.bind(fsp);
+      const swaps: string[] = [];
+      const open = vi.spyOn(fsp, 'open').mockImplementation((file, flags, mode) => {
+        if (String(file) === skill && swaps.length === 0) {
+          swaps.push(String(file));
+          fs.renameSync(docs, path.join(swapped, 'docs-before'));
+          fs.symlinkSync(other, docs, 'dir');
+        }
+        return realOpen(file, flags, mode);
+      });
+
+      const result = await new CapabilityManifestScanner().scanWithRefusals([caps]).finally(() => open.mockRestore());
+
+      expect(swaps).toEqual([skill]);
+      expect(result.descriptors).toHaveLength(1);
+      expect(result.descriptors[0]).toMatchObject({ id: 'tool:other', fullContent: otherSkill });
+      expect(result.refused).toEqual([
+        { manifestPath: path.join(swapped, 'CAPABILITY.yaml'), field: 'skillContent', problem: 'link' },
+      ]);
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'on Linux, when /proc gives no path for an open file, the scan reads its capabilities without that check and writes one warning line saying so',
+    async () => {
+      capability('good', { 'CAPABILITY.yaml': manifest('good'), 'SKILL.md': GOOD_SKILL });
+      capability('second', { 'CAPABILITY.yaml': manifest('second'), 'SKILL.md': '# Second\n' });
+      const realReadlink = fsp.readlink.bind(fsp);
+      const readlink = vi.spyOn(fsp, 'readlink').mockImplementation(async (file, options) => {
+        if (String(file).startsWith('/proc/self/fd/')) {
+          throw Object.assign(new Error('no /proc in this test'), { code: 'ENOENT' });
+        }
+        return realReadlink(file, options);
+      });
+
+      const result = await new CapabilityManifestScanner().scanWithRefusals([caps]).finally(() => readlink.mockRestore());
+
+      expect(result.descriptors.map((descriptor) => descriptor.id).sort()).toEqual(['tool:good', 'tool:second']);
+      expect(result.refused).toEqual([]);
+      const unchecked = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('without checking'));
+      // One line for the scan's four reads: each capability's manifest and SKILL.md (neither has a schema.json).
+      expect(unchecked).toHaveLength(1);
+      expect(unchecked[0]).toContain('Read 4 capability files');
+      expect(unchecked[0]).toContain('/proc/self/fd');
     },
   );
 });

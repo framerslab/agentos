@@ -27,9 +27,9 @@
  * would leave the folder, an empty value, no value or `false`, is refused, and the capability with it. The manifest,
  * the skill's content and `schema.json` are read never through a symbolic link at the capability's folder or below
  * it, never waiting, and only when each is a regular file (`readFileOutsideLinks` in `core/utils/linkFreeWrite`,
- * which on Linux also checks that the file it opened lies below the folder that holds the capability's folder). A
- * refused capability is left out with a warning, the scan goes on with the others, and `scanWithRefusals()` reports
- * it.
+ * which on Linux also checks that the file it opened lies below the capability's own folder; where that check cannot
+ * run, the scan writes one warning line saying so). A refused capability is left out with a warning, the scan goes on
+ * with the others, and `scanWithRefusals()` reports it.
  *
  * Extends the existing workspace-discovery.ts pattern from agentos-skills-registry.
  */
@@ -38,7 +38,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
-import { readFileOutsideLinks, type OpenRefusal } from '../../core/utils/linkFreeWrite.js';
+import {
+  readFileOutsideLinks,
+  type OpenRefusal,
+  type UncheckedOpenPath,
+} from '../../core/utils/linkFreeWrite.js';
 import {
   MAX_PATH_NAME_BYTES,
   describeRefusedName,
@@ -246,14 +250,45 @@ export function resolveSkillContentPath(
 }
 
 /**
+ * The files one scan, or one `parseManifest` call, read on Linux without the full check that the file the open
+ * reached lies below its capability's folder, counted by why, so that the scan writes one warning line for them all.
+ */
+type UncheckedReads = Map<UncheckedOpenPath, number>;
+
+/** Why a read went without the full check, as the warning words it. */
+const UNCHECKED_BECAUSE: Record<UncheckedOpenPath, string> = {
+  realpath: "a folder's real path could not be had",
+  proc: '/proc/self/fd gave no path for an open file',
+};
+
+/**
+ * Write one warning line for the files a scan read without the full check of the path the open reached, when there
+ * are any. Such a file was still refused when a link or something other than a regular file was in its place, or
+ * in a folder's on the way, when the scan looked.
+ */
+function warnUncheckedReads(unchecked: UncheckedReads): void {
+  if (unchecked.size === 0) return;
+  let files = 0;
+  for (const count of unchecked.values()) files += count;
+  const because = [...unchecked.keys()].map((reason) => UNCHECKED_BECAUSE[reason]).join('; ');
+  console.warn(
+    `[CapabilityManifestScanner] Read ${files} capability file${files === 1 ? '' : 's'} without checking that ` +
+      `the file opened lies below its capability's folder (${because}); links and special files met on the way ` +
+      'were still refused',
+  );
+}
+
+/**
  * Read `file`, a path inside `folder`, never waiting, only when it is a regular file, and never through a symbolic
  * link at the folder or below it (`readFileOutsideLinks`). The file is read below the folder's parent, the folder
  * that holds every capability's folder when the scan reads it, so the capability's own folder is looked at too, and
- * on Linux the file the open reached is checked to lie below that parent.
+ * on Linux the file the open reached is checked to lie below the capability's own folder, whose real path is taken
+ * before the looks. A read made without that check is counted in `unchecked`.
  *
  * @param folder - The capability's folder, which holds the file. It may not be a link.
  * @param file - The file's path, absolute or relative to `folder`, inside `folder`.
  * @param field - What the file is, for a refusal.
+ * @param unchecked - The scan's count of files read without the full check, which this adds to.
  * @returns The file's text, or null when no file is there.
  * @throws CapabilityManifestRefusedError (`link` or `special`) when the file is not read through.
  */
@@ -261,13 +296,16 @@ async function readCapabilityFile(
   folder: string,
   file: string,
   field: CapabilityManifestField,
+  unchecked: UncheckedReads,
 ): Promise<string | null> {
   const dir = path.resolve(folder);
   const target = path.resolve(dir, file);
   const root = path.dirname(dir);
-  const read = await readFileOutsideLinks(root, path.relative(root, target));
+  const read = await readFileOutsideLinks(root, path.relative(root, target), { within: dir });
   if (typeof read === 'string') throw new CapabilityManifestRefusedError(field, read, target);
-  return read === null ? null : read.text;
+  if (read === null) return null;
+  if (read.unchecked !== undefined) unchecked.set(read.unchecked, (unchecked.get(read.unchecked) ?? 0) + 1);
+  return read.text;
 }
 
 /**
@@ -335,7 +373,9 @@ export class CapabilityManifestScanner {
   /**
    * Scan directories for CAPABILITY.yaml files, as {@link scan} does, and report each capability left out because
    * its `skillContent` or the place of one of its files was refused (see {@link CapabilityManifestRefusedError}).
-   * A refused capability is left out, a warning names it, and the scan goes on with the others.
+   * A refused capability is left out, a warning names it, and the scan goes on with the others. On Linux, when the
+   * check that each file opened lies below its capability's folder cannot run, the files are read without it and the
+   * scan writes one warning line saying so.
    *
    * @param dirs - The folders to scan, each holding one folder per capability; {@link getDefaultDirs} by default.
    * @returns The capabilities read, and the ones refused with their manifests and reasons.
@@ -344,6 +384,7 @@ export class CapabilityManifestScanner {
     const scanDirs = dirs ?? this.getDefaultDirs();
     const descriptors: CapabilityDescriptor[] = [];
     const refused: RefusedCapabilityManifest[] = [];
+    const unchecked: UncheckedReads = new Map();
 
     for (const dir of scanDirs) {
       if (!fs.existsSync(dir)) continue;
@@ -369,7 +410,7 @@ export class CapabilityManifestScanner {
         if (!manifestPath) continue;
 
         try {
-          const descriptor = await this.parseManifest(manifestPath, capDir);
+          const descriptor = await this.readManifest(manifestPath, capDir, unchecked);
           if (descriptor) {
             descriptors.push(descriptor);
           }
@@ -386,6 +427,7 @@ export class CapabilityManifestScanner {
       }
     }
 
+    warnUncheckedReads(unchecked);
     return { descriptors, refused };
   }
 
@@ -393,7 +435,8 @@ export class CapabilityManifestScanner {
    * Parse a single CAPABILITY.yaml file into a CapabilityDescriptor. The manifest, the skill's content and
    * `schema.json` are read never through a symbolic link at the capability's folder or below it, never waiting, and
    * only when each is a regular file; the file `skillContent` names is read only when it lies inside `capDir`
-   * ({@link resolveSkillContentPath}).
+   * ({@link resolveSkillContentPath}). On Linux each file opened must also lie below the capability's folder; when
+   * that check cannot run, the files are read without it and one warning line says so.
    *
    * @param yamlPath - The manifest's path.
    * @param capDir - The capability's folder, which holds its files. Its files are read below its parent folder, so
@@ -407,7 +450,24 @@ export class CapabilityManifestScanner {
     yamlPath: string,
     capDir: string,
   ): Promise<CapabilityDescriptor | null> {
-    const content = await readCapabilityFile(path.dirname(yamlPath), path.basename(yamlPath), 'manifest');
+    const unchecked: UncheckedReads = new Map();
+    try {
+      return await this.readManifest(yamlPath, capDir, unchecked);
+    } finally {
+      warnUncheckedReads(unchecked);
+    }
+  }
+
+  /**
+   * What {@link parseManifest} does, counting in `unchecked` each file read without the full check of its path, so
+   * that a scan writes one warning line for all of its capabilities.
+   */
+  private async readManifest(
+    yamlPath: string,
+    capDir: string,
+    unchecked: UncheckedReads,
+  ): Promise<CapabilityDescriptor | null> {
+    const content = await readCapabilityFile(path.dirname(yamlPath), path.basename(yamlPath), 'manifest', unchecked);
     if (content === null) {
       console.warn(`[CapabilityManifestScanner] No manifest at ${yamlPath}`);
       return null;
@@ -428,14 +488,14 @@ export class CapabilityManifestScanner {
     // YAML's null, written as no value, `null` or `~`, is read as the empty value.
     const skillContent: unknown = parsed.skillContent === null ? '' : parsed.skillContent;
     const skillFile = skillContent === undefined ? 'SKILL.md' : resolveSkillContentPath(capDir, skillContent);
-    const fullContent = (await readCapabilityFile(capDir, skillFile, 'skillContent')) ?? undefined;
+    const fullContent = (await readCapabilityFile(capDir, skillFile, 'skillContent', unchecked)) ?? undefined;
 
     // Load optional schema.json
     let fullSchema: Record<string, unknown> | undefined;
     if (parsed.inputSchema) {
       fullSchema = parsed.inputSchema as Record<string, unknown>;
     } else {
-      const schemaText = await readCapabilityFile(capDir, 'schema.json', 'schema');
+      const schemaText = await readCapabilityFile(capDir, 'schema.json', 'schema', unchecked);
       if (schemaText !== null) {
         try {
           fullSchema = JSON.parse(schemaText);
