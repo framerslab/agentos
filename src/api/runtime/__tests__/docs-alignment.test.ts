@@ -110,11 +110,11 @@ describe('AgentOS docs alignment', () => {
     const personality = read('../../../../docs/memory/HEXACO_PERSONALITY.md');
 
     expect(readme).not.toContain('memory: { enabled: true, cognitive: true }');
-    // The guide's memory example runs on the GMI path, the one agent() path that reads memory.
+    // The guide's cognitive-memory example runs on the GMI path.
     expect(guide).toMatch(/agent\(\{\s*runtime: 'gmi',[^`]*\bmemory: \{ embedding: \{/);
-    // The guide names the MemoryConfig fields the GMI path reads, and says the other path reads none.
+    // The guide distinguishes GMI store settings from the default runtime's callback.
     expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding` and `consolidation`');
-    expect(guide).toContain("without `runtime: 'gmi'` the agent reads no `memory` option at all");
+    expect(guide).toContain('The default runtime reads only the `memory.working` callback described above.');
     // No example passes memory to an agent() that does not read it.
     const pages = { 'README.md': readme, 'docs/getting-started/HIGH_LEVEL_API.md': guide, 'examples/high-level-api.mjs': example, 'docs/GMI.md': gmiGuide, 'docs/memory/HEXACO_PERSONALITY.md': personality };
     for (const [page, text] of Object.entries(pages)) {
