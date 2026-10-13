@@ -58,6 +58,57 @@ describe('a worker the manager cannot reach', () => {
     expect((await h.stores.runs.get(runId))?.state).toBe('done');
   });
 
+  it('a leaving run that holds no kill deadline is armed on the next pass and killed thirty seconds after it', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    // a leave written without its deadline, as a row from before the deadline was kept on the run holds it
+    await h.stores.runs.update(runId, { state: 'leaving', reason: 'stopped_by_owner' }, 'in_call');
+    const restarted = h.peer('m2');
+    const armedAt = h.clock.now();
+    await restarted.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', leaveCommandedAt: armedAt });
+    h.clock.advance(30_000);
+    await restarted.tick();
+    expect(h.provider.commands.get(runId)?.some((c) => c.name === 'kill')).toBe(false);
+    h.clock.advance(1);
+    await restarted.tick();
+    expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'kill' });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stopped_by_owner' });
+  });
+
+  it('a purge fenced without its kill deadline is armed on the next pass, and its bot is killed and the purge finished', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    // the fence of a dispatched run, written by a process that stopped before it wrote the kill's deadline
+    await h.stores.runs.update(runId, { state: 'purging', reason: 'stopped_by_owner' }, 'in_call');
+    await h.stores.transcript.fence(runId);
+    await h.stores.events.fence(runId);
+    const restarted = h.peer('m2');
+    const armedAt = h.clock.now();
+    await restarted.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'purging', leaveCommandedAt: armedAt });
+    h.clock.advance(30_001);
+    await restarted.tick(); // the kill, and the bot taken as gone
+    await restarted.tick(); // the purge's steps
+    expect(h.provider.commands.get(runId)?.filter((c) => c.name === 'kill')).toHaveLength(1);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stopped_by_owner' });
+    expect((await h.stores.runs.get(runId))?.purgedAt).toBeDefined();
+    expect(h.provider.deleted).toEqual([runId]);
+    expect(h.rooms.deleted).toEqual([`bot-${runId}`]);
+  });
+
+  it('stamps lastReportAt when a report is applied, and a report sent again leaves it where it was', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    h.clock.advance(10_000);
+    const taken = h.clock.now();
+    await h.report(runId, 'usage', { seconds: 60 }, taken);
+    expect((await h.stores.runs.get(runId))?.lastReportAt).toBe(taken);
+    h.clock.advance(5_000);
+    await h.report(runId, 'usage', { seconds: 60 }, taken); // the same report: its event is stored once
+    expect((await h.stores.runs.get(runId))?.lastReportAt).toBe(taken);
+  });
+
   it.each(['alive', 'unreachable'] as const)('ends at durable usage after exactly two silent minutes with the provider %s', async (mode) => {
     const h = harness({ usageSilenceMs: 120_000 });
     const runId = await joined(h);
