@@ -573,7 +573,8 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
     }
 
     status.retryCount++;
-    return this.deliverMessage(message);
+    // Skip history on retry so the message is recorded only once.
+    return this.deliverMessage(message, { skipHistory: true });
   }
 
   // ==========================================================================
@@ -672,7 +673,10 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
   // Private Helpers
   // ==========================================================================
 
-  private async deliverMessage(message: AgentMessage): Promise<DeliveryStatus> {
+  private async deliverMessage(
+    message: AgentMessage,
+    options: { skipHistory?: boolean } = {},
+  ): Promise<DeliveryStatus> {
     const startTime = Date.now();
     const targetAgentId = message.toAgentId!;
 
@@ -680,9 +684,11 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
     this.stats.totalMessagesSent++;
     this.stats.messagesByType[message.type] = (this.stats.messagesByType[message.type] ?? 0) + 1;
 
-    // Store in history
-    this.addToHistory(targetAgentId, message);
-    this.addToHistory(message.fromAgentId, message);
+    // Store in history on the first send only. Retries re-use the existing entry.
+    if (!options.skipHistory) {
+      this.addToHistory(targetAgentId, message);
+      this.addToHistory(message.fromAgentId, message);
+    }
 
     const resolvedPendingRequest = this.resolvePendingRequest(message);
 
