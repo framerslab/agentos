@@ -1,72 +1,22 @@
 /**
- * @fileoverview Twilio `<Connect><Stream>` WebSocket media stream parser.
- *
- * ## Twilio media stream protocol
- *
- * When a Twilio call executes the TwiML `<Connect><Stream url="wss://..." />`,
- * Twilio opens a WebSocket to the specified URL and sends **all messages as
- * JSON-encoded strings** (never raw binary). Each message has an `event` field
- * and a `streamSid` field that together identify the event type and stream.
- *
- * ### Inbound JSON message shapes
- *
- * ```
- * ┌─────────────────────────────────────────────────────────────────────┐
- * │ event: "start"                                                     │
- * │ streamSid: "MZxxx"                                                 │
- * │ start: { callSid, accountSid, mediaFormat: { encoding, ... } }     │
- * ├─────────────────────────────────────────────────────────────────────┤
- * │ event: "media"                                                     │
- * │ streamSid: "MZxxx"                                                 │
- * │ media: { track: "inbound"|"outbound", payload: "<base64>" }        │
- * │ sequenceNumber: 42                                                 │
- * ├─────────────────────────────────────────────────────────────────────┤
- * │ event: "dtmf"                                                      │
- * │ streamSid: "MZxxx"                                                 │
- * │ dtmf: { digit: "5", duration: 500 }                                │
- * ├─────────────────────────────────────────────────────────────────────┤
- * │ event: "mark"                                                      │
- * │ streamSid: "MZxxx"                                                 │
- * │ mark: { name: "utterance-done" }                                   │
- * ├─────────────────────────────────────────────────────────────────────┤
- * │ event: "stop"                                                      │
- * │ streamSid: "MZxxx"                                                 │
- * └─────────────────────────────────────────────────────────────────────┘
- * ```
- *
- * ### Outbound audio format
- *
- * Audio sent back to Twilio must be wrapped in a JSON `media` envelope:
- * ```json
- * { "event": "media", "streamSid": "MZxxx", "media": { "payload": "<base64>" } }
- * ```
- *
- * ### Connection acknowledgment
- *
- * Immediately after the WebSocket handshake, the server must send:
- * ```json
- * { "event": "connected", "protocol": "Call", "version": "1.0.0" }
- * ```
- * This tells Twilio the listener is ready to receive media.
- *
- * @see {@link https://www.twilio.com/docs/voice/twiml/stream}
- * @module @framers/agentos/voice/parsers/TwilioMediaStreamParser
+ * Twilio media parser with an explicit documented carrier profile and a retained legacy profile.
+ * Carrier mode requires PCMU 8 kHz mono and preserves carrier timestamps and chunk counters.
+ * Legacy mode exists for existing callers and fixtures; it is not a live-carrier conformance claim.
  */
 
-import type { MediaStreamParser, MediaStreamIncoming } from '../MediaStreamParser.js';
+import { parseCarrierMedia, carrierAudio, carrierClear, carrierMark, type MediaStreamParser, type MediaStreamIncoming } from '../MediaStreamParser.js';
 
 /**
- * Parses the Twilio `<Connect><Stream>` WebSocket media stream protocol.
- *
- * Twilio sends all messages as JSON-encoded strings. Outbound audio is
- * wrapped in the same JSON envelope so Twilio can associate it with the
- * correct stream. An explicit `connected` acknowledgment is sent once
- * immediately after the WebSocket handshake to signal that the listener is
- * ready to receive media.
- *
- * @see {@link https://www.twilio.com/docs/voice/twiml/stream}
+ * Twilio media parser with an explicit documented carrier profile and a retained legacy profile.
+ * Carrier mode requires PCMU 8 kHz mono and preserves carrier timestamps and chunk counters.
+ * Legacy mode exists for existing callers and fixtures; it is not a live-carrier conformance claim.
  */
-export class TwilioMediaStreamParser implements MediaStreamParser {
+export class TwilioMediaStreamParser<P extends 'legacy' | 'carrier' = 'legacy'> implements MediaStreamParser {
+  /** Selected once; the no-argument constructor preserves released behavior. */
+  readonly protocol: P;
+  /** Selects documented carrier messages explicitly. */
+  constructor(options: { protocol?: P } = {}) { this.protocol = (options.protocol ?? 'legacy') as P; }
+
   /**
    * Parse a raw WebSocket frame from Twilio's media stream.
    *
@@ -81,11 +31,18 @@ export class TwilioMediaStreamParser implements MediaStreamParser {
    * Messages with missing `event` or `streamSid` fields, malformed JSON,
    * or unrecognised event types are silently dropped (return `null`).
    *
+   * In the carrier profile ({@link parseCarrierMedia}) a `start` must declare
+   * PCMU at 8 kHz mono, the numeric strings `sequenceNumber`, `media.chunk` and
+   * `media.timestamp` are read as integers, and a malformed payload is dropped;
+   * an unsupported start format, an `error` event or an oversized frame throws.
+   *
    * @param data - Raw WebSocket frame payload (always a JSON string from Twilio).
    * @returns Normalised {@link MediaStreamIncoming} event, or `null` for
    *   outbound audio tracks, unknown event types, or malformed messages.
    */
   parseIncoming(data: Buffer | string): MediaStreamIncoming | null {
+    if (this.protocol === 'carrier') return parseCarrierMedia('twilio', data);
+
     const raw = typeof data === 'string' ? data : data.toString('utf8');
 
     let msg: Record<string, unknown>;
@@ -187,41 +144,18 @@ export class TwilioMediaStreamParser implements MediaStreamParser {
     }
   }
 
-  /**
-   * Encode mu-law audio for transmission back to the Twilio stream.
-   *
-   * Twilio requires base64-encoded audio wrapped in a JSON `media` envelope
-   * so it can route the audio to the correct stream by `streamSid`.
-   *
-   * @param audio - Raw mu-law PCM bytes to send to the caller.
-   * @param streamSid - The stream identifier to include in the envelope.
-   * @returns JSON string conforming to the Twilio media-out envelope format:
-   *   `{ event: 'media', streamSid: '...', media: { payload: '<base64>' } }`
-   */
+  /** Formats media for either the retained JSON protocol or the documented carrier profile. */
   formatOutgoing(audio: Buffer, streamSid: string): string {
-    return JSON.stringify({
-      event: 'media',
-      streamSid,
-      media: { payload: audio.toString('base64') },
-    });
+    if (this.protocol === 'carrier') return carrierAudio('twilio', audio, streamSid);
+    return JSON.stringify({ event: 'media', streamSid, media: { payload: audio.toString('base64') } });
+  }
+  /** Carrier Twilio sends connected to us; only legacy clients receive the old acknowledgement. */
+  formatConnected(_streamSid: string): P extends 'carrier' ? null : string {
+    return (this.protocol === 'carrier' ? null : JSON.stringify({ event: 'connected', protocol: 'Call', version: '1.0.0' })) as P extends 'carrier' ? null : string;
   }
 
-  /**
-   * Generate the initial `connected` acknowledgment expected by Twilio
-   * immediately after the WebSocket connection is established.
-   *
-   * Without this message, Twilio waits indefinitely for a response and
-   * eventually times out the stream connection.
-   *
-   * @param _streamSid - Unused -- Twilio does not require the stream ID in the
-   *   `connected` message, but the parameter is accepted for interface parity.
-   * @returns JSON string: `{ event: 'connected', protocol: 'Call', version: '1.0.0' }`
-   */
-  formatConnected(_streamSid: string): string {
-    return JSON.stringify({
-      event: 'connected',
-      protocol: 'Call',
-      version: '1.0.0',
-    });
-  }
+  /** Clears carrier output; compatibility clients have no mapped clear operation. */
+  formatClear(streamSid: string): string | null { return this.protocol === 'carrier' ? carrierClear('twilio', streamSid) : null; }
+  /** Marks carrier playback; compatibility clients have no mapped checkpoint operation. */
+  formatMark(streamSid: string, name: string): string | null { return this.protocol === 'carrier' ? carrierMark('twilio', streamSid, name) : null; }
 }
