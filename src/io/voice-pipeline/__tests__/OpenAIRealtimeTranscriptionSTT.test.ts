@@ -1874,6 +1874,17 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
     expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
     await orchestrator.stopSession();
   });
+
+  it('joins finals with one space and keeps the punctuation fast path when a transcript has spaces around it', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    twoUtterances(socket, 'Book a table for two. ', ' At seven tonight. ');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two. At seven tonight.');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
+    await orchestrator.stopSession();
+  });
 });
 
 describe('OpenAIRealtimeTranscriptionSTT: behind the failover chain of createVoiceProvidersFromEnv()', () => {

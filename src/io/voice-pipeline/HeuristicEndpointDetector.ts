@@ -512,7 +512,9 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   /**
    * The turn's item-keyed finals as one text: their texts in the order the
    * items began (by `startMs`, or in the order their first finals arrived
-   * when an item has none), with one space between them.
+   * when an item has none), each trimmed, with one space between them, so
+   * spaces a provider leaves around a final neither pile up between two
+   * texts nor hide the turn's terminal punctuation.
    */
   private _joinItemFinals(): string {
     const finals = [...this.itemFinals.values()];
@@ -521,7 +523,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
       finals.sort((a, b) => (a.startMs ?? 0) - (b.startMs ?? 0));
     }
     return finals
-      .map((final) => final.text)
+      .map((final) => final.text.trim())
       .filter((text) => text !== '')
       .join(' ');
   }
