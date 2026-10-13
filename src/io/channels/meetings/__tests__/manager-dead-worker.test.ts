@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { harness } from './manager-harness.js';
 import { MeetingManager } from '../MeetingManager.js';
 import { MeetingRoom } from '../MeetingRoom.js';
@@ -106,6 +106,22 @@ describe('a worker the manager cannot reach', () => {
     expect(h.provider.alive.has(runId)).toBe(true); // the provider started the worker after the run ended
     expect(commandsBefore).toBeGreaterThanOrEqual(0);
     expect(h.provider.commands.get(runId)?.slice(commandsBefore)).toEqual([{ name: 'kill' }]);
+  });
+
+  it('keeps a run whose usage report is taken after the pass read it as silent, and sends its worker no kill', async () => {
+    const h = harness({ usageSilenceMs: 120_000 });
+    const runId = await joined(h);
+    h.clock.advance(120_000);
+    const list = h.stores.runs.list.bind(h.stores.runs);
+    vi.spyOn(h.stores.runs, 'list').mockImplementation(async (filter) => {
+      const listed = await list(filter);
+      // the worker's report is taken after the pass read the row, whose silence as read has reached the threshold
+      if (filter.states?.includes('in_call')) await h.report(runId, 'usage', { seconds: 60 });
+      return listed;
+    });
+    await h.manager.reconcile();
+    expect(h.provider.commands.get(runId)?.some((c) => c.name === 'kill')).toBe(false);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'in_call', lastUsageAt: h.clock.now(), reportedSeconds: 60 });
   });
 
   it('a duplicate usage event and stop-monitor heartbeats cannot extend the usage clock', async () => {

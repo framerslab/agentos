@@ -52,6 +52,16 @@ export interface IRunStore {
   get(runId: string): Promise<MeetingRunRecord | undefined>;
   /** Atomically re-reads the row, checks `expectState` and applies the patch; undefined on a mismatch. Postgres holds the shared run anchor and sets the content fence for a purge in the same transaction. In-memory comparison and update have no await between them. */
   update(runId: string, patch: Partial<MeetingRunRecord>, expectState?: MeetingRunState | readonly MeetingRunState[]): Promise<MeetingRunRecord | undefined>;
+  /**
+   * Optional. Re-reads the row and applies the patch `patchFor` makes of it, atomically as `update` is: the patch is
+   * decided on the row as the store holds it when it writes, so a write another caller made since an earlier read is
+   * never overwritten by a patch decided on that read. Nothing is written when `patchFor` answers undefined, and then
+   * undefined is answered, as it is for a run that does not exist. `patchFor` runs while the row is held, so it is
+   * synchronous and does no I/O. The manager decides with it a silent run's end against the run's last usage, and,
+   * without it, reads the row and writes with `update` guarded by the state it read, which a write that keeps the
+   * state can slip between.
+   */
+  updateWith?(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined>;
   /** Rewrites the whole row (the content-free form at the end of a purge). */
   replace(run: MeetingRunRecord): Promise<void>;
   /** The runs the filter selects, requestedAt descending, then runId ascending. Default limit 500; states: [] applies no state filter. */

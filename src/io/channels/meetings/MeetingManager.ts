@@ -1534,30 +1534,65 @@ export class MeetingManager {
 
   /**
    * With `usageSilenceMs`, ends as crashed each dispatching or dispatched run whose worker has sent no fresh usage report
-   * for that long: the bot is sent a kill, and the run ends at the manager's receipt of its last usage report (its
-   * dispatch, when none came, or its request) and at the total its reports gave, nothing when none did. The rule rests on
-   * what the stores hold alone, never on the provider's answer or the stop monitor's heartbeats, so a worker that cannot
-   * be reached, or one that answers and sends nothing, ends the same way, and a manager that restarted ends it too. A
-   * dispatching run whose job was never recorded dispatched (its dispatcher stopped first) is among them. A run whose
-   * step throws holds back no other, and the first error is thrown at the end. Without `usageSilenceMs` it does nothing.
+   * for that long: the run ends at the manager's receipt of its last usage report (its dispatch, when none came, or its
+   * request) and at the total its reports gave, nothing when none did, and then the bot is sent a kill. The silence is
+   * decided again on the row as the store holds it, in the same write as the end, so a usage report taken after the runs
+   * were listed keeps its run and no kill goes to its worker. The rule rests on what the stores hold alone, never on the
+   * provider's answer or the stop monitor's heartbeats, so a worker that cannot be reached, or one that answers and sends
+   * nothing, ends the same way, and a manager that restarted ends it too. A dispatching run whose job was never recorded
+   * dispatched (its dispatcher stopped first) is among them. A run whose step throws holds back no other, and the first
+   * error is thrown at the end. Without `usageSilenceMs` it does nothing.
    */
   private async endSilentRuns(): Promise<void> {
     const silenceMs = this.usageSilenceMs;
     if (silenceMs === undefined) return;
-    const now = this.now();
     let failure: { error: unknown } | undefined;
-    for (const run of await this.stores.runs.list({ states: SILENCE_STATES, limit: Number.MAX_SAFE_INTEGER })) {
-      const heard = run.lastUsageAt ?? run.dispatchedAt ?? run.requestedAt;
-      if (now - heard < silenceMs) continue;
+    for (const listed of await this.stores.runs.list({ states: SILENCE_STATES, limit: Number.MAX_SAFE_INTEGER })) {
+      if (this.now() - this.lastHeard(listed) < silenceMs) continue;
       try {
-        this.config.logger?.warn(`[MeetingManager] ${run.runId}: no usage report for ${now - heard} ms; ending as crashed`);
-        await this.sendCommand(run, { name: 'kill' });
-        await this.crash(run, heard, run.reportedSeconds ?? 0);
+        // decided again on the row as the store holds it, in the write that ends the run: a usage report taken since the
+        // list was read (while an earlier run's kill was on its way, say) keeps the run, and its worker is sent no kill
+        let silentFor = 0;
+        const left = await this.updateRunWith(listed.runId, (current) => {
+          const heard = this.lastHeard(current);
+          silentFor = this.now() - heard;
+          if (!SILENCE_STATES.includes(current.state) || silentFor < silenceMs) return undefined;
+          return { state: 'left', leftAt: heard, reason: current.reason ?? 'crashed', reportedSeconds: current.reportedSeconds ?? 0, cleanupPending: true };
+        });
+        if (!left) continue;
+        this.config.logger?.warn(`[MeetingManager] ${left.runId}: no usage report for ${silentFor} ms; ended as crashed`);
+        await this.sendCommand(left, { name: 'kill' });
+        await this.emit('bot:left', left, { reason: left.reason });
+        await this.complete(left, left.reportedSeconds);
       } catch (error) {
         failure ??= { error };
       }
     }
     if (failure) throw failure.error;
+  }
+
+  /** When a run's worker was last heard from, as the usage silence counts it: the receipt of its last usage report, else its dispatch, else its request. */
+  private lastHeard(run: MeetingRunRecord): number {
+    return run.lastUsageAt ?? run.dispatchedAt ?? run.requestedAt;
+  }
+
+  /**
+   * Writes the patch `patchFor` makes of the run's row as it stands: through the run store's `updateWith`, in one step
+   * with the read, when the store has it. Otherwise the row is read and written with `update` guarded by the state read,
+   * and read again when that state moved in between, three times at most; a write that keeps the state can still slip
+   * between the read and the write. Undefined when `patchFor` answers undefined or the run does not exist.
+   */
+  private async updateRunWith(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined> {
+    const runs = this.stores.runs;
+    if (runs.updateWith) return runs.updateWith(runId, patchFor);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await runs.get(runId);
+      const patch = current && patchFor(current);
+      if (!current || !patch) return undefined;
+      const updated = await runs.update(runId, patch, current.state);
+      if (updated) return updated;
+    }
+    return undefined;
   }
 
   /**
