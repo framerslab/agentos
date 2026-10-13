@@ -1,3 +1,17 @@
+## [0.13.100](https://github.com/framerslab/agentos/compare/v0.13.99...v0.13.100) (2026-10-13)
+
+### feat
+
+* **auth:** content keys and independent deletion journal (#422) ([217d315](https://github.com/framerslab/agentos/commit/217d3156189f7d96a4a7ed524b2977c0156cfb02))
+* **claims:** a deterministic evidence verifier for published claims (#420) ([0477b13](https://github.com/framerslab/agentos/commit/0477b134ff741493ceeee4a11b645d46cb59a9af))
+* **meetings:** recoverable creation and adjusted dispatch allowances (#412) ([37a0d82](https://github.com/framerslab/agentos/commit/37a0d82881e73c66d51a737ece570c820f4a260e))
+* **safety:** a deferred outcome for expired holds in the spend meters (#418) ([c9bada5](https://github.com/framerslab/agentos/commit/c9bada509dbc27572bfe8262a23646011901dada))
+* **voice-platform:** closed call contracts and generated OpenAPI (#417) ([5cea06f](https://github.com/framerslab/agentos/commit/5cea06f976a519ef8080a819536786c9e42387a8))
+
+### docs
+
+* **voice:** Deepgram's add-ons are billed on top of the priced row (#425) ([156e162](https://github.com/framerslab/agentos/commit/156e1620f7d316ad4cef2a60e204c3f660cdd90c))
+
 ## [0.13.99](https://github.com/framerslab/agentos/compare/v0.13.98...v0.13.99) (2026-10-13)
 
 ### fix
