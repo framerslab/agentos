@@ -209,7 +209,7 @@ export interface IOutbox {
    * may have emptied since) and, when it is still pending, calls `send` with the fresh row and a signal that a purge of
    * its run aborts. Answers true when `send` resolved, false when the delivery was skipped (gone, no longer pending, or
    * cancelled by a purge), and rejects with `send`'s error otherwise. `OutboxDispatcher` sends through it when an outbox
-   * has it (`InMemoryOutbox` and `SqlOutbox` do), and sends the row `due` returned when it has not.
+   * has it (`InMemoryOutbox`, `SqlOutbox` and `FencedOutbox` do), and sends the row `due` returned when it has not.
    */
   sendClaimed?(candidate: OutboxDelivery, send: (fresh: OutboxDelivery, signal: AbortSignal) => Promise<void>): Promise<boolean>;
 }

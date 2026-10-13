@@ -1,3 +1,9 @@
+## [0.13.97](https://github.com/framerslab/agentos/compare/v0.13.96...v0.13.97) (2026-10-13)
+
+### feat
+
+* **meetings:** an outbox dispatcher for signed deliveries (#401) ([79219ea](https://github.com/framerslab/agentos/commit/79219ead0128205d805f1282e7d1a4bc10e13409))
+
 ## [0.13.96](https://github.com/framerslab/agentos/compare/v0.13.95...v0.13.96) (2026-10-13)
 
 ### fix

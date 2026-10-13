@@ -76,6 +76,15 @@ export interface MeetingManagerConfig {
   destinationsFor?: (ownerRef: string) => Promise<string[]>;
   /** The product's steps of the purge sequence: the agent's history, the kept session, the page. Each is retried until it resolves. */
   purgeHooks?: Array<(runId: string) => Promise<void>>;
+  /**
+   * Whether the completion of a run kept nowhere (`keep: 'none'`) empties the run's content deliveries in the outbox,
+   * pending and delivered ones, before the run is `done`, as a purge does: an outbox with `sendClaimed` also cancels the
+   * run's send under way, and a `FencedOutbox` stores every later delivery of the run without content. Default true.
+   * False leaves the run's deliveries to their retries, so a destination still receives the content deliveries pending
+   * at completion. The run's transcript and event payloads are removed either way, and a purge of the run empties its
+   * deliveries whatever this says.
+   */
+  scrubUnkeptOutbox?: boolean;
   /** How long a dispatch lease lasts; renewed every third of it while a dispatch is in flight. Default 60000. */
   leaseTtlMs?: number;
   /** How long after `in_call` the notice may go unconfirmed before the run leaves with `notice_failed`. Default 30000. */
@@ -260,6 +269,7 @@ export class MeetingManager {
   private readonly killAfterMs: number;
   private readonly usageSilenceMs: number | undefined;
   private readonly minReservationSeconds: number;
+  private readonly scrubUnkeptOutbox: boolean;
   private readonly purgeHooks: Array<(runId: string) => Promise<void>> = [];
   private lastReconcileAt = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -295,6 +305,7 @@ export class MeetingManager {
     this.killAfterMs = config.killAfterMs ?? 30_000;
     this.usageSilenceMs = config.usageSilenceMs;
     this.minReservationSeconds = config.minReservationSeconds ?? 600;
+    this.scrubUnkeptOutbox = config.scrubUnkeptOutbox ?? true;
     this.purgeHooks.push(...(config.purgeHooks ?? []));
   }
 
@@ -1500,9 +1511,10 @@ export class MeetingManager {
   }
 
   /**
-   * After `left` (no purge): settle or release, drop what is not kept, delete the room, remove the job, and only then
-   * `done`. A run that ended with `permission_denied` is purged instead, whatever its Keep. A step that throws leaves the
-   * run in `left` with `cleanupPending`, and the next tick calls this again; the entitlement hook's `settle` and
+   * After `left` (no purge): settle or release, drop what is not kept (a run kept nowhere loses its transcript, its event
+   * payloads and, unless `scrubUnkeptOutbox` is false, its content deliveries), delete the room, remove the job, and only
+   * then `done`. A run that ended with `permission_denied` is purged instead, whatever its Keep. A step that throws leaves
+   * the run in `left` with `cleanupPending`, and the next tick calls this again; the entitlement hook's `settle` and
    * `release` are idempotent, so a retry after a half-done cleanup changes nothing twice.
    */
   private async complete(run: MeetingRunRecord, reportedSeconds: number | undefined): Promise<void> {
@@ -1532,7 +1544,7 @@ export class MeetingManager {
       }
       if (run.keep === 'none') {
         await this.stores.events.fence(run.runId);
-        await this.stores.outbox.purgeContent(run.runId);
+        if (this.scrubUnkeptOutbox) await this.stores.outbox.purgeContent(run.runId);
         await this.stores.transcript.purge(run.runId);
         await this.stores.events.purgePayloads(run.runId);
       }
