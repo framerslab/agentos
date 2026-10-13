@@ -37,13 +37,18 @@
  *    item's final with no words answers its `speech_end` and adds no text.
  *    A `speech_end` whose final has not come within the silence timeout (an
  *    utterance the provider found no words in gets none) stops holding the
- *    turn. A `speech_end` with `source: 'vad'` (a standalone VAD, or the
- *    orchestrator's turn-duration watchdog) is none of the provider's
- *    utterances, so it decides the turn on the finals held. Finals answer
- *    the transcriber's `speech_end` events in the order they arrive, so a
- *    final that comes more than the silence timeout after its own
- *    `speech_end` can answer a later one and end the turn without that
- *    utterance's words.
+ *    turn. A final that finds no `speech_end` waiting answers one that
+ *    stopped waiting without its final, if any, or else the transcriber's
+ *    next `speech_end` the moment it comes, so a final that arrives before
+ *    its end of speech (as a flush delivers it under client commits, before
+ *    a listen session's stop supplies the `speech_end`) decides the turn at
+ *    that `speech_end` without waiting. A `speech_end` with
+ *    `source: 'vad'` (a standalone VAD, or the orchestrator's turn-duration
+ *    watchdog) is none of the provider's utterances, so it decides the turn
+ *    on the finals held. Finals answer the transcriber's `speech_end` events
+ *    in the order they arrive, so a final that comes more than the silence
+ *    timeout after its own `speech_end` can answer a later one and end the
+ *    turn without that utterance's words.
  *
  * ## Why heuristic over acoustic-only?
  *
@@ -248,10 +253,26 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * When the turn's `speech_end` events from the transcriber (any `source`
    * but `'vad'`) that no item-keyed final has answered yet arrived, on this
    * detector's own clock, oldest first. A new item's final answers the
-   * oldest; one that has waited the silence timeout is dropped and stops
-   * holding the turn.
+   * oldest; one that has waited the silence timeout is dropped, stops
+   * holding the turn and is counted in {@link expiredSpeechEnds}.
    */
   private unansweredSpeechEnds: number[] = [];
+
+  /**
+   * How many of the turn's `speech_end` events from the transcriber stopped
+   * waiting (see {@link unansweredSpeechEnds}) before an item-keyed final
+   * answered them. A new item's final that finds no `speech_end` waiting
+   * answers one of these, as its late final.
+   */
+  private expiredSpeechEnds = 0;
+
+  /**
+   * How many of the turn's item-keyed finals answered no `speech_end`: each
+   * came with none waiting and none expired, before its end of speech. The
+   * transcriber's next `speech_end` pairs with the earliest of them at once
+   * instead of waiting for a final.
+   */
+  private finalsWithoutSpeechEnd = 0;
 
   /**
    * The turn's latest `speech_end`: its timestamp, for the turn's duration,
@@ -346,6 +367,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     this.lastConfidence = transcript.confidence;
     // The latest final replaces the turn's item-keyed finals as well.
     this.itemFinals.clear();
+    this.finalsWithoutSpeechEnd = 0;
 
     // The speech already ended without a transcript: decide the turn now. The
     // silence began at that end of speech, so what has passed since counts.
@@ -378,9 +400,11 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    *   timeout still counted from this `speech_end`. A turn of item-keyed
    *   finals is decided once every `speech_end` the transcriber reported
    *   since it began has its final, or has waited the silence timeout for
-   *   it. A `speech_end` with `source: 'vad'` (a standalone VAD, or the
-   *   orchestrator's turn-duration watchdog) gets no final of its own: it
-   *   decides the turn on the finals held, as a single final is decided.
+   *   it; an item-keyed final that answered no `speech_end` when it came
+   *   is this one's, so it has its final at once. A `speech_end` with
+   *   `source: 'vad'` (a standalone VAD, or the orchestrator's
+   *   turn-duration watchdog) gets no final of its own: it decides the turn
+   *   on the finals held, as a single final is decided.
    *
    * - **`silence`**: Periodic heartbeat events are ignored. The silence timer
    *   (started on `speech_end`) already handles delayed turn-completion
@@ -407,13 +431,16 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
         this.speechActive = false;
         const at = Date.now();
         this.lastSpeechEnd = { timestamp: event.timestamp, at };
-        // An item-keyed final for the transcriber's speech may still come. An end
-        // from a standalone VAD or the orchestrator's turn-duration watchdog
-        // (`source: 'vad'`) is none of the provider's utterances and gets none.
+        // The transcriber's speech gets an item-keyed final: one that came
+        // before this end of speech pairs with it at once, and otherwise the
+        // end waits for one. An end from a standalone VAD or the orchestrator's
+        // turn-duration watchdog (`source: 'vad'`) is none of the provider's
+        // utterances and gets none.
         const transcriberEnd = event.source !== 'vad';
         if (transcriberEnd) {
           this._dropExpiredSpeechEnds(at);
-          this.unansweredSpeechEnds.push(at);
+          if (this.finalsWithoutSpeechEnd > 0) this.finalsWithoutSpeechEnd -= 1;
+          else this.unansweredSpeechEnds.push(at);
         }
 
         // A turn of item-keyed finals is decided once each of the transcriber's speech ends has its final.
@@ -466,6 +493,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     this.speechEndWithoutText = null;
     this.itemFinals.clear();
     this.unansweredSpeechEnds = [];
+    this.expiredSpeechEnds = 0;
+    this.finalsWithoutSpeechEnd = 0;
     this.lastSpeechEnd = null;
   }
 
@@ -498,8 +527,10 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   /**
    * Keep a final that carries an `itemId`. The turn holds one text per item,
    * from the item's latest final, and its text joins them. A new item's
-   * final answers the oldest `speech_end` still waiting for one; a
-   * backchannel or a final with no words answers it too and adds no text.
+   * final answers the oldest `speech_end` still waiting for one; with none
+   * waiting, one that stopped waiting without its final; with neither, the
+   * transcriber's next `speech_end`, which pairs with it when it comes. A
+   * backchannel or a final with no words answers one too and adds no text.
    * Once speech has ended in this turn, the turn is decided again. A
    * backchannel is announced last, so a `'backchannel_detected'` listener
    * that throws leaves the final recorded and the turn decided.
@@ -513,7 +544,15 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
     if (!this.itemFinals.has(itemId)) {
       this._dropExpiredSpeechEnds(Date.now());
-      this.unansweredSpeechEnds.shift();
+      if (this.unansweredSpeechEnds.length > 0) {
+        this.unansweredSpeechEnds.shift();
+      } else if (this.expiredSpeechEnds > 0) {
+        // A speech end stopped waiting before its final came: this is that late final.
+        this.expiredSpeechEnds -= 1;
+      } else {
+        // No speech end waits for it yet: the transcriber's next one pairs with it at once.
+        this.finalsWithoutSpeechEnd += 1;
+      }
     }
     const text = normalised && !backchannel ? transcript.text : '';
     this.itemFinals.set(itemId, { text, startMs: transcript.startMs });
@@ -577,10 +616,11 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
   /**
    * Drop the `speech_end` events that have waited the silence timeout for an
-   * item-keyed final. A clock set back counts as no silence yet, as in
-   * `_startSilenceTimer`: a `speech_end` recorded later than `now` waits
-   * from `now`, so a step back delays the turn by at most one more silence
-   * timeout, not by the size of the step.
+   * item-keyed final, and count them in {@link expiredSpeechEnds}. A clock
+   * set back counts as no silence yet, as in `_startSilenceTimer`: a
+   * `speech_end` recorded later than `now` waits from `now`, so a step back
+   * delays the turn by at most one more silence timeout, not by the size of
+   * the step.
    *
    * @param now - The current time on this detector's clock.
    */
@@ -591,6 +631,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
       now - this.unansweredSpeechEnds[0] >= this.silenceTimeoutMs
     ) {
       this.unansweredSpeechEnds.shift();
+      this.expiredSpeechEnds += 1;
     }
   }
 
