@@ -64,3 +64,99 @@ export {
   openAITranscriptionPricing,
 } from '../../core/llm/providers/implementations/openaiPricing.js';
 export { DEEPGRAM_STREAMING_PRICING, deepgramStreamingPricing } from '../../io/voice-pipeline/providers/deepgramPricing.js';
+
+// Compound credit: rational rates, funding lots, holds, every-attempt budgets and the margin report.
+export {
+  CREDIT_UNITS,
+  assertRate,
+  componentMicro,
+  deriveMeasuredRate,
+  isBilledPerAttempt,
+  quoteCompoundLiability,
+  rateComponent,
+} from './CreditRates.js';
+export type {
+  AttemptLimits,
+  CompoundLiability,
+  CreditUnit,
+  LiabilityRequest,
+  MeasuredRate,
+  MeasuredUnitCost,
+  RateComponent,
+  RateSnapshot,
+  RationalRate,
+} from './CreditRates.js';
+export { CreditConflictError, InMemoryCompoundCreditStore, checkVersion, creditDay } from './CompoundCreditStore.js';
+export type {
+  AttemptPurpose,
+  CreditAccountRow,
+  CreditAllocationRow,
+  CreditAttemptRow,
+  CreditAttemptState,
+  CreditEntryFilter,
+  CreditEntryKind,
+  CreditEntryRow,
+  CreditHoldFilter,
+  CreditHoldRow,
+  CreditHoldState,
+  CreditLotKind,
+  CreditLotRow,
+  CreditLotState,
+  CreditTransaction,
+  ICompoundCreditStore,
+  SupplierDayRow,
+} from './CompoundCreditStore.js';
+export {
+  attemptUsageOf,
+  completeLotRefund,
+  creditBalance,
+  deferCompoundHold,
+  disputeCreditLot,
+  grantCreditLot,
+  isLotEligible,
+  lotFreeMicro,
+  priceAttempts,
+  promotionsFirstPolicy,
+  reconcileCompoundCredit,
+  refundCreditLot,
+  reserveCompoundCredit,
+  resolveCreditDispute,
+  retireExpiredPromotions,
+  settleCompoundCredit,
+  withCreditRetry,
+} from './CompoundCreditLedger.js';
+export type {
+  AllocationPolicy,
+  CallFence,
+  CreditBalance,
+  GrantCreditLotInput,
+  GrantCreditLotResult,
+  HoldRates,
+  HoldResolution,
+  ReconcileCompoundCreditResult,
+  RefundCreditLotInput,
+  RefundCreditLotResult,
+  ReserveCompoundCreditInput,
+  ReserveCompoundCreditResult,
+  SettleCompoundCreditInput,
+  SettleCompoundCreditResult,
+} from './CompoundCreditLedger.js';
+export {
+  AttemptBudgetExhaustedError,
+  authorizeModelAttempt,
+  CountingAttemptBudget,
+  ModelAttemptBudget,
+  recordAttemptUsage,
+} from './ModelAttemptBudget.js';
+export type {
+  AttemptGrant,
+  AuthorizeModelAttemptInput,
+  AuthorizeModelAttemptResult,
+  IAttemptAuthorizer,
+  RecordAttemptUsageInput,
+  RecordAttemptUsageResult,
+} from './ModelAttemptBudget.js';
+export { COMPOUND_CREDIT_DDL, SqlCompoundCreditStore, compoundCreditDdl } from './SqlCompoundCreditStore.js';
+export type { SqlCompoundCreditStoreOptions } from './SqlCompoundCreditStore.js';
+export { buildMarginReport, marginReport, readMarginPeriod } from './MarginReport.js';
+export type { MarginAllocationPolicy, MarginPeriodInput, MarginReport, MarginReportQuery, MarginSettlement } from './MarginReport.js';

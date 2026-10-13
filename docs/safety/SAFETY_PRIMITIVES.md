@@ -391,6 +391,45 @@ const { reservations, periods } = await hourly.purge({ before: Date.now() - 3_60
 
 A reservation still reserved is never deleted, and neither is a period meter's period row, which holds the period's count: a month's `snapshot()` reads the same after its settled reservations are purged. For a window meter, a `before` at least one window back keeps every unit the window counts. Once an operation's row is purged the meter no longer knows the operation: a retry of it reserves and counts again, and a refund of it finds nothing, so `before` lies past the time either can come. `purge()` deletes across every account in its meter's two tables, so meters under one prefix share their retention, and a meter under a prefix of its own keeps its own.
 
+## Compound credit
+
+A host that sells metered calls reserves each call's most before any work starts, and settles it once from measured quantities. `@framers/agentos/safety/runtime` carries the arithmetic and the ledger; the host supplies rates, caps and its allocation policy.
+
+```typescript
+import {
+  InMemoryCompoundCreditStore,
+  grantCreditLot,
+  reserveCompoundCredit,
+  settleCompoundCredit,
+  ModelAttemptBudget,
+} from '@framers/agentos/safety/runtime';
+
+const store = new InMemoryCompoundCreditStore(); // SqlCompoundCreditStore on Postgres in a deployment
+await grantCreditLot(store, { scopeId: 'scope-a', kind: 'paid', fundingRef: 'payment-1', principalMicro: 10_000_000, at: Date.now() });
+const held = await reserveCompoundCredit(store, {
+  scopeId: 'scope-a', operationId: 'call-1', kind: 'call', requestHash: 'h', rates: { primary: rates },
+  mediaComponent: 'media_second', durationSeconds: 600,
+  attempts: { maxAttempts: 64, perAttempt: { input_token: 8_192, output_token: 512 } },
+  supplierDailyCapMicro: 10_000_000, at: Date.now(), expiresAt: Date.now() + 3_660_000,
+});
+if (held.status === 'reserved') {
+  const budget = new ModelAttemptBudget({ store, holdId: held.hold.holdId });
+  const attempt = await budget.authorize({ purpose: 'initial' }); // before every provider request
+  await budget.record(attempt.attemptId, { input_token: 900, output_token: 120 }, true);
+  await settleCompoundCredit(store, {
+    holdId: held.hold.holdId, connectedMs: 61_500, at: Date.now(),
+    fence: { mediaClosed: true, inferenceTerminated: true, evidence: 'room closed; worker exited', observedAt: Date.now() },
+  });
+}
+```
+
+- A rate is rational (`micro` micro-dollars for every `per` units), and a component's charge is one ceiling of the exact product, on BigInt. `quoteCompoundLiability` prices the full duration and every permitted attempt at the dearest authorized snapshot; reasoning tokens are counted once when the snapshot says output includes them.
+- A hold is allocated to lots in the policy's order (`promotionsFirstPolicy`: earliest-expiring promotions, then paid lots); settlement consumes those shares in that order. An expired promotion keeps the share an admitted hold took, and whatever that share does not consume retires.
+- Settlement needs evidence that the media closed and the inference stopped; without it the hold is deferred, still held. `reconcileCompoundCredit` defers when its resolver cannot tell or fails.
+- Every provider attempt (initial, tool continuation, retry, fallback) is authorized with `authorizeModelAttempt` before it is sent; an attempt that never reports usage keeps its supplier most open.
+- Refunds take only a paid lot's free principal, reserved before the payment rail is asked (`refundCreditLot`, then `completeLotRefund`). A dispute freezes the lot and the account's admission; a lost reversal past the free balance is a receivable outside spendable credit.
+- `marginReport` reconciles a scope's period: paid-funded revenue, promotional usage, reversals, refunds, supplier cost including failed work, compute by measured runtime, and other costs quantified or excluded; a missing cost makes it `unreconciled`, with no contribution stated.
+
 ## ToolExecutionGuard
 
 Wraps tool execution with a timeout and per-tool circuit breaker, so a hung tool returns a timeout result and a tool that keeps failing is refused while its breaker is open. Each tool gets its own circuit breaker instance and health tracking. `execute()` never throws: a timeout, an error or an open breaker comes back as `{ success: false }`. A timed-out call is not cancelled; its promise runs on and its result is dropped.
