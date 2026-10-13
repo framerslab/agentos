@@ -6,7 +6,10 @@
  * agent's output the check blocks turns the approval into a rejection, so it
  * never reaches the gated agent's request, and the strategy goes on as it does
  * after any rejection. An output the check passes reaches the agent, with the
- * approval's instructions after it.
+ * approval's instructions after it. Where the strategy writes more text after
+ * the task or after an earlier agent's output, the check also reads that task
+ * or output on its own, so a statement it matches only at the end of a text
+ * is blocked there too.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
@@ -101,12 +104,12 @@ type Team = {
 };
 type Outcome = { text: string; agentCalls: Json[] };
 
-const generated = async (team: Team): Promise<Outcome> => {
-  const result = (await team.generate(PROMPT)) as Json;
+const generated = async (team: Team, prompt: string = PROMPT): Promise<Outcome> => {
+  const result = (await team.generate(prompt)) as Json;
   return { text: String(result.text), agentCalls: (result.agentCalls ?? []) as Json[] };
 };
-const streamed = async (team: Team): Promise<Outcome> => {
-  const s = team.stream(PROMPT);
+const streamed = async (team: Team, prompt: string = PROMPT): Promise<Outcome> => {
+  const s = team.stream(prompt);
   for await (const part of s.fullStream) void part;
   return { text: await s.text, agentCalls: await s.agentCalls };
 };
@@ -228,5 +231,158 @@ describe.each(CASES)('the beforeAgent gate under $name', ({ strategy, agents, ex
     const sent = userText(last(opsRequests()));
     expect(sent).toContain(PASSING);
     expect(sent).toBe(`${String(last(handler.mock.calls)[0].details.input)}\n\n${MARKER}: ${BENIGN}`);
+  });
+});
+
+/**
+ * Two statements the check matches only at the end of the text it reads: an
+ * `rm -rf .`, and a `DELETE FROM` with nothing after the table. The check reads
+ * its texts as JSON, where a line break inside a text is escaped, so once the
+ * strategy writes more after one of them it no longer ends the text read.
+ */
+const TASK_ENDING_IN_RM = 'Tidy the build logs, then clear the workspace with rm -rf .';
+const OUTPUT_ENDING_IN_DELETE = 'Then empty the table: DELETE FROM sessions;';
+const REVIEW_APPROVED = JSON.stringify({ approved: true, feedback: 'Fine.' });
+
+/**
+ * The paths where the strategy writes more text after the task, or after an
+ * earlier agent's output, in the input ops receives, with one of those
+ * statements at the end of that task or output, and how the run ends once ops
+ * is refused.
+ */
+const TAIL_CASES: Array<{
+  name: string;
+  strategy: string;
+  agents: Json;
+  extra?: Json;
+  prompt: string;
+  statement: string;
+  script: Record<string, string[]>;
+  run: (team: Team, prompt: string) => Promise<Outcome>;
+  refused: Outcome;
+}> = [
+  {
+    name: 'graph generate(), the task',
+    strategy: 'graph',
+    agents: { research: { instructions: RESEARCH }, ops: { instructions: OPS, dependsOn: ['research'] } },
+    prompt: TASK_ENDING_IN_RM,
+    statement: 'rm -rf .',
+    script: { research: [PASSING], ops: ['ops done'] },
+    run: generated,
+    refused: { text: PASSING, agentCalls: [{ agent: 'research' }] },
+  },
+  {
+    name: "graph generate(), the first of two dependencies' outputs",
+    strategy: 'graph',
+    agents: {
+      research: { instructions: RESEARCH },
+      writer: { instructions: WRITER, dependsOn: ['research'] },
+      ops: { instructions: OPS, dependsOn: ['research', 'writer'] },
+    },
+    prompt: PROMPT,
+    statement: OUTPUT_ENDING_IN_DELETE,
+    script: { research: [OUTPUT_ENDING_IN_DELETE], writer: [PASSING], ops: ['ops done'] },
+    run: generated,
+    refused: { text: PASSING, agentCalls: [{ agent: 'research' }, { agent: 'writer' }] },
+  },
+  {
+    name: 'graph stream(), the task',
+    strategy: 'graph',
+    agents: { research: { instructions: RESEARCH }, ops: { instructions: OPS, dependsOn: ['research'] } },
+    prompt: TASK_ENDING_IN_RM,
+    statement: 'rm -rf .',
+    script: { research: [PASSING], ops: ['ops done'] },
+    run: streamed,
+    refused: { text: PASSING, agentCalls: [{ agent: 'research' }] },
+  },
+  {
+    name: "graph stream(), the first of two dependencies' outputs",
+    strategy: 'graph',
+    agents: {
+      research: { instructions: RESEARCH },
+      writer: { instructions: WRITER, dependsOn: ['research'] },
+      ops: { instructions: OPS, dependsOn: ['research', 'writer'] },
+    },
+    prompt: PROMPT,
+    statement: OUTPUT_ENDING_IN_DELETE,
+    script: { research: [OUTPUT_ENDING_IN_DELETE], writer: [PASSING], ops: ['ops done'] },
+    run: streamed,
+    // stream() joins the text the agents that ran streamed.
+    refused: { text: `${OUTPUT_ENDING_IN_DELETE}${PASSING}`, agentCalls: [{ agent: 'research' }, { agent: 'writer' }] },
+  },
+  {
+    name: "review-loop, the reviewer's input: the task",
+    strategy: 'review-loop',
+    agents: { writer: { instructions: WRITER }, ops: { instructions: OPS } },
+    prompt: TASK_ENDING_IN_RM,
+    statement: 'rm -rf .',
+    script: { writer: [PASSING], ops: [REVIEW_APPROVED] },
+    run: generated,
+    refused: { text: PASSING, agentCalls: [{ agent: 'writer' }] },
+  },
+  {
+    name: "review-loop, the reviewer's input: the draft",
+    strategy: 'review-loop',
+    agents: { writer: { instructions: WRITER }, ops: { instructions: OPS } },
+    prompt: PROMPT,
+    statement: OUTPUT_ENDING_IN_DELETE,
+    script: { writer: [OUTPUT_ENDING_IN_DELETE], ops: [REVIEW_APPROVED] },
+    run: generated,
+    refused: { text: OUTPUT_ENDING_IN_DELETE, agentCalls: [{ agent: 'writer' }] },
+  },
+  {
+    name: "review-loop, the producer's input in the next round: the reviewer's feedback",
+    strategy: 'review-loop',
+    agents: { ops: { instructions: OPS }, editor: { instructions: EDITOR } },
+    prompt: PROMPT,
+    statement: OUTPUT_ENDING_IN_DELETE,
+    script: {
+      ops: ['First draft.', 'Second draft.'],
+      editor: [JSON.stringify({ approved: false, feedback: OUTPUT_ENDING_IN_DELETE }), REVIEW_APPROVED],
+    },
+    run: generated,
+    refused: { text: 'First draft.', agentCalls: [{ agent: 'ops' }, { agent: 'editor' }] },
+  },
+  {
+    name: 'debate, the task',
+    strategy: 'debate',
+    agents: { pro: { instructions: PRO }, ops: { instructions: OPS } },
+    extra: { maxRounds: 1 },
+    prompt: TASK_ENDING_IN_RM,
+    statement: 'rm -rf .',
+    script: { pro: [PASSING], ops: ['I disagree.'], judge: [VERDICT] },
+    run: generated,
+    refused: { text: VERDICT, agentCalls: [{ agent: 'pro' }] },
+  },
+  {
+    name: 'debate, an earlier argument',
+    strategy: 'debate',
+    agents: { pro: { instructions: PRO }, ops: { instructions: OPS } },
+    extra: { maxRounds: 1 },
+    prompt: PROMPT,
+    statement: OUTPUT_ENDING_IN_DELETE,
+    script: { pro: [OUTPUT_ENDING_IN_DELETE], ops: ['I disagree.'], judge: [VERDICT] },
+    run: generated,
+    refused: { text: VERDICT, agentCalls: [{ agent: 'pro' }] },
+  },
+];
+
+describe.each(TAIL_CASES)('the beforeAgent check under $name', ({ strategy, agents, extra, prompt, statement, script, run, refused }) => {
+  it('reads that task or output on its own, so the statement at its end is blocked and never reaches ops', async () => {
+    serve(script);
+    const handler = approve();
+    const guardrailHitlOverride = vi.fn();
+    const outcome = await run(team(strategy, agents, handler, { guardrailHitlOverride }, extra), prompt);
+
+    expect(guardrailHitlOverride).toHaveBeenCalledTimes(1);
+    expect(guardrailHitlOverride).toHaveBeenCalledWith(expect.objectContaining({ guardrailId: 'code-safety', toolName: 'agent:ops' }));
+    // The approver was shown the input ops would receive: the statement, with the strategy's text after it.
+    const shown = String(last(handler.mock.calls)[0].details.input);
+    expect(shown).toContain(statement);
+    expect(shown.trimEnd().endsWith(statement)).toBe(false);
+    expect(opsRequests().filter((b) => userText(b).includes(statement))).toHaveLength(0);
+    expect(opsRequests()).toHaveLength(refused.agentCalls.filter((c) => c.agent === 'ops').length);
+    expect(outcome.text).toBe(refused.text);
+    expect(outcome.agentCalls.map((c) => c.agent)).toEqual(refused.agentCalls.map((c) => c.agent));
   });
 });
