@@ -4,12 +4,18 @@
  *
  * Loads skills from directories by parsing SKILL.md files with YAML frontmatter.
  * Skills are modular capabilities that extend agent functionality.
+ *
+ * A skill's SKILL.md is read never through a symbolic link at the skill's
+ * folder or below it, never waiting, and only when it is a regular file
+ * (`readFileOutsideLinks`); a skill whose SKILL.md is refused that way is
+ * skipped with a warning.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import YAML from 'yaml';
 
+import { readFileOutsideLinks, type OpenRefusal } from '../../core/utils/linkFreeWrite.js';
 import type {
   Skill,
   SkillEntry,
@@ -172,23 +178,41 @@ function resolveSkillInvocationPolicy(frontmatter: ParsedSkillFrontmatter): Skil
 // SKILL LOADING
 // ============================================================================
 
+/** What is wrong with a SKILL.md's place, as a warning words it. */
+const PLACE_REFUSED: Record<OpenRefusal, string> = {
+  link: 'it is reached through a symbolic link',
+  special: 'it is not a regular file',
+};
+
 /**
  * Load a single skill from a directory.
  *
- * @param skillDir - Path to skill directory (should contain SKILL.md)
- * @returns SkillEntry or null if invalid
+ * SKILL.md is read below the folder that holds `skillDir`, so the skill's own
+ * folder is looked at too: never through a symbolic link at that folder or
+ * below it, never waiting, and only when it is a regular file
+ * (`readFileOutsideLinks`). A SKILL.md refused that way, or one that cannot
+ * be loaded, is skipped with a warning.
+ *
+ * @param skillDir - Path to skill directory (should contain SKILL.md). It may
+ *   not be a symbolic link; the folder that holds it may.
+ * @returns SkillEntry, or null when the folder holds no SKILL.md or its
+ *   SKILL.md was skipped
  */
 export async function loadSkillFromDir(skillDir: string): Promise<SkillEntry | null> {
   const skillPath = path.join(skillDir, 'SKILL.md');
 
   try {
-    const stat = await fsp.stat(skillPath);
-    if (!stat.isFile()) {
+    const dir = path.resolve(skillDir);
+    const root = path.dirname(dir);
+    const read = await readFileOutsideLinks(root, path.relative(root, path.join(dir, 'SKILL.md')));
+    // A folder with no SKILL.md is not a skill.
+    if (read === null) return null;
+    if (typeof read === 'string') {
+      console.warn(`[SkillLoader] Skipped ${skillPath}: ${PLACE_REFUSED[read]}`);
       return null;
     }
 
-    const content = await fsp.readFile(skillPath, 'utf-8');
-    const { frontmatter, body } = parseSkillFrontmatter(content);
+    const { frontmatter, body } = parseSkillFrontmatter(read.text);
 
     const name = (typeof frontmatter.name === 'string' && frontmatter.name.trim())
       ? frontmatter.name.trim()
@@ -215,16 +239,21 @@ export async function loadSkillFromDir(skillDir: string): Promise<SkillEntry | n
       invocation,
       sourcePath: skillDir,
     };
-  } catch {
-    // Skill doesn't exist or is invalid
+  } catch (err) {
+    console.warn(
+      `[SkillLoader] Skipped ${skillPath}: it could not be loaded (${err instanceof Error ? err.message : String(err)})`,
+    );
     return null;
   }
 }
 
 /**
- * Load all skills from a directory.
+ * Load all skills from a directory. Each skill is a folder in it; an entry
+ * whose name starts with a dot, and one that is not a folder, is passed over,
+ * and a symbolic link is passed over with a warning.
  *
- * @param dir - Parent directory containing skill subdirectories
+ * @param dir - Parent directory containing skill subdirectories. It may be a
+ *   symbolic link.
  * @returns Array of SkillEntry objects
  */
 export async function loadSkillsFromDir(dir: string): Promise<SkillEntry[]> {
@@ -234,8 +263,13 @@ export async function loadSkillsFromDir(dir: string): Promise<SkillEntry[]> {
     const items = await fsp.readdir(dir, { withFileTypes: true });
 
     for (const item of items) {
-      if (!item.isDirectory()) continue;
       if (item.name.startsWith('.')) continue;
+      if (item.isSymbolicLink()) {
+        // A skill is read only from a folder of its own, never through a link.
+        console.warn(`[SkillLoader] Skipped ${path.join(dir, item.name)}: it is a symbolic link`);
+        continue;
+      }
+      if (!item.isDirectory()) continue;
 
       const skillDir = path.join(dir, item.name);
       const entry = await loadSkillFromDir(skillDir);
