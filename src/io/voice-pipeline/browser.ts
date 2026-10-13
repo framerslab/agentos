@@ -40,7 +40,8 @@ export { phraseHeard, type HeardLine, type PhraseHeardOptions, type PhraseHeardR
 // The entries a speech-to-text chain is built from, and their parser; sttEntries.ts imports nothing.
 export { STT_CHAIN_VENDORS, parseSttEntry, type SttChainVendor, type SttEntry } from './sttEntries.js';
 
-// Every type of the streaming contracts; types.ts holds no run-time code.
+// Every type of the streaming contracts. The export is of types alone, so the call runtime's two fence
+// functions in types.ts (sameVoiceGeneration and copyAudioIdentity) are not this entry's.
 export type * from './types.js';
 
 // The emitter the contracts extend, and the browser-safe sessions' base.
