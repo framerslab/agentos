@@ -153,6 +153,9 @@ export {
 } from './cognition/rag/unified/policy.js';
 // Cognitive Memory System
 export * from './cognition/memory';
+// Two barrels above export an `isPublicAddress`: the memory barrel `guardedFetch`'s rule, and the meetings barrel the
+// checked egress module's stricter rule, which the outbox delivery holds. The root exports `guardedFetch`'s.
+export { isPublicAddress } from './cognition/memory';
 // Memory Wiki — markdown-first long-term memory for soul-file agents
 export {
   WikiMemoryStore,
