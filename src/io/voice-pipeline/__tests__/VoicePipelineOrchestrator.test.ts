@@ -23,7 +23,7 @@
  * - A turn_complete listener that stops the session leaves it closed, and no turn is taken
  * - A turn_complete listener that throws is reported; the listeners after it run and the turn is taken
  * - A transport send that rejects is reported once as 'error' and the turn goes on; with nothing listening
- *   for 'error', or with an 'error' listener that throws, it is written as a console warning
+ *   for 'error', or with an 'error' listener that throws, it is written as a console warning that names the failure
  * - Of the audio chunks a transport refuses, the first of each reply is reported and the rest of that reply's
  *   are not, whatever order the replies' sends settle in; a refused control message is reported each time
  */
@@ -497,7 +497,7 @@ describe('VoicePipelineOrchestrator', () => {
 
       expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
         expect.stringContaining('the socket is closing'),
-        expect.stringContaining('the error listener failed'),
+        expect.stringMatching(/the socket is closing.*the error listener failed/), // both failures
       ]);
       expect(orchestrator.state).toBe('listening');
       expect(unhandled).toEqual([]);
