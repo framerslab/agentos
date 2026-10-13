@@ -18,7 +18,9 @@ The host owns route authentication, authorization, notice wording, webhook desti
 
 The Postgres implementations are `SqlRunStore`, `SqlJobStore`, `SqlTranscriptStore`, `SqlEventStore` and `SqlOutbox`, over `@framers/sql-storage-adapter`. Pass the same `SqlStoreOptions` (`db`, optional `tablePrefix`) to all five stores; `SqlRunStoreOptions` also requires `box: SecretBox`. The adapter must identify as Postgres and support transactions, persistence and concurrent access. Constructors validate the adapter and prefix; they do not create tables.
 
-Apply `meetingStoresDdl(prefix)` through the host's migration before constructing the stores. `DEFAULT_TABLE_PREFIX` is `agentos_meeting`; `MEETING_STORES_DDL` is the DDL with that prefix. `meetingStoreTables(prefix)` returns `MeetingStoreTables`: names for runs, jobs, turns, events, outbox and the run anchors. A prefix is a lower-case letter followed by at most 37 lower-case letters, digits or underscores. The DDL creates missing tables and indexes; it does not upgrade existing table definitions. The run schema includes the nullable millisecond timers `leave_commanded_at`, `capture_suspended_at` and `alone_since`.
+Apply `meetingStoresDdl(prefix)` through the host's migration before constructing the stores. `DEFAULT_TABLE_PREFIX` is `agentos_meeting`; `MEETING_STORES_DDL` is the DDL with that prefix. `meetingStoreTables(prefix)` returns `MeetingStoreTables`: names for runs, jobs, turns, events, outbox and the run anchors. A prefix is a lower-case letter followed by at most 37 lower-case letters, digits or underscores. The DDL creates missing tables and indexes; it does not upgrade existing table definitions. The run schema includes the nullable millisecond timers `leave_commanded_at`, `capture_suspended_at` and `alone_since`, and the nullable `provider_connection_ref`. A runs table made before that column existed takes `meetingProvenanceDdl(prefix)`, one idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, in the host's migration before a `SqlRunStore` of this version writes to it.
+
+A run's `providerConnectionRef` is the provider's opaque reference for the connection the run was sent through, such as a credential's generation; `contentFreeRun` keeps it. `connectionRuns(db, runs, prefix, ownerRef, provider, generation)` reads the ids of every run an owner sent through that connection from the runs table, whatever their state, and returns them through the run store, ordered by run id, so a host can purge what one connection gathered after the connection itself is gone.
 
 A job lease uses one statement with `FOR UPDATE SKIP LOCKED`. Run updates re-read and check the expected state under the run anchor; entering `purging` sets the shared content fence in that transaction. Transcript allocation, event numbering and content writes use that anchor too. `SqlRunStore` seals only the meeting URL with the run id as authenticated context and opens it on read. It does not encrypt every column.
 
@@ -31,7 +33,7 @@ The store contracts are:
 | `ITranscriptStore` | Append a numbered turn or atomically allocate one with `appendNext`; read after a sequence cursor, fence and purge. A repeated `(runId, seq)` keeps the first turn. A fenced append throws `FencedError`. Purging keeps the fence. |
 | `IEventStore`, `MeetingEvent` | Store stable event ids and per-run sequence numbers; read after a cursor. Fenced content events keep their metadata with no payload and `purged: true`. `purgePayloads` strips content payloads. |
 | `IOutbox`, `OutboxDelivery` | Enqueue, read due deliveries, mark delivered/failed, replay, purge content and list by run. A repeated delivery id keeps its first copy. Due deliveries default to 100, ordered by `nextAt` then id. |
-| `IEntitlementHook`, `ReserveResult` | Reserve, revalidate, meter a running total, settle or release; settlement and release must tolerate retries. |
+| `IEntitlementHook`, `ReserveResult` | Reserve, revalidate, meter a running total, settle or release; settlement and release must tolerate retries. The optional `recordSupplierUsage` records a supplier's stream and capture totals and keeps the largest of each. |
 | `IClock` | Supply the manager's current time in milliseconds. |
 
 `nextAttemptAt(attempts, now)` schedules retries after 5 seconds, then 10, 20 and so on, capped at one hour. `OUTBOX_GIVE_UP_MS` is 86400000: a failure at least a day after the first failure marks the delivery dead. Manual `replay` resets its attempts. The host calls these methods from its delivery worker; the manager does not send HTTP deliveries.
@@ -104,7 +106,15 @@ async function sendMeetingBot(provider: IMeetingBotProvider, roomService: IMeeti
 
 `MeetingManagerConfig` and `MeetingManagerStores` type the setup; `MeetingManagerEventHandler` types subscriptions. The host's report route passes `ProviderEventContext` to `processProviderEvent(providerName, ctx)`. The provider's `verifyEvent(ctx, run)` returns `ProviderVerificationResult`; its `parseEvent` returns `ProviderParseResult` with `NormalizedMeetingEvent` entries and stable ids. Events verified against a run are applied only to that run. `ProviderEventType` describes incoming reports; `MeetingEventType` describes outgoing `bot:*` events. State reports emit their transitions, and heartbeats add no event rows. Deduplication is not an atomic transaction spanning event storage and all side effects: an already stored report is not reapplied after a later application failure.
 
-`DispatchInput` carries the run, publish token, per-run worker token and report URL; `DispatchResult` supplies worker references. `ProviderCommand` covers `startCapture`, `suspendCapture`, `postChat`, `leave` and `kill`. `ProviderUsage` reports whether a worker holds a run and its elapsed seconds. These operations belong to the provider, not the outbound webhook envelope.
+`DispatchInput` carries the run, publish token, per-run worker token and report URL; `DispatchResult` supplies worker references. `ProviderCommand` covers `startCapture`, `suspendCapture`, `postChat`, `leave` and `kill`. `ProviderUsage` reports whether a worker holds a run and its elapsed seconds, and, for a provider that measures it, its `supplierUsage`. These operations belong to the provider, not the outbound webhook envelope.
+
+### A dispatch the provider refuses
+
+A provider's `dispatch` throws `DispatchRefusedError(reason, message)` when the run will never start: `permission_denied` when the platform refused it for good, `no_capacity` when no worker has a slot (`NoCapacityError`). The manager ends the run at once with that reason: the job is removed, the room deleted, the reservation released, nothing billed, and `bot:left` carries the message for the host to read. Any other error is retried every `dispatchRetryDelayMs` until `dispatchRetryMs` has passed.
+
+A worker's report may arrive before the provider's `dispatch` returns. The manager writes the worker's id to the run in whatever active state the report left it, and a cancel that arrived in the same window still becomes a leave.
+
+A `left` report may carry a `message`: a provider's code word for why the run ended. `bot:left` carries it beside the reason, as it carries the message of a refused dispatch; a provider keeps it to a fixed list of words and never puts a word of the meeting there.
 
 ## Capture, limits and billing
 
@@ -115,6 +125,8 @@ With default manager options, an unconfirmed notice times out after 30 seconds. 
 `DEFAULT_RUN_LIMITS` gives ten minutes in the waiting room, five minutes alone and four hours total. Total time starts at dispatch; the waiting-room limit uses the joined timestamp when present, otherwise dispatch time. The alone timer follows reports of zero participants besides the bot. There is no default page-away limit: a page host can pass `limits: { pageAwayMs: 120000 }` and call `pageSeen`. API clients can omit it.
 
 `MeetingRunState`, `RUN_TRANSITIONS`, `TERMINAL_RUN_STATES` and `canTransition` expose the state graph. `MeetingRunLimits`, `MeetingLeaveReason`, `MeetingNotice` and `MeetingDispatchRecord` type run policy and metadata. `isBilledEnd` requires capture and excludes every `UNBILLED_REASONS` entry: `not_admitted`, `notice_failed`, `stop_monitor_failed`, `permission_denied` and `no_capacity`, even after capture. Otherwise settlement uses reported seconds, or elapsed seconds from dispatch when no total was reported. Usage reports drive `bot:usage` and `entitlement.meter`; providers supply their periodic cadence. The manager does not generate a separate minute meter event without a report.
+
+A provider whose supplier bills for the media it carries may report `supplierUsage` (`SupplierUsage`: the seconds the supplier's stream was open and the seconds of it during which capture was open, both running totals, with `final` on the last) on any report, and in `ProviderUsage` for reconciliation. The manager hands a report's totals to `entitlement.recordSupplierUsage` when the hook has that method, before its terminal and fence checks, so a run that ends unbilled, or has already ended, still records what it cost; reconciliation hands over the totals the provider's usage answers for each run it polls. The hook may receive the same totals again and keeps the largest of each. Without the method nothing is recorded, and metering, settlement and release are unchanged.
 
 ## Rooms and listening
 
@@ -138,7 +150,17 @@ An active purge changes the run to `purging`, fences transcripts and event paylo
 
 `CONTENT_EVENT_TYPES` includes chat, transcript, participant-joined, participant-left and stop-command payloads. Their event metadata remains. Outbox content is scrubbed even from delivered rows: its payload becomes empty and its type becomes `bot:purged`. Content-free deliveries keep their type and payload. The host's sender must honor the current purge state, including before replay; a previously fetched delivery is a copy and cannot be recalled by the store. The host implements deletion of listener history, output queues, kept summaries and client copies through its purge path and hooks.
 
-`contentFreeRun` clears the meeting URL, bot name, notice text and stop phrase. It retains ids and settings (owner, provider, platform, state, Keep, limits, idempotency and reservation ids), lifecycle times, reason, billed seconds, notice version and consent record id. Terminal cleanup also clears dispatch and timer fields. Ordinary completion with `keep: 'account'` retains the bot name, notice and stored content; `keep: 'none'` clears stored content.
+`contentFreeRun` clears the meeting URL, bot name, notice text and stop phrase. It retains ids and settings (owner, provider, the provider's connection reference, platform, state, Keep, limits, idempotency and reservation ids), lifecycle times, reason, billed seconds, notice version and consent record id. Terminal cleanup also clears dispatch and timer fields. Ordinary completion with `keep: 'account'` retains the bot name, notice and stored content; `keep: 'none'` clears stored content.
+
+## Helpers for a provider's own lifecycle
+
+A provider that holds a media stream outside the manager (a worker that connects, publishes, suspends and leaves on the manager's commands) can use three helpers. None is required.
+
+`LifecycleSerial` orders that work and fences a start in flight. `run(work)` queues `work` behind every operation queued before it, whether those resolved or rejected. A start takes `stamp()` before its first await and publishes only while `allows(stamp)` holds; a suspension or an end calls `invalidate()` before it queues its own work, so a start still in flight never publishes after it. `invalidate(true)` ends the lifecycle for good: `ended` is true and no stamp is allowed again.
+
+`writeDurableJson(path, value)` replaces a private state file atomically: it writes a new file with mode `0600`, syncs it, renames it over the old one and syncs the directory. `removeDurableJson(path)` deletes the file and syncs the directory; a file already missing counts as removed.
+
+`IDurableInbox` keeps the deliveries a receiver accepted until it acknowledges them, so work a restart interrupted is found again. `accept(entry)` answers false for an id it has accepted before; `pending()` lists the unacknowledged entries, oldest first; `acknowledge(id)` drops the payload and keeps the id, so a replay is still refused. `MemoryDurableInbox` serves tests and a single process. `SqlDurableInbox(db, prefix, box)` seals each payload with `box` (a `SecretBox`, for example) in the Postgres table `durableInboxDdl(prefix)` creates, `<prefix>_inbox`; apply that DDL in the host's migration.
 
 ## Verifying an outbound envelope
 

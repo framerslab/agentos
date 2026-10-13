@@ -1,5 +1,5 @@
 import type { TranscriptInput } from '../../../voice-pipeline/types.js';
-import type { MeetingEvent, MeetingEventType, MeetingPlatform, MeetingRunRecord, MeetingRunState, TranscriptTurn } from '../types.js';
+import type { MeetingEvent, MeetingEventType, MeetingPlatform, MeetingRunRecord, MeetingRunState, SupplierUsage, TranscriptTurn } from '../types.js';
 
 /** Thrown by a store that refuses content for a run behind the fence. */
 export class FencedError extends Error {
@@ -219,6 +219,14 @@ export interface IEntitlementHook {
   settle(reservationId: string, billedSeconds: number): Promise<void>;
   /** Frees a reservation nothing is billed against: a run that ends unbilled, or a send refused after its reservation. */
   release(reservationId: string): Promise<void>;
+  /**
+   * Optional. Records what the run's supplier measured ({@link SupplierUsage}), apart from the seconds the owner is
+   * billed: the cost the run incurred, settled whatever the owner's bill, an unbilled end included. The manager calls it
+   * for every report that carries totals, before its terminal and fence checks, and for the totals a provider's usage
+   * answers at reconciliation, so it may be called again with the same or older totals: keep the largest of each.
+   * Absent, nothing is recorded, and `meter`, `settle` and `release` behave as they do without it.
+   */
+  recordSupplierUsage?(reservationId: string, usage: SupplierUsage): Promise<void>;
 }
 
 /** The manager's clock; a test passes a fake. */

@@ -151,6 +151,12 @@ export interface MeetingRunRecord {
   /** The product's reference for who owns the run (an account, an API key's workspace). Opaque to the library. */
   ownerRef: string;
   providerName: string;
+  /**
+   * The provider's opaque reference for the connection the run was sent through (a credential's generation, for
+   * example). The content-free row keeps it, so the runs sent through one connection can still be found, and their kept
+   * content purged, after the connection's credentials are gone. It names no person and carries nothing of the meeting.
+   */
+  providerConnectionRef?: string;
   platform: MeetingPlatform;
   state: MeetingRunState;
   keep: 'none' | 'account';
@@ -201,12 +207,13 @@ export interface MeetingRunRecord {
   aloneSince?: number;
 }
 
-/** The terminal, content-free form of a run: ids, platform, times, reason, seconds, the notice version and the consent record. */
+/** The terminal, content-free form of a run: ids, the provider's connection reference, platform, times, reason, seconds, the notice version and the consent record. */
 export function contentFreeRun(run: MeetingRunRecord): MeetingRunRecord {
   return {
     runId: run.runId,
     ownerRef: run.ownerRef,
     providerName: run.providerName,
+    providerConnectionRef: run.providerConnectionRef,
     platform: run.platform,
     state: run.state,
     keep: run.keep,
@@ -293,6 +300,20 @@ export type ProviderEventType =
   | 'usage'
   | 'error';
 
+/**
+ * What a provider's supplier (the platform that carries the run's media and bills for it) measured for a run, apart
+ * from the seconds the manager bills the owner: how long the supplier's stream was open, and how much of it the run
+ * captured. Both are running totals; a host records them through the entitlement hook's `recordSupplierUsage`.
+ */
+export interface SupplierUsage {
+  /** Seconds the supplier's media stream was open for the run, so far. */
+  streamSeconds: number;
+  /** Seconds of that stream during which capture was open, so far. */
+  captureSeconds: number;
+  /** Set on the last totals the provider reports for the run. */
+  final?: boolean;
+}
+
 /** One report from a provider, in the channel's terms, as the provider's parser returns it. */
 export interface NormalizedMeetingEvent {
   /** Stable: the provider supplies it or derives it from its own ids, never at random. */
@@ -313,8 +334,10 @@ export interface NormalizedMeetingEvent {
     participantRef?: string;
     /** How many participants besides the bot, on `in_call` and when one joins or leaves. */
     participantCount?: number;
-    /** An error's description, on `error`. */
+    /** An error's description, on `error`; on `left`, the provider's word for why the run ended, which `bot:left` carries beside the reason. */
     message?: string;
+    /** What the provider's supplier measured so far, on any report: recorded whatever the run's state, a terminal one included. */
+    supplierUsage?: SupplierUsage;
   };
 }
 

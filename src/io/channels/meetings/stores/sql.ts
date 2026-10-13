@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS ${t.runs} (
   run_id TEXT PRIMARY KEY,
   owner_ref TEXT NOT NULL,
   provider_name TEXT NOT NULL,
+  provider_connection_ref TEXT,
   platform TEXT NOT NULL,
   state TEXT NOT NULL,
   keep TEXT NOT NULL,
@@ -192,9 +193,9 @@ export class SqlRunStore implements IRunStore {
   toJSON(): string {
     return '[SqlRunStore redacted]';
   }
-  private static readonly COLUMNS = 'run_id, owner_ref, provider_name, platform, state, keep, meeting_url, bot_name, notice_text, notice_version, notice_late_text, stop_phrase, limits_json, idempotency_key, transcriber, requested_at, join_at, dispatched_at, joined_at, notice_posted_at, capture_started_at, left_at, done_at, reason, billed_seconds, reservation_id, consent_record_id, dispatch_json, page_seen_at, last_usage_at, monitor_seen_at, participant_count, leave_commanded_at, capture_suspended_at, alone_since, reported_seconds, cleanup_pending, purged_at';
+  private static readonly COLUMNS = 'run_id, owner_ref, provider_name, platform, state, keep, meeting_url, bot_name, notice_text, notice_version, notice_late_text, stop_phrase, limits_json, idempotency_key, transcriber, requested_at, join_at, dispatched_at, joined_at, notice_posted_at, capture_started_at, left_at, done_at, reason, billed_seconds, reservation_id, consent_record_id, dispatch_json, page_seen_at, last_usage_at, monitor_seen_at, participant_count, leave_commanded_at, capture_suspended_at, alone_since, reported_seconds, cleanup_pending, purged_at, provider_connection_ref';
   private row(run: MeetingRunRecord): unknown[] {
-    return [run.runId, run.ownerRef, run.providerName, run.platform, run.state, run.keep, run.meetingUrl === '' ? '' : this.opts.box.seal(run.meetingUrl, run.runId), run.botName, run.notice.text, run.notice.version, run.notice.lateArrivalText, run.stopPhrase, JSON.stringify(run.limits), run.idempotencyKey ?? null, run.transcriber ?? null, run.requestedAt, run.joinAt, run.dispatchedAt ?? null, run.joinedAt ?? null, run.noticePostedAt ?? null, run.captureStartedAt ?? null, run.leftAt ?? null, run.doneAt ?? null, run.reason ?? null, run.billedSeconds, run.reservationId ?? null, run.consentRecordId ?? null, run.dispatch ? JSON.stringify(run.dispatch) : null, run.pageSeenAt ?? null, run.lastUsageAt ?? null, run.monitorSeenAt ?? null, run.participantCount ?? null, run.leaveCommandedAt ?? null, run.captureSuspendedAt ?? null, run.aloneSince ?? null, run.reportedSeconds ?? null, run.cleanupPending ?? false, run.purgedAt ?? null];
+    return [run.runId, run.ownerRef, run.providerName, run.platform, run.state, run.keep, run.meetingUrl === '' ? '' : this.opts.box.seal(run.meetingUrl, run.runId), run.botName, run.notice.text, run.notice.version, run.notice.lateArrivalText, run.stopPhrase, JSON.stringify(run.limits), run.idempotencyKey ?? null, run.transcriber ?? null, run.requestedAt, run.joinAt, run.dispatchedAt ?? null, run.joinedAt ?? null, run.noticePostedAt ?? null, run.captureStartedAt ?? null, run.leftAt ?? null, run.doneAt ?? null, run.reason ?? null, run.billedSeconds, run.reservationId ?? null, run.consentRecordId ?? null, run.dispatch ? JSON.stringify(run.dispatch) : null, run.pageSeenAt ?? null, run.lastUsageAt ?? null, run.monitorSeenAt ?? null, run.participantCount ?? null, run.leaveCommandedAt ?? null, run.captureSuspendedAt ?? null, run.aloneSince ?? null, run.reportedSeconds ?? null, run.cleanupPending ?? false, run.purgedAt ?? null, run.providerConnectionRef ?? null];
   }
   private fromRow(r: Record<string, unknown>): MeetingRunRecord {
     const sealed = String(r.meeting_url ?? '');
@@ -206,6 +207,7 @@ export class SqlRunStore implements IRunStore {
     const opt = <K extends keyof MeetingRunRecord>(key: K, value: MeetingRunRecord[K] | undefined | null): void => { if (value !== undefined && value !== null) run[key] = value; };
     opt('idempotencyKey', r.idempotency_key as string | null); opt('transcriber', r.transcriber as string | null); opt('dispatchedAt', num(r.dispatched_at)); opt('joinedAt', num(r.joined_at)); opt('noticePostedAt', num(r.notice_posted_at)); opt('captureStartedAt', num(r.capture_started_at)); opt('leftAt', num(r.left_at)); opt('doneAt', num(r.done_at)); opt('reason', r.reason as MeetingRunRecord['reason'] | null); opt('reservationId', r.reservation_id as string | null); opt('consentRecordId', r.consent_record_id as string | null); opt('dispatch', r.dispatch_json ? JSON.parse(String(r.dispatch_json)) : undefined); opt('pageSeenAt', num(r.page_seen_at)); opt('lastUsageAt', num(r.last_usage_at)); opt('monitorSeenAt', num(r.monitor_seen_at)); opt('participantCount', num(r.participant_count)); opt('leaveCommandedAt', num(r.leave_commanded_at)); opt('captureSuspendedAt', num(r.capture_suspended_at)); opt('aloneSince', num(r.alone_since)); opt('reportedSeconds', num(r.reported_seconds)); opt('purgedAt', num(r.purged_at));
     if (bool(r.cleanup_pending)) run.cleanupPending = true;
+    opt('providerConnectionRef', r.provider_connection_ref as string | null);
     return run;
   }
   /** Inserts a run, mapping an owner's repeated idempotency key to the public conflict error. */
