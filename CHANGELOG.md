@@ -1,3 +1,9 @@
+## [0.13.98](https://github.com/framerslab/agentos/compare/v0.13.97...v0.13.98) (2026-10-13)
+
+### fix
+
+* **meetings:** fence an outbox so a purge cancels the run's sends under way and later deliveries carry no content (#414) ([7bce8f7](https://github.com/framerslab/agentos/commit/7bce8f7716368de8498caa265b7c0d39a6ebd831))
+
 ## [0.13.97](https://github.com/framerslab/agentos/compare/v0.13.96...v0.13.97) (2026-10-13)
 
 ### feat
