@@ -46,8 +46,8 @@ function speechStart(): VadEvent {
   return { type: 'speech_start', timestamp: Date.now(), source: 'vad' };
 }
 
-/** Build a final from a provider that keys its results by item, as OpenAI Realtime does. */
-function itemFinal(text: string, itemId: string, startMs: number): TranscriptEvent {
+/** Build a final from a provider that keys its results by item, as OpenAI Realtime does; `startMs` when it knows the start. */
+function itemFinal(text: string, itemId: string, startMs?: number): TranscriptEvent {
   return { text, confidence: 0.9, words: [], isFinal: true, itemId, startMs };
 }
 
@@ -459,6 +459,22 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
       transcript: 'Book a table for two at seven tonight.',
       reason: 'punctuation',
     });
+  });
+
+  it('orders clauses by their start when a final with no words has no start', () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    for (let utterance = 0; utterance < 3; utterance++) {
+      detector.pushVadEvent(transcriberSpeech('speech_start'));
+      detector.pushVadEvent(transcriberSpeech('speech_end'));
+    }
+    detector.pushTranscript(itemFinal('At seven tonight.', 'item_B', 1_300));
+    detector.pushTranscript(itemFinal('', 'item_X')); // interim text taken back, for an item with no known start
+    detector.pushTranscript(itemFinal('Book a table for two.', 'item_A', 0));
+
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0].transcript).toBe('Book a table for two. At seven tonight.');
   });
 
   it('lets a final without an itemId replace the turn of item-keyed finals', () => {
