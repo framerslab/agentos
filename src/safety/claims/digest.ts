@@ -33,9 +33,11 @@ function encode(value: unknown, seen: Set<object>): string {
       seen.add(value);
       try {
         if (Array.isArray(value)) {
-          // An index loop, not map: map skips holes, and join would then write each one as an empty string.
+          // An index loop, not map: map skips holes, and join would then write each one as an empty string. The
+          // length is read once, as JSON.stringify reads it, so an item getter that grows the array changes nothing.
           const items: string[] = [];
-          for (let index = 0; index < value.length; index += 1) {
+          const length = value.length;
+          for (let index = 0; index < length; index += 1) {
             const item: unknown = value[index];
             items.push(item === undefined ? 'null' : encode(item, seen));
           }
@@ -44,10 +46,13 @@ function encode(value: unknown, seen: Set<object>): string {
         const proto = Object.getPrototypeOf(value) as unknown;
         if (proto !== Object.prototype && proto !== null) throw new TypeError('canonicalJson: only a plain object has a JSON form');
         const record = value as Record<string, unknown>;
-        const keys = Object.keys(record)
-          .filter((key) => record[key] !== undefined)
-          .sort();
-        return `{${keys.map((key) => `${JSON.stringify(key)}:${encode(record[key], seen)}`).join(',')}}`;
+        // Each member is read once, so a getter cannot answer one way when checked and another when encoded.
+        const members: string[] = [];
+        for (const key of Object.keys(record).sort()) {
+          const member = record[key];
+          if (member !== undefined) members.push(`${JSON.stringify(key)}:${encode(member, seen)}`);
+        }
+        return `{${members.join(',')}}`;
       } finally {
         seen.delete(value);
       }
