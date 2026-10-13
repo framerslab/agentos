@@ -39,8 +39,8 @@ export interface DeepgramPreRecordedBatchSTTConfig {
   smartFormat?: boolean;
   /**
    * Opt requests out of Deepgram's Model Improvement Program by sending
-   * `mip_opt_out=true`. Off by default because Deepgram notes that opting out
-   * has pricing impacts.
+   * `mip_opt_out=true`: Deepgram keeps an opted-out request's data only for
+   * the duration necessary to process the request.
    * @default false
    */
   mipOptOut?: boolean;
