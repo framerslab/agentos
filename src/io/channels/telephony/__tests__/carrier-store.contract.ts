@@ -81,6 +81,22 @@ export function carrierStoreContract(name: string, open: () => Promise<CarrierSt
         expect(await h.second.withProvider('twilio', (tx) => tx.get('local'))).toMatchObject(spoken);
       } finally { m.dispose(); await h.close(); }
     });
+    it('keeps the bot speech a manager records on a call another manager has ended, and the call keeps its stored outcome', async () => {
+      const h = await open(); const a = carrierManager(); const b = carrierManager(); const held = holdingStore(h.first);
+      try {
+        await h.first.withProvider('twilio', (tx) => tx.put(storedCall()));
+        await a.processWebhookDurable('twilio', signedStatus('in-progress'), held.store);
+        await b.processWebhookDurable('twilio', signedStatus('completed'), h.second);
+        // a's record still reads the call as live: its first save finds the call ended, and the second entry is recorded while that save commits.
+        held.state.holding = true; a.speakText('local', 'one moment');
+        await vi.waitFor(() => expect(held.state.waiting).toBe(true));
+        held.state.holding = false; a.speakText('local', 'goodbye'); held.release();
+        expect(await a.processWebhookDurable('twilio', signedStatus('completed'), held.store)).toEqual({ accepted: true, applied: 0 });
+        const ended = { state: 'completed', transcript: [{ speaker: 'bot', text: 'one moment' }, { speaker: 'bot', text: 'goodbye' }] };
+        expect(a.getCall('local')).toMatchObject(ended);
+        expect(await h.second.withProvider('twilio', (tx) => tx.get('local'))).toMatchObject(ended);
+      } finally { held.release(); a.dispose(); b.dispose(); await h.close(); }
+    });
     it('ends a call its manager hangs up once, in the store, so a later completion callback changes nothing', async () => {
       const h = await open(); const m = carrierManager(); const ended: string[] = [];
       m.on((e) => { if (e.type === 'call:ended') ended.push(e.call.state); });
