@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import type { TranscriptInput } from '../../../voice-pipeline/types.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
@@ -187,6 +188,10 @@ export class SqlRunStore implements IRunStore {
   constructor(private readonly opts: SqlRunStoreOptions) {
     checkPostgres(opts.db, 'SqlRunStore');
     this.t = meetingStoreTables(opts.tablePrefix);
+  }
+  /** What `util.inspect`, and so `console.log`, prints: a redacted marker, neither the box nor the database's options. */
+  [inspect.custom](): string {
+    return '[SqlRunStore redacted]';
   }
   /** Serialises no options, database or box; persistence uses only the explicit row fields. */
   toJSON(): string {

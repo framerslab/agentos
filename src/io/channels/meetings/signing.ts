@@ -9,6 +9,7 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { inspect } from 'node:util';
 import { openSecret, sealSecret, SealedSecretError, type SealingKey } from '../../../core/llm/auth/sealing.js';
 
 /** The three header names of the envelope. A host passes its own (a product's branded names are the product's policy, never the library's). */
@@ -153,6 +154,11 @@ export class SecretBox {
 
   /** Serialises only a redacted marker, never current or previous key bytes. */
   toJSON(): string {
+    return '[SecretBox redacted]';
+  }
+
+  /** What `util.inspect`, and so `console.log` and loggers built on it, print: the same redacted marker, never key bytes. */
+  [inspect.custom](): string {
     return '[SecretBox redacted]';
   }
 
