@@ -1508,7 +1508,7 @@ export class AgentOS implements IAgentOS {
     if (verdict.action === GuardrailAction.BLOCK && withheld.length > 0) {
       try {
         await this.agentOSOrchestrator.discardBlockedToolCalls(verdict.streamId, withheld, {
-          reason: 'An output guardrail blocked this tool call, so it was not run.',
+          reason: 'An output guardrail blocked the reply that requested this tool call, so the call was not run.',
           ...(verdict.reasonCode ? { reasonCode: verdict.reasonCode } : {}),
           ...(verdict.guardrailId ? { guardrailId: verdict.guardrailId } : {}),
         });

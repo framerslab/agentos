@@ -265,8 +265,8 @@ export interface GuardrailConfig {
    * - BLOCK ends the stream with the guard's verdict (the error chunk, or the
    *   final response holding `replacementText`) in place of the chunk, so the
    *   stream never hands the host an actionable call
-   *   (`executionMode: 'external'`) to execute. AgentOS drops the pause it
-   *   saved for that call before the chunk went out:
+   *   (`executionMode: 'external'`) to execute. AgentOS drops the pause the
+   *   runtime saved for that call when the turn stopped for it:
    *   `getPendingExternalToolRequest()` no longer returns it, the
    *   conversation answers the call with a refused tool result, and the
    *   stream cannot be continued with a result for it.

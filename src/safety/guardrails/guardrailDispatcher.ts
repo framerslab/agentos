@@ -136,7 +136,7 @@ export interface GuardrailOutputVerdict {
   /**
    * The ids of the actionable tool calls (`executionMode: 'external'`) a block withheld from the caller: the calls of
    * the tool-call chunk it ended the stream in place of, or, in hold mode, of the tool-call chunk after the text it
-   * blocked. The runtime saved a pause for them before the chunk went out; AgentOS drops it. Unset when a verdict
+   * blocked. AgentOS drops the pause the runtime saved for them when the turn stopped for them. Unset when a verdict
    * withheld no actionable call.
    */
   toolCallIds?: string[];
