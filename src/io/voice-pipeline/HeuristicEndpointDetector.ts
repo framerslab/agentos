@@ -474,7 +474,9 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * from the item's latest final, and its text joins them. A new item's
    * final answers the oldest `speech_end` still waiting for one; a
    * backchannel or a final with no words answers it too and adds no text.
-   * Once speech has ended in this turn, the turn is decided again.
+   * Once speech has ended in this turn, the turn is decided again. A
+   * backchannel is announced last, so a `'backchannel_detected'` listener
+   * that throws leaves the final recorded and the turn decided.
    *
    * @param itemId - The provider input item the final belongs to.
    * @param transcript - The final transcript event.
@@ -482,7 +484,6 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   private _pushItemFinal(itemId: string, transcript: TranscriptEvent): void {
     const normalised = transcript.text.trim().toLowerCase();
     const backchannel = BACKCHANNEL_PHRASES.has(normalised);
-    if (backchannel) this.emit('backchannel_detected', { text: transcript.text });
 
     if (!this.itemFinals.has(itemId)) {
       this._dropExpiredSpeechEnds(Date.now());
@@ -494,6 +495,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     this.accumulatedText = this._joinItemFinals();
 
     if (!this.speechActive && this.lastSpeechEnd !== null) this._decideItemTurn();
+
+    if (backchannel) this.emit('backchannel_detected', { text: transcript.text });
   }
 
   /**
