@@ -709,4 +709,172 @@ describe('VoicePipelineOrchestrator', () => {
       warn.mockRestore();
     }
   });
+
+  // --------------------------------------------------------------------------
+  // Client transcripts: a client that transcribes on its own device
+  // --------------------------------------------------------------------------
+
+  /** Records the endpoint detector's calls, in order, as one log. */
+  function logDetector(): string[] {
+    const log: string[] = [];
+    vi.mocked(endpoint.pushVadEvent).mockImplementation((event) => {
+      log.push(`vad ${event.type}`);
+    });
+    vi.mocked(endpoint.pushTranscript).mockImplementation((event) => {
+      log.push(`${event.isFinal ? 'final' : 'interim'} ${event.text}`);
+    });
+    vi.mocked(endpoint.reset).mockImplementation(() => {
+      log.push('reset');
+    });
+    return log;
+  }
+
+  /** A client transcript message, as a transport delivers it. */
+  function clientTranscript(itemId: string, text: string, isFinal: boolean, extra: Record<string, unknown> = {}) {
+    return { type: 'transcript', text, itemId, isFinal, ...extra };
+  }
+
+  it('should hand client transcripts to the endpoint detector between a speech start and a speech end', async () => {
+    await startSession();
+    const log = logDetector();
+    transport.emit('message', clientTranscript('7', 'Hello', false, { startMs: 0, endMs: 400, language: 'en' }));
+    transport.emit(
+      'message',
+      clientTranscript('7', 'Hello there.', true, { confidence: 0.8, startMs: 0, endMs: 900, language: 'en' })
+    );
+    transport.emit('message', clientTranscript('8', 'Bye.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The mock detector completes no turn, so line 8's final carries the turn's
+    // finals so far: the detector keeps one final per turn.
+    expect(log).toEqual([
+      'vad speech_start',
+      'interim Hello',
+      'final Hello there.',
+      'vad speech_end',
+      'vad speech_start',
+      'final Hello there. Bye.',
+      'vad speech_end',
+    ]);
+    expect(endpoint.pushVadEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'speech_start', source: 'stt' }),
+    );
+    // A final carries the turn's text so far, not one line's, so it reaches the detector
+    // without the line's itemId.
+    expect(endpoint.pushTranscript).toHaveBeenCalledWith({
+      text: 'Hello there.',
+      confidence: 0.8,
+      words: [],
+      isFinal: true,
+      durationMs: 900,
+      startMs: 0,
+      endMs: 900,
+      language: 'en',
+    });
+    expect(transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'transcript' }));
+  });
+
+  it("should keep speech open while any client line is open, each final joined with the turn's earlier ones", async () => {
+    await startSession();
+    const log = logDetector();
+    transport.emit('message', clientTranscript('1', 'one', false));
+    transport.emit('message', clientTranscript('2', 'two', false));
+    transport.emit('message', clientTranscript('1', 'one.', true));
+    transport.emit('message', clientTranscript('2', 'two.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log).toEqual([
+      'vad speech_start',
+      'interim one',
+      'interim two',
+      'final one.',
+      'final one. two.',
+      'vad speech_end',
+    ]);
+  });
+
+  it("should take a client's first line while the agent speaks as barge-in, before the line's text", async () => {
+    await startSession();
+    endpoint.emit('turn_complete', makeTurnComplete());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('speaking');
+    const log = logDetector();
+
+    transport.emit('message', clientTranscript('9', 'Wait', false));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ttsSession.cancel).toHaveBeenCalled();
+    expect(agentSession.abort).toHaveBeenCalled();
+    expect(transport.sendControl).toHaveBeenCalledWith(expect.objectContaining({ type: 'barge_in' }));
+    expect(orchestrator.state).toBe('listening');
+    expect(log).toEqual(['vad speech_start', 'reset', 'interim Wait']);
+  });
+
+  it('should close a client line on an empty final without its text, and ignore an empty line that never opened', async () => {
+    await startSession();
+    const log = logDetector();
+    transport.emit('message', clientTranscript('3', 'Um', false));
+    transport.emit('message', clientTranscript('3', '', true));
+    transport.emit('message', clientTranscript('4', '', true));
+    transport.emit('message', clientTranscript('5', ' ', false));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log).toEqual(['vad speech_start', 'interim Um', 'vad speech_end']);
+  });
+
+  it('should ignore malformed and other client messages, and client transcripts once closed', async () => {
+    await startSession();
+    const log = logDetector();
+    transport.emit('message', { type: 'transcript', text: 42, itemId: '6', isFinal: true });
+    transport.emit('message', { type: 'transcript', text: 'No id.', isFinal: true });
+    transport.emit('message', { type: 'control', action: { type: 'mute' } });
+    transport.emit('close');
+    transport.emit('message', clientTranscript('6', 'Too late.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The close resets the detector, as every stop does; no client message reaches it.
+    expect(log).toEqual(['reset']);
+  });
+
+  it('should close a client line that gets no message for five seconds, so a later line still starts and ends speech', async () => {
+    await startSession();
+    const log = logDetector();
+    // Line 41's final never comes: the device session that made it failed.
+    transport.emit('message', clientTranscript('41', 'Turn the', false));
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(log).toEqual(['vad speech_start', 'interim Turn the']);
+
+    await vi.advanceTimersByTimeAsync(1);
+    transport.emit('message', clientTranscript('57', 'Lights on.', false));
+    transport.emit('message', clientTranscript('57', 'Lights on.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log).toEqual([
+      'vad speech_start',
+      'interim Turn the',
+      'vad speech_end',
+      'vad speech_start',
+      'interim Lights on.',
+      'final Lights on.',
+      'vad speech_end',
+    ]);
+  });
+
+  it('should hold at most eight client lines open, and stop a turn at 16,000 characters', async () => {
+    await startSession();
+    const log = logDetector();
+    // Nine lines open, so the first gives way; the other eight close with long finals.
+    for (let i = 1; i <= 9; i++) transport.emit('message', clientTranscript(String(i), 'open', false));
+    for (let i = 2; i <= 9; i++) transport.emit('message', clientTranscript(String(i), 'x'.repeat(4_000), true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log.filter((entry) => entry.startsWith('vad'))).toEqual(['vad speech_start', 'vad speech_end']);
+    const finals = vi
+      .mocked(endpoint.pushTranscript)
+      .mock.calls.map(([event]) => event)
+      .filter((event) => event.isFinal);
+    expect(finals.map((event) => event.text.length)).toEqual([
+      4_000, 8_001, 12_002, 16_000, 16_000, 16_000, 16_000, 16_000,
+    ]);
+  });
 });

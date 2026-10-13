@@ -22,6 +22,11 @@
  *
  * 4. **Multiple sequential turns**: Verifies that the endpoint detector
  *    resets between turns and the agent can handle consecutive interactions.
+ *
+ * 5. **A client's transcript lines**: a client that transcribes on its own
+ *    device sends its lines as `transcript` messages, and the lines of one
+ *    turn reach the agent together, whether they are open at once (5a) or the
+ *    next opens inside the detector's silence timeout (5b).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -403,5 +408,64 @@ describe('voice pipeline -- full conversational loop integration', () => {
 
     // After two full turns: 2 resets per turn = 4 total
     expect(resetSpy).toHaveBeenCalledTimes(4);
+  });
+
+  // ============================================================================
+  // Scenario 5: A client's transcript lines
+  // ============================================================================
+
+  /** A client transcript message, as a transport delivers it. */
+  function clientLine(itemId: string, text: string, isFinal: boolean) {
+    return { type: 'transcript', text, itemId, isFinal };
+  }
+
+  it('scenario 5a: two client lines open at once make one turn, and the agent receives both', async () => {
+    await startSession();
+
+    transport.emit('message', clientLine('1', 'Book a table', false));
+    transport.emit('message', clientLine('2', 'for two', false));
+    transport.emit('message', clientLine('1', 'Book a table', true));
+    transport.emit('message', clientLine('2', 'for two.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(agentSession.sendText).toHaveBeenCalledTimes(1);
+    expect(agentSession.sendText).toHaveBeenCalledWith(
+      'Book a table for two.',
+      expect.objectContaining({ endpointReason: 'punctuation' }),
+    );
+  });
+
+  /**
+   * A pause inside a sentence completes a Moonshine line. The first line has
+   * no terminal punctuation, so its speech end starts the detector's silence
+   * timeout; the next line opens inside it, and the turn holds both.
+   */
+  it('scenario 5b: a line that opens inside the silence timeout joins the turn, and the next turn starts empty', async () => {
+    await startSession({ silenceTimeoutMs: 1_500 });
+
+    transport.emit('message', clientLine('3', 'I was thinking', false));
+    transport.emit('message', clientLine('3', 'I was thinking', true));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+
+    transport.emit('message', clientLine('4', 'about Lisbon.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(agentSession.sendText).toHaveBeenCalledWith(
+      'I was thinking about Lisbon.',
+      expect.objectContaining({ endpointReason: 'punctuation' }),
+    );
+
+    // The agent's reply ends; the next turn holds its own line alone.
+    ttsSession.emit('flush_complete');
+    transport.emit('message', clientLine('5', 'Thanks.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(agentSession.sendText).toHaveBeenCalledTimes(2);
+    expect(agentSession.sendText).toHaveBeenNthCalledWith(
+      2,
+      'Thanks.',
+      expect.objectContaining({ endpointReason: 'punctuation' }),
+    );
   });
 });
