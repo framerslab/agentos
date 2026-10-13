@@ -11,6 +11,7 @@ import { lookup as dnsLookup } from 'node:dns';
 import { request as httpsRequest } from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
 import { isPublicAddress } from '../../../cognition/memory/io/ingestion/guardedFetch.js';
+import { isPublicNetworkAddress, nat64PrefixesFrom } from '../../media/images/networkAddress.js';
 import { DEFAULT_ENVELOPE_HEADERS, envelopeHeaders, type EnvelopeHeaderNames } from './signing.js';
 import type { IClock, IOutbox } from './stores/types.js';
 
@@ -19,7 +20,8 @@ import type { IClock, IOutbox } from './stores/types.js';
  * input reach. Loopback, private, link-local, carrier-grade NAT, unique-local, multicast, documentation, benchmarking,
  * reserved and unspecified addresses are not public, nor is an IPv6 address that carries such an IPv4 one (IPv4-mapped,
  * NAT64, 6to4), nor text that is not an address. It is the rule `guardedFetch` applies, re-exported as the rule
- * {@link httpsSend} holds at each delivery, so a host can check a destination's addresses when it is registered.
+ * {@link httpsSend} holds at each delivery, so a host can check a destination's addresses when it is registered. A
+ * network's own NAT64 prefix is not part of it: `httpsSend` reads those prefixes at the delivery, as `guardedFetch` does.
  */
 export { isPublicAddress };
 
@@ -68,7 +70,10 @@ export interface DeliveryDestination {
 /**
  * The default send: https only, no credentials in the address, every resolved address public, the connection made to
  * the first of them (the request's `lookup` answers it, so a second resolution cannot move the connection), no redirect
- * followed, the answer's body read and dropped.
+ * followed, the answer's body read and dropped. An IPv6 address is also checked under the network's own NAT64
+ * prefixes, as `guardedFetch` checks it: they are read (RFC 7050) from the IPv6 addresses `lookup` gives for
+ * `ipv4only.arpa`, a name with IPv4 addresses only, when such an address comes up, and a send whose prefixes cannot be
+ * read fails without connecting.
  *
  * @param options - `lookup`, a host name's addresses; the system resolver when absent.
  */
@@ -80,16 +85,31 @@ export function httpsSend(options: { lookup?: AddressLookup } = {}): DeliverySen
     const target = new URL(url);
     if (target.protocol !== 'https:') throw new DestinationRefusedError('a destination is https');
     if (target.username || target.password) throw new DestinationRefusedError('a destination carries no credentials');
+    // a lookup cannot be cancelled: the wait for it ends at the signal, while the lookup runs on
+    const lookup = (name: string): Promise<Array<{ address: string; family: number }>> =>
+      new Promise((resolve, reject) => {
+        const cancelled = (): void => reject(signal?.reason);
+        signal?.addEventListener('abort', cancelled, { once: true });
+        void resolveAll(name).then(resolve, reject).finally(() => signal?.removeEventListener('abort', cancelled));
+      });
     const host = target.hostname.replace(/^\[|\]$/g, '');
     const literal = isIP(host);
-    const addresses = literal ? [{ address: host, family: literal }] : await new Promise<Array<{ address: string; family: number }>>((resolve, reject) => {
-      const cancelled = (): void => reject(signal?.reason);
-      signal?.addEventListener('abort', cancelled, { once: true });
-      void resolveAll(host).then(resolve, reject).finally(() => signal?.removeEventListener('abort', cancelled));
-    });
+    const addresses = literal ? [{ address: host, family: literal }] : await lookup(host);
     signal?.throwIfAborted();
     if (addresses.length === 0 || !addresses.every((a) => isPublicAddress(a.address))) {
       throw new DestinationRefusedError('the destination resolves to a private address');
+    }
+    // A public-looking IPv6 address can carry a private IPv4 one under a NAT64 prefix of this network, which a DNS64
+    // resolver writes into the answer for a name with IPv4 addresses only; the NAT64 gateway connects to that IPv4 one.
+    const overIPv6 = addresses.filter((a) => isIP(a.address) === 6);
+    if (overIPv6.length > 0) {
+      const known = await lookup('ipv4only.arpa').catch((): undefined => undefined);
+      signal?.throwIfAborted();
+      if (known === undefined) throw new Error("the network's NAT64 prefixes could not be read, so the destination's IPv6 address cannot be cleared");
+      const nat64Prefixes = nat64PrefixesFrom(known.map((a) => a.address).filter((address) => isIP(address) === 6));
+      if (!overIPv6.every((a) => isPublicNetworkAddress(a.address, { nat64Prefixes }))) {
+        throw new DestinationRefusedError('the destination resolves to a private address');
+      }
     }
     const chosen = addresses[0]!;
     const pinned = ((_hostname: string, lookupOptions: { all?: boolean } | undefined, callback: (...args: unknown[]) => void) => {

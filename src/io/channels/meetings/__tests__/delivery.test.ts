@@ -26,6 +26,35 @@ describe('httpsSend', () => {
     await expect(mixed(request)).rejects.toBeInstanceOf(DestinationRefusedError);
     await expect(send({ ...request, url: 'https://127.0.0.1/in' })).rejects.toBeInstanceOf(DestinationRefusedError);
   });
+
+  it("refuses an IPv6 address that carries a private IPv4 one under the network's own NAT64 prefix, before any socket", async () => {
+    // A DNS64 resolver on a network whose NAT64 prefix is 3ffe:ffff:64::/96 answers ipv4only.arpa (192.0.0.170 and
+    // 192.0.0.171) under that prefix, and writes a name whose only address is 10.0.0.7 as 3ffe:ffff:64::a00:7, which
+    // reads as a global address.
+    const synthesized = '3ffe:ffff:64::a00:7';
+    const asked: string[] = [];
+    const send = httpsSend({
+      lookup: async (hostname) => {
+        asked.push(hostname);
+        return hostname === 'ipv4only.arpa'
+          ? [{ address: '3ffe:ffff:64::c000:aa', family: 6 }, { address: '3ffe:ffff:64::c000:ab', family: 6 }]
+          : [{ address: synthesized, family: 6 }];
+      },
+    });
+    const request: DeliveryRequest = { url: 'https://hooks.example.test/in', headers: {}, body: '{}', timeoutMs: 1000 };
+    expect(isPublicAddress(synthesized)).toBe(true);
+    await expect(send(request)).rejects.toBeInstanceOf(DestinationRefusedError);
+    await expect(send({ ...request, url: `https://[${synthesized}]/in` })).rejects.toBeInstanceOf(DestinationRefusedError);
+    expect(asked).toContain('ipv4only.arpa');
+    // prefixes that cannot be read clear no IPv6 address
+    const unread = httpsSend({
+      lookup: async (hostname) => {
+        if (hostname === 'ipv4only.arpa') throw new Error('lookup failed');
+        return [{ address: '3ffe:ffff:1::1', family: 6 }];
+      },
+    });
+    await expect(unread(request)).rejects.toThrow(/NAT64 prefixes could not be read/);
+  });
 });
 
 describe('OutboxDispatcher', () => {
