@@ -9,6 +9,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { ITranscriptInputSink, TranscriptTurn } from '../../voice-pipeline/types.js';
+import type { IDurableInbox } from './DurableInbox.js';
 import type { DispatchResult, IMeetingBotProvider, ProviderCommand, ProviderEventContext } from './IMeetingBotProvider.js';
 import type { MeetingRoom, MeetingRoomHandle } from './MeetingRoom.js';
 import { MeetingTranscriptSink } from './MeetingTranscriptSink.js';
@@ -27,9 +28,11 @@ import {
   type MeetingRunRecord,
   type MeetingRunState,
   type NormalizedMeetingEvent,
+  type PendingSupplierUsage,
   type ProviderEventType,
   type SendBotRequest,
   type SendBotResult,
+  type SupplierUsage,
 } from './types.js';
 
 /** The stores and hooks a manager keeps its runs in. */
@@ -48,6 +51,13 @@ export interface MeetingManagerStores {
   entitlement: IEntitlementHook;
   /** The clock the manager measures every limit on. */
   clock: IClock;
+  /**
+   * Optional. Where the supplier totals of a report wait when the entitlement hook's `recordSupplierUsage` refuses
+   * them, until the next {@link MeetingManager.reconcile} hands them over again; a durable inbox (`SqlDurableInbox`)
+   * keeps them across a restart. The report is applied either way; without an inbox, the hook's error is thrown once
+   * the report is applied.
+   */
+  supplierUsageInbox?: IDurableInbox<PendingSupplierUsage>;
 }
 
 /** How a host builds a {@link MeetingManager}: its stores, its room helper, its routes and its limits. */
@@ -627,10 +637,70 @@ export class MeetingManager {
   private async apply(event: NormalizedMeetingEvent): Promise<boolean> {
     const run = await this.stores.runs.get(event.runId);
     // what the supplier measured is cost already incurred: recorded before the terminal, fence and dedup guards, so a
-    // terminal report still settles it without admitting content (the hook keeps the largest totals, so a repeat is safe)
-    if (run?.reservationId && event.data?.supplierUsage !== undefined) {
-      await this.stores.entitlement.recordSupplierUsage?.(run.reservationId, event.data.supplierUsage);
+    // terminal report still settles it without admitting content (the hook keeps the largest totals, so a repeat is safe).
+    // A record the hook refuses holds back nothing of the report: a left or a crash still ends the run below
+    const refused = run?.reservationId && event.data?.supplierUsage !== undefined
+      ? await this.recordSupplierTotals(run.runId, run.reservationId, event.data.supplierUsage)
+      : undefined;
+    const applied = await this.applyReport(run, event);
+    if (refused) throw refused.error;
+    return applied;
+  }
+
+  /**
+   * Hands what a run's supplier measured to the entitlement hook's `recordSupplierUsage`, when the hook has one. Totals
+   * the hook refuses wait in the stores' `supplierUsageInbox`, when there is one, until a reconcile hands them over
+   * again; with no inbox, or one that refuses them too, the hook's error is answered, for the caller to throw once its
+   * own work is done.
+   */
+  private async recordSupplierTotals(runId: string, reservationId: string, usage: SupplierUsage): Promise<{ error: unknown } | undefined> {
+    try {
+      await this.stores.entitlement.recordSupplierUsage?.(reservationId, usage);
+      return undefined;
+    } catch (error) {
+      const inbox = this.stores.supplierUsageInbox;
+      if (!inbox) {
+        this.config.logger?.warn(`[MeetingManager] supplier usage of ${runId} not recorded: ${String(error)}`);
+        return { error };
+      }
+      try {
+        // the id names the run and the totals, so the same totals refused twice wait once
+        await inbox.accept({ id: `${runId}:${usage.streamSeconds}:${usage.captureSeconds}:${usage.final === true ? 'final' : 'running'}`, acceptedAt: this.now(), value: { runId, reservationId, usage } });
+      } catch (keepError) {
+        this.config.logger?.error(`[MeetingManager] supplier usage of ${runId} neither recorded (${String(error)}) nor kept (${String(keepError)})`);
+        return { error };
+      }
+      this.config.logger?.warn(`[MeetingManager] supplier usage of ${runId} not recorded, kept for the next reconcile: ${String(error)}`);
+      return undefined;
     }
+  }
+
+  /**
+   * Hands the entitlement hook again the supplier totals it refused before, kept in the stores' `supplierUsageInbox`:
+   * each one recorded is acknowledged, and one refused again stays for the next reconcile.
+   */
+  private async recordKeptSupplierUsage(): Promise<void> {
+    const inbox = this.stores.supplierUsageInbox;
+    if (!inbox || !this.stores.entitlement.recordSupplierUsage) return;
+    const kept = await inbox.pending();
+    let refused = 0;
+    let firstError: unknown;
+    for (const entry of kept) {
+      try {
+        await this.stores.entitlement.recordSupplierUsage?.(entry.value.reservationId, entry.value.usage);
+      } catch (error) {
+        if (refused === 0) firstError = error;
+        refused += 1;
+        continue;
+      }
+      await inbox.acknowledge(entry.id);
+    }
+    // one line for the pass, however many the hook refused
+    if (refused > 0) this.config.logger?.warn(`[MeetingManager] ${refused} of ${kept.length} kept supplier usage totals refused again, kept for the next reconcile: ${String(firstError)}`);
+  }
+
+  /** The report applied to its run as `apply` read it, whatever became of the report's supplier totals. */
+  private async applyReport(run: MeetingRunRecord | undefined, event: NormalizedMeetingEvent): Promise<boolean> {
     if (!run || TERMINAL_RUN_STATES.has(run.state)) return false;
     const fenced = run.state === 'purging';
     // behind the fence nothing a person said or did is stored or forwarded: a late content report is dropped whole
@@ -1166,7 +1236,8 @@ export class MeetingManager {
   /**
    * Compares dispatched jobs with the providers' usage: a run whose container is gone is ended as crashed; an unfinished
    * purge is resumed; what a provider's supplier measured for a run is recorded through the entitlement hook's
-   * `recordSupplierUsage`, when the hook has one. An answer about a run the provider was not asked about is ignored and
+   * `recordSupplierUsage`, when the hook has one. First, the supplier totals the hook refused before, kept in the stores'
+   * `supplierUsageInbox`, are handed to it again. An answer about a run the provider was not asked about is ignored and
    * logged. A run still waiting for its dispatch whose job is missing (a send whose job could not be stored) is given its
    * job again, and one a cancel left without its job (the cancel's reason is on the run) is ended, so neither waits for
    * ever holding its reservation. As in the limits, a run whose step throws holds back no other, and the first error is
@@ -1175,6 +1246,11 @@ export class MeetingManager {
   async reconcile(): Promise<void> {
     const now = this.now();
     let failure: { error: unknown } | undefined;
+    try {
+      await this.recordKeptSupplierUsage();
+    } catch (error) {
+      failure ??= { error };
+    }
     const byProvider = new Map<string, string[]>();
     for (const job of await this.stores.jobs.listDispatched()) {
       try {

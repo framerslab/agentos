@@ -314,6 +314,16 @@ export interface SupplierUsage {
   final?: boolean;
 }
 
+/** Supplier totals the entitlement hook refused, as the manager's `supplierUsageInbox` keeps them until the hook records them. */
+export interface PendingSupplierUsage {
+  /** The run the totals were measured for. */
+  runId: string;
+  /** The run's reservation, which the hook records them against. */
+  reservationId: string;
+  /** The totals. */
+  usage: SupplierUsage;
+}
+
 /** One report from a provider, in the channel's terms, as the provider's parser returns it. */
 export interface NormalizedMeetingEvent {
   /** Stable: the provider supplies it or derives it from its own ids, never at random. */
