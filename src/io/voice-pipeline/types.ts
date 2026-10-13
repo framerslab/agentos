@@ -666,6 +666,15 @@ export interface TurnCompleteEvent {
  * | `'turn_complete'`      | {@link TurnCompleteEvent} | The user's turn has ended.           |
  * | `'speech_start'`       | *(none)*                | The user has started speaking.         |
  * | `'barge_in_detected'`  | *(none)*                | User spoke while TTS was playing.      |
+ * | `'late_final'`         | {@link TranscriptEvent} | A final that arrived after its turn ended, which the turn does not take. |
+ *
+ * A detector that drops such a final from its turns emits `'late_final'`
+ * with the final as it was pushed, once per final it drops
+ * ({@link HeuristicEndpointDetector} does, for an item-keyed final that
+ * arrives after a reset ended its turn and before speech starts or ends
+ * again). `VoicePipelineOrchestrator` does not listen for it, so the
+ * conversation leaves those words out; `startListenSession` writes the
+ * final to its sink as a turn of its own.
  *
  * @see {@link HeuristicEndpointDetector} for the rule-based implementation.
  * @see {@link AcousticEndpointDetector} for the purely acoustic implementation.

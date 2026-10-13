@@ -17,6 +17,7 @@
  * - speech_start cancels a pending silence timer
  * - reset() clears accumulated text and cancels pending timers
  * - Finals keyed by item, as OpenAI Realtime sends them after each end of speech
+ * - An item final that comes before its end of speech, and one left over from a completed turn, reported as late_final
  *
  * The silence_timeout cases use a 100 ms detector instance and a short
  * setTimeout await -- fast enough for CI while remaining deterministic. The
@@ -533,5 +534,98 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
 
     vi.advanceTimersByTime(5_000);
     expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('ends the turn at once at the end of speech when its final came before it', () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(itemFinal('We start at nine.', 'item_A', 0)); // the final comes while the speech goes on
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toMatchObject({ transcript: 'We start at nine.', reason: 'punctuation' });
+  });
+
+  it('keeps waiting for the next utterance when an earlier final comes later than the silence timeout during it', () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    vi.advanceTimersByTime(1_500); // the first end of speech stops waiting while the second utterance goes on
+    detector.pushTranscript(itemFinal('Book a table for two.', 'item_A', 0));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    // The late final answered its own end of speech, so the second one still waits for its final.
+    expect(handler).not.toHaveBeenCalled();
+
+    detector.pushTranscript(itemFinal('At seven tonight.', 'item_B', 1_300));
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0].transcript).toBe('Book a table for two. At seven tonight.');
+  });
+
+  it('drops a final that arrives after its turn has completed and reports it as late_final, so the next turn holds only its own words', () => {
+    const handler = vi.fn();
+    const late = vi.fn();
+    detector.on('turn_complete', handler);
+    detector.on('late_final', late);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(itemFinal('Book a table for two.', 'item_A', 0));
+    detector.pushVadEvent(transcriberSpeech('speech_end')); // the second utterance's final is slow
+    vi.advanceTimersByTime(1_000); // so the turn stops waiting for it and ends on the first clause
+    expect(handler).toHaveBeenCalledOnce();
+    detector.reset(); // as the orchestrator does once the reply has played
+
+    const slow = itemFinal('At seven tonight', 'item_B', 1_300);
+    detector.pushTranscript(slow); // the slow final, after its turn
+    expect(late).toHaveBeenCalledOnce();
+    expect(late.mock.calls[0][0]).toBe(slow); // the final as it arrived, for a listener that keeps every final
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('what about Friday', 'item_C', 6_000));
+    vi.advanceTimersByTime(1_000);
+
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(handler.mock.calls[1][0]).toMatchObject({ transcript: 'what about Friday', reason: 'silence_timeout' });
+    expect(late).toHaveBeenCalledOnce(); // the next turn's own final is no late final
+  });
+
+  it("keeps the early final of the next turn's first utterance after a reset, and decides the turn at its end of speech", () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('Book a table for two.', 'item_A', 0));
+    expect(handler).toHaveBeenCalledOnce();
+    detector.reset();
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(itemFinal('what about Friday', 'item_B', 6_000)); // before its end of speech
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    vi.advanceTimersByTime(999);
+    expect(handler).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(1); // the silence timeout, counted from the end of speech
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(handler.mock.calls[1][0]).toMatchObject({ transcript: 'what about Friday', reason: 'silence_timeout' });
+  });
+
+  it("keeps an utterance's slow final when a reset came while the utterance was spoken", () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.reset(); // as the orchestrator does when the user barges in on the reply
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    vi.advanceTimersByTime(1_500); // the transcript comes later than the silence timeout
+    detector.pushTranscript(itemFinal('Stop, I meant Friday.', 'item_A', 0));
+
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0].transcript).toBe('Stop, I meant Friday.');
   });
 });

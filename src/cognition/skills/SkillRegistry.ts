@@ -10,6 +10,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { describeRefusedName, pathNameProblem } from '../../core/utils/pathName.js';
 import type {
   SkillEntry,
   SkillSnapshot,
@@ -512,7 +513,36 @@ function normalizePlatformName(raw: string): string {
   return lower;
 }
 
-function hasBinary(bin: string): boolean {
+/**
+ * The most skill and binary name pairs remembered as warned about. When the set is full it starts again, so a host
+ * that loads many skills over its life holds a bounded set and warns again at most once per pair each time.
+ */
+const MAX_WARNED_BINARY_NAMES = 1024;
+
+/** Each skill and refused binary name already warned about, so a refused name is warned about once per skill. */
+const warnedBinaryNames = new Set<string>();
+
+/**
+ * True when a file named `bin` that this process may run is in a folder on PATH. `bin` comes from a skill's front
+ * matter (`requires.bins`, `requires.anyBins`), so before any folder is looked at it is held to the rule for one
+ * file name (`pathNameProblem`): a name the rule refuses, such as one that holds a slash or starts with a dot, or
+ * a value that is not a string, counts as missing, no path is built from it, and the first time for each skill a
+ * warning names it.
+ *
+ * @param bin - The binary's name, as the front matter gives it.
+ * @param skillName - The skill that requires it, for the warning.
+ */
+function hasBinary(bin: unknown, skillName: string): boolean {
+  if (typeof bin !== 'string') {
+    warnRefusedBinaryName(skillName, bin, 'type');
+    return false;
+  }
+  const problem = pathNameProblem(bin);
+  if (problem !== null) {
+    warnRefusedBinaryName(skillName, bin, problem);
+    return false;
+  }
+
   // Local PATH-only check (no shell).
   // Mirrors OpenClaw's behavior and is safe to call in hot paths.
   const pathEnv = process.env.PATH ?? '';
@@ -534,6 +564,26 @@ function hasBinary(bin: string): boolean {
   }
 
   return false;
+}
+
+/**
+ * Write the warning for a binary name the skill `skillName` requires and `hasBinary` refused, the first time for
+ * that skill and name.
+ *
+ * @param skillName - The skill that requires the binary.
+ * @param bin - The refused name, as the front matter gives it.
+ * @param problem - Why it was refused: the part of the name rule it breaks, or `type` when it is not a string.
+ */
+function warnRefusedBinaryName(skillName: string, bin: unknown, problem: string): void {
+  // The name as the warning shows it, cut short, so a long name holds no more memory here than in the line.
+  const shown = describeRefusedName(bin);
+  const key = `${skillName}\u0000${shown}`;
+  if (warnedBinaryNames.has(key)) return;
+  if (warnedBinaryNames.size >= MAX_WARNED_BINARY_NAMES) warnedBinaryNames.clear();
+  warnedBinaryNames.add(key);
+  console.warn(
+    `[SkillRegistry] Skill '${skillName}': the binary name ${shown} is not one file name (${problem}), so the binary counts as missing`,
+  );
 }
 
 function shouldIncludeSkillEntry(
@@ -568,11 +618,11 @@ function shouldIncludeSkillEntry(
   const requiredConfig = requires?.config ?? [];
 
   for (const bin of requiredBins) {
-    if (!hasBinary(bin)) return false;
+    if (!hasBinary(bin, name)) return false;
   }
 
   if (requiredAnyBins.length > 0) {
-    const ok = requiredAnyBins.some((bin) => hasBinary(bin));
+    const ok = requiredAnyBins.some((bin) => hasBinary(bin, name));
     if (!ok) return false;
   }
 
