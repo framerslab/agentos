@@ -239,7 +239,7 @@ class PostgresCheckpointStore implements ICheckpointStore {
 
   async save(checkpoint: Checkpoint): Promise<void> {
     await this.pool.query(
-      'INSERT INTO checkpoints (id, run_id, graph_id, node_id, timestamp, payload) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO UPDATE SET payload = $6',
+      'INSERT INTO checkpoints (id, run_id, graph_id, node_id, timestamp, payload) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO UPDATE SET run_id = EXCLUDED.run_id, graph_id = EXCLUDED.graph_id, node_id = EXCLUDED.node_id, timestamp = EXCLUDED.timestamp, payload = EXCLUDED.payload, seq = DEFAULT',
       [checkpoint.id, checkpoint.runId, checkpoint.graphId, checkpoint.nodeId, checkpoint.timestamp, JSON.stringify(checkpoint)]
     );
   }
@@ -293,7 +293,7 @@ class PostgresCheckpointStore implements ICheckpointStore {
 }
 ```
 
-The runtime can save several checkpoints of one run in the same millisecond, such as the checkpoints of a parallel batch's nodes and the one it saves after the batch, so `load()` and `latest()` return the checkpoint saved last of those with the latest `timestamp`, and `list()` puts it first. The example's `checkpoints` table has a `seq bigserial` column, which grows with each insert, to order them; `InMemoryCheckpointStore` uses the order it stored them in.
+The runtime can save several checkpoints of one run in the same millisecond, such as the checkpoints of a parallel batch's nodes and the one it saves after the batch, so `load()` and `latest()` return the checkpoint saved last of those with the latest `timestamp`, and `list()` puts it first. The example's `checkpoints` table has a `seq bigserial` column to order them: it takes the next value at each insert, and `save()` sets it again (`seq = DEFAULT`) when it saves a checkpoint again under its id, so that save counts as the last. `InMemoryCheckpointStore` orders them by each checkpoint's last save.
 
 Then pass it to any graph:
 
