@@ -50,6 +50,10 @@ describeIfPostgres('the Postgres meeting stores', () => {
     expect(await runs.update('r1', { state: 'joining' }, 'scheduled')).toBeUndefined();
     expect((await runs.update('r1', { state: 'dispatching', dispatchedAt: 5 }, ['requested', 'scheduled']))?.state).toBe('dispatching');
     expect((await runs.findByIdempotencyKey('a', 'k-r1'))?.runId).toBe('r1');
+    await runs.update('r1', { lastReportAt: 42 });
+    expect((await runs.get('r1'))?.lastReportAt).toBe(42);
+    await runs.update('r1', { lastUsageSourceAt: 41 });
+    expect((await runs.get('r1'))?.lastUsageSourceAt).toBe(41);
   });
   it('reads an old sealed row with previousKeys and reseals it with the current key on update', async () => {
     const previousKey = Buffer.alloc(32, 1);

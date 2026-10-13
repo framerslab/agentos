@@ -37,7 +37,7 @@ export interface RunFilter {
 /**
  * The run's row. An implementation keeps every field of it, the manager's timers (`leaveCommandedAt`,
  * `captureSuspendedAt`, `aloneSince`) among them: the manager keeps nothing about a run in process. An implementation
- * seals `meetingUrl` at rest.
+ * seals `meetingUrl` and `creationContext` at rest.
  */
 export interface IRunStore {
   /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
@@ -52,6 +52,16 @@ export interface IRunStore {
   get(runId: string): Promise<MeetingRunRecord | undefined>;
   /** Atomically re-reads the row, checks `expectState` and applies the patch; undefined on a mismatch. Postgres holds the shared run anchor and sets the content fence for a purge in the same transaction. In-memory comparison and update have no await between them. */
   update(runId: string, patch: Partial<MeetingRunRecord>, expectState?: MeetingRunState | readonly MeetingRunState[]): Promise<MeetingRunRecord | undefined>;
+  /**
+   * Optional. Re-reads the row and applies the patch `patchFor` makes of it, atomically as `update` is: the patch is
+   * decided on the row as the store holds it when it writes, so a write another caller made since an earlier read is
+   * never overwritten by a patch decided on that read. Nothing is written when `patchFor` answers undefined, and then
+   * undefined is answered, as it is for a run that does not exist. `patchFor` runs while the row is held, so it is
+   * synchronous and does no I/O. The manager decides with it a usage report's time and total against the last ones
+   * taken, and a silent run's end against the run's last usage, so a manager given `usageSilenceMs` refuses a run store
+   * without it: a read and a later `update` would let another write slip between them.
+   */
+  updateWith?(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined>;
   /** Rewrites the whole row (the content-free form at the end of a purge). */
   replace(run: MeetingRunRecord): Promise<void>;
   /** The runs the filter selects, requestedAt descending, then runId ascending. Default limit 500; states: [] applies no state filter. */
@@ -209,18 +219,36 @@ export type ReserveResult =
   | { ok: true; reservationId: string; maxSeconds: number }
   | { ok: false; reason: 'allowance' | 'permission_denied'; message: string };
 
+/** What {@link IEntitlementHook.revalidateAllowance} answers at dispatch: the seconds the run's reservation covers now, or a refusal. */
+export type DispatchAllowance = { ok: true; maxSeconds: number } | { ok: false };
+
 /**
- * The product's billing. The library reserves before a run exists, meters every minute, settles at the end, releases an
- * unbilled run. `settle` and `release` are idempotent per reservation: the manager retries them until they resolve, and a
- * repeated call after a success changes nothing.
+ * The product's billing. The library reserves before a run exists (`reserve`), or for a run written pending
+ * (`reserveOnce`), meters every minute, settles at the end, releases an unbilled run. `settle` and `release` are
+ * idempotent per reservation: the manager retries them until they resolve, and a repeated call after a success changes
+ * nothing.
  */
 export interface IEntitlementHook {
   /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
   forget?(runId: string): Promise<void>;
   /** Reserves at most `maxSeconds` for a run about to be made; the answer's `maxSeconds` is what it covers, and the run's limit is cut to it. A refusal sends no bot. */
   reserve(input: { ownerRef: string; runId: string; platform: MeetingPlatform; maxSeconds: number }): Promise<ReserveResult>;
-  /** A scheduled run, at dispatch: still paid, still has the hours. */
+  /**
+   * Optional; `MeetingManager.sendBotPrepared` requires it. Reserves at most `maxSeconds` for a run already written
+   * pending, idempotently by its run id: it must return the same committed reservation for a run id even after the
+   * caller loses its response, so a creation an interruption cut short and finished later holds one reservation.
+   */
+  reserveOnce?(input: { ownerRef: string; runId: string; platform: MeetingPlatform; maxSeconds: number }): Promise<ReserveResult>;
+  /** A scheduled run, at dispatch: still paid, still has the hours. Not asked when the hook has `revalidateAllowance`. */
   revalidate(reservationId: string): Promise<boolean>;
+  /**
+   * Optional. The grant at dispatch, asked before a worker is sent for a run that holds a reservation: a run sent now, a
+   * scheduled one, and one whose dispatch is tried again after its bot was found not running. The manager cuts the run's
+   * `limits.totalMs` to the answer's `maxSeconds` and writes it on the run before the provider sees the run; a refusal,
+   * or a grant under the manager's `minReservationSeconds`, ends the run `allowance` before any dispatch. When present,
+   * `revalidate` is not asked.
+   */
+  revalidateAllowance?(reservationId: string): Promise<DispatchAllowance>;
   /** The seconds the run has used so far, every minute: a running total, not an increment. */
   meter(reservationId: string, seconds: number): Promise<void>;
   /** Settles the run at the seconds it is billed. */

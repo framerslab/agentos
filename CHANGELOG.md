@@ -1,3 +1,13 @@
+## [0.13.99](https://github.com/framerslab/agentos/compare/v0.13.98...v0.13.99) (2026-10-13)
+
+### fix
+
+* **meetings:** end runs whose worker cannot be reached (#403) ([e487054](https://github.com/framerslab/agentos/commit/e48705471bf62cf369b174ad72d1c91379acc5bf))
+
+### feat
+
+* **meetings:** visitor-bound demonstration capabilities (#416) ([636ab30](https://github.com/framerslab/agentos/commit/636ab306a21be5974adb48068c0a077d387d040e))
+
 ## [0.13.98](https://github.com/framerslab/agentos/compare/v0.13.97...v0.13.98) (2026-10-13)
 
 ### fix

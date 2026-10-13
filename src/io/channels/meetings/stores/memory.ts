@@ -73,6 +73,15 @@ export class InMemoryRunStore implements IRunStore {
     Object.assign(r, structuredClone(patch));
     return structuredClone(r);
   }
+  /** Decides the patch on a copy of the stored row and applies it with no await between them, so no other write lands in between. */
+  async updateWith(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined> {
+    const r = this.runs.get(runId);
+    if (!r) return undefined;
+    const patch = patchFor(structuredClone(r));
+    if (patch === undefined) return undefined;
+    Object.assign(r, structuredClone(patch));
+    return structuredClone(r);
+  }
   async replace(run: MeetingRunRecord): Promise<void> {
     this.runs.set(run.runId, structuredClone(run));
   }

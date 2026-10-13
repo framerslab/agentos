@@ -306,17 +306,18 @@ Each refusal reaches the caller before any model call. The turn settles in the o
 | `db` | required | The store. It must offer transactions, persistence and concurrent access unless `requireShared: false` |
 | `allowanceFor(accountId, period)` | required | The account's allowance in units for the period, read at every reservation |
 | `periodOf(now, accountId)` | required unless `windowMs` is set | The period a moment falls in for the account, such as its calendar month in its own time zone. Not read with a window |
-| `windowMs` | none | A rolling window in milliseconds, in place of periods: the allowance holds the units reserved or consumed in the `windowMs` before each reservation |
+| `windowMs` | none | A rolling window in milliseconds, in place of periods: the allowance holds the units consumed in the `windowMs` before each reservation and every unit still reserved, whatever its age |
 | `leaseMs` | `45000` | How long a reservation lives without a heartbeat; the turn heartbeats on each tool iteration |
 | `maxAttemptsPerOperation` | `3` | Reservations one operation may take, its retries after a release included |
 | `retry` | 3 tries, 50 to 400 ms, 2 s deadline | Retries of transient store errors before `SpendMeterUnavailableError` |
 | `resolveUnknown(reservation)` | none | Asked by `reconcile()` what became of an expired reservation: `consumed`, `released` or `unknown` |
+| `resolveExpired(reservation)` | none | Asked by `reconcile()` for each expired reservation in place of `resolveUnknown` and `unknownAfterLease`: `consumed`, `released`, or `deferred` until `retryAt` with its evidence, which keeps the reservation reserved and counted. See [Deferred expiry](#deferred-expiry) |
 | `unknownAfterLease` | `'release'` | How an expired reservation settles when the answer is `unknown` |
 | `ensureSchema` | `true` | Create the two tables when missing, and on tables that exist the indexes they lack; a product that runs its own migrations copies `SPEND_METER_DDL`, or `spendMeterDdl(prefix)` for its `tablePrefix`, and passes `false` |
 | `tablePrefix` | `'agentos_spend'` | The start of the two tables' names, `<prefix>_meter` and `<prefix>_reservations`; their indexes are named `idx_<prefix>_reservations_*`, and `idx_spend_reservations_*` under the default. A lower-case letter and at most 37 more lower-case letters, digits or underscores, and not `spend`: the constructor throws on any other value, before any statement is built. At 38 characters the longest names, `idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled`, take the 63 bytes Postgres keeps of an identifier |
 | `onWarning(warning)` | none | Told of each statement that failed while `ensureSchema` brought tables that exist up to the meter's indexes, with the `statement` and the `error`: an index the store refused, or the catalogue read before them. The meter uses the tables as they are |
 
-With `windowMs` the meter counts from the reservations themselves, inside each reservation's own transaction and after it has taken the account row's lock, so two reservations cannot both take the last unit of a window. Every row then carries the period `window`, which is the period `allowanceFor` is asked for. A unit counts from its reservation until more than `windowMs` have passed. A released reservation never counts, and one whose lease ran out still counts until `reconcile()` releases it. `snapshot()` answers the units consumed and reserved inside the window and what remains. A meter given neither `periodOf` nor `windowMs` throws when it is constructed.
+With `windowMs` the meter counts from the reservations themselves, inside each reservation's own transaction and after it has taken the account row's lock, so two reservations cannot both take the last unit of a window. Every row then carries the period `window`, which is the period `allowanceFor` is asked for. A consumed unit counts from its reservation until more than `windowMs` have passed, and a unit still reserved counts whatever its age, until it settles. A released reservation never counts, and one whose lease ran out still counts until `reconcile()` releases it. `snapshot()` answers the units consumed and reserved inside the window and what remains. A meter given neither `periodOf` nor `windowMs` throws when it is constructed.
 
 The window's count reads the index `idx_spend_reservations_account`, and `purge()` finds the reservations settled before its `before` through `idx_spend_reservations_settled`, on `settled_at` and `state` (`idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled` under another prefix). The DDL creates both with the tables. On tables that exist, `ensureSchema` reads the store's catalogue before the meter's first statement (`pg_indexes` on Postgres, `sqlite_master` on SQLite) and runs the `CREATE INDEX IF NOT EXISTS` statement of each of the meter's indexes the tables lack, so a store whose tables an earlier release made gains them. A meter whose tables hold all three runs no index statement, so on Postgres its start takes no SHARE lock on the reservations table, the lock a `CREATE INDEX` takes before it checks `IF NOT EXISTS`. The indexes change no answer of the meter, so tables that refuse one, as Postgres does for a role that does not own them, are used as they are, and the statement and its error go to `onWarning`. Postgres holds back writes to a table while it builds an index on it, so a product with a large reservations table creates the two indexes first in its own migration, with `CREATE INDEX CONCURRENTLY IF NOT EXISTS` and the names and columns `spendMeterDdl(prefix)` gives them, and runs the meter with `ensureSchema: false`.
 
@@ -376,6 +377,24 @@ const { used, remaining } = await meter.snapshot(userId);
 // A plan change mid-period: the units used carry over, the new allowance applies at once
 await meter.setAllowance(userId, 600);
 ```
+
+### Deferred expiry
+
+A call whose work may outlive its lease (a worker still running, an inference not yet stopped) must not be released or consumed by a sweeper that cannot prove it stopped. Reserve it with `requireFence: true` and give the meter `resolveExpired`:
+
+```typescript
+const meter = new SqlSpendMeter({
+  db, periodOf, allowanceFor,
+  resolveExpired: async (reservation) => {
+    const fence = await controlPlane.fenceOf(reservation.operationId); // the host's own evidence
+    if (!fence.transportClosed || !fence.inferenceTerminated) return { outcome: 'deferred', retryAt: Date.now() + 15_000, evidence: fence };
+    return { outcome: fence.served ? 'consumed' : 'released' };
+  },
+});
+await meter.reserve({ accountId, operationId: callId, requireFence: true });
+```
+
+A deferred reservation stays reserved and counted, with its evidence and its next check kept on its row; a resolver that throws defers it for one lease. A meter without `resolveExpired` (a legacy sweeper over the same tables) leaves a `requireFence` reservation reserved and counts it pending; an explicit `settle()` still ends it. A rolling window counts a reservation still reserved whatever its age. `releaseExpiredSpend(store, at, { resolve })` does the same for a day's bound, with `SpendDayStore.deferReservation` keeping the next check.
 
 ### Retention
 
