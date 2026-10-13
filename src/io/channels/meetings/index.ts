@@ -1,6 +1,6 @@
 /**
  * Barrel exports for the meeting-participant channel: the manager, the provider interface, the room helper, the stores,
- * the signing, the outbox's delivery and the mock provider.
+ * the fenced outbox, the signing, the outbox's delivery and the mock provider.
  *
  * @module @framers/agentos/io/channels/meetings
  */
@@ -24,6 +24,8 @@ export { MeetingRoom } from './MeetingRoom.js';
 export type { IMeetingRoomService, MeetingRoomOptions, MeetingRoomHandle } from './MeetingRoom.js';
 export * from './stores/types.js';
 export { InMemoryRunStore, InMemoryJobStore, InMemoryTranscriptStore, InMemoryEventStore, InMemoryOutbox, InMemoryEntitlementHook, SystemClock, FakeClock } from './stores/memory.js';
+export { FencedOutbox, MemoryDeliveryFence } from './stores/fenced-outbox.js';
+export type { DeliveryFence } from './stores/fenced-outbox.js';
 export { SqlRunStore, SqlJobStore, SqlTranscriptStore, SqlEventStore, SqlOutbox, meetingStoresDdl, meetingStoreTables, MEETING_STORES_DDL, DEFAULT_TABLE_PREFIX } from './stores/sql.js';
 export type { SqlStoreOptions, SqlRunStoreOptions, MeetingStoreTables } from './stores/sql.js';
 export { connectionRuns, meetingProvenanceDdl } from './stores/provenance.js';
