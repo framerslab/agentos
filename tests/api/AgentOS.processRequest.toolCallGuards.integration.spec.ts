@@ -4,6 +4,7 @@ import { AgentOS, type AgentOSConfig } from '../../src/api/AgentOS';
 import type { AgentOSInput } from '../../src/api/types/AgentOSInput';
 import {
   AgentOSResponseChunkType,
+  isActionableToolCallRequestChunk,
   type AgentOSErrorChunk,
   type AgentOSFinalResponseChunk,
   type AgentOSResponse,
@@ -13,9 +14,10 @@ import { WorkflowFacade } from '../../src/api/runtime/WorkflowFacade';
 import { RagMemoryInitializer } from '../../src/api/runtime/RagMemoryInitializer';
 import { GMI } from '../../src/cognition/substrate/GMI.js';
 import { GMIManager } from '../../src/cognition/substrate/GMIManager.js';
-import { GMIPrimeState } from '../../src/cognition/substrate/IGMI.js';
+import { GMIOutputChunkType, GMIPrimeState, type GMIOutput } from '../../src/cognition/substrate/IGMI.js';
 import { InMemoryWorkingMemory } from '../../src/cognition/substrate/memory/InMemoryWorkingMemory.js';
 import { ConversationContext } from '../../src/core/conversation/ConversationContext';
+import { MessageRole } from '../../src/core/conversation/ConversationMessage';
 import { PromptEngine } from '../../src/core/llm/PromptEngine';
 import type { ChatMessage, ModelCompletionResponse } from '../../src/core/llm/providers/IProvider';
 import {
@@ -386,6 +388,146 @@ describe('AgentOS output guards that evaluate tool calls', () => {
       expect(guard.seen.some((chunk) => chunk.type === AgentOSResponseChunkType.TOOL_CALL_REQUEST)).toBe(false);
       const final = responses.find((r): r is AgentOSFinalResponseChunk => r.type === AgentOSResponseChunkType.FINAL_RESPONSE);
       expect(final?.finalResponseText).toContain('The command did not run.');
+    });
+  });
+
+  describe('on a call the host executes', () => {
+    const READ_CALL = { id: 'call-read-1', name: 'read_file', arguments: { path: 'notes.txt' } };
+
+    /**
+     * A GMI that stops its turn for `firstCall`, streaming the call before it returns as a host-tool GMI does; a tool
+     * result continues it to `continuation`.
+     */
+    function pausingGmi(
+      firstCall: { id: string; name: string; arguments: Record<string, unknown> },
+      continuation: GMIOutput = { isFinal: true, responseText: 'Done.' },
+    ) {
+      return {
+        getCurrentPrimaryPersonaId: () => 'test-persona',
+        getGMIId: () => 'gmi-host-tools',
+        getPersona: () => ({ id: 'test-persona', name: 'Test Persona', version: '1.0.0', baseSystemPrompt: 'You run commands for the user.' }),
+        processTurnStream: async function* (): AsyncGenerator<any, GMIOutput, undefined> {
+          yield {
+            type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+            content: [firstCall],
+            interactionId: 'interaction-host-tools',
+            timestamp: new Date(),
+            metadata: { executionMode: 'external', requiresExternalToolResult: true },
+          };
+          return { isFinal: false, responseText: 'I need a tool first.', toolCalls: [firstCall] };
+        },
+        hydrateConversationHistory: vi.fn(),
+        handleToolResult: vi.fn(async (): Promise<GMIOutput> => continuation),
+      };
+    }
+
+    /** A runtime whose turns run on `gmi` over the conversation `conversationId`, with `guard` as its output guard. */
+    async function runtimeWithHostTools(gmi: ReturnType<typeof pausingGmi>, conversationId: string, guard: IGuardrailService) {
+      const context = new ConversationContext(conversationId);
+      context.setMetadata('userId', 'user-1');
+      vi.spyOn(GMIManager.prototype, 'getOrCreateGMIForSession').mockResolvedValue({ gmi, conversationContext: context } as any);
+
+      const agentos = new AgentOS();
+      openAgents.push(agentos);
+      await agentos.initialize(createConfig({ guardrailService: guard }));
+      vi.spyOn(agentos.getConversationManager(), 'getConversation').mockImplementation(async (id: string) =>
+        id === conversationId ? (context as any) : null,
+      );
+
+      const input: AgentOSInput = {
+        userId: 'user-1',
+        sessionId: `session-${conversationId}`,
+        conversationId,
+        textInput: 'Tidy my files.',
+        selectedPersonaId: 'test-persona',
+      };
+      return { agentos, context, input };
+    }
+
+    /** The assistant message a saved pause adds for `callId`. A turn saves its pause after it streams the call. */
+    const pauseMessageFor = (context: ConversationContext, callId: string) =>
+      context
+        .getAllMessages()
+        .find((m) => m.role === MessageRole.ASSISTANT && Array.isArray(m.tool_calls) && m.tool_calls.some((c: any) => c.id === callId));
+
+    /** The tool message that answers `callId` in the conversation. */
+    const resultFor = (context: ConversationContext, callId: string) =>
+      context.getAllMessages().find((m) => m.role === MessageRole.TOOL && m.tool_call_id === callId);
+
+    it('a block on the call a turn stops for drops the saved pause, and the history answers the call with a refusal', async () => {
+      const gmi = pausingGmi(SHELL_CALL);
+      const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-turn-block', shellGuard(BLOCK_SHELL));
+
+      const responses = await collect(agentos.processRequest(input));
+
+      expect(responses.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+      const last = responses.at(-1) as AgentOSErrorChunk;
+      expect(last.type).toBe(AgentOSResponseChunkType.ERROR);
+      expect(last.code).toBe('SHELL_DESTRUCTIVE');
+      await vi.waitFor(() => expect(pauseMessageFor(context, SHELL_CALL.id)).toBeDefined());
+
+      expect(await agentos.getPendingExternalToolRequest('conv-turn-block', 'user-1')).toBeNull();
+      const refusal = resultFor(context, SHELL_CALL.id);
+      expect(String(refusal?.content)).toContain('AUTH_PERMISSION_DENIED');
+      expect(String(refusal?.content)).toContain('SHELL_DESTRUCTIVE');
+
+      // the stream the call was blocked on is closed: the blocked call cannot be resumed on it
+      const resumed = await collect(agentos.handleToolResult(last.streamId, SHELL_CALL.id, SHELL_CALL.name, { exitCode: 0 }, true));
+      expect(resumed.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+      expect(gmi.handleToolResult).not.toHaveBeenCalled();
+    });
+
+    it('a block on the call a continuation stops for drops that pause too', async () => {
+      const gmi = pausingGmi(READ_CALL, { isFinal: false, responseText: 'Now a command.', toolCalls: [SHELL_CALL] });
+      const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-continuation-block', shellGuard(BLOCK_SHELL));
+
+      const first = await collect(agentos.processRequest(input));
+      const request = first.find((r) => isActionableToolCallRequestChunk(r)) as AgentOSToolCallRequestChunk | undefined;
+      expect(request?.toolCalls.map((call) => call.id)).toEqual([READ_CALL.id]);
+      await vi.waitFor(() => expect(pauseMessageFor(context, READ_CALL.id)).toBeDefined());
+
+      const continuation = await collect(agentos.handleToolResult(request!.streamId, READ_CALL.id, READ_CALL.name, 'notes', true));
+
+      expect(continuation.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+      expect((continuation.at(-1) as AgentOSErrorChunk).code).toBe('SHELL_DESTRUCTIVE');
+      expect(await agentos.getPendingExternalToolRequest('conv-continuation-block', 'user-1')).toBeNull();
+      expect(String(resultFor(context, SHELL_CALL.id)?.content)).toContain('AUTH_PERMISSION_DENIED');
+    });
+
+    it('a block on the call a resumed pause stops for drops that pause too', async () => {
+      const gmi = pausingGmi(READ_CALL, { isFinal: false, responseText: 'Now a command.', toolCalls: [SHELL_CALL] });
+      const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-resume-block', shellGuard(BLOCK_SHELL));
+
+      await collect(agentos.processRequest(input));
+      await vi.waitFor(() => expect(pauseMessageFor(context, READ_CALL.id)).toBeDefined());
+      const pending = await agentos.getPendingExternalToolRequest('conv-resume-block', 'user-1');
+      expect(pending?.toolCalls.map((call) => call.id)).toEqual([READ_CALL.id]);
+
+      const resumed = await collect(
+        agentos.resumeExternalToolRequest(pending!, [
+          { toolCallId: READ_CALL.id, toolName: READ_CALL.name, toolOutput: 'notes', isSuccess: true },
+        ]),
+      );
+
+      expect(resumed.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+      expect((resumed.at(-1) as AgentOSErrorChunk).code).toBe('SHELL_DESTRUCTIVE');
+      expect(await agentos.getPendingExternalToolRequest('conv-resume-block', 'user-1')).toBeNull();
+      expect(String(resultFor(context, SHELL_CALL.id)?.content)).toContain('AUTH_PERMISSION_DENIED');
+    });
+
+    it('a call the guard allows still pauses as before: the host receives it and the pause is saved', async () => {
+      const gmi = pausingGmi(READ_CALL);
+      const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-allowed', shellGuard(BLOCK_SHELL));
+
+      const responses = await collect(agentos.processRequest(input));
+
+      const request = responses.find((r) => isActionableToolCallRequestChunk(r)) as AgentOSToolCallRequestChunk | undefined;
+      expect(request?.toolCalls).toEqual([READ_CALL]);
+      await vi.waitFor(() => expect(pauseMessageFor(context, READ_CALL.id)).toBeDefined());
+      const pending = await agentos.getPendingExternalToolRequest('conv-allowed', 'user-1');
+      expect(pending?.streamId).toBe(request?.streamId);
+      expect(pending?.toolCalls).toEqual([READ_CALL]);
+      expect(resultFor(context, READ_CALL.id)).toBeUndefined();
     });
   });
 });
