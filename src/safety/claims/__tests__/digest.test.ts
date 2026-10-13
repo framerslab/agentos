@@ -6,6 +6,19 @@ describe('canonical JSON and its digest', () => {
     expect(canonicalJson({ b: 1, a: { d: [3, 1], c: 'x' }, e: undefined })).toBe('{"a":{"c":"x","d":[3,1]},"b":1}');
     expect(canonicalJson([undefined, null])).toBe('[null,null]');
   });
+  it('writes an array hole as null, as JSON does, so a hole neither vanishes nor breaks the text', () => {
+    const holes: unknown[] = [];
+    holes.length = 2;
+    const gap: unknown[] = ['a'];
+    gap[2] = 'c';
+    expect(canonicalJson(holes)).toBe('[null,null]');
+    expect(canonicalJson({ list: gap })).toBe('{"list":["a",null,"c"]}');
+    expect(canonicalJson(gap)).toBe(JSON.stringify(gap));
+    const one: unknown[] = [];
+    one.length = 1;
+    expect(digestOf(one)).toBe(digestOf([null]));
+    expect(digestOf(one)).not.toBe(digestOf([]));
+  });
   it('gives equal digests to equal values written in a different key order', () => {
     expect(digestOf({ x: 1, y: [true] })).toBe(digestOf({ y: [true], x: 1 }));
   });
