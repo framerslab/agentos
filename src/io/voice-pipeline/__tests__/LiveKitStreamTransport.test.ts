@@ -121,6 +121,52 @@ describe('LiveKitStreamTransport', () => {
     transport.close();
   });
 
+  it('stops a replay at a renewed pause and keeps the frames it has not emitted, in order', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('bot', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({ room, participantIdentity: 'bot', sampleRate: 16_000, frameSizeMs: 20, rtc: fakeRtc() });
+    const heard: number[] = [];
+    let pauseAgain = true;
+    transport.on('audio', (f: AudioFrame) => {
+      heard.push(Math.round(f.samples[0] * 32768));
+      if (pauseAgain) {
+        pauseAgain = false;
+        transport.emit('pause'); // the consumer falls behind again on the first frame replayed
+      }
+    });
+    await settle();
+    const stream = FakeAudioStream.opened[0];
+    transport.emit('pause');
+    for (let i = 1; i <= 5; i++) stream.push(rtcFrame(new Array(320).fill(i), 16_000, 1));
+    await settle();
+    expect(heard).toEqual([]);
+    transport.emit('resume');
+    expect(heard).toEqual([1]);
+    transport.emit('resume');
+    expect(heard).toEqual([1, 2, 3, 4, 5]);
+    transport.close();
+  });
+
+  it('emits nothing it held once it has closed: a resume after the close replays no audio and reports no gap', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('bot', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({ room, participantIdentity: 'bot', sampleRate: 16_000, frameSizeMs: 20, bufferMs: 40, rtc: fakeRtc() });
+    const audio: AudioFrame[] = [];
+    const gaps: unknown[] = [];
+    transport.on('audio', (f: AudioFrame) => audio.push(f));
+    transport.on('gap', (g: unknown) => gaps.push(g));
+    await settle();
+    const stream = FakeAudioStream.opened[0];
+    transport.emit('pause');
+    for (let i = 0; i < 5; i++) stream.push(rtcFrame(new Array(320).fill(0), 16_000, 1)); // two held, three dropped
+    await settle();
+    transport.close();
+    transport.emit('resume'); // a session's cleanup releases its pause after the transport closed
+    await settle();
+    expect(audio).toEqual([]);
+    expect(gaps).toEqual([]);
+  });
+
   it('sends control messages as text streams on its topic, to the participant', async () => {
     const room = new FakeRoom();
     const { transport } = open(room);
