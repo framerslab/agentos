@@ -169,6 +169,43 @@ describe('dispatch and the interlock', () => {
     await h.manager.tick();
     expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'suspendCapture' });
   });
+  it('a heartbeat the worker made before the notice opens no capture when the worker\'s clock runs far ahead, in the same moment as the notice or after it', async () => {
+    const h = harness();
+    const ahead = 3_600_000; // the worker's clock runs an hour ahead of the manager's
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    const t0 = h.clock.now();
+    await h.report(runId, 'joining', {}, t0 + ahead);
+    await h.report(runId, 'in_call', { participantCount: 2 }, t0 + ahead);
+    await h.report(runId, 'notice_posted', {}, t0 + ahead + 5_000);
+    // made a second before the notice by the worker's clock, applied in the same manager millisecond: both times bound
+    // to the manager's clock plus one interval, the same time
+    await h.report(runId, 'monitor_heartbeat', {}, t0 + ahead + 4_000);
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    h.clock.advance(2_000);
+    // still from before the notice by the worker's clock, delivered two seconds later: bound to a time after the notice's
+    await h.report(runId, 'monitor_heartbeat', {}, t0 + ahead + 4_500);
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    await h.report(runId, 'monitor_heartbeat', {}, t0 + ahead + 7_000); // the monitor's first heartbeat after the notice
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'startCapture' }]);
+  });
+  it('ends a run whose stop monitor never reports after the notice within the notice\'s confirmation window more, when the worker\'s clock runs an hour ahead', async () => {
+    const h = harness();
+    const ahead = 3_600_000;
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining', {}, h.clock.now() + ahead);
+    await h.report(runId, 'in_call', { participantCount: 2 }, h.clock.now() + ahead); // the call's time bounds to ten seconds from now
+    await h.report(runId, 'notice_posted', {}, h.clock.now() + ahead); // kept on the worker's clock, an hour ahead
+    h.clock.advance(100_000); // the bounded call time, the confirmation window, then the monitor's window and the recovery wait
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    h.clock.advance(1);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stop_monitor_failed' }]);
+  });
   it('refuses a report with another token, and drops a repeated report', async () => {
     const h = harness();
     const r = await h.manager.sendBot(h.request);

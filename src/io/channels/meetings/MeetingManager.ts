@@ -679,15 +679,21 @@ export class MeetingManager {
         await this.move(run, 'in_call_notice_pending', { joinedAt: at, participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, at) }, 'bot:in_call', undefined, event);
         return true;
       }
-      case 'notice_posted': {
-        // the notice alone does not open capture: the stop monitor must report a real observation after it (the interlock)
-        const moved = await this.move(run, 'in_call', { noticePostedAt: this.reportedAt(event.at) }, 'bot:notice_posted', { version: run.notice.version }, event);
-        if (moved) await this.startCaptureIfReady(moved);
+      case 'notice_posted':
+        // The notice alone does not open capture: the stop monitor must report a real observation after it (the
+        // interlock). The notice's time is kept as the worker gave it, on the worker's clock, since the monitor's
+        // heartbeats are ordered against it on that clock; and a heartbeat time the run holds from before the
+        // confirmation, whose order against the notice is not known, is cleared, so the next heartbeat decides.
+        await this.move(run, 'in_call', { noticePostedAt: event.at, monitorSeenAt: undefined }, 'bot:notice_posted', { version: run.notice.version }, event);
         return true;
-      }
       case 'monitor_heartbeat': {
-        // the stop monitor's own observation: the first after the notice opens capture, one after a suspension resumes it (the method holds every guard)
-        const updated = await this.stores.runs.update(run.runId, { monitorSeenAt: this.reportedAt(event.at) });
+        // The stop monitor's own observation counts only once the notice is confirmed, and only when the worker made it at
+        // or after the notice, both read on the worker's clock: one from before the notice proves nothing about the chat
+        // being watched after it, and its time bounded on the manager's clock could equal the notice's or pass it. A
+        // counted heartbeat is kept at its bounded time, by which the limits measure the monitor's freshness. The first
+        // after the notice opens capture, one after a suspension resumes it (the method holds every guard).
+        if (run.state !== 'in_call' || run.noticePostedAt === undefined || event.at < run.noticePostedAt) return false;
+        const updated = await this.stores.runs.update(run.runId, { monitorSeenAt: this.reportedAt(event.at) }, 'in_call');
         if (updated) await this.startCaptureIfReady(updated);
         return true;
       }
@@ -763,8 +769,10 @@ export class MeetingManager {
   /**
    * A report's time as the limits read it: the worker's own, but no later than one heartbeat interval past the manager's
    * clock. The limits compare these times with the manager's clock, so a worker whose clock runs ahead would otherwise
-   * keep a quiet stop monitor counted healthy, and the notice and alone limits unexpired, for as long as it runs ahead.
-   * Within the interval the worker's times keep their order, which the interlock reads (a heartbeat after the notice).
+   * keep a quiet stop monitor counted healthy, and the waiting-room, notice and alone limits unexpired, for as long as it
+   * runs ahead. Bounded times need not keep the worker's order (two reports of a worker far ahead can take one time, or
+   * a later report an earlier one's), so the interlock's order, a heartbeat at or after the notice, is read on the
+   * worker's own times, never on these.
    */
   private reportedAt(at: number): number {
     return Math.min(at, this.now() + this.monitorHeartbeatMs);
@@ -804,19 +812,24 @@ export class MeetingManager {
     return this.emit(type, run, data, `${event.eventId}#${type}`, event.at);
   }
 
+  /**
+   * The capture interlock holds: `in_call`, the notice confirmed, a heartbeat the stop monitor made after the notice and
+   * still fresh, and no suspension. `monitorSeenAt` is kept only for a heartbeat the worker made at or after the notice
+   * (read on the worker's clock as the heartbeat is applied; the notice's confirmation clears it), so its presence is that
+   * order; its bounded time is never compared with the notice's, which is on the worker's clock.
+   */
   private captureReady(run: MeetingRunRecord): boolean {
     return run.state === 'in_call'
       && run.noticePostedAt !== undefined
       && run.monitorSeenAt !== undefined
-      && run.monitorSeenAt >= run.noticePostedAt
       && this.now() - run.monitorSeenAt < this.monitorHeartbeatMs * this.monitorMissedBeats
       && run.captureSuspendedAt === undefined;
   }
 
   /** The capture interlock: `in_call`, the notice confirmed, and the stop monitor's own observation reported after the notice, no fence. */
   private async startCaptureIfReady(run: MeetingRunRecord): Promise<void> {
+    // a heartbeat from before the notice proves nothing about the chat being watched now, and none is kept (see captureReady)
     if (run.state !== 'in_call' || run.noticePostedAt === undefined || run.monitorSeenAt === undefined) return;
-    if (run.monitorSeenAt < run.noticePostedAt) return; // a heartbeat from before the notice proves nothing about the chat being watched now
     if (this.now() - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats) return;
     if (run.captureStartedAt !== undefined && run.captureSuspendedAt === undefined) return; // already capturing
     const provider = this.providers.get(run.providerName);
@@ -1193,11 +1206,17 @@ export class MeetingManager {
           continue;
         }
         if (run.state === 'in_call') {
-          // a stop monitor that has not reported once since the notice: capture never opened, and the run leaves when the
-          // window and the recovery wait have both passed, as it does for a monitor that went quiet and stayed quiet
-          if (run.monitorSeenAt === undefined && run.noticePostedAt !== undefined && now - run.noticePostedAt > this.monitorHeartbeatMs * this.monitorMissedBeats + this.monitorRecoverMs) {
-            await this.leave(run, 'stop_monitor_failed');
-            continue;
+          // A stop monitor that has not reported once since the notice: capture never opened, and the run leaves when the
+          // window and the recovery wait have both passed, as it does for a monitor that went quiet and stayed quiet. The
+          // notice's time is the worker's own, so the wait counts from it but from no later than the end of the notice's
+          // confirmation window after the bot entered the call (joinedAt, bounded on the manager's clock): a worker whose
+          // clock runs ahead does not keep the run in the call for as long as it runs ahead.
+          if (run.monitorSeenAt === undefined && run.noticePostedAt !== undefined) {
+            const noticeAt = run.joinedAt === undefined ? run.noticePostedAt : Math.min(run.noticePostedAt, run.joinedAt + this.noticeConfirmMs);
+            if (now - noticeAt > this.monitorHeartbeatMs * this.monitorMissedBeats + this.monitorRecoverMs) {
+              await this.leave(run, 'stop_monitor_failed');
+              continue;
+            }
           }
           // quiet once monitorMissedBeats intervals have passed since the last heartbeat, the boundary captureReady and startCaptureIfReady use
           const monitorStale = run.monitorSeenAt !== undefined && now - run.monitorSeenAt >= this.monitorHeartbeatMs * this.monitorMissedBeats;

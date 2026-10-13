@@ -167,6 +167,7 @@ export interface MeetingRunRecord {
   dispatchedAt?: number;
   /** When the bot reached the meeting: its waiting room, then the call itself once it is admitted. The waiting-room limit counts from the first, the notice's confirmation from the second. */
   joinedAt?: number;
+  /** When the bot confirmed its notice in the meeting's chat, as the worker reported it, on the worker's clock: the stop monitor's heartbeats are ordered against it on that clock. */
   noticePostedAt?: number;
   captureStartedAt?: number;
   leftAt?: number;
@@ -186,7 +187,11 @@ export interface MeetingRunRecord {
   cleanupPending?: boolean;
   /** When a kept run's content was purged after `done` (a session's deletion). */
   purgedAt?: number;
-  /** The last time the stop monitor reported. */
+  /**
+   * The last heartbeat the stop monitor made at or after the notice, at its time bounded to one heartbeat interval past
+   * the manager's clock, by which the limits measure the monitor's freshness. The notice's confirmation clears it, so a
+   * heartbeat from before the notice is never taken for one after it.
+   */
   monitorSeenAt?: number;
   /** How many participants besides the bot the provider last reported. */
   participantCount?: number;
