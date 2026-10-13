@@ -141,6 +141,8 @@ const ONCE_EVENTS: ReadonlySet<MeetingEventType> = new Set<MeetingEventType>([
 const ACTIVE_STATES: readonly MeetingRunState[] = ['dispatching', 'joining', 'waiting_room', 'in_call_notice_pending', 'in_call', 'leaving', 'left', 'purging'];
 /** States a purge may start from: everything that is not terminal. */
 const PURGEABLE_STATES: readonly MeetingRunState[] = ['requested', 'scheduled', ...ACTIVE_STATES.filter((s) => s !== 'purging')];
+/** Every state that is not terminal. */
+const OPEN_STATES: readonly MeetingRunState[] = ['requested', 'scheduled', ...ACTIVE_STATES];
 /** Reports that carry what a person said or did; behind the fence they are neither stored nor forwarded. */
 const CONTENT_REPORTS: ReadonlySet<ProviderEventType> = new Set<ProviderEventType>(['chat_message', 'stop_command', 'participant_joined', 'participant_left']);
 
@@ -888,9 +890,9 @@ export class MeetingManager {
     return true;
   }
 
-  /** A run sent from a page: the page is still there. */
+  /** A run sent from a page: the page is still there. A run that is over keeps its terminal row as it was written. */
   async pageSeen(runId: string): Promise<void> {
-    await this.stores.runs.update(runId, { pageSeenAt: this.now() });
+    await this.stores.runs.update(runId, { pageSeenAt: this.now() }, OPEN_STATES);
   }
 
   /** Adds a step to the purge sequence, as {@link MeetingManagerConfig.purgeHooks} does. */

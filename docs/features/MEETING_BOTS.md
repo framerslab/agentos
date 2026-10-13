@@ -96,7 +96,7 @@ async function sendMeetingBot(provider: IMeetingBotProvider, roomService: IMeeti
 | `leaveBot` | Leave while retaining content according to `keep`; cancel a pending send. A run already told to leave keeps the reason it was told, which decides its billing, and its kill deadline. |
 | `purgeRun` | Leave and delete content; on a run that is over (done, or failed before it joined), delete what is kept and run the purge hooks. Returns false for a run that does not exist. |
 | `postChat` | Post only while `in_call` and the provider declares chat posting. |
-| `pageSeen` | Refresh the page-presence timestamp for an enabled `pageAwayMs` limit. |
+| `pageSeen` | Refresh the page-presence timestamp for an enabled `pageAwayMs` limit; a run that is over is left as it is. |
 | `addPurgeHook` | Add deletion of host-owned copies. |
 | `on` | Receive `MeetingManagerEvent`; returns an unsubscribe function. |
 | `processProviderEvent` | Verify, parse and apply a provider report. |

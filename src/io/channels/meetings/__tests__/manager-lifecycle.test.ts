@@ -228,6 +228,16 @@ describe('the limits, the meter and the ends', () => {
     expect(h.provider.commands.get(runId)?.some((c) => c.name === 'leave')).toBe(false);
     expect((await h.stores.runs.get(runId))?.aloneSince).toBe(h.clock.now());
   });
+  it('a page seen after its run is over writes nothing to the terminal row', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot({ ...h.request, limits: { pageAwayMs: 120_000 } });
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.leaveBot(runId); // cancelled before its dispatch: the run fails, content-free
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'failed' });
+    h.clock.advance(1_000);
+    await h.manager.pageSeen(runId);
+    expect((await h.stores.runs.get(runId))?.pageSeenAt).toBeUndefined();
+  });
   it('meters usage, settles at done, drops the turns of a run that is not kept, and bills a crash after capture', async () => {
     const h = harness();
     const runId = await joined(h);
