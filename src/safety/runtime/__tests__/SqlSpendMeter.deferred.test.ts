@@ -8,7 +8,7 @@
  */
 import { afterAll, describe, expect, it } from 'vitest';
 import { createPostgresAdapter, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
-import { SqlSpendMeter, type SqlSpendMeterOptions } from '../SqlSpendMeter.js';
+import { SqlSpendMeter, type SpendUnknownResolution, type SqlSpendMeterOptions } from '../SqlSpendMeter.js';
 import type { SpendExpiryDecision, SpendReconcileResult, SpendReserveResult } from '../SpendMeter.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
@@ -107,7 +107,7 @@ function suite(name: string, open: () => Promise<{ db: StorageAdapter; prefix: s
       const optedIn = meter(db, prefix, { resolveExpired: async () => ({ outcome: 'deferred', retryAt: at(5), evidence }) });
       let meanwhile: SpendReconcileResult | undefined;
       const legacy = meter(db, prefix, {
-        resolveUnknown: async () => {
+        resolveUnknown: async (): Promise<SpendUnknownResolution> => {
           // the opted-in pass runs while the legacy one waits on its resolver, and finds the hold's work may still run
           meanwhile = await optedIn.reconcile({ now: at(1) });
           return 'unknown';
@@ -126,7 +126,7 @@ function suite(name: string, open: () => Promise<{ db: StorageAdapter; prefix: s
     it('leaves a turn reserved when its heartbeat renews the lease while a legacy pass asks resolveUnknown about it', async () => {
       const { db, prefix } = await open();
       const legacy: SqlSpendMeter = meter(db, prefix, {
-        resolveUnknown: async (r) => {
+        resolveUnknown: async (r): Promise<SpendUnknownResolution> => {
           // the turn was alive after all: its heartbeat lands while the pass waits on its resolver
           await legacy.heartbeat(r.operationId, at(1));
           return 'unknown';
