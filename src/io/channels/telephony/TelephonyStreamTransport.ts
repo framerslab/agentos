@@ -36,7 +36,11 @@ export interface TelephonyStreamTransportConfig {
   protocol?: 'legacy' | 'carrier';
   /** Validates the call and custom parameters against the already verified upgrade. Must be synchronous. */
   authorizeStart?: (start: Extract<MediaStreamIncoming, { type: 'start' }>) => boolean;
-  /** Deadline for one write plus playback checkpoint; default 10000 ms, maximum 30000 ms. */
+  /**
+   * Deadline for each write and each playback checkpoint; default 10000 ms, maximum 30000 ms. A chunk with a generation
+   * has it for its writes and its checkpoint together; a chunk without one, written in order, has it for its checkpoint
+   * from when it is the oldest written chunk awaiting one.
+   */
   playbackTimeoutMs?: number;
 }
 
@@ -382,11 +386,18 @@ function telephonePcm(chunk: EncodedAudioChunk): Buffer {
 function generationCompare(a: TelephonyPlaybackGeneration, b: TelephonyPlaybackGeneration): number {
   return a.workerGeneration - b.workerGeneration || a.transportEpoch - b.transportEpoch || a.inferenceGeneration - b.inferenceGeneration;
 }
-/** The one chunk awaiting its carrier checkpoint, with the clear epoch it was sent in. */
+/** A chunk awaiting its carrier checkpoint, with the clear epoch it was sent in; its timer runs once it is the oldest awaited. */
 interface PendingCarrierPlayback {
   name: string; epoch: number; samples: number; sampleRate: number;
-  resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>;
+  resolve(): void; reject(error: Error): void; timer?: ReturnType<typeof setTimeout>;
 }
+/** A chunk without a generation, converted to PCMU and waiting to be written behind the chunks before it. */
+interface QueuedCarrierOutput {
+  mulaw: Buffer; epoch: number; samples: number; sampleRate: number;
+  resolve(): void; reject(error: Error): void;
+}
+/** Most PCMU bytes of chunks without a generation that wait unwritten: 24.576 seconds at 8 kHz. */
+const MAX_QUEUED_CARRIER_BYTES = 196608;
 /** Opt-in carrier transport; the no-option construction retains the original transport behavior. */
 export class TelephonyStreamTransport extends EventEmitter implements IStreamTransport {
   /** Stable connection identifier. */
@@ -397,6 +408,11 @@ export class TelephonyStreamTransport extends EventEmitter implements IStreamTra
   private readonly rate: number;
   private readonly timeoutMs: number;
   private pending?: PendingCarrierPlayback; private sending = false; private clearing = false;
+  /** Chunks without a generation, admitted in order and not yet written. */
+  private queued: QueuedCarrierOutput[] = [];
+  private queuedBytes = 0;
+  /** Written chunks without a generation awaiting their checkpoints, oldest first. */
+  private unplayed: PendingCarrierPlayback[] = [];
   private epoch = 0;
   private serial = 0;
   private latestGeneration?: TelephonyPlaybackGeneration;
@@ -441,9 +457,11 @@ export class TelephonyStreamTransport extends EventEmitter implements IStreamTra
     if (frame.type === 'stop') { this.close(); return; }
     if (frame.type === 'dtmf') { this.emit('dtmf', { digit: frame.digit, durationMs: frame.durationMs }); return; }
     if (frame.type === 'mark') {
-      const p = this.pending;
-      if (!p || p.epoch !== this.epoch || p.name !== frame.name) return;
-      this.pending = undefined; clearTimeout(p.timer);
+      const p = this.pending?.name === frame.name ? this.pending : this.unplayed.find((u) => u.name === frame.name);
+      if (!p || p.epoch !== this.epoch) return;
+      if (p === this.pending) this.pending = undefined;
+      else { this.unplayed.splice(this.unplayed.indexOf(p), 1); this.armOldest(); }
+      clearTimeout(p.timer);
       this.emit('mark', { name: frame.name }); this.emit('playback', { name: frame.name, playedSamples: p.samples, sampleRate: p.sampleRate }); p.resolve(); return;
     }
     if (frame.mediaChunk !== undefined && this.lastChunk !== undefined && frame.mediaChunk <= this.lastChunk) return;
@@ -468,19 +486,26 @@ export class TelephonyStreamTransport extends EventEmitter implements IStreamTra
     });
   }
   /**
-   * One producer at a time; completion means its carrier mark was received before cancellation.
+   * Plays one chunk; completion means its carrier checkpoint returned before an interruption or a close.
+   *
+   * A chunk with a `generation` is one producer's at a time: a second chunk before the first completes is refused,
+   * and so are an older generation and, once a generation was sent, a chunk without one. A chunk without a
+   * `generation` from a producer that sends none, as the voice pipeline without a call profile sends none and does
+   * not wait for one send before the next, is admitted behind the chunks before it: each is written in order with
+   * its checkpoint after it, without waiting for the earlier chunks to play, and at most 196608 bytes of their PCMU
+   * wait unwritten. An interruption rejects every chunk not yet played; the chunks sent after it play.
    * A chunk outside {@link TelephonyAudioChunk}, such as one in an MP3 or Ogg container, is refused before output.
    */
   async sendAudio(chunk: EncodedAudioChunk): Promise<void> {
     if (this.legacy) return this.legacy.sendAudio(chunk);
     if (this.current !== 'open' || !this.streamSid) throw new Error('carrier output unavailable');
-    if (this.pending || this.sending || this.clearing) throw new Error('concurrent producer');
+    if (!chunk.generation && !this.latestGeneration) return this.sendInOrder(chunk);
+    if (this.pending || this.sending || this.clearing || this.queued.length || this.unplayed.length) throw new Error('concurrent producer');
     const pcm = telephonePcm(chunk); const generation = chunk.generation;
-    if (generation) {
-      if (![generation.workerGeneration, generation.inferenceGeneration, generation.transportEpoch].every((n) => Number.isSafeInteger(n) && n >= 0)) throw new Error('invalid generation');
-      if ((this.fencedGeneration && generationCompare(generation, this.fencedGeneration) <= 0) || (this.latestGeneration && generationCompare(generation, this.latestGeneration) < 0)) throw new Error('stale generation');
-      this.latestGeneration = { ...generation };
-    } else if (this.latestGeneration || this.epoch > 0) throw new Error('missing generation');
+    if (!generation) throw new Error('missing generation');
+    if (![generation.workerGeneration, generation.inferenceGeneration, generation.transportEpoch].every((n) => Number.isSafeInteger(n) && n >= 0)) throw new Error('invalid generation');
+    if ((this.fencedGeneration && generationCompare(generation, this.fencedGeneration) <= 0) || (this.latestGeneration && generationCompare(generation, this.latestGeneration) < 0)) throw new Error('stale generation');
+    this.latestGeneration = { ...generation };
     const name = `audio-${this.epoch}-${++this.serial}`; const epoch = this.epoch;
     let resolve!: () => void; let reject!: (error: Error) => void;
     const played = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
@@ -500,14 +525,67 @@ export class TelephonyStreamTransport extends EventEmitter implements IStreamTra
       throw failure; } finally { this.sending = false;
     }
   }
+  /** Admits a chunk without a generation behind the chunks before it; it completes at its own checkpoint. */
+  private sendInOrder(chunk: EncodedAudioChunk): Promise<void> {
+    const pcm = telephonePcm(chunk); const mulaw = convertPcmToMulaw8k(pcm, chunk.sampleRate);
+    if (this.queuedBytes + mulaw.length > MAX_QUEUED_CARRIER_BYTES) throw new Error('carrier output bound');
+    return new Promise<void>((resolve, reject) => {
+      this.queued.push({ mulaw, epoch: this.epoch, samples: pcm.length / 2, sampleRate: chunk.sampleRate, resolve, reject }); this.queuedBytes += mulaw.length;
+      void this.writeQueued();
+    });
+  }
+  /**
+   * Writes the queued chunks one at a time, each media frame followed by its checkpoint, and does not wait for a chunk
+   * to play before writing the next: the carrier plays them in order. A clear holds the queue until its own write ends.
+   */
+  private async writeQueued(): Promise<void> {
+    if (this.sending) return;
+    this.sending = true;
+    try {
+      for (;;) {
+        const next = this.queued[0]; const sid = this.streamSid;
+        if (!next || !sid || this.clearing || this.current !== 'open') return;
+        this.queued.shift(); this.queuedBytes -= next.mulaw.length;
+        const entry: PendingCarrierPlayback = { name: `audio-${next.epoch}-${++this.serial}`, epoch: next.epoch, samples: next.samples, sampleRate: next.sampleRate, resolve: next.resolve, reject: next.reject };
+        try {
+          await this.write(this.parser.formatOutgoing(next.mulaw, sid));
+          if (next.epoch !== this.epoch || this.current !== 'open') throw new Error('carrier playback cleared');
+          const mark = this.parser.formatMark!(sid, entry.name);
+          if (!mark) throw new Error('carrier mark unavailable');
+          this.unplayed.push(entry); this.armOldest();
+          await this.write(mark);
+        } catch (error) {
+          const failure = error instanceof Error ? error : new Error('carrier output failed');
+          const at = this.unplayed.indexOf(entry);
+          if (at >= 0) { this.unplayed.splice(at, 1); clearTimeout(entry.timer); this.armOldest(); }
+          entry.reject(failure);
+          if (next.epoch === this.epoch) this.fail(failure);
+        }
+      }
+    } catch {
+      // Only an 'error' listener that throws from fail() lands here; the stream is already closed and its chunks settled.
+    } finally { this.sending = false; }
+  }
+  /** Starts the playback deadline of the oldest written chunk awaiting its checkpoint, once. */
+  private armOldest(): void {
+    const oldest = this.unplayed[0];
+    if (oldest && !oldest.timer) oldest.timer = setTimeout(() => this.fail(new Error('carrier playback timeout')), this.timeoutMs);
+  }
+  /** Rejects every chunk not yet played: the one awaited alone, those written in order and those still queued. */
+  private discard(error: Error): void {
+    const p = this.pending; this.pending = undefined; if (p) { clearTimeout(p.timer); p.reject(error); }
+    for (const u of this.unplayed.splice(0)) { clearTimeout(u.timer); u.reject(error); }
+    for (const q of this.queued.splice(0)) q.reject(error);
+    this.queuedBytes = 0;
+  }
   /** Cancels pending playback before sending clear. All other pipeline controls remain local. */
   async sendControl(message: ServerTextMessage): Promise<void> {
     if (this.legacy) return this.legacy.sendControl(message);
     if (message.type !== 'barge_in' || (message.action.type !== 'cancel' && message.action.type !== 'pause') || this.current !== 'open' || !this.streamSid) return;
     if (this.clearing) throw new Error("concurrent clear"); this.clearing = true; this.epoch += 1; if (this.latestGeneration) this.fencedGeneration = { ...this.latestGeneration };
-    const p = this.pending; this.pending = undefined; if (p) { clearTimeout(p.timer); p.reject(new Error('carrier playback cleared')); }
+    this.discard(new Error('carrier playback cleared'));
     try { const clear = this.parser.formatClear!(this.streamSid); if (!clear) throw new Error('carrier clear unavailable'); await this.write(clear); }
-    catch (error) { this.fail(error instanceof Error ? error : new Error('carrier clear failed')); throw error; } finally { this.clearing = false; }
+    catch (error) { this.fail(error instanceof Error ? error : new Error('carrier clear failed')); throw error; } finally { this.clearing = false; void this.writeQueued(); }
   }
   private fail(error: Error): void {
     if (this.current === 'closed') return;
@@ -518,7 +596,7 @@ export class TelephonyStreamTransport extends EventEmitter implements IStreamTra
   private finish(error: Error): void {
     if (this.current === 'closed') return;
     this.current = 'closed'; this.epoch += 1; clearTimeout(this.startTimer); this.startTimer = undefined;
-    const p = this.pending; this.pending = undefined; if (p) { clearTimeout(p.timer); p.reject(error); }
+    this.discard(error);
     this.emit('close');
   }
   /** Stops admission and pending output once; subsequent socket-close events are harmless. */
