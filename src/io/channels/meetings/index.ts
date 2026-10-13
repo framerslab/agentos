@@ -26,7 +26,7 @@ export * from './stores/types.js';
 export { InMemoryRunStore, InMemoryJobStore, InMemoryTranscriptStore, InMemoryEventStore, InMemoryOutbox, InMemoryEntitlementHook, SystemClock, FakeClock } from './stores/memory.js';
 export { FencedOutbox, MemoryDeliveryFence } from './stores/fenced-outbox.js';
 export type { DeliveryFence } from './stores/fenced-outbox.js';
-export { SqlRunStore, SqlJobStore, SqlTranscriptStore, SqlEventStore, SqlOutbox, meetingStoresDdl, meetingStoreTables, MEETING_STORES_DDL, DEFAULT_TABLE_PREFIX } from './stores/sql.js';
+export { SqlRunStore, SqlJobStore, SqlTranscriptStore, SqlEventStore, SqlOutbox, SqlDeliveryFence, meetingStoresDdl, meetingStoresUpgradeDdl, meetingStoreTables, MEETING_STORES_DDL, DEFAULT_TABLE_PREFIX } from './stores/sql.js';
 export type { SqlStoreOptions, SqlRunStoreOptions, MeetingStoreTables } from './stores/sql.js';
 export { connectionRuns, meetingProvenanceDdl } from './stores/provenance.js';
 export { LifecycleSerial } from './LifecycleSerial.js';

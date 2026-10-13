@@ -5,6 +5,7 @@ import { CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type Mee
 import type { SecretBox } from '../signing.js';
 import { DuplicateIdempotencyKeyError, FencedError, nextAttemptAt, OUTBOX_GIVE_UP_MS, type IEventStore, type IJobStore, type IOutbox, type IRunStore, type ITranscriptStore, type MeetingJob, type OutboxDelivery, type RunFilter } from './types.js';
 import { abortClaimedSends, runClaimedSend, type ClaimedSends } from './claims.js';
+import type { DeliveryFence } from './fenced-outbox.js';
 
 /** Default prefix for all meeting tables and indexes. */
 export const DEFAULT_TABLE_PREFIX = 'agentos_meeting';
@@ -23,7 +24,7 @@ export interface MeetingStoreTables {
   events: string;
   /** Outbound deliveries and retry state. */
   outbox: string;
-  /** One row per run: the row every content write of the run locks, the event counter and the fence. */
+  /** One row per run: the row every content write of the run locks, the event and turn counters, the content fence and the deliveries' fence. */
   locks: string;
 }
 
@@ -33,7 +34,10 @@ export function meetingStoreTables(tablePrefix: string = DEFAULT_TABLE_PREFIX): 
   return { runs: `${tablePrefix}_runs`, jobs: `${tablePrefix}_jobs`, turns: `${tablePrefix}_turns`, events: `${tablePrefix}_events`, outbox: `${tablePrefix}_outbox`, locks: `${tablePrefix}_run_locks` };
 }
 
-/** The six tables and their indexes under one prefix. A product copies this text into its migration. */
+/**
+ * The six tables and their indexes under one prefix. A product copies this text into its migration. It makes missing
+ * tables and indexes only: tables an earlier version made take {@link meetingStoresUpgradeDdl}.
+ */
 export function meetingStoresDdl(tablePrefix: string = DEFAULT_TABLE_PREFIX): string {
   const t = meetingStoreTables(tablePrefix);
   const p = tablePrefix;
@@ -79,7 +83,9 @@ CREATE TABLE IF NOT EXISTS ${t.runs} (
   cleanup_pending BOOLEAN NOT NULL DEFAULT FALSE,
   purged_at BIGINT,
   last_report_at BIGINT,
-  last_usage_source_at BIGINT
+  last_usage_source_at BIGINT,
+  creation_pending BOOLEAN NOT NULL DEFAULT FALSE,
+  creation_context TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_${p}_runs_idem ON ${t.runs} (owner_ref, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_${p}_runs_owner ON ${t.runs} (owner_ref, requested_at DESC);
@@ -98,7 +104,8 @@ CREATE TABLE IF NOT EXISTS ${t.locks} (
   run_id TEXT PRIMARY KEY,
   event_seq INTEGER NOT NULL DEFAULT 0,
   turn_seq INTEGER NOT NULL DEFAULT 0,
-  fenced_at BIGINT
+  fenced_at BIGINT,
+  outbox_fenced_at BIGINT
 );
 CREATE TABLE IF NOT EXISTS ${t.turns} (
   run_id TEXT NOT NULL,
@@ -143,11 +150,38 @@ CREATE INDEX IF NOT EXISTS idx_${p}_outbox_run ON ${t.outbox} (run_id);
 /** Schema under {@link DEFAULT_TABLE_PREFIX}; apply it before constructing the stores. */
 export const MEETING_STORES_DDL = meetingStoresDdl();
 
+/**
+ * The upgrade that brings tables an earlier version's {@link meetingStoresDdl} made to this version's columns: one
+ * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for each column of the runs and run-lock tables that such tables may lack,
+ * each made as the fresh schema makes it. Applied twice, or to tables this version made, it changes nothing. The stores
+ * read and write every column, so a host runs it in its migration, in one transaction
+ * (`db.transaction((tx) => tx.exec(meetingStoresUpgradeDdl(prefix)))`), before it constructs them.
+ *
+ * @param tablePrefix - The prefix the tables were made under.
+ * @throws Error, the one {@link meetingStoreTables} throws, when the prefix is not a lower-case letter followed by at
+ * most 37 lower-case letters, digits or underscores; no SQL is built.
+ */
+export function meetingStoresUpgradeDdl(tablePrefix: string = DEFAULT_TABLE_PREFIX): string {
+  const t = meetingStoreTables(tablePrefix);
+  return `
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS provider_connection_ref TEXT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS leave_commanded_at BIGINT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS capture_suspended_at BIGINT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS alone_since BIGINT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS last_report_at BIGINT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS last_usage_source_at BIGINT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS creation_pending BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS creation_context TEXT;
+ALTER TABLE ${t.locks} ADD COLUMN IF NOT EXISTS turn_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ${t.locks} ADD COLUMN IF NOT EXISTS outbox_fenced_at BIGINT;
+`;
+}
+
 /** Connection and table names shared by all five stores for a run. */
 export interface SqlStoreOptions {
   /** Open Postgres adapter supporting transactions, persistence and concurrent access. */
   db: StorageAdapter;
-  /** Prefix of an already applied {@link meetingStoresDdl} schema. */
+  /** Prefix of an applied {@link meetingStoresDdl} schema, or one an earlier version made that {@link meetingStoresUpgradeDdl} brought up to date. */
   tablePrefix?: string;
 }
 
@@ -181,13 +215,19 @@ async function fenceRun(db: StorageAdapter, locks: string, runId: string, now: n
   await db.run(`INSERT INTO ${locks} (run_id, fenced_at) VALUES (?, ?) ON CONFLICT (run_id) DO UPDATE SET fenced_at = COALESCE(${locks}.fenced_at, EXCLUDED.fenced_at)`, [runId, now]);
 }
 
+/**
+ * The authenticated context a run's sealed creation context is bound to: the run and the column, so the sealed text
+ * opens neither in another run's row nor in the place of the meeting url, which is bound to the run id alone.
+ */
+const creationContextAad = (runId: string): string => `creation_context:${runId}`;
+
 /** Run storage options, including the host's meeting URL sealing key. */
 export interface SqlRunStoreOptions extends SqlStoreOptions {
-  /** Seals `meetingUrl` at rest. */
+  /** Seals `meetingUrl` and `creationContext` at rest. */
   box: SecretBox;
 }
 
-/** Durable run records with sealed URLs and expected-state updates under the run anchor. */
+/** Durable run records with sealed URLs and creation contexts, and expected-state updates under the run anchor. */
 export class SqlRunStore implements IRunStore {
   private readonly t: MeetingStoreTables;
   /** Checks the adapter capabilities and prefix; the caller applies the exported DDL. */
@@ -203,9 +243,9 @@ export class SqlRunStore implements IRunStore {
   toJSON(): string {
     return '[SqlRunStore redacted]';
   }
-  private static readonly COLUMNS = 'run_id, owner_ref, provider_name, platform, state, keep, meeting_url, bot_name, notice_text, notice_version, notice_late_text, stop_phrase, limits_json, idempotency_key, transcriber, requested_at, join_at, dispatched_at, joined_at, notice_posted_at, capture_started_at, left_at, done_at, reason, billed_seconds, reservation_id, consent_record_id, dispatch_json, page_seen_at, last_usage_at, monitor_seen_at, participant_count, leave_commanded_at, capture_suspended_at, alone_since, reported_seconds, cleanup_pending, purged_at, provider_connection_ref, last_report_at, last_usage_source_at';
+  private static readonly COLUMNS = 'run_id, owner_ref, provider_name, platform, state, keep, meeting_url, bot_name, notice_text, notice_version, notice_late_text, stop_phrase, limits_json, idempotency_key, transcriber, requested_at, join_at, dispatched_at, joined_at, notice_posted_at, capture_started_at, left_at, done_at, reason, billed_seconds, reservation_id, consent_record_id, dispatch_json, page_seen_at, last_usage_at, monitor_seen_at, participant_count, leave_commanded_at, capture_suspended_at, alone_since, reported_seconds, cleanup_pending, purged_at, provider_connection_ref, last_report_at, last_usage_source_at, creation_pending, creation_context';
   private row(run: MeetingRunRecord): unknown[] {
-    return [run.runId, run.ownerRef, run.providerName, run.platform, run.state, run.keep, run.meetingUrl === '' ? '' : this.opts.box.seal(run.meetingUrl, run.runId), run.botName, run.notice.text, run.notice.version, run.notice.lateArrivalText, run.stopPhrase, JSON.stringify(run.limits), run.idempotencyKey ?? null, run.transcriber ?? null, run.requestedAt, run.joinAt, run.dispatchedAt ?? null, run.joinedAt ?? null, run.noticePostedAt ?? null, run.captureStartedAt ?? null, run.leftAt ?? null, run.doneAt ?? null, run.reason ?? null, run.billedSeconds, run.reservationId ?? null, run.consentRecordId ?? null, run.dispatch ? JSON.stringify(run.dispatch) : null, run.pageSeenAt ?? null, run.lastUsageAt ?? null, run.monitorSeenAt ?? null, run.participantCount ?? null, run.leaveCommandedAt ?? null, run.captureSuspendedAt ?? null, run.aloneSince ?? null, run.reportedSeconds ?? null, run.cleanupPending ?? false, run.purgedAt ?? null, run.providerConnectionRef ?? null, run.lastReportAt ?? null, run.lastUsageSourceAt ?? null];
+    return [run.runId, run.ownerRef, run.providerName, run.platform, run.state, run.keep, run.meetingUrl === '' ? '' : this.opts.box.seal(run.meetingUrl, run.runId), run.botName, run.notice.text, run.notice.version, run.notice.lateArrivalText, run.stopPhrase, JSON.stringify(run.limits), run.idempotencyKey ?? null, run.transcriber ?? null, run.requestedAt, run.joinAt, run.dispatchedAt ?? null, run.joinedAt ?? null, run.noticePostedAt ?? null, run.captureStartedAt ?? null, run.leftAt ?? null, run.doneAt ?? null, run.reason ?? null, run.billedSeconds, run.reservationId ?? null, run.consentRecordId ?? null, run.dispatch ? JSON.stringify(run.dispatch) : null, run.pageSeenAt ?? null, run.lastUsageAt ?? null, run.monitorSeenAt ?? null, run.participantCount ?? null, run.leaveCommandedAt ?? null, run.captureSuspendedAt ?? null, run.aloneSince ?? null, run.reportedSeconds ?? null, run.cleanupPending ?? false, run.purgedAt ?? null, run.providerConnectionRef ?? null, run.lastReportAt ?? null, run.lastUsageSourceAt ?? null, run.creationPending ?? false, run.creationContext === undefined ? null : this.opts.box.seal(run.creationContext, creationContextAad(run.runId))];
   }
   private fromRow(r: Record<string, unknown>): MeetingRunRecord {
     const sealed = String(r.meeting_url ?? '');
@@ -218,6 +258,8 @@ export class SqlRunStore implements IRunStore {
     opt('idempotencyKey', r.idempotency_key as string | null); opt('transcriber', r.transcriber as string | null); opt('dispatchedAt', num(r.dispatched_at)); opt('joinedAt', num(r.joined_at)); opt('noticePostedAt', num(r.notice_posted_at)); opt('captureStartedAt', num(r.capture_started_at)); opt('leftAt', num(r.left_at)); opt('doneAt', num(r.done_at)); opt('reason', r.reason as MeetingRunRecord['reason'] | null); opt('reservationId', r.reservation_id as string | null); opt('consentRecordId', r.consent_record_id as string | null); opt('dispatch', r.dispatch_json ? JSON.parse(String(r.dispatch_json)) : undefined); opt('pageSeenAt', num(r.page_seen_at)); opt('lastUsageAt', num(r.last_usage_at)); opt('monitorSeenAt', num(r.monitor_seen_at)); opt('participantCount', num(r.participant_count)); opt('leaveCommandedAt', num(r.leave_commanded_at)); opt('captureSuspendedAt', num(r.capture_suspended_at)); opt('aloneSince', num(r.alone_since)); opt('reportedSeconds', num(r.reported_seconds)); opt('purgedAt', num(r.purged_at)); opt('lastReportAt', num(r.last_report_at)); opt('lastUsageSourceAt', num(r.last_usage_source_at));
     if (bool(r.cleanup_pending)) run.cleanupPending = true;
     opt('providerConnectionRef', r.provider_connection_ref as string | null);
+    run.creationPending = bool(r.creation_pending);
+    opt('creationContext', r.creation_context ? this.opts.box.open(String(r.creation_context), creationContextAad(run.runId)) : undefined);
     return run;
   }
   /** Inserts a run, mapping an owner's repeated idempotency key to the public conflict error. */
@@ -237,7 +279,7 @@ export class SqlRunStore implements IRunStore {
       throw err;
     }
   }
-  /** Reads a run, opening its URL with its run id as authenticated context. */
+  /** Reads a run, opening its URL with its run id as authenticated context, and its creation context with the run and its column. */
   async get(runId: string): Promise<MeetingRunRecord | undefined> {
     const r = await this.opts.db.get<Record<string, unknown>>(`SELECT * FROM ${this.t.runs} WHERE run_id = ?`, [runId]);
     return r ? this.fromRow(r) : undefined;
@@ -559,5 +601,29 @@ export class SqlOutbox implements IOutbox {
       await send(this.fromRow(r), signal);
       return true;
     });
+  }
+}
+
+/**
+ * The durable {@link DeliveryFence} for a `FencedOutbox`: a run's fence is its run-lock row's `outbox_fenced_at`, so it
+ * holds across a restart and between processes that share the tables. It is apart from the content fence the stores set
+ * when a run enters `purging`. Fences are kept for good, so it has no `forget`.
+ */
+export class SqlDeliveryFence implements DeliveryFence {
+  private readonly t: MeetingStoreTables;
+  /** Checks the adapter capabilities and prefix without creating tables. */
+  constructor(private readonly opts: SqlStoreOptions) {
+    checkPostgres(opts.db, 'SqlDeliveryFence');
+    this.t = meetingStoreTables(opts.tablePrefix);
+  }
+  /** Whether the run's deliveries are fenced. */
+  async isFenced(runId: string): Promise<boolean> {
+    const row = await this.opts.db.get<{ outbox_fenced_at: unknown }>(`SELECT outbox_fenced_at FROM ${this.t.locks} WHERE run_id = ?`, [runId]);
+    return num(row?.outbox_fenced_at) !== undefined;
+  }
+  /** Fences the run's deliveries, making its run-lock row when there is none; a fence already written keeps its time. */
+  async fence(runId: string): Promise<void> {
+    await this.opts.db.run(`INSERT INTO ${this.t.locks} (run_id, outbox_fenced_at) VALUES (?, ?)
+      ON CONFLICT (run_id) DO UPDATE SET outbox_fenced_at = COALESCE(${this.t.locks}.outbox_fenced_at, EXCLUDED.outbox_fenced_at)`, [runId, Date.now()]);
   }
 }
