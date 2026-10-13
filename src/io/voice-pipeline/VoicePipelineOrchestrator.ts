@@ -39,6 +39,12 @@
  * - The orchestrator does not resolve providers from ExtensionManager: every
  *   component is injected via {@link VoicePipelineOverrides}.
  * - Event wiring is done once during `startSession()` and never rewired.
+ * - Without a call profile, a client that transcribes on its own device sends
+ *   `transcript` messages ({@link ClientTranscriptMessage}) in place of audio;
+ *   they reach the endpoint detector as the STT session's transcripts do, each
+ *   final joined with the turn's earlier ones, the client's lines standing in
+ *   for its speech events (`_wireClientTranscripts`). A call profile ends the
+ *   call on one, as on any client message but its controls.
  * - A watchdog timer prevents a session without a call profile from staying in
  *   LISTENING forever if the user walks away (default 30 s). The watchdog
  *   resets after each completed turn.
@@ -55,6 +61,8 @@ import {
   sameVoiceGeneration,
   type AudioFrame,
   type AudioIdentity,
+  type ClientTextMessage,
+  type ClientTranscriptMessage,
   type EncodedAudioChunk,
   type IBargeinHandler,
   type IDiarizationEngine,
@@ -82,6 +90,28 @@ import {
   type VoiceTurnMetadata,
   type ServerTextMessage,
 } from './types.js';
+import { isClientTranscriptMessage, transcriptEventFromClient } from './clientTranscript.js';
+
+/**
+ * How long a client's open transcript line lasts with no message before it is
+ * closed as by an empty final (`_wireClientTranscripts`), so a line whose final
+ * never comes holds no speech open.
+ */
+const CLIENT_LINE_TIMEOUT_MS = 5_000;
+
+/** The most transcript lines a client holds open; one more makes the oldest give way. */
+const CLIENT_MAX_OPEN_LINES = 8;
+
+/** The most text a turn of a client's joined finals reaches the endpoint detector with. */
+const CLIENT_TURN_MAX_TEXT = 16_000;
+
+/** What speech starting and ending does, from the STT session's events or a client's transcript lines. */
+interface SpeechEdges {
+  /** Speech began: a synthetic VAD event, and barge-in while the agent speaks. */
+  start(): Promise<void>;
+  /** Speech ended: a synthetic VAD event. */
+  end(): void;
+}
 
 // ============================================================================
 // Call profile and overrides
@@ -272,7 +302,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Without a call profile this method:
    * 1. Validates the orchestrator is in `'idle'` state and has its four components.
    * 2. Creates STT and TTS sub-sessions from the provided factories.
-   * 3. Wires all event handlers (transport -> STT -> endpoint -> agent -> TTS -> transport).
+   * 3. Wires all event handlers (transport -> STT -> endpoint -> agent -> TTS -> transport, and a client's
+   *    transcript messages -> endpoint).
    * 4. Transitions to `'listening'` and starts the watchdog timer.
    * 5. Returns a {@link VoicePipelineSession} handle.
    *
@@ -381,27 +412,35 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       this.supervise(() => endpoint.reset());
       this.resetWatchdog();
     });
-    stt.on('speech_start', () => this.supervise(async () => {
-      if (this.current === 'closed') return;
-      endpoint.pushVadEvent({ type: 'speech_start', timestamp: Date.now(), source: 'stt' });
-      if (this.current !== 'speaking') return;
-      const action = await bargein.handleBargein({ speechDurationMs: 0, interruptedText: this.text, playedDurationMs: this.playedMs });
-      // A decision that comes back after the reply has ended is not acted on.
-      if (this.current !== 'speaking') return;
-      if (action.type === 'cancel') {
-        this.stateTo('interrupting');
-        tts.cancel();
-        agent.abort?.();
-        this._watchSend(() => transport.sendControl({ type: 'barge_in', action }));
-        if ((this.current as PipelineState) === 'closed') return;
-        endpoint.reset();
-        this.stateTo('listening');
-        this.resetWatchdog();
-      } else if (action.type === 'pause') this._watchSend(() => transport.sendControl({ type: 'barge_in', action }));
-    }));
-    stt.on('speech_end', () => {
-      if (this.current !== 'closed') this.supervise(() => endpoint.pushVadEvent({ type: 'speech_end', timestamp: Date.now(), source: 'stt' }));
-    });
+    // Speech starting and ending: the STT session's speech_start and speech_end, or a client's transcript lines
+    // (_wireClientTranscripts). Each goes to the endpoint detector as a synthetic VAD event, and a start while the
+    // agent speaks asks the barge-in handler.
+    const speech: SpeechEdges = {
+      start: async () => {
+        if (this.current === 'closed') return;
+        endpoint.pushVadEvent({ type: 'speech_start', timestamp: Date.now(), source: 'stt' });
+        if (this.current !== 'speaking') return;
+        const action = await bargein.handleBargein({ speechDurationMs: 0, interruptedText: this.text, playedDurationMs: this.playedMs });
+        // A decision that comes back after the reply has ended is not acted on.
+        if (this.current !== 'speaking') return;
+        if (action.type === 'cancel') {
+          this.stateTo('interrupting');
+          tts.cancel();
+          agent.abort?.();
+          this._watchSend(() => transport.sendControl({ type: 'barge_in', action }));
+          if ((this.current as PipelineState) === 'closed') return;
+          endpoint.reset();
+          this.stateTo('listening');
+          this.resetWatchdog();
+        } else if (action.type === 'pause') this._watchSend(() => transport.sendControl({ type: 'barge_in', action }));
+      },
+      end: () => {
+        if (this.current !== 'closed') endpoint.pushVadEvent({ type: 'speech_end', timestamp: Date.now(), source: 'stt' });
+      },
+    };
+    stt.on('speech_start', () => this.supervise(() => speech.start()));
+    stt.on('speech_end', () => this.supervise(() => speech.end()));
+    this._wireClientTranscripts(transport, endpoint, speech);
     const publicSession = Object.assign(new EventEmitter(), { sessionId: randomUUID(), transport, close: (reason?: string) => this.stopSession(reason) });
     // A getter, so the session reads the state of the moment rather than a copy taken here.
     Object.defineProperty(publicSession, 'state', { get: () => this.current });
@@ -409,6 +448,129 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this.stateTo('listening');
     this.resetWatchdog();
     return this.publicSession;
+  }
+
+  /**
+   * Client transcripts -> Endpoint Detector, for a session without a call profile.
+   *
+   * A client that transcribes on its own device sends its transcripts as
+   * `transcript` messages ({@link ClientTranscriptMessage}) in place of
+   * audio. Each one `isClientTranscriptMessage()` accepts reaches the endpoint
+   * detector as a transcript from the STT session does, and the client's lines
+   * stand in for the STT session's speech events: the first line to open while
+   * none is open is a speech start (with barge-in while the agent speaks,
+   * decided before the line's text reaches the detector), and the final that
+   * closes the last open line is a speech end, after its text.
+   *
+   * The detector keeps one final without an `itemId` per turn, each replacing
+   * the last, and a client makes one line per speech segment (Moonshine
+   * completes a line at a pause inside a sentence), so each final reaches the
+   * detector joined, in arrival order, after the finals of the turn so far,
+   * and without the line's `itemId`, since its text is the turn's: a final
+   * with one would be kept per item and joined again. An interim reaches it
+   * as it is. The turn's finals start again when the detector completes a
+   * turn and when the pipeline returns to listening, where the detector is
+   * reset.
+   *
+   * A line opens with its first message that has text, so an empty line that
+   * never opened is nothing, and an empty final closes its line without its
+   * text (an empty final would replace the detector's last final). A line
+   * that gets no message for `CLIENT_LINE_TIMEOUT_MS` is closed as by an empty
+   * final, so a line whose final never comes (a client session that failed, a
+   * message lost in a reconnect) holds no speech open. A client's input is
+   * bounded: at most `CLIENT_MAX_OPEN_LINES` lines open, the oldest giving
+   * way, and a turn's joined text at most `CLIENT_TURN_MAX_TEXT` characters.
+   * Messages are handled one at a time, in the order they arrive, and one
+   * that fails ends the session as a failure of the STT session's events
+   * does. Nothing is relayed back, since the client shows its own text, and
+   * once the session is closed a message is ignored. Other client messages
+   * are not this segment's.
+   *
+   * @param transport - The transport the client's messages arrive on.
+   * @param endpoint - The detector whose turns the client's finals are joined within.
+   * @param speech - What speech starting and ending does, as for the STT session's events.
+   */
+  private _wireClientTranscripts(transport: IStreamTransport, endpoint: IEndpointDetector, speech: SpeechEdges): void {
+    const lines = { open: new Map<string, ReturnType<typeof setTimeout>>(), finals: [] as string[] };
+    endpoint.on('turn_complete', () => {
+      lines.finals = [];
+    });
+    // `flush_complete` and a barge-in's cancel reset the detector as they return to listening.
+    this.on('state_changed', (change: { to: PipelineState }) => {
+      if (change.to === 'listening') lines.finals = [];
+    });
+    let handled: Promise<void> = Promise.resolve();
+    const handle = (message: ClientTranscriptMessage): void => {
+      // As supervise() does for the STT session's events, a failure ends the session through reportFailure().
+      handled = handled
+        .then(() => this._onClientTranscript(message, lines, handle, endpoint, speech))
+        .catch(() => this.reportFailure());
+    };
+    transport.on('message', (message: ClientTextMessage) => {
+      if (isClientTranscriptMessage(message)) handle(message);
+    });
+  }
+
+  /**
+   * One checked client transcript (see `_wireClientTranscripts`).
+   *
+   * @param message - The client's message.
+   * @param lines - The client's open lines, each with the timer that closes it,
+   *   and the finals of the detector's current turn.
+   * @param handle - Hands a message to the chain, as one from the transport.
+   * @param endpoint - The session's endpoint detector.
+   * @param speech - What speech starting and ending does.
+   */
+  private async _onClientTranscript(
+    message: ClientTranscriptMessage,
+    lines: { open: Map<string, ReturnType<typeof setTimeout>>; finals: string[] },
+    handle: (message: ClientTranscriptMessage) => void,
+    endpoint: IEndpointDetector,
+    speech: SpeechEdges
+  ): Promise<void> {
+    if (this.current === 'closed') return;
+    const { itemId } = message;
+    const text = message.text.trim();
+    const opening = !lines.open.has(itemId);
+    if (opening && !text) return;
+    if (opening && lines.open.size >= CLIENT_MAX_OPEN_LINES) {
+      // A client holds at most CLIENT_MAX_OPEN_LINES lines open: the oldest gives way.
+      const oldest = lines.open.keys().next();
+      if (!oldest.done) {
+        clearTimeout(lines.open.get(oldest.value));
+        lines.open.delete(oldest.value);
+      }
+    }
+    // Each message gives its line CLIENT_LINE_TIMEOUT_MS more; a line that
+    // gets no message in that time is closed as by an empty final.
+    clearTimeout(lines.open.get(itemId));
+    lines.open.set(
+      itemId,
+      setTimeout(() => handle({ type: 'transcript', text: '', itemId, isFinal: true }), CLIENT_LINE_TIMEOUT_MS)
+    );
+    if (opening && lines.open.size === 1) {
+      await speech.start();
+      // Cast needed because TypeScript keeps `this.current` narrowed by the
+      // check above across the await; the session may have closed meanwhile.
+      if ((this.current as PipelineState) === 'closed') return;
+    }
+    if (text) {
+      const event = transcriptEventFromClient(message);
+      if (message.isFinal) {
+        // A turn's text stops growing at CLIENT_TURN_MAX_TEXT: later finals are left out.
+        if (lines.finals.join(' ').length < CLIENT_TURN_MAX_TEXT) lines.finals.push(text);
+        event.text = lines.finals.join(' ').slice(0, CLIENT_TURN_MAX_TEXT);
+        // The text is the turn's, not the line's: with the line's itemId, a detector
+        // that keeps finals per item would join the turn's lines a second time.
+        delete event.itemId;
+      }
+      endpoint.pushTranscript(event);
+    }
+    if (message.isFinal) {
+      clearTimeout(lines.open.get(itemId));
+      lines.open.delete(itemId);
+      if (lines.open.size === 0) speech.end();
+    }
   }
 
   /**
