@@ -2071,14 +2071,16 @@ export class AgentOS implements IAgentOS {
 
       // The orchestrator creates/manages the actual stream and starts pushing chunks to StreamingManager.
       // We get the streamId it uses so our bridge can listen to it.
-      // the output guards that evaluate tool calls also judge each call the runtime runs itself, before it runs
-      streamIdToListen = await this.agentOSOrchestrator.orchestrateTurn(
-        {
-          ...orchestratorInput,
-          languageNegotiation,
-        } as any,
-        { toolCallGate: createToolCallGate(guardrailServices, guardrailContext) }
-      );
+      // the output guards that evaluate tool calls also judge each call the runtime runs itself, before it runs; a
+      // host with none hands the orchestrator the turn alone, as before
+      const turnInput = {
+        ...orchestratorInput,
+        languageNegotiation,
+      } as any;
+      const toolCallGate = createToolCallGate(guardrailServices, guardrailContext);
+      streamIdToListen = toolCallGate
+        ? await this.agentOSOrchestrator.orchestrateTurn(turnInput, { toolCallGate })
+        : await this.agentOSOrchestrator.orchestrateTurn(turnInput);
       await this.streamingManager.registerClient(streamIdToListen, bridge);
       this.logger.debug?.('Bridge registered', { bridgeId: bridge.id, streamId: streamIdToListen });
 
@@ -2312,9 +2314,12 @@ export class AgentOS implements IAgentOS {
       // This call is `async Promise<void>`; it triggers the orchestrator to process the tool result(s)
       // and push new chunks to the StreamingManager for the given streamId. The output guards that evaluate tool
       // calls judge each call the continuation runs itself, before it runs.
-      await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults, {
-        toolCallGate: createToolCallGate(continuationServices, continuationContext),
-      });
+      const continuationGate = createToolCallGate(continuationServices, continuationContext);
+      if (continuationGate) {
+        await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults, { toolCallGate: continuationGate });
+      } else {
+        await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults);
+      }
 
       // Yield new chunks received by our bridge client on the same stream, through the same output guards a turn has
       const continuationKey = identity?.conversationId || identity?.sessionId || streamId;
@@ -2555,12 +2560,12 @@ export class AgentOS implements IAgentOS {
       };
       const resumeServices = this.getActiveGuardrailServices();
       // the output guards that evaluate tool calls judge each call the resumed turn runs itself, before it runs
-      streamIdToListen = await this.agentOSOrchestrator.orchestrateResumedToolResults(
-        pendingRequest,
-        toolResults,
-        options,
-        { toolCallGate: createToolCallGate(resumeServices, resumeContext) }
-      );
+      const resumeGate = createToolCallGate(resumeServices, resumeContext);
+      streamIdToListen = resumeGate
+        ? await this.agentOSOrchestrator.orchestrateResumedToolResults(pendingRequest, toolResults, options, {
+            toolCallGate: resumeGate,
+          })
+        : await this.agentOSOrchestrator.orchestrateResumedToolResults(pendingRequest, toolResults, options);
       await this.streamingManager.registerClient(streamIdToListen, bridge);
 
       const guardedResume = wrapOutputGuardrails(resumeServices, resumeContext, bridge.consume(), {
