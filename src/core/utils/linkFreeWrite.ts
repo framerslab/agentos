@@ -1,25 +1,33 @@
 /**
  * @fileoverview Writing and reading below a folder whose contents another process may change: folders are made
  * one name at a time and never through a link, a file is opened for writing never through a link, never waiting,
- * and only when it is a regular file with one name, and a file is read never through a link below the folder,
- * never waiting, and only when it is a regular file.
+ * and only when it is a regular file with one name, a file is made only in a place that nothing holds, and a file
+ * is read never through a link below the folder, never waiting, and only when it is a regular file.
  *
  * The Markdown and Obsidian memory exporters write a file per trace below an export folder, and the skill exporter
  * writes a tool's files below a skills folder. Whoever can write below such a folder could put there a link that
  * leads elsewhere, a second name for a file elsewhere, or a named pipe that holds a writer up, so both write
- * through the functions here. The capability manifest scanner reads a capability's files below its folder, where
- * a link could lead a read to a file elsewhere and a named pipe could hold the read up, so it reads through
- * {@link readFileOutsideLinks}. The folder itself is the caller's and may be a link. The checks run as each folder
- * is made or looked at and each file opened; Node has no `openat`, so a process that swaps a folder for a link
- * between a check and the write or read is outside what they stop, except that on Linux a read also checks the
- * path the kernel gives for the file it opened.
+ * through the functions here. The capability manifest scanner reads a capability's files, the skill loader a
+ * skill's `SKILL.md` and the soul loader a soul's files, and the soul loader makes the soul's `memory/` folder and
+ * the files that start it. A link there could lead a read or a write to a file elsewhere, and a named pipe could
+ * hold a read up, so each reads and makes those files through the functions here, below the folder that holds the
+ * capability's, skill's or soul's folder, so that folder is looked at too. The soul loader also loads
+ * synchronously, through the synchronous forms. The folder a function is given is the caller's and may be a link.
+ * The checks run as each folder is made or looked at and each file opened; Node has no `openat`, so a process that
+ * swaps a folder for a link between a check and the write or read is outside what they stop, except that on Linux
+ * a read also checks the path the kernel gives for the file it opened.
+ *
+ * A function here that takes a path below a folder refuses an absolute path, and a path with a `.` or `..` name,
+ * before it looks at anything.
  *
  * @module agentos/core/utils/linkFreeWrite
  */
 
 import fs, { type FileHandle } from 'node:fs/promises';
-import { constants as fsConstants, type Stats } from 'node:fs';
+import fsSync, { constants as fsConstants, type Stats } from 'node:fs';
 import path from 'node:path';
+
+import { describeRefusedName } from './pathName.js';
 
 /**
  * Where the platform has each flag (Windows has neither): open never through a symbolic link in the file's own
@@ -38,6 +46,13 @@ const NO_LINK_NO_WAIT: number =
  */
 const OPEN_FLAGS: number = fsConstants.O_WRONLY | fsConstants.O_CREAT | NO_LINK_NO_WAIT;
 
+/**
+ * The flags a file is made with: write only, and made by this open or not opened at all (`O_CREAT` with `O_EXCL`),
+ * so the open fails on anything already in the file's place, a symbolic link among them, whether or not it leads
+ * anywhere, and opens nothing that is there.
+ */
+const CREATE_FLAGS: number = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | NO_LINK_NO_WAIT;
+
 /** The flags a file is opened with for reading: read only, never through a link in its own place and never waiting. */
 const READ_FLAGS: number = fsConstants.O_RDONLY | NO_LINK_NO_WAIT;
 
@@ -50,6 +65,12 @@ const LINK_OPEN_CODES: ReadonlySet<string> = new Set(['ELOOP', 'EMLINK']);
  * a device with no driver, or, on Linux, a socket; EOPNOTSUPP for a socket on macOS.
  */
 const SPECIAL_OPEN_CODES: ReadonlySet<string> = new Set(['EISDIR', 'ENXIO', 'EOPNOTSUPP']);
+
+/**
+ * The separators a path below a folder is split into names at: the slash, and on Windows the backslash too, since
+ * Node's path functions read both as separators there.
+ */
+const NAME_SEPARATORS: RegExp = path.sep === '\\' ? /[\\/]/ : /\//;
 
 /**
  * Why a file was not opened: `link` when a symbolic link holds its place or the file has a second name (a hard
@@ -76,10 +97,11 @@ export interface OpenedFile {
  * @param root     - The folder the others are made in. It may itself be a link.
  * @param relative - The folders' path under `root`.
  * @returns True when every folder is in place and none of them is a link.
+ * @throws TypeError when `relative` is absolute or a name in it is `.` or `..`; nothing is looked at or made.
  */
 export async function makeFoldersOutsideLinks(root: string, relative: string): Promise<boolean> {
   let dir = root;
-  for (const name of relative.split(path.sep).filter((part) => part.length > 0)) {
+  for (const name of namesBelow('makeFoldersOutsideLinks', relative)) {
     dir = path.join(dir, name);
     const entry = await lstatOrNull(dir);
     if (entry) {
@@ -92,6 +114,34 @@ export async function makeFoldersOutsideLinks(root: string, relative: string): P
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       // Something was put there since the look: look again.
       if ((await fs.lstat(dir)).isSymbolicLink()) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The synchronous form of {@link makeFoldersOutsideLinks}, for a caller that cannot wait on a promise.
+ *
+ * @param root     - The folder the others are made in. It may itself be a link.
+ * @param relative - The folders' path under `root`.
+ * @returns True when every folder is in place and none of them is a link.
+ * @throws TypeError when `relative` is absolute or a name in it is `.` or `..`; nothing is looked at or made.
+ */
+export function makeFoldersOutsideLinksSync(root: string, relative: string): boolean {
+  let dir = root;
+  for (const name of namesBelow('makeFoldersOutsideLinksSync', relative)) {
+    dir = path.join(dir, name);
+    const entry = lstatOrNullSync(dir);
+    if (entry) {
+      if (entry.isSymbolicLink()) return false;
+      continue;
+    }
+    try {
+      fsSync.mkdirSync(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      // Something was put there since the look: look again.
+      if (fsSync.lstatSync(dir).isSymbolicLink()) return false;
     }
   }
   return true;
@@ -150,6 +200,34 @@ export async function openFileOutsideLinks(file: string): Promise<OpenedFile | O
 }
 
 /**
+ * Make a file in a place that nothing holds, in a folder already made, and write `text` into it. The open makes
+ * the file or fails (`O_CREAT` with `O_EXCL`), so it never opens what is already in the file's place: a symbolic
+ * link there, one that leads nowhere among them, is never followed, and a named pipe or a device is never opened.
+ * Nothing already in the place is changed. Synchronous, for a caller that cannot wait on a promise.
+ *
+ * @param file - Absolute path of the file.
+ * @param text - What the file holds, written as UTF-8.
+ * @returns True when the file was made and written; false when an entry of any kind was already in its place, which
+ *   is left as it is.
+ * @throws Any other error the open or the write meets.
+ */
+export function createFileOutsideLinksSync(file: string, text: string): boolean {
+  let fd: number;
+  try {
+    fd = fsSync.openSync(file, CREATE_FLAGS, 0o666);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw err;
+  }
+  try {
+    fsSync.writeFileSync(fd, text);
+  } finally {
+    fsSync.closeSync(fd);
+  }
+  return true;
+}
+
+/**
  * Read the file that `relative` names under `root`, never through a symbolic link below `root`. Each folder on the
  * way is looked at, and so is the file's place before the file is opened, so a link or something other than a
  * regular file is refused before any open. The file is then opened never through a link in its own place and,
@@ -164,17 +242,19 @@ export async function openFileOutsideLinks(file: string): Promise<OpenedFile | O
  *
  * @param root - The folder the file is read below. It may itself be a link.
  * @param relative - The file's path under `root`, its names joined by the platform's separator, as `path.relative`
- *   gives it. The caller checks that the path stays under `root` (`resolveInsideFolder`).
+ *   gives it. An absolute path, or one with a name that is `.` or `..`, is refused before any look, since the walk
+ *   would start elsewhere or leave `root`.
  * @returns The file's text, read as UTF-8; `link` when a symbolic link holds the file's place or a folder's on the
  *   way, or, on Linux, when the file the open reached lies outside `root`; `special` when something other than a
  *   regular file holds the file's place; or null when no file is there.
+ * @throws TypeError when `relative` is absolute or a name in it is `.` or `..`; nothing is looked at or read.
  * @throws Any other error the looks, the open or the read meet.
  */
 export async function readFileOutsideLinks(
   root: string,
   relative: string,
 ): Promise<{ text: string } | OpenRefusal | null> {
-  const names = relative.split(path.sep).filter((part) => part.length > 0);
+  const names = namesBelow('readFileOutsideLinks', relative);
   // With no name, the path is the root itself, a folder.
   if (names.length === 0) return 'special';
   // Taken before the looks: a link put on the way after them does not move it.
@@ -182,24 +262,10 @@ export async function readFileOutsideLinks(
   let place = root;
   for (let index = 0; index < names.length; index++) {
     place = path.join(place, names[index]);
-    const entry = await lstatOrNull(place);
-    if (entry === null) return null;
-    if (entry.isSymbolicLink()) return 'link';
-    if (index === names.length - 1) {
-      if (!entry.isFile()) return 'special';
-    } else if (!entry.isDirectory()) {
-      // Something other than a folder on the way: no file is there.
-      return null;
-    }
+    const step = readStep(await lstatOrNull(place), index === names.length - 1);
+    if (step !== 'on') return step;
   }
-  const handle = await fs.open(place, READ_FLAGS).catch((err: unknown) => {
-    const code = String((err as NodeJS.ErrnoException).code);
-    // Taken away since the look.
-    if (code === 'ENOENT') return null;
-    if (LINK_OPEN_CODES.has(code)) return 'link' as const;
-    if (SPECIAL_OPEN_CODES.has(code)) return 'special' as const;
-    throw err;
-  });
+  const handle = await fs.open(place, READ_FLAGS).catch(readOpenRefusal);
   if (handle === null || typeof handle === 'string') return handle;
   try {
     // Something put in the file's place since the look is refused here, before it is read.
@@ -210,6 +276,98 @@ export async function readFileOutsideLinks(
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * The synchronous form of {@link readFileOutsideLinks}, for a caller that cannot wait on a promise. It looks, opens
+ * and checks the same way, so a named pipe is refused at once rather than holding the thread up.
+ *
+ * @param root - The folder the file is read below. It may itself be a link.
+ * @param relative - The file's path under `root`, as {@link readFileOutsideLinks} takes it.
+ * @returns What {@link readFileOutsideLinks} returns.
+ * @throws TypeError when `relative` is absolute or a name in it is `.` or `..`; nothing is looked at or read.
+ * @throws Any other error the looks, the open or the read meet.
+ */
+export function readFileOutsideLinksSync(root: string, relative: string): { text: string } | OpenRefusal | null {
+  const names = namesBelow('readFileOutsideLinksSync', relative);
+  // With no name, the path is the root itself, a folder.
+  if (names.length === 0) return 'special';
+  // Taken before the looks: a link put on the way after them does not move it.
+  const realRoot = realPathWhereOpenPathsShowSync(root);
+  let place = root;
+  for (let index = 0; index < names.length; index++) {
+    place = path.join(place, names[index]);
+    const step = readStep(lstatOrNullSync(place), index === names.length - 1);
+    if (step !== 'on') return step;
+  }
+  let fd: number;
+  try {
+    fd = fsSync.openSync(place, READ_FLAGS);
+  } catch (err) {
+    return readOpenRefusal(err);
+  }
+  try {
+    // Something put in the file's place since the look is refused here, before it is read.
+    if (!fsSync.fstatSync(fd).isFile()) return 'special';
+    // So is a file the open reached through a folder swapped for a link since its look.
+    if (realRoot !== null && !openedBelowSync(fd, realRoot)) return 'link';
+    return { text: fsSync.readFileSync(fd, 'utf8') };
+  } finally {
+    fsSync.closeSync(fd);
+  }
+}
+
+/**
+ * The names of `relative`, a path below a folder, in order, with empty names left out (`a//b` is `a` then `b`).
+ *
+ * @param caller - The function given the path, for the error message.
+ * @param relative - The path below the folder.
+ * @throws TypeError when `relative` is absolute, or when a name in it is `.` or `..`: the names are walked from the
+ *   folder one at a time, and such a path would start the walk elsewhere, or lead it off the folder or above it.
+ */
+function namesBelow(caller: string, relative: string): string[] {
+  if (path.isAbsolute(relative)) {
+    throw new TypeError(`${caller}: the path ${describeRefusedName(relative)} is absolute; give a path below the folder`);
+  }
+  const names = relative.split(NAME_SEPARATORS).filter((name) => name.length > 0);
+  const dots = names.find((name) => name === '.' || name === '..');
+  if (dots !== undefined) {
+    throw new TypeError(
+      `${caller}: the path ${describeRefusedName(relative)} holds the name ${dots}; give a path below the folder with no . or .. name`,
+    );
+  }
+  return names;
+}
+
+/**
+ * What the entry at one name on the way to a file means for a read: `on` to go on to the next name, null when no
+ * file is there, or the refusal.
+ *
+ * @param entry - The entry at the name, a link not followed, or null when there is none.
+ * @param last - True for the file's own name, false for a folder on the way to it.
+ */
+function readStep(entry: Stats | null, last: boolean): 'on' | OpenRefusal | null {
+  if (entry === null) return null;
+  if (entry.isSymbolicLink()) return 'link';
+  if (last) return entry.isFile() ? 'on' : 'special';
+  // Something other than a folder on the way: no file is there.
+  return entry.isDirectory() ? 'on' : null;
+}
+
+/**
+ * What a failed open for reading means: null when the file was taken away since the look, or the refusal for a link
+ * or something other than a regular file in its place.
+ *
+ * @param err - The error the open failed with.
+ * @throws `err` itself when it means anything else.
+ */
+function readOpenRefusal(err: unknown): OpenRefusal | null {
+  const code = String((err as NodeJS.ErrnoException).code);
+  // Taken away since the look.
+  if (code === 'ENOENT') return null;
+  if (LINK_OPEN_CODES.has(code)) return 'link';
+  if (SPECIAL_OPEN_CODES.has(code)) return 'special';
+  throw err;
 }
 
 /** The folder whose entries name each open file of this process by its descriptor, on Linux; null elsewhere. */
@@ -228,6 +386,16 @@ async function realPathWhereOpenPathsShow(root: string): Promise<Buffer | null> 
   }
 }
 
+/** The synchronous form of {@link realPathWhereOpenPathsShow}. */
+function realPathWhereOpenPathsShowSync(root: string): Buffer | null {
+  if (OPEN_FILE_PATHS === null) return null;
+  try {
+    return fsSync.realpathSync(root, { encoding: 'buffer' });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * True when the path the kernel gives for the open file `handle` lies below `realRoot`, or when it gives none (no
  * `/proc` mounted), where the looks alone stand; false when it lies anywhere else.
@@ -239,6 +407,22 @@ async function openedBelow(handle: FileHandle, realRoot: Buffer): Promise<boolea
   } catch {
     return true;
   }
+  return liesBelow(opened, realRoot);
+}
+
+/** The synchronous form of {@link openedBelow}, for the open file descriptor `fd`. */
+function openedBelowSync(fd: number, realRoot: Buffer): boolean {
+  let opened: Buffer;
+  try {
+    opened = fsSync.readlinkSync(`${OPEN_FILE_PATHS}/${fd}`, { encoding: 'buffer' });
+  } catch {
+    return true;
+  }
+  return liesBelow(opened, realRoot);
+}
+
+/** True when the path `opened` lies below the folder `realRoot`, both as bytes; the folder itself is not below. */
+function liesBelow(opened: Buffer, realRoot: Buffer): boolean {
   const separator = Buffer.from(path.sep);
   const below = realRoot.subarray(realRoot.length - separator.length).equals(separator)
     ? realRoot
@@ -254,4 +438,9 @@ async function lstatOrNull(file: string): Promise<Stats | null> {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw err;
   }
+}
+
+/** The synchronous form of {@link lstatOrNull}. */
+function lstatOrNullSync(file: string): Stats | null {
+  return fsSync.lstatSync(file, { throwIfNoEntry: false }) ?? null;
 }
