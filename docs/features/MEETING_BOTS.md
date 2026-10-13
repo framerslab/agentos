@@ -86,6 +86,8 @@ async function sendMeetingBot(manager: MeetingManager) {
 
 `start(intervalMs = 1000)` schedules ticks, one at a time: a pass still running when the next is due is not joined by it. `stop()` stops that timer without stopping bots. Hosts may drive `tick()` themselves. Each tick dispatches due jobs, enforces limits, resumes cleanup and periodically reconciles. `reconcile()` queries provider usage for dispatched runs, ends workers reported gone, resumes purges and restores missing jobs for waiting runs. A job whose dispatcher lost its lease after the bot had reported is recorded as dispatched when the next dispatcher leases it, so reconcile watches that run too. The manager stores leave, suspension and alone timers on `MeetingRunRecord`, so a replacement manager can continue them.
 
+`start()` runs a tick's two passes apart from each other, the dispatches and the upkeep (the limits, kills, purges, eviction and the reconcile), so a dispatch a provider is slow to answer holds back no limit. A pass of either kind still running five intervals after it began is no longer waited for and the next one starts beside it, so a call that never answers, such as a command to a worker that froze, stops no later pass. `tick()` runs the two in turn.
+
 | Manager method | Purpose |
 | --- | --- |
 | `registerProvider`, `getProvider`, `providerFor` | Register by name, look up by name, or select the first provider declaring a platform unless a name is given. |

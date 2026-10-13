@@ -346,18 +346,78 @@ describe('dispatch and the interlock', () => {
 });
 
 describe('the loop', () => {
-  it('start() runs one pass at a time: a pass still running is not joined by the next one due', async () => {
+  it('start() runs each of its passes one at a time: a dispatch pass still running is not joined by the next one due, and the upkeep goes on beside it', async () => {
     vi.useFakeTimers();
     const h = harness();
     try {
       let finish: () => void = () => {};
-      const tick = vi.spyOn(h.manager, 'tick').mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+      const lease = vi.spyOn(h.stores.jobs, 'lease').mockImplementationOnce(() => new Promise<undefined>((resolve) => { finish = () => resolve(undefined); }));
+      const list = vi.spyOn(h.stores.runs, 'list');
+      const limitsPasses = () => list.mock.calls.filter(([filter]) => filter.states?.includes('in_call')).length;
       h.manager.start(1_000);
       await vi.advanceTimersByTimeAsync(3_500);
-      expect(tick).toHaveBeenCalledTimes(1);
+      expect(lease).toHaveBeenCalledTimes(1);
+      expect(limitsPasses()).toBe(3); // the limits ran in each of the three intervals while the dispatch pass waited
       finish();
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(tick).toHaveBeenCalledTimes(2);
+      expect(lease).toHaveBeenCalledTimes(2);
+    } finally {
+      h.manager.stop();
+      vi.useRealTimers();
+    }
+  });
+  it('a dispatch the provider is slow to answer holds back no limit: a stop monitor that goes quiet meanwhile is still suspended', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      const capturing = await h.manager.sendBot(h.request);
+      const capturingId = capturing.ok ? capturing.run.runId : '';
+      await h.manager.tick();
+      await h.report(capturingId, 'joining');
+      await h.report(capturingId, 'in_call', { participantCount: 2 });
+      await h.report(capturingId, 'notice_posted');
+      await h.report(capturingId, 'monitor_heartbeat', {}, h.clock.now() + 1);
+      expect(h.provider.commands.get(capturingId)).toEqual([{ name: 'startCapture' }]);
+      // the next run's dispatch does not return: its worker is still pulling the bot's image
+      h.provider.beforeDispatch = () => new Promise<void>(() => {});
+      await h.manager.sendBot({ ...h.request, idempotencyKey: 'k2' });
+      h.manager.start(1_000);
+      await vi.advanceTimersByTimeAsync(1_000); // the dispatch pass takes the second run and waits on its provider
+      h.clock.advance(30_001); // the first run's stop monitor has been quiet for its window
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.provider.commands.get(capturingId)?.at(-1)).toEqual({ name: 'suspendCapture' });
+    } finally {
+      h.manager.stop();
+      vi.useRealTimers();
+    }
+  });
+  it('a pass held by a call that never answers holds the next one back five intervals at most: another run\'s quiet monitor is still suspended', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      const first = await h.manager.sendBot(h.request);
+      const firstId = first.ok ? first.run.runId : '';
+      const second = await h.manager.sendBot({ ...h.request, idempotencyKey: 'k2' });
+      const secondId = second.ok ? second.run.runId : '';
+      await h.manager.tick();
+      for (const id of [firstId, secondId]) {
+        await h.report(id, 'joining');
+        await h.report(id, 'in_call', { participantCount: 2 });
+        await h.report(id, 'notice_posted');
+      }
+      await h.report(firstId, 'monitor_heartbeat', {}, h.clock.now() + 1);
+      h.clock.advance(20_000);
+      await h.report(secondId, 'monitor_heartbeat', {}, h.clock.now() + 1); // the second run's monitor reports twenty seconds later
+      // the first run's worker froze: a command to it never answers
+      const command = h.provider.command.bind(h.provider);
+      vi.spyOn(h.provider, 'command').mockImplementation((runId, cmd) => (runId === firstId ? new Promise<void>(() => {}) : command(runId, cmd)));
+      h.manager.start(1_000);
+      h.clock.advance(10_001); // the first run's monitor has been quiet for its window: the pass suspends it and waits on the command
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((await h.stores.runs.get(firstId))?.captureSuspendedAt).toBeDefined();
+      h.clock.advance(20_000); // the second run's monitor has now been quiet for its window too
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(h.provider.commands.get(secondId)?.at(-1)).toEqual({ name: 'suspendCapture' });
     } finally {
       h.manager.stop();
       vi.useRealTimers();

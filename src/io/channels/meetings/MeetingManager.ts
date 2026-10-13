@@ -145,6 +145,10 @@ const PURGEABLE_STATES: readonly MeetingRunState[] = ['requested', 'scheduled', 
 const OPEN_STATES: readonly MeetingRunState[] = ['requested', 'scheduled', ...ACTIVE_STATES];
 /** Reports that carry what a person said or did; behind the fence they are neither stored nor forwarded. */
 const CONTENT_REPORTS: ReadonlySet<ProviderEventType> = new Set<ProviderEventType>(['chat_message', 'stop_command', 'participant_joined', 'participant_left']);
+/** The two passes of the loop `start()` runs, apart from each other: the dispatches, and the upkeep. */
+type LoopPass = 'dispatch' | 'upkeep';
+/** How many of the loop's intervals a pass may run before the next one starts beside it: a pass this old is held by a call that does not answer. */
+const STUCK_PASS_INTERVALS = 5;
 
 /**
  * A run's limits: the defaults, each replaced by the request's own value where it gives one. A limit given as
@@ -187,8 +191,10 @@ export class MeetingManager {
   private readonly purgeHooks: Array<(runId: string) => Promise<void>> = [];
   private lastReconcileAt = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
-  /** Whether a pass the timer started is still running. */
-  private ticking = false;
+  /** How many intervals the loop has run: the clock its passes are timed on. */
+  private loopIntervals = 0;
+  /** The interval in which each of the loop's passes that is still running began. */
+  private readonly passStartedAt = new Map<LoopPass, number>();
   /** When the terminal runs are next listed for eviction: when the first of them can go, and at least once a minute. */
   private nextCleanupAt = 0;
 
@@ -384,21 +390,37 @@ export class MeetingManager {
   // ── The loop ──
 
   /**
-   * Runs `tick()` every second until `stop()`, one pass at a time: a pass still running when the next is due is not
-   * joined by it, so a slow store does not stack passes on each other. A host with its own scheduler calls `tick()` itself.
+   * Runs a tick's two passes every second until `stop()`, apart from each other: the dispatches, and the upkeep (the
+   * limits, the kills, the purges and cleanups resumed, the eviction and a reconcile every minute). Apart, a dispatch a
+   * provider is slow to answer (a worker pulling its image) holds back no limit: a quiet stop monitor is still suspended
+   * and an armed kill still fires while it waits. Each pass runs one at a time, so a slow store does not stack passes on
+   * each other, except that a pass still running five intervals after it began is no longer waited for and the next one
+   * starts beside it: a pass held by a call that never answers (a command to a worker that froze) would otherwise stop
+   * every later one. A host with its own scheduler calls `tick()` itself.
    */
   start(intervalMs = 1_000): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      if (this.ticking) return;
-      this.ticking = true;
-      void this.tick()
-        .catch((err) => this.config.logger?.error(`[MeetingManager] tick: ${String(err)}`))
-        .finally(() => {
-          this.ticking = false;
-        });
+      this.loopIntervals += 1;
+      this.runPass('dispatch', () => this.dispatchDue());
+      this.runPass('upkeep', () => this.upkeep());
     }, intervalMs);
     this.timer.unref?.();
+  }
+
+  /** Starts one of the loop's passes, unless the last one of it is still running and has not run for five intervals. */
+  private runPass(pass: LoopPass, work: () => Promise<void>): void {
+    const began = this.passStartedAt.get(pass);
+    if (began !== undefined && this.loopIntervals - began < STUCK_PASS_INTERVALS) return;
+    if (began !== undefined) this.config.logger?.warn(`[MeetingManager] the ${pass} pass begun ${this.loopIntervals - began} intervals ago has not finished; the next one starts beside it`);
+    const mark = this.loopIntervals;
+    this.passStartedAt.set(pass, mark);
+    void work()
+      .catch((err) => this.config.logger?.error(`[MeetingManager] ${pass} pass: ${String(err)}`))
+      .finally(() => {
+        // a pass that was stuck and finishes after a later one began leaves the later one's mark alone
+        if (this.passStartedAt.get(pass) === mark) this.passStartedAt.delete(pass);
+      });
   }
 
   /** Stops the loop `start()` began; a pass already running finishes. */
@@ -408,11 +430,29 @@ export class MeetingManager {
   }
 
   /**
-   * One pass: due jobs dispatched, limits enforced, kills issued, purges resumed, a reconcile every minute. Each step runs
-   * even when an earlier one throws, so a dispatch that fails on one run never holds back the limits of the others (the
-   * stop monitor's suspension among them); the first error is thrown once the pass is over.
+   * One pass: due jobs dispatched, then the upkeep (limits enforced, kills issued, purges resumed, a reconcile every
+   * minute). Each step runs even when an earlier one throws, so a dispatch that fails on one run never holds back the
+   * limits of the others (the stop monitor's suspension among them); the first error is thrown once the pass is over.
+   * The steps run in turn, so a dispatch that takes long holds this pass's limits back until it returns; `start()` runs
+   * the two apart.
    */
   async tick(): Promise<void> {
+    let failure: { error: unknown } | undefined;
+    try {
+      await this.dispatchDue();
+    } catch (error) {
+      failure = { error };
+    }
+    try {
+      await this.upkeep();
+    } catch (error) {
+      failure ??= { error };
+    }
+    if (failure) throw failure.error;
+  }
+
+  /** The steps after the dispatches: the limits, the eviction and a reconcile every minute, each run even when an earlier one throws; the first error is thrown at the end. */
+  private async upkeep(): Promise<void> {
     let failure: { error: unknown } | undefined;
     const step = async (pass: () => Promise<void>): Promise<void> => {
       try {
@@ -421,7 +461,6 @@ export class MeetingManager {
         failure ??= { error };
       }
     };
-    await step(() => this.dispatchDue());
     await step(() => this.enforceLimits());
     await step(() => this.cleanupExpired());
     if (this.now() - this.lastReconcileAt >= 60_000) {
