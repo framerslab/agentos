@@ -126,3 +126,31 @@ it('ends a run whose worker is gone although the hook refuses its final supplier
   expect(recordSupplierUsage).toHaveBeenLastCalledWith('res-1', usage);
   expect(await inbox.pending()).toEqual([]);
 });
+
+it('hands over every kept total although an acknowledgement fails, and throws that failure once the pass is done', async () => {
+  const h = harness();
+  const recordSupplierUsage = vi.fn(async (_reservationId: string, _usage: SupplierUsage) => undefined);
+  Object.assign(h.entitlement, { recordSupplierUsage });
+  const inbox = new MemoryDurableInbox<PendingSupplierUsage>();
+  const first = { runId: 'run-a', reservationId: 'res-a', usage: { streamSeconds: 60, captureSeconds: 30, final: true } };
+  const second = { runId: 'run-b', reservationId: 'res-b', usage: { streamSeconds: 90, captureSeconds: 45, final: true } };
+  await inbox.accept({ id: 'a', acceptedAt: 1, value: first });
+  await inbox.accept({ id: 'b', acceptedAt: 2, value: second });
+  const acknowledge = inbox.acknowledge.bind(inbox);
+  let acknowledgements = 0;
+  vi.spyOn(inbox, 'acknowledge').mockImplementation(async (id: string) => {
+    acknowledgements += 1;
+    if (acknowledgements === 1) throw new Error('inbox is down');
+    return acknowledge(id);
+  });
+  const { manager } = withLogger(h, { supplierUsageInbox: inbox });
+  await expect(manager.reconcile()).rejects.toThrow('inbox is down');
+  // both totals reached the hook; only the entry whose acknowledgement failed still waits
+  expect(recordSupplierUsage.mock.calls).toEqual([['res-a', first.usage], ['res-b', second.usage]]);
+  expect((await inbox.pending()).map((entry) => entry.id)).toEqual(['a']);
+  // the next pass hands the kept totals over again and acknowledges them
+  await manager.reconcile();
+  expect(recordSupplierUsage).toHaveBeenCalledTimes(3);
+  expect(recordSupplierUsage).toHaveBeenLastCalledWith('res-a', first.usage);
+  expect(await inbox.pending()).toEqual([]);
+});

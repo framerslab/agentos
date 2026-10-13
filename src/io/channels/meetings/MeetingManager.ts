@@ -717,6 +717,8 @@ export class MeetingManager {
   /**
    * Hands the entitlement hook again the supplier totals it refused before, kept in the stores' `supplierUsageInbox`:
    * each one recorded is acknowledged, and one refused again stays for the next reconcile.
+   * An entry recorded but not acknowledged holds back no other, and the first such failure is thrown once the pass
+   * is done, for reconcile to throw at the end of its own work.
    */
   private async recordKeptSupplierUsage(): Promise<void> {
     const inbox = this.stores.supplierUsageInbox;
@@ -724,6 +726,7 @@ export class MeetingManager {
     const kept = await inbox.pending();
     let refused = 0;
     let firstError: unknown;
+    let unacknowledged: { error: unknown } | undefined;
     for (const entry of kept) {
       try {
         await this.stores.entitlement.recordSupplierUsage?.(entry.value.reservationId, entry.value.usage);
@@ -732,10 +735,16 @@ export class MeetingManager {
         refused += 1;
         continue;
       }
-      await inbox.acknowledge(entry.id);
+      try {
+        await inbox.acknowledge(entry.id);
+      } catch (error) {
+        // recorded all the same: the entry stays pending, and the hook, which keeps the largest of each, sees the totals again
+        unacknowledged ??= { error };
+      }
     }
     // one line for the pass, however many the hook refused
     if (refused > 0) this.config.logger?.warn(`[MeetingManager] ${refused} of ${kept.length} kept supplier usage totals refused again, kept for the next reconcile: ${String(firstError)}`);
+    if (unacknowledged) throw unacknowledged.error;
   }
 
   /** The report applied to its run as `apply` read it, whatever became of the report's supplier totals. */
