@@ -469,21 +469,28 @@ export async function deferCompoundHold(store: ICompoundCreditStore, input: { ho
 export interface RefundCreditLotInput {
   scopeId: string;
   lotId: string;
-  /** The host's stable id for the refund; a second call with it answers the first. */
+  /**
+   * The host's stable id for the refund. A second call with it and the same scope, lot and amount answers the first;
+   * any other request under it is refused as `conflict`.
+   */
   refundId: string;
   amountMicro: number;
   at: number;
 }
 
-/** A refund reservation's answer; `refundableMicro` is the lot's free paid principal at that moment. */
+/**
+ * A refund reservation's answer; `refundableMicro` is the lot's free paid principal at that moment. `conflict`: the
+ * refund id is reserved for another scope, lot or amount, and nothing is reserved for this request.
+ */
 export type RefundCreditLotResult =
   | { status: 'reserved' | 'existing'; refundableMicro: number }
-  | { status: 'refused'; reason: 'not_found' | 'not_paid' | 'not_active' | 'insufficient_refundable'; refundableMicro: number };
+  | { status: 'refused'; reason: 'not_found' | 'not_paid' | 'not_active' | 'insufficient_refundable' | 'conflict'; refundableMicro: number };
 
 /**
  * Reserves a refund before the payment rail is asked for it: only the paid lot's free principal (neither held nor
- * consumed) can be refunded, so a refund of committed funds is refused with what can be refunded now. Confirm or revert
- * it with {@link completeLotRefund}.
+ * consumed) can be refunded, so a refund of committed funds is refused with what can be refunded now. A refund id
+ * reserved already answers `existing` only for its own scope, lot and amount. Confirm or revert it with
+ * {@link completeLotRefund}.
  */
 export async function refundCreditLot(store: ICompoundCreditStore, input: RefundCreditLotInput): Promise<RefundCreditLotResult> {
   whole('amountMicro', input.amountMicro, 1);
@@ -491,7 +498,12 @@ export async function refundCreditLot(store: ICompoundCreditStore, input: Refund
     await trx.lockAccount(input.scopeId);
     const lot = await trx.getLot(input.lotId);
     if (!lot || lot.scopeId !== input.scopeId) return { status: 'refused', reason: 'not_found', refundableMicro: 0 };
-    if (await trx.getEntry(`refund:${input.refundId}:reserved`)) return { status: 'existing', refundableMicro: lotFreeMicro(lot) };
+    const reserved = await trx.getEntry(`refund:${input.refundId}:reserved`);
+    if (reserved) {
+      // Entry ids span every scope: the id answers this request only when it reserved this very refund.
+      const same = reserved.scopeId === input.scopeId && reserved.lotId === lot.lotId && reserved.amountMicro === input.amountMicro;
+      return same ? { status: 'existing', refundableMicro: lotFreeMicro(lot) } : { status: 'refused', reason: 'conflict', refundableMicro: 0 };
+    }
     if (lot.kind !== 'paid') return { status: 'refused', reason: 'not_paid', refundableMicro: 0 };
     if (lot.state !== 'active') return { status: 'refused', reason: 'not_active', refundableMicro: 0 };
     const free = lotFreeMicro(lot);
