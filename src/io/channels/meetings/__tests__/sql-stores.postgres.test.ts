@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createPostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
-import { SqlEventStore, SqlJobStore, SqlOutbox, SqlRunStore, SqlTranscriptStore, meetingStoresDdl } from '../stores/sql.js';
+import { SqlDeliveryFence, SqlEventStore, SqlJobStore, SqlOutbox, SqlRunStore, SqlTranscriptStore, meetingStoresDdl, meetingStoresUpgradeDdl } from '../stores/sql.js';
 import { SecretBox } from '../signing.js';
 import { DuplicateIdempotencyKeyError, FencedError } from '../stores/types.js';
 import { meetingStoreContract } from './store-contract.js';
+import { legacyMeetingStoresDdl } from './fixtures/legacy-meeting-ddl.js';
 import { DEFAULT_RUN_LIMITS, type MeetingRunRecord } from '../types.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
@@ -25,6 +26,15 @@ describeIfPostgres('the Postgres meeting stores', () => {
     for (const t of ['runs', 'jobs', 'turns', 'events', 'outbox', 'run_locks']) await db.exec(`DROP TABLE IF EXISTS ${PREFIX}_${t}`);
   });
   afterAll(async () => { await db.close(); });
+  /** Each column of the six tables under a prefix, as `<table>.<column> <type> <nullable> <default>`, sorted. */
+  const columnsOf = async (prefix: string): Promise<string[]> => {
+    const tables = ['runs', 'jobs', 'turns', 'events', 'outbox', 'run_locks'].map((name) => `${prefix}_${name}`);
+    const rows = await db.all<{ table_name: string; column_name: string; data_type: string; is_nullable: string; column_default: string | null }>(
+      `SELECT table_name, column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = current_schema() AND table_name IN (${tables.map(() => '?').join(', ')})`,
+      tables
+    );
+    return rows.map((r) => `${r.table_name.slice(prefix.length + 1)}.${r.column_name} ${r.data_type} ${r.is_nullable} ${r.column_default ?? ''}`).sort();
+  };
   const run = (id: string): MeetingRunRecord => ({ runId: id, ownerRef: 'a', providerName: 'mock', platform: 'google_meet', state: 'requested', keep: 'account', meetingUrl: 'https://meet.google.com/abc-defg-hij', botName: 'Notes', notice: { text: 'n', version: '1', lateArrivalText: 's' }, stopPhrase: 'stop', limits: DEFAULT_RUN_LIMITS, requestedAt: 1, joinAt: 1, billedSeconds: 0, idempotencyKey: `k-${id}` });
 
   meetingStoreContract('shared Postgres contracts', async () => {
@@ -213,5 +223,36 @@ describeIfPostgres('the Postgres meeting stores', () => {
   it('refuses an adapter that is not Postgres', () => {
     const notPostgres = { kind: 'sqlite', capabilities: new Set(['transactions', 'persistence']) } as unknown as StorageAdapter;
     expect(() => new SqlEventStore({ db: notPostgres, tablePrefix: PREFIX })).toThrow(/Postgres/);
+  });
+  it('upgrades an existing schema twice, preserving old data and round-tripping the new fields', async () => {
+    const prefix = `${PREFIX}_old`;
+    const box = new SecretBox(Buffer.alloc(32, 1));
+    try {
+      await db.exec(legacyMeetingStoresDdl(prefix));
+      // a row as an earlier version wrote it, its url sealed with the run id as context
+      await db.run(`INSERT INTO ${prefix}_runs
+        (run_id, owner_ref, provider_name, platform, state, keep, meeting_url, bot_name, notice_text, notice_version, notice_late_text, stop_phrase, limits_json, requested_at, join_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ['old', 'owner', 'mock', 'google_meet', 'requested', 'account', box.seal('https://meet.google.com/abc-defg-hij', 'old'), 'Notes', 'notice', '1', 'notice', 'stop', JSON.stringify(DEFAULT_RUN_LIMITS), 1, 1]);
+      await db.transaction((tx) => tx.exec(meetingStoresUpgradeDdl(prefix)));
+      await db.transaction((tx) => tx.exec(meetingStoresUpgradeDdl(prefix)));
+      // every column a fresh schema has, with its type, nullability and default
+      expect(await columnsOf(prefix)).toEqual(await columnsOf(PREFIX));
+      const runs = new SqlRunStore({ db, tablePrefix: prefix, box });
+      expect((await runs.get('old'))?.botName).toBe('Notes');
+      await runs.update('old', { lastReportAt: 100, lastUsageAt: 90, lastUsageSourceAt: 80, reportedSeconds: 60, creationPending: true, creationContext: 'opaque-host-data' });
+      expect(await runs.get('old')).toMatchObject({ lastReportAt: 100, lastUsageAt: 90, lastUsageSourceAt: 80, reportedSeconds: 60, creationPending: true, creationContext: 'opaque-host-data' });
+      const raw = await db.get<{ creation_context: string }>(`SELECT creation_context FROM ${prefix}_runs WHERE run_id = ?`, ['old']);
+      expect(raw?.creation_context).not.toContain('opaque-host-data');
+      const fences = new SqlDeliveryFence({ db, tablePrefix: prefix });
+      await fences.fence('old');
+      expect(await new SqlDeliveryFence({ db, tablePrefix: prefix }).isFenced('old')).toBe(true);
+      // the sealed context is bound to its column as well as its run: moved into the url's place, it does not open
+      await db.run(`UPDATE ${prefix}_runs SET meeting_url = creation_context WHERE run_id = ?`, ['old']);
+      await expect(runs.get('old')).rejects.toThrow();
+      expect(() => meetingStoresUpgradeDdl('Bad prefix')).toThrow();
+    } finally {
+      for (const name of ['runs', 'jobs', 'turns', 'events', 'outbox', 'run_locks']) await db.exec(`DROP TABLE IF EXISTS ${prefix}_${name}`);
+    }
   });
 });
