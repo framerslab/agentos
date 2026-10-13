@@ -111,7 +111,22 @@ describe('embedText OpenAI-compatible batches', () => {
   });
 
   it('rejects an input exceeding the byte bound without sending it', async () => {
-    await expect(embedText({ input: 'x'.repeat(300001) })).rejects.toThrow(RangeError);
+    await expect(embedText({ input: 'x'.repeat(300001) })).rejects.toThrow(
+      new RangeError('Embedding input at index 0 is 300001 UTF-8 bytes and exceeds the 300,000 UTF-8 byte request bound.'),
+    );
     expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(recordAgentOSUsage).toHaveBeenCalledWith(expect.objectContaining({
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    }));
+  });
+
+  it('rejects an oversized input after 2048 short inputs before sending any request', async () => {
+    await expect(embedText({ input: [...inputs(2048), '界'.repeat(100001)] })).rejects.toThrow(
+      new RangeError('Embedding input at index 2048 is 300003 UTF-8 bytes and exceeds the 300,000 UTF-8 byte request bound.'),
+    );
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(recordAgentOSUsage).toHaveBeenCalledWith(expect.objectContaining({
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    }));
   });
 });

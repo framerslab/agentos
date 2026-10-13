@@ -557,6 +557,15 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           embeddings = [];
           reportedModel = resolved.modelId;
           usage = { promptTokens: 0, totalTokens: 0 };
+          metricUsage = usage;
+          // Reject the whole input list before any batch can incur charges.
+          const inputSizes = inputArray.map((input, index) => {
+            const bytes = encoder.encode(input).byteLength;
+            if (bytes > 300_000) {
+              throw new RangeError(`Embedding input at index ${index} is ${bytes} UTF-8 bytes and exceeds the 300,000 UTF-8 byte request bound.`);
+            }
+            return bytes;
+          });
           let offset = 0;
           try {
             // Preserve the provider's handling of an empty input array.
@@ -566,10 +575,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
               let bytes = 0;
               while (offset < inputArray.length && batch.length < maxInputs) {
                 const input = inputArray[offset];
-                const inputBytes = encoder.encode(input).byteLength;
-                if (inputBytes > 300_000) {
-                  throw new RangeError('An embedding input exceeds the 300,000 UTF-8 byte request bound.');
-                }
+                const inputBytes = inputSizes[offset];
                 if (bytes + inputBytes > 300_000) break;
                 batch.push(input);
                 bytes += inputBytes;
