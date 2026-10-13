@@ -40,7 +40,10 @@ export interface HoldRates {
   fallbacks: readonly RateSnapshot[];
 }
 
-/** Orders a scope's lots for allocation; lots it leaves out are not used. */
+/**
+ * Orders the lots a new hold may take; lots it leaves out are not used. The ledger hands it only the scope's lots that
+ * {@link isLotEligible} admits at `at`, so no ordering can fund a hold from an expired, disputed, closed or spent lot.
+ */
 export type AllocationPolicy = (lots: readonly CreditLotRow[], at: number) => CreditLotRow[];
 
 /** A lot's free balance: what is neither consumed, held, refunded nor retired. */
@@ -64,6 +67,11 @@ export const promotionsFirstPolicy: AllocationPolicy = (lots, at) => {
   const paid = eligible.filter((l) => l.kind === 'paid').sort(tie);
   return [...promotions, ...paid];
 };
+
+/** The scope's lots a new hold may take at `at`, in the policy's order: the policy orders the eligible ones alone. */
+function allocatableLots(lots: readonly CreditLotRow[], at: number, policy: AllocationPolicy): CreditLotRow[] {
+  return policy(lots.filter((lot) => isLotEligible(lot, at)), at);
+}
 
 /**
  * The supplier-day key every reservation locks before it reads the open supplier liability. That liability spans every
@@ -153,11 +161,11 @@ export interface CreditBalance {
   lots: Array<{ lotId: string; kind: CreditLotKind; freeMicro: number; heldMicro: number; expiresAt: number | null; state: CreditLotRow['state'] }>;
 }
 
-/** The scope's balance at `at`: available counts only the lots the policy would allocate from. */
+/** The scope's balance at `at`: available counts only the eligible lots the policy would allocate from. */
 export async function creditBalance(store: ICompoundCreditStore, scopeId: string, at: number, policy: AllocationPolicy = promotionsFirstPolicy): Promise<CreditBalance> {
   return store.withTransaction(async (trx) => {
     const lots = await trx.listLots(scopeId);
-    const eligible = policy(lots, at);
+    const eligible = allocatableLots(lots, at, policy);
     return {
       availableMicro: eligible.reduce((sum, lot) => sum + lotFreeMicro(lot), 0),
       heldMicro: lots.reduce((sum, lot) => sum + lot.heldMicro, 0),
@@ -218,7 +226,7 @@ export async function reserveCompoundCredit(store: ICompoundCreditStore, input: 
       return { status: 'existing', hold: existing, allocations: await trx.listAllocations(existing.holdId), liability };
     }
     if (!account) return { status: 'refused', reason: 'no_account', availableMicro: 0, liability };
-    const ordered = policy(await trx.listLots(input.scopeId), input.at);
+    const ordered = allocatableLots(await trx.listLots(input.scopeId), input.at, policy);
     const availableMicro = ordered.reduce((sum, lot) => sum + lotFreeMicro(lot), 0);
     if (account.frozen) return { status: 'refused', reason: 'account_frozen', availableMicro, liability };
     if (availableMicro < liability.customerMicro) return { status: 'refused', reason: 'insufficient_credit', availableMicro, liability };
