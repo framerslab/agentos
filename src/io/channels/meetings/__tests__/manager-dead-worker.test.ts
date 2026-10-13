@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { harness } from './manager-harness.js';
 import { MeetingManager } from '../MeetingManager.js';
 import { MeetingRoom } from '../MeetingRoom.js';
+import type { IRunStore } from '../stores/types.js';
 
 /** A run in the call with capture open. */
 async function joined(h: ReturnType<typeof harness>, key = 'k1'): Promise<string> {
@@ -196,5 +197,22 @@ describe('a worker the manager cannot reach', () => {
     for (const usageSilenceMs of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {
       expect(() => new MeetingManager({ managerId: 'm2', stores: h.stores, room: new MeetingRoom(h.rooms), usageSilenceMs, reportUrlFor: (id, p) => `https://product.test/events/${p}/${id}` }), String(usageSilenceMs)).toThrow(RangeError);
     }
+  });
+
+  it('refuses a usage silence over a run store without updateWith, and takes that store without one', () => {
+    const h = harness();
+    const runs = h.stores.runs;
+    // a run store written before updateWith existed: every other method, as the in-memory store answers it
+    const older: IRunStore = {
+      insert: (run) => runs.insert(run),
+      get: (runId) => runs.get(runId),
+      update: (runId, patch, expectState) => runs.update(runId, patch, expectState),
+      replace: (run) => runs.replace(run),
+      list: (filter) => runs.list(filter),
+      findByIdempotencyKey: (ownerRef, key) => runs.findByIdempotencyKey(ownerRef, key),
+    };
+    const build = (usageSilenceMs?: number) => new MeetingManager({ managerId: 'm2', stores: { ...h.stores, runs: older }, room: new MeetingRoom(h.rooms), usageSilenceMs, reportUrlFor: (id, p) => `https://product.test/events/${p}/${id}` });
+    expect(() => build(120_000)).toThrow(TypeError);
+    expect(() => build()).not.toThrow();
   });
 });
