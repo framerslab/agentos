@@ -205,13 +205,18 @@ export interface SqlSpendMeterOptions {
   retry?: SpendRetryPolicy;
   /**
    * Asked by {@link SqlSpendMeter.reconcile} for each expired reservation on a meter without `resolveExpired`, except
-   * one made with `requireFence` or deferred before, which such a meter leaves reserved.
+   * one made with `requireFence` or deferred before, which such a meter leaves reserved. Its answer settles the
+   * reservation only if, when the pass writes it, the reservation is still the attempt asked about, still past its
+   * lease and still unfenced: one an opted-in pass defers, or a heartbeat renews, while it is asked stays reserved.
    */
   resolveUnknown?(reservation: { operationId: string; accountId: string; period: string; units: number }): SpendUnknownResolution | Promise<SpendUnknownResolution>;
   /**
    * Asked by {@link SqlSpendMeter.reconcile} for each expired reservation, in place of `resolveUnknown` and
    * `unknownAfterLease`: consumed, released, or deferred until `retryAt` with its evidence, which stays reserved and
    * counted. A resolver that throws defers the reservation for one lease; it never falls through to a default outcome.
+   * An answer is written only to the attempt it was asked about, so an operation released and retried while it is
+   * asked keeps the retry reserved under its own lease; a consumed or released answer is also dropped when a heartbeat
+   * renewed the lease meanwhile.
    */
   resolveExpired?(reservation: SpendExpiredReservation): SpendExpiryDecision | Promise<SpendExpiryDecision>;
   /** How an expired reservation settles when the product cannot tell. Default `release`: the person is not charged for a turn nobody saw finish. */
@@ -270,6 +275,13 @@ interface ReservationRow {
 
 /** The one period every row of a window meter carries. The window's own statements name it literally. */
 const WINDOW_PERIOD = 'window';
+
+/**
+ * The SQL test that a reserved row carries no fence: its `outcome` is neither `fence_required` (made with
+ * `requireFence`) nor `deferred` (deferred before), the markers that leave it to a reconcile with `resolveExpired` or
+ * to an explicit settle. An ordinary reserved row's `outcome` is NULL.
+ */
+const UNFENCED = `(outcome IS NULL OR outcome NOT IN ('fence_required', 'deferred'))`;
 
 /** Rolls a reservation's transaction back when the allowance has no room; caught inside the same try, never retried. */
 class AllowanceExhausted extends Error {
@@ -513,18 +525,32 @@ export class SqlSpendMeter implements ISpendMeter {
   }
 
   async settle(req: SpendSettleRequest): Promise<SpendSettleResult> {
+    return this.settleOnce(req);
+  }
+
+  /**
+   * Settles an operation's reservation in one transaction, moving it only from the state just read. With `pass` it is
+   * the settlement a {@link reconcile} pass decided for an expired reservation it read: the move is made only while the
+   * row is still that attempt and still past its lease at the pass's `now` and, with `unfenced`, still carries no
+   * fence: a retry or a heartbeat made while the pass asked its resolver stands, and with `unfenced` so does a deferral
+   * by an opted-in pass.
+   */
+  private settleOnce(req: SpendSettleRequest, pass?: { attempt: number; unfenced: boolean }): Promise<SpendSettleResult> {
     const now = req.now ?? Date.now();
     const { meter, reservations } = this.tables;
+    const guard = pass ? ` AND attempts = ? AND expires_at <= ?${pass.unfenced ? ` AND ${UNFENCED}` : ''}` : '';
     return this.run(() =>
       this.db.transaction(async (trx): Promise<SpendSettleResult> => {
         const row = await trx.get<ReservationRow>(`SELECT operation_id, account_id, period, units, state FROM ${reservations} WHERE operation_id = ?`, [req.operationId]);
         if (!row) return { status: 'not_found' };
         const move = transition(row.state, req.outcome);
         if (!move) return { status: 'already_settled', state: row.state };
-        // the move only from the state just read: a concurrent settle that got there first leaves nothing to change
+        // the move only from the state just read: a concurrent settle that got there first leaves nothing to change.
+        // A reconcile's move also names the attempt it decided about and its lease, and on Postgres a row another
+        // transaction changed meanwhile is tested again in its new version, so a deferral that committed first stands.
         const changed = await trx.run(
-          `UPDATE ${reservations} SET state = ?, outcome = ?, settled_at = ?, usage_json = ? WHERE operation_id = ? AND state = ?`,
-          [move.to, req.outcome, now, req.usage ? JSON.stringify(req.usage) : null, req.operationId, row.state],
+          `UPDATE ${reservations} SET state = ?, outcome = ?, settled_at = ?, usage_json = ? WHERE operation_id = ? AND state = ?${guard}`,
+          [move.to, req.outcome, now, req.usage ? JSON.stringify(req.usage) : null, req.operationId, row.state, ...(pass ? [pass.attempt, now] : [])],
         );
         if (!changed.changes) {
           const current = await trx.get<{ state: SpendReservationState }>(`SELECT state FROM ${reservations} WHERE operation_id = ?`, [req.operationId]);
@@ -569,22 +595,35 @@ export class SqlSpendMeter implements ISpendMeter {
    * Settles the expired reservations, at most `limit` a pass (default 100), the earliest expiry first. With
    * `resolveExpired` the host decides each one: consumed, released, or deferred, which keeps it reserved and counted
    * with its evidence and its next check on its row. Without it an ordinary reservation settles as `resolveUnknown` and
-   * `unknownAfterLease` say, and one made with `requireFence`, or deferred before, stays reserved and counts as pending.
+   * `unknownAfterLease` say, and one made with `requireFence`, or deferred before, stays reserved and counts as pending;
+   * such a pass takes the ordinary reservations into its page first, so the fenced holds it leaves never take the
+   * place of one it can settle.
+   *
+   * Each decision is written to the reservation as the pass read it, in one conditional statement: the same attempt,
+   * still reserved and, for a settlement, still past its lease at `now` and, without `resolveExpired`, still unfenced.
+   * So a deferral never lands on a newer attempt of the operation, and a settlement never takes a reservation that was
+   * retried, renewed by a heartbeat, or, on a meter without `resolveExpired`, fenced by an opted-in pass while the
+   * resolver was asked; the pass drops that decision.
    */
   async reconcile(opts: { now?: number; limit?: number } = {}): Promise<SpendReconcileResult> {
     const now = opts.now ?? Date.now();
     const limit = Math.max(1, Math.trunc(opts.limit ?? 100));
+    const resolveExpired = this.opts.resolveExpired;
+    // a pass without resolveExpired settles no fenced hold, so its fenced rows go to the end of the page: they keep
+    // their expiry from pass to pass, and first in the page they would hold back every ordinary reservation behind them
+    const order = resolveExpired ? 'expires_at' : `CASE WHEN ${UNFENCED} THEN 0 ELSE 1 END, expires_at`;
     const due = await this.run(() =>
       this.db.all<ReservationRow & { outcome: string | null; usage_json: string | null }>(
-        `SELECT operation_id, account_id, period, units, state, outcome, usage_json FROM ${this.tables.reservations}
-          WHERE state = 'reserved' AND expires_at <= ? ORDER BY expires_at LIMIT ${limit}`,
+        `SELECT operation_id, account_id, period, units, state, attempts, outcome, usage_json FROM ${this.tables.reservations}
+          WHERE state = 'reserved' AND expires_at <= ? ORDER BY ${order} LIMIT ${limit}`,
         [now],
       ),
     );
-    const resolveExpired = this.opts.resolveExpired;
     const out: SpendReconcileResult = resolveExpired ? { consumed: 0, released: 0, pending: 0, deferred: 0 } : { consumed: 0, released: 0, pending: 0 };
     for (const r of due) {
       const fenced = r.outcome === 'fence_required' || r.outcome === 'deferred';
+      // the attempt this pass read: a release and a retry while a resolver is asked make another, which no decision here is about
+      const attempt = num(r.attempts);
       let outcome: SpendOutcome;
       if (resolveExpired) {
         const prior = deferralOf(r.usage_json);
@@ -599,10 +638,11 @@ export class SqlSpendMeter implements ISpendMeter {
           const evidence = decision.evidence ?? prior?.evidence ?? null;
           const deferred = await this.run(() =>
             this.db.transaction((trx) =>
-              trx.run(`UPDATE ${this.tables.reservations} SET outcome = 'deferred', expires_at = ?, usage_json = ? WHERE operation_id = ? AND state = 'reserved'`, [
+              trx.run(`UPDATE ${this.tables.reservations} SET outcome = 'deferred', expires_at = ?, usage_json = ? WHERE operation_id = ? AND state = 'reserved' AND attempts = ?`, [
                 retryAt,
                 JSON.stringify({ deferral: { count: (prior?.count ?? 0) + 1, evidence } }),
                 r.operation_id,
+                attempt,
               ]),
             ),
           );
@@ -627,7 +667,7 @@ export class SqlSpendMeter implements ISpendMeter {
         }
         outcome = resolution === 'consumed' ? 'consumed' : resolution === 'released' ? 'released' : this.opts.unknownAfterLease === 'consume' ? 'consumed' : 'released';
       }
-      const settled = await this.settle({ operationId: r.operation_id, outcome, now });
+      const settled = await this.settleOnce({ operationId: r.operation_id, outcome, now }, { attempt, unfenced: !resolveExpired });
       if (settled.status !== 'settled') out.pending += settled.state === 'reserved' ? 1 : 0;
       else if (outcome === 'consumed') out.consumed += 1;
       else out.released += 1;
