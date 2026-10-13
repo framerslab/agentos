@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { harness } from './manager-harness.js';
 import { MeetingManager } from '../MeetingManager.js';
 import { MeetingRoom } from '../MeetingRoom.js';
@@ -89,6 +89,41 @@ describe('a worker the manager cannot reach', () => {
     expect(h.entitlement.released).toEqual(['res-1']);
   });
 
+  it('kills the worker a dispatch starts after the silence ended its run while the provider was answering', async () => {
+    const h = harness({ usageSilenceMs: 120_000 });
+    const sent = await h.manager.sendBot(h.request);
+    if (!sent.ok) throw new Error('send failed');
+    const runId = sent.run.runId;
+    let commandsBefore = -1;
+    h.provider.beforeDispatch = async () => {
+      // the provider takes the threshold to answer, and the upkeep ends the run meanwhile, before its worker exists
+      h.clock.advance(120_000);
+      await h.manager.reconcile();
+      commandsBefore = h.provider.commands.get(runId)?.length ?? 0;
+    };
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed' });
+    expect(h.provider.alive.has(runId)).toBe(true); // the provider started the worker after the run ended
+    expect(commandsBefore).toBeGreaterThanOrEqual(0);
+    expect(h.provider.commands.get(runId)?.slice(commandsBefore)).toEqual([{ name: 'kill' }]);
+  });
+
+  it('keeps a run whose usage report is taken after the pass read it as silent, and sends its worker no kill', async () => {
+    const h = harness({ usageSilenceMs: 120_000 });
+    const runId = await joined(h);
+    h.clock.advance(120_000);
+    const list = h.stores.runs.list.bind(h.stores.runs);
+    vi.spyOn(h.stores.runs, 'list').mockImplementation(async (filter) => {
+      const listed = await list(filter);
+      // the worker's report is taken after the pass read the row, whose silence as read has reached the threshold
+      if (filter.states?.includes('in_call')) await h.report(runId, 'usage', { seconds: 60 });
+      return listed;
+    });
+    await h.manager.reconcile();
+    expect(h.provider.commands.get(runId)?.some((c) => c.name === 'kill')).toBe(false);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'in_call', lastUsageAt: h.clock.now(), reportedSeconds: 60 });
+  });
+
   it('a duplicate usage event and stop-monitor heartbeats cannot extend the usage clock', async () => {
     const h = harness({ usageSilenceMs: 120_000 });
     const runId = await joined(h);
@@ -101,6 +136,59 @@ describe('a worker the manager cannot reach', () => {
     expect(await h.stores.runs.get(runId)).toMatchObject({ lastUsageAt: at, reportedSeconds: 60 });
     await h.report(runId, 'usage', { seconds: 90 }, h.clock.now());
     expect(await h.stores.runs.get(runId)).toMatchObject({ lastUsageAt: h.clock.now(), reportedSeconds: 90 });
+  });
+
+  it('of two usage reports applied at once, the older one never writes its time or a smaller total over the newer one\'s', async () => {
+    const h = harness({ usageSilenceMs: 120_000 });
+    const runId = await joined(h);
+    const older = h.clock.now();
+    h.clock.advance(60_000);
+    const newer = h.clock.now();
+    const append = h.stores.events.append.bind(h.stores.events);
+    let raced = false;
+    vi.spyOn(h.stores.events, 'append').mockImplementation(async (event) => {
+      if (!raced && event.type === 'bot:usage' && event.at === older) {
+        raced = true;
+        // the newer report is taken whole while the older one is between its read of the run and its write
+        await h.report(runId, 'usage', { seconds: 120 }, newer);
+      }
+      return append(event);
+    });
+    await h.report(runId, 'usage', { seconds: 60 }, older);
+    expect(raced).toBe(true);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ lastUsageAt: newer, lastUsageSourceAt: newer, reportedSeconds: 120 });
+  });
+
+  it('keeps on the done row the total a done report gave after a left report that gave none, the total it settled', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    h.clock.advance(60_000);
+    let fails = 1;
+    h.entitlement.settleThrows = () => fails-- > 0;
+    await h.report(runId, 'left', { reason: 'ended' }); // no total: the cleanup bills the time in the call, and its settle fails
+    expect((await h.stores.runs.get(runId))?.state).toBe('left');
+    await h.report(runId, 'done', { seconds: 90 });
+    expect(h.entitlement.settled).toEqual([['res-1', 90]]);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', billedSeconds: 90, reportedSeconds: 90 });
+  });
+
+  it('ends every silent run though the provider never answers their kills', async () => {
+    const h = harness({ usageSilenceMs: 120_000 });
+    const runIds = [await joined(h, 'k1'), await joined(h, 'k2')];
+    const command = h.provider.command.bind(h.provider);
+    const sent = vi.spyOn(h.provider, 'command').mockImplementation((runId, c) => (c.name === 'kill' ? new Promise<void>(() => {}) : command(runId, c)));
+    h.clock.advance(120_000);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const held = new Promise<string>((resolve) => { timer = setTimeout(() => resolve('held by a kill'), 1_000); });
+    try {
+      expect(await Promise.race([h.manager.reconcile().then(() => 'returned'), held])).toBe('returned');
+    } finally {
+      clearTimeout(timer);
+    }
+    for (const runId of runIds) {
+      expect(sent).toHaveBeenCalledWith(runId, { name: 'kill' });
+      expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed' });
+    }
   });
 
   it('refuses a usage silence that is not a finite number of milliseconds above zero', () => {

@@ -243,15 +243,23 @@ export class SqlRunStore implements IRunStore {
   }
   /** Re-reads and patches under the anchor, setting the content fence atomically on entry to purging. */
   async update(runId: string, patch: Partial<MeetingRunRecord>, expectState?: MeetingRunState | readonly MeetingRunState[]): Promise<MeetingRunRecord | undefined> {
+    return this.updateWith(runId, (current) => {
+      if (expectState !== undefined) {
+        const allowed = Array.isArray(expectState) ? expectState : [expectState as MeetingRunState];
+        if (!allowed.includes(current.state)) return undefined;
+      }
+      return patch;
+    });
+  }
+  /** Re-reads the row under the anchor and writes the patch `patchFor` makes of it in the same transaction, setting the content fence there too on entry to purging. */
+  async updateWith(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined> {
     return this.opts.db.transaction(async (trx) => {
       await lockRun(trx, this.t.locks, runId);
       const r = await trx.get<Record<string, unknown>>(`SELECT * FROM ${this.t.runs} WHERE run_id = ? FOR UPDATE`, [runId]);
       if (!r) return undefined;
       const current = this.fromRow(r);
-      if (expectState !== undefined) {
-        const allowed = Array.isArray(expectState) ? expectState : [expectState as MeetingRunState];
-        if (!allowed.includes(current.state)) return undefined;
-      }
+      const patch = patchFor(current);
+      if (patch === undefined) return undefined;
       if (patch.state === 'purging') {
         await trx.run(`UPDATE ${this.t.locks} SET fenced_at = COALESCE(fenced_at, ?) WHERE run_id = ?`, [Date.now(), runId]);
       }

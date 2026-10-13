@@ -5,7 +5,7 @@ import type { MeetingRunRecord } from '../types.js';
 
 /** The stores one contract case runs against, made fresh for each case, and how to close them. */
 export interface ContractStores {
-  runs: IRunStore;
+  runs: IRunStore & Required<Pick<IRunStore, 'updateWith'>>;
   jobs: IJobStore;
   transcript: ITranscriptStore & Required<Pick<ITranscriptStore, 'appendNext'>>;
   events: IEventStore;
@@ -205,6 +205,17 @@ export function meetingStoreContract(name: string, make: () => Promise<ContractS
         expect(cleared?.leaveCommandedAt).toBe(5);
         expect(cleared?.captureSuspendedAt).toBeUndefined();
         expect(cleared?.aloneSince).toBeUndefined();
+      });
+      it('decides an updateWith patch on the row as the store holds it, and writes nothing when the patch is none', async () => {
+        const r = stores.runs;
+        await r.insert({ runId: 'r1', ownerRef: 'a', providerName: 'mock', platform: 'google_meet', state: 'in_call', keep: 'none', meetingUrl: 'u', botName: 'b', notice: { text: 'n', version: '1', lateArrivalText: 's' }, stopPhrase: 'stop', limits: { waitingRoomMs: 1, aloneMs: 1, totalMs: 1 }, requestedAt: 0, joinAt: 0, billedSeconds: 0 });
+        await r.update('r1', { reportedSeconds: 60, lastUsageSourceAt: 5 });
+        // a patch decided on an older read would lower the total: decided on the stored row, it keeps the larger one
+        expect(await r.updateWith('r1', (current) => ({ reportedSeconds: Math.max(current.reportedSeconds ?? 0, 30) }))).toMatchObject({ state: 'in_call', reportedSeconds: 60 });
+        expect(await r.updateWith('r1', (current) => (current.lastUsageSourceAt !== undefined && current.lastUsageSourceAt >= 5 ? undefined : { lastUsageSourceAt: 5, state: 'left' }))).toBeUndefined();
+        expect(await r.get('r1')).toMatchObject({ state: 'in_call', reportedSeconds: 60, lastUsageSourceAt: 5 });
+        expect(await r.updateWith('r1', () => ({ state: 'left', leftAt: 7 }))).toMatchObject({ state: 'left', leftAt: 7, reportedSeconds: 60 });
+        expect(await r.updateWith('r9', () => ({ reportedSeconds: 1 }))).toBeUndefined();
       });
     });
 
