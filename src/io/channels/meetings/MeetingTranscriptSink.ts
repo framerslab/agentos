@@ -3,8 +3,9 @@
  *
  * The sink a listen session writes one run's transcript to: each final is
  * stored as the run's next turn and recorded by the manager as a
- * `bot:transcript` event. A turn that reaches a run behind the fence, or a run
- * that is over, is dropped.
+ * `bot:transcript` event. A turn that reaches a run behind the fence, a run
+ * that is over, or a run whose capture has not started, is dropped: the
+ * capture interlock does not rest on the provider alone.
  */
 import type { ITranscriptInputSink, TranscriptInput, TranscriptTurn } from '../../voice-pipeline/types.js';
 import type { MeetingManager } from './MeetingManager.js';
@@ -24,7 +25,7 @@ export class MeetingTranscriptSink implements ITranscriptInputSink {
   async append(turn: TranscriptTurn): Promise<void> {
     if (turn.runId !== this.options.runId) throw new Error('a sink writes one run');
     const run = await this.options.manager.getRun(turn.runId);
-    if (!run || run.state === 'purging' || run.state === 'done' || run.state === 'failed') return;
+    if (!run || run.state === 'purging' || run.state === 'done' || run.state === 'failed' || run.captureStartedAt === undefined) return;
     try {
       await this.options.transcript.append(turn);
       await this.options.manager.recordTranscript(turn);
@@ -33,11 +34,11 @@ export class MeetingTranscriptSink implements ITranscriptInputSink {
     }
   }
 
-  /** Stores the final as the run's next turn and records its `bot:transcript` event; undefined when a fence or a run that is over drops it. */
+  /** Stores the final as the run's next turn and records its `bot:transcript` event; undefined when a fence, a run that is over or a run whose capture has not started drops it. */
   async appendNext(input: TranscriptInput): Promise<TranscriptTurn | undefined> {
     if (input.runId !== this.options.runId) throw new Error('a sink writes one run');
     const run = await this.options.manager.getRun(input.runId);
-    if (!run || run.state === 'purging' || run.state === 'done' || run.state === 'failed') return undefined;
+    if (!run || run.state === 'purging' || run.state === 'done' || run.state === 'failed' || run.captureStartedAt === undefined) return undefined;
     try {
       const turn = await this.options.transcript.appendNext!(input);
       return await this.options.manager.recordTranscript(turn) ? turn : undefined;

@@ -415,6 +415,22 @@ describe('the limits, the meter and the ends', () => {
     expect(await h.stores.runs.get(kept)).toBeDefined();
     expect(await h.manager.transcriptSink(runId).appendNext({ runId, at: 3, text: 'late after eviction' })).toBeUndefined();
   });
+  it('drops a turn for a run whose capture has not started: the interlock does not rest on the provider alone', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 2 });
+    await h.report(runId, 'notice_posted'); // no heartbeat yet: capture is closed
+    const sink = h.manager.transcriptSink(runId);
+    expect(await sink.appendNext({ runId, at: 1, text: 'heard before capture opened' })).toBeUndefined();
+    expect(await h.manager.recordTranscript({ runId, seq: 7, turnId: `${runId}:7`, at: 1, text: 'stored by a caller' })).toBe(false);
+    expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
+    expect(h.seen.some((e) => e.type === 'bot:transcript')).toBe(false);
+    await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1); // capture opens
+    expect((await sink.appendNext({ runId, at: 2, text: 'heard once capture opened' }))?.seq).toBe(1);
+  });
   it('the transcript sink writes the turn and the manager records bot:transcript; behind the fence it drops the turn', async () => {
     const h = harness();
     const runId = await joined(h);

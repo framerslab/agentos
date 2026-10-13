@@ -1258,10 +1258,13 @@ export class MeetingManager {
 
   // ── The transcript ──
 
-  /** A turn the listen session wrote: a `bot:transcript` event, stored and forwarded, unless the run is behind the fence or over. */
+  /**
+   * A turn the listen session wrote: a `bot:transcript` event, stored and forwarded, unless the run is behind the fence
+   * or over, or its capture has not started (a provider that passed audio before `startCapture` is not taken at its word).
+   */
   async recordTranscript(turn: TranscriptTurn): Promise<boolean> {
     const run = await this.stores.runs.get(turn.runId);
-    if (!run || run.state === 'purging' || TERMINAL_RUN_STATES.has(run.state) || await this.stores.transcript.isFenced(turn.runId)) return false;
+    if (!run || run.state === 'purging' || TERMINAL_RUN_STATES.has(run.state) || run.captureStartedAt === undefined || await this.stores.transcript.isFenced(turn.runId)) return false;
     await this.emit('bot:transcript', run, { seq: turn.seq, turnId: turn.turnId, text: turn.text, speaker: turn.speaker, startMs: turn.startMs, endMs: turn.endMs }, `${turn.runId}:transcript:${turn.seq}`, turn.at);
     return true;
   }
