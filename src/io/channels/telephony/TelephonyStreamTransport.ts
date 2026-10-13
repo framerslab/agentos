@@ -338,7 +338,10 @@ class LegacyTelephonyStreamTransport extends EventEmitter implements IStreamTran
 
 /** Optional generation stamp, structurally compatible with the voice pipeline generation. */
 export interface TelephonyPlaybackGeneration { workerGeneration: number; inferenceGeneration: number; transportEpoch: number }
-/** Telephone output accepts declared PCM16 containers; compression is explicitly refused. */
+/**
+ * Telephone output accepts declared PCM16 containers; compression is explicitly refused.
+ * `sendAudio()` takes any `EncodedAudioChunk`, as `IStreamTransport` does, and refuses one outside this type before output.
+ */
 export type TelephonyAudioChunk = EncodedAudioChunk & { container?: 'raw' | 'wav'; generation?: TelephonyPlaybackGeneration };
 /** Audio with carrier timing kept separate from the transport's monotonic relative clock. */
 export interface TelephonyAudioFrame extends AudioFrame { sourceTimestampMs?: number; mediaChunk?: number; sequenceNumber?: number }
@@ -350,7 +353,7 @@ export interface TelephonySocket {
   readonly bufferedAmount?: number;
 }
 /** Returns the chunk's PCM16 samples, reading a WAV container once; refuses anything else before output. */
-function telephonePcm(chunk: TelephonyAudioChunk): Buffer {
+function telephonePcm(chunk: EncodedAudioChunk): Buffer {
   const fail = (): never => { throw new Error('unsupported or inconsistent telephony audio format'); };
   if (chunk.format !== 'pcm' || ![8000, 16000, 24000, 48000].includes(chunk.sampleRate) || chunk.audio.length > 196608) return fail();
   const bytes = chunk.audio; let pcm = bytes;
@@ -464,8 +467,11 @@ export class TelephonyStreamTransport extends EventEmitter implements IStreamTra
       catch (error) { clearTimeout(timer); reject(error); }
     });
   }
-  /** One producer at a time; completion means its carrier mark was received before cancellation. */
-  async sendAudio(chunk: TelephonyAudioChunk): Promise<void> {
+  /**
+   * One producer at a time; completion means its carrier mark was received before cancellation.
+   * A chunk outside {@link TelephonyAudioChunk}, such as one in an MP3 or Ogg container, is refused before output.
+   */
+  async sendAudio(chunk: EncodedAudioChunk): Promise<void> {
     if (this.legacy) return this.legacy.sendAudio(chunk);
     if (this.current !== 'open' || !this.streamSid) throw new Error('carrier output unavailable');
     if (this.pending || this.sending || this.clearing) throw new Error('concurrent producer');

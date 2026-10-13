@@ -42,7 +42,7 @@ describe('telephony PCM boundary', () => {
   it('rejects compressed, mislabeled, truncated and misaligned chunks without output', async () => {
     const ws = new CarrierSocket(); const t = new TelephonyStreamTransport(ws, new TwilioMediaStreamParser({ protocol: 'carrier' }), { protocol: 'carrier', authorizeStart: () => true }); ws.emit('message', startFrame());
     const raw = audioChunk();
-    for (const bad of [{ ...raw, format: 'mp3' as const }, { ...raw, format: 'opus' as const }, { ...raw, audio: wav(raw.audio, 16000) }, { ...raw, container: 'wav' as const, audio: Buffer.from('RIFF') }, { ...raw, audio: Buffer.alloc(3) }, { ...raw, durationMs: 500 }, { ...raw, sampleRate: 44100 }]) await expect(t.sendAudio(bad)).rejects.toThrow('audio format');
+    for (const bad of [{ ...raw, format: 'mp3' as const }, { ...raw, format: 'opus' as const }, { ...raw, container: 'mp3' as const }, { ...raw, container: 'ogg' as const }, { ...raw, audio: wav(raw.audio, 16000) }, { ...raw, container: 'wav' as const, audio: Buffer.from('RIFF') }, { ...raw, audio: Buffer.alloc(3) }, { ...raw, durationMs: 500 }, { ...raw, sampleRate: 44100 }]) await expect(t.sendAudio(bad)).rejects.toThrow('audio format');
     expect(ws.sent).toEqual([]); t.close();
   });
   it('reads little-endian samples from an unaligned view without reinterpreting a header', async () => {
