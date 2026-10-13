@@ -674,9 +674,11 @@ export class MeetingManager {
         // the waiting-room limit counts from here, the bot's arrival in the waiting room; admission moves joinedAt on to the call
         await this.move(run, 'waiting_room', { joinedAt: this.reportedAt(event.at) }, 'bot:waiting_room', undefined, event);
         return true;
-      case 'in_call':
-        await this.move(run, 'in_call_notice_pending', { joinedAt: this.reportedAt(event.at), participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, this.reportedAt(event.at)) }, 'bot:in_call', undefined, event);
+      case 'in_call': {
+        const at = this.reportedAt(event.at);
+        await this.move(run, 'in_call_notice_pending', { joinedAt: at, participantCount: event.data?.participantCount, ...this.aloneTimer(run, event.data?.participantCount, at) }, 'bot:in_call', undefined, event);
         return true;
+      }
       case 'notice_posted': {
         // the notice alone does not open capture: the stop monitor must report a real observation after it (the interlock)
         const moved = await this.move(run, 'in_call', { noticePostedAt: this.reportedAt(event.at) }, 'bot:notice_posted', { version: run.notice.version }, event);
@@ -984,8 +986,9 @@ export class MeetingManager {
 
   /**
    * After `left` (no purge): settle or release, drop what is not kept, delete the room, remove the job, and only then
-   * `done`. A run that ended with `permission_denied` is purged instead, whatever its Keep. A step that throws leaves the run in `left` with `cleanupPending`, and the next tick calls this again; the
-   * entitlement hook's `settle` and `release` are idempotent, so a retry after a half-done cleanup changes nothing twice.
+   * `done`. A run that ended with `permission_denied` is purged instead, whatever its Keep. A step that throws leaves the
+   * run in `left` with `cleanupPending`, and the next tick calls this again; the entitlement hook's `settle` and
+   * `release` are idempotent, so a retry after a half-done cleanup changes nothing twice.
    */
   private async complete(run: MeetingRunRecord, reportedSeconds: number | undefined): Promise<void> {
     const current = await this.stores.runs.get(run.runId);
