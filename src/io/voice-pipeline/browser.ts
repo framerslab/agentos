@@ -13,6 +13,7 @@
  * @example
  * ```typescript
  * import { TranscriptLedger, transcriptEventFromLiveKit } from '@framers/agentos/io/voice-pipeline/browser';
+ * import { StreamingSTTChain, type StreamingSTTSession } from '@framers/agentos/io/voice-pipeline/browser';
  * ```
  */
 
@@ -38,3 +39,42 @@ export { phraseHeard, type HeardLine, type PhraseHeardOptions, type PhraseHeardR
 
 // The entries a speech-to-text chain is built from, and their parser; sttEntries.ts imports nothing.
 export { STT_CHAIN_VENDORS, parseSttEntry, type SttChainVendor, type SttEntry } from './sttEntries.js';
+
+// Every type of the streaming contracts; types.ts holds no run-time code.
+export type * from './types.js';
+
+// The emitter the contracts extend, and the browser-safe sessions' base.
+export { VoiceEventEmitter, type EventEmitterLike, type VoiceEventListener } from './VoiceEventEmitter.js';
+
+// The speech-to-text chain and its parts.
+export {
+  StreamingSTTChain,
+  type StreamingSTTChainOptions,
+  type ProviderSelectedEvent,
+  type ProviderFailedEvent,
+  type ProviderFailoverEvent,
+} from './providers/StreamingSTTChain.js';
+export {
+  CircuitBreaker,
+  type BreakerState,
+  type CircuitBreakerOptions,
+  type StateChangeEvent,
+} from './CircuitBreaker.js';
+export {
+  VoiceMetricsReporter,
+  type VoiceMetricEvent,
+  type VoiceMetricListener,
+} from './VoiceMetricsReporter.js';
+export {
+  VoicePipelineError,
+  AggregateVoiceError,
+  type HealthErrorClass,
+  type VoicePipelineErrorInit,
+} from './VoicePipelineError.js';
+export {
+  defaultCapabilities,
+  supportsLanguage,
+  type HealthyProvider,
+  type ProviderCapabilities,
+  type HealthCheckResult,
+} from './HealthyProvider.js';
