@@ -4,8 +4,8 @@ import ts from 'typescript';
 import { expect, it } from 'vitest';
 
 const fixed = [
-  'src/api/generateText.ts', 'src/api/model.ts', 'src/api/observers.ts',
-  'src/api/runtime/spendBudget.ts', 'src/api/runtime/tool-emulation/loop.ts',
+  'src/api/generateText.ts', 'src/api/streamText.ts', 'src/api/model.ts', 'src/api/observers.ts',
+  'src/api/runtime/approval-gate.ts', 'src/api/runtime/spendBudget.ts', 'src/api/runtime/tool-emulation/loop.ts',
   'src/cognition/rag/EmbeddingManager.ts', 'src/core/safety/LLMProviderHealthRegistry.ts',
   'src/core/llm/providers/AIModelProviderManager.ts', 'src/core/llm/routing/ModelRouter.ts',
 ];

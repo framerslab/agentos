@@ -12,6 +12,7 @@ import {
   configureAgentOSObservability, startAgentOSSpan, withAgentOSSpan,
   recordExceptionOnActiveSpan, getActiveTraceMetadata, recordAgentOSTurnMetrics,
   shouldExportAgentOSLogsToOtel, shouldIncludeTraceIdsInAgentOSLogs,
+  isAgentOSTracingEnabled, isAgentOSMetricsEnabled, shouldIncludeTraceInAgentOSResponses,
 } from '../../../safety/evaluation/observability/otel.js';
 import { fireLlmUsageObserver, setGlobalLlmObserver } from '../../../api/observers.js';
 
@@ -82,12 +83,19 @@ describe('content-safe server telemetry', () => {
       expect(custom[level]).not.toHaveBeenCalled();
     }
     for (const spy of spies) expect(spy).not.toHaveBeenCalled();
-    configureAgentOSObservability({
+    // Every setting asks for its signal, and every guard still answers no.
+    expect(configureAgentOSObservability({
       enabled: true, tracing: { enabled: true, includeTraceInResponses: true },
       logging: { includeTraceIds: true, exportToOtel: true }, metrics: { enabled: true },
+    })).toMatchObject({
+      tracingEnabled: true, includeTraceInResponses: true, includeTraceIdsInLogs: true,
+      exportOtelLogs: true, metricsEnabled: true,
     });
     expect(shouldExportAgentOSLogsToOtel()).toBe(false);
     expect(shouldIncludeTraceIdsInAgentOSLogs()).toBe(false);
+    expect(isAgentOSTracingEnabled()).toBe(false);
+    expect(isAgentOSMetricsEnabled()).toBe(false);
+    expect(shouldIncludeTraceInAgentOSResponses()).toBe(false);
     expect(startAgentOSSpan('fixture-secret-span')).toBeNull();
     expect(getActiveTraceMetadata()).toBeNull();
     const error = new Error('fixture-secret-exception');
