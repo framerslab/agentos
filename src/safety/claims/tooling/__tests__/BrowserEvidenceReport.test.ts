@@ -123,6 +123,15 @@ describe('browser evidence reports', () => {
     expect(requiredPassed(run, 'main', signsIn)).toBe(false);
   });
 
+  it('reports a non-zero exit beside a missing or malformed report, but an unknown exit only beside a readable one', () => {
+    const crashed = reconcileInvocations(manifest([expected()]), [observed(null, { exitCode: 137 })]);
+    expect(crashed.problems.map((p) => p.code)).toEqual(['missing_report', 'nonzero_exit']);
+    expect(crashed.problems[1]).toEqual({ code: 'nonzero_exit', invocationId: 'main', detail: 'exit code 137' });
+    const broken = (exitCode: number | null) => reconcileInvocations(manifest([expected()]), [observed({ suites: 'no' }, { exitCode })]).problems.map((p) => p.code);
+    expect(broken(1)).toEqual(['malformed_report', 'nonzero_exit']);
+    expect(broken(null)).toEqual(['malformed_report']);
+  });
+
   it('checks every instance of a test seen twice in one project, and passes no test seen twice or under a shared spec id', () => {
     const hidden = report([spec('s1', 'signs in', [test('engine-a', 'unexpected', [result('failed')])]), spec('s2', 'signs in', [test('engine-a', 'expected', [result('passed')])])], { expected: 1, unexpected: 1 });
     const run = reconcileInvocations(manifest([expected()]), [observed(hidden)]);
