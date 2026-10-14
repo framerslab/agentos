@@ -7,11 +7,14 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
 import { MemoryStore } from '../MemoryStore.js';
+import { Memory } from '../../../io/facade/Memory.js';
+import { MemoryAddTool } from '../../../io/tools/MemoryAddTool.js';
 import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
 import type { IKnowledgeGraph } from '../../graph/knowledge/IKnowledgeGraph.js';
 import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager.js';
@@ -157,5 +160,58 @@ describe('memory_traces.scope_id', () => {
       expect(rows.filter((row) => row.scope_id !== (JSON.parse(row.metadata).scopeId ?? ''))).toEqual([]);
       expect(rows.filter((row) => row.scope_id !== '')).toHaveLength(433);
     }
+  });
+});
+
+describe("the facade's writers set scope_id", () => {
+  const closers: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    while (closers.length) await closers.pop()!();
+  });
+  async function facade(): Promise<Memory> {
+    const memory = await Memory.createSqlite(tempFile(), { brainId: 'facade' });
+    closers.push(() => memory.close());
+    return memory;
+  }
+  // Ordered by content: two writes can share a millisecond, and the facade's trace ids are random.
+  const rowsOf = (memory: Memory) =>
+    (memory as unknown as { _brain: Brain })._brain.all<{ content: string; scope: string; scope_id: string }>(
+      'SELECT content, scope, scope_id FROM memory_traces WHERE deleted = 0 ORDER BY content',
+    );
+
+  it('remember() files its scope id in the column, and a call that names none files under ""', async () => {
+    const memory = await facade();
+    await memory.remember('Ana likes tea.', { scope: 'user', scopeId: 'ana' });
+    await memory.remember('The office closes at six.');
+    expect(await rowsOf(memory)).toEqual([
+      { content: 'Ana likes tea.', scope: 'user', scope_id: 'ana' },
+      { content: 'The office closes at six.', scope: 'user', scope_id: '' },
+    ]);
+  });
+
+  it("ingest() files its chunks under '', the scope id they carry", async () => {
+    const memory = await facade();
+    const dir = path.dirname(tempFile());
+    const filePath = path.join(dir, 'notes.txt');
+    await fsp.writeFile(filePath, 'The quick brown fox jumps over the lazy dog. '.repeat(30), 'utf8');
+    expect((await memory.ingest(filePath)).tracesCreated).toBeGreaterThanOrEqual(1);
+    const rows = await rowsOf(memory);
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    expect(rows.every((row) => row.scope_id === '')).toBe(true);
+  });
+
+  it("memory_add files the scope id it resolves from the call's context", async () => {
+    const memory = await facade();
+    const brain = (memory as unknown as { _brain: Brain })._brain;
+    const add = new MemoryAddTool(brain);
+    const context = { gmiId: 'g', personaId: 'tutor', userContext: { userId: 'ana' } as never, sessionData: { sessionId: 's-1' } };
+    expect((await add.execute({ content: 'Ana prefers mornings.', scope: 'user' }, context)).success).toBe(true);
+    expect((await add.execute({ content: 'Thread note.', scope: 'thread' }, context)).success).toBe(true);
+    expect((await add.execute({ content: 'Persona note.', scope: 'persona' }, context)).success).toBe(true);
+    expect(await rowsOf(memory)).toEqual([
+      { content: 'Ana prefers mornings.', scope: 'user', scope_id: 'ana' },
+      { content: 'Persona note.', scope: 'persona', scope_id: 'ana::tutor' },
+      { content: 'Thread note.', scope: 'thread', scope_id: 's-1' },
+    ]);
   });
 });
