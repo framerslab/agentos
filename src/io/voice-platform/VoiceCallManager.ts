@@ -12,13 +12,19 @@ export const CALL_END_MESSAGES: Readonly<Record<CallEndReason, string>> = {
   participant_disconnected: 'The participant disconnected.', setup_timeout: 'The call could not connect in time.', provider_failure: 'A speech or reasoning provider failed.',
   transport_failure: 'The media connection failed.', sink_failure: 'Transcript delivery failed.', worker_lost: 'The call worker stopped responding.', deployment: 'The call ended for maintenance.', purged: 'Call content was deleted.',
 };
-/** Canonical JSON digest of validated JSON values; object key order cannot change an operation's identity. */
+/**
+ * Canonical JSON digest of validated JSON values; object key order cannot change an operation's identity.
+ * An object member whose value is `undefined` is omitted, as JSON omits it, so a value and its stored JSON form share one digest.
+ */
 export function canonicalVoiceHash(value: unknown): string {
   const encode = (item: unknown): string => {
     if (item === null || typeof item === 'boolean' || typeof item === 'string') return JSON.stringify(item);
     if (typeof item === 'number' && Number.isFinite(item)) return JSON.stringify(item);
     if (Array.isArray(item)) return `[${item.map(encode).join(',')}]`;
-    if (item && typeof item === 'object') return `{${Object.keys(item).sort().map((key) => `${JSON.stringify(key)}:${encode((item as Record<string, unknown>)[key])}`).join(',')}}`;
+    if (item && typeof item === 'object') {
+      const record = item as Record<string, unknown>;
+      return `{${Object.keys(record).filter((key) => record[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${encode(record[key])}`).join(',')}}`;
+    }
     throw new Error('non-JSON operation input');
   };
   return createHash('sha256').update(encode(value)).digest('hex');
