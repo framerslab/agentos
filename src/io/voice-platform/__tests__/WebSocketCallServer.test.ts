@@ -125,11 +125,15 @@ describe('authenticated WebSocket media over HTTP upgrade', () => {
         if (binary) return; const message = JSON.parse(String(data));
         if (message.type === 'generation') notices.push(message.generation.inferenceGeneration);
       });
-      const g = f.call.binding.generation;
-      // A turn and the interruption right after it record two generations within one socket write.
-      await f.call.binding.recordGeneration({ ...g, inferenceGeneration: g.inferenceGeneration + 1 });
-      await f.call.binding.recordGeneration({ ...g, inferenceGeneration: g.inferenceGeneration + 2 });
-      await vi.waitFor(() => expect(notices).toEqual([g.inferenceGeneration + 1, g.inferenceGeneration + 2]));
+      const start = f.call.binding.generation.inferenceGeneration;
+      // A transcriber gap interrupts the reply the turn has just begun, so the interruption's generation is recorded
+      // before the socket has finished writing the turn's.
+      const sendControl = f.call.binding.sendControl.bind(f.call.binding);
+      vi.spyOn(f.call.binding, 'sendControl').mockImplementationOnce(async (message) => {
+        f.call.stt.emit('stt:gap', { lostMs: 20 }); return sendControl(message);
+      });
+      f.call.turn();
+      await vi.waitFor(() => expect(notices).toEqual([start + 1, start + 2]));
       expect(ws.readyState).toBe(WebSocket.OPEN); expect(f.call.binding.state).toBe('open');
     } finally { await f.close(); }
   });
