@@ -37,21 +37,6 @@ AgentOS is an open-source TypeScript framework for AI agents that **remember, ad
 
 ---
 
-<div align="center">
-
-<picture>
-  <source srcset="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-forge-demo.webp" type="image/webp" />
-  <img src="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-forge-demo.gif"
-       alt="Three AgentOS agents with distinct HEXACO personalities collaborate on a code review, forge a new tool at runtime once they hit a gap their static toolkit can't cover, the LLM judge approves the spec, and all three invoke it on the next turn."
-       width="900" />
-</picture>
-
-<sub>Runtime tool forging + multi-agent collaboration. Reproduce with <code>node <a href="https://github.com/framerslab/agentos/blob/master/examples/emergent-hierarchical-spawning.mjs">examples/emergent-hierarchical-spawning.mjs</a></code>.</sub>
-
-</div>
-
----
-
 ## Install
 
 ```bash
@@ -244,7 +229,7 @@ Three layers, highest priority first: inline `apiKey` on the call, a module-leve
 
 - **`agent()`**: lightweight stateful agent. Prompts, sessions, personality, hooks, tools, memory through `memoryProvider` hooks. With `runtime: 'gmi'` (or `gmi()`), every session is a GMI built from the same options, with cognitive memory, sentiment tracking and metaprompts per its `cognition` profile.
 - **`agency()`**: multi-agent teams built from `agent()` members, with HITL approval gates, run limits, structured output, provenance and, on the hierarchical strategy, specialists spawned at runtime. Its `guardrails` and `rag` options are reported or logged and not applied, and `voice.enabled` serves the agency as JSON text over a local WebSocket. It wires no channels; channel adapters run on the full runtime or with `ChannelRouter`.
-- **`generateText()` / `streamText()` / `generateObject()` / `generateImage()` / `generateVideo()` / `generateMusic()` / `performOCR()` / `embedText()`**: low-level multi-modal helpers with native tool calling.
+- **`generateText()` / `streamText()` / `generateObject()` / `generateImage()` / `generateVideo()` / `generateMusic()` / `performOCR()` / `embedText()`**: low-level multi-modal helpers. `generateText()` and `streamText()` take `tools`; the other helpers take none.
 - **`workflow()` / `AgentGraph` / `mission()`**: three orchestration authoring APIs over one graph runtime.
 
 Provider fallback is on by default for `generateText()`, `streamText()`, `agent()` and `agency()`: when a call fails with a retryable error, it is retried on the other providers whose keys are in the environment. Pass `fallbackProviders: []` to turn it off, or a list to set the chain yourself. The GMIs of the full runtime (`processRequest()`) call their provider without a fallback chain. The GMIs of `agent({ runtime: 'gmi' })` call it through a completion gateway built from the agent's `fallbackProviders`, which moves to the next provider when a call fails with a retryable error before its first output, and not after it.
