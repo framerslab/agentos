@@ -52,6 +52,17 @@ describe('capture evidence', () => {
     ]);
     expect(validateCaptureSet({ manifests: all.slice(1), bytes, requirement })).toEqual(['390x844@2 light: no capture']);
   });
+
+  it('names a capture id used twice, and supports nothing when the requirement names no size or look', async () => {
+    // One picture under one id, offered as both looks of a size.
+    const twice = { ...all[1]!, captureId: all[0]!.captureId, sha256: all[0]!.sha256 };
+    expect(validateCaptureSet({ manifests: [all[0]!, twice, all[2]!, all[3]!], bytes, requirement })).toEqual(['listen-390x844-light: named twice']);
+    expect(validateCaptureSet({ manifests: [], bytes: {}, requirement: { ...requirement, sizes: [] } })).toEqual(['the requirement names no size']);
+    expect(validateCaptureSet({ manifests: [], bytes: {}, requirement: { ...requirement, looks: [] } })).toEqual(['the requirement names no look']);
+    const empty = { manifests: [], bytes: {}, requirement };
+    const outcome = await captureAdapter({ requirementFor: () => ({ ...requirement, sizes: [], looks: [] }) }).check({ kind: 'capture', ref: 'listen', digest: digestOf(empty), payload: empty }, { claimId: 'example-feature.primary', sentenceDigest: 'x', requirements: [] }, new AbortController().signal);
+    expect(outcome).toEqual({ verdict: 'contradicted', basis: 'deterministic', detail: 'the requirement names no size; the requirement names no look' });
+  });
 });
 
 describe('fixtures and drivers', () => {
