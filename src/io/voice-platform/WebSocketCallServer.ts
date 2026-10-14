@@ -132,14 +132,14 @@ export class WebSocketCallServer {
   }
   private accept(ws: WebSocket, binding: CallTransportBinding, origin: string): void {
     let phase: 'first' | 'authenticating' | 'open' | 'closed' = 'first'; let lastSequence = 0;
-    let physical: SocketPlaybackTransport | undefined; let acceptedEpoch = 0; let generationPending = false;
+    let physical: SocketPlaybackTransport | undefined; let acceptedEpoch = 0;
     const deadline = setTimeout(() => ws.terminate(), 5000);
     const terminate = (): void => { ws.terminate(); };
+    // Each notice is written as its generation is recorded, so it reaches the client ahead of every message of that
+    // generation, however quickly the next one follows; send() still bounds the buffered bytes and each write's deadline.
     const generation = (value: VoiceGeneration): void => {
       if (phase !== 'open') return;
-      if (generationPending) { terminate(); return; }
-      generationPending = true;
-      void send(ws, JSON.stringify({ type: 'generation', generation: value })).catch(terminate).finally(() => { generationPending = false; });
+      void send(ws, JSON.stringify({ type: 'generation', generation: value })).catch(terminate);
     };
     binding.on('generation', generation);
     ws.on('error', terminate);
