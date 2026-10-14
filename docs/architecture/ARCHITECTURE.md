@@ -1132,7 +1132,7 @@ When `observability.metrics.enabled` is true, AgentOS exports ([`otel.ts`](https
 
 ### Logging
 
-[`PinoLogger`](https://github.com/framerslab/agentos/blob/master/src/core/logging/PinoLogger.ts) injects `trace_id` and `span_id` fields when `observability.logging.includeTraceIds` is true. Optional `exportToOtel` emits `LogRecord` objects via `@opentelemetry/api-logs`.
+[`PinoLogger`](https://github.com/framerslab/agentos/blob/master/src/core/logging/PinoLogger.ts) injects `trace_id` and `span_id` fields when `observability.logging.includeTraceIds` is true. Optional `exportToOtel` emits `LogRecord` objects via `@opentelemetry/api-logs`. With content-safe telemetry on (`enableContentSafeTelemetry` from `@framers/agentos/logging`), it writes no record: the host's sink receives one fixed event per record instead, and spans, metrics and log export stay off.
 
 ### Evaluation Framework
 
