@@ -67,6 +67,45 @@ describe('loadMoonshineWasm', () => {
     expect(failed?.cause).toBe(missing);
   });
 
+  it('names how to install the package when a page cannot resolve its bare specifier', async () => {
+    const unresolved = new TypeError(
+      'Failed to resolve module specifier \'@moonshine-ai/moonshine-wasm\'. Relative references must start with either "/", "./", or "../".'
+    );
+    let failed: (Error & { cause?: unknown }) | undefined;
+    try {
+      await loadMoonshineWasm(async () => {
+        throw unresolved;
+      });
+    } catch (err) {
+      failed = err as Error & { cause?: unknown };
+    }
+    expect(failed?.message).toBe(
+      '@moonshine-ai/moonshine-wasm is required for the Moonshine browser speech-to-text provider. Install it: npm install @moonshine-ai/moonshine-wasm'
+    );
+    expect(failed?.cause).toBe(unresolved);
+  });
+
+  it("carries the import's own message when the import fails for another reason, keeping its error as the cause", async () => {
+    const failures = [
+      new TypeError('Failed to fetch dynamically imported module: https://cdn.example.com/moonshine/index.js'),
+      new SyntaxError("Unexpected token '<'"),
+    ];
+    for (const failure of failures) {
+      let failed: (Error & { cause?: unknown }) | undefined;
+      try {
+        await loadMoonshineWasm(async () => {
+          throw failure;
+        });
+      } catch (err) {
+        failed = err as Error & { cause?: unknown };
+      }
+      expect(failed?.message).toBe(
+        `@moonshine-ai/moonshine-wasm could not be imported for the Moonshine browser speech-to-text provider: ${failure.message}`
+      );
+      expect(failed?.cause).toBe(failure);
+    }
+  });
+
   it('imports the package by its name', async () => {
     const asked: string[] = [];
     const module = { marker: true };
@@ -436,6 +475,25 @@ for (const thread of THREADS) describe(`MoonshineBrowserSTT on the ${thread} thr
     warn.mockRestore();
   });
 
+  it('completes a line once when a transcript listener flushes in the middle of a pass, and a flush from its final shares that flush', async () => {
+    const { session, stream, log } = await open();
+    stream.passes.push([line('g', 'Is it', 0, 0.3)]);
+    stream.passes.push([line('g', 'Is it done?', 0, 0.6)]);
+    const flushes: Array<Promise<void>> = [];
+    // A listener that completes a line once it reads as a question, and asks again on the final.
+    session.on('transcript', (event: TranscriptEvent) => {
+      if (event.isFinal || event.text.endsWith('?')) flushes.push(session.flush());
+    });
+    session.pushAudio(frame(500));
+    session.pushAudio(frame(500));
+    await settle();
+    await Promise.all(flushes);
+    session.close();
+    expect(log.events).toEqual(['interim g Is it', 'interim g Is it done?', 'final g Is it done?', 'close']);
+    expect(stream.stops).toBe(1);
+    expect(stream.starts).toBe(2);
+  });
+
   it('takes the confidence from the timed words, and their offsets from the line start', async () => {
     const { session, stream, log } = await open();
     const words = [
@@ -615,6 +673,39 @@ describe('MoonshineBrowserSTT: the model, its loading and the provider', () => {
     expect(log.events).toEqual(['close']);
     expect(FakeWorkerHost.created[0].closed).toBe(true);
     await expect(stt.startSession()).rejects.toThrow(/disposed/);
+  });
+
+  for (const thread of THREADS) {
+    it(`rejects the start as disposed and closes its stream when dispose lands as the stream opens, on the ${thread} thread`, async () => {
+      const stt = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), thread, model: 'moonshine-small' });
+      const starting = stt.startSession();
+      // Lands once the model has loaded, before the stream starts.
+      void stt.load().then(() => stt.dispose());
+      await expect(starting).rejects.toThrow('MoonshineBrowserSTT: disposed');
+      expect(newestStream().closed).toBe(true);
+      expect(heldSessions(stt)).toBe(0);
+    });
+  }
+
+  it("gives wasmBaseUrl one trailing slash, as the package's worker resolves its files against it", async () => {
+    for (const wasmBaseUrl of [
+      'https://cdn.example.com/moonshine/dist',
+      'https://cdn.example.com/moonshine/dist/',
+      'https://cdn.example.com/moonshine/dist//',
+    ]) {
+      const stt = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), model: 'moonshine-small', wasmBaseUrl });
+      await stt.load();
+      stt.dispose();
+    }
+    const packageFolder = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), model: 'moonshine-small' });
+    await packageFolder.load();
+    packageFolder.dispose();
+    expect(FakeWorkerHost.created.map((host) => host.wasmBaseUrl)).toEqual([
+      'https://cdn.example.com/moonshine/dist/',
+      'https://cdn.example.com/moonshine/dist/',
+      'https://cdn.example.com/moonshine/dist/',
+      undefined,
+    ]);
   });
 
   it('reports in its health check what this scope lacks, and nothing once a single-thread build is served', async () => {

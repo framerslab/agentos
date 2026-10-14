@@ -122,6 +122,30 @@ describe('StreamingSTTChain — init-time fallback', () => {
     });
   });
 
+  it('keeps two providers with the same providerId apart in its breaker and its events', async () => {
+    const { CircuitBreaker } = await import('../CircuitBreaker.js');
+    const breaker = new CircuitBreaker({ failureThreshold: 1, windowMs: 60_000, cooldownMs: 60_000 });
+    // Two sizes of one on-device model: the larger cannot load here, the smaller can.
+    const larger = mkFakeProvider({ id: 'device', startBehavior: 'fail', failMessage: 'out of memory', priority: 10 });
+    const smaller = mkFakeProvider({ id: 'device', startBehavior: 'success', priority: 20 });
+    const startLarger = vi.spyOn(larger, 'startSession');
+    const failed = vi.fn();
+    const selected = vi.fn();
+    const chain = new StreamingSTTChain([larger, smaller], {
+      breaker,
+      onProviderFailed: failed,
+      onProviderSelected: selected,
+    });
+    await chain.startSession();
+    await chain.startSession();
+    expect(startLarger).toHaveBeenCalledTimes(1);
+    expect(failed.mock.calls.map(([event]) => event.providerId)).toEqual(['device#1']);
+    expect(selected.mock.calls.map(([event]) => event.providerId)).toEqual(['device#2', 'device#2']);
+    expect(breaker.isAvailable('device#1')).toBe(false);
+    expect(breaker.isAvailable('device#2')).toBe(true);
+    expect(chain.currentProviderId).toBe('device');
+  });
+
   it('exposes providers getter for introspection', () => {
     const a = mkFakeProvider({ id: 'a', startBehavior: 'success', priority: 30 });
     const b = mkFakeProvider({ id: 'b', startBehavior: 'success', priority: 5 });
@@ -388,6 +412,60 @@ describe('StreamingSTTChain: the mid-utterance failover facade', () => {
     return { samples: new Float32Array(8_000), sampleRate: 16_000, timestamp: Date.now() };
   }
 
+  /**
+   * A provider whose sessions, as the Moonshine browser provider's do, retract the interim text of a line still open
+   * with an empty final when they close, before their 'close'. `show()` emits an interim line and keeps it open.
+   */
+  function retractingProvider(id: string, priority: number) {
+    const sessions: Array<StreamingSTTSession & { show(event: TranscriptEvent): void }> = [];
+    const provider: IStreamingSTT & HealthyProvider = {
+      providerId: id,
+      priority,
+      capabilities: defaultCapabilities({ languages: ['en'] }),
+      isStreaming: true,
+      async startSession() {
+        const emitter = new EventEmitter();
+        let open: TranscriptEvent | undefined;
+        const session = Object.assign(emitter, {
+          show(event: TranscriptEvent) {
+            open = event;
+            emitter.emit('transcript', event);
+          },
+          pushAudio() {},
+          async flush() {},
+          close() {
+            const line = open;
+            open = undefined;
+            if (line) emitter.emit('transcript', { ...line, text: '', words: [], isFinal: true });
+            emitter.emit('close');
+          },
+        }) as unknown as StreamingSTTSession & { show(event: TranscriptEvent): void };
+        sessions.push(session);
+        return session;
+      },
+      async healthCheck() {
+        return { ok: true };
+      },
+    };
+    return { provider, sessions };
+  }
+
+  /** A line of a session's own, from the start of its audio to `endMs`. */
+  function lineEvent(itemId: string, text: string, endMs: number, isFinal = false): TranscriptEvent {
+    return { text, confidence: 1, words: [], isFinal, itemId, startMs: 0, endMs };
+  }
+
+  /** What a facade emits, in order: each transcript as `interim|final <itemId> <text>`, then 'error' and 'close'. */
+  function watch(facade: StreamingSTTSession): string[] {
+    const seen: string[] = [];
+    facade.on('transcript', (event: TranscriptEvent) =>
+      seen.push(`${event.isFinal ? 'final' : 'interim'} ${event.itemId} ${event.text}`)
+    );
+    facade.on('error', () => seen.push('error'));
+    facade.on('close', () => seen.push('close'));
+    return seen;
+  }
+
   it('forwards transcripts and speech events from the active session', async () => {
     const a = recordingProvider('a', 10);
     const chain = new StreamingSTTChain([a.provider], { enableMidUtteranceFailover: true });
@@ -458,5 +536,82 @@ describe('StreamingSTTChain: the mid-utterance failover facade', () => {
     expect(b.sessions).toHaveLength(0);
     expect(failover).not.toHaveBeenCalled();
     expect(closed).toHaveBeenCalledOnce();
+  });
+
+  it("passes on the empty final a session emits as the caller closes it, before the facade's close", async () => {
+    const a = retractingProvider('a', 10);
+    const chain = new StreamingSTTChain([a.provider], { enableMidUtteranceFailover: true });
+    const facade = await chain.startSession();
+    const seen = watch(facade);
+    a.sessions[0].show(lineEvent('1', 'Half a', 300));
+    facade.close();
+    expect(seen).toEqual(['interim 1 Half a', 'final 1 ', 'close']);
+  });
+
+  it('passes on the empty final when a frame over the bound ends the facade: the error, the final, then close', async () => {
+    const a = retractingProvider('a', 10);
+    const chain = new StreamingSTTChain([a.provider], { enableMidUtteranceFailover: true });
+    const facade = await chain.startSession();
+    const seen = watch(facade);
+    a.sessions[0].show(lineEvent('1', 'Half a', 300));
+    // Four seconds of audio, past the default 3000 ms bound.
+    await facade.pushAudio({ samples: new Float32Array(64_000), sampleRate: 16_000, timestamp: 0 });
+    expect(seen).toEqual(['interim 1 Half a', 'error', 'final 1 ', 'close']);
+  });
+
+  it('passes on the empty final a failed session emits as the facade switches away from it', async () => {
+    const a = retractingProvider('a', 10);
+    const b = retractingProvider('b', 20);
+    const failover = vi.fn();
+    const chain = new StreamingSTTChain([a.provider, b.provider], {
+      enableMidUtteranceFailover: true,
+      onProviderFailover: failover,
+    });
+    const facade = await chain.startSession();
+    const seen = watch(facade);
+    a.sessions[0].show(lineEvent('1', 'Half a', 300));
+    a.sessions[0].emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+    expect(seen).toEqual(['interim 1 Half a', 'final 1 ']);
+  });
+
+  it("passes on a backup's empty final at close though the failed provider gave a final over the same audio", async () => {
+    const a = retractingProvider('a', 10);
+    const b = retractingProvider('b', 20);
+    const failover = vi.fn();
+    const chain = new StreamingSTTChain([a.provider, b.provider], {
+      enableMidUtteranceFailover: true,
+      onProviderFailover: failover,
+    });
+    const facade = await chain.startSession();
+    const seen = watch(facade);
+    a.sessions[0].emit('transcript', lineEvent('1', 'Hello there.', 800, true));
+    a.sessions[0].emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+    b.sessions[0].show(lineEvent('7', 'Hello', 400));
+    facade.close();
+    expect(seen).toEqual(['final 1 Hello there.', 'interim 7 Hello', 'final 7 ', 'close']);
+  });
+
+  it("drops a backup's repeat of a final when both providers have the same providerId", async () => {
+    const a = recordingProvider('device', 10);
+    const b = recordingProvider('device', 20);
+    const failover = vi.fn();
+    const chain = new StreamingSTTChain([a.provider, b.provider], {
+      enableMidUtteranceFailover: true,
+      onProviderFailover: failover,
+    });
+    const facade = await chain.startSession();
+    const finals: string[] = [];
+    facade.on('transcript', (event: TranscriptEvent) => finals.push(event.text));
+    await facade.pushAudio(halfSecond());
+    const said = lineEvent('1', 'Hello there.', 500, true);
+    a.sessions[0].emit('transcript', said);
+    a.sessions[0].emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+    expect(failover.mock.calls[0][0]).toMatchObject({ from: 'device#1', to: 'device#2' });
+    // The backup transcribes the replayed audio again.
+    b.sessions[0].emit('transcript', { ...said, itemId: '9' });
+    expect(finals).toEqual(['Hello there.']);
   });
 });
