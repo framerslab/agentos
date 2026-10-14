@@ -120,6 +120,40 @@ jobs:
           }
           JS
 
+      - name: Built source derivation store enforces inactive owners
+        run: |
+          node --input-type=module <<'JS'
+          import { randomUUID } from 'node:crypto';
+          import { createPostgresAdapter } from '@framers/sql-storage-adapter';
+          import { sourceDerivationSchema, SqlSourceDerivationStore } from './dist/cognition/library/index.js';
+          const prefix = `bc_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+          const db = createPostgresAdapter({ connectionString: process.env.AGENTOS_TEST_POSTGRES_URL });
+          await db.open();
+          try {
+            for (const statement of sourceDerivationSchema(prefix)) await db.exec(statement);
+            const store = new SqlSourceDerivationStore(db, {
+              tablePrefix: prefix,
+              bindings: {
+                readCurrent: async () => [], purgeResults: async () => {}, purgeSources: async () => {},
+              },
+            });
+            const scope = { tenantId: 'tenant-a', ownerId: 'owner-a' };
+            if (await store.capture(scope) !== null) throw new Error('inactive_owner_admitted');
+            if (await store.activateOwner(scope, async () => false)) throw new Error('authorization_bypassed');
+            await store.activateOwner(scope, async () => true);
+            const ticket = await store.capture(scope);
+            if (!ticket) throw new Error('active_owner_missing');
+            await store.invalidate(scope, { kind: 'owner' }, async () => {}, { disableOwner: true });
+            const result = await store.apply(ticket, async () => { throw new Error('stale_callback_entered'); });
+            if (result.kind !== 'stale') throw new Error('stale_ticket_accepted');
+          } finally {
+            for (const suffix of ['edges', 'results', 'tombstones', 'journal', 'owners']) {
+              await db.exec(`DROP TABLE IF EXISTS "${prefix}_${suffix}" CASCADE`);
+            }
+            await db.close();
+          }
+          JS
+
       - name: Lint
         run: pnpm run lint
 

@@ -1,7 +1,7 @@
 /**
  * @fileoverview The library module: an index of sources over any vector store, a transcript's chunker, the word
- * rule of the lexical legs with a search hit's snippet, a lexical index a device can hold, and the delivery policy of
- * results derived from private sources.
+ * rule of the lexical legs with a search hit's snippet, a lexical index a device can hold, the delivery policy of
+ * results derived from private sources, and their durable store with deletion fences on PostgreSQL.
  * @module agentos/cognition/library
  */
 
@@ -25,3 +25,14 @@ export {
   type SourceDeliverySurface,
   type SourceDeliveryContext,
 } from './SourceDerivations.js';
+export { sourceDerivationSchema } from './sourceDerivationSchema.js';
+export {
+  SqlSourceDerivationStore,
+  type SourceOwnerScope,
+  type SourceFenceTicket,
+  type SourceInvalidation,
+  type SourceDeletionTombstone,
+  type SourceDerivationBindings,
+  type SourceDerivationStoreOptions,
+  type SourceFencedResult,
+} from './SqlSourceDerivationStore.js';
