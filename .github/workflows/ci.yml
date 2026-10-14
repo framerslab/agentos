@@ -194,17 +194,38 @@ jobs:
 
       # The Moonshine browser provider's integration test runs the real
       # @moonshine-ai/moonshine-wasm in Node on its tiny streaming model and a
-      # recorded clip, fetched once and kept in the cache.
+      # recorded clip, fetched once and kept in the cache. The fetch checks each
+      # file against the sha256 pinned here, and the cache key ends in a digest
+      # of the pins, so a copy cached under other pins is never restored. A file
+      # that differs fails the job with its actual sha256; to move to another
+      # model or clip, change its URL and its line together.
+      - name: Pin the Moonshine test model's checksums
+        id: moonshine-sums
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/moonshine-test-model.sha256" <<'SUMS'
+          22ecc949e146c49667fda28d102d4e30749a107dc88a396292aa8f277ef1347c  tiny-streaming-en/adapter.ort
+          143a36667b8d05fd9d04e8c337b7ee121f37ef299aea6b3d82bdb3d3401950b4  tiny-streaming-en/cross_kv.ort
+          8852553f312adb6c9aa4d17418015049b30f412209ee569d336548c0044627de  tiny-streaming-en/decoder_kv.ort
+          a8414e1a5dedf9f2093d7680601dd8a9b0433e7020260eafe0e370ead91134ca  tiny-streaming-en/encoder.ort
+          271a563251f11e6311949530f8025ed4d345c5d69d4ac1efa74093779927d636  tiny-streaming-en/frontend.ort
+          74fe5ddebd63b17caf59e8a3b18c17547ff7bce1642050edbb1c3962674f8950  tiny-streaming-en/streaming_config.json
+          6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d  tiny-streaming-en/tokenizer.bin
+          14a5a09479cab470db7de4fd16c0e18a8a88c03cc6d92a09a658e857ee1f73a5  two_cities_16k.wav
+          SUMS
+          echo "digest=$(sha256sum "$RUNNER_TEMP/moonshine-test-model.sha256" | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
       - name: Cache the Moonshine test model
         uses: actions/cache@v5
         with:
           path: .cache/moonshine
-          key: moonshine-test-tiny-streaming-en-quantized_26_07_30-cd95be77
+          key: moonshine-test-tiny-streaming-en-quantized_26_07_30-cd95be77-${{ steps.moonshine-sums.outputs.digest }}
 
       - name: Fetch the Moonshine test model
         run: |
           set -euo pipefail
           dir=.cache/moonshine
+          sums="$RUNNER_TEMP/moonshine-test-model.sha256"
           mkdir -p "$dir/tiny-streaming-en"
           for f in adapter.ort cross_kv.ort decoder_kv.ort encoder.ort frontend.ort streaming_config.json tokenizer.bin; do
             [ -s "$dir/tiny-streaming-en/$f" ] || curl -fsSL --retry 3 -o "$dir/tiny-streaming-en/$f" \
@@ -212,18 +233,17 @@ jobs:
           done
           [ -s "$dir/two_cities_16k.wav" ] || curl -fsSL --retry 3 -o "$dir/two_cities_16k.wav" \
             "https://raw.githubusercontent.com/moonshine-ai/moonshine/cd95be7728c5141b581a3fb8837742687c06c6d1/test-assets/two_cities_16k.wav"
+          # A file that differs from its pin is deleted, so the next run fetches it again, and the job fails.
+          if ! (cd "$dir" && sha256sum --check --strict "$sums"); then
+            while read -r sum file; do
+              if ! echo "$sum  $dir/$file" | sha256sum --check --status; then
+                echo "::error::$dir/$file has sha256 $(sha256sum "$dir/$file" | cut -d' ' -f1), not the pinned $sum; deleted, so the next run fetches it again"
+                rm -f -- "$dir/$file"
+              fi
+            done < "$sums"
+            exit 1
+          fi
           echo "AGENTOS_TEST_MOONSHINE_DIR=$PWD/$dir" >> "$GITHUB_ENV"
-
-      # The sha256 and the size in bytes of each file the integration test reads.
-      - name: Print the Moonshine test model's checksums and sizes
-        run: |
-          set -euo pipefail
-          cd .cache/moonshine
-          for f in tiny-streaming-en/adapter.ort tiny-streaming-en/cross_kv.ort tiny-streaming-en/decoder_kv.ort \
-              tiny-streaming-en/encoder.ort tiny-streaming-en/frontend.ort tiny-streaming-en/streaming_config.json \
-              tiny-streaming-en/tokenizer.bin two_cities_16k.wav; do
-            echo "$(sha256sum "$f" | cut -d' ' -f1)  $(stat -c %s "$f")  $f"
-          done
 
       - name: Test with coverage
         run: pnpm run test -- --coverage
