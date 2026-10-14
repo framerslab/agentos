@@ -397,4 +397,25 @@ describe('AgentOS tool-result continuations', () => {
     expect(resumed.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
     expect(await rt.pending()).toBeNull();
   });
+
+  it('a continuation that asks the host for a new call stops for exactly that call', async () => {
+    const writeCall: ToolCallRequest = { id: 'call-write-1', name: 'write_file', arguments: { path: 'notes.txt' } };
+    const host = hostToolGmi({ isFinal: false, responseText: 'Now I write the file.', toolCalls: [writeCall] });
+    const rt = await runtime('conv-next-external');
+    const { request } = await rt.pauseOnRead(host);
+
+    const continuation = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+
+    expect(host.handleToolResult).toHaveBeenCalledTimes(1);
+    const requests = continuation.filter((r) => isActionableToolCallRequestChunk(r));
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ streamId: request.streamId, toolCalls: [writeCall] });
+    expect(continuation.at(-1)).toBe(requests[0]);
+    expect(continuation.some((r) => r.type === AgentOSResponseChunkType.FINAL_RESPONSE)).toBe(false);
+    const saved = await rt.pending();
+    expect(saved?.streamId).toBe(request.streamId);
+    expect(saved?.toolCalls).toEqual([writeCall]);
+  });
 });
