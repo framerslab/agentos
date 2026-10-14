@@ -30,8 +30,8 @@ export interface CoverageCase {
 /**
  * Every case of every claim.
  *
- * @param claims - Each claim once, with no empty dimension.
- * @throws Error on a claim named twice or an empty dimension.
+ * @param claims - Each claim once, with no empty dimension and no value twice within one dimension.
+ * @throws Error on a claim named twice, an empty dimension or a value named twice within one dimension.
  */
 export function enumerateClaimCases(claims: readonly CoverageClaim[]): CoverageCase[] {
   const seen = new Set<string>();
@@ -41,6 +41,9 @@ export function enumerateClaimCases(claims: readonly CoverageClaim[]): CoverageC
     seen.add(claim.claimId);
     for (const [name, values] of [['states', claim.states], ['modes', claim.modes], ['placements', claim.placements]] as const) {
       if (values.length === 0) throw new Error(`enumerateClaimCases: ${claim.claimId} has no ${name}`);
+      // A repeated value would give two cases with one key and count the same check twice.
+      const repeated = values.find((value, index) => values.indexOf(value) !== index);
+      if (repeated !== undefined) throw new Error(`enumerateClaimCases: ${claim.claimId} names ${repeated} twice in its ${name}`);
     }
     for (const state of claim.states) {
       for (const mode of claim.modes) {
@@ -99,16 +102,21 @@ export interface ScenarioPlan {
 /**
  * Counts the scenario cases each route runs and checks them against the budget.
  *
- * @param families - The table.
- * @param routes - Each route's families.
+ * @param families - The table, each family id once.
+ * @param routes - Each route's families, each route once.
  * @param matrix - The browser matrix.
  * @param budget - The most distinct cases one route may run.
+ * @returns The counts and every problem: a family id or a route named twice, a family the table lacks, a case id in
+ * two families, a case that names no claim, an empty matrix dimension and a route over the budget.
  */
 export function planScenarios(families: readonly ScenarioFamily[], routes: readonly RouteSelection[], matrix: BrowserMatrix, budget: number): ScenarioPlan {
   const problems: string[] = [];
   const byId = new Map<string, ScenarioFamily>();
   const caseIds = new Set<string>();
   for (const family of families) {
+    // A later family with the same id replaces the earlier one in the lookup, so the earlier one's cases would leave
+    // the count without a word.
+    if (byId.has(family.id)) problems.push(`the family id ${family.id} appears more than once in the table`);
     byId.set(family.id, family);
     for (const c of family.cases) {
       if (caseIds.has(c.id)) problems.push(`the case id ${c.id} appears in more than one family`);
@@ -118,7 +126,11 @@ export function planScenarios(families: readonly ScenarioFamily[], routes: reado
   }
   if (matrix.engines.length === 0 || matrix.looks.length === 0 || matrix.sizes.length === 0) problems.push('the browser matrix has an empty dimension');
   const perRoute: RouteCount[] = [];
+  const routesSeen = new Set<string>();
   for (const selection of routes) {
+    // The budget holds per route: a route split over two selections would have each half checked on its own.
+    if (routesSeen.has(selection.route)) problems.push(`${selection.route}: the route appears in more than one selection`);
+    routesSeen.add(selection.route);
     let raw = 0;
     const distinct = new Map<string, string>();
     for (const familyId of selection.families) {
