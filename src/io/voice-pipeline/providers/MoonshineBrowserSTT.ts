@@ -211,8 +211,13 @@ export interface MoonshineWasmModule {
  *
  * @param importer - How to import a module; the default is a dynamic `import()`.
  * @returns The module.
- * @throws {Error} Naming the package and how to install it when the import
- *   fails; the import's own error is its `cause`.
+ * @throws {Error} Naming the package when the import fails, with the import's
+ *   own error as its `cause`: how to install it when the package is missing
+ *   (Node's `ERR_MODULE_NOT_FOUND`, or a `TypeError` that names the bare
+ *   specifier, as a browser gives for one it cannot resolve), otherwise the
+ *   import's own message, as for a failed fetch of the module a page maps the
+ *   package to, a syntax error or a refusal by the page's Content Security
+ *   Policy.
  */
 export async function loadMoonshineWasm(
   importer: (specifier: string) => Promise<unknown> = (specifier) =>
@@ -221,13 +226,29 @@ export async function loadMoonshineWasm(
   try {
     return (await importer(MOONSHINE_WASM)) as MoonshineWasmModule;
   } catch (err) {
-    throw Object.assign(
-      new Error(
-        `${MOONSHINE_WASM} is required for the Moonshine browser speech-to-text provider. Install it: npm install ${MOONSHINE_WASM}`
-      ),
-      { cause: err }
-    );
+    const message = isMissingModule(err)
+      ? `${MOONSHINE_WASM} is required for the Moonshine browser speech-to-text provider. Install it: npm install ${MOONSHINE_WASM}`
+      : `${MOONSHINE_WASM} could not be imported for the Moonshine browser speech-to-text provider: ${err instanceof Error ? err.message : String(err)}`;
+    throw Object.assign(new Error(message), { cause: err });
   }
+}
+
+/**
+ * The package's name standing alone in a message, as a browser quotes a bare
+ * specifier it cannot resolve, and not as part of a URL, such as a CDN's
+ * `.../npm/@moonshine-ai/moonshine-wasm@0.1.5/dist/index.js`.
+ */
+const BARE_SPECIFIER_IN_MESSAGE = /(^|[^\w./@-])@moonshine-ai\/moonshine-wasm($|[^\w./@-])/;
+
+/**
+ * Whether an import of the package failed because the package is not there:
+ * Node's `ERR_MODULE_NOT_FOUND`, or a `TypeError` that names the package's bare
+ * specifier, as a browser gives for one it cannot resolve. A failed fetch
+ * names the URL it fetched instead, and is not taken for a missing package.
+ */
+function isMissingModule(err: unknown): boolean {
+  if ((err as { code?: unknown } | null | undefined)?.code === 'ERR_MODULE_NOT_FOUND') return true;
+  return err instanceof TypeError && BARE_SPECIFIER_IN_MESSAGE.test(err.message);
 }
 
 // ---------------------------------------------------------------------------

@@ -88,6 +88,10 @@ describe('loadMoonshineWasm', () => {
   it("carries the import's own message when the import fails for another reason, keeping its error as the cause", async () => {
     const failures = [
       new TypeError('Failed to fetch dynamically imported module: https://cdn.example.com/moonshine/index.js'),
+      // A CDN's URL names the package too, as part of the URL.
+      new TypeError(
+        'Failed to fetch dynamically imported module: https://cdn.example.com/npm/@moonshine-ai/moonshine-wasm@0.1.5/dist/index.js'
+      ),
       new SyntaxError("Unexpected token '<'"),
     ];
     for (const failure of failures) {
