@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pino from 'pino';
+import { setLogger, resetLoggerFactory } from '../../../logging/loggerFactory.js';
 import { OpenAIProvider } from '../implementations/OpenAIProvider.js';
 import { AnthropicProvider } from '../implementations/AnthropicProvider.js';
 import { GeminiProvider } from '../implementations/GeminiProvider.js';
@@ -25,6 +27,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const logged: Record<string, unknown>[] = [];
+beforeEach(() => {
+  logged.length = 0;
+  setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
+});
+afterEach(() => resetLoggerFactory());
+
 describe('provider stream diagnostics', () => {
   it.each(['chat', 'responses', 'trailing'] as const)('keeps content out of OpenAI %s warnings', async (path) => {
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [] })));
@@ -40,15 +49,12 @@ describe('provider stream diagnostics', () => {
     fetch.mockResolvedValueOnce(streamResponse(path === 'trailing' ? sentinel : `data: ${sentinel}\n\n${completed}`));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await drain(provider.generateCompletionStream(path === 'responses' ? 'gpt-5.5' : 'gpt-4o', messages, options));
-    const message = path === 'responses'
-      ? 'OpenAIProvider: Failed to parse /responses stream event JSON:'
-      : path === 'trailing'
-        ? 'OpenAIProvider: Trailing stream data not processed:'
-        : 'OpenAIProvider: Failed to parse stream chunk JSON:';
-    expect(warn).toHaveBeenCalledWith(message, {
-      eventBytes: new TextEncoder().encode(sentinel).byteLength,
-      error: path === 'trailing' ? 'Unrecognized stream framing.' : 'Invalid stream JSON.',
-    });
+    expect(logged.filter((line) => line.event === 'llm.stream_invalid')).toEqual([
+      expect.objectContaining({ provider: 'openai', bytes: new TextEncoder().encode(sentinel).byteLength, reason: path === 'trailing' ? 'framing' : 'json' }),
+    ]);
+    expect(JSON.stringify(logged)).not.toContain('sentinel-words-7731');
+    // The provider writes these diagnostics as events, and none reaches the console.
+    expect(warn).not.toHaveBeenCalled();
     expect(JSON.stringify(warn.mock.calls)).not.toContain('sentinel-words-7731');
   });
 

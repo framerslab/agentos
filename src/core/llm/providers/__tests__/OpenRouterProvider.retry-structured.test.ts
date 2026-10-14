@@ -8,13 +8,22 @@
  *              schema, and mid-stream upstream-error surfacing.
  */
 import { Readable } from 'node:stream';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pino from 'pino';
+import { setLogger, resetLoggerFactory } from '../../../logging/loggerFactory.js';
 import { OpenRouterProvider } from '../implementations/OpenRouterProvider';
 import { OpenRouterProviderError } from '../errors/OpenRouterProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool';
 import type { ChatMessage } from '../IProvider';
 
 const messages: ChatMessage[] = [{ role: 'user', content: 'hi' }];
+
+const logged: Record<string, unknown>[] = [];
+beforeEach(() => {
+  logged.length = 0;
+  setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
+});
+afterEach(() => resetLoggerFactory());
 
 function okResponse() {
   return {
@@ -57,10 +66,6 @@ function authHeaderOfCall(request: ReturnType<typeof vi.fn>, callIdx: number): s
 }
 
 describe('makeApiRequest retry + key rotation', () => {
-  beforeEach(() => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-
   it('retries a 429 on the next pool key and succeeds', async () => {
     const request = vi
       .fn()
@@ -77,6 +82,9 @@ describe('makeApiRequest retry + key rotation', () => {
     // The 429'd key enters cooldown, so the retry draws the OTHER key.
     expect(authHeaderOfCall(request, 0)).toBe('Bearer key-a');
     expect(authHeaderOfCall(request, 1)).toBe('Bearer key-b');
+    expect(logged.filter((line) => line.event === 'llm.retry')).toEqual([
+      expect.objectContaining({ provider: 'openrouter', status: 429, attempt: 1 }),
+    ]);
   });
 
   it('retries transport-level failures (no HTTP response)', async () => {
@@ -92,6 +100,10 @@ describe('makeApiRequest retry + key rotation', () => {
 
     expect((result as { id: string }).id).toBe('gen-1');
     expect(request).toHaveBeenCalledTimes(2);
+    // No HTTP response, so the retry line carries status 0.
+    expect(logged.filter((line) => line.event === 'llm.retry')).toEqual([
+      expect.objectContaining({ provider: 'openrouter', status: 0, attempt: 1 }),
+    ]);
   });
 
   it('does NOT retry a 400 request error', async () => {
@@ -104,6 +116,7 @@ describe('makeApiRequest retry + key rotation', () => {
       }).makeApiRequest('/chat/completions', 'POST', 1000, { model: 'x' }),
     ).rejects.toMatchObject({ httpStatus: 400, message: '[400] bad request' });
     expect(request).toHaveBeenCalledTimes(1);
+    expect(logged.filter((line) => line.event === 'llm.retry')).toEqual([]);
   });
 
   it('gives up after 3 attempts on persistent 5xx', async () => {
@@ -116,6 +129,11 @@ describe('makeApiRequest retry + key rotation', () => {
       }).makeApiRequest('/chat/completions', 'POST', 1000, { model: 'x' }),
     ).rejects.toMatchObject({ httpStatus: 503 });
     expect(request).toHaveBeenCalledTimes(3);
+    // Two retries are scheduled; the third failure is thrown, with no wait.
+    expect(logged.filter((line) => line.event === 'llm.retry')).toEqual([
+      expect.objectContaining({ provider: 'openrouter', status: 503, attempt: 1 }),
+      expect.objectContaining({ provider: 'openrouter', status: 503, attempt: 2 }),
+    ]);
   });
 });
 
@@ -140,8 +158,6 @@ describe('json_schema forwarding + require_parameters routing', () => {
       config: { requestTimeout: 60000, streamRequestTimeout: 120000 },
       makeApiRequest,
     });
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   it('forwards the json_schema response_format and adds require_parameters', async () => {
@@ -190,6 +206,9 @@ describe('json_schema forwarding + require_parameters routing', () => {
     const retryPayload = makeApiRequest.mock.calls[1][3] as Record<string, unknown>;
     expect(retryPayload.response_format).toEqual({ type: 'json_object' });
     expect(retryPayload.provider).toBeUndefined();
+    expect(logged.filter((line) => line.event === 'llm.format_fallback')).toEqual([
+      expect.objectContaining({ provider: 'openrouter', reason: 'json_schema' }),
+    ]);
   });
 
   it('does not degrade on unrelated errors', async () => {
@@ -202,6 +221,7 @@ describe('json_schema forwarding + require_parameters routing', () => {
       } as never),
     ).rejects.toMatchObject({ httpStatus: 401 });
     expect(makeApiRequest).toHaveBeenCalledTimes(1);
+    expect(logged.filter((line) => line.event === 'llm.format_fallback')).toEqual([]);
   });
 });
 

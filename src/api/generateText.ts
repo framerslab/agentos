@@ -28,7 +28,8 @@ import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
-import { createLogger } from '../core/logging/loggerFactory.js';
+import { lazyLogger } from '../core/logging/loggerFactory.js';
+import { errorFields, providerName } from '../core/logging/events.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';
@@ -41,7 +42,7 @@ import {
   type PolicyTier,
 } from '../core/llm/routing/UncensoredModelCatalog.js';
 import { checkContextFit } from './runtime/contextWindowFit.js';
-import { describeResponseFormatShape, responseFormatCarriesSchema } from './runtime/responseFormatForProvider.js';
+import { responseFormatCarriesSchema } from './runtime/responseFormatForProvider.js';
 import {
   asSpendBudget,
   assertCallWithinBudget,
@@ -52,7 +53,17 @@ import {
 } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
 
-const fallbackLogger = createLogger('fallback');
+const fallbackLogger = lazyLogger('fallback');
+
+// A fallback skip's reason as one of the fixed words `llm.fallback_skipped` takes, never the reason's own text.
+function skipReason(reason: string): 'duplicate' | 'excluded' | 'capability' | 'refusal' | 'refill' | 'unknown' {
+  if (reason.includes('duplicate') || reason.includes('primary')) return 'duplicate';
+  if (reason.includes('exclud')) return 'excluded';
+  if (reason.includes('capabil')) return 'capability';
+  if (reason.includes('refus') || reason.includes('claude')) return 'refusal';
+  if (reason.includes('refill')) return 'refill';
+  return 'unknown';
+}
 
 /**
  * Invoke a caller-supplied per-leg responseFormat builder without letting a
@@ -70,12 +81,7 @@ function safeBuildLegResponseFormat(
   try {
     return builder(providerId, modelId);
   } catch (err) {
-    fallbackLogger.warn('responseFormat builder threw; leg proceeds without provider-native structured output', {
-      event: 'response_format_builder_failed',
-      fallbackProvider: providerId,
-      fallbackModel: modelId,
-      errorMessage: (err instanceof Error ? err.message : String(err)).slice(0, 200),
-    });
+    fallbackLogger.warn('llm.response_format_failed', { provider: providerName(providerId), ...errorFields(err) });
     return undefined;
   }
 }
@@ -3136,14 +3142,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       ? buildPolicyAwareFallbackChain(walkTier, metricProviderId)
       : opts.fallbackProviders;
     const logLegSkip = (entry: FallbackProviderEntry, reason: FallbackSkipReason): void =>
-      fallbackLogger.info('provider fallback skipped', {
-        event: 'fallback_leg_skipped',
-        api: 'generateText',
-        reason,
-        primaryProvider: metricProviderId,
-        fallbackProvider: entry.provider,
-        fallbackModel: entry.model,
-      });
+      fallbackLogger.warn('llm.fallback_skipped', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(entry.provider), reason: skipReason(reason) });
     // Resolved only when the walk runs, so its skip lines describe a walk.
     // A call whose prompt-shim tools already ran cannot be continued, and a
     // restart would run them again; it surfaces the error instead.
@@ -3189,14 +3188,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // `openrouter:` id under another provider goes to OpenRouter.
         const legProvider = fallbackEntrySentAs(fb).provider;
         if (globalLLMProviderHealth.isOpen(legProvider)) {
-          fallbackLogger.info('provider fallback skipped (circuit open)', {
-            event: 'fallback_skipped_circuit_open',
-            api: 'generateText',
-            primaryProvider: metricProviderId,
-            fallbackProvider: legProvider,
-            fallbackModel: fb.model,
-            attempt,
-          });
+          fallbackLogger.warn('llm.fallback_circuit_open', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(legProvider), attempt });
           // An open breaker is an availability failure: a standing leg is
           // owed a refill.
           walkState = advanceFallbackWalk(walkState, fb.walkRole, undefined);
@@ -3206,27 +3198,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           const lastErr = lastError instanceof Error ? lastError: new Error(String(lastError));
           // Per-leg structured-output rebuild: when the caller supplied a
           // builder, recompute the provider-native payload for THIS leg's
-          // provider (computed once here so the log line below and the
-          // recursion payload agree).
+          // provider, once, for the recursion below.
           const hasResponseFormatBuilder = typeof opts._responseFormatBuilder === 'function';
           const rebuiltResponseFormat = hasResponseFormatBuilder
             ? safeBuildLegResponseFormat(opts._responseFormatBuilder!, fb.provider, fb.model ?? '')
             : undefined;
-          fallbackLogger.info('provider fallback triggered', {
-            event: 'fallback_fired',
-            api: 'generateText',
-            primaryProvider: metricProviderId,
-            fallbackProvider: fb.provider,
-            fallbackModel: fb.model,
-            errorType: lastErr.name,
-            errorMessage: lastErr.message.slice(0, 200),
-            attempt,
-            // Live signal that per-leg rebuild is active (2026-07-07 spec
-            // rollout verification): absent for legacy verbatim-carry callers.
-            ...(hasResponseFormatBuilder
-              ? { rebuiltResponseFormatType: describeResponseFormatShape(rebuiltResponseFormat) }
-              : {}),
-          });
+          fallbackLogger.warn('llm.fallback_fired', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(fb.provider), attempt, ...errorFields(lastErr) });
           opts.onFallback?.(lastErr, fb.provider);
           // Build a new options object targeting the fallback provider.
           const fallbackResult = await generateText({
@@ -3312,14 +3289,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 }
               : {}),
           });
-          fallbackLogger.info('provider fallback succeeded', {
-            event: 'fallback_succeeded',
-            api: 'generateText',
-            primaryProvider: metricProviderId,
-            fallbackProvider: fallbackResult.provider,
-            fallbackModel: fallbackResult.model,
-            attempt,
-          });
+          fallbackLogger.info('llm.fallback_succeeded', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(fallbackResult.provider), attempt });
           metricStatus = 'ok';
           fallbackHops.push(
             ...(fallbackResult.fallback?.hops ?? [
@@ -3362,14 +3332,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       }
       // All fallbacks exhausted: fall through to throw
       const lastErr = lastError instanceof Error ? lastError: new Error(String(lastError));
-      fallbackLogger.warn('all provider fallbacks exhausted', {
-        event: 'fallback_exhausted',
-        api: 'generateText',
-        primaryProvider: metricProviderId,
-        attempts: attempt,
-        errorType: lastErr.name,
-        errorMessage: lastErr.message.slice(0, 200),
-      });
+      fallbackLogger.error('llm.fallback_exhausted', { api: 'generateText', primaryProvider: providerName(metricProviderId), attempts: attempt, ...errorFields(lastErr) });
       metricStatus = 'error';
       throw markChainWalked(
         toolProgress.shimRanTool || toolProgress.completedToolRounds ? markToolsRan(lastError) : lastError,

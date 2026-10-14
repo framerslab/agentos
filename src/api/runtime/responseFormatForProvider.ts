@@ -133,9 +133,8 @@ export function responseFormatCarriesSchema(
 }
 
 /**
- * Compact label for a structured-output payload shape, used by the
- * `fallback_fired` log line (`rebuiltResponseFormatType`) as the live
- * verification signal that per-leg rebuild is active.
+ * Compact label for a structured-output payload shape, naming which form a
+ * per-leg rebuild produced.
  *
  * @returns `'none'` | `'anthropic_tool'` | `'gemini_response_schema'` |
  *   the payload's `type` string (`'json_schema'` / `'json_object'` / …) |

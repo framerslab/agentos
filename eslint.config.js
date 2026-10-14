@@ -52,5 +52,17 @@ export default tseslint.config(
         }],
       }],
     },
+  },
+  {
+    // These files write their diagnostics as logging events: no console call, and no direct write to standard
+    // output or standard error, which only src/core/utils/terminal.ts makes.
+    files: ['src/core/logging/**/*.ts', 'src/core/llm/providers/implementations/OpenAIProvider.ts', 'src/core/llm/providers/implementations/OpenRouterProvider.ts'],
+    rules: {
+      'no-console': 'error',
+      'no-restricted-syntax': ['error', {
+        selector: "CallExpression[callee.object.object.name='process'][callee.object.property.name=/^(stdout|stderr)$/][callee.property.name='write']",
+        message: 'Write standard streams only through src/core/utils/terminal.ts.',
+      }],
+    },
   }
 );

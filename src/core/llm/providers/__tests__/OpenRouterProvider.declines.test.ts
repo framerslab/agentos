@@ -8,7 +8,9 @@
  * details.usage. A 403 that is NOT a decline keeps the auth policy.
  */
 import { Readable } from 'node:stream';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pino from 'pino';
+import { setLogger, resetLoggerFactory } from '../../../logging/loggerFactory.js';
 import {
   OpenRouterProvider,
   classifyOpenRouterDecline,
@@ -18,6 +20,13 @@ import { ApiKeyPool } from '../../../providers/ApiKeyPool';
 import type { ChatMessage } from '../IProvider';
 
 const messages: ChatMessage[] = [{ role: 'user', content: 'hi' }];
+
+const logged: Record<string, unknown>[] = [];
+beforeEach(() => {
+  logged.length = 0;
+  setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
+});
+afterEach(() => resetLoggerFactory());
 const MODEL = 'anthropic/claude-sonnet-5.5';
 
 /** Bare provider with injected internals (initialize() hits the network). */
@@ -110,10 +119,6 @@ describe('classifyOpenRouterDecline', () => {
 });
 
 describe('the decline error', () => {
-  beforeEach(() => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-
   it('carries no HTTP status, a fixed message, and bounded redacted details', async () => {
     const longMessage = 'declined key-a '.repeat(40); // 600 chars, contains a pool key
     const request = vi.fn().mockRejectedValueOnce(
@@ -175,10 +180,6 @@ function okResponse() {
 }
 
 describe('HTTP error responses', () => {
-  beforeEach(() => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-
   it('does not retry a decline inside the provider and does not cool the pool key', async () => {
     const request = vi
       .fn()
@@ -188,6 +189,7 @@ describe('HTTP error responses', () => {
     const err = await thrown(provider.generateCompletion(MODEL, messages, {}));
     expect(err.code).toBe('content_filter');
     expect(request).toHaveBeenCalledTimes(1);
+    expect(logged.filter((line) => line.event === 'llm.retry')).toEqual([]);
     // No key was cooled: every pool entry's cooldown is still unset. (The pool is a
     // weighted round-robin, so the next key drawn is not a usable signal.)
     const pool = (provider as unknown as { keyPool: { keys: Array<{ key: string; exhaustedUntil: number }> } }).keyPool;
@@ -207,6 +209,7 @@ describe('HTTP error responses', () => {
     expect(err.code).toBe('content_filter');
     expect((err.details as { httpStatus?: number }).httpStatus).toBe(429);
     expect(request).toHaveBeenCalledTimes(1);
+    expect(logged.filter((line) => line.event === 'llm.retry')).toEqual([]);
     const pool = (provider as unknown as { keyPool: { keys: Array<{ exhaustedUntil: number }> } }).keyPool;
     expect(pool.keys.map((k) => k.exhaustedUntil)).toEqual([0, 0]);
   });
@@ -276,10 +279,6 @@ describe('HTTP error responses', () => {
 });
 
 describe('HTTP 200 bodies, non-stream', () => {
-  beforeEach(() => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-
   it('an error-only body that is a decline throws the decline error with details.httpStatus 403', async () => {
     const request = vi.fn().mockResolvedValueOnce({
       data: { id: 'gen-1', error: { code: 403, message: 'refused', metadata: { error_type: 'refusal' } } },
@@ -454,10 +453,6 @@ describe('HTTP 200 bodies, non-stream', () => {
 });
 
 describe('streams', () => {
-  beforeEach(() => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-
   const chunk = (o: Record<string, unknown>) => 'data: ' + JSON.stringify({ id: 'gen-s', object: 'chat.completion.chunk', created: 1, model: MODEL, ...o });
   const textChunk = (t: string) => chunk({ choices: [{ index: 0, delta: { role: 'assistant', content: t }, finish_reason: null }] });
   const filterChunk = chunk({ choices: [{ index: 0, delta: { content: '', refusal: 'I cannot help with that.' }, finish_reason: 'content_filter' }] });
@@ -645,7 +640,6 @@ describe('streams', () => {
     open.push(Buffer.from(textChunk('Once ') + '\n\n'));
     open.push(Buffer.from(filterChunk + '\n\n'));
     const request = vi.fn().mockResolvedValueOnce({ data: open });
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const started = Date.now();
     const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
     expect(Date.now() - started).toBeGreaterThanOrEqual(1500);
@@ -653,7 +647,7 @@ describe('streams', () => {
     expect((err.details as { partialText?: string }).partialText).toBe('Once ');
     expect(open.destroyed).toBe(true);
     // The deliberate close is not logged as a read error.
-    expect(errorSpy).not.toHaveBeenCalled();
+    expect(logged.filter((line) => line.event === 'llm.stream_failed')).toEqual([]);
   }, 10_000);
 
   it('an abort while the stream is idle after a content_filter finish is answered within the bound', async () => {
@@ -805,7 +799,6 @@ describe('streams', () => {
     const open = new Readable({ read() {} });
     open.push(Buffer.from(choiceError({ code: 502, message: 'down', metadata: { error_type: 'provider_unavailable' } }) + '\n\n'));
     const request = vi.fn().mockResolvedValueOnce({ data: open });
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const started = Date.now();
     const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { type?: string } }>;
     expect(Date.now() - started).toBeGreaterThanOrEqual(1500);
@@ -813,7 +806,7 @@ describe('streams', () => {
     expect(out[0]?.error?.type).toBe('upstream_error');
     expect(open.destroyed).toBe(true);
     // The deliberate close is not logged as a read error.
-    expect(errorSpy).not.toHaveBeenCalled();
+    expect(logged.filter((line) => line.event === 'llm.stream_failed')).toEqual([]);
   }, 10_000);
 
   it('an abort while the stream is idle after a choice-level error is answered within the bound', async () => {

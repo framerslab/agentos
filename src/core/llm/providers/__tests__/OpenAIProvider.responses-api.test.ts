@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pino from 'pino';
+import { setLogger, resetLoggerFactory } from '../../../logging/loggerFactory.js';
 
 // Mock fetch so initialize()/any request never hits the network.
 vi.stubGlobal('fetch', vi.fn());
@@ -40,6 +42,13 @@ const multimodal: ChatMessage[] = [
     ],
   },
 ];
+
+const logged: Record<string, unknown>[] = [];
+beforeEach(() => {
+  logged.length = 0;
+  setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
+});
+afterEach(() => resetLoggerFactory());
 
 describe('isResponsesMappableContent / flattenResponsesTextContent', () => {
   it('accepts strings, null, and all-text block arrays; rejects multimodal parts', () => {
@@ -322,7 +331,6 @@ describe('OpenAIProvider.mapResponsesToCompletionResponse', () => {
   });
 
   it('reasoning-only + incomplete/max_output_tokens → finishReason length, no throw', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = map({
       id: 'r', model: 'gpt-6-astra', status: 'incomplete',
       incomplete_details: { reason: 'max_output_tokens' },
@@ -335,14 +343,13 @@ describe('OpenAIProvider.mapResponsesToCompletionResponse', () => {
     expect(res.choices[0].message.content).toBeNull();
     expect(res.choices[0].message.tool_calls).toBeUndefined();
     expect(res.usage.completionTokens).toBe(300);
-    // Diagnostic must name the budget as the cause.
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0][0])).toMatch(/reasoning-only/i);
-    warn.mockRestore();
+    // One diagnostic event, carrying the output token count the reasoning spent.
+    expect(logged.filter((line) => line.event === 'llm.output_empty')).toEqual([
+      expect.objectContaining({ provider: 'openai', count: 300 }),
+    ]);
   });
 
   it('reasoning-only + completed → finishReason stop, no throw (empty turn)', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = map({
       id: 'r', model: 'gpt-6-astra', status: 'completed',
       output: [{ type: 'reasoning', summary: [] }],
@@ -350,11 +357,12 @@ describe('OpenAIProvider.mapResponsesToCompletionResponse', () => {
     }) as any;
     expect(res.choices[0].finishReason).toBe('stop');
     expect(res.choices[0].message.content).toBeNull();
-    warn.mockRestore();
+    expect(logged.filter((line) => line.event === 'llm.output_empty')).toEqual([
+      expect.objectContaining({ provider: 'openai', count: 40 }),
+    ]);
   });
 
   it('reasoning-only + incomplete/content_filter → finishReason content_filter, no throw', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = map({
       id: 'r', model: 'gpt-6-astra', status: 'incomplete',
       incomplete_details: { reason: 'content_filter' },
@@ -362,7 +370,9 @@ describe('OpenAIProvider.mapResponsesToCompletionResponse', () => {
     }) as any;
     expect(res.choices[0].finishReason).toBe('content_filter');
     expect(res.choices[0].message.content).toBeNull();
-    warn.mockRestore();
+    expect(logged.filter((line) => line.event === 'llm.output_empty')).toEqual([
+      expect.objectContaining({ provider: 'openai', count: 0 }),
+    ]);
   });
 
   it('reasoning + function_call (no message) still maps tool_calls normally', () => {
