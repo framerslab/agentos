@@ -110,6 +110,15 @@ describe('source-derived delivery', () => {
   });
 
   it.each<SourceDeliverySurface>(['search', 'ask'])(
+    'delivers a current personal result to %s',
+    (surface) => {
+      expect(canDeliverSourceDerivation(
+        createSourceDerivation([source()]), context({ surface }), [state()], 1_000,
+      )).toBe(true);
+    },
+  );
+
+  it.each<SourceDeliverySurface>(['search', 'ask'])(
     'checks the current private-use switch for %s',
     (surface) => {
       expect(canDeliverSourceDerivation(
