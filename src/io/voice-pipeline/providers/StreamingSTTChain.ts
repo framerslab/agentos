@@ -6,6 +6,13 @@
  * opens; a `CircuitBreaker` in the options skips providers that failed
  * recently, and every failed opening is recorded to it.
  *
+ * The chain names each provider by its `providerId` in its breaker, its
+ * dedupe and its events, and two providers with the same id, such as two
+ * sizes of `MoonshineBrowserSTT` (`moonshine-browser`), by that id and their
+ * place among the providers that share it, from 1 in the chain's order
+ * (`moonshine-browser#1`, `moonshine-browser#2`), so they keep apart.
+ * `currentProviderId` and a `ProviderPolicy` read the provider's own id.
+ *
  * The chain's provider policy decides the order and whether the chain may
  * move on. Without a policy, or with `legacyProviderPolicy`, every provider is
  * tried in priority order (lower first). A `ProviderPolicy` keeps the
@@ -35,7 +42,12 @@ import { authorizeProviderOpening, freezeProviderPolicy, legacyProviderPolicy, s
 export interface ProviderSelectedEvent {
   /** The chain that opened the session. */
   kind: 'stt' | 'tts';
-  /** The provider whose session opened. */
+  /**
+   * The provider whose session opened: its `providerId`, or, when another
+   * provider in the chain has the same id, that id with `#` and the
+   * provider's place among them, from 1 in the chain's order
+   * (`'moonshine-browser#2'`).
+   */
   providerId: string;
   /** Its place among the providers tried, from 1. */
   attempt: number;
@@ -45,7 +57,7 @@ export interface ProviderSelectedEvent {
 export interface ProviderFailedEvent {
   /** The chain that tried the provider. */
   kind: 'stt' | 'tts';
-  /** The provider whose opening failed. */
+  /** The provider whose opening failed, named as in {@link ProviderSelectedEvent.providerId}. */
   providerId: string;
   /** The failure's class, as `VoicePipelineError.classifyError` reads it. */
   errorClass: HealthErrorClass;
@@ -57,9 +69,9 @@ export interface ProviderFailedEvent {
 export interface ProviderFailoverEvent {
   /** The chain that switched. */
   kind: 'stt' | 'tts';
-  /** The provider whose session failed. */
+  /** The provider whose session failed, named as in {@link ProviderSelectedEvent.providerId}. */
   from: string;
-  /** The provider that took over. */
+  /** The provider that took over, named as in {@link ProviderSelectedEvent.providerId}. */
   to: string;
   /** The class of the failure that started the switch. */
   reason: HealthErrorClass;
@@ -69,7 +81,10 @@ export interface ProviderFailoverEvent {
 
 /** Explicit selection plus the existing health and replay options. */
 export interface StreamingSTTChainOptions {
-  /** Skips providers it reports unavailable; failed openings and failed sessions are recorded to it. */
+  /**
+   * Skips providers it reports unavailable; failed openings and failed sessions are recorded to it, each provider
+   * under the name the chain's events give it ({@link ProviderSelectedEvent.providerId}).
+   */
   breaker?: CircuitBreaker;
   /** Receives the chain's `provider_selected`, `provider_failed`, `provider_failover` and `provider_unavailable` events. */
   metrics?: VoiceMetricsReporter;
@@ -117,6 +132,28 @@ export interface StreamingSTTChainOptions {
 
 type STTProvider = IStreamingSTT & HealthyProvider;
 
+/**
+ * Each provider's name in the chain's breaker, dedupe and events: its `providerId`, or, when other providers in the
+ * list have the same id, that id with `#` and the provider's place among them, from 1 in the list's order. No
+ * built-in provider's id holds a `#`, and a `ProviderPermission` id may not.
+ */
+function instanceNames(providers: readonly STTProvider[]): Map<STTProvider, string> {
+  const sharing = new Map<string, number>();
+  for (const p of providers) sharing.set(p.providerId, (sharing.get(p.providerId) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  const names = new Map<STTProvider, string>();
+  for (const p of providers) {
+    if (sharing.get(p.providerId) === 1) {
+      names.set(p, p.providerId);
+      continue;
+    }
+    const place = (seen.get(p.providerId) ?? 0) + 1;
+    seen.set(p.providerId, place);
+    names.set(p, `${p.providerId}#${place}`);
+  }
+  return names;
+}
+
 /** Provider chain with authorization below both initialization and mid-session routing loops. */
 export class StreamingSTTChain implements IStreamingSTT {
   /** Always `'chain'`. */
@@ -125,6 +162,8 @@ export class StreamingSTTChain implements IStreamingSTT {
   readonly isStreaming = false;
   private readonly list: STTProvider[];
   private readonly policy: ProviderSelectionPolicy;
+  /** Each provider's name in the breaker, the dedupe and the events, by `instanceNames`. */
+  private readonly names: ReadonlyMap<STTProvider, string>;
   private activeProviderId?: string;
 
   /**
@@ -138,6 +177,7 @@ export class StreamingSTTChain implements IStreamingSTT {
     if (!providers.length) throw new Error('StreamingSTTChain requires at least one provider');
     this.policy = freezeProviderPolicy(opts.policy ?? legacyProviderPolicy);
     this.list = selectPolicyProviders(providers, this.policy, 'stt');
+    this.names = instanceNames(this.list);
     if (!Number.isSafeInteger(opts.maxPendingFrames ?? 100) || (opts.maxPendingFrames ?? 100) <= 0 || !Number.isFinite(opts.ringBufferCapacityMs ?? 3000) || (opts.ringBufferCapacityMs ?? 3000) <= 0) throw new Error('invalid STT buffer bound');
   }
 
@@ -146,13 +186,21 @@ export class StreamingSTTChain implements IStreamingSTT {
     return this.list;
   }
 
-  /** Most recently opened provider, for existing introspection callers. */
+  /**
+   * The `providerId` of the most recently opened provider, for existing introspection callers. Two providers with the
+   * same id read the same here; the chain's events tell them apart.
+   */
   get currentProviderId(): string | undefined {
     return this.activeProviderId;
   }
 
   private metric(event: VoiceMetricEvent): void {
     this.opts.metrics?.emit(event);
+  }
+
+  /** The provider's name in the breaker, the dedupe and the chain's events. */
+  private nameOf(provider: STTProvider): string {
+    return this.names.get(provider) ?? provider.providerId;
   }
 
   /**
@@ -165,7 +213,7 @@ export class StreamingSTTChain implements IStreamingSTT {
    *   tried failed to open.
    */
   async startSession(config?: StreamingSTTConfig): Promise<StreamingSTTSession> {
-    const candidates = this.list.filter((p) => !this.opts.breaker || this.opts.breaker.isAvailable(p.providerId));
+    const candidates = this.list.filter((p) => !this.opts.breaker || this.opts.breaker.isAvailable(this.nameOf(p)));
     const errors: VoicePipelineError[] = [];
     for (let i = 0; i < candidates.length; i++) {
       const provider = candidates[i]!;
@@ -174,21 +222,21 @@ export class StreamingSTTChain implements IStreamingSTT {
       try {
         const session = await provider.startSession(config);
         this.activeProviderId = provider.providerId;
-        const selected: ProviderSelectedEvent = { kind: 'stt', providerId: provider.providerId, attempt: i + 1 };
+        const selected: ProviderSelectedEvent = { kind: 'stt', providerId: this.nameOf(provider), attempt: i + 1 };
         this.opts.onProviderSelected?.(selected);
         this.metric({ type: 'provider_selected', ...selected });
-        this.opts.breaker?.recordSuccess(provider.providerId);
+        this.opts.breaker?.recordSuccess(this.nameOf(provider));
         return this.wrap(session, provider, candidates.slice(i + 1), config);
       } catch (error) {
         const failure = VoicePipelineError.classifyError(error, { kind: 'stt', provider: provider.providerId });
         errors.push(failure);
-        const event: ProviderFailedEvent = { kind: 'stt', providerId: provider.providerId, errorClass: failure.errorClass, message: this.policy.mode === 'legacy' ? failure.message : 'provider opening failed' };
+        const event: ProviderFailedEvent = { kind: 'stt', providerId: this.nameOf(provider), errorClass: failure.errorClass, message: this.policy.mode === 'legacy' ? failure.message : 'provider opening failed' };
         this.opts.onProviderFailed?.(event);
         this.metric({ type: 'provider_failed', ...event });
-        this.opts.breaker?.recordFailure(provider.providerId, failure.errorClass);
+        this.opts.breaker?.recordFailure(this.nameOf(provider), failure.errorClass);
       }
     }
-    this.metric({ type: 'provider_unavailable', kind: 'stt', checkedProviders: this.list.map((p) => p.providerId) });
+    this.metric({ type: 'provider_unavailable', kind: 'stt', checkedProviders: this.list.map((p) => this.nameOf(p)) });
     if (!errors.length) throw new Error('No STT providers available (all tripped or filtered)');
     throw new AggregateVoiceError(errors);
   }
@@ -303,7 +351,7 @@ export class StreamingSTTChain implements IStreamingSTT {
     const failover = async (error: Error): Promise<void> => {
       const from = provider;
       const failure = VoicePipelineError.classifyError(error, { kind: 'stt', provider: from.providerId });
-      this.opts.breaker?.recordFailure(from.providerId, failure.errorClass);
+      this.opts.breaker?.recordFailure(this.nameOf(from), failure.errorClass);
       const replay = ring.snapshot();
       const replayMs = ring.durationMs();
       const started = Date.now();
@@ -312,7 +360,7 @@ export class StreamingSTTChain implements IStreamingSTT {
       retire(old);
       for (const backup of remaining) {
         if (closed) return;
-        if (this.opts.breaker && !this.opts.breaker.isAvailable(backup.providerId)) continue;
+        if (this.opts.breaker && !this.opts.breaker.isAvailable(this.nameOf(backup))) continue;
         if (this.policy.mode !== 'legacy') await authorizeProviderOpening(this.policy, 'stt', from.providerId, backup.providerId, 'mid_session_failure', config?.call);
         if (closed) return;
         let next: StreamingSTTSession;
@@ -320,7 +368,7 @@ export class StreamingSTTChain implements IStreamingSTT {
           next = await backup.startSession(config);
         } catch (error) {
           const failed = VoicePipelineError.classifyError(error, { kind: 'stt', provider: backup.providerId });
-          this.opts.breaker?.recordFailure(backup.providerId, failed.errorClass);
+          this.opts.breaker?.recordFailure(this.nameOf(backup), failed.errorClass);
           continue;
         }
         if (closed) {
@@ -330,7 +378,7 @@ export class StreamingSTTChain implements IStreamingSTT {
         current = next;
         provider = backup;
         remaining = remaining.filter((p) => p !== backup);
-        attach(next, backup.providerId);
+        attach(next, this.nameOf(backup));
         if (replayMs >= (this.opts.minReplayMs ?? 400)) for (const frame of replay) {
           if (closed) return;
           await deliver(next, frame);
@@ -342,8 +390,8 @@ export class StreamingSTTChain implements IStreamingSTT {
         }
         if (closed) return;
         this.activeProviderId = backup.providerId;
-        this.opts.breaker?.recordSuccess(backup.providerId);
-        const event: ProviderFailoverEvent = { kind: 'stt', from: from.providerId, to: backup.providerId, reason: failure.errorClass, lostMs: Date.now() - started + lostMs };
+        this.opts.breaker?.recordSuccess(this.nameOf(backup));
+        const event: ProviderFailoverEvent = { kind: 'stt', from: this.nameOf(from), to: this.nameOf(backup), reason: failure.errorClass, lostMs: Date.now() - started + lostMs };
         this.opts.onProviderFailover?.(event);
         this.metric({ type: 'provider_failover', ...event });
         if (lostMs) {
@@ -362,7 +410,7 @@ export class StreamingSTTChain implements IStreamingSTT {
         switching = undefined;
       });
     };
-    attach(initial, first.providerId);
+    attach(initial, this.nameOf(first));
     const wrapped: StreamingSTTSession = Object.assign(facade, {
       pushAudio: async (frame: AudioFrame): Promise<void> => {
         if (closed) return;

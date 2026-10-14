@@ -389,11 +389,11 @@ export function sttEntryPricePerMinute(entry: string): number | undefined {
  * `close`; later audio is ignored and no backup starts.
  *
  * Entries of one vendor share that vendor's provider id (every `openai`
- * entry is `openai-realtime-transcription`), so `currentProviderId`, the
- * chain's provider events and a `CircuitBreaker` in the chain options
- * cannot tell them apart: a breaker counts the failures of all of a
- * vendor's entries together, and once it trips, later sessions skip every
- * entry of that vendor.
+ * entry is `openai-realtime-transcription`), so `currentProviderId` cannot
+ * tell them apart. The chain's provider events and a `CircuitBreaker` in the
+ * chain options name each entry by that id and its place among the vendor's
+ * entries (`openai-realtime-transcription#2`): a breaker counts each entry's
+ * failures, and skips only the entries it has tripped.
  *
  * @throws {RangeError} For no entry, an entry twice, an entry
  *   {@link parseSttEntry} refuses, or a vendor with no options.

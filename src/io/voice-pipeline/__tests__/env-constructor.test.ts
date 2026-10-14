@@ -402,7 +402,8 @@ describe('createSttChain sessions', () => {
     try {
       expect(asked).toEqual(['gpt-4o-transcribe', 'gpt-4o-mini-transcribe']);
       expect(confirmed).toEqual(['gpt-4o-mini-transcribe']);
-      expect(failed).toEqual(['openai-realtime-transcription']);
+      // The entries share the vendor's provider id, so the chain names each by its place among them.
+      expect(failed).toEqual(['openai-realtime-transcription#1']);
       expect(attempts).toEqual([2]);
       // Failover is off, so the session is the provider's own, which ends a turn with flush().
       expect(typeof session.flush).toBe('function');
