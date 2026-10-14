@@ -14,7 +14,7 @@ const manifest = VoiceAdapterManifestSchema.parse({ providerId: 'stt', locality:
 export function sttDescriptor(): ScopedVoiceAdapter<'streaming-stt'> {
   return { voiceAdapterVersion: 1, kind: 'streaming-stt', manifest, options: z.strictObject({}), create: vi.fn(async () => ({
     value: { providerId: 'stt', isStreaming: true, priority: 0, capabilities: defaultCapabilities(), healthCheck: async () => ({ ok: true }), startSession: async () => Object.assign(new EventEmitter(), { pushAudio: () => {}, pushAudioScoped: async () => {}, flush: async () => {}, reset: async () => {}, close: () => {} }) },
-    fence: async () => ({ stopped: true, evidenceRef: 'stt-stopped' }), dispose: async () => {} })) };
+    fence: async () => ({ stopped: true as const, evidenceRef: 'stt-stopped' }), dispose: async () => {} })) };
 }
 describe('typed voice extension factories', () => {
   it('discovers typed payloads without replacing legacy batch registrations', async () => {
