@@ -415,6 +415,11 @@
       "default": "./dist/safety/auth/index.js",
       "types": "./dist/safety/auth/index.d.ts"
     },
+    "./safety/egress": {
+      "types": "./dist/safety/egress/index.d.ts",
+      "import": "./dist/safety/egress/index.js",
+      "default": "./dist/safety/egress/index.js"
+    },
     "./sandbox/subprocess": {
       "import": "./dist/safety/sandbox/subprocess/index.js",
       "default": "./dist/safety/sandbox/subprocess/index.js",

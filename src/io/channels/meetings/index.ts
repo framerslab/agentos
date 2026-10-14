@@ -1,6 +1,7 @@
 /**
  * Barrel exports for the meeting-participant channel: the manager, the provider interface, the room helper, the stores,
- * the fenced outbox, the signing, the outbox's delivery and the mock provider.
+ * the fenced outbox, the signing, the outbox's delivery, the mock provider, the visitor-bound demonstration capability
+ * and the composite funding entitlement.
  *
  * @module @framers/agentos/io/channels/meetings
  */
@@ -37,3 +38,9 @@ export type { EnvelopeHeaderNames } from './signing.js';
 export { OutboxDispatcher, httpsSend, isPublicAddress, DestinationRefusedError } from './delivery.js';
 export type { OutboxDispatcherOptions, DeliveryRequest, DeliverySend, DeliveryDestination, AddressLookup } from './delivery.js';
 export { MockMeetingBotProvider, mockEventContext } from './providers/mock.js';
+/** Visitor-bound authority with a host-owned transactional store. */
+export * from './DemoRunCapability.js';
+export * from './stores/demo.js';
+/** Immutable funding choice and quantity settlement. */
+export * from './CompositeMeetingEntitlement.js';
+export { meetingFundingUpgradeDdl } from './stores/sql.js';
