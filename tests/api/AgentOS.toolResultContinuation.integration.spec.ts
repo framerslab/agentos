@@ -8,6 +8,7 @@ import {
   isActionableToolCallRequestChunk,
   type AgentOSFinalResponseChunk,
   type AgentOSResponse,
+  type AgentOSToolCallRequestChunk,
 } from '../../src/api/types/AgentOSResponse';
 import { WorkflowFacade } from '../../src/api/runtime/WorkflowFacade';
 import { RagMemoryInitializer } from '../../src/api/runtime/RagMemoryInitializer';
@@ -18,6 +19,11 @@ import { InMemoryWorkingMemory } from '../../src/cognition/substrate/memory/InMe
 import { ConversationContext } from '../../src/core/conversation/ConversationContext';
 import { PromptEngine } from '../../src/core/llm/PromptEngine';
 import type { ChatMessage, ModelCompletionResponse } from '../../src/core/llm/providers/IProvider';
+import {
+  GuardrailAction,
+  type GuardrailOutputPayload,
+  type IGuardrailService,
+} from '../../src/safety/guardrails/IGuardrailService';
 
 /**
  * Tool-result continuations on the real path: AgentOS.initialize(), the orchestrator, its tool-result handler, the
@@ -78,6 +84,28 @@ const READ_CALL: ToolCallRequest = { id: 'call-read-1', name: 'read_file', argum
 
 /** A call of a tool registered with the runtime: the GMI runs it itself. */
 const LOOKUP_CALL: ToolCallRequest = { id: 'call-lookup-1', name: 'lookup_notes', arguments: { query: 'standup' } };
+
+/** A call of a registered tool that the shell guard refuses. */
+const SHELL_CALL: ToolCallRequest = { id: 'call-shell-1', name: 'shell_execute', arguments: { command: 'rm -rf /' } };
+
+/**
+ * An output guard that evaluates tool calls and blocks a TOOL_CALL_REQUEST chunk that calls shell_execute: any such
+ * chunk, or, with `internalOnly`, only the chunk for a call the runtime runs itself (`executionMode: 'internal'`).
+ */
+function shellGuard(internalOnly: boolean): IGuardrailService {
+  return {
+    id: 'shell-guard',
+    config: { evaluateToolCalls: true },
+    async evaluateOutput({ chunk }: GuardrailOutputPayload) {
+      if (chunk.type !== AgentOSResponseChunkType.TOOL_CALL_REQUEST) return null;
+      const request = chunk as AgentOSToolCallRequestChunk;
+      if (internalOnly && request.executionMode !== 'internal') return null;
+      return request.toolCalls.some((call) => call.name === SHELL_CALL.name)
+        ? { action: GuardrailAction.BLOCK, reason: 'A destructive shell command', reasonCode: 'SHELL_DESTRUCTIVE' }
+        : null;
+    },
+  };
+}
 
 const PERSONA = {
   id: 'test-persona',
@@ -269,8 +297,8 @@ describe('AgentOS tool-result continuations', () => {
   });
 
   /**
-   * A runtime with lookup_notes registered, over the conversation `conversationId`. The session's GMI is the one the
-   * test sets with `useGmi()`, as the GMI manager hands a session the GMI it holds or builds for it.
+   * A runtime with lookup_notes and shell_execute registered, over the conversation `conversationId`. The session's
+   * GMI is the one the test sets with `useGmi()`, as the GMI manager hands a session the GMI it holds or builds for it.
    */
   async function runtime(conversationId: string, overrides: Partial<AgentOSConfig> = {}) {
     const context = new ConversationContext(conversationId);
@@ -281,6 +309,7 @@ describe('AgentOS tool-result continuations', () => {
     );
 
     const lookup = vi.fn(async () => ({ success: true, output: { notes: ['Standup moved to 10:00.'] } }));
+    const shell = vi.fn(async () => ({ success: true, output: { exitCode: 0 } }));
     const agentos = new AgentOS();
     openAgents.push(agentos);
     await agentos.initialize(
@@ -292,6 +321,14 @@ describe('AgentOS tool-result continuations', () => {
               description: 'Search the notes of the user.',
               inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
               execute: lookup,
+            },
+          ],
+          [
+            'shell_execute',
+            {
+              description: 'Run a shell command on the host.',
+              inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+              execute: shell,
             },
           ],
         ]),
@@ -360,6 +397,7 @@ describe('AgentOS tool-result continuations', () => {
       context,
       input,
       lookup,
+      shell,
       pending,
       pauseOnRead,
       shippedGmi,
@@ -417,5 +455,35 @@ describe('AgentOS tool-result continuations', () => {
     const saved = await rt.pending();
     expect(saved?.streamId).toBe(request.streamId);
     expect(saved?.toolCalls).toEqual([writeCall]);
+  });
+
+  it.each([
+    ['a guard that blocks the call on any chunk', false],
+    ['a guard that blocks only the calls the runtime runs itself', true],
+  ])('%s: a call the gate refused in a resumed turn is never paused on', async (_label, internalOnly) => {
+    const rt = await runtime(`conv-refused-${internalOnly ? 'internal' : 'any'}`, {
+      guardrailService: shellGuard(internalOnly),
+    });
+    const { saved } = await rt.pauseOnRead(hostToolGmi());
+
+    const { gmi, provider, promptCalls } = await rt.shippedGmi([
+      { toolCalls: [LOOKUP_CALL, SHELL_CALL] },
+      { text: 'Standup moved to 10:00. The command was refused.' },
+    ]);
+    rt.useGmi(gmi);
+    const resumed = await collect(rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT]));
+
+    // the gate refused shell_execute before it ran, lookup_notes ran, and the model read both results
+    expect(provider.generateCompletionStream).toHaveBeenCalledTimes(2);
+    expect(rt.shell).not.toHaveBeenCalled();
+    expect(rt.lookup).toHaveBeenCalledTimes(1);
+    const refusal = promptCalls[1]?.find((m) => m.role === 'tool' && m.tool_call_id === SHELL_CALL.id);
+    expect(String(refusal?.content)).toContain('AUTH_PERMISSION_DENIED');
+
+    const last = resumed.at(-1) as AgentOSFinalResponseChunk;
+    expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(last.finalResponseText).toBe('Standup moved to 10:00. The command was refused.');
+    expect(resumed.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+    expect(await rt.pending()).toBeNull();
   });
 });
