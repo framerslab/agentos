@@ -86,12 +86,12 @@ Preferred providers receive priorities 50, 51, 52, … (lower number = higher pr
 | `deepgram` | Deepgram | `DEEPGRAM_API_KEY` | No | Yes | cloud, streaming |
 | `deepgram-streaming` | Deepgram Streaming | `DEEPGRAM_API_KEY` | No | Yes | streaming, interim-results, diarization, punctuation, endpointing |
 | `assemblyai` | AssemblyAI | `ASSEMBLYAI_API_KEY` | No | Yes | cloud, streaming, diarization |
-| `google-cloud-stt` | Google Cloud STT | `GOOGLE_STT_CREDENTIALS` | No | Yes | cloud, streaming |
+| `google-cloud-stt` | Google Cloud STT | `GOOGLE_STT_CREDENTIALS` | No | No | batch transcription through the installed provider |
 | `azure-speech-stt` | Azure Speech STT | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | No | No | cloud, streaming |
-| `whisper-chunked` | Whisper Chunked Streaming | `OPENAI_API_KEY` | No | Yes | streaming, interim-results |
+| `whisper-chunked` | Whisper Chunked Streaming | `OPENAI_API_KEY` | No | Chunked | a stream-shaped adapter over bounded file requests, not an intrinsically streaming acoustic model |
 | `openai-realtime-transcription` | OpenAI Realtime Transcription | `OPENAI_API_KEY` | No | Yes | streaming, interim-results, endpointing, item-ids, long-sessions |
 | `whisper-local` | Whisper.cpp | — | Yes | No | local, offline _(unavailable: no implementation)_ |
-| `vosk` | Vosk | — | Yes | Yes | local, offline, streaming |
+| `vosk` | Vosk | none | Yes | No | local, offline, batch provider |
 | `moonshine-browser` | Moonshine (in the browser) | — | Yes | Yes | local, offline, streaming, browser |
 | `nvidia-nemo` | NVIDIA NeMo | — | Yes | No | local, offline _(unavailable — not yet integrated)_ |
 
@@ -105,6 +105,8 @@ Preferred providers receive priorities 50, 51, 52, … (lower number = higher pr
 | `openai-streaming-tts` | OpenAI Streaming TTS | `OPENAI_API_KEY` | No | Yes | streaming, sentence-chunking |
 | `elevenlabs` | ElevenLabs | `ELEVENLABS_API_KEY` | No | Yes | cloud, tts, voice-cloning |
 | `elevenlabs-streaming-tts` | ElevenLabs Streaming TTS | `ELEVENLABS_API_KEY` | No | Yes | streaming, websocket, continuation-hints |
+| `deepgram-aura` | Deepgram Aura | `DEEPGRAM_API_KEY` | No | Yes | catalog entry; runtime construction requires a configured provider |
+| `minimax-tts` | MiniMax TTS | `MINIMAX_API_KEY` | No | Yes | catalog entry; runtime construction requires a configured provider |
 | `google-cloud-tts` | Google Cloud TTS | `GOOGLE_TTS_CREDENTIALS` | No | No | cloud, tts |
 | `amazon-polly` | Amazon Polly | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | No | Yes | cloud, tts |
 | `azure-speech-tts` | Azure Speech TTS | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | No | Yes | cloud, tts |
@@ -133,6 +135,18 @@ Preferred providers receive priorities 50, 51, 52, … (lower number = higher pr
 | `twilio` | Twilio | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | `voice-twilio` |
 | `telnyx` | Telnyx | `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID` | `voice-telnyx` |
 | `plivo` | Plivo | `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN` | `voice-plivo` |
+
+---
+
+## Scoped provider resolution
+
+Batch capability is not a streaming session. The tables describe catalog entries and installed interfaces, not every capability a vendor sells. A catalog id does not instantiate a provider; `whisper-local` has no built-in runtime instance. The Vosk and Google Cloud STT packs expose batch recognition. Their batch results cannot satisfy `startSession` merely by setting a streaming flag.
+
+`resolveVoicePlan` is the scoped call entry on the same `SpeechProviderResolver`. It reads typed factories, validates model/voice revisions, language, sample rate, codec and closed options, then freezes the call selection. `resolveScopedBatch` retains batch operation as an explicit separate choice. `ExtensionManager.getVoiceAdapters()` discovers scoped factories without opening them or resolving a process credential.
+
+The configured call policy names its mode and fallback allowlist. Hosted construction rejects legacy environment discovery and never treats the presence of an environment key as permission to contact another vendor. Every actual request and retry passes through `VoiceAdapterRuntime` and its attempt authorizer. Legacy `SpeechRuntime` and the environment constructors remain single-tenant conveniences with their existing behavior.
+
+Provider retirement data lives in `src/io/speech/retirements.ts`, and its dated tests in `src/io/speech/__tests__/retirements.test.ts`. Consult that versioned register and its source notices before selecting a model. A replacement model name does not prove protocol compatibility with an existing adapter. The hosted factory does not silently substitute a retiring provider.
 
 ---
 
@@ -171,7 +185,7 @@ sttEntryPricePerMinute('deepgram:nova-3'); // 0.0077 US dollars a minute
 sttEntryPricePerMinute('elevenlabs:scribe_v2'); // undefined: no price row
 ```
 
-**The entry.** An entry is `<vendor>:<model>`: a vendor of `STT_CHAIN_VENDORS` (`openai`, `deepgram`, `elevenlabs`), a colon, and the model's name, 1 to 128 letters, digits, `.`, `_` and `-`. `parseSttEntry(entry)` returns `{ vendor, model }` and throws a `RangeError` for any other shape, a vendor outside the list included. `parseSttEntry(entry, registeredVendors)` reads the vendors a host registered instead, and no other, a built-in one included: a vendor there is a lower-case letter followed by up to 63 lower-case letters, digits or `-`, such as `local-stt`, and the result is a `RegisteredSttEntry`. Neither form puts the entry in its error message. Its module imports nothing, so the browser entry, `@framers/agentos/io/voice-pipeline/browser`, exports it as well, and a page can hold a list of entries to the rule the server builds them by.
+**The entry.** An entry has the form `vendor:model`: a vendor of `STT_CHAIN_VENDORS` (`openai`, `deepgram`, `elevenlabs`), a colon, and the model's name, 1 to 128 letters, digits, `.`, `_` and `-`. The original `STT_CHAIN_VENDORS` remain the built-in convenience choices. `parseSttEntry(entry)` returns `{ vendor, model }` and throws a `RangeError` for any other shape, a vendor outside the list included. Registered entry support is explicit; a settings string alone does not install a model or grant credentials. `parseSttEntry(entry, registeredVendors)` reads the vendors a host registered instead, and no other, a built-in one included: a vendor there is a lower-case letter followed by up to 63 lower-case letters, digits or `-`, such as `local-stt`, and the result is a `RegisteredSttEntry`. Neither form puts the entry in its error message. Its module imports nothing, so the browser entry, `@framers/agentos/io/voice-pipeline/browser`, exports it as well, and a page can hold a list of entries to the rule the server builds them by. The scoped factory uses typed registrations and its frozen policy, not ambient environment discovery.
 
 **The order is the priority.** The entries take the priorities 10, 20, 30 and so on, in the order given: a session starts on the first provider whose session opens, and the next entry is its fallback. `createSttChain` throws a `RangeError` for an empty list, an entry named twice, an entry `parseSttEntry` refuses, or an entry whose vendor has no options. Mid-utterance failover is off unless the third argument, the chain's `StreamingSTTChainOptions`, turns it on, so a session is the provider's own, with its `flush()` and its events; with failover on, a session is the chain's facade, which forwards transcripts, speech events, `'usage'` and `'warning'`, and whose `flush()` drains the provider session in use.
 
