@@ -141,6 +141,51 @@ Each passage has `index` (from 0), `text`, `firstSeq`, `lastSeq`, `itemIds`, `st
 
 `snippetAround(text, words, { before, after })` finds the first word of `text` that begins with one of `words` and answers `{ at, text }`. `at` is where that word starts in the text as given, or -1 when no word matches. `text` is the snippet in whole words, with white space collapsed: it runs from just after the last white space (a space, a tab or a line break, such as the one between two turns of a passage) at or before `before` characters (80 unless given) ahead of the word, or from the text's start, to the first white space at or after `after` characters (120 unless given) past the word's start, or to the text's end. A text with no white space, as Chinese and Japanese are written, comes back whole. With no match, the snippet is the text's start.
 
+## Results from private sources
+
+```typescript
+import { canDeliverSourceDerivation, createSourceDerivation } from '@framers/agentos/cognition/library';
+
+const read = {
+  tenantId: 'tenant-1',
+  ownerId: 'account-1',
+  connectionId: 'connection-1',
+  generation: 4,
+  sourceId: 'source-1',
+  messageIds: ['message-7', 'message-9'],
+  version: 'v-2f6c',
+  expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+};
+
+// The answer's record: one entry for every private input, quoted in the answer or not.
+const answer = createSourceDerivation([read]);
+
+// At delivery, against the sources' state read in the same transaction that delivers.
+const current = [{ ...read, connected: true, paused: false, searchAskEnabled: true, liveEnabled: false }];
+const deliverable = canDeliverSourceDerivation(
+  answer,
+  { tenantId: 'tenant-1', ownerId: 'account-1', surface: 'ask', liveOptIn: false },
+  current,
+  Date.now(),
+);
+// true; with surface 'share', or once the source is paused, removed or expired, false
+```
+
+A result made from private sources, such as an answer drawn from the documents of a connected account, keeps a record of every source version it was made from, and goes only to its owner's private use while each of those sources is unchanged and unexpired.
+
+`createSourceDerivation(dependencies)` makes the record. Each dependency names a tenant, an owner, a connection and its `generation`, a source, the `messageIds` of the source that the result used, the source's `version` and `expiresAt`, when the source's copy expires. Identifiers are opaque keys, never display text; `generation` and `expiresAt` are nonnegative safe integers, `expiresAt` in UTC epoch milliseconds. Pass one dependency for every private input of the result, whether or not the result quotes it. Dependencies on the same tenant, owner, connection and source are merged into one: their message ids are joined and sorted, and the earlier expiry is kept. The record is `{ tenantId, ownerId, visibility: 'personal', expiresAt, dependencies }`. Its `expiresAt` is the earliest of its dependencies', its dependencies are sorted by tenant, owner, connection and source, and the record, each dependency and each list of message ids are frozen copies, which later changes to the arrays passed in do not reach. It throws a `RangeError` with the message `invalid_source_dependency` for an empty list; a dependency with an empty identifier, version or message id, no message ids, or a `generation` or `expiresAt` that is not a nonnegative safe integer; dependencies of more than one tenant or owner; and two dependencies on one source with different generations or versions.
+
+`canDeliverSourceDerivation(derivation, context, current, now)` answers whether the record's result may be delivered at `now`, in UTC epoch milliseconds. `context` names the receiver's `tenantId` and `ownerId`, the destination `surface`, and `liveOptIn`, whether the receiving live session chose these sources. `current` holds each source's state now: a dependency's fields with `connected`, `paused`, `searchAskEnabled` and `liveEnabled`. It answers true only when all of these hold:
+
+- the receiver is the record's tenant and owner;
+- the surface is `search` or `ask`, or `live` with `liveOptIn` true. `team`, `guest`, `share`, `export` and `outbound` refuse the whole result, however little of it a private source made;
+- `now` is before the record's expiry and before each dependency's, and the record's expiry is the earliest of its dependencies';
+- each dependency has one row in `current`, matched by tenant, owner, connection and source, and that row is connected, not paused and unexpired, holds the dependency's generation, version and every one of its message ids, and has the surface's switch on: `liveEnabled` for `live`, `searchAskEnabled` for `search` and `ask`.
+
+A malformed record, row or dependency, a source given twice in `current` or in the record, a dependency of another tenant or owner than the record's, a record with no dependencies and a `now` that is not a nonnegative safe integer each answer false. A source read again with a later expiry does not extend a record made before: the record keeps its own expiry.
+
+`canDeliverSourceDerivation` reads no database and takes no lock. Read `current` in the transaction that commits or delivers the result, serialized with disconnection, pausing, removal, expiry and changes to the switches: a check against rows read earlier can deliver a result whose source is gone.
+
 ## On a device
 
 ```typescript
