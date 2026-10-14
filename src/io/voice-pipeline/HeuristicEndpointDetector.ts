@@ -59,7 +59,11 @@
  *    it belongs to the turn that ended, and pays none of the next turn's
  *    `speech_end` events. A `speech_start` from a standalone VAD
  *    (`source: 'vad'`) ends that window, as a `speech_end` does: its speech
- *    events say nothing about when the transcriber's finals come.
+ *    events say nothing about when the transcriber's finals come. So does a
+ *    reset with `'session'`, which a session makes as it starts on the
+ *    detector: the new session's transcriber sends no final of an earlier
+ *    session's turns, so a detector handed to one session after another
+ *    waits for no late final of the last turn before.
  *
  * ## Why heuristic over acoustic-only?
  *
@@ -177,10 +181,10 @@ export interface HeuristicEndpointDetectorOptions {
  *
  * `'late_final'` carries, as it was pushed, an item-keyed final that
  * arrived after a reset ended its turn (each `turn_complete` makes one) and
- * before the next `speech_end` or a standalone VAD's next `speech_start`,
- * while the transcriber's next utterance was spoken included, once per such
- * final. The detector drops it from its turns, so it never joins the next
- * turn's text.
+ * before the next `speech_end`, a standalone VAD's next `speech_start` or a
+ * session's start (`reset('session')`), while the transcriber's next
+ * utterance was spoken included, once per such final. The detector drops it
+ * from its turns, so it never joins the next turn's text.
  * `VoicePipelineOrchestrator` does not listen for it, so the conversation
  * leaves those words out; `startListenSession` writes the final to its sink
  * as a turn of its own.
@@ -298,14 +302,15 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
   /**
    * Set when a reset ends a turn in which speech started, and cleared by the
-   * next `speech_end`, or by a `speech_start` from a standalone VAD
-   * (`source: 'vad'`), whose speech events say nothing about when the
-   * transcriber's finals come: an item-keyed final that arrives meanwhile is
-   * the late final of the turn that ended, and is dropped and reported as
-   * `'late_final'`. The transcriber's own `speech_start` leaves it set: the
-   * transcriber sends an utterance's final after that utterance's end of
-   * speech, so a final that arrives while the next utterance is spoken is
-   * still the ended turn's.
+   * next `speech_end`, by a reset with `'session'` (a new session's
+   * transcriber sends no final of an earlier session's turns), or by a
+   * `speech_start` from a standalone VAD (`source: 'vad'`), whose speech
+   * events say nothing about when the transcriber's finals come: an
+   * item-keyed final that arrives meanwhile is the late final of the turn
+   * that ended, and is dropped and reported as `'late_final'`. The
+   * transcriber's own `speech_start` leaves it set: the transcriber sends an
+   * utterance's final after that utterance's end of speech, so a final that
+   * arrives while the next utterance is spoken is still the ended turn's.
    */
   private awaitingNextSpeechEnd = false;
 
@@ -529,10 +534,19 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * the next `speech_end` or a standalone VAD's next `speech_start`, while
    * the transcriber's next utterance is spoken included, is that turn's late
    * final, and is dropped and reported as `'late_final'`.
+   *
+   * A session that starts on the detector resets it with `'session'`
+   * (`VoicePipelineOrchestrator.startSession()` and `startListenSession()`
+   * do): the new session's transcriber sends no final of an earlier
+   * session's turns, so no late final is awaited after it.
+   *
+   * @param scope - `'turn'` (the default) ends a turn; `'session'` starts a
+   *   session, and ends the wait for a late final of the turns before it.
    */
-  reset(): void {
-    // A turn in which speech started can still get a final after it has ended.
-    this.awaitingNextSpeechEnd ||= this.turnStartMs !== null;
+  reset(scope: 'turn' | 'session' = 'turn'): void {
+    // A turn in which speech started can still get a final after it has ended; a session that starts gets none of an
+    // earlier session's turns.
+    this.awaitingNextSpeechEnd = scope === 'turn' && (this.awaitingNextSpeechEnd || this.turnStartMs !== null);
     this._clearSilenceTimer();
     this.accumulatedText = '';
     this.speechActive = false;

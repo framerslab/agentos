@@ -34,6 +34,8 @@ export interface ListenSessionOverrides {
    * and their first start and last end times (including with {@link AcousticEndpointDetector}).
    * A `late_final` it emits, a final that arrived after its turn completed and that no turn takes,
    * is written as a turn of its own, as a final is without a detector; one with no words writes nothing.
+   * The session resets it with `'session'` as it starts, so a detector an earlier session used waits for no
+   * late final of that session's last turn.
    */
   endpointDetector?: IEndpointDetector;
   /** Passed to the transcriber's `startSession()`. */
@@ -120,6 +122,9 @@ export interface ListenSession extends EventEmitter {
  * ```
  */
 export async function startListenSession(transport: IStreamTransport, sink: ITranscriptInputSink, overrides: ListenSessionOverrides): Promise<ListenSession> {
+  // This session's transcriber sends no final of an earlier session's turns, so a detector an earlier session used
+  // waits for none.
+  overrides.endpointDetector?.reset('session');
   const stt = overrides.reconnect === false ? overrides.streamingSTT : new ReconnectingSTT(overrides.streamingSTT, typeof overrides.reconnect === 'object' ? overrides.reconnect : {});
   const sttSession: StreamingSTTSession = await stt.startSession(overrides.sttConfig);
   const detector = overrides.endpointDetector;

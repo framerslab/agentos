@@ -347,6 +347,8 @@ describe('VoicePipelineOrchestrator', () => {
 
   it('should reset endpoint detector after flush_complete to prepare for next turn', async () => {
     await startSession();
+    expect(endpoint.reset).toHaveBeenCalledWith('session'); // as the session started
+    vi.mocked(endpoint.reset).mockClear();
     endpoint.emit('turn_complete', makeTurnComplete());
     await vi.advanceTimersByTimeAsync(0);
 

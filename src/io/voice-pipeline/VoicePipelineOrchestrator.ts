@@ -317,11 +317,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    *
    * Without a call profile this method:
    * 1. Validates the orchestrator is in `'idle'` state and has its four components.
-   * 2. Creates STT and TTS sub-sessions from the provided factories.
-   * 3. Wires all event handlers (transport -> STT -> endpoint -> agent -> TTS -> transport, and a client's
+   * 2. Resets the endpoint detector with `'session'`, so a detector an earlier session used carries nothing of that
+   *    session into this one, such as a wait for the late final of its last turn.
+   * 3. Creates STT and TTS sub-sessions from the provided factories.
+   * 4. Wires all event handlers (transport -> STT -> endpoint -> agent -> TTS -> transport, and a client's
    *    transcript messages -> endpoint).
-   * 4. Transitions to `'listening'` and starts the watchdog timer.
-   * 5. Returns a {@link VoicePipelineSession} handle.
+   * 5. Transitions to `'listening'` and starts the watchdog timer.
+   * 6. Returns a {@link VoicePipelineSession} handle.
    *
    * A sub-session that fails to start closes the session, its transport included, and rejects this call.
    *
@@ -354,6 +356,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     }
     if (!overrides.endpointDetector) throw new Error('endpointDetector is required');
     if (!overrides.bargeinHandler) throw new Error('bargeinHandler is required');
+    // This session's STT session sends no final of an earlier session's turns, so a detector an earlier session used
+    // waits for none.
+    overrides.endpointDetector.reset('session');
     this.transport = transport;
     this.agent = agent;
     this.endpoint = overrides.endpointDetector;
