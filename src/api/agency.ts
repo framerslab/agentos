@@ -850,66 +850,67 @@ export function agency(opts: AgencyOptions): Agent {
   // ---------------------------------------------------------------------------
 
   /**
-   * When `opts.voice.enabled` is set, attach a `listen()` method that starts a
-   * WebSocket server on 127.0.0.1 (port 0, the default, picks a free port) and
-   * returns its port, its URL and a `close()`.
-   *
-   * The server carries text, not audio, and runs no speech-to-text or
-   * text-to-speech. Each message is read as JSON; one with a `text` field is
-   * sent through the agency's `generate()`, and the reply goes back as
-   * `{ "text": ... }`. A message that is not JSON, or whose run throws, gets
-   * `{ "error": ... }` back.
-   *
-   * Dynamic import of `ws` keeps voice entirely optional — if the package is
-   * not installed the error message tells the caller exactly what to install.
-   * The `@vite-ignore` keeps bundlers/vitest from trying to statically resolve
-   * the optional, possibly-uninstalled `ws` package at transform time (which
-   * otherwise surfaces as a "Failed to load url ws" load error in test runs).
+   * Optional loopback JSON-text listener. It performs no STT or TTS.
+   * Binary frames receive audio_not_supported and close code 1003.
+   * Use VoiceSessionFactory and its authenticated transport for spoken calls.
    */
   if (opts.voice?.enabled) {
     agentObj.listen = async (listenOpts?: { port?: number }): Promise<{ port: number; url: string; close: () => Promise<void> }> => {
-      try {
-        const ws = await import(/* @vite-ignore */ 'ws');
-        const WebSocketServer = (ws as any).WebSocketServer ?? ws.default?.Server ?? ws.Server;
-        const port = listenOpts?.port ?? 0;
-
-        const wss = new WebSocketServer({ port, host: '127.0.0.1' });
-        await new Promise<void>((resolve) => wss.on('listening', resolve));
-        const address = wss.address() as { port: number } | null;
-        const actualPort = address?.port ?? port;
-
-        /**
-         * Connection handler: each message a client sends is one text turn,
-         * read as JSON as described above. No audio is read.
-         */
-        wss.on('connection', async (ws: any) => {
-          // Voice pipeline stub — STT/TTS bridging requires a full AudioProcessor
-          // + speech provider setup. For now, accept text frames via JSON and
-          // route them through the agent's generate() method.
-          ws.on('message', async (data: Buffer) => {
-            try {
-              const msg = JSON.parse(data.toString());
-              if (msg.text) {
-                const result = await agentObj.generate(msg.text);
-                const text = typeof result === 'string' ? result : (result as any)?.text ?? '';
-                ws.send(JSON.stringify({ text }));
-              }
-            } catch {
-              ws.send(JSON.stringify({ error: 'Invalid message format. Send JSON: { "text": "..." }' }));
-            }
-          });
-        });
-
-        return {
-          port: actualPort,
-          url: `ws://127.0.0.1:${actualPort}`,
-          close: () => new Promise<void>((resolve) => wss.close(() => resolve())),
+      const { WebSocketServer, WebSocket } = await import('ws');
+      const wss = new WebSocketServer({ port: listenOpts?.port ?? 0, host: '127.0.0.1', maxPayload: 65536 });
+      await new Promise<void>((resolve, reject) => {
+        const ready = (): void => { wss.off('error', failed); resolve(); };
+        const failed = (error: Error): void => { wss.off('listening', ready); reject(error); };
+        wss.once('listening', ready); wss.once('error', failed);
+      });
+      wss.on('error', () => { for (const client of wss.clients) client.terminate(); });
+      wss.on('connection', (socket) => {
+        let busy = false;
+        socket.on('error', () => socket.terminate());
+        const send = (value: unknown): void => {
+          if (socket.readyState !== WebSocket.OPEN) return;
+          if (socket.bufferedAmount > 65536) { socket.close(1013, 'output unavailable'); return; }
+          socket.send(JSON.stringify(value), (error) => { if (error) socket.terminate(); });
         };
-      } catch {
-        throw new Error(
-          'Voice transport requires the ws package. Install with: npm install ws',
-        );
-      }
+        const error = (code: string, message: string): void => send({ error: { code, message } });
+        socket.on('message', (data, isBinary) => {
+          if (isBinary) {
+            error('audio_not_supported', 'This listener accepts JSON text only. Use VoiceSessionFactory for audio.');
+            socket.close(1003, 'audio_not_supported'); return;
+          }
+          let text: string;
+          try {
+            const input: unknown = JSON.parse(data.toString());
+            if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('shape');
+            const message = input as Record<string, unknown>;
+            if (Object.keys(message).length !== 1 || typeof message.text !== 'string' || !message.text.trim() || message.text.length > 16384) throw new Error('shape');
+            text = message.text;
+          } catch { error('invalid_message', 'Send one JSON object with a non-empty text string, at most 16384 characters.'); return; }
+          if (busy) { error('request_in_progress', 'Wait for the current text response.'); return; }
+          busy = true;
+          void (async () => {
+            try {
+              const result = await agentObj.generate(text);
+              const output = typeof result === 'string' ? result : (result as { text?: unknown })?.text;
+              if (typeof output !== 'string' || Buffer.byteLength(output, 'utf8') > 32768) {
+                error('output_unavailable', 'Text response exceeds the listener limit.'); return;
+              }
+              send({ text: output });
+            } catch { error('generation_failed', 'Text generation failed.'); }
+            finally { busy = false; }
+          })();
+        });
+      });
+      const address = wss.address();
+      if (!address || typeof address === 'string') { wss.close(); throw new Error('text listener address unavailable'); }
+      let closing: Promise<void> | undefined;
+      return { port: address.port, url: `ws://127.0.0.1:${address.port}`, close: () => {
+        if (!closing) closing = new Promise<void>((resolve, reject) => {
+          for (const client of wss.clients) client.terminate();
+          wss.close((error) => { if (error) reject(error); else resolve(); });
+        });
+        return closing;
+      } };
     };
   }
 
