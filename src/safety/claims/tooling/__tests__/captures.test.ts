@@ -86,7 +86,8 @@ describe('claim-bound capture adapters', () => {
   it('rejects another claim and a payload-chosen implementation', async () => {
     const bytes = { image: 'a'.repeat(64) };
     const requirement: CaptureRequirement = { claimIds: ['example-feature.primary'], implementation: 'service-a', audience: 'account', servingMode: 'direct', sizes: [], looks: [], drivers: ['a'], candidateCommit: 'c', adoptedCommits: [], identity: { executableDigest: 'e', uiDigest: 'u', harnessDigest: 'h', configurationDigest: 'g', providerFixtureDigest: 'p' } };
-    const manifest = { captureId: 'image', sha256: bytes.image, implementation: 'service-b', audience: 'visitor', servingMode: 'hosted', driverId: 'a', sourceCommit: 'c', claimIds: ['sibling.primary'], ...requirement.identity } as CaptureManifest;
+    // Deliberately partial: the requirement names no size or look, so nothing reads the fields it leaves out.
+    const manifest = { captureId: 'image', sha256: bytes.image, implementation: 'service-b', audience: 'visitor', servingMode: 'hosted', driverId: 'a', sourceCommit: 'c', claimIds: ['sibling.primary'], ...requirement.identity } as unknown as CaptureManifest;
     const payload = { manifests: [manifest], bytes, requirement: { ...requirement, implementation: 'service-b', audience: 'visitor', servingMode: 'hosted', claimIds: ['sibling.primary'] } };
     const result = await captureAdapter({ requirementFor: () => requirement }).check({ kind: 'capture', ref: 'image', digest: digestOf(payload), payload }, { claimId: 'example-feature.primary', sentenceDigest: 'x', requirements: [] }, new AbortController().signal);
     expect(result.verdict).toBe('contradicted');
