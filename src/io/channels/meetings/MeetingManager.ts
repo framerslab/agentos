@@ -138,8 +138,8 @@ export interface MeetingManagerConfig {
      * new send's funding, under the owner's lock, after `admit`, with the id the run is written under: the snapshot it
      * answers is written with the run (`MeetingRunRecord.funding`) and decides the run's funding from then on, and a send
      * its idempotency key repeats answers the stored run without asking again. A manager given it refuses `sendBot`, and
-     * `sendBotPrepared` throws unless the manager has a `dispatchGuard`, the entitlement hook has `checkRun` and
-     * `recover`, and the run store has `listFundingPending`.
+     * `sendBotPrepared` throws unless the manager has a `dispatchGuard`, the entitlement hook has `checkRun`, `recover`
+     * and `finalize`, and the run store has `listFundingPending`.
      */
     funding?: (request: SendBotRequest, context: string, runId: string) => Promise<MeetingFundingSnapshot>;
   };
@@ -525,7 +525,7 @@ export class MeetingManager {
    *
    * @param requestInput - The send; it must carry an idempotency key. It is copied first, so a caller that changes it meanwhile changes nothing of the send.
    * @param context - The host's preparation data, opaque to the manager, handed to `admit`, `funding` and `prepare`.
-   * @throws Error when the manager has no `creation`, the entitlement hook has no `reserveOnce` or the request has no idempotency key; when `creation.funding` is given and the manager has no `dispatchGuard`, the entitlement hook no `checkRun` or `recover`, or the run store no `listFundingPending`; when the selected snapshot does not fit the run (`assertMeetingFundingChange`) or expires before the run's join time plus its total limit, with nothing written; and when the run store does not keep `creationPending` and `creationContext` as written, after the run is ended `crashed`.
+   * @throws Error when the manager has no `creation`, the entitlement hook has no `reserveOnce` or the request has no idempotency key; when `creation.funding` is given and the manager has no `dispatchGuard`, the entitlement hook no `checkRun`, `recover` or `finalize`, or the run store no `listFundingPending`, before the selector is asked; when the selected snapshot does not fit the run (`assertMeetingFundingChange`) or expires before the run's join time plus its total limit, with nothing written; and when the run store does not keep `creationPending` and `creationContext` as written, after the run is ended `crashed`.
    * @throws RangeError when `joinAt` or a limit the request gives is not a finite number (a limit must also be zero or more); nothing is written.
    */
   async sendBotPrepared(requestInput: SendBotRequest, context: string): Promise<SendBotResult> {
@@ -533,7 +533,8 @@ export class MeetingManager {
     const creation = this.config.creation;
     const key = request.idempotencyKey;
     if (!creation || !this.stores.entitlement.reserveOnce || !key) throw new Error('prepared creation requires host locking, preparation, reserveOnce and a key');
-    if (creation.funding && (!this.config.dispatchGuard || !this.stores.entitlement.checkRun || !this.stores.entitlement.recover || !this.stores.runs.listFundingPending)) throw new Error('funded creation requires lifecycle entitlement, bounded recovery and dispatch guard');
+    // finalize ends every funded run's funding: without it a run would be reserved and sent, then never end
+    if (creation.funding && (!this.config.dispatchGuard || !this.stores.entitlement.checkRun || !this.stores.entitlement.recover || !this.stores.entitlement.finalize || !this.stores.runs.listFundingPending)) throw new Error('funded creation requires lifecycle entitlement, bounded recovery and dispatch guard');
     return creation.withOwnerLock(request.ownerRef, async (): Promise<SendBotResult> => {
       const previous = await this.stores.runs.findByIdempotencyKey(request.ownerRef, key);
       if (previous) {
