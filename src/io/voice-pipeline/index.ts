@@ -21,7 +21,7 @@
  * ## Built-in Providers
  *
  * **STT (Speech-to-Text):**
- * - {@link DeepgramStreamingSTT} — WebSocket streaming via Deepgram Nova-2. Lowest latency.
+ * - {@link DeepgramStreamingSTT}: WebSocket streaming via Deepgram Nova-3. Lowest latency.
  * - {@link ElevenLabsStreamingSTT} — Chunked REST via ElevenLabs Scribe. Uses same key as TTS.
  * - {@link OpenAIRealtimeTranscriptionSTT}: WebSocket streaming via OpenAI's Realtime API in transcription mode, keyed by item id, with a connection rollover for long sessions.
  * - {@link MoonshineBrowserSTT}: Moonshine's streaming models on the user's own device, in the browser through WebAssembly; also in `@framers/agentos/io/voice-pipeline/browser`.

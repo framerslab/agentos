@@ -789,12 +789,10 @@ async function generateWithValidation(
  * surface, with every session served by a Generalized Mind Instance built from
  * these options, and the construction checks and diagnostics of that path.
  *
- * @param opts - Agent configuration including model, instructions, and optional tools.
- *   All `BaseAgentConfig` fields are accepted. Without `runtime: 'gmi'`, the fields
- *   the `agent` column of the capability contract defers (rag, discovery,
- *   guardrails, security, permissions, emergent, voice, etc.) are not applied, and
- *   one warning at construction names those that are set. No surface applies
- *   `security` or `permissions`.
+ * @param opts - Agent configuration. Deferred fields are reported at construction.
+ *   Voice is applied only through an explicit `voice.session` binding and the
+ *   returned `voiceSession()` method. Ordinary generate/stream/session calls
+ *   remain text calls. The full runtime does not apply the voice flag.
  * @returns An {@link Agent} instance with `generate`, `stream`, `session`, and `close` methods.
  * @throws {Error} With `runtime: 'gmi'`, at construction, naming an option the GMI path
  *   cannot honour (see {@link gmi}).
@@ -1380,8 +1378,9 @@ export function agent(opts: AgentOptions): Agent {
 
   if (opts.voice?.session) {
     const voice = opts.voice.session;
+    const factory = voice.factory;
     const revision = structuredClone(voice.agent);
-    agentInstance.voiceSession = (request) => voice.factory.startSession({ ...request, agent: revision });
+    agentInstance.voiceSession = (request) => factory.startSession({ ...request, agent: revision });
   }
 
   // Stash the original config as a non-enumerable property so that

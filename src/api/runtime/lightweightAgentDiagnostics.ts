@@ -29,13 +29,18 @@ export function isMeaningfullyConfigured(value: unknown): boolean {
 /**
  * The config fields that are set but that `surface` accepts without enforcing
  * (`accepted_but_deferred` in {@link BASE_AGENT_CONFIG_CAPABILITY_CONTRACT}),
- * plus memory settings beyond the default runtime's working callback.
+ * plus, on the `agent` surface, memory settings beyond the default runtime's
+ * working callback and a set `voice` (`agent()` passes its config without a
+ * configured `voice.session`, the one voice binding it applies).
  */
 export function getDeferredCapabilities(
   config: Partial<BaseAgentConfig>,
   surface: CapabilitySurface,
 ): CapabilityKey[] {
   return CAPABILITY_KEYS.filter((key) => {
+    // agent() applies voice only through a configured voice.session, which it removes before
+    // this check; every other voice field it receives is accepted and not applied.
+    if (key === 'voice' && surface === 'agent') return isMeaningfullyConfigured(config.voice);
     if (key === 'memory' && surface === 'agent') {
       const memory = config.memory;
       if (typeof memory === 'object' && memory !== null && typeof memory.working === 'function') {
@@ -79,10 +84,12 @@ const APPLIED_BY_AGENCY: ReadonlySet<CapabilityKey> = new Set<CapabilityKey>(['h
 /**
  * Logs one warning through `warn` when `config` sets a field that
  * {@link getDeferredLightweightAgentCapabilities} returns, and returns those
- * fields. The message has one part per group: the fields it points to the
- * full runtime or `agency()`, those it points to the full runtime alone, the
- * memory settings other than the working callback, and `security` and
- * `permissions`, which no surface enforces. `agent()` without
+ * fields. The message has one part per group: the legacy voice fields, which
+ * it points to `voice.session` with `voiceSession()` or to
+ * `VoiceSessionFactory`, the fields it points to the full runtime or
+ * `agency()`, those it points to the full runtime alone, the memory settings
+ * other than the working callback, and `security` and `permissions`, which no
+ * surface enforces. `agent()` without
  * `runtime: 'gmi'` calls it once at construction.
  */
 export function warnOnDeferredLightweightAgentCapabilities(
@@ -96,7 +103,10 @@ export function warnOnDeferredLightweightAgentCapabilities(
 
   const parts: string[] = [];
   const enforcedNowhere = deferredCapabilities.filter((key) => ENFORCED_ON_NO_SURFACE.has(key));
-  const others = deferredCapabilities.filter((key) => key !== 'memory' && !ENFORCED_ON_NO_SURFACE.has(key));
+  const others = deferredCapabilities.filter((key) => key !== 'memory' && key !== 'voice' && !ENFORCED_ON_NO_SURFACE.has(key));
+  if (deferredCapabilities.includes('voice')) {
+    parts.push('agent() accepts legacy voice fields without starting audio. Configure voice.session and call voiceSession(), or construct VoiceSessionFactory directly.');
+  }
   const runtimeOrAgency = others.filter((key) => APPLIED_BY_AGENCY.has(key));
   const runtimeAlone = others.filter((key) => !APPLIED_BY_AGENCY.has(key));
   if (runtimeOrAgency.length > 0) {
