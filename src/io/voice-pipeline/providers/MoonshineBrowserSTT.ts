@@ -575,7 +575,9 @@ export class MoonshineBrowserSTT implements IStreamingSTT, HealthyProvider {
    * @param config - `language`, when given, must be the model's (a region
    *   such as `en-US` is accepted); the other fields do not apply.
    * @throws {Error} When the language differs, or the model or the stream
-   *   cannot be opened, so a `StreamingSTTChain` can fall back.
+   *   cannot be opened, so a `StreamingSTTChain` can fall back; with
+   *   `MoonshineBrowserSTT: disposed` when `dispose()` lands before the
+   *   stream runs, which closes the stream.
    */
   async startSession(config?: StreamingSTTConfig): Promise<StreamingSTTSession> {
     if (config?.language && baseLanguage(config.language) !== this.language) {
@@ -587,12 +589,19 @@ export class MoonshineBrowserSTT implements IStreamingSTT, HealthyProvider {
     const loaded = this.loaded;
     if (!loaded) throw new Error('MoonshineBrowserSTT: disposed');
     const session = new MoonshineBrowserSession(this.providerId, this.language);
-    const engine = await this.openEngine(loaded, session.listener);
+    // dispose() may land while the stream opens or starts. It has released the
+    // model, so the stream is closed and the start rejects as disposed,
+    // whatever the package says of the released model.
+    const engine = await this.openEngine(loaded, session.listener).catch((err: unknown) => {
+      throw this.disposed ? new Error('MoonshineBrowserSTT: disposed') : err;
+    });
     try {
+      if (this.disposed) throw new Error('MoonshineBrowserSTT: disposed');
       await engine.start();
+      if (this.disposed) throw new Error('MoonshineBrowserSTT: disposed');
     } catch (err) {
       engine.close();
-      throw err;
+      throw this.disposed ? new Error('MoonshineBrowserSTT: disposed') : err;
     }
     session.attach(engine);
     this.sessions.add(session);
