@@ -75,8 +75,7 @@ it('intercepts actual stream parse and embedding failure diagnostics', async () 
   await manager.initialize({
     enableCache: false,
     embeddingModels: [{ modelId: 'fixture-model', providerId: 'fixture-provider', dimension: 3, isDefault: true }],
-  }, { getProvider: () => ({ providerId: 'fixture-provider', generateEmbeddings: embed }) }
-    as unknown as AIModelProviderManager);
+  }, { getProvider: () => ({ providerId: 'fixture-provider', generateEmbeddings: embed }) } as unknown as AIModelProviderManager);
   const result = await manager.generateEmbeddings({ texts: [canary] });
   expect(embed).toHaveBeenCalled();
   expect(result.errors?.length).toBe(1);
