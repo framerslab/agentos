@@ -58,6 +58,26 @@ describe('call credentials', () => {
     await f.service.revokeCall('scope-a', 'call-a');
     await expect(f.service.stop('scope-a', 'call-a', connection.controlCredential.token, f.origin, input)).rejects.toThrow();
   });
+  it('answers a first stop after the server ended the call with a receipt of the state reached', async () => {
+    const f = await fixture(); const connection = await f.service.exchange('scope-a', 'call-a', f.grant.token, f.origin, f.connect());
+    await f.service.consumeMedia('scope-a', 'call-a', connection.token, f.origin, 1);
+    await f.manager.connected('scope-a', 'call-a', 1, 1);
+    f.time(16000); await f.manager.tick('scope-a', 'call-a');
+    expect((await f.manager.get('scope-a', 'call-a'))!).toMatchObject({ state: 'ending', endReason: 'worker_lost' });
+    const credentialId = connection.controlCredential.token.split('.')[0]!;
+    const stop = (key: string) => {
+      const requestHash = controlRequestHash('stop', 'call-a', credentialId, key, f.origin);
+      return { idempotencyKey: key, proof: f.identity.proof({ operation: 'stop', callId: 'call-a', credentialId, origin: f.origin, operationKey: key, requestHash, issuedAt: 16000, nonce: `${key}-proof` }) };
+    };
+    const receipt = await f.service.stop('scope-a', 'call-a', connection.controlCredential.token, f.origin, stop('stop-a'));
+    expect(receipt).toEqual({ callId: 'call-a', stopId: 'stop-a', state: 'ending' });
+    for (let i = 0; i < 10; i++) await f.manager.advance('scope-a', 'call-a');
+    expect(await f.service.stop('scope-a', 'call-a', connection.controlCredential.token, f.origin, stop('stop-a'))).toEqual(receipt);
+    expect(await f.service.stop('scope-a', 'call-a', connection.controlCredential.token, f.origin, stop('stop-b'))).toEqual({ callId: 'call-a', stopId: 'stop-b', state: 'failed' });
+    expect((await f.manager.get('scope-a', 'call-a'))!).toMatchObject({ state: 'failed', endReason: 'worker_lost' });
+    await f.service.revokeCall('scope-a', 'call-a');
+    await expect(f.service.stop('scope-a', 'call-a', connection.controlCredential.token, f.origin, stop('stop-c'))).rejects.toThrow('credential refused');
+  });
   it('renews control once, recovers that response and grants no media authority to control', async () => {
     const f = await fixture(); const c = await f.service.exchange('scope-a', 'call-a', f.grant.token, f.origin, f.connect());
     const credentialId = c.controlCredential.token.split('.')[0]!; const key = 'renew-a';

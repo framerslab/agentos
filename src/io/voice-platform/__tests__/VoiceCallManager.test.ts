@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { VoiceCallManager, CALL_END_MESSAGES } from '../VoiceCallManager.js';
+import { VoiceCallManager, CALL_END_MESSAGES, canonicalVoiceHash } from '../VoiceCallManager.js';
 import { CallEndReasonSchema, CreateWebCallSchema } from '../contracts/index.js';
 import { InMemoryVoiceStore } from '../stores/memory.js';
 import { storedCall } from './callFixtures.js';
@@ -118,5 +118,31 @@ describe('durable voice calls', () => {
       await f.manager.tick('scope-a', id);
       expect((await f.manager.get('scope-a', id))!.endReason).toBe({ silence: 'silence_limit', duration: 'duration_limit', turns: 'turn_limit', reconnect: 'participant_disconnected' }[limit]);
     }
+  });
+  it('commits the turn limit with the turn that reaches it', async () => {
+    const f = fixture(); f.seed.limits.maxTurns = 2; const id = await prepared(f);
+    f.time(2000); await f.manager.connected('scope-a', id, 1, 1);
+    await f.manager.completedTurn('scope-a', id, 1, 1, 1, 1);
+    expect((await f.manager.get('scope-a', id))!).toMatchObject({ state: 'connected', endReason: null });
+    await f.manager.completedTurn('scope-a', id, 1, 1, 1, 2);
+    expect((await f.manager.get('scope-a', id))!).toMatchObject({ state: 'ending', endReason: 'turn_limit' });
+  });
+  it('keeps a failed call failed, with its reason, when a purge reaches its cleanup', async () => {
+    const f = fixture(); const id = await prepared(f);
+    f.time(2000); await f.manager.connected('scope-a', id, 1, 1);
+    f.time(18000); await f.manager.tick('scope-a', id); await f.manager.advance('scope-a', id);
+    await f.manager.requestEnd('scope-a', id, 'purged'); await drain(f, id);
+    expect((await f.manager.get('scope-a', id))!).toMatchObject({ state: 'failed', endReason: 'worker_lost', contentRetention: { state: 'purged' } });
+    const terminal = (await f.manager.events('scope-a', id)).filter((e) => e.type !== 'call.started');
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]).toMatchObject({ type: 'call.failed', payload: { endReason: 'worker_lost', transcript: { availability: 'unavailable', reason: 'purged' } } });
+    expect(f.external.effects).toContain('fence-content'); expect(f.external.effects).not.toContain('transcripts');
+  });
+  it('creates a call whose principal leaves its optional issuer undefined, as a stored row reads back', async () => {
+    const f = fixture(); f.seed.call.initiatingPrincipal = { kind: 'member', principalId: 'member-a', issuerRef: undefined };
+    const call = await f.manager.create({ scopeId: 'scope-a', request: f.request, seed: f.seed });
+    f.seed.call.initiatingPrincipal = { kind: 'member', principalId: 'member-a' };
+    expect((await f.manager.create({ scopeId: 'scope-a', request: f.request, seed: f.seed })).callId).toBe(call.callId);
+    expect(canonicalVoiceHash([{ b: undefined, a: 1 }])).toBe(canonicalVoiceHash([{ a: 1 }]));
   });
 });
