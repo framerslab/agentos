@@ -10,7 +10,9 @@
  *
  * It runs when AGENTOS_TEST_MOONSHINE_DIR names a folder holding
  * tiny-streaming-en/ (the files of MOONSHINE_STREAMING_MODEL_FILES) and
- * two_cities_16k.wav; CI's Test & Lint job fetches them and sets it.
+ * two_cities_16k.wav; CI's Test & Lint job fetches them and sets it. On a
+ * folder that lacks one of them, or holds one empty, the test is skipped
+ * with a note naming the file, so a stale folder shows why.
  */
 
 import * as http from 'node:http';
@@ -31,8 +33,8 @@ const MODEL_FOLDER = 'tiny-streaming-en';
 const CLIP = 'two_cities_16k.wav';
 
 /**
- * The note the suite is skipped with on `dir`: it names the first of the
- * model's files and the clip that the folder lacks or holds empty, so a
+ * The note the suite's test is skipped with on `dir`: it names the first of
+ * the model's files and the clip that the folder lacks or holds empty, so a
  * developer whose folder is stale sees which; `undefined` when the folder
  * holds them all.
  */
@@ -104,7 +106,10 @@ describe.skipIf(!MODEL_DIR)('MoonshineBrowserSTT on the real package, in Node', 
     await new Promise((resolve) => server.close(resolve));
   });
 
-  it("transcribes a clip on the calling thread: Moonshine's line ids, a line's interims and final under one id, flush and one close", async () => {
+  it("transcribes a clip on the calling thread: Moonshine's line ids, a line's interims and final under one id, flush and one close", async ({ skip }) => {
+    // A folder that lacks a file skips the test, with a note naming the file, rather than failing it.
+    const note = skipNote(MODEL_DIR);
+    if (note) skip(note);
     const stt = new MoonshineBrowserSTT({
       moonshine: () => import('@moonshine-ai/moonshine-wasm'),
       thread: 'calling',
