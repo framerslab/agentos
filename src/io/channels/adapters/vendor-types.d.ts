@@ -99,6 +99,7 @@ declare module 'irc-framework' {
 declare module 'ws' {
   import { EventEmitter } from 'events';
   import { IncomingMessage, Server as HTTPServer } from 'http';
+  import { AddressInfo } from 'net';
   import { Duplex } from 'stream';
 
   class WebSocket extends EventEmitter {
@@ -142,6 +143,8 @@ declare module 'ws' {
         [key: string]: any;
       });
       close(cb?: (err?: Error) => void): void;
+      /** The address of the server it created, as `net.Server.address()` gives it; null before it listens. */
+      address(): AddressInfo | string | null;
       clients: Set<WebSocket>;
       /** Completes an upgrade the caller accepted, for a server created with `noServer`. */
       handleUpgrade(request: IncomingMessage, socket: Duplex, upgradeHead: Buffer, callback: (client: WebSocket, request: IncomingMessage) => void): void;

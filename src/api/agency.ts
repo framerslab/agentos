@@ -98,6 +98,7 @@ import {
   type AgencyProvenanceRecorder,
   type AgencyProvenanceTrail,
 } from './agency-provenance.js';
+import type { RawData, WebSocket } from 'ws';
 
 // ---------------------------------------------------------------------------
 // Public factory
@@ -856,7 +857,7 @@ export function agency(opts: AgencyOptions): Agent {
    */
   if (opts.voice?.enabled) {
     agentObj.listen = async (listenOpts?: { port?: number }): Promise<{ port: number; url: string; close: () => Promise<void> }> => {
-      const { WebSocketServer, WebSocket } = await import('ws');
+      const { WebSocketServer } = await import('ws');
       const wss = new WebSocketServer({ port: listenOpts?.port ?? 0, host: '127.0.0.1', maxPayload: 65536 });
       await new Promise<void>((resolve, reject) => {
         const ready = (): void => { wss.off('error', failed); resolve(); };
@@ -864,16 +865,16 @@ export function agency(opts: AgencyOptions): Agent {
         wss.once('listening', ready); wss.once('error', failed);
       });
       wss.on('error', () => { for (const client of wss.clients) client.terminate(); });
-      wss.on('connection', (socket) => {
+      wss.on('connection', (socket: WebSocket) => {
         let busy = false;
         socket.on('error', () => socket.terminate());
         const send = (value: unknown): void => {
-          if (socket.readyState !== WebSocket.OPEN) return;
+          if (socket.readyState !== socket.OPEN) return;
           if (socket.bufferedAmount > 65536) { socket.close(1013, 'output unavailable'); return; }
           socket.send(JSON.stringify(value), (error) => { if (error) socket.terminate(); });
         };
         const error = (code: string, message: string): void => send({ error: { code, message } });
-        socket.on('message', (data, isBinary) => {
+        socket.on('message', (data: RawData, isBinary: boolean) => {
           if (isBinary) {
             error('audio_not_supported', 'This listener accepts JSON text only. Use VoiceSessionFactory for audio.');
             socket.close(1003, 'audio_not_supported'); return;
