@@ -33,13 +33,14 @@ CI runs (job "Test & Lint" in [`.github/workflows/ci.yml`](https://github.com/fr
 
 1. `pnpm install`
 2. `pnpm run build` (cleans `dist`, compiles, then rewrites path aliases and import specifiers in `dist`)
-3. `pnpm run lint`
-4. `pnpm run typecheck`
-5. `pnpm run test -- --coverage` (Postgres-backed tests run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI provides a Postgres service. The Moonshine browser provider's integration test runs only when `AGENTOS_TEST_MOONSHINE_DIR` is set, and is skipped with a note naming the file when the folder it names lacks one of the model's files or the clip, or holds one empty; CI fetches them before this step)
+3. `pnpm run verify:exports` (checks that every non-wildcard `exports` target exists in the build, then installs the packed package into an empty project, where the meeting channel, safety runtime and checked egress entries compile and import with network access refused; a run dispatched on a release tag checks the published package of that version the same way, after matching its tarball to the registry's integrity; the release runs it too)
+4. `pnpm run lint`
+5. `pnpm run typecheck`
+6. `pnpm run test -- --coverage` (Postgres-backed tests run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI provides a Postgres service. The Moonshine browser provider's integration test runs only when `AGENTOS_TEST_MOONSHINE_DIR` is set, and is skipped with a note naming the file when the folder it names lacks one of the model's files or the clip, or holds one empty; CI fetches them before this step)
 
 A second job, "Batch-1 gated tests", builds and runs a fixed list of test files with `pnpm vitest run`.
 
-Available scripts that CI does not run: `pnpm run verify:exports` (checks that every non-wildcard `exports` target exists in the build; the release runs it), `pnpm run build:knowledge`, `pnpm run docs`, `pnpm run dev:test`.
+Available scripts that CI does not run: `pnpm run build:knowledge`, `pnpm run docs`, `pnpm run dev:test`.
 
 ## Conventions
 
