@@ -80,4 +80,49 @@ describe('persistence evidence', () => {
     expect(partial.kind).toBe('partial_claim_suppressed');
     expect(suppressionResult({ mode: 'partial', absenceDigests: [], partialRecord: 'p', tests: [{ id: 't', passed: true }], denials: [{ id: 'd', passed: true }], implementationPresent: true, completePath: true }).kind).toBe('failed');
   });
+
+  it('refuses a verification that rests on no case, names a case twice, leaves a run unread or states no path or harness', () => {
+    expect(verifyNoContentWrites({ path: 'direct', inventory, requiredCases: [], runs: [], harness })).toEqual({ kind: 'failed', failures: ['no required case'] });
+    expect(verifyNoContentWrites({ path: 'direct', inventory, requiredCases: ['success', 'success'], runs: [run('success')], harness })).toEqual({ kind: 'failed', failures: ['success: the required case appears twice'] });
+    const unread = run('extra', { findings: [{ sinkId: 'log', code: 'marker_in_stream', detail: 'stdout' }] });
+    expect(verifyNoContentWrites({ path: 'direct', inventory, requiredCases: ['success'], runs: [run('success'), unread], harness })).toEqual({ kind: 'failed', failures: ['extra: the case ran but is not required'] });
+    const unstated = { commit: '', harnessDigest: 'h', applicationDigest: 'a' };
+    expect(verifyNoContentWrites({ path: '', inventory, requiredCases: ['success'], runs: [run('success', { harness: unstated })], harness: unstated })).toEqual({ kind: 'failed', failures: ['no path', 'the harness names no commit, harness digest or application digest'] });
+  });
+
+  it('names a missing negative case when no deliberate leak is expected', () => {
+    expect(leakDetectionProblems([run('leak-db')], [])).toEqual(['no deliberate leak was named']);
+  });
+
+  it('refuses a partial suppression with no implementation or a blank partial-implementation record', () => {
+    const partial = { mode: 'partial' as const, absenceDigests: [], partialRecord: 'p', tests: [{ id: 't', passed: true }], denials: [{ id: 'd', passed: true }], implementationPresent: true, completePath: false };
+    expect(suppressionResult({ ...partial, implementationPresent: false })).toEqual({ kind: 'failed', failures: ['no implementation exists, so partial suppression does not apply'] });
+    expect(suppressionResult({ ...partial, partialRecord: '' })).toEqual({ kind: 'failed', failures: ['no partial-implementation record'] });
+  });
+
+  it('reads a result again before either adapter supports it', async () => {
+    const verified = { kind: 'verified_no_content_writes', path: 'direct', sinks: inventory, scenarios: ['success'] };
+    expect(await check(persistenceAdapter(), verified)).toEqual({ verdict: 'supported', basis: 'deterministic', detail: '1 cases on direct' });
+    const verifiedFaults: [unknown, string][] = [
+      [{ kind: 'verified_no_content_writes' }, 'the result lacks its path, sinks or cases'],
+      [{ ...verified, path: '' }, 'the result names no path'],
+      [{ ...verified, scenarios: [] }, 'the result names no case'],
+      [{ ...verified, scenarios: ['success', 'success'] }, 'the result names a case twice'],
+      [{ ...verified, sinks: [{ id: 'db', kind: 'database', location: 'state/app.db' }] }, 'the result holds a sink that is not a sink entry'],
+      [{ ...verified, sinks: [] }, 'the inventory is empty'],
+    ];
+    for (const [payload, detail] of verifiedFaults) expect(await check(persistenceAdapter(), payload)).toEqual({ verdict: 'unverifiable', basis: 'deterministic', detail });
+    const absent = { kind: 'absent_claim_suppressed', absence: ['d'], tests: ['absence-suppression'], denials: ['link-denied'] };
+    const partial = { kind: 'partial_claim_suppressed', partial: 'p', tests: ['partial-suppression'], denials: ['route-denied'] };
+    expect((await check(suppressionAdapter(), absent)).verdict).toBe('supported');
+    expect((await check(suppressionAdapter(), partial)).verdict).toBe('supported');
+    const suppressionFaults: [unknown, string][] = [
+      [{ ...absent, absence: [] }, 'the result names no refreshed absence record'],
+      [{ ...absent, tests: [] }, 'the result names no executed test'],
+      [{ ...partial, denials: [] }, 'the result names no executed denial'],
+      [{ ...partial, partial: '' }, 'the result names no partial-implementation record'],
+      [{ kind: 'partial_claim_suppressed', partial: 'p' }, 'the result names no executed test'],
+    ];
+    for (const [payload, detail] of suppressionFaults) expect(await check(suppressionAdapter(), payload)).toEqual({ verdict: 'unverifiable', basis: 'deterministic', detail });
+  });
 });
