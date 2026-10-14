@@ -382,7 +382,7 @@ A persona definition includes:
 
 ### HEXACO Trait Modulation
 
-The HEXACO model provides six personality dimensions. In cognitive memory (the traits a host passes as `CognitiveMemoryConfig.traits`), each one weights a content feature at encoding and scales one mechanism:
+The HEXACO model provides six personality dimensions. In cognitive memory (the traits a host passes as `CognitiveMemoryConfig.traits`), each one weights a content feature at encoding and scales one mechanism, and openness scales two:
 
 | HEXACO Trait | Range | Cognitive Effect |
 |---|---|---|
@@ -391,7 +391,7 @@ The HEXACO model provides six personality dimensions. In cognitive memory (the t
 | **Extraversion** | 0-1 | Social-content attention at encoding; a lower feeling-of-knowing threshold, so more partial recalls surface. |
 | **Agreeableness** | 0-1 | Cooperative-content attention at encoding; a faster emotion-regulation reappraisal rate. |
 | **Conscientiousness** | 0-1 | Procedural-content attention at encoding; stronger retrieval-induced forgetting; above 0.6, one working-memory slot fewer. |
-| **Openness** | 0-1 | Novelty attention at encoding; a higher involuntary-recall probability; above 0.6, one working-memory slot more. |
+| **Openness** | 0-1 | Novelty attention at encoding; a higher involuntary-recall probability and a larger schema-encoding boost for novel traces; above 0.6, one working-memory slot more. |
 
 ### Persona Definition Example
 
@@ -641,7 +641,7 @@ Retrieval combines six weighted signals to rank candidate traces ([`RetrievalPri
 
 ### Eight Cognitive Mechanisms
 
-Located in `cognition/memory/mechanisms/`; six of the eight are scaled by a HEXACO trait. They run when `CognitiveMemoryManager` is initialized with a `cognitiveMechanisms` config:
+Located in `cognition/memory/mechanisms/`; seven of the eight are scaled by a HEXACO trait, all but temporal gist extraction. They run when `CognitiveMemoryManager` is initialized with a `cognitiveMechanisms` config:
 
 | Mechanism | HEXACO Modulator | Effect |
 |-----------|-----------------|--------|
@@ -650,7 +650,7 @@ Located in `cognition/memory/mechanisms/`; six of the eight are scaled by a HEXA
 | Involuntary recall | Openness | Spontaneous memory surfacing; high O increases trigger sensitivity |
 | Feeling-of-knowing | Extraversion | Metacognitive confidence judgment; high X lowers sharing threshold |
 | Temporal gist extraction | None | Compresses old, rarely retrieved traces into a gist at consolidation |
-| Schema encoding | None | Strengthens novel traces and weakens schema-congruent ones at encoding, once the host sets cluster centroids |
+| Schema encoding | Openness | Strengthens novel traces and weakens schema-congruent ones at encoding, once the host sets cluster centroids; high O strengthens novel traces more |
 | Source confidence decay | Honesty-Humility | Shortens the stability of inferred and reflected traces at consolidation; high H decays reflections faster |
 | Emotion regulation | Agreeableness | Reappraises high-arousal traces at consolidation; high A reappraises faster |
 
