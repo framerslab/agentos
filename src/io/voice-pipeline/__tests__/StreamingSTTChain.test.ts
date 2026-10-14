@@ -2,7 +2,15 @@ import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { StreamingSTTChain } from '../providers/StreamingSTTChain.js';
 import { defaultCapabilities } from '../HealthyProvider.js';
-import type { AudioFrame, IStreamingSTT, StreamingSTTSession, TranscriptEvent } from '../types.js';
+import type {
+  AudioFrame,
+  AudioIdentity,
+  IStreamingSTT,
+  ScopedAudioFrame,
+  ScopedStreamingSTTSession,
+  StreamingSTTSession,
+  TranscriptEvent,
+} from '../types.js';
 import type { HealthyProvider } from '../HealthyProvider.js';
 
 function mkSession(providerId: string): StreamingSTTSession {
@@ -613,5 +621,117 @@ describe('StreamingSTTChain: the mid-utterance failover facade', () => {
     // The backup transcribes the replayed audio again.
     b.sessions[0].emit('transcript', { ...said, itemId: '9' });
     expect(finals).toEqual(['Hello there.']);
+  });
+});
+
+describe('StreamingSTTChain: a backup that fails as it takes over', () => {
+  /** A session whose methods are spies; `close()` emits 'close', as a real session's does. */
+  function spySession() {
+    const emitter = new EventEmitter();
+    return Object.assign(emitter, {
+      pushAudio: vi.fn(async (_frame: AudioFrame): Promise<void> => {}),
+      flush: vi.fn(async (): Promise<void> => {}),
+      close: vi.fn((): void => {
+        emitter.emit('close');
+      }),
+    });
+  }
+
+  /** A provider whose `startSession()` opens `session`. */
+  function spyProvider(id: string, priority: number, session: StreamingSTTSession) {
+    const startSession = vi.fn(async (): Promise<StreamingSTTSession> => session);
+    const stt: IStreamingSTT & HealthyProvider = {
+      providerId: id,
+      priority,
+      capabilities: defaultCapabilities({ languages: ['en'] }),
+      isStreaming: true,
+      startSession,
+      async healthCheck() {
+        return { ok: true };
+      },
+    };
+    return { stt, startSession };
+  }
+
+  /** Half a second of 16 kHz audio, over the facade's 400 ms replay floor. */
+  const halfSecond = (timestamp = 0): AudioFrame => ({ samples: new Float32Array(8_000), sampleRate: 16_000, timestamp });
+
+  /** A facade over `a` and the backups `b` and `c` that has taken half a second of audio; `a` then fails. */
+  async function switchingFacade(b: StreamingSTTSession, c: StreamingSTTSession) {
+    const { CircuitBreaker } = await import('../CircuitBreaker.js');
+    const breaker = new CircuitBreaker({ failureThreshold: 1, windowMs: 60_000, cooldownMs: 60_000 });
+    const a = spySession();
+    const third = spyProvider('c', 30, c);
+    const failover = vi.fn();
+    const errors = vi.fn();
+    const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, spyProvider('b', 20, b).stt, third.stt], {
+      breaker,
+      enableMidUtteranceFailover: true,
+      onProviderFailover: failover,
+    });
+    const facade = await chain.startSession();
+    facade.on('error', errors);
+    const frame = halfSecond();
+    await facade.pushAudio(frame);
+    a.emit('error', new Error('socket hang up'));
+    return { chain, breaker, failover, errors, third, frame };
+  }
+
+  it.each(['error', 'close'] as const)('passes over a backup that reports %s while it takes the replay, for the next provider', async (event) => {
+    const b = spySession();
+    // The backup's connection fails as it takes the replayed audio; the push itself completes.
+    b.pushAudio.mockImplementation(async () => {
+      if (event === 'error') b.emit('error', new Error('socket hang up'));
+      else b.emit('close');
+    });
+    const c = spySession();
+    const f = await switchingFacade(b, c);
+    await vi.waitFor(() => expect(f.failover).toHaveBeenCalledOnce());
+    expect(f.failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'c' });
+    expect(c.pushAudio).toHaveBeenCalledWith(f.frame);
+    expect(f.chain.currentProviderId).toBe('c');
+    expect(f.breaker.isAvailable('b')).toBe(false);
+    expect(f.errors).not.toHaveBeenCalled();
+  });
+
+  it('tries the next provider when a backup refuses a replayed frame', async () => {
+    const b = spySession();
+    b.pushAudio.mockRejectedValue(new Error('socket closed'));
+    const c = spySession();
+    const f = await switchingFacade(b, c);
+    await vi.waitFor(() => expect(f.third.startSession).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(f.failover).toHaveBeenCalledOnce());
+    expect(f.failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'c' });
+    expect(c.pushAudio).toHaveBeenCalledWith(f.frame);
+    expect(b.close).toHaveBeenCalled();
+    expect(f.breaker.isAvailable('b')).toBe(false);
+    expect(f.errors).not.toHaveBeenCalled();
+  });
+
+  it('ends a scoped facade at a frame without its identity, with no provider blamed for it or sent it', async () => {
+    const { CircuitBreaker } = await import('../CircuitBreaker.js');
+    const breaker = new CircuitBreaker({ failureThreshold: 1, windowMs: 60_000, cooldownMs: 60_000 });
+    const scoped = () =>
+      Object.assign(spySession(), {
+        pushAudioScoped: vi.fn(async (_frame: ScopedAudioFrame): Promise<void> => {}),
+        reset: vi.fn(async (_identity: AudioIdentity): Promise<void> => {}),
+      });
+    const a = scoped();
+    const second = spyProvider('b', 20, scoped());
+    const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt], { breaker, enableMidUtteranceFailover: true });
+    const generation = { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 };
+    const identity: AudioIdentity = { scopeId: 'scope-a', callId: 'call-a', turnId: 'turn-a', generation };
+    const facade = (await chain.startSession({ call: identity })) as ScopedStreamingSTTSession;
+    const seen: string[] = [];
+    facade.on('error', (error: Error) => seen.push(`error ${error.message}`));
+    facade.on('close', () => seen.push('close'));
+    await facade.pushAudioScoped({ ...halfSecond(), ...identity, generation, sampleRate: 16_000, channels: 1, sequence: 1 });
+    // The legacy entry, with a frame that carries no scope, turn or generation.
+    await facade.pushAudio(halfSecond(500));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(second.startSession).not.toHaveBeenCalled();
+    expect(breaker.isAvailable('a')).toBe(true);
+    expect(seen).toEqual(['error scoped STT input required', 'close']);
+    expect(a.pushAudioScoped).toHaveBeenCalledTimes(1);
   });
 });
