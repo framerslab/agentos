@@ -126,7 +126,9 @@ export class ResolvedReasoningSession implements IVoicePipelineAgentSession {
         } catch (error) { failure = error; }
         finally {
           attemptAbort.abort(); if (!completed) {
+            // eslint-disable-next-line no-unsafe-finally -- missing stop evidence replaces the attempt's own error, so an unfenced attempt never reads as stopped
             try { const evidence = await this.options.fence(this.scope, endpoint, grant.attemptId, identity); if (evidence.stopped !== true || !evidence.evidenceRef) throw new Error('reasoning fence incomplete'); }
+            // eslint-disable-next-line no-unsafe-finally -- as above: a fence that fails poisons the session and wins over the attempt's error
             catch { this.poisoned = true; throw new Error('reasoning fence incomplete'); }
           }
         }

@@ -49,6 +49,7 @@ export class VoiceToolRegistry {
       const result = JSON.stringify(entry.output.parse(JSON.parse(answer.body.toString('utf8')))); complete = true; return result;
     } finally {
       abort.abort();
+      // eslint-disable-next-line no-unsafe-finally -- missing stop evidence replaces the request's own error, so an unfenced tool never reads as stopped
       if (!complete) { const evidence = await entry.fence(scope, operationId).catch(() => { throw new Error('tool fence incomplete'); }); if (evidence.stopped !== true || !evidence.evidenceRef) throw new Error('tool fence incomplete'); }
     }
   }
