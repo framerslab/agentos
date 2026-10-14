@@ -624,13 +624,14 @@ const research = agency({
 });
 ```
 
-A specialist the manager spawns stays in the roster for the rest of that call
-(`generate()`, `stream()`, or a session's `send()` or `stream()`), and the next
-call starts from the configured roster:
+A specialist the manager spawns stays in the roster until the run that spawned
+it ends. Every run starts from the configured roster, since
 [`hierarchical.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/strategies/hierarchical.ts)
-copies the roster at the start of each run. `emergent.tier` (`'session'`,
-`'agent'` or `'shared'`) is accepted and not read, so no tier keeps a
-specialist past the call that spawned it.
+copies it at the start of each run, so the specialist is gone in the next
+`generate()`, `stream()` or session `send()`, and in a retry that a failed
+`output` validation starts. `emergent.tier` (`'session'`, `'agent'` or
+`'shared'`) is accepted and not read, so no tier keeps a specialist past its
+run.
 
 | `planner` field | Default | Effect |
 |---|---|---|
