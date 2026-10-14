@@ -28,6 +28,11 @@ const expected = (overrides: Partial<ExpectedInvocation> = {}): ExpectedInvocati
 });
 const manifest = (invocations: ExpectedInvocation[]): InvocationManifest => ({ repository: 'example/repo', runId: '1', attempt: 1, commit: identity.commit, invocations });
 const observed = (body: unknown, overrides: Partial<ObservedInvocation> = {}): ObservedInvocation => ({ invocationId: 'main', exitCode: 0, report: body, identity, ...overrides });
+const clean = report([spec('s1', 'signs in', [test('engine-a', 'expected', [result('passed')])])], { expected: 1 });
+const signsIn = { file: 'journey.spec.ts', title: 'the journey > signs in', projects: ['engine-a'] };
+// Specs at the top of their file, so a test's title is the spec's own.
+const topLevel = (specs: unknown[]) => ({ ...report([], { expected: specs.length }), suites: [{ title: 'journey.spec.ts', file: 'journey.spec.ts', line: 0, column: 0, specs }] });
+const passing = (project: string) => test(project, 'expected', [result('passed')]);
 
 describe('browser evidence reports', () => {
   it('normalizes a report: the title path, every attempt and the final status', () => {
@@ -89,5 +94,63 @@ describe('browser evidence reports', () => {
     expect(requiredPassed(run, 'main', { file: 'journey.spec.ts', title: 'the journey > signs in', projects: ['engine-a'] })).toBe(false);
     const asked = reconcileInvocations(manifest([expected({ eligible: false })]), [observed(body)]);
     expect(asked.problems.map((p) => p.code)).toEqual(['ineligible_required']);
+  });
+
+  const invocationLevel: [string, ObservedInvocation[], string[]][] = [
+    ['an identity that is not the expected one', [observed(clean, { identity: { ...identity, commit: 'b'.repeat(40) } })], ['identity_mismatch']],
+    ['no identity file', [observed(clean, { identity: null })], ['identity_mismatch', 'identity_mismatch', 'identity_mismatch', 'identity_mismatch']],
+    ['a second report', [observed(clean), observed(clean)], ['duplicate_invocation']],
+    ['report-level errors', [observed({ ...clean, errors: [{ message: 'Worker crashed' }] })], ['report_errors']],
+    ['counts that do not match its tests', [observed({ ...clean, stats: { ...clean.stats, expected: 99 } })], ['stats_mismatch']],
+  ];
+  it.each(invocationLevel)('lets no test of an invocation with %s satisfy a requirement', (_name, seen, codes) => {
+    const run = reconcileInvocations(manifest([expected()]), seen);
+    expect(run.problems.map((p) => p.code)).toEqual(codes);
+    expect(requiredPassed(run, 'main', signsIn)).toBe(false);
+    expect(run.passed.size).toBe(0);
+  });
+
+  it('reports a non-zero exit whatever the other tests did', () => {
+    const mixed = report([spec('s1', 'signs in', [test('engine-a', 'expected', [result('passed')])]), spec('s2', 'other', [test('engine-a', 'unexpected', [result('failed')])])], { expected: 1, unexpected: 1 });
+    const run = reconcileInvocations(manifest([expected()]), [observed(mixed, { exitCode: 1 })]);
+    expect(run.problems.map((p) => p.code)).toEqual(['nonzero_exit']);
+    expect(requiredPassed(run, 'main', signsIn)).toBe(false);
+  });
+
+  it('reports an unknown exit as unknown, not as non-zero, and passes nothing of it', () => {
+    const run = reconcileInvocations(manifest([expected()]), [observed(clean, { exitCode: null })]);
+    expect(run.problems.map((p) => p.code)).toEqual(['unknown_exit']);
+    expect(requiredPassed(run, 'main', signsIn)).toBe(false);
+  });
+
+  it('checks every instance of a test seen twice in one project, and passes no test seen twice or under a shared spec id', () => {
+    const hidden = report([spec('s1', 'signs in', [test('engine-a', 'unexpected', [result('failed')])]), spec('s2', 'signs in', [test('engine-a', 'expected', [result('passed')])])], { expected: 1, unexpected: 1 });
+    const run = reconcileInvocations(manifest([expected()]), [observed(hidden)]);
+    expect(run.problems.map((p) => p.code)).toEqual(['duplicate_test', 'failed_required']);
+    expect(requiredPassed(run, 'main', signsIn)).toBe(false);
+    const twice = report([spec('s1', 'signs in', [test('engine-a', 'expected', [result('passed')]), test('engine-a', 'expected', [result('passed')])])], { expected: 2 });
+    expect(requiredPassed(reconcileInvocations(manifest([expected()]), [observed(twice)]), 'main', signsIn)).toBe(false);
+    const shared = report([spec('s1', 'signs in', [test('engine-a', 'expected', [result('passed')])]), spec('s1', 'signs out', [test('engine-a', 'expected', [result('passed')])])], { expected: 2 });
+    expect(requiredPassed(reconcileInvocations(manifest([expected()]), [observed(shared)]), 'main', signsIn)).toBe(false);
+  });
+
+  it('keeps two tests apart when their project, file and title join to the same text', () => {
+    const apart = topLevel([{ ...spec('s1', 'c', [passing('p')]), file: 'a :: b' }, { ...spec('s2', 'c', [passing('p :: a')]), file: 'b' }]);
+    const required = [{ file: 'a :: b', title: 'c', projects: ['p'] }, { file: 'b', title: 'c', projects: ['p :: a'] }];
+    const run = reconcileInvocations(manifest([expected({ required })]), [observed(apart)]);
+    expect(run.problems).toEqual([]);
+    expect(required.map((t) => requiredPassed(run, 'main', t))).toEqual([true, true]);
+    const oneId = topLevel([{ ...spec('s1', 'c', [passing('p')]), file: 'a :: b' }, { ...spec('s1', 'b :: c', [passing('p')]), file: 'a' }]);
+    expect(reconcileInvocations(manifest([expected({ required: [] })]), [observed(oneId)]).problems.map((p) => p.code)).toEqual(['conflicting_test']);
+  });
+
+  it('never lets a pass in one invocation answer for another whose id and project join to the same text', () => {
+    const run = reconcileInvocations(
+      manifest([expected({ required: [] }), expected({ invocationId: 'main :: engine-b', required: [] })]),
+      [observed(report([], {})), observed(clean, { invocationId: 'main :: engine-b' })],
+    );
+    expect(run.problems).toEqual([]);
+    expect(requiredPassed(run, 'main', { ...signsIn, projects: ['engine-b :: engine-a'] })).toBe(false);
+    expect(requiredPassed(run, 'main :: engine-b', signsIn)).toBe(true);
   });
 });

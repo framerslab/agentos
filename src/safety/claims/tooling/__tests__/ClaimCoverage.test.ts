@@ -73,4 +73,21 @@ describe('claim coverage', () => {
     expect(projectRuntime({ cases: 100, ms: 600_000, fixedMs: 300_000 }, 600, 3_600_000)).toEqual({ projectedMs: 3_900_000, fits: false });
     expect(() => projectRuntime({ cases: 0, ms: 1, fixedMs: 0 }, 1, 1)).toThrow(/no measured case/);
   });
+
+  it('names the family a case id repeats in, and reports a family listed twice once, by its id', () => {
+    const within: ScenarioFamily[] = [{ id: 'fam', cases: [{ id: 'case-1', claims: ['a.primary'], configuration: {}, expected: 'renders' }, { id: 'case-1', claims: ['b.primary'], configuration: {}, expected: 'renders' }] }];
+    expect(planScenarios(within, [], matrix, 24).problems).toEqual(['the case id case-1 appears more than once in the family fam']);
+    expect(planScenarios([...families, families[1]!], [], matrix, 24).problems).toEqual(['the family id switch appears more than once in the table']);
+  });
+
+  it('refuses a state, mode or placement that holds the key separator, so no two cases share a key', () => {
+    expect(() => enumerateClaimCases([{ claimId: 'a|b', states: ['s'], modes: ['m'], placements: ['p'] }, { claimId: 'a', states: ['b|s'], modes: ['m'], placements: ['p'] }])).toThrow(/a names b\|s in its states/);
+    expect(() => enumerateClaimCases([{ claimId: 'a', states: ['s'], modes: ['m'], placements: ['p|q'] }])).toThrow(/a names p\|q in its placements/);
+    const cases = enumerateClaimCases([{ claimId: 'a|b', states: ['s'], modes: ['m'], placements: ['p'] }, { claimId: 'a', states: ['b'], modes: ['s'], placements: ['m'] }]);
+    expect(cases.map((c) => c.key)).toEqual(['a|b|s|m|p', 'a|b|s|m']);
+  });
+
+  it('refuses a browser matrix that names a value twice in one dimension', () => {
+    expect(planScenarios(families, [{ route: '/', families: ['baseline'] }], { ...matrix, engines: ['engine-a', 'engine-a'] }, 24).problems).toEqual(['the browser matrix names engine-a twice in its engines']);
+  });
 });
