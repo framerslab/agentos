@@ -121,4 +121,15 @@ describe('configured call lifetime', () => {
       finishRenew(); await runtime.cancelTts(); await runtime.releaseMedia(); await runtime.confirmStopped(); await runtime.releaseSlots();
     } finally { vi.useRealTimers(); }
   });
+  it('keeps cumulative cancelled synthesis work separate from acknowledged playback', async () => {
+    const f = await factoryFixture(); const { runtime } = await f.attach();
+    const usage = { ...f.identity(), providerId: 'tts', requestId: 'synthesis-a', acceptedCharacters: 5, generatedSamples: 320, sampleRate: 16000, status: 'cancelled', final: true };
+    runtime.orchestrator.emit('usage', usage); runtime.orchestrator.emit('usage', usage);
+    await runtime.abortModelAndTools(); await runtime.cancelTts(); await runtime.releaseMedia(); await runtime.confirmStopped(); await runtime.releaseSlots();
+    const state = await f.store.withTransaction('scope-a', async (tx) => (await tx.get('calls', 'call-a'))!.value);
+    expect(state.call.usage.supplierComponents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ component: 'synthesis_accepted_character', quantity: 5, status: 'cancelled' }),
+      expect.objectContaining({ component: 'synthesis_sample_16000', quantity: 320, status: 'cancelled' }),
+    ])); expect(state.call.usage.supplierComponents).toHaveLength(2);
+  });
 });
