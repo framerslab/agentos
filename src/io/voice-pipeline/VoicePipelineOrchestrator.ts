@@ -43,8 +43,11 @@
  *   `transcript` messages ({@link ClientTranscriptMessage}) in place of audio;
  *   they reach the endpoint detector as the STT session's transcripts do, each
  *   final joined with the turn's earlier ones, the client's lines standing in
- *   for its speech events (`_wireClientTranscripts`). A call profile ends the
- *   call on one, as on any client message but its controls.
+ *   for its speech events (`_wireClientTranscripts`). A session takes its
+ *   speech from the first source it receives, audio or transcript messages,
+ *   and drops what arrives from the other, reporting the first drop as
+ *   `'error'` (`_takesSpeechFrom`). A call profile ends the call on a
+ *   transcript message, as on any client message but its controls.
  * - A watchdog timer prevents a session without a call profile from staying in
  *   LISTENING forever if the user walks away (default 30 s). The watchdog
  *   resets after each completed turn.
@@ -202,7 +205,7 @@ export interface VoicePipelineOverrides {
  * | `'state_changed'`      | `{ from: PipelineState, to: PipelineState }`  |
  * | `'turn_complete'`      | {@link TurnCompleteEvent}; a {@link ScopedTurnCompleteEvent} under a call profile |
  * | `'close'`              | *(none)*: the session moved to `closed`       |
- * | `'error'`              | `Error`: a `turn_complete` or `close` listener threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
+ * | `'error'`              | `Error`: a `turn_complete` or `close` listener threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); speech came from a second source and was dropped (the session's first drop only); or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
  * | `'cleanup_incomplete'` | *(none)*: the stop that followed such a failure could not close every part |
  * | `'transcript'`, `'gap'`, `'generation'`, `'interrupted'`, `'usage'`, `'failure'`, `'detached'`, `'reattached'` | re-emitted from a call profile's session |
  *
@@ -233,6 +236,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * after a stop; set when a session without a call profile starts.
    */
   private endClientLines?: () => void;
+  /**
+   * Where the session takes its speech from: the first source it received, its transport's audio or a client's
+   * transcript messages (`_takesSpeechFrom`); unset until either arrives.
+   */
+  private speechSource?: 'audio' | 'client';
+  /** Whether the session has reported dropping speech from its other source; it reports that once. */
+  private speechSourceDropReported = false;
 
   /**
    * Create a new orchestrator with the given pipeline configuration.
@@ -368,7 +378,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     const endpoint = this.endpoint;
     const bargein = overrides.bargeinHandler;
     transport.on('audio', (frame: AudioFrame) => {
-      if (this.current !== 'closed') this.supervise(() => stt.pushAudio(frame));
+      if (this.current !== 'closed' && this._takesSpeechFrom('audio')) this.supervise(() => stt.pushAudio(frame));
     });
     transport.on('close', () => {
       this.supervise(() => this.stopSession('transport_closed'));
@@ -461,12 +471,15 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    *
    * A client that transcribes on its own device sends its transcripts as
    * `transcript` messages ({@link ClientTranscriptMessage}) in place of
-   * audio. Each one `isClientTranscriptMessage()` accepts reaches the endpoint
-   * detector as a transcript from the STT session does, and the client's lines
-   * stand in for the STT session's speech events: the first line to open while
-   * none is open is a speech start (with barge-in while the agent speaks,
-   * decided before the line's text reaches the detector), and the final that
-   * closes the last open line is a speech end, after its text.
+   * audio. A session that received audio first drops them, and one that
+   * received a transcript message first drops the transport's audio
+   * (`_takesSpeechFrom`). Each one `isClientTranscriptMessage()` accepts
+   * reaches the endpoint detector as a transcript from the STT session does,
+   * and the client's lines stand in for the STT session's speech events: the
+   * first line to open while none is open is a speech start (with barge-in
+   * while the agent speaks, decided before the line's text reaches the
+   * detector), and the final that closes the last open line is a speech end,
+   * after its text.
    *
    * The detector keeps one final without an `itemId` per turn, each replacing
    * the last, and a client makes one line per speech segment (Moonshine
@@ -519,8 +532,35 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         .catch(() => this.reportFailure());
     };
     transport.on('message', (message: ClientTextMessage) => {
-      if (isClientTranscriptMessage(message)) handle(message);
+      if (isClientTranscriptMessage(message) && this.current !== 'closed' && this._takesSpeechFrom('client')) handle(message);
     });
+  }
+
+  /**
+   * Whether the session takes speech from `source`. A session takes its speech from one source, the first it
+   * receives: its transport's audio, which the STT session transcribes, or a client's transcript messages
+   * (`_wireClientTranscripts`). With both, the endpoint detector would get two sets of speech starts and ends and two
+   * sets of finals, and a client's final would replace the finals the STT session's transcripts hold. What arrives from
+   * the other source is dropped; the session's first drop is reported through `_reportError()`, and the rest are not.
+   *
+   * @param source - Where the speech arrived from: `'audio'` for a frame, `'client'` for a transcript message.
+   * @returns `true` when the session takes its speech from `source`.
+   */
+  private _takesSpeechFrom(source: 'audio' | 'client'): boolean {
+    this.speechSource ??= source;
+    if (this.speechSource === source) return true;
+    if (!this.speechSourceDropReported) {
+      this.speechSourceDropReported = true;
+      this._reportError(
+        new Error(
+          source === 'audio'
+            ? 'audio was dropped: this session takes its speech from client transcripts, which it received first'
+            : 'a client transcript was dropped: this session takes its speech from audio, which it received first'
+        ),
+        'a second speech source'
+      );
+    }
+    return false;
   }
 
   /**

@@ -1581,6 +1581,9 @@ export interface VoicePipelineSession extends EventEmitterLike {
  * `toClientTranscriptMessage()` makes one from a `TranscriptEvent`;
  * `isClientTranscriptMessage()` checks one a server received, and
  * `transcriptEventFromClient()` turns it back into a `TranscriptEvent`.
+ * `VoicePipelineOrchestrator` takes a session's speech from the first source
+ * it receives: a session that received audio first drops these messages, and
+ * one that received a message first drops the audio.
  *
  * @example
  * ```typescript
