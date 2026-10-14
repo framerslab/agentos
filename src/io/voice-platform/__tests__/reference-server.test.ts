@@ -77,4 +77,24 @@ describe('single-scope reference HTTP authority', () => {
       await f.reference.revoke(); expect((await f.request(`/web-calls/${grant.callId}/connect`, 'POST', {}, grant.token)).status).toBe(401);
     } finally { await f.reference.close(); }
   });
+  it('replays stored lifecycle events after a sequence as an event stream', async () => {
+    const f = await fixture(); const browser = browserIdentity();
+    try {
+      const agent = await (await f.request('/agents', 'POST', f.agentInput)).json();
+      const input = { agentId: agent.agentId, clientOrigin: 'https://client.example.test', proofKeyThumbprint: browser.thumbprint, maxDurationSeconds: f.agentInput.limits.maxDurationSeconds, idempotencyKey: 'call-events' };
+      const grant = await (await f.request('/web-calls', 'POST', input)).json();
+      await f.request(`/calls/${grant.callId}/stop`, 'POST', { idempotencyKey: 'stop-events' }); await f.reference.drain(grant.callId);
+      const stream = await f.request(`/calls/${grant.callId}/events`);
+      expect(stream.status).toBe(200); expect(stream.headers.get('content-type')).toBe('text/event-stream; charset=utf-8');
+      const text = await stream.text(); const prefix = 'id: 1\ndata: ';
+      expect(text.startsWith(prefix)).toBe(true); expect(text.endsWith('\n\n')).toBe(true);
+      expect(JSON.parse(text.slice(prefix.length, -2))).toMatchObject({ callId: grant.callId, sequence: 1, type: 'call.ended' });
+      expect(await (await f.request(`/calls/${grant.callId}/events?afterSequence=1`)).text()).toBe('');
+      for (const query of ['afterSequence=-1', 'afterSequence=1.5', 'afterSequence=0&afterSequence=1', 'since=0']) expect((await f.request(`/calls/${grant.callId}/events?${query}`)).status).toBe(400);
+      expect((await f.request(`/calls/${grant.callId}/events`, 'GET', undefined, null)).status).toBe(401);
+      expect((await f.request(`/calls/${grant.callId}/events`, 'GET', undefined, grant.token)).status).toBe(401);
+      expect((await f.request('/calls/missing-call/events')).status).toBe(404);
+      await f.reference.revoke(); expect((await f.request(`/calls/${grant.callId}/events`)).status).toBe(401);
+    } finally { await f.reference.close(); }
+  });
 });
