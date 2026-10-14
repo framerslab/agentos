@@ -621,7 +621,7 @@
     "prepare": "test -d dist || npm run build",
     "build": "npm run clean && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json && node scripts/fix-esm-imports.mjs",
     "build:knowledge": "node scripts/build-knowledge-corpus.mjs",
-    "verify:exports": "node --test scripts/package-exports.test.mjs",
+    "verify:exports": "node --test scripts/package-exports.test.mjs scripts/meeting-package.test.mjs",
     "prepublishOnly": "npm run build:knowledge && npm run build && npm run verify:exports",
     "typecheck": "tsc --noEmit",
     "lint": "node scripts/strip-nbsp.mjs && eslint \"src/**/*.ts\"",
