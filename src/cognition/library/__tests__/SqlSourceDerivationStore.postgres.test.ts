@@ -1,0 +1,239 @@
+import { randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createPostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
+import { createSourceDerivation, type SourceDependencyState, type SourceDeliveryContext } from '../SourceDerivations.js';
+import {
+  SqlSourceDerivationStore, type SourceDerivationBindings,
+  type SourceOwnerScope, type SourceFenceTicket,
+} from '../SqlSourceDerivationStore.js';
+import { sourceDerivationSchema } from '../sourceDerivationSchema.js';
+
+const url = process.env.AGENTOS_TEST_POSTGRES_URL;
+const prefix = `sd_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+const scope: SourceOwnerScope = { tenantId: 'tenant-a', ownerId: 'owner-a' };
+const context: SourceDeliveryContext = { ...scope, surface: 'ask', liveOptIn: false };
+const state = (sourceId = 'source-a'): SourceDependencyState => ({
+  ...scope, connectionId: 'connection-a', sourceId, generation: 1,
+  messageIds: [`${sourceId}-message`], version: 'v1', expiresAt: 4_000,
+  connected: true, paused: false, searchAskEnabled: true, liveEnabled: true,
+});
+const envelope = () => createSourceDerivation([state(), state('source-b')]);
+
+function latch() {
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { release = resolve; });
+  return { ready, release };
+}
+
+describe.skipIf(!url)('durable personal-source derivations', () => {
+  let db: StorageAdapter;
+  let other: StorageAdapter;
+  let store: SqlSourceDerivationStore;
+  let peer: SqlSourceDerivationStore;
+  let now = 1_000;
+  let failPurge = false;
+  let bindings: SourceDerivationBindings;
+
+  beforeAll(async () => {
+    db = createPostgresAdapter({ connectionString: url!, max: 8 });
+    other = createPostgresAdapter({ connectionString: url!, max: 4 });
+    await db.open();
+    await other.open();
+    for (const sql of sourceDerivationSchema(prefix)) await db.exec(sql);
+    await db.exec(`CREATE TABLE "${prefix}_fixture_sources" (
+      tenant_id TEXT NOT NULL, owner_id TEXT NOT NULL, connection_id TEXT NOT NULL,
+      source_id TEXT NOT NULL, state JSONB NOT NULL,
+      PRIMARY KEY (tenant_id, owner_id, connection_id, source_id))`);
+    await db.exec(`CREATE TABLE "${prefix}_fixture_results" (
+      tenant_id TEXT NOT NULL, owner_id TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL,
+      PRIMARY KEY (tenant_id, owner_id, id))`);
+    bindings = {
+      async readCurrent(tx, derivation) {
+        const states: SourceDependencyState[] = [];
+        for (const dep of derivation.dependencies) {
+          const row = await tx.get<{ state: SourceDependencyState }>(
+            `SELECT state FROM "${prefix}_fixture_sources"
+             WHERE tenant_id=$1 AND owner_id=$2 AND connection_id=$3 AND source_id=$4`,
+            [dep.tenantId, dep.ownerId, dep.connectionId, dep.sourceId],
+          );
+          if (row) states.push(row.state);
+        }
+        return states;
+      },
+      async purgeResults(tx, owner, ids) {
+        if (failPurge) throw new Error('fixture_purge_failed');
+        await tx.run(`DELETE FROM "${prefix}_fixture_results"
+          WHERE tenant_id=$1 AND owner_id=$2 AND id=ANY($3::text[])`,
+        [owner.tenantId, owner.ownerId, [...ids]]);
+      },
+      async purgeSources(tx, owner, affected) {
+        await tx.run(`DELETE FROM "${prefix}_fixture_sources"
+          WHERE tenant_id=$1 AND owner_id=$2
+          AND ($3::text IS NULL OR connection_id=$3)
+          AND ($4::text IS NULL OR source_id=$4)`,
+        [owner.tenantId, owner.ownerId,
+          affected.kind === 'owner' ? null : affected.connectionId,
+          affected.kind === 'source' ? affected.sourceId : null]);
+      },
+    };
+    store = new SqlSourceDerivationStore(db, { tablePrefix: prefix, bindings, clock: () => now });
+    peer = new SqlSourceDerivationStore(other, { tablePrefix: prefix, bindings, clock: () => now });
+  });
+
+  afterAll(async () => {
+    if (db) {
+      for (const suffix of ['fixture_results', 'fixture_sources', 'edges', 'results', 'tombstones', 'journal', 'owners']) {
+        await db.exec(`DROP TABLE IF EXISTS "${prefix}_${suffix}" CASCADE`);
+      }
+      await db.close();
+    }
+    await other?.close();
+  });
+
+  async function seed(): Promise<SourceFenceTicket> {
+    now = 1_000;
+    failPurge = false;
+    await store.invalidate(scope, { kind: 'owner' }, async () => {});
+    expect(await store.activateOwner(scope, async () => true)).toBe(true);
+    const ticket = await store.capture(scope);
+    if (!ticket) throw new Error('fixture_no_ticket');
+    const applied = await store.apply(ticket, async (tx) => {
+      for (const source of [state(), state('source-b')]) {
+        await tx.run(`INSERT INTO "${prefix}_fixture_sources"
+          (tenant_id,owner_id,connection_id,source_id,state) VALUES ($1,$2,$3,$4,$5::jsonb)`,
+        [source.tenantId, source.ownerId, source.connectionId, source.sourceId, JSON.stringify(source)]);
+      }
+    });
+    expect(applied.kind).toBe('applied');
+    return ticket;
+  }
+
+  async function save(ticket: SourceFenceTicket, id = 'answer-a') {
+    expect(await store.commit(ticket, id, envelope(), 'synthetic mixed answer', context)).toBe(true);
+    await store.apply(ticket, (tx) => tx.run(`INSERT INTO "${prefix}_fixture_results"
+      (tenant_id,owner_id,id,payload) VALUES ($1,$2,$3,$4)`,
+    [scope.tenantId, scope.ownerId, id, 'synthetic saved mark']));
+  }
+
+  it('requires explicit active-account authorization and preserves personal mixed provenance', async () => {
+    const unused = { tenantId: 'tenant-denied', ownerId: 'owner-denied' };
+    expect(await store.capture(unused)).toBeNull();
+    expect(await store.activateOwner(unused, async () => false)).toBe(false);
+    expect(await store.capture(unused)).toBeNull();
+    const ticket = await seed();
+    await save(ticket);
+    const sent: string[] = [];
+    expect(await peer.deliver('answer-a', context, (text) => { sent.push(text); return true; })).toBe(true);
+    expect(sent).toEqual(['synthetic mixed answer']);
+    for (const surface of ['team', 'guest', 'share', 'export', 'outbound'] as const) {
+      expect(await peer.deliver('answer-a', { ...context, surface }, () => {
+        throw new Error('fixture_private_result_leaked');
+      })).toBe(false);
+    }
+    expect(await peer.deliver('answer-a', { ...context, ownerId: 'owner-b' }, () => true)).toBe(false);
+    expect(await peer.deliver('answer-a', { ...context, tenantId: 'tenant-b' }, () => true)).toBe(false);
+  });
+
+  it('deletes the whole mixed result and its saved mark when one source is removed', async () => {
+    const ticket = await seed();
+    await save(ticket);
+    await store.invalidate(scope, { kind: 'source', connectionId: 'connection-a', sourceId: 'source-a' }, async () => {});
+    expect(await peer.deliver('answer-a', context, () => true)).toBe(false);
+    expect(await db.get(`SELECT id FROM "${prefix}_results" WHERE id=$1`, ['answer-a'])).toBeNull();
+    expect(await db.get(`SELECT id FROM "${prefix}_fixture_results" WHERE id=$1`, ['answer-a'])).toBeNull();
+    const left = await db.all<{ source_id: string }>(`SELECT source_id FROM "${prefix}_fixture_sources"`);
+    expect(left.map((row) => row.source_id)).toEqual(['source-b']);
+    expect(await store.commit(ticket, 'late-answer', envelope(), 'late completion', context)).toBe(false);
+    expect((await store.apply(ticket, async () => { throw new Error('fixture_stale_write'); })).kind).toBe('stale');
+  });
+
+  it('checks expiry without a running cleanup job and purges external expired results', async () => {
+    const ticket = await seed();
+    await save(ticket);
+    now = 4_000;
+    expect(await store.deliver('answer-a', context, () => true)).toBe(false);
+    expect(await store.commit(ticket, 'expired-answer', envelope(), 'expired', context)).toBe(false);
+    expect(await store.expireResults(scope, 10)).toBe(1);
+    expect(await db.get(`SELECT id FROM "${prefix}_fixture_results" WHERE id=$1`, ['answer-a'])).toBeNull();
+  });
+
+  it('rereads current switches, versions and message membership at delivery', async () => {
+    const ticket = await seed();
+    await save(ticket);
+    for (const patch of [
+      { paused: true }, { connected: false }, { searchAskEnabled: false },
+      { generation: 2 }, { version: 'v2' }, { messageIds: ['other-message'] },
+    ]) {
+      await store.apply(ticket, (tx) => tx.run(`UPDATE "${prefix}_fixture_sources"
+        SET state=$1::jsonb WHERE source_id=$2`, [JSON.stringify({ ...state(), ...patch }), 'source-a']));
+      expect(await store.deliver('answer-a', context, () => true)).toBe(false);
+    }
+    await store.apply(ticket, (tx) => tx.run(`UPDATE "${prefix}_fixture_sources"
+      SET state=$1::jsonb WHERE source_id=$2`, [JSON.stringify(state()), 'source-a']));
+    expect(await store.deliver('answer-a', { ...context, surface: 'live', liveOptIn: false }, () => true)).toBe(false);
+    expect(await store.deliver('answer-a', { ...context, surface: 'live', liveOptIn: true }, () => true)).toBe(true);
+  });
+
+  it('serializes a second worker behind a committed deletion fence', async () => {
+    const ticket = await seed();
+    await save(ticket);
+    const locked = latch();
+    const release = latch();
+    const removing = store.invalidate(scope, { kind: 'connection', connectionId: 'connection-a' }, async () => {
+      locked.release();
+      await release.ready;
+    });
+    await locked.ready;
+    const delivery = peer.deliver('answer-a', context, () => { throw new Error('fixture_late_delivery'); });
+    release.release();
+    await removing;
+    expect(await delivery).toBe(false);
+    expect(await peer.commit(ticket, 'late', envelope(), 'late', context)).toBe(false);
+  });
+  it('retains the committed block when content purge fails', async () => { const ticket = await seed(); await save(ticket); await store.blockOwner(scope, async () => {}); failPurge = true; await expect(store.invalidate(scope, { kind: 'owner' }, async () => {})).rejects.toThrow('fixture_purge_failed'); failPurge = false; expect(await store.capture(scope)).toBeNull(); expect(await peer.deliver('answer-a', context, () => true)).toBe(false); expect(await peer.commit(ticket, 'late-blocked', envelope(), 'late', context)).toBe(false); });
+  it('rolls back epoch, purge and tombstone together if a binding fails', async () => {
+    const ticket = await seed();
+    await save(ticket);
+    failPurge = true;
+    await expect(store.invalidate(scope, { kind: 'owner' }, async () => {}))
+      .rejects.toThrow('fixture_purge_failed');
+    failPurge = false;
+    expect(await store.capture(scope)).toEqual(ticket);
+    expect(await peer.deliver('answer-a', context, () => true)).toBe(true);
+  });
+
+  it('keeps account deletion disabled, rejects stale CAS invalidation and exports only tombstones', async () => {
+    const ticket = await seed();
+    await save(ticket);
+    await store.invalidate(scope, { kind: 'owner' }, async () => {}, { disableOwner: true });
+    expect(await store.capture(scope)).toBeNull();
+    expect(await store.activateOwner(scope, async () => false)).toBe(false);
+    const stale = await store.invalidate(scope, { kind: 'owner' }, async () => {
+      throw new Error('fixture_stale_mutation');
+    }, { expected: ticket });
+    expect(stale.kind).toBe('stale');
+    const records = await store.readTombstones(0, 1_000);
+    expect(records.length).toBeGreaterThan(0);
+    expect(JSON.stringify(records)).not.toContain('synthetic mixed answer');
+    expect(JSON.stringify(records)).not.toContain('source-a-message');
+  });
+  it('does not skip a slower invalidation when a journal cursor advances', async () => { await seed(); const before = (await store.readTombstones(0, 1000)).at(-1)!.sequence; const entered = latch(); const release = latch(); const slow = store.invalidate(scope, { kind: 'source', connectionId: 'connection-a', sourceId: 'source-a' }, async () => { entered.release(); await release.ready; }); await entered.ready; await peer.invalidate({ tenantId: 'tenant-b', ownerId: 'owner-b' }, { kind: 'owner' }, async () => {}); const cursor = (await store.readTombstones(before, 1000)).at(-1)!.sequence; release.release(); await slow; const following = await store.readTombstones(cursor, 1000); expect(following.map((record) => record.ownerId)).toEqual(['owner-a']); });
+  it('replays an independent tombstone record before restored reads or jobs resume', async () => {
+    const ticket = await seed();
+    await save(ticket);
+    const before = (await store.readTombstones(0, 1_000)).at(-1)?.sequence ?? 0;
+    await store.invalidate(scope, { kind: 'connection', connectionId: 'connection-a' }, async () => {});
+    const journal = await store.readTombstones(before, 1_000);
+    expect(journal.length).toBe(1);
+    // A restored content snapshot must lose all private source material for the affected account.
+    await seed();
+    const restoredTicket = await store.capture(scope);
+    await save(restoredTicket!);
+    await store.replayTombstones(journal);
+    await store.replayTombstones(journal);
+    expect(await store.capture(scope)).toBeNull();
+    expect(await store.deliver('answer-a', context, () => true)).toBe(false);
+    expect(await db.get(`SELECT id FROM "${prefix}_fixture_results" LIMIT 1`)).toBeNull();
+    expect(await db.get(`SELECT source_id FROM "${prefix}_fixture_sources" LIMIT 1`)).toBeNull();
+  });
+});
