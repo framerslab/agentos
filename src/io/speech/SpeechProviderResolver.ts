@@ -12,6 +12,32 @@ import type {
 } from './types.js';
 import { FallbackSTTProxy, FallbackTTSProxy } from './FallbackProxy.js';
 import { findSpeechProviderCatalogEntry } from './providerCatalog.js';
+import { z } from 'zod';
+import { isScopedVoiceAdapter, VoiceAdapterManifestSchema, VoiceAdapterRuntime, type ScopedVoiceAdapter, type VoiceAdapterKind, type VoiceAdapterSelection, type OpenedVoiceAdapter } from './VoiceAdapter.js';
+import { VoiceAgentSchema, type VoiceAgent } from '../voice-platform/contracts/index.js';
+import { captureVoiceScope, type VoiceScopeContext } from '../voice-platform/VoiceScopeContext.js';
+import type { IAttemptAuthorizer } from '../../safety/runtime/ModelAttemptBudget.js';
+import { checkDestination, hostedEgressPolicy, localEgressPolicy } from '../../safety/egress/CheckedEgress.js';
+import type { VoiceNetworkDependencies, VoiceStopEvidence } from '../voice-platform/reasoning/tools.js';
+import type { VoiceGeneration, IStreamingSTT, IStreamingTTS, IVadSession, IAudioEndpointDetector } from '../voice-pipeline/types.js';
+import { StreamingSTTChain } from '../voice-pipeline/providers/StreamingSTTChain.js';
+import { ReconnectingSTT } from '../voice-pipeline/ReconnectingSTT.js';
+import { StreamingTTSChain } from '../voice-pipeline/providers/StreamingTTSChain.js';
+/** Scoped registered option lookup; options are parsed against the selected factory's closed schema. */
+export interface VoiceOptionsStore { read(scopeId: string, ref: string): Promise<Record<string, unknown> | undefined> }
+/** Constructed provider set with one combined native stop obligation. */
+export interface OpenedVoicePlan {
+  stt: IStreamingSTT; tts: IStreamingTTS; vad: IVadSession; endpoint: IAudioEndpointDetector;
+  fence(generation: VoiceGeneration): Promise<VoiceStopEvidence>;
+  fenceSynthesis(generation: VoiceGeneration): Promise<VoiceStopEvidence>;
+  dispose(): Promise<void>;
+}
+/** Configuration is captured before admission; model construction is deferred until the authenticated binding starts. */
+export interface FrozenVoicePlan {
+  readonly agent: VoiceAgent;
+  open(budget: IAttemptAuthorizer): Promise<OpenedVoicePlan>;
+}
+const freezeVoiceValue = <T>(value: T): T => { if (value && typeof value === 'object') { for (const child of Object.values(value)) freezeVoiceValue(child); Object.freeze(value); } return value; };
 
 /**
  * Central resolver for speech providers (STT, TTS, VAD, wake-word).
@@ -355,6 +381,91 @@ export class SpeechProviderResolver extends EventEmitter {
     }
 
     this.applyPreferredPriorities();
+  }
+
+  private readonly voiceAdapters = new Map<string, ScopedVoiceAdapter>();
+  /** Registers an explicit scoped factory. Legacy catalog metadata cannot satisfy this API. */
+  registerVoiceAdapter(adapter: ScopedVoiceAdapter): void {
+    if (!isScopedVoiceAdapter(adapter)) throw new Error('scoped voice adapter required');
+    const manifest = VoiceAdapterManifestSchema.parse(adapter.manifest);
+    if ((adapter.kind.startsWith('streaming-') && !manifest.streaming) || (adapter.kind.startsWith('batch-') && manifest.streaming)) throw new Error('streaming capability mismatch');
+    if (adapter.kind === 'streaming-tts' && !manifest.awaitedOutput) throw new Error('awaited synthesis required');
+    const captured = Object.freeze({ voiceAdapterVersion: adapter.voiceAdapterVersion, kind: adapter.kind,
+      manifest: freezeVoiceValue(manifest), options: adapter.options.strict(), create: adapter.create.bind(adapter) });
+    this.voiceAdapters.set(`${adapter.kind}:${manifest.providerId}`, captured);
+  }
+  /** Reads typed descriptors without triggering legacy environment discovery or creating providers. */
+  refreshVoiceAdapters(manager: { getVoiceAdapters(): ScopedVoiceAdapter[] }): void {
+    const entries = manager.getVoiceAdapters(); this.voiceAdapters.clear();
+    for (const entry of entries) this.registerVoiceAdapter(entry);
+  }
+  /** Validates language, PCM format, immutable models/voices, options and every fallback before construction. */
+  async resolveVoicePlan(rawScope: VoiceScopeContext, rawAgent: VoiceAgent, options: VoiceOptionsStore, network: VoiceNetworkDependencies = {}): Promise<FrozenVoicePlan> {
+    const scope = captureVoiceScope(rawScope); const agent = freezeVoiceValue(VoiceAgentSchema.parse(rawAgent));
+    if (agent.scopeId !== scope.scopeId || agent.state !== 'active' || agent.providerPolicy.mode !== scope.policy.mode || agent.providerPolicy.fallback !== scope.policy.fallback || JSON.stringify(agent.providerPolicy.providerIds) !== JSON.stringify(scope.policy.providers.map((p) => p.providerId)) || JSON.stringify(agent.providerPolicy.purposes) !== JSON.stringify(scope.policy.purposes) || JSON.stringify(agent.allowedToolRefs) !== JSON.stringify(scope.allowedToolRefs)) throw new Error('agent scope or policy refused');
+    if (agent.stt.mode !== 'streaming' || agent.tts.mode !== 'streaming' || agent.stt.sampleRate !== 16000 || agent.stt.codec !== 'pcm_f32le' || !['pcm_s16le', 'wav'].includes(agent.tts.codec)) throw new Error('call streaming format refused');
+    const selected: Array<{ adapter: ScopedVoiceAdapter; selection: VoiceAdapterSelection }> = [];
+    for (const [purpose, kind, primary] of [['stt', 'streaming-stt', agent.stt], ['tts', 'streaming-tts', agent.tts], ['vad', 'vad-session', agent.vad], ['endpoint', 'audio-endpoint', agent.endpoint]] as const) {
+      const permitted = scope.policy.providers.filter((p) => p.purposes.includes(purpose) && (scope.policy.mode !== 'local' || p.locality === 'local'));
+      if (permitted[0]?.providerId !== primary.providerId) throw new Error('primary provider order refused');
+      const ids = scope.policy.fallback === 'allowlisted' && (purpose === 'stt' || purpose === 'tts') ? permitted.map((p) => p.providerId) : [primary.providerId];
+      for (const providerId of ids) {
+        const adapter = this.voiceAdapters.get(`${kind}:${providerId}`); if (!adapter) throw new Error('typed voice adapter missing');
+        const m = adapter.manifest; const permission = permitted.find((p) => p.providerId === providerId)!;
+        if (m.locality !== permission.locality || !m.languages.includes(agent.language) || !m.sampleRates.includes(purpose === 'tts' ? agent.tts.sampleRate : 16000) || !m.codecs.includes(purpose === 'tts' ? agent.tts.codec : 'pcm_f32le')) throw new Error('voice manifest capability refused');
+        if (providerId === primary.providerId && (m.modelId !== primary.modelId || m.modelRevision !== primary.modelRevision)) throw new Error('voice model revision refused');
+        if (purpose === 'tts' && !m.voices.some((v) => v.id === agent.voice.id && v.revision === agent.voice.revision)) throw new Error('voice revision refused');
+        if ('credentialRef' in primary && providerId === primary.providerId && primary.credentialRef !== m.credentialRef) throw new Error('voice credential revision refused');
+        const values = primary.optionsRef ? await options.read(scope.scopeId, primary.optionsRef) : {};
+        if (!values) throw new Error('voice options missing'); const parsed = z.record(z.string(), z.unknown()).parse(adapter.options.parse(values));
+        // Model-specific fallback options must accept the same closed values or admission fails.
+        if (m.origin) await checkDestination(m.origin, (scope.policy.mode === 'hosted' ? hostedEgressPolicy : localEgressPolicy)(), network.lookup);
+        const selection: VoiceAdapterSelection = freezeVoiceValue({ modelId: m.modelId, modelRevision: m.modelRevision, language: agent.language, sampleRate: purpose === 'tts' ? agent.tts.sampleRate : 16000, codec: purpose === 'tts' ? agent.tts.codec : 'pcm_f32le', options: parsed,
+          ...(purpose === 'tts' ? { voice: agent.voice } : {}), ...(purpose === 'vad' ? { threshold: agent.vad.threshold } : {}) });
+        selected.push({ adapter, selection });
+      }
+    }
+    return Object.freeze({ agent, open: async (budget: IAttemptAuthorizer): Promise<OpenedVoicePlan> => {
+      const opened: Array<{ kind: VoiceAdapterKind; value: OpenedVoiceAdapter<VoiceAdapterKind>; runtime: VoiceAdapterRuntime }> = [];
+      try {
+        for (const entry of selected) {
+          scope.signal.throwIfAborted(); const kind = entry.adapter.kind;
+          const purpose = kind === 'streaming-stt' ? 'stt' : kind === 'streaming-tts' ? 'tts' : kind === 'vad-session' ? 'vad' : 'endpoint';
+          const runtime = new VoiceAdapterRuntime(scope, entry.adapter.manifest.providerId, purpose, budget, { ...network, origin: entry.adapter.manifest.origin, credentialRef: entry.adapter.manifest.credentialRef });
+          const value = await entry.adapter.create(scope, entry.selection, runtime); opened.push({ kind, value, runtime });
+          if (typeof value.fence !== 'function' || typeof value.dispose !== 'function') throw new Error('voice adapter lifetime refused');
+        }
+        const stt = opened.filter((p) => p.kind === 'streaming-stt').map((p) => p.value.value as OpenedVoiceAdapter<'streaming-stt'>['value']);
+        const tts = opened.filter((p) => p.kind === 'streaming-tts').map((p) => p.value.value as OpenedVoiceAdapter<'streaming-tts'>['value']);
+        if (stt.some((p) => !p.isStreaming || typeof p.startSession !== 'function') || tts.some((p) => typeof p.startSession !== 'function')) throw new Error('actual streaming capability refused');
+        const vad = opened.find((p) => p.kind === 'vad-session')!.value.value as IVadSession;
+        const endpoint = opened.find((p) => p.kind === 'audio-endpoint')!.value.value as IAudioEndpointDetector;
+        if (typeof vad.pushAudio !== 'function' || typeof vad.reset !== 'function' || typeof vad.flush !== 'function' || typeof vad.dispose !== 'function' || typeof endpoint.pushAudio !== 'function' || typeof endpoint.pushVadEvent !== 'function' || typeof endpoint.pushTranscript !== 'function' || typeof endpoint.reset !== 'function' || typeof endpoint.dispose !== 'function') throw new Error('audio detector capability refused');
+        const reconnecting = stt.map((provider) => {
+          const retry = new ReconnectingSTT(provider);
+          return new Proxy(provider, { get(target, key) {
+            if (key === 'startSession') return retry.startSession.bind(retry);
+            const value = Reflect.get(target, key, target); return typeof value === 'function' ? value.bind(target) : value;
+          } });
+        });
+        return { stt: new StreamingSTTChain(reconnecting, { policy: scope.policy }), tts: new StreamingTTSChain(tts, { policy: scope.policy }), vad, endpoint,
+          fenceSynthesis: async (generation) => {
+            const synthesis = opened.filter((p) => p.kind === 'streaming-tts');
+            for (const p of synthesis) p.runtime.fenceGeneration(generation);
+            const proofs = await Promise.all(synthesis.map((p) => p.value.fence(generation)));
+            await Promise.all(synthesis.map((p) => p.runtime.whenIdle()));
+            if (proofs.some((p) => !p.stopped || !p.evidenceRef)) throw new Error('synthesis fence incomplete');
+            return { stopped: true, evidenceRef: proofs.map((p) => p.evidenceRef).join(':') };
+          },
+          fence: async (generation) => { for (const p of opened) p.runtime.fenceGeneration(generation); const proofs = await Promise.all(opened.map((p) => p.value.fence(generation))); await Promise.all(opened.map((p) => p.runtime.whenIdle()));
+            if (proofs.some((p) => p.stopped !== true || !p.evidenceRef)) throw new Error('voice fence incomplete'); return { stopped: true, evidenceRef: proofs.map((p) => p.evidenceRef).join(':') }; },
+          dispose: async () => { const results = await Promise.allSettled(opened.map((p) => p.value.dispose())); if (results.some((r) => r.status === 'rejected')) throw new Error('voice disposal incomplete'); },
+        };
+      } catch (error) {
+        const cleanup = await Promise.allSettled(opened.map(async (p) => { await p.value.dispose(); await p.runtime.whenIdle(); }));
+        if (cleanup.some((r) => r.status === 'rejected')) throw new Error('voice initialization fence incomplete'); throw error;
+      }
+    } });
   }
 
   // ---------------------------------------------------------------------------
