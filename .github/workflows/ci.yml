@@ -214,6 +214,17 @@ jobs:
             "https://raw.githubusercontent.com/moonshine-ai/moonshine/cd95be7728c5141b581a3fb8837742687c06c6d1/test-assets/two_cities_16k.wav"
           echo "AGENTOS_TEST_MOONSHINE_DIR=$PWD/$dir" >> "$GITHUB_ENV"
 
+      # The sha256 and the size in bytes of each file the integration test reads.
+      - name: Print the Moonshine test model's checksums and sizes
+        run: |
+          set -euo pipefail
+          cd .cache/moonshine
+          for f in tiny-streaming-en/adapter.ort tiny-streaming-en/cross_kv.ort tiny-streaming-en/decoder_kv.ort \
+              tiny-streaming-en/encoder.ort tiny-streaming-en/frontend.ort tiny-streaming-en/streaming_config.json \
+              tiny-streaming-en/tokenizer.bin two_cities_16k.wav; do
+            echo "$(sha256sum "$f" | cut -d' ' -f1)  $(stat -c %s "$f")  $f"
+          done
+
       - name: Test with coverage
         run: pnpm run test -- --coverage
 
