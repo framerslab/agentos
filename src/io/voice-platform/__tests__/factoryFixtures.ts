@@ -75,7 +75,7 @@ export async function factoryFixture(synthesisLimits = { maxTextCharacters: 8192
       const write = async (text: string): Promise<void> => {
         if (closed || final || !sink) throw new Error('synthesis unavailable');
         acceptedCharacters += text.length; generatedSamples += 320; usage('running');
-        await sink({ ...call, audio: Buffer.alloc(640), format: 'pcm', container: 'raw', channels: 1, sampleRate: 16000, durationMs: 20, text });
+        await sink({ ...call, audio: Buffer.alloc(640), format: 'pcm', container: 'raw', sampleRate: 16000, durationMs: 20, text });
       };
       const session: StreamingTTSSession = Object.assign(new EventEmitter(), {
         pushTokens(text: string) { void write(text).catch((error) => session.emit('error', error)); },
