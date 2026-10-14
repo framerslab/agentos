@@ -2,8 +2,9 @@
  * @file Brain.scope-id.test.ts
  * `memory_traces.scope_id`: the scope id of a trace as a column of its own. A Brain at schema version 2 gains the
  * column on open, filled from each row's metadata JSON (a malformed row stays ''), for every brain the file holds; a
- * fresh Brain has it; the index a per-scope read uses exists; and every writer this file reaches sets it. Real SQLite
- * files through `@framers/sql-storage-adapter`, as the store opens them in production.
+ * fresh Brain has it; the index a per-scope read uses exists; every writer this file reaches sets it; and the importers
+ * file by it and deduplicate inside one scope id. Real SQLite files through `@framers/sql-storage-adapter`, as the store
+ * opens them in production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -15,6 +16,9 @@ import { Brain } from '../Brain.js';
 import { MemoryStore } from '../MemoryStore.js';
 import { Memory } from '../../../io/facade/Memory.js';
 import { MemoryAddTool } from '../../../io/tools/MemoryAddTool.js';
+import { JsonImporter } from '../../../io/JsonImporter.js';
+import { SqliteImporter } from '../../../io/SqliteImporter.js';
+import { CsvImporter } from '../../../io/CsvImporter.js';
 import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
 import type { IKnowledgeGraph } from '../../graph/knowledge/IKnowledgeGraph.js';
 import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager.js';
@@ -213,5 +217,58 @@ describe("the facade's writers set scope_id", () => {
       { content: 'Persona note.', scope: 'persona', scope_id: 'ana::tutor' },
       { content: 'Thread note.', scope: 'thread', scope_id: 's-1' },
     ]);
+  });
+});
+
+describe('the importers file by scope id and deduplicate inside one', () => {
+  /** A JSON export holding one trace of `user:<scopeId>` with the given text, tags and creation time. */
+  const exportOf = (scopeId: string, text: string, tags: string[], createdAt: number) =>
+    JSON.stringify({
+      meta: { schema_version: '3' },
+      traces: [{
+        id: `t-${scopeId}`, type: 'episodic', scope: 'user', content: text, strength: 1, created_at: createdAt,
+        retrieval_count: 0, tags: JSON.stringify(tags), emotions: '{}', metadata: JSON.stringify({ scopeId }), deleted: 0,
+      }],
+    });
+  const tracesOf = (brain: Brain) =>
+    brain.all<{ scope_id: string; tags: string; created_at: number }>(
+      'SELECT scope_id, tags, created_at FROM memory_traces WHERE deleted = 0 ORDER BY scope_id',
+    );
+
+  it('JSON: two tenants with one equal text keep two rows, and neither row changes', async () => {
+    const brain = await open(tempFile(), 'json');
+    const importer = new JsonImporter(brain);
+    await importer.importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+    const second = await importer.importFromString(exportOf('B%2F42', 'Same words.', ['b'], 200));
+    expect(second.imported).toBe(1);
+    expect(await tracesOf(brain)).toEqual([
+      { scope_id: 'A%2F42', tags: '["a"]', created_at: 100 },
+      { scope_id: 'B%2F42', tags: '["b"]', created_at: 200 },
+    ]);
+    // Inside one scope id the text is still a duplicate.
+    expect((await importer.importFromString(exportOf('A%2F42', 'Same words.', ['c'], 300))).skipped).toBe(1);
+  });
+
+  it("SQLite: a record of another scope id is imported, and no other tenant's tags or time are merged", async () => {
+    const target = await open(tempFile(), 'sqlite-target');
+    await new JsonImporter(target).importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+    const sourcePath = tempFile();
+    const source = await open(sourcePath, 'sqlite-source');
+    await new JsonImporter(source).importFromString(exportOf('B%2F42', 'Same words.', ['b'], 200));
+    const result = await new SqliteImporter(target).import(sourcePath);
+    expect(result.imported).toBe(1);
+    expect(await tracesOf(target)).toEqual([
+      { scope_id: 'A%2F42', tags: '["a"]', created_at: 100 },
+      { scope_id: 'B%2F42', tags: '["b"]', created_at: 200 },
+    ]);
+  });
+
+  it('CSV: the scope id comes from the metadata column, and dedup reads only that scope id', async () => {
+    const brain = await open(tempFile(), 'csv');
+    const csv = (scopeId: string) =>
+      `content,scope,metadata\n"Same words.",user,"${JSON.stringify({ scopeId }).replace(/"/g, '""')}"\n`;
+    await new CsvImporter(brain).importFromString(csv('A%2F42'));
+    expect((await new CsvImporter(brain).importFromString(csv('B%2F42'))).imported).toBe(1);
+    expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['A%2F42', 'B%2F42']);
   });
 });
