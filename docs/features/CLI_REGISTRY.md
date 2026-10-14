@@ -177,17 +177,17 @@ The `claude-code-cli` and `gemini-cli` providers call their bridge's `checkBinar
 ### Creating a custom bridge
 
 ```typescript
-import { CLISubprocessBridge } from '@framers/agentos/sandbox/subprocess';
-import { CLISubprocessError, CLI_ERROR } from '@framers/agentos/sandbox/subprocess';
+import { CLISubprocessBridge, CLISubprocessError, CLI_ERROR } from '@framers/agentos/sandbox/subprocess';
+import type { BridgeOptions, OutputFormat, StreamEvent } from '@framers/agentos/sandbox/subprocess';
 
 class MyToolBridge extends CLISubprocessBridge {
   protected readonly binaryName = 'mytool';
 
-  protected buildArgs(options, format) {
+  protected buildArgs(options: BridgeOptions, format: OutputFormat): string[] {
     return ['--prompt', options.prompt, '--format', format];
   }
 
-  protected classifyError(error) {
+  protected classifyError(error: any): CLISubprocessError {
     if (error.code === 'ENOENT') {
       return new CLISubprocessError(
         'mytool not found',
@@ -206,7 +206,8 @@ class MyToolBridge extends CLISubprocessBridge {
     );
   }
 
-  protected parseStreamEvent(raw) {
+  // The declared return type keeps each `type` a literal, as StreamEvent requires.
+  protected parseStreamEvent(raw: any): StreamEvent | null {
     if (raw.text) return { type: 'text_delta', text: raw.text };
     if (raw.done) return { type: 'result', result: raw.output };
     return null;
