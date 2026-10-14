@@ -191,15 +191,18 @@ describe.skipIf(!url)('durable personal-source derivations', () => {
     expect(await peer.commit(ticket, 'late', envelope(), 'late', context)).toBe(false);
   });
   it('retains the committed block when content purge fails', async () => { const ticket = await seed(); await save(ticket); await store.blockOwner(scope, async () => {}); failPurge = true; await expect(store.invalidate(scope, { kind: 'owner' }, async () => {})).rejects.toThrow('fixture_purge_failed'); failPurge = false; expect(await store.capture(scope)).toBeNull(); expect(await peer.deliver('answer-a', context, () => true)).toBe(false); expect(await peer.commit(ticket, 'late-blocked', envelope(), 'late', context)).toBe(false); });
-  it('rolls back epoch, purge and tombstone together if a binding fails', async () => {
+  it('rolls back the epoch and the purge together if a binding fails, and writes no deletion record', async () => {
     const ticket = await seed();
     await save(ticket);
+    const before = (await store.readTombstones(0, 1_000)).at(-1)!.sequence;
     failPurge = true;
     await expect(store.invalidate(scope, { kind: 'owner' }, async () => {}))
       .rejects.toThrow('fixture_purge_failed');
     failPurge = false;
     expect(await store.capture(scope)).toEqual(ticket);
     expect(await peer.deliver('answer-a', context, () => true)).toBe(true);
+    // The record is written last, after every binding, so this failure leaves none to roll back.
+    expect(await store.readTombstones(before, 1_000)).toEqual([]);
   });
 
   it('keeps account deletion disabled, rejects stale CAS invalidation and exports only tombstones', async () => {
@@ -235,6 +238,47 @@ describe.skipIf(!url)('durable personal-source derivations', () => {
     expect(await store.deliver('answer-a', context, () => true)).toBe(false);
     expect(await db.get(`SELECT id FROM "${prefix}_fixture_results" LIMIT 1`)).toBeNull();
     expect(await db.get(`SELECT source_id FROM "${prefix}_fixture_sources" LIMIT 1`)).toBeNull();
+  });
+
+  it('keeps only an invalidation\'s kind and keys in its deletion record, also when replayed', async () => {
+    await seed();
+    const before = (await store.readTombstones(0, 1_000)).at(-1)!.sequence;
+    // A caller without the types can pass more than the scope's keys; a deletion record keeps none of it.
+    const note = 'fixture-private-note';
+    const source = { kind: 'source' as const, connectionId: 'connection-a', sourceId: 'source-a', note };
+    await store.invalidate(scope, source, async () => {});
+    const [written] = await store.readTombstones(before, 1_000);
+    expect(written?.affected).toEqual({ kind: 'source', connectionId: 'connection-a', sourceId: 'source-a' });
+    const connection = { kind: 'connection' as const, connectionId: 'connection-a', note };
+    const owner = { kind: 'owner' as const, note };
+    await store.replayTombstones([
+      { ...written!, id: randomUUID(), affected: connection },
+      { ...written!, id: randomUUID(), affected: owner },
+    ]);
+    const records = await store.readTombstones(before, 1_000);
+    expect(records.map((record) => record.affected)).toEqual([
+      { kind: 'source', connectionId: 'connection-a', sourceId: 'source-a' },
+      { kind: 'connection', connectionId: 'connection-a' },
+      { kind: 'owner' },
+    ]);
+    expect(JSON.stringify(records)).not.toContain(note);
+  });
+
+  it('runs in the caller\'s transaction when it is made on a transaction view', async () => {
+    const ticket = await seed();
+    await save(ticket);
+    const before = (await store.readTombstones(0, 1_000)).at(-1)!.sequence;
+    await expect(db.transaction(async (tx) => {
+      const inner = new SqlSourceDerivationStore(tx, { tablePrefix: prefix, bindings, clock: () => now });
+      await inner.invalidate(scope, { kind: 'owner' }, async () => {}, { disableOwner: true });
+      expect(await inner.capture(scope)).toBeNull();
+      expect(await inner.readTombstones(before, 1_000)).toHaveLength(1);
+      throw new Error('fixture_caller_rollback');
+    })).rejects.toThrow('fixture_caller_rollback');
+    // The caller's rollback takes the epoch, the purge and the deletion record with it.
+    expect(await store.capture(scope)).toEqual(ticket);
+    expect(await peer.deliver('answer-a', context, () => true)).toBe(true);
+    expect(await store.readTombstones(before, 1_000)).toEqual([]);
   });
 
   /** Waits until PostgreSQL shows a session blocked by the session `pid`, or until `settled` answers true. */
