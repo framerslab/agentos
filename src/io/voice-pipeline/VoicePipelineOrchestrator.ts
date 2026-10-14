@@ -91,6 +91,7 @@ import {
   type ServerTextMessage,
 } from './types.js';
 import { isClientTranscriptMessage, transcriptEventFromClient } from './clientTranscript.js';
+import { describeReason, isError } from './describeReason.js';
 
 /**
  * How long a client's open transcript line lasts with no message before it is
@@ -615,18 +616,19 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * handler, where a listener's throw or rejection would become an unhandled rejection, and `emit()` does not hand back
    * what a listener returns.
    *
-   * @param err - The failure; anything other than an `Error` is wrapped in one.
+   * @param err - The failure; anything other than an `Error` is wrapped in one. Its text, and that of what a listener
+   *   throws, comes from `describeReason()`, which gives text for any value: a reason `String()` cannot print (an
+   *   object without a prototype, a revoked proxy) is named by its type, where building the report would throw.
    * @param what - What failed, for the console warning.
    * @param target - Whose listeners get the failure: the orchestrator, or the session it returned.
    */
   private _reportError(err: unknown, what: string, target: EventEmitter = this): void {
-    const error = err instanceof Error ? err : new Error(String(err));
+    const error = isError(err) ? err : new Error(describeReason(err));
     const warnListenerFailed = (thrown: unknown): void => {
-      const listenerFailure = thrown instanceof Error ? thrown.message : String(thrown);
       console.warn(
         `[voice-pipeline-orchestrator] ${what}:`,
-        error.message,
-        `(an 'error' listener failed: ${listenerFailure})`
+        describeReason(error),
+        `(an 'error' listener failed: ${describeReason(thrown)})`
       );
     };
     const handToListeners = (event: string | symbol): void => {
@@ -642,7 +644,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     };
     handToListeners(EventEmitter.errorMonitor);
     if (target.listenerCount('error') === 0) {
-      console.warn(`[voice-pipeline-orchestrator] ${what}:`, error.message);
+      console.warn(`[voice-pipeline-orchestrator] ${what}:`, describeReason(error));
       return;
     }
     handToListeners('error');

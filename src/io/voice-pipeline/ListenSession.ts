@@ -9,6 +9,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { ReconnectingSTT, type ReconnectingSTTOptions, type SttGapEvent, type SttReconnectedEvent } from './ReconnectingSTT.js';
+import { describeReason, isError } from './describeReason.js';
 import type { AudioFrame, IEndpointDetector, IStreamingSTT, IStreamTransport, ITranscriptInputSink, StreamingSTTConfig, StreamingSTTSession, TranscriptEvent, TranscriptInput, TranscriptTurn, TurnCompleteEvent, VadEvent } from './types.js';
 
 export type { ITranscriptSink, ITranscriptInputSink, TranscriptInput, TranscriptTurn } from './types.js';
@@ -225,7 +226,8 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
       } catch (err) {
         sinkFailed = true;
         pending.length = 0;
-        void end('sink_failed', err instanceof Error ? err : new Error(String(err)), true);
+        // describeReason() gives text for any value: String() throws for some a sink can reject with.
+        void end('sink_failed', isError(err) ? err : new Error(describeReason(err)), true);
         return;
       }
       if (paused && pending.length < Math.ceil(queueLimit / 2)) {
