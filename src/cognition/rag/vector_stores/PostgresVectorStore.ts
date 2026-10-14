@@ -10,6 +10,8 @@
  * - Hybrid search combining both with RRF fusion in a single SQL query
  * - JSONB metadata filtering with GIN indexes, array fields included
  * - Connection pooling via pg.Pool, or a pool the caller owns
+ * - An open PostgreSQL `StorageAdapter` the caller owns, and a view of the store bound to one of the adapter's
+ *   transactions (`withStorageTransaction`), so vector writes commit or roll back with the caller's own
  * - Tables made by the caller's migrations (`manageSchema: false` with `schemaSql()`)
  * - pgvector's iterative index scans for filtered searches
  *
@@ -18,6 +20,7 @@
  * @see ../../IVectorStore.ts for the interface definition.
  */
 
+import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import type {
   IVectorStore,
   VectorStoreProviderConfig,
@@ -56,10 +59,15 @@ export interface PgPoolLike {
 /** Configuration specific to the Postgres vector store. */
 export interface PostgresVectorStoreConfig extends VectorStoreProviderConfig {
   type: 'postgres';
-  /** Postgres connection string. Required unless `pool` is given. */
+  /** Postgres connection string. Required unless `pool` or `adapter` is given. */
   connectionString?: string;
   /** A pool the caller owns. The store opens none of its own, and `close()` leaves this one open. */
   pool?: PgPoolLike;
+  /**
+   * Open PostgreSQL adapter owned by the caller; exclusive with pool/connectionString. The store opens no pool of
+   * its own and `close()` leaves the adapter open. With `pool` or `connectionString` as well, `initialize()` throws.
+   */
+  adapter?: StorageAdapter;
   /** Connection pool size when the store opens its own pool. @default 10 */
   poolSize?: number;
   /** Default embedding dimensions for new collections. @default 1536 */
@@ -132,6 +140,40 @@ function cutToBytes(name: string, bytes: number): string {
   return kept;
 }
 
+/** The rows a statement answered, or the number of rows it changed. */
+interface VectorSqlResult {
+  rows: Record<string, unknown>[];
+  rowCount: number;
+}
+
+/** The one call the store's statements go through: a pool's client in a transaction, or an adapter. */
+interface VectorSqlExecutor {
+  query(sql: string, params?: unknown[]): Promise<VectorSqlResult>;
+}
+
+/**
+ * The store's statements on a `StorageAdapter`: a read (`SELECT` or `WITH`) through `all`, anything else through
+ * `run`, whose `changes` is the row count. It runs no transaction command and never opens a `pg` pool. Its SQL comes
+ * only from this store, whose `WITH` statements are read queries.
+ *
+ * @throws When the adapter is not a PostgreSQL adapter with transactions.
+ */
+function adapterExecutor(adapter: StorageAdapter): VectorSqlExecutor {
+  if (adapter.kind !== 'postgres' || !adapter.capabilities.has('transactions')) {
+    throw new Error('vector_adapter_requires_postgres_transactions');
+  }
+  return {
+    async query(sql, params = []) {
+      if (/^\s*(SELECT|WITH)\b/i.test(sql)) {
+        const rows = await adapter.all<Record<string, unknown>>(sql, params);
+        return { rows, rowCount: rows.length };
+      }
+      const result = await adapter.run(sql, params);
+      return { rows: [], rowCount: result.changes };
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // PostgresVectorStore
 // ---------------------------------------------------------------------------
@@ -141,11 +183,13 @@ function cutToBytes(name: string, bytes: number): string {
  * lexical search through its `tsv` column, and both fused in one statement.
  */
 export class PostgresVectorStore implements IVectorStore {
-  private pool: any = null; // pg.Pool
+  private pool: any = null; // pg.Pool, the caller's pool, or the statements of an adapter
   private config: PostgresVectorStoreConfig;
   private prefix: string;
   private isInitialized = false;
   private ownsPool = false;
+  /** Set on a view of a caller's transaction when its callback ends; the view then refuses every call. */
+  private borrowedEnded = false;
   private readonly manageSchema: boolean;
   private readonly textConfig: string;
 
@@ -220,14 +264,23 @@ export class PostgresVectorStore implements IVectorStore {
   // =========================================================================
 
   /**
-   * Take the caller's pool or open one, then, unless `manageSchema` is false, ensure the pgvector extension
-   * exists and create the collections metadata table.
+   * Initialize the selected connection and optionally manage collection metadata: take the caller's adapter or
+   * pool, or open a pool from the connection string; then, unless `manageSchema` is false, ensure the pgvector
+   * extension exists and create the collections metadata table.
    *
-   * @throws When the configuration holds neither a connection string nor a pool.
+   * @throws `vector_connection_ambiguous` when an adapter is given with a pool or a connection string, without
+   *   contacting a database; `vector_adapter_requires_postgres_transactions` when the adapter is not a PostgreSQL
+   *   adapter with transactions; `vector_transaction_closed` on a view of a transaction whose callback has ended;
+   *   and an error when the configuration holds no adapter, pool or connection string.
    */
   async initialize(): Promise<void> {
+    if (this.borrowedEnded) throw new Error('vector_transaction_closed');
     if (this.isInitialized) return;
-    if (this.config.pool) {
+    if (this.config.adapter) {
+      if (this.config.pool || this.config.connectionString) throw new Error('vector_connection_ambiguous');
+      this.pool = adapterExecutor(this.config.adapter);
+      this.ownsPool = false;
+    } else if (this.config.pool) {
       this.pool = this.config.pool;
       this.ownsPool = false;
     } else {
@@ -250,7 +303,7 @@ export class PostgresVectorStore implements IVectorStore {
     this.isInitialized = true;
   }
 
-  /** Close the pool the store opened; a caller's pool is left open. */
+  /** Close the pool the store opened; a caller's pool or adapter is left open. */
   async close(): Promise<void> {
     if (this.pool && this.ownsPool) await this.pool.end();
     this.pool = null;
@@ -280,6 +333,58 @@ export class PostgresVectorStore implements IVectorStore {
   async checkHealth(): Promise<{ isHealthy: boolean; details?: any }> {
     const isHealthy = await this.healthCheck();
     return { isHealthy };
+  }
+
+  // =========================================================================
+  // Caller transactions
+  // =========================================================================
+
+  /**
+   * Borrow only the transaction adapter supplied to StorageAdapter.transaction. `work` gets a view of this store
+   * whose every statement runs on that transaction's connection, so its vector writes commit or roll back with the
+   * caller's own writes in the same transaction. The view opens no pool, commits nothing and runs no DDL: like a
+   * store with `manageSchema: false`, it takes the metric from `similarityMetric`. When `work` settles the view
+   * stops working, and any later call on it throws `vector_transaction_closed`.
+   *
+   * Await every call on the view inside `work`, keep neither the view nor the transaction after it, and let a
+   * failure reach the transaction's callback, so that the transaction rolls back: a transaction that catches a
+   * failed write and commits is outside this contract. Compute embeddings before the transaction opens, not inside
+   * it.
+   *
+   * @param transaction - The adapter that `StorageAdapter.transaction` passed to its callback.
+   * @param work - The reads and writes to run in the transaction.
+   * @returns What `work` returns.
+   * @throws `vector_adapter_required` when the store was configured with a pool or a connection string rather
+   *   than an adapter; `vector_adapter_requires_postgres_transactions` when `transaction` is not a PostgreSQL
+   *   adapter with transactions; `vector_transaction_closed` when called on a view whose callback has ended; and
+   *   whatever `work` throws.
+   *
+   * @example
+   * await db.transaction((tx) => store.withStorageTransaction(tx, async (vectors) => {
+   *   await tx.run('UPDATE sources SET version = ? WHERE id = ?', [version, sourceId]);
+   *   await vectors.delete('chunks', undefined, { filter: { sourceId } });
+   *   await vectors.upsert('chunks', passages);
+   * }));
+   */
+  async withStorageTransaction<T>(
+    transaction: StorageAdapter,
+    work: (store: PostgresVectorStore) => Promise<T>,
+  ): Promise<T> {
+    if (this.borrowedEnded) throw new Error('vector_transaction_closed');
+    if (!this.config.adapter) throw new Error('vector_adapter_required');
+    const view = new PostgresVectorStore({
+      ...this.config, adapter: transaction, pool: undefined,
+      connectionString: undefined, manageSchema: false,
+    });
+    view.pool = adapterExecutor(transaction);
+    view.isInitialized = true;
+    try {
+      return await work(view);
+    } finally {
+      view.borrowedEnded = true;
+      view.pool = null;
+      view.isInitialized = false;
+    }
   }
 
   // =========================================================================
@@ -377,8 +482,9 @@ export class PostgresVectorStore implements IVectorStore {
   // =========================================================================
 
   /**
-   * Upsert documents into a collection.
-   * Uses INSERT ... ON CONFLICT (id) DO UPDATE for idempotent writes.
+   * Insert/update the batch atomically on the current storage connection: INSERT ... ON CONFLICT (id) DO UPDATE in
+   * one transaction, on a pool's client, in an adapter transaction, or in the caller's transaction for a view of
+   * {@link PostgresVectorStore.withStorageTransaction}.
    */
   async upsert(
     collectionName: string,
@@ -388,17 +494,9 @@ export class PostgresVectorStore implements IVectorStore {
     await this._ensureInit();
     const table = this._t(collectionName);
     const now = Date.now();
-
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-
+    await this._transaction(async (client) => {
       for (const doc of documents) {
-        // Convert embedding to pgvector string format: '[0.1,0.2,...]'
-        const vecStr = `[${doc.embedding.join(',')}]`;
-        const metaJson = doc.metadata ? JSON.stringify(doc.metadata) : null;
-        const text = doc.textContent ?? null;
-
+        // The embedding in pgvector's text form: '[0.1,0.2,...]'.
         await client.query(
           `INSERT INTO ${table} (id, embedding, metadata_json, text_content, created_at, updated_at)
            VALUES ($1, $2::vector, $3::jsonb, $4, $5, $5)
@@ -407,23 +505,12 @@ export class PostgresVectorStore implements IVectorStore {
              metadata_json = EXCLUDED.metadata_json,
              text_content = EXCLUDED.text_content,
              updated_at = EXCLUDED.updated_at`,
-          [doc.id, vecStr, metaJson, text, now],
+          [doc.id, `[${doc.embedding.join(',')}]`, doc.metadata ? JSON.stringify(doc.metadata) : null,
+            doc.textContent ?? null, now],
         );
       }
-
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
-
-    return {
-      upsertedCount: documents.length,
-      upsertedIds: documents.map(d => d.id),
-      failedCount: 0,
-    };
+    });
+    return { upsertedCount: documents.length, upsertedIds: documents.map((doc) => doc.id), failedCount: 0 };
   }
 
   // =========================================================================
@@ -945,29 +1032,67 @@ export class PostgresVectorStore implements IVectorStore {
   }
 
   /**
-   * Runs one search statement, inside a transaction with the search settings when there are any, so the
-   * settings stay on one connection for one statement and never reach the pool's other users.
+   * One transaction using the configured adapter or the existing pool path. On a view of a caller's transaction
+   * the adapter's `transaction` runs `work` on that same transaction, which commits when the caller's does.
    */
-  private async _search(sql: string, params: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }> {
-    const settings = this._searchSettings();
-    if (settings.length === 0) return this.pool.query(sql, params);
+  private async _transaction<T>(work: (sql: VectorSqlExecutor) => Promise<T>): Promise<T> {
+    if (this.config.adapter) {
+      return this.config.adapter.transaction((tx) => work(adapterExecutor(tx)));
+    }
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      for (const setting of settings) await client.query(setting);
-      const result = await client.query(sql, params);
+      const result = await work({
+        async query(sql, params = []) {
+          const result = await client.query(sql, params);
+          return { rows: result.rows, rowCount: result.rowCount ?? 0 };
+        },
+      });
       await client.query('COMMIT');
       return result;
-    } catch (err) {
+    } catch (error) {
       try {
         await client.query('ROLLBACK');
       } catch {
-        // the connection is gone; the first error is the one to report
+        // Preserve the operation failure if the connection was lost.
       }
-      throw err;
+      throw error;
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Run search settings on one connection and restore a borrowed transaction's settings. A search with settings
+   * runs in a transaction with `SET LOCAL`, so they stay on one connection for one statement and never reach the
+   * pool's other users. On an adapter the transaction may be the caller's, which goes on after the search: each
+   * setting's value is read first and set back after the search.
+   */
+  private async _search(sql: string, params: unknown[]): Promise<{
+    rows: Record<string, unknown>[]; rowCount?: number | null;
+  }> {
+    const settings = this._searchSettings();
+    if (settings.length === 0) return this.pool.query(sql, params);
+    return this._transaction(async (client) => {
+      if (!this.config.adapter) {
+        for (const setting of settings) await client.query(setting);
+        return client.query(sql, params);
+      }
+      const saved: { name: string; value: string | null }[] = [];
+      for (const setting of settings) {
+        const name = /^SET LOCAL ([a-z_.]+) = /.exec(setting)?.[1];
+        if (!name) throw new Error('vector_search_setting_invalid');
+        const before = await client.query('SELECT current_setting($1, true) AS value', [name]);
+        const value = before.rows[0]?.value;
+        saved.push({ name, value: typeof value === 'string' ? value : null });
+        await client.query(setting);
+      }
+      const result = await client.query(sql, params);
+      for (const previous of saved.reverse()) {
+        await client.query('SELECT set_config($1, $2, true)', [previous.name, previous.value]);
+      }
+      return result;
+    });
   }
 
   /**
@@ -1080,8 +1205,12 @@ export class PostgresVectorStore implements IVectorStore {
         params.push(JSON.stringify(cond.$all));
         idx++;
       }
+      // jsonb_exists is the function behind jsonb's ? operator. The SQL storage adapter rewrites every question mark
+      // in a statement to a placeholder, so the statement spells the function.
       if (cond.$exists !== undefined) {
-        conditions.push(cond.$exists ? `metadata_json ? '${key}'` : `NOT (metadata_json ? '${key}')`);
+        conditions.push(cond.$exists
+          ? `jsonb_exists(metadata_json, '${key}')`
+          : `NOT jsonb_exists(metadata_json, '${key}')`);
       }
       if (cond.$contains !== undefined) {
         conditions.push(`(CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} @> $${idx}::jsonb ELSE ${path} LIKE $${idx + 1} END)`);

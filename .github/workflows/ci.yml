@@ -99,6 +99,27 @@ jobs:
           if (canDeliverSourceDerivation(answer, context, current, 1000)) throw new Error('expired_delivery_allowed');
           JS
 
+      - name: Built Postgres vectors accept the SQL adapter
+        run: |
+          node --input-type=module <<'JS'
+          import { createPostgresAdapter } from '@framers/sql-storage-adapter';
+          import { PostgresVectorStore } from './dist/cognition/rag/vector_stores/PostgresVectorStore.js';
+          const db = createPostgresAdapter({ connectionString: process.env.AGENTOS_TEST_POSTGRES_URL });
+          await db.open();
+          try {
+            const store = new PostgresVectorStore({ id: 'contract', type: 'postgres', adapter: db, manageSchema: false });
+            await store.initialize();
+            if (!await store.healthCheck()) throw new Error('adapter_health_failed');
+            await db.transaction((tx) => store.withStorageTransaction(tx, async (view) => {
+              if (!await view.healthCheck()) throw new Error('transaction_health_failed');
+            }));
+            await store.close();
+            if ((await db.get('SELECT 1 AS n'))?.n !== 1) throw new Error('adapter_closed');
+          } finally {
+            await db.close();
+          }
+          JS
+
       - name: Lint
         run: pnpm run lint
 
