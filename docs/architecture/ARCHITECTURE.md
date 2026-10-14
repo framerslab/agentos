@@ -318,7 +318,7 @@ Every descriptor carries an `id`, a `kind` and a `payload`, plus optional `prior
 | `provenance` | [`EXTENSION_KIND_PROVENANCE`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | provenance pack payload | Content anchoring provider |
 | `meeting-provider` | [`EXTENSION_KIND_MEETING_PROVIDER`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | `IMeetingBotProvider` | Meeting participant registered by the host on `MeetingManager` |
 
-The other kinds are `response-processor`, `workflow-executor`, `persona`, `planning-strategy`, `hitl-handler`, `communication-channel`, `memory-provider`, `stt-provider`, `tts-provider`, `vad-provider`, `wake-word-provider`, `messaging-channel`, `http-handler`, `streaming-stt-provider`, `streaming-tts-provider` and `diarization-provider`.
+The other kinds are `response-processor`, `workflow-executor`, `persona`, `planning-strategy`, `hitl-handler`, `communication-channel`, `memory-provider`, `stt-provider`, `tts-provider`, `vad-provider`, `wake-word-provider`, `messaging-channel`, `http-handler`, `streaming-stt-provider`, `streaming-tts-provider`, `diarization-provider`, `endpoint-detector`, `bargein-handler`, `vad-session-provider` and `audio-endpoint-provider`.
 
 ### Guardrail Dispatch Model
 
