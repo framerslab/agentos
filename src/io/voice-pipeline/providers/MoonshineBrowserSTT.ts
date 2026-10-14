@@ -428,7 +428,12 @@ export interface MoonshineBrowserSTTConfig {
   onProgress?: (progress: MoonshineLoadProgress) => void;
   /** Where the model runs: the package's worker, the calling thread, or `'auto'` (the worker in a page). @defaultValue 'auto' */
   thread?: 'auto' | 'worker' | 'calling';
-  /** Where the package's worker finds `moonshine.wasm`; the package's own folder when omitted. */
+  /**
+   * The URL of the folder where the package's worker finds `moonshine.wasm`,
+   * with or without a trailing slash (one is added: the worker resolves the
+   * file against this URL, which would otherwise lose its last segment); the
+   * package's own folder when omitted.
+   */
   wasmBaseUrl?: string;
   /** The page serves a single-thread build of the package, which needs no cross-origin isolation; `healthCheck()` reads it. */
   singleThreadBuild?: boolean;
@@ -651,7 +656,10 @@ export class MoonshineBrowserSTT implements IStreamingSTT, HealthyProvider {
     const wanted = this.config.thread ?? 'auto';
     const thread = wanted === 'auto' ? (moonshine.sttWorkerSupported() ? 'worker' : 'calling') : wanted;
     if (thread === 'worker') {
-      const host = new moonshine.SttWorkerHost(this.config.wasmBaseUrl);
+      // The worker resolves moonshine.wasm with new URL(file, wasmBaseUrl),
+      // which drops a last segment that has no trailing slash.
+      const wasmBaseUrl = this.config.wasmBaseUrl ? `${this.config.wasmBaseUrl.replace(/\/+$/, '')}/` : undefined;
+      const host = new moonshine.SttWorkerHost(wasmBaseUrl);
       if (onProgress) {
         const report = onProgress;
         host.onProgress = (_transcriberId, loaded, total, file) => report(loaded, total, file);

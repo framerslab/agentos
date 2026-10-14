@@ -392,7 +392,7 @@ In a page the model runs in the package's own Web Worker, so a transcription pas
 | `keyterms`, `context`, `contextMaxTerms` | none, none, `200` | Terms to bias the transcription towards (no term may contain a comma), and a passage whose unusual words become such terms. |
 | `onProgress` | none | `{ model, loaded, total, fraction, file }` as the model downloads; a cached file counts at once. |
 | `thread` | `'auto'` | `'worker'` (the package's Web Worker), `'calling'` (the calling thread), or `'auto'` (the worker in a page). |
-| `wasmBaseUrl` | the package's folder | Where the package's worker finds `moonshine.wasm`. |
+| `wasmBaseUrl` | the package's folder | The URL of the folder where the package's worker finds `moonshine.wasm`, with or without a trailing slash. |
 | `singleThreadBuild` | `false` | The page serves a single-thread build of the package, so `healthCheck()` asks for no cross-origin isolation. |
 | `moonshine` | imported by name on first use (Node, or a page with an import map) | The package, or a function that imports it from where the page serves its `dist` folder. |
 | `device` | read from the browser | The signals `'auto'` picks the size by. |
