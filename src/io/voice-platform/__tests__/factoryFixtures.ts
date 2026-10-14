@@ -58,7 +58,7 @@ export async function factoryFixture(synthesisLimits = { maxTextCharacters: 8192
   class RecognitionAdapter implements ScopedVoiceAdapter<'streaming-stt'> {
     readonly voiceAdapterVersion = 1 as const; readonly kind = 'streaming-stt' as const;
     readonly manifest = manifest('stt', true); readonly options = z.strictObject({}); calls = 0;
-    constructor(private readonly session: ScopedStreamingSTTSession) {}
+    constructor(readonly session: ScopedStreamingSTTSession) {}
     async create() { this.calls++; let opened = false; return { value: { providerId: 'stt', isStreaming: true as const, priority: 0, capabilities: defaultCapabilities(), healthCheck: async () => ({ ok: true }), startSession: async () => { if (opened) return makeRecognitionSession(); opened = true; return this.session; } }, fence, dispose }; }
   }
   const recognitionAdapter = new RecognitionAdapter(stt);
