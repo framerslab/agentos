@@ -46,6 +46,7 @@ import {
   DDL_ARCHIVE_ACCESS_LOG_IDX,
 } from '../../archive/SqlStorageMemoryArchive.js';
 import { MigrationRunner, MIGRATIONS, LATEST_SCHEMA_VERSION } from './migrations/index.js';
+import { ensureScopeIdColumn } from './migrations/v2-to-v3.js';
 import { PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 
@@ -388,6 +389,8 @@ CREATE TABLE IF NOT EXISTS brain_meta (
  * - `strength` is the Ebbinghaus retrievability R ∈ [0, 1].
  * - `tags` / `emotions` / `metadata` are JSON TEXT columns.
  * - `deleted` is a soft-delete flag (0 = active, 1 = tombstoned).
+ * - `scope_id` is the trace's scope id, also kept in `metadata.scopeId`; `''` for a trace filed under no scope id.
+ *   Its index is created by `ensureScopeIdColumn` (migrations/v2-to-v3.ts), after the column is known to exist.
  */
 const DDL_MEMORY_TRACES = `
 CREATE TABLE IF NOT EXISTS memory_traces (
@@ -405,6 +408,7 @@ CREATE TABLE IF NOT EXISTS memory_traces (
   emotions        TEXT    NOT NULL DEFAULT '{}',
   metadata        TEXT    NOT NULL DEFAULT '{}',
   deleted         INTEGER NOT NULL DEFAULT 0,
+  scope_id        TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (brain_id, id)
 );
 
@@ -792,7 +796,7 @@ export class Brain {
    * @param opts.priority - Override the default adapter priority.
    * @param opts.coordinationToken - Optional process-local identity for
    *   non-filesystem adapters whose resource name is adapter-specific.
-   * @returns A fully initialised `Brain` instance with the v2 schema.
+   * @returns A fully initialised `Brain` instance with the latest schema.
    */
   static async openSqlite(
     dbPath: string,
@@ -925,7 +929,7 @@ export class Brain {
    * 1. Build platform-aware feature bundle.
    * 2. Set WAL mode (dialect.pragma returns null on Postgres).
    * 3. Enable foreign key enforcement (dialect.pragma returns null on Postgres).
-   * 4. Auto-migrate v1 schemas to v2 (idempotent; no-op for fresh DBs and v2).
+   * 4. Run the pending schema migrations (idempotent; no-op for fresh DBs and the latest schema).
    * 5. Apply full DDL via _initSchema().
    * 6. Seed brain_meta defaults.
    */
@@ -1063,6 +1067,9 @@ export class Brain {
     for (const statement of ddlStatements) {
       await this._adapter.exec(this._normalizeDdlForDialect(statement));
     }
+
+    // A table another path created without `scope_id` (a migration engine's copy) gains it here; a fresh table has it.
+    await ensureScopeIdColumn(this._adapter);
 
     // FTS index via feature abstraction (FTS5 on SQLite, tsvector/GIN on Postgres).
     // SQL.js builds may not include FTS5, so keep the core schema independent.
