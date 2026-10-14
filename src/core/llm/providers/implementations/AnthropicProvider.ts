@@ -48,6 +48,7 @@ import { computeRetryBackoffMs } from './retry-backoff.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
 import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
 import { redactUrlSecrets } from '../url-secrets';
+import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
 // Re-export so callers that already reach for Anthropic model-capability
 // predicates (modelSupportsTemperature lives here too) find this one next to

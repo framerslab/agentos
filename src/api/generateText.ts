@@ -29,6 +29,7 @@ import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { createLogger } from '../core/logging/loggerFactory.js';
+import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';

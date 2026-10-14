@@ -4,6 +4,7 @@ import { renderToolSystemBlock } from './renderer';
 import { parseToolCalls } from './parser';
 import { formatToolResponse } from './activation';
 import { markHookStop } from '../callerStop';
+import { contentSafeConsole as console } from '../../../core/logging/contentSafeConsole.js';
 
 export interface EmulatedLoopMessage { role: string; content: string; }
 

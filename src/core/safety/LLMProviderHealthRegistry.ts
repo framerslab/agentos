@@ -81,6 +81,7 @@
  */
 
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../llm/providers/errors/errorCodes.js';
+import { contentSafeConsole as console } from '../logging/contentSafeConsole.js';
 
 /** Snapshot of breaker state for a single provider. */
 export interface LLMProviderHealthStats {

@@ -120,6 +120,11 @@
       "default": "./dist/core/llm/auth/index.js",
       "types": "./dist/core/llm/auth/index.d.ts"
     },
+    "./logging": {
+      "types": "./dist/core/logging/index.d.ts",
+      "import": "./dist/core/logging/index.js",
+      "default": "./dist/core/logging/index.js"
+    },
     "./orchestration": {
       "import": "./dist/orchestration/index.js",
       "default": "./dist/orchestration/index.js",

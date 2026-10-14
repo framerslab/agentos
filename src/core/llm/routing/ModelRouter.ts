@@ -17,6 +17,7 @@
 import { IModelRouter, ModelRouteParams, ModelRouteResult } from './IModelRouter';
 import { ModelInfo } from '../providers/IProvider';
 import { AIModelProviderManager } from '../providers/AIModelProviderManager';
+import { contentSafeConsole as console } from '../../logging/contentSafeConsole.js';
 
 /**
  * Custom error class for ModelRouter specific operational errors.

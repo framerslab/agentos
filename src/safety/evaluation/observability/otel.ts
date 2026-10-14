@@ -1,5 +1,6 @@
 import type { Attributes, Span, SpanContext, SpanKind } from '@opentelemetry/api';
 import { context, metrics, trace, SpanStatusCode } from '@opentelemetry/api';
+import { isContentSafeTelemetryEnabled } from '../../../core/logging/contentSafeTelemetry.js';
 
 export interface AgentOSObservabilityConfig {
   /**
@@ -213,28 +214,42 @@ export function getAgentOSObservabilityState(): AgentOSObservabilityState {
   return state;
 }
 
+/** Whether AgentOS creates its manual spans: the tracing setting, and never while content-safe telemetry is on. */
 export function isAgentOSTracingEnabled(): boolean {
-  return state.tracingEnabled;
+  return !isContentSafeTelemetryEnabled() && state.tracingEnabled;
 }
 
+/** Whether AgentOS records its metrics: the metrics setting, and never while content-safe telemetry is on. */
 export function isAgentOSMetricsEnabled(): boolean {
-  return state.metricsEnabled;
+  return !isContentSafeTelemetryEnabled() && state.metricsEnabled;
 }
 
+/**
+ * Whether `PinoLogger` adds `trace_id` and `span_id` to its records: the `includeTraceIds` setting, and never while
+ * content-safe telemetry is on.
+ */
 export function shouldIncludeTraceIdsInAgentOSLogs(): boolean {
-  return state.includeTraceIdsInLogs;
+  return !isContentSafeTelemetryEnabled() && state.includeTraceIdsInLogs;
 }
 
+/**
+ * Whether `PinoLogger` emits OpenTelemetry log records: the `exportToOtel` setting, and never while content-safe
+ * telemetry is on.
+ */
 export function shouldExportAgentOSLogsToOtel(): boolean {
-  return state.exportOtelLogs;
+  return !isContentSafeTelemetryEnabled() && state.exportOtelLogs;
 }
 
 export function getAgentOSOtelLoggerName(): string {
   return state.otelLoggerName;
 }
 
+/**
+ * Whether streamed chunks carry `metadata.trace`: the `includeTraceInResponses` setting, and never while content-safe
+ * telemetry is on.
+ */
 export function shouldIncludeTraceInAgentOSResponses(): boolean {
-  return state.includeTraceInResponses;
+  return !isContentSafeTelemetryEnabled() && state.includeTraceInResponses;
 }
 
 function sanitizeAttributes(attributes?: Attributes): Attributes | undefined {
@@ -275,7 +290,7 @@ let instruments: AgentOSMetricsInstruments | null = null;
 let instrumentsMeterName: string | null = null;
 
 function getMetricInstruments(): AgentOSMetricsInstruments | null {
-  if (!state.metricsEnabled) return null;
+  if (isContentSafeTelemetryEnabled() || !state.metricsEnabled) return null;
 
   if (instruments && instrumentsMeterName === state.meterName) return instruments;
 
@@ -464,11 +479,18 @@ export function recordAgentOSToolResultMetrics(input: AgentOSToolResultMetricInp
   }
 }
 
+/**
+ * Starts an AgentOS span. Only string, number and boolean attributes, and arrays of them, are kept.
+ *
+ * @param name - The span's name.
+ * @param options - The span's kind and attributes.
+ * @returns The started span, or null while tracing is off or content-safe telemetry is on.
+ */
 export function startAgentOSSpan(
   name: string,
   options?: { kind?: SpanKind; attributes?: Attributes },
 ): Span | null {
-  if (!state.tracingEnabled) return null;
+  if (isContentSafeTelemetryEnabled() || !state.tracingEnabled) return null;
   const tracer = trace.getTracer(state.tracerName);
   const span = tracer.startSpan(name, {
     kind: options?.kind,
@@ -491,29 +513,31 @@ function getErrorMessage(error: unknown): string {
   }
 }
 
+/**
+ * Runs `fn` inside a new AgentOS span and ends the span when `fn` settles. A rejection is recorded on the span as an
+ * exception with an error status and then rethrown. While tracing is off or content-safe telemetry is on, `fn`
+ * receives null, no span is made and nothing about an error is recorded.
+ *
+ * @param name - The span's name.
+ * @param fn - The work to run; it receives the span, or null.
+ * @param options - The span's kind and attributes.
+ * @returns What `fn` resolves to.
+ */
 export async function withAgentOSSpan<T>(
   name: string,
   fn: (span: Span | null) => Promise<T>,
   options?: { kind?: SpanKind; attributes?: Attributes },
 ): Promise<T> {
   const span = startAgentOSSpan(name, options);
-  if (!span) {
-    return fn(null);
-  }
-
+  if (!span) return fn(null);
   return runWithSpanContext(span, async () => {
     try {
       return await fn(span);
     } catch (error) {
-      try {
-        span.recordException(error as any);
-      } catch {
-        // ignore
-      }
-      try {
-        span.setStatus({ code: SpanStatusCode.ERROR, message: getErrorMessage(error) });
-      } catch {
-        // ignore
+      if (!isContentSafeTelemetryEnabled()) {
+        try { span.recordException(error as any); } catch { /* Export failures are ignored. */ }
+        try { span.setStatus({ code: SpanStatusCode.ERROR, message: getErrorMessage(error) }); }
+        catch { /* Export failures are ignored. */ }
       }
       throw error;
     } finally {
@@ -522,22 +546,29 @@ export async function withAgentOSSpan<T>(
   });
 }
 
+/**
+ * Records `error` on the active span and sets an error status carrying `message`, or the error's own message. Does
+ * nothing when no span is active or while content-safe telemetry is on.
+ *
+ * @param error - The error to record.
+ * @param message - The status message to use instead of the error's message.
+ */
 export function recordExceptionOnActiveSpan(error: unknown, message?: string): void {
+  if (isContentSafeTelemetryEnabled()) return;
   const span = trace.getSpan(context.active());
   if (!span) return;
-  try {
-    span.recordException(error as any);
-  } catch {
-    // ignore
-  }
-  try {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: message ?? getErrorMessage(error) });
-  } catch {
-    // ignore
-  }
+  try { span.recordException(error as any); } catch { /* Export failures are ignored. */ }
+  try { span.setStatus({ code: SpanStatusCode.ERROR, message: message ?? getErrorMessage(error) }); }
+  catch { /* Export failures are ignored. */ }
 }
 
+/**
+ * The active span's context.
+ *
+ * @returns The context, or null when no span is active or while content-safe telemetry is on.
+ */
 export function getActiveSpanContext(): SpanContext | null {
+  if (isContentSafeTelemetryEnabled()) return null;
   const span = trace.getSpan(context.active());
   if (!span) return null;
   try {

@@ -28,6 +28,7 @@ import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
 import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
+import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
 /**
  * Configuration specific to the OpenRouterProvider.

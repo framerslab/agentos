@@ -33,6 +33,7 @@ import { ClaudeCodeProvider, ClaudeCodeProviderConfig } from './implementations/
 import { GeminiCLIProvider, GeminiCLIProviderConfig } from './implementations/GeminiCLIProvider';
 import { LiteLLMProvider, LiteLLMProviderConfig } from './implementations/LiteLLMProvider';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/errors.js'; // Corrected import path
+import { contentSafeConsole as console } from '../../logging/contentSafeConsole.js';
 
 /**
  * Configuration for a single AI model provider entry within the manager.

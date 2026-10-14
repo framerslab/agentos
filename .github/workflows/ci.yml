@@ -154,6 +154,22 @@ jobs:
           }
           JS
 
+      - name: Built content-safe logging export
+        run: |
+          node --input-type=module <<'JS'
+          import { enableContentSafeTelemetry, createLogger, PinoLogger } from '@framers/agentos/logging';
+          const events = [];
+          const before = new PinoLogger().child({ opaque: 'fixture-private-binding' });
+          enableContentSafeTelemetry((event) => events.push(event));
+          before.error('fixture-private-content', { err: new Error('fixture-private-error') });
+          createLogger('fixture-private-component').warn('fixture-private-content');
+          if (events.length !== 2) throw new Error('missing_safe_events');
+          if (JSON.stringify(events).includes('fixture-private')) throw new Error('unsafe_event');
+          if (events.some((event) => Object.keys(event).sort().join(',') !== 'kind,n,state')) {
+            throw new Error('unexpected_safe_event_keys');
+          }
+          JS
+
       - name: Lint
         run: pnpm run lint
 
