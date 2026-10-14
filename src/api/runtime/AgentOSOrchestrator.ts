@@ -69,6 +69,7 @@ import { ExternalToolResultHandler } from './ExternalToolResultHandler';
 import { GMIChunkTransformer } from './GMIChunkTransformer';
 import { TurnExecutionPipeline } from './TurnExecutionPipeline';
 import { gmiToolCallGateFor } from './toolCallGate';
+import { externalToolPauseCalls } from './externalToolPause';
 
 // Public config types extracted to types/OrchestratorConfig.ts
 export type {
@@ -921,11 +922,10 @@ export class AgentOSOrchestrator {
         responseText: gmi ? 'Processing complete.' : 'Processing ended.',
       };
 
-      if (
-        finalGMIStateForResponse.isFinal === false &&
-        Array.isArray(finalGMIStateForResponse.toolCalls) &&
-        finalGMIStateForResponse.toolCalls.length > 0
-      ) {
+      // The turn stops for the host by the rule its continuations share; the calls a final output lists ran, or were
+      // refused, in the GMI's own tool rounds.
+      const pauseCalls = externalToolPauseCalls(finalGMIStateForResponse);
+      if (pauseCalls) {
         keepStreamContextActive = true;
 
         if (conversationContext) {
@@ -933,7 +933,7 @@ export class AgentOSOrchestrator {
             agentOSStreamId,
             streamContext,
             gmiInstanceIdForChunks,
-            finalGMIStateForResponse.toolCalls,
+            pauseCalls,
             finalGMIStateForResponse.responseText ||
               'Agent requires tool execution before it can complete the turn.'
           );
@@ -947,7 +947,7 @@ export class AgentOSOrchestrator {
             currentPersonaId,
             false,
             {
-              toolCalls: finalGMIStateForResponse.toolCalls,
+              toolCalls: pauseCalls,
               rationale:
                 finalGMIStateForResponse.responseText ||
                 'Agent requires tool execution before it can complete the turn.',
