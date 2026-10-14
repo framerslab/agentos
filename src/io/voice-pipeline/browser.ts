@@ -1,14 +1,19 @@
 /**
  * @module @framers/agentos/io/voice-pipeline/browser
  *
- * The voice pipeline's browser entry: modules that import no Node built-in and
- * no package, so a browser bundle can take them. The Node entry,
- * `@framers/agentos/io/voice-pipeline`, carries all of this as well, with the
- * providers, transports and orchestrator that run on a server.
+ * The voice pipeline's browser entry: modules whose static imports name no
+ * Node built-in and no package, so a browser bundle can take them. One of
+ * them loads a package at run time: `MoonshineBrowserSTT` imports its
+ * optional peer, `@moonshine-ai/moonshine-wasm`, through a variable specifier
+ * on first use when the host passes no `moonshine` option (a bundled page
+ * passes one). The Node entry, `@framers/agentos/io/voice-pipeline`, carries
+ * all of this as well, with the providers, transports and orchestrator that
+ * run on a server.
  *
- * A test walks this entry's built module graph and fails on any import that
- * is not one of the library's own modules, so a module added here keeps to
- * that.
+ * A test walks this entry's built module graph (static imports and
+ * re-exports, and dynamic imports of a literal path) and fails on any import
+ * that is not one of the library's own modules, so a module added here keeps
+ * to that.
  *
  * @example
  * ```typescript
