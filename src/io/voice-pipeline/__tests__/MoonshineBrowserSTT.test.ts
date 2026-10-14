@@ -36,6 +36,14 @@ type Expect<T extends true> = T;
 type ModuleFits = Expect<typeof Moonshine extends MoonshineWasmModule ? true : false>;
 const conformance: ModuleFits = true;
 
+// Checked by the type check, for the docs: TypeScript 5.9's DOM lib declares
+// WebAssembly.validate(bytes: BufferSource), with BufferSource =
+// ArrayBufferView<ArrayBuffer> | ArrayBuffer, and a scope with that validate
+// does not type as a MoonshineBrowserScope, so a host casts a page's globalThis.
+type DomScope = { WebAssembly: { validate(bytes: ArrayBufferView<ArrayBuffer> | ArrayBuffer): boolean } };
+type DomScopeNeedsCast = Expect<DomScope extends MoonshineBrowserScope ? false : true>;
+const domScopeNeedsCast: DomScopeNeedsCast = true;
+
 const CHROME_WINDOWS =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 const CHROME_ANDROID =

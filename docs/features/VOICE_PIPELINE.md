@@ -487,6 +487,8 @@ The package's default build runs WebAssembly SIMD with threads. Threads need `Sh
 
 A page that cannot be cross-origin isolated serves a single-thread build of the package, which needs SIMD alone: build it from the package's source with `scripts/build-wasm.sh single-thread`, as [its README](https://github.com/moonshine-ai/moonshine/blob/main/language-bindings/wasm/README.md#building-from-source) shows, and pass `singleThreadBuild: true`.
 
+An Android WebView is such a page: it has WebAssembly SIMD, but no `SharedArrayBuffer`, which threads need, and no `Cross-Origin-Opener-Policy`, so it cannot be cross-origin isolated ([MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#browser_compatibility), [MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cross-Origin-Opener-Policy#browser_compatibility)). Firefox 89 to 113 has SIMD but no module workers ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/Worker/Worker#browser_compatibility)), and the package's worker and the default build's threads are module workers, so in those versions only the single-thread build on the calling thread (`singleThreadBuild: true` and `thread: 'calling'`) starts none. A page whose Content Security Policy has a `script-src` or `default-src` directive adds `'wasm-unsafe-eval'` to it, or the page compiles no WebAssembly, and a worker follows the policy its own script is served with, so a policy served with the package's `stt-worker.js` needs it as well ([MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy)).
+
 `checkMoonshineBrowserSupport()` reports, with no download, whether the provider can run where it is called, before a host chooses it:
 
 ```typescript
@@ -496,6 +498,8 @@ const support = checkMoonshineBrowserSupport(); // { singleThreadBuild: true } f
 // support.thread: 'worker' in a page, 'calling' in a worker
 // support.model: the size 'auto' picks here
 ```
+
+The check reads WebAssembly SIMD and cross-origin isolation, not module workers or the page's Content Security Policy, so in Firefox 89 to 113, or under a policy without `'wasm-unsafe-eval'`, it can report support where the provider cannot start. It reads the global scope, or the one passed as `scope`; with TypeScript 5.9's DOM lib, whose `WebAssembly.validate` takes a `BufferSource`, which the plain `Uint8Array` in `MoonshineBrowserScope` is not ([TypeScript 5.9](https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-9.html)), a host that passes the page's `globalThis` casts it: `checkMoonshineBrowserSupport({ scope: globalThis as unknown as MoonshineBrowserScope })`.
 
 ### The model
 

@@ -95,9 +95,13 @@ export const MOONSHINE_STREAMING_MODEL_FILES: readonly string[] = [
 
 /** A word with its timing (`WordTiming`), in seconds from the start of the stream. */
 export interface MoonshineWordLike {
+  /** The word. */
   readonly text: string;
+  /** When the word starts, in seconds, on the clock of its line's `startTime`. */
   readonly start: number;
+  /** When the word ends, in seconds, on the same clock. */
   readonly end: number;
+  /** The model's confidence in the word, from 0 to 1. */
   readonly confidence: number;
 }
 
@@ -105,11 +109,13 @@ export interface MoonshineWordLike {
 export interface MoonshineLineLike {
   /** Opaque 64-bit id as a decimal string, unique within a transcriber. */
   readonly id: string;
+  /** The line's text so far; the whole line once it is complete. */
   readonly text: string;
   /** Seconds from the start of the stream's current run. */
   readonly startTime: number;
   /** Seconds. */
   readonly duration: number;
+  /** The line is complete: its text changes no more. */
   readonly isComplete: boolean;
   /** Filled when the transcriber was loaded with word timestamps. */
   readonly words: readonly MoonshineWordLike[];
@@ -117,31 +123,45 @@ export interface MoonshineLineLike {
 
 /** A line event (`LineStarted`, `LineTextChanged`, `LineUpdated` or `LineCompleted`). */
 export interface MoonshineLineEvent {
+  /** The line as the pass that raised the event left it. */
   readonly line: MoonshineLineLike;
 }
 
 /** A transcript listener (`TranscriptEventListener`); every callback is optional. */
 export interface MoonshineLineListener {
+  /** A line was seen for the first time. */
   onLineStarted?(event: MoonshineLineEvent): void;
+  /** A line seen before was updated by a later pass. */
   onLineUpdated?(event: MoonshineLineEvent): void;
+  /** A line's text changed. */
   onLineTextChanged?(event: MoonshineLineEvent): void;
+  /** A line completed; it comes once per line. */
   onLineCompleted?(event: MoonshineLineEvent): void;
+  /** A transcription failed: a pass, or, in the package's worker, a frame the stream refused. */
   onError?(event: { readonly error: Error }): void;
 }
 
 /** A streaming session on a transcriber (`Stream`). */
 export interface MoonshineStreamLike {
+  /** Adds a listener for the stream's line events. */
   addListener(listener: MoonshineLineListener): void;
+  /** Starts the stream, or starts it again after `stop()`, from an empty transcript. */
   start(): void;
+  /** Stops the stream: a last pass completes every open line, and its events go out before this returns. */
   stop(): void;
+  /** Adds mono samples at any sample rate (the package resamples them); throws when the stream is not started. */
   addAudio(audio: Float32Array, sampleRate: number, flags?: number): void;
+  /** Runs a transcription pass when enough new audio has come, or when `flags` forces one, and emits its events. */
   transcribe(flags?: number): unknown;
+  /** Closes the stream and releases it, with no last pass. */
   close(): void;
 }
 
 /** A loaded model (`Transcriber`). */
 export interface MoonshineTranscriberLike {
+  /** Opens a stream on the model; `updateInterval` is the seconds of new audio a pass waits for. */
   createStream(options?: { flags?: number; updateInterval?: number }): MoonshineStreamLike;
+  /** Releases the model. */
   close(): void;
 }
 
@@ -154,7 +174,9 @@ export type MoonshineProgressReport = (loaded: number, total: number | undefined
 
 /** The options of `Transcriber.load` and `Transcriber.loadFromUrls` this module sets. */
 export interface MoonshineLoadOptionsLike {
+  /** The model's architecture, a value of the package's `ModelArch`. */
   modelArch?: number;
+  /** Called as the model's files download. */
   onProgress?: MoonshineProgressReport;
   /** Native transcriber options (`keyterms`, `context`, `context_max_terms`). */
   options?: Record<string, string>;
@@ -167,38 +189,51 @@ export type MoonshineModelSource =
 
 /** The package's worker host (`SttWorkerHost`): a transcriber and its streams in a module Web Worker. */
 export interface MoonshineWorkerHostLike {
+  /** Called as a transcriber's files download in the worker. */
   onProgress?: (transcriberId: string, loaded: number, total: number | undefined, file: string) => void;
+  /** Downloads and builds a transcriber in the worker, under `transcriberId`. */
   loadTranscriber(config: {
     transcriberId: string;
     modelArch: number;
     options?: Record<string, string>;
     source: MoonshineModelSource;
   }): Promise<void>;
+  /** Opens a stream on a transcriber in the worker, under `streamId`. */
   createStream(
     transcriberId: string,
     streamId: string,
     options?: { flags?: number; updateInterval?: number }
   ): Promise<void>;
+  /** Sets the listener the stream's line events reach on this thread. */
   setListener(streamId: string, listener: MoonshineLineListener): void;
+  /** Starts the stream, or starts it again after `stop()`. */
   start(streamId: string): Promise<void>;
+  /** Posts a copy of the samples to the worker without waiting for a pass. */
   addAudio(streamId: string, audio: Float32Array, sampleRate: number): void;
+  /** Stops the stream; the last pass's events arrive before this resolves. */
   stop(streamId: string): Promise<void>;
+  /** Closes the stream in the worker and drops its listener. */
   closeStream(streamId: string): Promise<void>;
+  /** Ends the worker: pending requests reject and it is terminated. */
   close(): void;
 }
 
 /** The parts of the `@moonshine-ai/moonshine-wasm` module this library uses. */
 export interface MoonshineWasmModule {
+  /** The architecture numbers of the streaming sizes. */
   readonly ModelArch: {
     readonly TinyStreaming: number;
     readonly SmallStreaming: number;
     readonly MediumStreaming: number;
   };
+  /** Loads a model on the calling thread: from the package's CDN by language, or from the host's URLs. */
   readonly Transcriber: {
     load(options: MoonshineLoadOptionsLike & { language: string }): Promise<MoonshineTranscriberLike>;
     loadFromUrls(files: Record<string, string>, options?: MoonshineLoadOptionsLike): Promise<MoonshineTranscriberLike>;
   };
+  /** Starts the package's worker; `wasmBaseUrl` is where it finds `moonshine.wasm`. */
   readonly SttWorkerHost: new (wasmBaseUrl?: string) => MoonshineWorkerHostLike;
+  /** Whether this scope can start the package's worker: a page with Web Workers. */
   sttWorkerSupported(): boolean;
 }
 
@@ -258,20 +293,36 @@ function isMissingModule(err: unknown): boolean {
 /**
  * The globals the capability check and the device signals read, as a
  * structural type, so they can be read from any scope (a page, a worker, a
- * test) and the library needs no DOM typings.
+ * test) and the library needs no DOM typings. With TypeScript 5.9's DOM lib,
+ * whose `WebAssembly.validate` takes a `BufferSource`, a page's `globalThis`
+ * (or `window`, or a worker's `self`) does not type as this one, since the
+ * plain `Uint8Array` named here is no `BufferSource` there: a host that
+ * passes one writes `globalThis as unknown as MoonshineBrowserScope`, and
+ * leaving `scope` out reads the global scope with no cast.
  */
 export interface MoonshineBrowserScope {
+  /** Where the device signals come from. */
   readonly navigator?: {
+    /** The browser's user agent string. */
     readonly userAgent?: string;
+    /** The logical processor cores the browser reports. */
     readonly hardwareConcurrency?: number;
+    /** The memory in gigabytes, as the browser rounds it (Chromium only). */
     readonly deviceMemory?: number;
+    /** User-Agent Client Hints, whose `mobile` is the browser's own word on whether it runs on a phone (Chromium only). */
     readonly userAgentData?: { readonly mobile?: boolean };
   };
+  /** Whether the scope is cross-origin isolated. */
   readonly crossOriginIsolated?: boolean;
+  /** WebAssembly, whose `validate` answers the SIMD probe. */
   readonly WebAssembly?: { validate(bytes: Uint8Array): boolean };
+  /** A page's window; with `document`, `Worker` and `URL`, the package's worker can start. */
   readonly window?: unknown;
+  /** A page's document. */
   readonly document?: unknown;
+  /** The Web Worker constructor. */
   readonly Worker?: unknown;
+  /** The URL constructor. */
   readonly URL?: unknown;
 }
 
@@ -363,9 +414,16 @@ export interface MoonshineBrowserSupportOptions {
  * SIMD and threads, and threads need cross-origin isolation (the page served
  * with `Cross-Origin-Opener-Policy: same-origin` and
  * `Cross-Origin-Embedder-Policy: require-corp`); a single-thread build needs
- * SIMD only. Every engine with WebAssembly SIMD has WebAssembly threads
- * (Chrome 91 and 74, Firefox 89 and 79, Safari 16.4 and 15.2), so SIMD and
- * isolation stand for both. It loads no package and reads no network.
+ * SIMD only. Chrome, Firefox and Safari have WebAssembly threads in every
+ * version with WebAssembly SIMD (Chrome 91 and 74, Firefox 89 and 79, Safari
+ * 16.4 and 15.2), so there SIMD and isolation stand for both; an Android
+ * WebView has SIMD without threads, and cannot be cross-origin isolated, so a
+ * page in one runs the single-thread build. The check reads neither module
+ * workers nor the page's Content Security Policy, so it can report support
+ * where the provider cannot start: in Firefox 89 to 113, which has SIMD and
+ * no module workers (the package's worker and the default build's threads
+ * are module workers), and on a page whose policy does not allow WebAssembly
+ * (`'wasm-unsafe-eval'`). It loads no package and reads no network.
  */
 export function checkMoonshineBrowserSupport(options: MoonshineBrowserSupportOptions = {}): MoonshineBrowserSupport {
   const scope = options.scope ?? (globalThis as unknown as MoonshineBrowserScope);
@@ -527,9 +585,17 @@ const SIZE_FOLDER: Record<MoonshineModelSize, string> = {
  * ```
  */
 export class MoonshineBrowserSTT implements IStreamingSTT, HealthyProvider {
+  /**
+   * `'moonshine-browser'`, the speech catalogue's id for the provider, the same
+   * for every size: a `StreamingSTTChain` that holds two sizes tells them apart
+   * by their place in it.
+   */
   readonly providerId = 'moonshine-browser';
+  /** Always `true`: a session transcribes as the audio arrives. */
   readonly isStreaming = true;
+  /** The chain priority from the configuration; lower is tried first. */
   readonly priority: number;
+  /** The model's one language, streaming, the cheap cost tier and the realtime latency class. */
   readonly capabilities: ProviderCapabilities;
   private readonly language: string;
   private readonly sessions = new Set<MoonshineBrowserSession>();
