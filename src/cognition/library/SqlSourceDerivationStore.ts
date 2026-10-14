@@ -105,6 +105,12 @@ function checkedAffected(affected: SourceInvalidation): void {
   if ((affected.kind !== 'connection' && affected.kind !== 'source') || !key(affected.connectionId)
     || (affected.kind === 'source' && !key(affected.sourceId))) throw new Error('invalid_source_invalidation');
 }
+/** The invalidation's kind and keys alone, so that no other property a caller passed reaches a deletion record. */
+function plainAffected(affected: SourceInvalidation): SourceInvalidation {
+  if (affected.kind === 'owner') return { kind: 'owner' };
+  if (affected.kind === 'connection') return { kind: 'connection', connectionId: affected.connectionId };
+  return { kind: 'source', connectionId: affected.connectionId, sourceId: affected.sourceId };
+}
 function count(value: string | number): number {
   const n = Number(value);
   if (!integer(n)) throw new Error('invalid_source_counter');
@@ -144,8 +150,11 @@ export class SqlSourceDerivationStore {
   private readonly bindings: SourceDerivationBindings;
 
   /**
-   * @param db - A PostgreSQL adapter with transactions; each call that reads or writes an owner's state runs in
-   *   a transaction of its own on it.
+   * @param db - A PostgreSQL adapter with transactions. Each call that reads or writes an owner's state runs in a
+   *   transaction of its own on it. On a transaction view (the adapter a `transaction` callback receives, whose own
+   *   `transaction` runs a callback in that same transaction) each call runs inside the caller's transaction
+   *   instead: it holds the owner's row, and after writing a deletion record the shared journal row, until the
+   *   caller commits or rolls back, and the caller's rollback undoes it.
    * @param options - Table prefix, clock and the host's bindings.
    * @throws {Error} `derivations_require_postgres_transactions` for another kind of adapter or one without
    *   transactions, and `invalid_derivation_table_prefix` for a malformed prefix.
@@ -350,10 +359,12 @@ export class SqlSourceDerivationStore {
   ): Promise<void> {
     await tx.run(`INSERT INTO ${this.tables.journal} (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
     await tx.get(`SELECT id FROM ${this.tables.journal} WHERE id=1 FOR UPDATE`);
+    // Rebuilt from its kind and keys: an invalidation or a replayed record can carry other properties, and the
+    // record outlives the account.
     await tx.run(`INSERT INTO ${this.tables.tombstones}
       (id,tenant_id,owner_id,epoch,at_ms,affected,owner_disabled) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
       ON CONFLICT (id) DO NOTHING`,
-    [id, scope.tenantId, scope.ownerId, epoch, at, JSON.stringify(affected), disabled]);
+    [id, scope.tenantId, scope.ownerId, epoch, at, JSON.stringify(plainAffected(affected)), disabled]);
   }
 
   /**
