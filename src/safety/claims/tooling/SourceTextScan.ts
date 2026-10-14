@@ -3,10 +3,11 @@
  *
  * Text a reader can meet, found in source: JSX text, text-bearing attributes, sentence-like string and template
  * literals, and every string of a metadata export, with file, line and column; the import graph a page reaches,
- * through static, re-export and dynamic imports; and a template's visible text and spoken attributes, with its scripts,
- * styles and comments left out. The TypeScript compiler is passed in by the caller. Strings pass as structural only
- * through syntax that cannot carry text to a reader (an import specifier, a type, a property name, an element access,
- * a directive, a comparison) or through an attribute the caller names as structural; never by file.
+ * through static, re-export, import-assignment and dynamic imports, with every import it cannot follow reported; and a
+ * template's visible text and spoken attributes, with its scripts, styles and comments left out. The TypeScript
+ * compiler is passed in by the caller. Strings pass as structural only through syntax that cannot carry text to a
+ * reader (an import specifier, a type, a property name, an element access, a directive, a comparison) or through an
+ * attribute the caller names as structural; never by file.
  */
 import type * as TS from 'typescript';
 
@@ -148,16 +149,21 @@ export function scanSourceText(ts: TypeScriptModule, files: readonly SourceInput
   return out.sort((a, b) => (a.file === b.file ? (a.line === b.line ? a.column - b.column : a.line - b.line) : a.file < b.file ? -1 : 1));
 }
 
-/** The files a set of entries reaches, and the relative imports nothing resolved. */
+/** The files a set of entries reaches, and the imports it could not follow. */
 export interface ImportGraph {
   /** Every file reached, the entries included, sorted. */
   files: readonly string[];
-  /** Each import nothing resolved; an entry or a resolved path missing from the files is listed as itself, in both fields. */
+  /**
+   * Each import nothing resolved, with its specifier; each dynamic import whose specifier is computed, with the
+   * specifier's source text; and an entry or a resolved path missing from the files, listed as itself in both fields.
+   */
   unresolved: readonly { from: string; specifier: string }[];
 }
 
 /**
- * The import graph from some entry files.
+ * The import graph from some entry files, through import declarations, re-exports, import assignments
+ * (`import x = require('./x')`) and dynamic imports. A dynamic import whose specifier is computed names no file to
+ * follow, so it is reported in `unresolved` rather than skipped.
  *
  * @param ts - The TypeScript compiler module.
  * @param files - Every file the graph may reach, by path.
@@ -178,14 +184,24 @@ export function importGraph(ts: TypeScriptModule, files: ReadonlyMap<string, str
     }
     reached.add(path);
     const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
-    const specifiers: string[] = [];
+    const found: { specifier: string; literal: boolean }[] = [];
     const visit = (node: TS.Node): void => {
-      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) specifiers.push(node.moduleSpecifier.text);
-      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments[0] !== undefined && ts.isStringLiteral(node.arguments[0])) specifiers.push(node.arguments[0].text);
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) found.push({ specifier: node.moduleSpecifier.text, literal: true });
+      if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) && ts.isStringLiteral(node.moduleReference.expression)) found.push({ specifier: node.moduleReference.expression.text, literal: true });
+      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        const argument = node.arguments[0];
+        // A template literal without substitutions is as static as a string; anything else is decided at run time.
+        if (argument !== undefined && ts.isStringLiteralLike(argument)) found.push({ specifier: argument.text, literal: true });
+        else found.push({ specifier: argument === undefined ? '' : argument.getText(source), literal: false });
+      }
       ts.forEachChild(node, visit);
     };
     visit(source);
-    for (const specifier of specifiers) {
+    for (const { specifier, literal } of found) {
+      if (!literal) {
+        unresolved.push({ from: path, specifier });
+        continue;
+      }
       const target = resolve(path, specifier);
       if (target === 'external') continue;
       if (target === null) unresolved.push({ from: path, specifier });
@@ -205,18 +221,27 @@ export interface TemplateText {
   text: string;
 }
 
-const SILENT_TAGS = new Set(['script', 'style', 'template', 'noscript']);
+const SILENT_TAGS = new Set(['script', 'style']);
 const SPOKEN = ['alt', 'title', 'aria-label', 'placeholder'];
+/** Input types whose `value` is the label shown on the control. */
+const LABELLED_INPUTS = new Set(['submit', 'button', 'reset']);
 
 /**
- * The visible text of an HTML template and its spoken attributes, with a meta description's `content`; scripts,
- * styles, templates, noscript blocks and comments are left out.
+ * The visible text of an HTML template and its spoken attributes, with a meta description's `content` and the label of
+ * a submit, button or reset input; scripts, styles and comments are left out. A `noscript` or `template` block is read:
+ * a reader without scripts sees the one, and a script that clones the other shows its text. Attribute values may be
+ * quoted or unquoted, and a `<` that opens no tag, comment or declaration is text, as a browser shows it.
  *
  * @param html - The template, read as text.
  */
 export function htmlTemplateText(html: string): TemplateText[] {
   const out: TemplateText[] = [];
   const lineAt = (index: number): number => html.slice(0, index).split('\n').length;
+  // Markup starts with `<` and a letter (a tag), `/` (an end tag), `!` (a comment or declaration) or `?`.
+  const opensMarkup = (index: number): boolean => {
+    const next = html.charAt(index + 1);
+    return /[a-zA-Z]/.test(next) || next === '/' || next === '!' || next === '?';
+  };
   let i = 0;
   let textStart = 0;
   const flush = (end: number): void => {
@@ -231,18 +256,22 @@ export function htmlTemplateText(html: string): TemplateText[] {
       textStart = i;
       continue;
     }
-    if (html[i] === '<') {
+    if (html[i] === '<' && opensMarkup(i)) {
       const close = html.indexOf('>', i);
       if (close === -1) break;
       flush(i);
       const tag = html.slice(i + 1, close);
       const name = (/^\/?([a-zA-Z0-9-]+)/.exec(tag)?.[1] ?? '').toLowerCase();
       const attributes = new Map<string, string>();
-      for (const m of tag.matchAll(/([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)')/g)) attributes.set((m[1] as string).toLowerCase(), m[3] ?? m[4] ?? '');
+      for (const m of tag.matchAll(/([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) attributes.set((m[1] as string).toLowerCase(), m[3] ?? m[4] ?? m[5] ?? '');
       if (!tag.startsWith('/')) {
         for (const attribute of SPOKEN) {
           const value = attributes.get(attribute);
           if (value !== undefined && collapse(value) !== '') out.push({ line: lineAt(i), site: 'attribute', attribute, text: collapse(value) });
+        }
+        if (name === 'input' && LABELLED_INPUTS.has((attributes.get('type') ?? '').toLowerCase())) {
+          const value = attributes.get('value');
+          if (value !== undefined && collapse(value) !== '') out.push({ line: lineAt(i), site: 'attribute', attribute: 'value', text: collapse(value) });
         }
         const meta = (attributes.get('name') ?? attributes.get('property') ?? '').toLowerCase();
         if (name === 'meta' && (meta === 'description' || meta === 'og:description' || meta === 'og:title' || meta === 'twitter:description')) {
