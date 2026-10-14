@@ -20,6 +20,14 @@ describe('agency text listener refuses audio', () => {
       expect((await closed)[0]).toBe(1003); expect(f.generate).not.toHaveBeenCalled();
     } finally { await f.close(); }
   });
+  it('starts no generation for a text frame that follows a refused binary frame', async () => {
+    const f = await listenerFixture();
+    try {
+      const closed = once(f.client, 'close');
+      f.client.send(Buffer.alloc(640)); f.client.send('{"text":"sent after the refusal"}');
+      expect((await closed)[0]).toBe(1003); expect(f.generate).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
   it('keeps JSON text requests working and exposes no audio success message', async () => {
     const f = await listenerFixture();
     try {

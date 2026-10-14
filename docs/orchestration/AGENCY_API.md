@@ -856,7 +856,8 @@ come back as `{ "error": { "code": "...", "message": "..." } }` with the codes
 generation's own error is not sent) and `output_unavailable` (a reply that is
 not text or exceeds 32768 bytes). `agency()` reads no other `voice` field and
 handles no audio: a binary frame receives `audio_not_supported` and close code
-1003. For spoken calls use `VoiceSessionFactory`, or put speech-to-text and
+1003, and frames that arrive while a connection is closing are ignored. For
+spoken calls use `VoiceSessionFactory`, or put speech-to-text and
 text-to-speech in front of the socket (the
 [Voice Pipeline](/features/voice-pipeline) and its providers live in
 `src/io/voice-pipeline/`).

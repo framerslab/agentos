@@ -875,6 +875,9 @@ export function agency(opts: AgencyOptions): Agent {
         };
         const error = (code: string, message: string): void => send({ error: { code, message } });
         socket.on('message', (data: RawData, isBinary: boolean) => {
+          // A closing connection starts no work: ws still delivers the frames that arrive before the client's close
+          // frame, such as a text frame sent right after a refused binary one.
+          if (socket.readyState !== socket.OPEN) return;
           if (isBinary) {
             error('audio_not_supported', 'This listener accepts JSON text only. Use VoiceSessionFactory for audio.');
             socket.close(1003, 'audio_not_supported'); return;
