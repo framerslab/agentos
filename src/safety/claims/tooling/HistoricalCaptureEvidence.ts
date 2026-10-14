@@ -5,7 +5,13 @@
  * and alternative text are catalogued, and only while its original bytes, receipt and bundle remain verifiable in the
  * durable store. It never stands in for a current `capture`: the verifier keys evidence by kind, so a requirement for
  * a current picture cannot be met by this class, and an active placement is contradicted here.
+ *
+ * Support needs the original the caller's policy names for the requesting claim: its receipt, which must exist; its
+ * placement, compared by canonical JSON, so a payload read back from a store with its keys in another order is the
+ * same evidence; and a manifest that meets the policy's capture requirement and pictures the requesting claim. Both
+ * dates must be calendar days.
  */
+import { canonicalJson } from '../digest.js';
 import type { EvidenceAdapter } from '../types.js';
 import { validateCaptureSet, type CaptureManifest, type CaptureRequirement } from './CaptureEvidence.js';
 
@@ -46,19 +52,29 @@ export interface HistoricalCaptureOptions {
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * Whether a text is a calendar day in `YYYY-MM-DD` form. The form alone admits a day such as `2026-02-30`, which a
+ * date parser refuses or rolls into the next month, so the day must also come back unchanged from a UTC round trip.
+ */
+function isDay(text: string): boolean {
+  if (!DAY.test(text)) return false;
+  const time = Date.parse(text);
+  return !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === text;
+}
+
+/**
  * The static problems of a payload, before the store is read.
  *
  * @param payload - The historical capture.
  * @param captions - Catalogued caption and alternative-text ids.
- * @returns The problems; none for a history placement with catalogued words, `YYYY-MM-DD` dates in order and a
- *   named claim.
+ * @returns The problems; none for a history placement with catalogued words, calendar days in `YYYY-MM-DD` form in
+ *   order and a named claim.
  */
 export function historicalProblems(payload: HistoricalCapturePayload, captions: ReadonlySet<string>): string[] {
   const problems: string[] = [];
   if (payload.placement.kind !== 'history') problems.push('an old capture on an active page');
   if (!captions.has(payload.placement.captionId)) problems.push('the caption is not catalogued');
   if (!captions.has(payload.placement.altId)) problems.push('the alternative text is not catalogued');
-  if (!DAY.test(payload.originalDate) || !DAY.test(payload.receiptDate)) problems.push('a date is not YYYY-MM-DD');
+  if (!isDay(payload.originalDate) || !isDay(payload.receiptDate)) problems.push('a date is not a YYYY-MM-DD calendar day');
   else if (payload.originalDate > payload.receiptDate) problems.push('the capture is dated after its receipt');
   if (payload.claimIds.length === 0) problems.push('no claim is named');
   return problems;
@@ -81,10 +97,16 @@ export function historicalCaptureAdapter(options: HistoricalCaptureOptions): Evi
       if (!options.originalFor || !options.verifyOriginal) return { verdict: 'unverifiable', basis: 'deterministic', detail: 'original receipt policy is required' };
       if (options.originalFor) {
         const expected = options.originalFor(claim.claimId);
-        if (!expected || !expected.claimIds.includes(claim.claimId) || expected.receiptDigest !== payload.originalReceiptDigest || JSON.stringify(expected.placement) !== JSON.stringify(payload.placement)) problems.push('the original receipt or historical placement differs');
+        if (!expected || !expected.claimIds.includes(claim.claimId) || expected.receiptDigest !== payload.originalReceiptDigest || canonicalJson(expected.placement) !== canonicalJson(payload.placement)) problems.push('the original receipt or historical placement differs');
         else {
+          // The receipt equals the policy's here, so an empty one means the policy names none either.
+          if (!payload.originalReceiptDigest) problems.push('the original receipt is missing');
           if (!payload.originalManifest || !expected.requirement.identity) problems.push('the original implementation tuple is missing');
-          else problems.push(...validateCaptureSet({ manifests: [payload.originalManifest], bytes: { [payload.captureId]: payload.originalSha256 }, requirement: expected.requirement }));
+          else {
+            problems.push(...validateCaptureSet({ manifests: [payload.originalManifest], bytes: { [payload.captureId]: payload.originalSha256 }, requirement: expected.requirement }));
+            // The policy's requirement may name other claims; the original must picture the one it is evidence for.
+            if (!payload.originalManifest.claimIds.includes(claim.claimId)) problems.push('the original does not picture the requesting claim');
+          }
           if (!await options.verifyOriginal(payload, expected)) problems.push('the original receipt and capture tuple are not verified');
         }
       }
