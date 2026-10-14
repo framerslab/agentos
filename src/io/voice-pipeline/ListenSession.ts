@@ -46,7 +46,8 @@ export interface ListenSessionOverrides {
   sinkQueueLimit?: number;
   /**
    * Names who spoke a turn, from the transcriber's final. A detector turn carries its text and no words,
-   * unless empty detector text uses the accumulated STT finals and their words.
+   * unless empty detector text uses the accumulated STT finals and their words. One that throws names no one:
+   * the throw is written as a console warning, and the turn is written with no speaker.
    */
   speaker?: (event: TranscriptEvent) => string | undefined;
   /** How long a stop waits for the flushed final to arrive, before draining a pending detector turn. Default 250. */
@@ -210,9 +211,20 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
     return endPromise;
   };
 
+  // `speaker` is the host's code, run inside the transcriber's or the detector's event: a throw would lose the turn
+  // and go into that event's emitter, so it is written as a console warning and the turn is written with no speaker.
+  const speakerOf = (event: TranscriptEvent): string | undefined => {
+    try {
+      return overrides.speaker?.(event);
+    } catch (thrown) {
+      console.warn('[listen-session] the speaker option threw; the turn is written with no speaker:', describeReason(thrown));
+      return undefined;
+    }
+  };
+
   const write = (text: string, event: TranscriptEvent): void => {
     if (!accepting() || sinkFailed) return;
-    const turn: TranscriptInput = { runId: overrides.runId, at: Date.now(), text, startMs: event.startMs, endMs: event.endMs, speaker: overrides.speaker?.(event) };
+    const turn: TranscriptInput = { runId: overrides.runId, at: Date.now(), text, startMs: event.startMs, endMs: event.endMs, speaker: speakerOf(event) };
     pending.push(turn);
     if (pending.length >= queueLimit && !paused) {
       paused = true;

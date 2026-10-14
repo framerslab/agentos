@@ -78,6 +78,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { IEndpointDetector, TranscriptEvent, VadEvent, TurnCompleteEvent } from './types.js';
+import { describeReason } from './describeReason.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -184,7 +185,10 @@ export interface HeuristicEndpointDetectorOptions {
  * before the next `speech_end`, a standalone VAD's next `speech_start` or a
  * session's start (`reset('session')`), while the transcriber's next
  * utterance was spoken included, once per such final. The detector drops it
- * from its turns, so it never joins the next turn's text.
+ * from its turns, so it never joins the next turn's text. Each listener gets
+ * it: one that throws or rejects is written as a console warning, and the
+ * listeners after it still run, so nothing is thrown into the code that
+ * pushed the final.
  * `VoicePipelineOrchestrator` does not listen for it, so the conversation
  * leaves those words out; `startListenSession` writes the final to its sink
  * as a turn of its own.
@@ -597,8 +601,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * backchannel is announced last, so a `'backchannel_detected'` listener
    * that throws leaves the final recorded and the turn decided. A final that
    * arrives while {@link awaitingNextSpeechEnd} holds is dropped and reported
-   * as `'late_final'`; the drop changes no state, so a listener that throws
-   * leaves the detector as it was.
+   * as `'late_final'` through {@link _emitLateFinal}; the drop changes no
+   * state, and a listener that throws is written as a console warning.
    *
    * @param itemId - The provider input item the final belongs to.
    * @param transcript - The final transcript event.
@@ -607,7 +611,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     // The late final of a turn that has ended stays out of the next turn. It is
     // reported for a listener that keeps every final, such as a listen session.
     if (this.awaitingNextSpeechEnd) {
-      this.emit('late_final', transcript);
+      this._emitLateFinal(transcript);
       return;
     }
 
@@ -634,6 +638,31 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     if (!this.speechActive && this.lastSpeechEnd !== null) this._decideItemTurn();
 
     if (backchannel) this.emit('backchannel_detected', { text: transcript.text });
+  }
+
+  /**
+   * Hands a late final to each `'late_final'` listener in order, as `emit()`
+   * would, except that a listener that throws or rejects is written as a
+   * console warning and the listeners after it still run. `emit()` stops at a
+   * throw and throws into the code that pushed the final, so a listener added
+   * before a listen session's would keep the session from writing the final,
+   * and the throw would reach the transcriber that delivered it.
+   *
+   * @param transcript - The late final, as it was pushed.
+   */
+  private _emitLateFinal(transcript: TranscriptEvent): void {
+    const warn = (thrown: unknown): void => {
+      console.warn("[heuristic-endpoint-detector] a 'late_final' listener failed:", describeReason(thrown));
+    };
+    for (const listener of this.rawListeners('late_final')) {
+      try {
+        const result: unknown = (listener as (event: TranscriptEvent) => unknown).call(this, transcript);
+        // Promise.resolve() also takes a promise of another realm or library, and leaves any other value alone.
+        Promise.resolve(result).catch(warn);
+      } catch (thrown) {
+        warn(thrown);
+      }
+    }
   }
 
   /**
