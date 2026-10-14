@@ -24,14 +24,19 @@ export interface CoverageCase {
   state: string;
   mode: string;
   placement: string;
+  /** The claim id, state, mode and placement joined with `|`. */
   key: string;
 }
 
 /**
  * Every case of every claim.
  *
- * @param claims - Each claim once, with no empty dimension and no value twice within one dimension.
- * @throws Error on a claim named twice, an empty dimension or a value named twice within one dimension.
+ * @param claims - Each claim once, with no empty dimension, no value twice within one dimension and no `|` in a state,
+ * mode or placement.
+ * @returns One case per state, mode and placement of each claim. A case's key joins its claim id, state, mode and
+ * placement with `|`; with no `|` in the last three, no two cases share a key.
+ * @throws Error on a claim named twice, an empty dimension, a value named twice within one dimension, or a state, mode
+ * or placement that holds `|`.
  */
 export function enumerateClaimCases(claims: readonly CoverageClaim[]): CoverageCase[] {
   const seen = new Set<string>();
@@ -44,6 +49,10 @@ export function enumerateClaimCases(claims: readonly CoverageClaim[]): CoverageC
       // A repeated value would give two cases with one key and count the same check twice.
       const repeated = values.find((value, index) => values.indexOf(value) !== index);
       if (repeated !== undefined) throw new Error(`enumerateClaimCases: ${claim.claimId} names ${repeated} twice in its ${name}`);
+      // The key joins the parts with |, so a value holding | could give two cases one key: claim a|b in state s and
+      // claim a in state b|s would both begin a|b|s.
+      const joined = values.find((value) => value.includes('|'));
+      if (joined !== undefined) throw new Error(`enumerateClaimCases: ${claim.claimId} names ${joined} in its ${name}, and | separates the parts of a case key`);
     }
     for (const state of claim.states) {
       for (const mode of claim.modes) {
@@ -76,7 +85,7 @@ export interface RouteSelection {
   families: readonly string[];
 }
 
-/** The browser matrix each scenario case runs in. */
+/** The browser matrix each scenario case runs in: no dimension empty, and no value twice within one. */
 export interface BrowserMatrix {
   engines: readonly string[];
   looks: readonly string[];
@@ -107,24 +116,37 @@ export interface ScenarioPlan {
  * @param matrix - The browser matrix.
  * @param budget - The most distinct cases one route may run.
  * @returns The counts and every problem: a family id or a route named twice, a family the table lacks, a case id in
- * two families, a case that names no claim, an empty matrix dimension and a route over the budget.
+ * two families or twice in one, a case that names no claim, an empty matrix dimension or one that names a value twice,
+ * and a route over the budget.
  */
 export function planScenarios(families: readonly ScenarioFamily[], routes: readonly RouteSelection[], matrix: BrowserMatrix, budget: number): ScenarioPlan {
   const problems: string[] = [];
   const byId = new Map<string, ScenarioFamily>();
-  const caseIds = new Set<string>();
+  // Each case id, with the family that first lists it.
+  const caseFamily = new Map<string, string>();
   for (const family of families) {
     // A later family with the same id replaces the earlier one in the lookup, so the earlier one's cases would leave
     // the count without a word.
     if (byId.has(family.id)) problems.push(`the family id ${family.id} appears more than once in the table`);
     byId.set(family.id, family);
+    const listed = new Set<string>();
     for (const c of family.cases) {
-      if (caseIds.has(c.id)) problems.push(`the case id ${c.id} appears in more than one family`);
-      caseIds.add(c.id);
+      // A repeat within one listing names its family. A case id first listed under this family's own id is the family
+      // listed twice, which the check above reports once rather than once more for each of its cases.
+      const owner = caseFamily.get(c.id);
+      if (listed.has(c.id)) problems.push(`the case id ${c.id} appears more than once in the family ${family.id}`);
+      else if (owner !== undefined && owner !== family.id) problems.push(`the case id ${c.id} appears in more than one family`);
+      listed.add(c.id);
+      if (owner === undefined) caseFamily.set(c.id, family.id);
       if (c.claims.length === 0) problems.push(`the case ${c.id} names no claim`);
     }
   }
   if (matrix.engines.length === 0 || matrix.looks.length === 0 || matrix.sizes.length === 0) problems.push('the browser matrix has an empty dimension');
+  for (const [name, values] of [['engines', matrix.engines], ['looks', matrix.looks], ['sizes', matrix.sizes]] as const) {
+    // A repeated value would list each of its browser tuples twice, and no run can match a tuple listed twice.
+    const repeated = values.find((value, index) => values.indexOf(value) !== index);
+    if (repeated !== undefined) problems.push(`the browser matrix names ${repeated} twice in its ${name}`);
+  }
   const perRoute: RouteCount[] = [];
   const routesSeen = new Set<string>();
   for (const selection of routes) {
