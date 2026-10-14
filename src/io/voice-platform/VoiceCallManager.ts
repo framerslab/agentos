@@ -283,13 +283,17 @@ export class VoiceCallManager {
       s.lastUserSpeechAt = voiceInteger(this.options.now()); await tx.put('calls', callId, s, row.version);
     });
   }
-  /** Cumulative turn count, not an increment. Repeated completion cannot consume another turn. */
+  /**
+   * Cumulative turn count, not an increment. Repeated completion cannot consume another turn.
+   * The count that reaches `limits.maxTurns` commits the `turn_limit` end intent with it, so no later turn starts on a connected call.
+   */
   async completedTurn(scopeId: string, callId: string, workerGeneration: number, inferenceGeneration: number, transportEpoch: number, count: number): Promise<void> { await this.tick(scopeId, callId);
     voiceInteger(count);
     await this.options.store.withTransaction(scopeId, async (tx) => {
       const row = await tx.get('calls', callId); if (!row) throw new Error('call not found'); const s = row.value;
       if (s.call.state !== 'connected' || s.call.workerGeneration !== workerGeneration || s.call.inferenceGeneration !== inferenceGeneration || s.call.transportEpoch !== transportEpoch) throw new Error('stale turn');
       s.completedTurns = Math.max(s.completedTurns, count); await tx.put('calls', callId, s, row.version);
+      if (s.completedTurns >= s.limits.maxTurns) await requestCallEndInTransaction(tx, callId, 'turn_limit', this.options.now());
     });
   }
   /** Commits the stop intent; advance performs cleanup, with no successful terminal event before it finishes. */
