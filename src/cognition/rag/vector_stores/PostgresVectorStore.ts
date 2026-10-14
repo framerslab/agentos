@@ -188,8 +188,16 @@ export class PostgresVectorStore implements IVectorStore {
   private prefix: string;
   private isInitialized = false;
   private ownsPool = false;
-  /** Set on a view of a caller's transaction when its callback ends; the view then refuses every call. */
+  /**
+   * Set on a view of a caller's transaction when its callback ends; the view then runs no statement again (see
+   * {@link PostgresVectorStore.withStorageTransaction} for the calls that still answer).
+   */
   private borrowedEnded = false;
+  /**
+   * The adapter the caller made the store with. A view keeps its store's rather than the transaction it was lent,
+   * so that it refuses that adapter too and may lend on the transaction it holds.
+   */
+  private ownAdapter: StorageAdapter | undefined;
   private readonly manageSchema: boolean;
   private readonly textConfig: string;
 
@@ -198,6 +206,7 @@ export class PostgresVectorStore implements IVectorStore {
     this.prefix = config.tablePrefix ?? '';
     this.manageSchema = config.manageSchema !== false;
     this.textConfig = PostgresVectorStore.textSearchConfigOf(config.textSearchConfig);
+    this.ownAdapter = config.adapter;
   }
 
   /** A name safe to write inside double quotes. */
@@ -343,21 +352,29 @@ export class PostgresVectorStore implements IVectorStore {
    * Borrow only the transaction adapter supplied to StorageAdapter.transaction. `work` gets a view of this store
    * whose every statement runs on that transaction's connection, so its vector writes commit or roll back with the
    * caller's own writes in the same transaction. The view opens no pool, commits nothing and runs no DDL: like a
-   * store with `manageSchema: false`, it takes the metric from `similarityMetric`. When `work` settles the view
-   * stops working, and any later call on it throws `vector_transaction_closed`.
+   * store with `manageSchema: false`, it takes the metric from `similarityMetric`. The adapter the store was made
+   * with is refused in place of the transaction, on the store and on a view of it: on that adapter the view's
+   * writes would run on pooled connections and commit at once, outside the caller's transaction.
    *
-   * Await every call on the view inside `work`, keep neither the view nor the transaction after it, and let a
-   * failure reach the transaction's callback, so that the transaction rolls back: a transaction that catches a
-   * failed write and commits is outside this contract. Compute embeddings before the transaction opens, not inside
-   * it.
+   * When `work` settles the view stops working: `close()` and `shutdown()` do nothing, `healthCheck()` answers
+   * false, `checkHealth()` answers `{ isHealthy: false }`, `fetchByIds()` with no ids answers an empty list, and
+   * every other call throws `vector_transaction_closed`.
+   *
+   * Make the calls on the view one at a time, awaiting each inside `work`: they share the transaction's one
+   * connection, and two searches with settings at once interleave their `SET LOCAL` and restore statements there,
+   * so that one can run under the transaction's own values and the transaction can go on under the store's. Keep
+   * neither the view nor the transaction after `work`, and let a failure reach the transaction's callback, so that
+   * the transaction rolls back: a transaction that catches a failed write and commits is outside this contract.
+   * Compute embeddings before the transaction opens, not inside it.
    *
    * @param transaction - The adapter that `StorageAdapter.transaction` passed to its callback.
    * @param work - The reads and writes to run in the transaction.
    * @returns What `work` returns.
    * @throws `vector_adapter_required` when the store was configured with a pool or a connection string rather
-   *   than an adapter; `vector_adapter_requires_postgres_transactions` when `transaction` is not a PostgreSQL
-   *   adapter with transactions; `vector_transaction_closed` when called on a view whose callback has ended; and
-   *   whatever `work` throws.
+   *   than an adapter; `vector_transaction_required` when `transaction` is the adapter the store was made with;
+   *   `vector_adapter_requires_postgres_transactions` when `transaction` is not a PostgreSQL adapter with
+   *   transactions; `vector_transaction_closed` when called on a view whose callback has ended; and whatever
+   *   `work` throws.
    *
    * @example
    * await db.transaction((tx) => store.withStorageTransaction(tx, async (vectors) => {
@@ -372,10 +389,14 @@ export class PostgresVectorStore implements IVectorStore {
   ): Promise<T> {
     if (this.borrowedEnded) throw new Error('vector_transaction_closed');
     if (!this.config.adapter) throw new Error('vector_adapter_required');
+    // On the adapter itself a view's writes would run on pooled connections and commit at once, outside the
+    // transaction the caller has open.
+    if (transaction === this.ownAdapter) throw new Error('vector_transaction_required');
     const view = new PostgresVectorStore({
       ...this.config, adapter: transaction, pool: undefined,
       connectionString: undefined, manageSchema: false,
     });
+    view.ownAdapter = this.ownAdapter;
     view.pool = adapterExecutor(transaction);
     view.isInitialized = true;
     try {
