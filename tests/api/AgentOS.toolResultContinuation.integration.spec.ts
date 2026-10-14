@@ -486,4 +486,27 @@ describe('AgentOS tool-result continuations', () => {
     expect(resumed.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
     expect(await rt.pending()).toBeNull();
   });
+
+  it('a turn with no continuation is unchanged: a call the GMI runs itself ends in FINAL_RESPONSE with no pause', async () => {
+    const rt = await runtime('conv-turn-only');
+    const { gmi, provider } = await rt.shippedGmi([{ toolCalls: [LOOKUP_CALL] }, { text: 'Standup moved to 10:00.' }]);
+    rt.useGmi(gmi);
+
+    const responses = await collect(rt.agentos.processRequest(rt.input));
+
+    expect(provider.generateCompletionStream).toHaveBeenCalledTimes(2);
+    expect(rt.lookup).toHaveBeenCalledTimes(1);
+    // the stream carries the call as one the runtime runs itself
+    const informational = responses.filter(
+      (r): r is AgentOSToolCallRequestChunk => r.type === AgentOSResponseChunkType.TOOL_CALL_REQUEST,
+    );
+    expect(informational.map((r) => [r.executionMode, r.toolCalls])).toEqual([['internal', [LOOKUP_CALL]]]);
+    expect(responses.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+
+    const last = responses.at(-1) as AgentOSFinalResponseChunk;
+    expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(last.finalResponseText).toBe('Standup moved to 10:00.');
+    expect(last.finalToolCalls).toEqual([LOOKUP_CALL]);
+    expect(await rt.pending()).toBeNull();
+  });
 });
