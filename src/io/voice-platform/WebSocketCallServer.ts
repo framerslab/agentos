@@ -167,8 +167,9 @@ export class WebSocketCallServer {
         if (binary) {
           if (data.length < 14 || data.length > 3212 || (data.length - 12) % 2 !== 0) { terminate(); return; }
           const worker = data.readUInt32LE(0); const epoch = data.readUInt32LE(4); const sequence = data.readUInt32LE(8);
-          if (worker !== binding.generation.workerGeneration || epoch !== acceptedEpoch || sequence <= lastSequence) return;
+          // Sequences start at 1: a zero is malformed, not an old packet.
           if (sequence === 0) { terminate(); return; }
+          if (worker !== binding.generation.workerGeneration || epoch !== acceptedEpoch || sequence <= lastSequence) return;
           if (sequence !== lastSequence + 1) physical.emit('gap', { lostMs: 0, reason: 'sequence' });
           lastSequence = sequence; physical.receiveAudio(data.subarray(12), sequence); return;
         }
