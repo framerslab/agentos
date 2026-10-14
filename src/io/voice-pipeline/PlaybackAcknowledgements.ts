@@ -20,7 +20,7 @@ function deferred<T>(timeoutMs: number): Deferred<T> {
 /** One audio receipt and one discard handshake, with fixed memory and explicit deadlines. */
 export class PlaybackAcknowledgements {
   private audio?: { receipt: PlaybackReceipt; result: Deferred<PlaybackReceipt>; acknowledged: boolean };
-  private clearing?: { message: PlaybackClear; result: Deferred<void> };
+  private clearing?: { message: PlaybackClear; result: Deferred<void>; done: Promise<void> };
   private cleared?: VoiceGeneration;
   private clearSequence = 0;
   private closed = false;
@@ -56,23 +56,28 @@ export class PlaybackAcknowledgements {
     try { const receipt = await pending.result.promise; if (signal.aborted || this.closed) throw new Error('playback cancelled'); return receipt; }
     finally { signal.removeEventListener('abort', abort); clearTimeout(pending.result.timer); if (this.audio === pending) this.audio = undefined; }
   }
-  /** Cancels before sending discard. Repeated clears of the same generation share one bounded handshake. */
+  /**
+   * Cancels before sending discard. Repeated clears of the same generation share one bounded handshake and settle
+   * together, only after it has released, so a caller may begin the next generation's audio as soon as its await returns.
+   */
   clear(generation: VoiceGeneration, send: (message: PlaybackClear) => Promise<void>): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.clearing) {
       if (!sameVoiceGeneration(this.clearing.message.generation, generation)) return Promise.reject(new Error('clear already outstanding'));
-      return this.clearing.result.promise;
+      return this.clearing.done;
     }
     if (this.cleared && sameVoiceGeneration(this.cleared, generation)) return Promise.resolve();
     const audio = this.audio;
     if (audio && !sameVoiceGeneration(audio.receipt.generation, generation)) return Promise.resolve();
     if (audio) { audio.result.reject(new Error('playback cancelled')); clearTimeout(audio.result.timer); this.audio = undefined; }
     const message: PlaybackClear = { type: 'clear', generation: { ...generation }, clearId: ++this.clearSequence };
-    const result = deferred<void>(this.timeoutMs); const pending = { message, result }; this.clearing = pending;
+    const result = deferred<void>(this.timeoutMs);
+    const done = result.promise.then(() => { this.cleared = { ...generation }; }).finally(() => { clearTimeout(result.timer); if (this.clearing?.result === result) this.clearing = undefined; });
+    this.clearing = { message, result, done };
     // send starts synchronously; its rejection is supervised even if the caller cancels meanwhile.
     try { void send(message).catch(() => result.reject(new Error('playback clear failed'))); }
     catch { result.reject(new Error('playback clear failed')); }
-    return result.promise.then(() => { this.cleared = { ...generation }; }).finally(() => { clearTimeout(result.timer); if (this.clearing === pending) this.clearing = undefined; });
+    return done;
   }
   /** Cancels all waits on confirmed physical teardown; no sample is acknowledged by this operation. */
   close(): void {
