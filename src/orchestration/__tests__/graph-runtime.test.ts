@@ -1997,3 +1997,91 @@ describe('GraphRuntime: the checkpoint after a parallel batch', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// A reducer combines each write of a parallel batch once
+// ---------------------------------------------------------------------------
+//
+// Inside a branch, a reducer combines what the node wrote with the value from
+// before the batch. After the batch, the reducer combines each branch's write
+// with the value merged so far, which starts from that same value, so the
+// value from before the batch counts once, as when the nodes run one after
+// another in the order they are declared. The search extension's executor,
+// like the model, is the host's and is scripted.
+
+describe('GraphRuntime: a reducer combines each write of a parallel batch once', () => {
+  // outline writes `sources`; the branches of the batch after it add to it.
+  const searches = {
+    list: { sources: ['CHANGELOG.md'] },
+    refine: { sources: ['docs/importer.md'] },
+    expand: { sources: ['README.md'] },
+  };
+  const outlineThenBatch = (id: string, branches: GraphNode[]) =>
+    graphOf(
+      id,
+      [extensionNode('outline', 'list'), ...branches, publishNode()],
+      [
+        [START, 'outline'],
+        ...branches.flatMap((branch): Array<[string, string]> => [
+          ['outline', branch.id],
+          [branch.id, 'publish'],
+        ]),
+        ['publish', END],
+      ],
+      { reducers: { 'scratch.sources': 'concat' } },
+    );
+
+  it('gives the node after the batch the value from before it followed by each write', async () => {
+    const model = recordingModel({ [PUBLISH]: 'Published.' });
+    const runtime = runtimeWithExtension(new InMemoryCheckpointStore(), model.providerCall, searches);
+    const branches = [extensionNode('refine', 'refine'), extensionNode('expand', 'expand')];
+
+    await runtime.invoke(outlineThenBatch('g-batch-reduced-once', branches), {});
+
+    expect(model.stateSeenBy(PUBLISH)?.scratch).toEqual({
+      sources: ['CHANGELOG.md', 'docs/importer.md', 'README.md'],
+    });
+  });
+
+  it('counts the value from before the batch once in the checkpoint of a batch that halts, and a resume reads it', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel({ [PUBLISH]: 'Published.' });
+    const runtime = runtimeWithExtension(store, model.providerCall, searches);
+    const graph = outlineThenBatch('g-batch-halt-reduced-once', [extensionNode('refine', 'refine'), approveNode()]);
+
+    const runId = runIdOf(await readUntil(runtime.stream(graph, {}), 'interrupt'));
+
+    const sources = ['CHANGELOG.md', 'docs/importer.md'];
+    expect((await store.latest(runId))?.state.scratch).toEqual({ sources });
+    await runtime.resume(graph, runId);
+    expect(model.stateSeenBy(PUBLISH)?.scratch).toEqual({ sources });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A parallel batch in which two branches wait for a person
+// ---------------------------------------------------------------------------
+//
+// The run stops at the first of them in the order the nodes are declared, and
+// a host answers the one `interrupt` it is shown before it resumes. Nobody has
+// been asked the other one, so the resumed run has to ask it.
+
+describe('GraphRuntime: a parallel batch in which two branches wait for a person', () => {
+  it('asks the second approval when the run resumes, and publishes once both are answered', async () => {
+    const model = scriptedModel({ [PUBLISH]: 'Published.' });
+    const runtime = runtimeOver(new InMemoryCheckpointStore(), model.providerCall);
+    const review: GraphNode = { ...humanNode({ prompt: 'Review these notes?' }), id: 'review' };
+    // START fans out to approve and review, which both lead to publish.
+    const graph = makeParallelJoinGraph('g-batch-two-approvals', approveNode(), review, publishNode());
+
+    const run = await readAll(runtime.stream(graph, {}));
+    expect(trace(run).filter((step) => step.startsWith('interrupt'))).toEqual(['interrupt:approve']);
+
+    const resumed = trace(await readAll(runtime.streamResume(graph, runIdOf(run))));
+    expect(resumed.filter((step) => step.startsWith('interrupt'))).toEqual(['interrupt:review']);
+    expect(model.calls).toEqual([]);
+
+    expect(await runtime.resume(graph, runIdOf(run))).toEqual({ publish: 'Published.' });
+    expect(model.calls).toEqual([PUBLISH]);
+  });
+});
