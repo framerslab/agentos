@@ -130,7 +130,7 @@ agentos's lower-level primitives.
 | Code review pipeline: one PR, parallel reviewers (style + security + tests) produce one review | Yes (use `parallel` or `graph`) | Fan-out / fan-in over a single input |
 | Multi-agent debate to consensus on a single question | Yes (use `debate`) | The strategy is built for it |
 | Long-running world simulation where a fixed roster of agents all run in parallel every turn against an evolving world state (e.g. paracosm) | **No** | Each simulation turn is closer to N independent `agent().session()` calls coordinated by your loop than to one `agency().generate()` call. Build your own turn loop; use `agent()` + (optionally) [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts) / [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts) for runtime synthesis |
-| Multi-turn conversation with persistent agent roster, shared [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts), and persistent specialists from `spawn_specialist` across turns | **Not yet** | `agency().session()` exists but only persists message history + usage. Roster, shared memory, and `tier: 'session'` synthesised specialists reset between `.send()` calls. Build your own multi-call coordination on top, or [open an issue](https://github.com/framerslab/agentos/issues) describing the use case |
+| Multi-turn conversation with persistent agent roster, shared [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts), and persistent specialists from `spawn_specialist` across turns | **No** | `agency().session()` keeps the session's message history and usage totals. `agency()` keeps no shared memory, and each `.send()` starts from the configured roster: a specialist `spawn_specialist` adds during one call is gone in the next, whatever `emergent.tier` names. Build your own multi-call coordination on top, or [open an issue](https://github.com/framerslab/agentos/issues) describing the use case |
 | Companion app where a single agent has a persistent identity across many user turns | **No** — use `agent()` directly | `agent().session()` already covers this. agency() is overkill for single-agent stateful chat |
 
 The shared rule: if your problem decomposes into "one external request →
@@ -615,7 +615,6 @@ const research = agency({
   strategy: 'hierarchical',
   emergent: {
     enabled: true,
-    tier: 'session',          // 'session' | 'agent' | 'shared'
     judge: true,              // EmergentAgentJudge gates each spawn
     planner: {
       maxSpecialists: 3,      // hard cap per run; default 5
@@ -625,11 +624,13 @@ const research = agency({
 });
 ```
 
-| `tier` | Lifetime of synthesised agents |
-|---|---|
-| `"session"` | Discarded when the `generate()` call ends |
-| `"agent"` | Persist for the lifetime of the agency instance |
-| `"shared"` | Persist globally across all agency instances |
+A specialist the manager spawns stays in the roster for the rest of that call
+(`generate()`, `stream()`, or a session's `send()` or `stream()`), and the next
+call starts from the configured roster:
+[`hierarchical.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/strategies/hierarchical.ts)
+copies the roster at the start of each run. `emergent.tier` (`'session'`,
+`'agent'` or `'shared'`) is accepted and not read, so no tier keeps a
+specialist past the call that spawned it.
 
 | `planner` field | Default | Effect |
 |---|---|---|

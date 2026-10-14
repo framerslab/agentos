@@ -35,12 +35,13 @@
  *   speak each turn. The agency strategies pick WHICH agent runs next;
  *   they do not run all of them in parallel per turn.
  *
- * `agency().session()` exists but is shallow: it persists per-session
- * message history and usage totals only. The agent roster, the
- * `AgencyMemoryManager`, and any `tier: 'session'` synthesised
- * specialists from `spawn_specialist` are reset between `.send()` calls.
- * If you need multi-call agency state to persist, build your own
- * orchestration layer over agentos primitives.
+ * `agency().session()` keeps per-session message history and usage totals
+ * only. `agency()` keeps no shared memory (it does not use
+ * `AgencyMemoryManager`), and each `.send()` starts from the configured
+ * roster: a specialist `spawn_specialist` adds during one call is gone in
+ * the next, whatever `emergent.tier` names. If you need multi-call agency
+ * state to persist, build your own orchestration layer over agentos
+ * primitives.
  *
  * @example
  * ```ts
