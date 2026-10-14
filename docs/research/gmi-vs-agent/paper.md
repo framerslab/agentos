@@ -111,7 +111,7 @@ T2 holds three scripts for each of twelve cards: one session of small talk and a
 
 T3's 48 scripts are 24 frustration and 24 confusion scripts, each set split into 8 explicit, 8 implicit and 8 sarcastic; each card plays 4 scripts. The cues fall at turns 3 and 5, and the judged replies are turns 3 to 6. A metaprompt runs after the reply of the turn that fired it, so C1 can differ from C0 only from the turn after a firing: turns 4 and 6 carry C1's adaptation and are reported separately as a secondary. The 12 false-positive scenes (grief roleplay, dark fiction, venting about a third party) check that a reply does not treat the user's feeling as the companion's fault or break the scene.
 
-T4's 180 prompts are 15 per card: 3 casual, 3 emotional support, 3 roleplay continuations, 2 in-character questions, 2 advice, 1 creative and 1 out of scope. Each has a hand-written frozen context of up to 6 messages and a seeded 20-fact memory, identical across arms.
+T4's 180 prompts are 15 per card: 3 casual, 3 emotional support, 3 roleplay continuations, 2 in-character questions, 2 advice, 1 creative and 1 out of scope. Each has a frozen context of up to 6 messages and a seeded 20-fact memory, written with the other materials (Section 5.3) and identical across arms.
 
 The pilot revises the planning counts, and 0b fixes the final ones (Section 4.9); every report prints the counts its run used.
 
