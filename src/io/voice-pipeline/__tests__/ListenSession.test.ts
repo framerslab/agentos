@@ -47,6 +47,8 @@ class ArraySink implements ITranscriptInputSink {
 }
 const frame = (t: number): AudioFrame => ({ samples: new Float32Array(320), sampleRate: 16_000, timestamp: t });
 const final = (text: string, startMs: number, endMs: number): TranscriptEvent => ({ text, confidence: 1, words: [], isFinal: true, startMs, endMs });
+/** A final keyed by item, as OpenAI Realtime sends it after its utterance's end of speech. */
+const itemFinal = (text: string, itemId: string, startMs: number, endMs: number): TranscriptEvent => ({ ...final(text, startMs, endMs), itemId });
 
 describe('startListenSession', () => {
   it('ends with transport_failed on a socket error and removes its transport listeners', async () => {
@@ -389,5 +391,111 @@ describe('startListenSession', () => {
     await closing;
     expect(sink.turns.map((turn) => turn.text)).toEqual(['queued words']);
     t.close();
+  });
+  it('ends with sink_failed when the sink rejects with a value that cannot be printed, leaving nothing unhandled', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { provider, sessions } = stt();
+      const sink = new ArraySink();
+      sink.appendNext = async () => {
+        throw Object.create(null); // String() throws for an object without a prototype
+      };
+      const session = await startListenSession(transport(), sink, { streamingSTT: provider, runId: 'r1', reconnect: false });
+      const ended = vi.fn();
+      session.on('ended', ended);
+      sessions[0].emit('transcript', final('refused', 0, 500));
+      await vi.waitFor(() => expect(ended).toHaveBeenCalledWith({ reason: 'sink_failed', error: expect.any(Error) }));
+      expect(ended.mock.calls[0][0].error.message).toBe('an unprintable object');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+  it("starts a second session on one detector with no late final awaited from the first session's last turn", async () => {
+    const detector = new HeuristicEndpointDetector();
+    const late = vi.fn();
+    detector.on('late_final', late);
+    const sink = new ArraySink();
+    const a = stt();
+    const first = await startListenSession(transport(), sink, { streamingSTT: a.provider, runId: 'r1', endpointDetector: detector, reconnect: false, drainMs: 0 });
+    a.sessions[0].emit('speech_start');
+    a.sessions[0].emit('speech_end');
+    a.sessions[0].emit('transcript', itemFinal('We start at nine.', 'item_A', 0, 900)); // ends the turn at once
+    await first.close('stopped');
+
+    // The next session's transcriber takes client commits: it reports no speech, and the stop's flush brings the final.
+    const b = stt();
+    const second = await startListenSession(transport(), sink, { streamingSTT: b.provider, runId: 'r1', endpointDetector: detector, reconnect: false, drainMs: 0 });
+    b.sessions[0].flush = vi.fn(async () => {
+      b.sessions[0].emit('transcript', itemFinal('Then lunch.', 'item_B', 0, 700));
+    });
+    await second.close('stopped');
+
+    expect(late).not.toHaveBeenCalled();
+    // A detector turn, not a late final written as a turn of its own with the final's times.
+    expect(sink.turns.map((turn) => [turn.text, turn.startMs, turn.endMs])).toEqual([
+      ['We start at nine.', undefined, undefined],
+      ['Then lunch.', undefined, undefined],
+    ]);
+  });
+  it("writes a late final when a late_final listener added before the session's throws, and throws nothing into the transcriber", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { provider, sessions } = stt();
+      const sink = new ArraySink();
+      const detector = new HeuristicEndpointDetector();
+      detector.on('late_final', () => {
+        throw new Error('a host listener failed');
+      });
+      const session = await startListenSession(transport(), sink, { streamingSTT: provider, runId: 'r1', endpointDetector: detector, reconnect: false });
+      sessions[0].emit('speech_start');
+      sessions[0].emit('speech_end');
+      sessions[0].emit('transcript', itemFinal('Book a table for two.', 'item_A', 0, 900)); // ends the turn at once
+
+      // The turn's late final reaches the session's own listener after the host's has thrown.
+      expect(() => sessions[0].emit('transcript', itemFinal('At seven tonight.', 'item_B', 1_300, 2_200))).not.toThrow();
+      await vi.waitFor(() =>
+        expect(sink.turns.map((turn) => [turn.text, turn.startMs, turn.endMs])).toEqual([
+          ['Book a table for two.', undefined, undefined],
+          ['At seven tonight.', 1_300, 2_200],
+        ]),
+      );
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([expect.stringContaining('a host listener failed')]);
+      await session.close('purged');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+  it('writes a turn whose speaker throws with no speaker, and throws nothing into the transcriber', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { provider, sessions } = stt();
+      const sink = new ArraySink();
+      const session = await startListenSession(transport(), sink, {
+        streamingSTT: provider,
+        runId: 'r1',
+        reconnect: false,
+        speaker: (event) => {
+          if (event.text === 'who said this') throw new Error('no speaker for this line');
+          return 'host';
+        },
+      });
+      expect(() => sessions[0].emit('transcript', final('who said this', 0, 500))).not.toThrow();
+      sessions[0].emit('transcript', final('the host said this', 600, 900));
+      await vi.waitFor(() =>
+        expect(sink.turns.map((turn) => [turn.text, turn.speaker])).toEqual([
+          ['who said this', undefined],
+          ['the host said this', 'host'],
+        ]),
+      );
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([expect.stringContaining('no speaker for this line')]);
+      await session.close('purged');
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

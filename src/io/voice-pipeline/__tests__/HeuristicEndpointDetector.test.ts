@@ -20,6 +20,7 @@
  * - An item final that comes before its end of speech, and one left over from a completed turn, reported as late_final,
  *   also when it arrives while the transcriber reports the next utterance; a standalone VAD's start of speech ends
  *   that window
+ * - Each late_final listener gets the final when one before it throws; the throw is written as a console warning
  *
  * The silence_timeout cases use a 100 ms detector instance and a short
  * setTimeout await -- fast enough for CI while remaining deterministic. The
@@ -677,5 +678,28 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
 
     expect(handler).toHaveBeenCalledOnce();
     expect(handler.mock.calls[0][0].transcript).toBe('Stop, I meant Friday.');
+  });
+
+  it('hands a late final to every late_final listener when one throws, and throws nothing into the code that pushed it', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const kept = vi.fn();
+      detector.on('late_final', () => {
+        throw new Error('a listener failed');
+      });
+      detector.on('late_final', kept);
+
+      detector.pushVadEvent(transcriberSpeech('speech_start'));
+      detector.pushVadEvent(transcriberSpeech('speech_end'));
+      detector.pushTranscript(itemFinal('Book a table for two.', 'item_A', 0)); // ends the turn, and the reset with it
+
+      const slow = itemFinal('At seven tonight.', 'item_B', 1_300);
+      expect(() => detector.pushTranscript(slow)).not.toThrow();
+      expect(kept).toHaveBeenCalledOnce();
+      expect(kept.mock.calls[0][0]).toBe(slow);
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([expect.stringContaining('a listener failed')]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

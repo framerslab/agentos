@@ -29,11 +29,18 @@
  * - A listener's rejection is reported from a promise of another realm or library as from a native one
  * - Of the audio chunks a transport refuses, the first of each reply is reported and the rest of that reply's
  *   are not, whatever order the replies' sends settle in; a refused control message is reported each time
+ * - A send refused with a value String() cannot print (an object without a prototype, a revoked proxy) is
+ *   reported, as is an 'error' listener that throws one, and nothing is left unhandled
+ * - A session takes speech from the first source it receives, the transport's audio or a client's transcripts;
+ *   what arrives from the other is dropped, and the drop is reported once
+ * - A session started on a detector an earlier session used hands its first final to the agent: no late final of
+ *   the earlier session's last turn is awaited
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
+import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
 import type {
   AudioFrame,
   BargeinAction,
@@ -710,6 +717,54 @@ describe('VoicePipelineOrchestrator', () => {
     }
   });
 
+  /**
+   * A transport can refuse a send with any value, and String() throws for some: an object without a prototype, and a
+   * revoked proxy, whose prototype cannot even be read. The refusal is still reported, as an Error that names the
+   * value's type, and so is an 'error' listener that throws such a value; neither becomes an unhandled rejection.
+   */
+  it.each([
+    ['an object without a prototype', (): unknown => Object.create(null)],
+    [
+      'a revoked proxy',
+      (): unknown => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      },
+    ],
+  ])('reports a send refused with %s, and an error listener that throws one, leaving nothing unhandled', async (_kind, unprintable) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      vi.mocked(transport.sendControl).mockRejectedValueOnce(unprintable());
+      await startSession();
+      const seen: Error[] = [];
+      orchestrator.on('error', () => {
+        throw unprintable();
+      });
+      orchestrator.on('error', (err: Error) => seen.push(err));
+
+      sttSession.emit('transcript', { text: 'hello', confidence: 0.9, words: [], isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBeInstanceOf(Error);
+      expect(seen[0].message).toBe('an unprintable object');
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
+        expect.stringMatching(/an unprintable object.*an 'error' listener failed: an unprintable object/),
+      ]);
+      expect(orchestrator.state).toBe('listening');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      warn.mockRestore();
+    }
+  });
+
   // --------------------------------------------------------------------------
   // Client transcripts: a client that transcribes on its own device
   // --------------------------------------------------------------------------
@@ -895,4 +950,96 @@ describe('VoicePipelineOrchestrator', () => {
       expect(vi.getTimerCount()).toBe(0);
     },
   );
+
+  /**
+   * A session takes speech from one source, the first it receives: the transport's audio, which its STT session
+   * transcribes, or a client's transcript messages. With both, the endpoint detector would get two sets of speech
+   * edges and finals, and a client's final would replace the finals the STT session's transcripts hold. What arrives
+   * from the other source is dropped, and the first drop is reported.
+   */
+  it("should drop a client's transcripts in a session that received audio first, and report the drop once", async () => {
+    await startSession();
+    const errors: Error[] = [];
+    orchestrator.on('error', (err: Error) => errors.push(err));
+    const log = logDetector();
+
+    transport.emit('audio', makeFrame());
+    transport.emit('message', clientTranscript('1', 'Hello there.', true));
+    transport.emit('message', clientTranscript('2', 'Bye.', true));
+    transport.emit('audio', makeFrame());
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sttSession.pushAudio).toHaveBeenCalledTimes(2);
+    expect(log).toEqual([]); // no client line reached the detector
+    expect(errors.map((err) => err.message)).toEqual([expect.stringMatching(/^a client transcript was dropped/)]);
+    expect(orchestrator.state).toBe('listening');
+  });
+
+  it('should drop audio in a session that received a client transcript first, and report the drop once', async () => {
+    await startSession();
+    const errors: Error[] = [];
+    orchestrator.on('error', (err: Error) => errors.push(err));
+    const log = logDetector();
+
+    transport.emit('message', clientTranscript('1', 'Hello there.', true));
+    transport.emit('audio', makeFrame());
+    transport.emit('audio', makeFrame());
+    transport.emit('message', clientTranscript('2', 'Bye.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sttSession.pushAudio).not.toHaveBeenCalled();
+    expect(log).toEqual([
+      'vad speech_start',
+      'final Hello there.',
+      'vad speech_end',
+      'vad speech_start',
+      'final Hello there. Bye.',
+      'vad speech_end',
+    ]);
+    expect(errors.map((err) => err.message)).toEqual([expect.stringMatching(/^audio was dropped/)]);
+    expect(orchestrator.state).toBe('listening');
+  });
+
+  /**
+   * A host can hand one endpoint detector to one session after another. After a turn in which speech started, the
+   * heuristic detector drops the late final of that turn until speech ends again; the next session's STT session
+   * sends no final of the earlier session's turns, so its first final, which comes before its end of speech as one
+   * does under client commits, is an ordinary final of its own turn.
+   */
+  it("should hand a session's first final to its agent when an earlier session's last turn on the same detector had speech", async () => {
+    const detector = new HeuristicEndpointDetector();
+    const late = vi.fn();
+    detector.on('late_final', late);
+    const start = async (stt: ReturnType<typeof createMockSTTSession>, agent: IVoicePipelineAgentSession) => {
+      const pipeline = new VoicePipelineOrchestrator(makeConfig());
+      await pipeline.startSession(createMockTransport(), agent, {
+        streamingSTT: createMockSTT(stt),
+        streamingTTS: createMockTTS(createMockTTSSession()),
+        endpointDetector: detector,
+        bargeinHandler: createMockBargeinHandler(),
+      });
+      return pipeline;
+    };
+
+    const firstStt = createMockSTTSession();
+    const firstAgent = createMockAgentSession();
+    const first = await start(firstStt, firstAgent);
+    firstStt.emit('speech_start');
+    firstStt.emit('speech_end');
+    firstStt.emit('transcript', { text: 'Book a table for two.', confidence: 0.9, words: [], isFinal: true, itemId: 'item_A' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firstAgent.sendText).toHaveBeenCalledWith('Book a table for two.', expect.objectContaining({ endpointReason: 'punctuation' }));
+    await first.stopSession();
+
+    const secondStt = createMockSTTSession();
+    const secondAgent = createMockAgentSession();
+    const second = await start(secondStt, secondAgent);
+    secondStt.emit('transcript', { text: 'What about Friday?', confidence: 0.9, words: [], isFinal: true, itemId: 'item_B' });
+    secondStt.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(late).not.toHaveBeenCalled();
+    expect(secondAgent.sendText).toHaveBeenCalledWith('What about Friday?', expect.objectContaining({ endpointReason: 'punctuation' }));
+    await second.stopSession();
+  });
 });
