@@ -415,9 +415,22 @@ export class GraphRuntime {
             haltedBatch.map((outcome) => outcome.writes),
           );
           haltState = { ...haltingOutcome.branchState, scratch: merged.scratch, artifacts: merged.artifacts };
+          // Another branch that interrupted waits for an answer nobody has
+          // been asked for, since the run reports the halting branch alone.
+          // A resume marks a `human`, `write` or `external` node complete
+          // from its recorded result, so the checkpoint leaves that branch's
+          // result out: the resumed run executes it again, and it interrupts.
+          const unanswered = new Set(
+            parallelOutcomes
+              .filter((outcome) => outcome?.earlyTermination?.type === 'interrupt' && outcome !== haltingOutcome)
+              .map((outcome) => outcome!.nodeId),
+          );
+          const haltNodeResults = Object.fromEntries(
+            Object.entries(nodeResults).filter(([resultNodeId]) => !unanswered.has(resultNodeId)),
+          );
           haltCheckpointId = await this.saveCheckpoint(
             activeGraph, runId, haltingOutcome.nodeId, haltState,
-            nodeResults, completedNodes, skippedNodes, [],
+            haltNodeResults, completedNodes, skippedNodes, [],
           );
         }
 
