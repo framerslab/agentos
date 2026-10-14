@@ -91,9 +91,9 @@ enableContentSafeTelemetry((event) => {
 From that call on, for the life of the process:
 
 - Every record of a `PinoLogger` or of a logger from `createLogger`, including one created before the call, reaches the sink as `{ kind: 'library_event', state, n: 1 }`, where `state` is the record's level. Its message, metadata, bindings and error are dropped without being read.
-- The console diagnostics of the LLM providers, the provider manager, the model router, the provider health registry, `EmbeddingManager`, and `generateText` with its model resolution, spend budget and tool-emulation loop become the same events.
+- The console diagnostics of the LLM providers, the provider manager, the model router, the provider health registry, `EmbeddingManager`, and `generateText` and `streamText` with their model resolution, spend budget, tool-emulation loop and tool-approval gate become the same events.
 - AgentOS spans, metrics, trace ids in logs and streamed responses, OTEL LogRecords and the usage observer set with `setGlobalLlmObserver` stay off, whatever the `observability` config or the `AGENTOS_*` environment variables say. Each call's result still carries its usage.
 
 The mode has no off switch and keeps its first sink: a second call with the same sink does nothing, and a different sink throws `content_safe_sink_already_set`. An error the sink throws is swallowed, and a record AgentOS writes while the sink runs is dropped. `isContentSafeTelemetryEnabled()` reports whether the mode is on.
 
-The mode leaves alone console output from other AgentOS modules (`streamText`, `RetrievalAugmentor` and `VectorStoreManager` among them), the host's own loggers, automatic HTTP and database instrumentation, and error reporting. Errors that AgentOS returns or throws keep their messages, so the host keeps them out of its responses and logs.
+The mode leaves alone console output from other AgentOS modules (`RetrievalAugmentor`, `VectorStoreManager`, the vector stores and `PromptEngine` among them), the host's own loggers, automatic HTTP and database instrumentation, and error reporting. Errors that AgentOS returns or throws keep their messages, so the host keeps them out of its responses and logs.

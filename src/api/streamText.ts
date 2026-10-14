@@ -60,6 +60,7 @@ import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstru
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { createLogger } from '../core/logging/loggerFactory.js';
+import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 
 const fallbackLogger = createLogger('fallback');
 

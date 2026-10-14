@@ -32,12 +32,13 @@ let emitting = false;
  * Enable once before creating providers or accepting work; never disable in-process.
  *
  * From this call on, every record that an AgentOS `PinoLogger` or a logger from `createLogger` (made before or after
- * this call) writes, and every console diagnostic of the LLM providers, the high-level generation API, the provider
- * manager, the model router, the provider health registry and `EmbeddingManager`, becomes one
- * {@link ContentSafeLogEvent} passed to `value`. The original message, metadata, bindings and errors are dropped
- * without being read. AgentOS spans, metrics, trace ids in logs and streamed responses, OpenTelemetry log records and
- * the global usage observer stay off, whatever the observability configuration or environment asks for. Console
- * output from other AgentOS modules, the host's own loggers and third-party instrumentation are outside this mode.
+ * this call) writes, and every console diagnostic of the LLM providers, the provider manager, the model router, the
+ * provider health registry, `EmbeddingManager`, and `generateText` and `streamText` with their model resolution,
+ * spend budget, tool-emulation loop and tool-approval gate, becomes one {@link ContentSafeLogEvent} passed to
+ * `value`. The original message, metadata, bindings and errors are dropped without being read. AgentOS spans,
+ * metrics, trace ids in logs and streamed responses, OpenTelemetry log records and the global usage observer stay
+ * off, whatever the observability configuration or environment asks for. Console output from other AgentOS modules,
+ * the host's own loggers and third-party instrumentation are outside this mode.
  *
  * The mode is process-wide, so pooled providers, retries and shared loggers cannot escape it. There is no way to turn
  * it off or to change the sink: a second call with the same sink does nothing. The state belongs to the loaded copy
