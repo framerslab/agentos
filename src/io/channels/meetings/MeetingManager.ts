@@ -1043,8 +1043,9 @@ export class MeetingManager {
   /**
    * Checks a funded run against its own funding through the entitlement hook's `checkRun`, at `phase`; a run without
    * funding is answered as it is. A check that refuses, throws or is missing, or a grant that is not a whole number of
-   * seconds above zero (or is under `minReservationSeconds` at `dispatch` or `recovery`), stops the run: its capture is
-   * suspended, then a run not yet out of `dispatching` has its job cancelled and ends `allowance`, and one that is out is
+   * seconds above zero (or is under `minReservationSeconds` at `dispatch` or `recovery`), stops the run: a run past
+   * `scheduled` has its capture suspended (one still waiting for its dispatch has no bot, and its provider is sent
+   * nothing), then a run not yet out of `dispatching` has its job cancelled and ends `allowance`, and one that is out is
    * told to leave with `allowance`. A grant shorter than the run's limit cuts `limits.totalMs` to it on the run.
    *
    * @returns The run, its limit cut to the grant, or undefined when it was stopped or moved on meanwhile.
@@ -1056,7 +1057,8 @@ export class MeetingManager {
     try { if (check) answer = await check.call(this.stores.entitlement, run.runId, phase); }
     catch { this.config.logger?.warn(`[MeetingManager] funding check unavailable for ${run.runId}`); }
     if (!answer.ok || !Number.isSafeInteger(answer.maxSeconds) || answer.maxSeconds <= 0 || ((phase === 'dispatch' || phase === 'recovery') && answer.maxSeconds < this.minReservationSeconds)) {
-      await this.sendCommand(run, { name: 'suspendCapture' });
+      // a run still waiting for its dispatch has no bot, so no provider is told anything about it
+      if (run.state !== 'requested' && run.state !== 'scheduled') await this.sendCommand(run, { name: 'suspendCapture' });
       if (['requested', 'scheduled', 'dispatching'].includes(run.state)) {
         await this.stores.jobs.cancel(run.runId);
         await this.fail(run, 'allowance');
