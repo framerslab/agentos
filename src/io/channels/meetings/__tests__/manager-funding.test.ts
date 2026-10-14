@@ -7,6 +7,7 @@ import { grantCreditLot } from '../../../../safety/runtime/CompoundCreditLedger.
 import { fundedRun, TestMeetingBlocks } from './meeting-funding.contract.js';
 import { harness } from './manager-harness.js';
 import { mockEventContext } from '../providers/mock.js';
+import type { IEntitlementHook } from '../stores/types.js';
 
 async function fixture() {
   const h = harness(); const credit = new InMemoryCompoundCreditStore(); const blocks = new TestMeetingBlocks();
@@ -20,7 +21,7 @@ async function fixture() {
       funding: async (_request, _context, runId) => { selections += 1; return fundedRun(runId).funding!; } },
     dispatchGuard: (_run, work) => work() };
   const manager = new MeetingManager(config); manager.registerProvider(h.provider);
-  return { h, manager, config, credit, check, selections: () => selections, eligible: (value: boolean) => { eligible = value; }, fenced: (value: boolean) => { fenced = value; }, measured: (value: number) => { connectedMs = value; },
+  return { h, manager, config, credit, check, entitlement, selections: () => selections, eligible: (value: boolean) => { eligible = value; }, fenced: (value: boolean) => { fenced = value; }, measured: (value: number) => { connectedMs = value; },
     request: { ...h.request, ownerRef: 'account', botName: 'Example notes', limits: { totalMs: 600_000 } } };
 }
 
@@ -108,5 +109,31 @@ describe('funded manager lifecycle', () => {
     const f = await fixture();
     await expect(f.manager.sendBot(f.request)).rejects.toThrow('funded creation requires sendBotPrepared');
     expect((await f.h.manager.sendBot({ ...f.h.request, botName: 'Example notes' })).ok).toBe(true);
+  });
+
+  it('refuses funded creation through a hook that cannot finalize, before any funding is selected or held', async () => {
+    const f = await fixture(); const e = f.entitlement;
+    // every member the funded lifecycle asks of the hook except finalize, which ends each run's funding
+    const entitlement: IEntitlementHook = {
+      reserve: (input) => e.reserve(input), reserveOnce: (input) => e.reserveOnce(input), revalidate: (reference) => e.revalidate(reference),
+      meter: (reference, seconds) => e.meter(reference, seconds), settle: (reference, seconds) => e.settle(reference, seconds),
+      release: (reference) => e.release(reference), checkRun: (runId, phase) => e.checkRun(runId, phase), recover: (runId) => e.recover(runId),
+    };
+    const manager = new MeetingManager({ ...f.config, stores: { ...f.config.stores, entitlement } }); manager.registerProvider(f.h.provider);
+    await expect(manager.sendBotPrepared(f.request, 'context')).rejects.toThrow('funded creation requires');
+    expect(f.selections()).toBe(0);
+    expect(await f.h.stores.runs.findByIdempotencyKey(f.request.ownerRef, f.request.idempotencyKey)).toBeUndefined();
+    expect(await f.credit.withTransaction((tx) => tx.listHolds({ scopeId: 'account' }))).toEqual([]);
+  });
+
+  it('tells no provider anything about a waiting run its funding refuses at dispatch', async () => {
+    const f = await fixture();
+    const sent = await f.manager.sendBotPrepared({ ...f.request, joinAt: f.h.clock.now() + 1_000 }, 'context');
+    if (!sent.ok) throw new Error('admission failed');
+    f.eligible(false); f.h.clock.advance(1_000);
+    await f.manager.tick();
+    expect((await f.h.stores.runs.get(sent.run.runId))?.state).toBe('failed');
+    expect(f.h.provider.dispatched.size).toBe(0);
+    expect(f.h.provider.commands.get(sent.run.runId)).toBeUndefined();
   });
 });
