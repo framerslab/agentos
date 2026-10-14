@@ -60,6 +60,14 @@ describe('claim coverage', () => {
     expect(planScenarios(bare, [], matrix, 24).problems).toEqual(['the case bare names no claim']);
   });
 
+  it('reports a family id or a route named twice, and refuses a value named twice in one dimension', () => {
+    const shadowed = [...families, { id: 'switch', cases: [{ id: 'switch-other', claims: ['c.primary'], configuration: { SWITCH: 'other' }, expected: 'renders' as const }] }];
+    expect(planScenarios(shadowed, [{ route: '/', families: ['switch'] }], matrix, 24).problems).toEqual(['the family id switch appears more than once in the table']);
+    expect(planScenarios(families, [{ route: '/', families: ['baseline'] }, { route: '/', families: ['switch'] }], matrix, 2).problems).toEqual(['/: the route appears in more than one selection']);
+    expect(() => enumerateClaimCases([{ claimId: 'a.primary', states: ['built', 'not_offered', 'built'], modes: ['any'], placements: ['p'] }])).toThrow(/a\.primary names built twice in its states/);
+    expect(() => enumerateClaimCases([{ claimId: 'a.primary', states: ['built'], modes: ['any'], placements: ['p', 'p'] }])).toThrow(/a\.primary names p twice in its placements/);
+  });
+
   it('projects the measured time per case onto a plan and says whether it fits', () => {
     expect(projectRuntime({ cases: 100, ms: 600_000, fixedMs: 300_000 }, 200, 3_600_000)).toEqual({ projectedMs: 1_500_000, fits: true });
     expect(projectRuntime({ cases: 100, ms: 600_000, fixedMs: 300_000 }, 600, 3_600_000)).toEqual({ projectedMs: 3_900_000, fits: false });
