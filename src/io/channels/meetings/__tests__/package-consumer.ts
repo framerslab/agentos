@@ -20,6 +20,10 @@ net.Socket.prototype.connect = refuse; http.request = refuse; http.get = refuse;
 https.request = refuse; https.get = refuse;
 // The declared types of dns.lookup and dns.resolve carry a __promisify__ member that a plain function lacks.
 dns.lookup = refuse as unknown as typeof dns.lookup; dns.resolve = refuse as unknown as typeof dns.resolve;
+dns.resolve4 = refuse as unknown as typeof dns.resolve4; dns.resolve6 = refuse as unknown as typeof dns.resolve6;
+// node:dns/promises is the same object as dns.promises, so these cover a promise-based import as well.
+dns.promises.lookup = refuse as unknown as typeof dns.promises.lookup; dns.promises.resolve = refuse as unknown as typeof dns.promises.resolve;
+dns.promises.resolve4 = refuse as unknown as typeof dns.promises.resolve4; dns.promises.resolve6 = refuse as unknown as typeof dns.promises.resolve6;
 globalThis.fetch = refuse; syncBuiltinESMExports();
 const meetings = await import('@framers/agentos/io/channels/meetings');
 const safety = await import('@framers/agentos/safety/runtime');
