@@ -227,6 +227,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    */
   private _currentReply = { audioRefusalReported: false };
   private publicSession?: VoicePipelineSession;
+  /**
+   * Clears the client's open transcript lines and the timer of each (`_wireClientTranscripts`), so that none fires
+   * after a stop; set when a session without a call profile starts.
+   */
+  private endClientLines?: () => void;
 
   /**
    * Create a new orchestrator with the given pipeline configuration.
@@ -477,9 +482,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * text (an empty final would replace the detector's last final). A line
    * that gets no message for `CLIENT_LINE_TIMEOUT_MS` is closed as by an empty
    * final, so a line whose final never comes (a client session that failed, a
-   * message lost in a reconnect) holds no speech open. A client's input is
-   * bounded: at most `CLIENT_MAX_OPEN_LINES` lines open, the oldest giving
-   * way, and a turn's joined text at most `CLIENT_TURN_MAX_TEXT` characters.
+   * message lost in a reconnect) holds no speech open. A stop, by
+   * `stopSession()` or a transport close, ends every open line and clears its
+   * timer, so none fires after the session. A client's input is bounded: at
+   * most `CLIENT_MAX_OPEN_LINES` lines open, the oldest giving way, and a
+   * turn's joined text at most `CLIENT_TURN_MAX_TEXT` characters.
    * Messages are handled one at a time, in the order they arrive, and one
    * that fails ends the session as a failure of the STT session's events
    * does. Nothing is relayed back, since the client shows its own text, and
@@ -492,6 +499,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    */
   private _wireClientTranscripts(transport: IStreamTransport, endpoint: IEndpointDetector, speech: SpeechEdges): void {
     const lines = { open: new Map<string, ReturnType<typeof setTimeout>>(), finals: [] as string[] };
+    this.endClientLines = () => {
+      for (const timer of lines.open.values()) clearTimeout(timer);
+      lines.open.clear();
+    };
     endpoint.on('turn_complete', () => {
       lines.finals = [];
     });
@@ -705,6 +716,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (this.stopping) return this.stopping;
     this.stateTo('closed');
     if (this.watchdog) clearTimeout(this.watchdog);
+    this.endClientLines?.();
     this._emitEach(this, 'close');
     if (this.publicSession) this._emitEach(this.publicSession, 'close');
     const failures: unknown[] = [];
