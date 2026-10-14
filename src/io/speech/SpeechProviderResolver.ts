@@ -13,7 +13,7 @@ import type {
 import { FallbackSTTProxy, FallbackTTSProxy } from './FallbackProxy.js';
 import { findSpeechProviderCatalogEntry } from './providerCatalog.js';
 import { z } from 'zod';
-import { isScopedVoiceAdapter, VoiceAdapterManifestSchema, VoiceAdapterRuntime, type ScopedVoiceAdapter, type VoiceAdapterKind, type VoiceAdapterSelection, type OpenedVoiceAdapter } from './VoiceAdapter.js';
+import { isScopedVoiceAdapter, VoiceAdapterManifestSchema, VoiceAdapterRuntime, type ScopedVoiceAdapter, type VoiceAdapterKind, type VoiceAdapterSelection, type OpenedVoiceAdapter, type VoiceSupplierUsageSink } from './VoiceAdapter.js';
 import { VoiceAgentSchema, type VoiceAgent } from '../voice-platform/contracts/index.js';
 import { captureVoiceScope, type VoiceScopeContext } from '../voice-platform/VoiceScopeContext.js';
 import type { IAttemptAuthorizer } from '../../safety/runtime/ModelAttemptBudget.js';
@@ -35,7 +35,7 @@ export interface OpenedVoicePlan {
 /** Configuration is captured before admission; model construction is deferred until the authenticated binding starts. */
 export interface FrozenVoicePlan {
   readonly agent: VoiceAgent;
-  open(budget: IAttemptAuthorizer): Promise<OpenedVoicePlan>;
+  open(budget: IAttemptAuthorizer, onSupplierUsage?: VoiceSupplierUsageSink): Promise<OpenedVoicePlan>;
 }
 const freezeVoiceValue = <T>(value: T): T => { if (value && typeof value === 'object') { for (const child of Object.values(value)) freezeVoiceValue(child); Object.freeze(value); } return value; };
 
@@ -425,13 +425,13 @@ export class SpeechProviderResolver extends EventEmitter {
         selected.push({ adapter, selection });
       }
     }
-    return Object.freeze({ agent, open: async (budget: IAttemptAuthorizer): Promise<OpenedVoicePlan> => {
+    return Object.freeze({ agent, open: async (budget: IAttemptAuthorizer, onSupplierUsage?: VoiceSupplierUsageSink): Promise<OpenedVoicePlan> => {
       const opened: Array<{ kind: VoiceAdapterKind; value: OpenedVoiceAdapter<VoiceAdapterKind>; runtime: VoiceAdapterRuntime }> = [];
       try {
         for (const entry of selected) {
           scope.signal.throwIfAborted(); const kind = entry.adapter.kind;
           const purpose = kind === 'streaming-stt' ? 'stt' : kind === 'streaming-tts' ? 'tts' : kind === 'vad-session' ? 'vad' : 'endpoint';
-          const runtime = new VoiceAdapterRuntime(scope, entry.adapter.manifest.providerId, purpose, budget, { ...network, origin: entry.adapter.manifest.origin, credentialRef: entry.adapter.manifest.credentialRef });
+          const runtime = new VoiceAdapterRuntime(scope, entry.adapter.manifest.providerId, purpose, budget, { ...network, origin: entry.adapter.manifest.origin, credentialRef: entry.adapter.manifest.credentialRef, onSupplierUsage });
           const value = await entry.adapter.create(scope, entry.selection, runtime); opened.push({ kind, value, runtime });
           if (typeof value.fence !== 'function' || typeof value.dispose !== 'function') throw new Error('voice adapter lifetime refused');
         }
@@ -466,6 +466,22 @@ export class SpeechProviderResolver extends EventEmitter {
         if (cleanup.some((r) => r.status === 'rejected')) throw new Error('voice initialization fence incomplete'); throw error;
       }
     } });
+  }
+  /** Resolves a scoped batch provider through the same registered options, credentials and request budget. */
+  async resolveScopedBatch<K extends 'batch-stt' | 'batch-tts'>(kind: K, providerId: string, rawScope: VoiceScopeContext, selection: VoiceAdapterSelection,
+    budget: IAttemptAuthorizer, network: VoiceNetworkDependencies = {}, onSupplierUsage?: VoiceSupplierUsageSink): Promise<OpenedVoiceAdapter<K>> {
+    const scope = captureVoiceScope(rawScope); const adapter = this.voiceAdapters.get(`${kind}:${providerId}`);
+    const purpose = kind === 'batch-stt' ? 'stt' : 'tts'; const permission = scope.policy.providers.find((p) => p.providerId === providerId && p.purposes.includes(purpose));
+    if (!adapter || adapter.kind !== kind || !permission || !scope.policy.purposes.includes(purpose)) throw new Error('batch provider refused');
+    const m = adapter.manifest;
+    if (m.streaming || m.locality !== permission.locality || (scope.policy.mode === 'local' && m.locality !== 'local') || m.modelId !== selection.modelId || m.modelRevision !== selection.modelRevision || !m.languages.includes(selection.language) || !m.sampleRates.includes(selection.sampleRate) || !m.codecs.includes(selection.codec)) throw new Error('batch capability refused');
+    if (kind === 'batch-tts' && (!selection.voice || !m.voices.some((voice) => voice.id === selection.voice!.id && voice.revision === selection.voice!.revision))) throw new Error('batch voice refused');
+    if (m.origin) await checkDestination(m.origin, (scope.policy.mode === 'hosted' ? hostedEgressPolicy : localEgressPolicy)(), network.lookup);
+    const parsed = freezeVoiceValue({ ...selection, options: z.record(z.string(), z.unknown()).parse(adapter.options.parse(selection.options)) });
+    const runtime = new VoiceAdapterRuntime(scope, providerId, purpose, budget, { ...network, origin: m.origin, credentialRef: m.credentialRef, onSupplierUsage });
+    const value = await adapter.create(scope, parsed, runtime) as OpenedVoiceAdapter<K>;
+    return { value: value.value, fence: async (generation) => { runtime.fenceGeneration(generation); const proof = await value.fence(generation); await runtime.whenIdle(); if (!proof.stopped || !proof.evidenceRef) throw new Error('batch fence incomplete'); return proof; },
+      dispose: async () => { await value.dispose(); await runtime.whenIdle(); } };
   }
 
   // ---------------------------------------------------------------------------

@@ -8,6 +8,9 @@ import type { AudioIdentity, VoiceGeneration, IStreamingSTT, IStreamingTTS, IVad
 import type { SpeechToTextProvider, TextToSpeechProvider } from './types.js';
 import type { HealthyProvider } from '../voice-pipeline/HealthyProvider.js';
 import type { VoiceNetworkDependencies, VoiceStopEvidence } from '../voice-platform/reasoning/tools.js';
+import { SupplierUsageComponentSchema, type SupplierUsageComponent } from '../voice-platform/contracts/index.js';
+/** Cumulative supplier work, separate from the customer's attempt-component tariff. */
+export type VoiceSupplierUsageSink = (component: SupplierUsageComponent) => Promise<void>;
 /** Closed model/voice capability evidence, consumed before a factory is invoked. */
 export const VoiceAdapterManifestSchema = z.strictObject({
   providerId: z.string().min(1).max(128), locality: z.enum(['local', 'remote']), modelId: z.string().min(1), modelRevision: z.string().min(1),
@@ -49,9 +52,11 @@ export interface VoiceAdapterRequest {
   grant: AttemptGrant; signal: AbortSignal;
   request(path: string, body: string): Promise<CheckedResponse>;
   stream(path: string, body: string): Promise<CheckedStreamResponse>;
+  /** Reports actual supplier work without treating unknown priced units as free. */
+  reportUsage(component: Omit<SupplierUsageComponent, 'providerId' | 'attemptId' | 'generation'>): Promise<void>;
 }
-/** Fixed-origin provider connection settings; mutable client input cannot replace these. */
-export interface VoiceAdapterNetwork extends VoiceNetworkDependencies { origin?: string; credentialRef?: string }
+/** Fixed-origin provider connection settings and the scoped cumulative supplier sink. */
+export interface VoiceAdapterNetwork extends VoiceNetworkDependencies { origin?: string; credentialRef?: string; onSupplierUsage?: VoiceSupplierUsageSink }
 /** The single call-scoped boundary below a pack's request/retry loop. */
 export class VoiceAdapterRuntime {
   private readonly scope: VoiceScopeContext;
@@ -76,7 +81,14 @@ export class VoiceAdapterRuntime {
       return { url: this.network.origin + path, method: 'POST' as const, body, signal, headers: { 'content-type': 'application/json', 'x-request-id': grant.attemptId, ...(key ? { authorization: `Bearer ${key}` } : {}) },
         policy: (this.scope.policy.mode === 'hosted' ? hostedEgressPolicy : localEgressPolicy)({ timeoutMs: 60000, maxResponseBytes: 1048576 }), lookup: this.network.lookup, connector: this.network.connector };
     };
-    const request: VoiceAdapterRequest = { grant, signal, request: async (path, body) => checkedRequest(await input(path, body)), stream: async (path, body) => checkedStream(await input(path, body)) };
+    const request: VoiceAdapterRequest = {
+      grant, signal, request: async (path, body) => checkedRequest(await input(path, body)), stream: async (path, body) => checkedStream(await input(path, body)),
+      reportUsage: async (component) => {
+        if (!live) throw new Error('supplier report after request lifetime');
+        const value = SupplierUsageComponentSchema.parse({ ...component, providerId: this.providerId, attemptId: grant.attemptId, generation: identity.generation.inferenceGeneration });
+        await this.network.onSupplierUsage?.(value);
+      },
+    };
     let complete = false;
     const operation = (async () => {
       try {
