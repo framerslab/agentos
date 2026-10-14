@@ -46,4 +46,18 @@ describe('logical call transport', () => {
     await expect(f.binding.reattach({ token: c.token, origin: f.seed.clientOrigin, participantId: f.seed.participantId, transportEpoch: c.transportEpoch, transport: 'websocket', physical: physicalTransport().transport })).rejects.toThrow('binding busy');
     await vi.waitFor(() => expect(release).toBeTypeOf('function')); release(); f.setFence(async () => {}); await detach; await f.binding.end('client_stop'); await f.runtime.stopSession();
   });
+  it('keeps a generation the pipeline records while the attachment is still completing', async () => {
+    const f = await transportFixture(); const connected = f.manager.connected.bind(f.manager);
+    vi.spyOn(f.manager, 'connected').mockImplementationOnce(async (...args) => {
+      // A provider gap interrupts the call the pipeline has just started, before the connection is recorded.
+      f.stt.emit('stt:gap', { lostMs: 20 });
+      await vi.waitFor(() => expect(f.identity().generation.inferenceGeneration).toBe(2));
+      return connected(...args);
+    });
+    await f.connect();
+    const live = f.identity().generation;
+    expect(f.binding.generation).toEqual(live);
+    await expect(f.binding.sendControl(Object.assign({ type: 'agent_thinking' as const }, { scopeId: 'scope-a', callId: 'call-a', generation: live }))).resolves.toBeUndefined();
+    await f.binding.end('client_stop'); await f.runtime.stopSession();
+  });
 });

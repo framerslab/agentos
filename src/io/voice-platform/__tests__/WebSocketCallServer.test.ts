@@ -95,4 +95,51 @@ describe('authenticated WebSocket media over HTTP upgrade', () => {
       const c = await f.open(); const oversized = once(c, 'close'); c.send(Buffer.alloc(8193)); await oversized;
     } finally { await f.close(); }
   });
+  it('clears a chunk whose socket writes are still pending and keeps the connection open', async () => {
+    const f = await fixture(); try {
+      const ws = await f.open(); await f.authenticate(ws);
+      const received: string[] = [];
+      ws.on('message', (data, binary) => {
+        if (binary) { received.push('pcm'); return; }
+        const message = JSON.parse(String(data)); received.push(message.type);
+        if (message.type === 'clear') ws.send(JSON.stringify({ type: 'cleared', generation: message.generation, clearId: message.clearId }));
+      });
+      const generation = f.call.binding.generation;
+      // A barge-in's clear arrives before the chunk's metadata write has completed.
+      const sending = f.call.binding.sendAudio({ scopeId: 'scope-a', callId: 'call-a', generation, sequence: 1, audio: Buffer.alloc(640), format: 'pcm', container: 'raw', sampleRate: 16000, durationMs: 20, text: '' });
+      const clearing = f.call.binding.clearPlayback(generation);
+      const [sent, cleared] = await Promise.allSettled([sending, clearing]);
+      await expect(f.call.binding.sendControl(Object.assign({ type: 'agent_thinking' as const }, { scopeId: 'scope-a', callId: 'call-a', generation }))).resolves.toBeUndefined();
+      expect(cleared.status).toBe('fulfilled');
+      expect(sent).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ message: 'audio cancelled' }) });
+      // The metadata and its PCM leave as a pair; the receiver discards the pair by its cleared generation.
+      await vi.waitFor(() => expect(received).toEqual(['audio', 'clear', 'pcm', 'agent_thinking']));
+      expect(f.call.binding.state).toBe('open');
+    } finally { await f.close(); }
+  });
+  it('writes every generation notice in order when the next comes before the last write completes', async () => {
+    const f = await fixture(); try {
+      const ws = await f.open(); await f.authenticate(ws);
+      const notices: number[] = [];
+      ws.on('message', (data, binary) => {
+        if (binary) return; const message = JSON.parse(String(data));
+        if (message.type === 'generation') notices.push(message.generation.inferenceGeneration);
+      });
+      const g = f.call.binding.generation;
+      // A turn and the interruption right after it record two generations within one socket write.
+      await f.call.binding.recordGeneration({ ...g, inferenceGeneration: g.inferenceGeneration + 1 });
+      await f.call.binding.recordGeneration({ ...g, inferenceGeneration: g.inferenceGeneration + 2 });
+      await vi.waitFor(() => expect(notices).toEqual([g.inferenceGeneration + 1, g.inferenceGeneration + 2]));
+      expect(ws.readyState).toBe(WebSocket.OPEN); expect(f.call.binding.state).toBe('open');
+    } finally { await f.close(); }
+  });
+  it('closes a socket whose audio packet carries sequence 0', async () => {
+    const f = await fixture(); try {
+      const ws = await f.open(); await f.authenticate(ws);
+      let closed = false; ws.on('close', () => { closed = true; });
+      ws.send(pcm(1, 0));
+      await vi.waitFor(() => expect(closed).toBe(true));
+      expect(f.call.stt.pushAudioScoped).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
 });
