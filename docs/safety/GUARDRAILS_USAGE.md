@@ -426,6 +426,22 @@ const neverDo = await PhraseListGuardrail.create({
 
 `PhraseListGuardrail.create` refuses an empty list, a list that does not load, and judge entries without a judge; `reload()` swaps the list in whole and keeps the last good one when the new one fails. The judge fails closed: a throw, an answer without `block` and `confidence`, or a confidence under `judgeThreshold` (default 0.7) blocks. `createLlmPhraseJudge` takes `fallbackProviders: []` by default, so the judge reaches only the provider it was given.
 
+`phraseMatches(entries, text)` runs the same match with no guard and no judge: the text goes through the same normalisation, the entries compile with the same word boundaries, and the entries that occur come back in list order. A `judge` entry comes back like any other; what a match means is the caller's to decide. It throws on an entry whose phrase normalises to nothing, as `PhraseListGuardrail.create` does.
+
+```typescript
+import { phraseMatches, type PhraseEntry } from '@framers/agentos';
+
+const entries: PhraseEntry[] = [
+  { phrase: 'coming soon', match: 'word', onMatch: 'block', ruleId: 'timing' },
+  { phrase: 'next', match: 'word', onMatch: 'judge', ruleId: 'timing' },
+  { phrase: 'in\\s+beta', match: 'regex', onMatch: 'block', ruleId: 'stage' },
+];
+
+phraseMatches(entries, 'Exports are COMING SOON.').map((e) => e.phrase); // ['coming soon']
+phraseMatches(entries, 'The nextcloud connector'); // []: a word entry keeps its word boundaries
+phraseMatches(entries, 'Now in beta').map((e) => e.ruleId); // ['stage']
+```
+
 ### Hard limits in the persona
 
 `IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter, when the file is loaded as a persona) renders as the last block of the system prompt of every GMI turn for that persona, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
