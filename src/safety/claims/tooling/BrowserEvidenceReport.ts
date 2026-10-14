@@ -6,9 +6,12 @@
  * invocation leaves a JSON report and an identity file. `reconcileInvocations` normalizes every report, keeps every
  * attempt of every test, and reports each way the run falls short: a report that is missing or malformed, an
  * invocation nobody expected or seen twice, a test seen twice or two tests with one id, an identity that is not the
- * expected one, a non-zero exit, report-level errors, counts that do not match, and a required test that is missing,
- * skipped, failed, flaky or marked as an expected failure. A baseline invocation is kept but never satisfies a
- * requirement. Nothing here passes for want of data.
+ * expected one, a non-zero or unknown exit, report-level errors, counts that do not match, and a required test that is
+ * missing, skipped, failed, flaky or marked as an expected failure. A test passes only when every attempt passed, it
+ * appears once in its project and its spec id names no other test, in an eligible invocation with no problem of its
+ * own: an identity that is not the expected one, a second report, report-level errors, counts that do not match or an
+ * exit code that is not 0. A baseline invocation is kept but never satisfies a requirement. Nothing here passes for
+ * want of data.
  */
 
 /** A result's status, as the reporter writes it. */
@@ -65,6 +68,7 @@ export interface NormalizedAttempt {
 
 /** One test in one project, with every attempt. */
 export interface NormalizedTest {
+  /** `testKey` of the project, file and title. */
   key: string;
   specId: string;
   file: string;
@@ -104,6 +108,7 @@ export type ReportProblemCode =
   | 'stats_mismatch'
   | 'report_errors'
   | 'nonzero_exit'
+  | 'unknown_exit'
   | 'missing_test'
   | 'skipped_required'
   | 'failed_required'
@@ -115,11 +120,15 @@ export type ReportProblemCode =
 export interface ReportProblem {
   code: ReportProblemCode;
   invocationId: string;
+  /** The test's key (`testKey`), or the required title for `ineligible_required`. */
   test?: string;
   detail: string;
 }
 
-/** The reconciled run: every invocation seen, every problem, and the tests that passed in an eligible invocation. */
+/**
+ * The reconciled run: every invocation seen, every problem, and the `passKey` of each test that passed cleanly, once,
+ * in an eligible invocation with no problem of its own.
+ */
 export interface ReconciledRun {
   invocations: readonly NormalizedInvocation[];
   problems: readonly ReportProblem[];
@@ -129,14 +138,14 @@ export interface ReconciledRun {
 const STATUSES: ReadonlySet<string> = new Set(['passed', 'failed', 'timedOut', 'skipped', 'interrupted']);
 const FINALS: ReadonlySet<string> = new Set(['expected', 'unexpected', 'flaky', 'skipped']);
 
-/** A test's key within an invocation. */
+/** A test's key within an invocation: its project, file and title as a JSON array, so no part can run into another. */
 export function testKey(file: string, title: string, project: string): string {
-  return `${project} :: ${file} :: ${title}`;
+  return JSON.stringify([project, file, title]);
 }
 
-/** A passed test's key within the run. */
+/** A passed test's key within the run: its invocation, project, file and title as a JSON array. */
 export function passKey(invocationId: string, file: string, title: string, project: string): string {
-  return `${invocationId} :: ${testKey(file, title, project)}`;
+  return JSON.stringify([invocationId, project, file, title]);
 }
 
 type Raw = Record<string, unknown>;
@@ -208,6 +217,10 @@ export function normalizePlaywrightReport(invocationId: string, report: unknown)
 /**
  * Reconciles a run's expected invocations with what each left.
  *
+ * Every problem is reported. A test enters `passed` only when every attempt passed, its key appears once in the report
+ * and its spec id names no other test, in an eligible invocation observed once, whose identity is the expected one and
+ * whose report has no report-level errors, counts that match its tests and an exit code of 0.
+ *
  * @param manifest - What the run expects.
  * @param observed - What each invocation left, in any order.
  */
@@ -217,6 +230,9 @@ export function reconcileInvocations(manifest: InvocationManifest, observed: rea
   const passed = new Set<string>();
   const expectedIds = new Set(manifest.invocations.map((i) => i.invocationId));
   const seen = new Map<string, ObservedInvocation>();
+  // An invocation named by two reports is still reconciled from the first, so its own problems are reported, but none
+  // of its tests passes: nothing says which report is the invocation's.
+  const repeated = new Set<string>();
   for (const o of observed) {
     if (!expectedIds.has(o.invocationId)) {
       problems.push({ code: 'unexpected_invocation', invocationId: o.invocationId, detail: 'the manifest does not name this invocation' });
@@ -224,6 +240,7 @@ export function reconcileInvocations(manifest: InvocationManifest, observed: rea
     }
     if (seen.has(o.invocationId)) {
       problems.push({ code: 'duplicate_invocation', invocationId: o.invocationId, detail: 'two reports name this invocation' });
+      repeated.add(o.invocationId);
       continue;
     }
     seen.set(o.invocationId, o);
@@ -235,8 +252,12 @@ export function reconcileInvocations(manifest: InvocationManifest, observed: rea
       continue;
     }
     const id = isRaw(o.identity) ? o.identity : {};
+    let identityMatches = true;
     for (const field of ['commit', 'applicationDigest', 'harnessDigest', 'configurationDigest'] as const) {
-      if (id[field] !== expected[field]) problems.push({ code: 'identity_mismatch', invocationId: expected.invocationId, detail: `${field} is not the expected one` });
+      if (id[field] !== expected[field]) {
+        problems.push({ code: 'identity_mismatch', invocationId: expected.invocationId, detail: `${field} is not the expected one` });
+        identityMatches = false;
+      }
     }
     const normalized = normalizePlaywrightReport(expected.invocationId, o.report);
     if (!normalized.ok) {
@@ -245,27 +266,39 @@ export function reconcileInvocations(manifest: InvocationManifest, observed: rea
     }
     const report = normalized.value;
     invocations.push({ ...report, invocationId: expected.invocationId, eligible: expected.eligible, exitCode: o.exitCode });
-    const byKey = new Map<string, NormalizedTest>();
+    // Every instance of each key, so a test seen twice is checked in each and passes in none.
+    const byKey = new Map<string, NormalizedTest[]>();
     const bySpec = new Map<string, string>();
+    // Spec ids that name more than one test: the report cannot say which test such an id is, so none of them passes.
+    const conflicted = new Set<string>();
     for (const t of report.tests) {
-      if (byKey.has(t.key)) problems.push({ code: 'duplicate_test', invocationId: expected.invocationId, test: t.key, detail: 'the test appears twice in one project' });
-      byKey.set(t.key, t);
-      const identity = `${t.file} :: ${t.title}`;
+      const instances = byKey.get(t.key);
+      if (instances === undefined) byKey.set(t.key, [t]);
+      else {
+        problems.push({ code: 'duplicate_test', invocationId: expected.invocationId, test: t.key, detail: 'the test appears twice in one project' });
+        instances.push(t);
+      }
+      const identity = JSON.stringify([t.file, t.title]);
       const prior = bySpec.get(t.specId);
-      if (prior !== undefined && prior !== identity) problems.push({ code: 'conflicting_test', invocationId: expected.invocationId, test: t.key, detail: 'one spec id names two tests' });
+      if (prior !== undefined && prior !== identity) {
+        problems.push({ code: 'conflicting_test', invocationId: expected.invocationId, test: t.key, detail: 'one spec id names two tests' });
+        conflicted.add(t.specId);
+      }
       bySpec.set(t.specId, identity);
     }
     const counted = { expected: 0, unexpected: 0, flaky: 0, skipped: 0 };
     for (const t of report.tests) counted[t.finalStatus] += 1;
-    if (Object.entries(counted).some(([k, v]) => report.stats[k as keyof typeof counted] !== v)) {
-      problems.push({ code: 'stats_mismatch', invocationId: expected.invocationId, detail: 'the counts do not match the tests the report holds' });
-    }
+    const countsMatch = Object.entries(counted).every(([k, v]) => report.stats[k as keyof typeof counted] === v);
+    if (!countsMatch) problems.push({ code: 'stats_mismatch', invocationId: expected.invocationId, detail: 'the counts do not match the tests the report holds' });
     if (report.errors > 0) problems.push({ code: 'report_errors', invocationId: expected.invocationId, detail: `${report.errors} report-level errors` });
-    const allExpected = report.tests.every((t) => t.finalStatus === 'expected');
-    if (o.exitCode !== 0 && allExpected) problems.push({ code: 'nonzero_exit', invocationId: expected.invocationId, detail: `exit code ${String(o.exitCode)}` });
+    if (o.exitCode === null) problems.push({ code: 'unknown_exit', invocationId: expected.invocationId, detail: 'the exit code is unknown' });
+    else if (o.exitCode !== 0) problems.push({ code: 'nonzero_exit', invocationId: expected.invocationId, detail: `exit code ${String(o.exitCode)}` });
+    // A problem of the invocation as a whole keeps every one of its tests out of passed.
+    const admissible = expected.eligible && !repeated.has(expected.invocationId) && identityMatches && countsMatch && report.errors === 0 && o.exitCode === 0;
     for (const t of report.tests) {
       const clean = t.finalStatus === 'expected' && t.expectedStatus === 'passed' && t.attempts.length > 0 && t.attempts.every((a) => a.status === 'passed');
-      if (clean && expected.eligible && o.exitCode === 0) passed.add(passKey(expected.invocationId, t.file, t.title, t.project));
+      const once = byKey.get(t.key)?.length === 1 && !conflicted.has(t.specId);
+      if (clean && once && admissible) passed.add(passKey(expected.invocationId, t.file, t.title, t.project));
     }
     for (const req of expected.required) {
       if (!expected.eligible) {
@@ -273,13 +306,16 @@ export function reconcileInvocations(manifest: InvocationManifest, observed: rea
         continue;
       }
       for (const project of req.projects) {
-        const t = byKey.get(testKey(req.file, req.title, project));
         const label = testKey(req.file, req.title, project);
-        if (t === undefined) problems.push({ code: 'missing_test', invocationId: expected.invocationId, test: label, detail: 'the required test did not run' });
-        else if (t.finalStatus === 'skipped') problems.push({ code: 'skipped_required', invocationId: expected.invocationId, test: label, detail: 'the required test was skipped' });
-        else if (t.expectedStatus !== 'passed') problems.push({ code: 'expected_failure_required', invocationId: expected.invocationId, test: label, detail: `expected status ${t.expectedStatus}` });
-        else if (t.finalStatus === 'unexpected') problems.push({ code: 'failed_required', invocationId: expected.invocationId, test: label, detail: `last attempt ${t.attempts.at(-1)?.status ?? 'none'}` });
-        else if (t.finalStatus === 'flaky') problems.push({ code: 'flaky_required', invocationId: expected.invocationId, test: label, detail: `${t.attempts.length} attempts` });
+        const instances = byKey.get(label) ?? [];
+        if (instances.length === 0) problems.push({ code: 'missing_test', invocationId: expected.invocationId, test: label, detail: 'the required test did not run' });
+        // Each instance of a test seen twice is checked, so a passing one cannot hide a failed one.
+        for (const t of instances) {
+          if (t.finalStatus === 'skipped') problems.push({ code: 'skipped_required', invocationId: expected.invocationId, test: label, detail: 'the required test was skipped' });
+          else if (t.expectedStatus !== 'passed') problems.push({ code: 'expected_failure_required', invocationId: expected.invocationId, test: label, detail: `expected status ${t.expectedStatus}` });
+          else if (t.finalStatus === 'unexpected') problems.push({ code: 'failed_required', invocationId: expected.invocationId, test: label, detail: `last attempt ${t.attempts.at(-1)?.status ?? 'none'}` });
+          else if (t.finalStatus === 'flaky') problems.push({ code: 'flaky_required', invocationId: expected.invocationId, test: label, detail: `${t.attempts.length} attempts` });
+        }
       }
     }
   }
@@ -287,7 +323,8 @@ export function reconcileInvocations(manifest: InvocationManifest, observed: rea
 }
 
 /**
- * True when a required test passed cleanly in every project it names, in an eligible invocation.
+ * True when a required test passed cleanly in every project it names, once in each, in an eligible invocation with no
+ * problem of its own (as `reconcileInvocations` decides).
  *
  * @param run - The reconciled run.
  * @param invocationId - The invocation.
