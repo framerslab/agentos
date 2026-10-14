@@ -174,7 +174,7 @@ export class SqlSourceDerivationStore {
       await tx.run(`INSERT INTO ${this.tables.owners} (tenant_id,owner_id)
         VALUES ($1,$2) ON CONFLICT (tenant_id,owner_id) DO NOTHING`, [scope.tenantId, scope.ownerId]);
       const row = await tx.get<OwnerRow>(`SELECT epoch,active FROM ${this.tables.owners}
-        WHERE tenant_id=$1 AND owner_id=$2 FOR UPDATE`, [scope.tenantId, scope.ownerId]);
+        WHERE tenant_id=$1 AND owner_id=$2`, [scope.tenantId, scope.ownerId]);
       if (!row) throw new Error('source_owner_missing');
       return work(tx, { epoch: count(row.epoch), active: row.active === true });
     });
@@ -348,8 +348,6 @@ export class SqlSourceDerivationStore {
     tx: StorageAdapter, scope: SourceOwnerScope, epoch: number,
     affected: SourceInvalidation, disabled: boolean, id: string = randomUUID(), at = this.now(),
   ): Promise<void> {
-    await tx.run(`INSERT INTO ${this.tables.journal} (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
-    await tx.get(`SELECT id FROM ${this.tables.journal} WHERE id=1 FOR UPDATE`);
     await tx.run(`INSERT INTO ${this.tables.tombstones}
       (id,tenant_id,owner_id,epoch,at_ms,affected,owner_disabled) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
       ON CONFLICT (id) DO NOTHING`,
