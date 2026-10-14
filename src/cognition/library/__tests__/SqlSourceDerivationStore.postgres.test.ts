@@ -236,4 +236,105 @@ describe.skipIf(!url)('durable personal-source derivations', () => {
     expect(await db.get(`SELECT id FROM "${prefix}_fixture_results" LIMIT 1`)).toBeNull();
     expect(await db.get(`SELECT source_id FROM "${prefix}_fixture_sources" LIMIT 1`)).toBeNull();
   });
+
+  /** Waits until PostgreSQL shows a session blocked by the session `pid`, or until `settled` answers true. */
+  async function blockedBehind(pid: number, settled: () => boolean): Promise<void> {
+    for (let poll = 0; poll < 500 && !settled(); poll += 1) {
+      if (await db.get(`SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, [pid])) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it('holds a delivery behind an open deletion fence until the fence commits', async () => {
+    const ticket = await seed();
+    await save(ticket);
+    const entered = latch();
+    const release = latch();
+    let fence = 0;
+    const removing = store.invalidate(scope, { kind: 'connection', connectionId: 'connection-a' }, async (tx) => {
+      fence = (await tx.get<{ pid: number }>('SELECT pg_backend_pid() AS pid'))!.pid;
+      entered.release();
+      await release.ready;
+    });
+    let delivery: Promise<boolean> = Promise.resolve(false);
+    try {
+      await Promise.race([entered.ready, removing]);
+      let settled = false;
+      delivery = peer.deliver('answer-a', context, () => { throw new Error('fixture_late_delivery'); });
+      delivery.then(() => { settled = true; }, () => { settled = true; });
+      await blockedBehind(fence, () => settled);
+      expect(settled).toBe(false);
+    } finally {
+      release.release();
+      await Promise.allSettled([removing, delivery]);
+    }
+    expect((await removing).kind).toBe('applied');
+    expect(await delivery).toBe(false);
+  });
+
+  it('holds a delivery behind open work under the owner lock', async () => {
+    const ticket = await seed();
+    await save(ticket);
+    const entered = latch();
+    const release = latch();
+    let holder = 0;
+    // Pausing a source in `apply` writes no owner row, so only the owner lock can hold the delivery back.
+    const pausing = store.apply(ticket, async (tx) => {
+      await tx.run(`UPDATE "${prefix}_fixture_sources" SET state=$1::jsonb WHERE source_id=$2`,
+        [JSON.stringify({ ...state(), paused: true }), 'source-a']);
+      holder = (await tx.get<{ pid: number }>('SELECT pg_backend_pid() AS pid'))!.pid;
+      entered.release();
+      await release.ready;
+    });
+    let delivery: Promise<boolean> = Promise.resolve(false);
+    try {
+      await Promise.race([entered.ready, pausing]);
+      let settled = false;
+      delivery = peer.deliver('answer-a', context, () => { throw new Error('fixture_paused_delivery'); });
+      delivery.then(() => { settled = true; }, () => { settled = true; });
+      await blockedBehind(holder, () => settled);
+      expect(settled).toBe(false);
+    } finally {
+      release.release();
+      await Promise.allSettled([pausing, delivery]);
+    }
+    expect((await pausing).kind).toBe('applied');
+    expect(await delivery).toBe(false);
+  });
+
+  it('commits no later deletion record while an earlier sequence is open', async () => {
+    await seed();
+    const before = (await store.readTombstones(0, 1_000)).at(-1)!.sequence;
+    const drawn = latch();
+    const release = latch();
+    let writer = 0;
+    // Another writer in the state a deletion record's writer is in just before it commits: it holds the journal row
+    // and has drawn the next sequence.
+    const open = other.transaction(async (tx) => {
+      await tx.run(`INSERT INTO "${prefix}_journal" (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+      await tx.get(`SELECT id FROM "${prefix}_journal" WHERE id=1 FOR UPDATE`);
+      writer = (await tx.get<{ pid: number }>('SELECT pg_backend_pid() AS pid'))!.pid;
+      await tx.run(`INSERT INTO "${prefix}_tombstones" (id,tenant_id,owner_id,epoch,at_ms,affected,owner_disabled)
+        VALUES ($1,'tenant-c','owner-c',1,1,'{"kind":"owner"}'::jsonb,TRUE)`, [randomUUID()]);
+      drawn.release();
+      await release.ready;
+    });
+    let later: Promise<unknown> = Promise.resolve();
+    try {
+      await Promise.race([drawn.ready, open]);
+      let settled = false;
+      later = store.invalidate({ tenantId: 'tenant-b', ownerId: 'owner-b' }, { kind: 'owner' }, async () => {});
+      later.then(() => { settled = true; }, () => { settled = true; });
+      await blockedBehind(writer, () => settled);
+      expect(settled).toBe(false);
+      expect(await store.readTombstones(before, 1_000)).toEqual([]);
+    } finally {
+      release.release();
+      await Promise.allSettled([open, later]);
+    }
+    await open;
+    await later;
+    const records = await store.readTombstones(before, 1_000);
+    expect(records.map((record) => record.ownerId)).toEqual(['owner-c', 'owner-b']);
+  });
 });
