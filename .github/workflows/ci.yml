@@ -82,6 +82,23 @@ jobs:
           console.log('loadIsolated from dist:', read.format, read.content);
           "
 
+      - name: Built library exports preserve personal-source delivery policy
+        run: |
+          node --input-type=module <<'JS'
+          import { createSourceDerivation, canDeliverSourceDerivation } from './dist/cognition/library/index.js';
+          const dependency = {
+            tenantId: 'tenant-a', ownerId: 'owner-a', connectionId: 'connection-a',
+            generation: 1, sourceId: 'source-a', messageIds: ['message-a'],
+            version: 'version-a', expiresAt: 1000,
+          };
+          const answer = createSourceDerivation([dependency]);
+          const current = [{ ...dependency, connected: true, paused: false, searchAskEnabled: true, liveEnabled: false }];
+          const context = { tenantId: 'tenant-a', ownerId: 'owner-a', surface: 'ask', liveOptIn: false };
+          if (!canDeliverSourceDerivation(answer, context, current, 999)) throw new Error('private_delivery_refused');
+          if (canDeliverSourceDerivation(answer, { ...context, surface: 'share' }, current, 999)) throw new Error('shared_delivery_allowed');
+          if (canDeliverSourceDerivation(answer, context, current, 1000)) throw new Error('expired_delivery_allowed');
+          JS
+
       - name: Lint
         run: pnpm run lint
 
