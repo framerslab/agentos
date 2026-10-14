@@ -44,7 +44,7 @@ const [hit] = await index.search({
 if (hit) console.log(hit.title, snippetAround(hit.text, lexicalTokens('budget')).text);
 ```
 
-The module is `@framers/agentos/cognition/library`; its names are also exported from `@framers/agentos/cognition/rag` and the package root. Nothing in it imports a Node module.
+The module is `@framers/agentos/cognition/library`; its names are also exported from `@framers/agentos/cognition/rag` and the package root. Nothing in it imports a Node module but `SqlSourceDerivationStore`, which imports `node:crypto`; a page imports the [browser entry](#on-a-device).
 
 ## Sources
 
@@ -184,7 +184,71 @@ A result made from private sources, such as an answer drawn from the documents o
 
 A malformed record, row or dependency, a source given twice in `current` or in the record, a dependency of another tenant or owner than the record's, a record with no dependencies and a `now` that is not a nonnegative safe integer each answer false. A source read again with a later expiry does not extend a record made before: the record keeps its own expiry.
 
-`canDeliverSourceDerivation` reads no database and takes no lock. Read `current` in the transaction that commits or delivers the result, serialized with disconnection, pausing, removal, expiry and changes to the switches: a check against rows read earlier can deliver a result whose source is gone.
+`canDeliverSourceDerivation` reads no database and takes no lock. Read `current` in the transaction that commits or delivers the result, serialized with disconnection, pausing, removal, expiry and changes to the switches: a check against rows read earlier can deliver a result whose source is gone. `SqlSourceDerivationStore`, below, does this on PostgreSQL.
+
+## Stored results and deletion fences
+
+```typescript
+import { createPostgresAdapter } from '@framers/sql-storage-adapter';
+import {
+  SqlSourceDerivationStore,
+  createSourceDerivation,
+  sourceDerivationSchema,
+} from '@framers/agentos/cognition/library';
+
+const db = createPostgresAdapter({ connectionString: process.env.DATABASE_URL });
+await db.open();
+// Once, from your migration: the store never creates its tables.
+for (const statement of sourceDerivationSchema()) await db.exec(statement);
+
+// Your own functions, each working on the transaction it is given.
+const store = new SqlSourceDerivationStore(db, {
+  bindings: {
+    readCurrent: (tx, derivation) => readSourceStates(tx, derivation),
+    purgeResults: (tx, owner, resultIds) => deleteSavedCopies(tx, owner, resultIds),
+    purgeSources: (tx, owner, affected) => deleteSourceContent(tx, owner, affected),
+  },
+});
+
+const owner = { tenantId: 'tenant-1', ownerId: 'account-1' };
+await store.activateOwner(owner, (tx) => accountIsActive(tx, owner));
+
+const ticket = await store.capture(owner); // before the model call
+const text = await answer(question, passages); // outside the store
+const context = { ...owner, surface: 'ask', liveOptIn: false } as const;
+if (ticket && await store.commit(ticket, 'answer-1', createSourceDerivation(reads), text, context)) {
+  await store.deliver('answer-1', context, (payload) => {
+    outbox.push(payload);
+    return true;
+  });
+}
+
+// Disconnecting a connection: the fence first, then the purge.
+await store.blockOwner(owner, (tx) => markDisconnecting(tx, owner));
+await store.invalidate(owner, { kind: 'connection', connectionId: 'connection-1' }, (tx) => markDisconnected(tx, owner));
+```
+
+`SqlSourceDerivationStore` keeps results made from private sources in PostgreSQL, with the sources each one depends on, and serializes committing and delivering them with the removal of those sources. It takes a PostgreSQL `StorageAdapter` with transactions; any other adapter throws `derivations_require_postgres_transactions`. `sourceDerivationSchema(prefix)` answers the statements that create its tables, which your migration runs: the store never does. The prefix is `agentos_source_derivation` unless given, and is a lower-case letter followed by at most 39 lower-case letters, digits or underscores; another throws `invalid_derivation_table_prefix`. Give the store the same prefix as `tablePrefix`, and `clock` when its time is not `Date.now`.
+
+Each call that reads or writes an owner's state runs in a transaction of its own that first locks the owner's row, so one owner's commits, deliveries, removals and expiry run one at a time, and different owners run independently but for one shared row, locked last and briefly, while a deletion record is written. The three bindings run inside that transaction and must work only on the adapter they are given:
+
+- `readCurrent(tx, derivation)` answers the current state of the derivation's sources, read now from your own rows: generation, version, held message ids, expiry, `connected`, `paused` and the two use switches. It leaves out a source that is gone, and answers none for an account you are deleting. An answer from a cache defeats the fence.
+- `purgeResults(tx, owner, resultIds)` deletes every copy you hold of those results, such as a saved mark or a summary, whole.
+- `purgeSources(tx, owner, affected)` deletes the source content in the affected scope: text, metadata, passages and vectors.
+
+Reads from a provider, parsing, embedding, model calls and revocation never run inside a binding or a callback the store runs.
+
+An owner starts inactive and is active once `activateOwner(owner, authorize)` runs `authorize` in the transaction and it answers true; check there that the account is active and has no deletion pending. Each owner has an epoch: activating an inactive owner, `blockOwner`, an applied `invalidate` and a replayed deletion each advance it.
+
+- `capture(owner)` answers a ticket holding the current epoch, or null while the owner is inactive. Capture it before the work outside the store begins.
+- `commit(ticket, id, derivation, payload, context)` stores the whole result and its dependencies only while the owner is active at the ticket's epoch, `context` and the record name the ticket's tenant and owner, the record is personal with the earliest expiry of its dependencies, and `canDeliverSourceDerivation` allows it for `context` against what `readCurrent` reads in the same transaction. It answers whether it stored the result: an id the owner already holds and a payload longer than 1,048,576 UTF-16 code units answer false.
+- `deliver(id, context, enqueue)` reads the stored result and its sources' state under the lock and, while the owner is active and `canDeliverSourceDerivation` allows `context`, calls `enqueue(payload)` before the lock is released. `enqueue` hands the payload on at once and answers a boolean: any other answer throws `source_delivery_must_be_synchronous`, and when `enqueue` throws, `deliver` rejects with its error. `deliver` answers what `enqueue` answered, or false, and never returns the payload. Each separately generated part of an answer is committed and delivered on its own.
+- `apply(ticket, work)` runs short storage work in the transaction while the owner is active at the ticket's epoch, and answers `{ kind: 'applied', value, ticket }`; otherwise it answers `{ kind: 'stale' }` without calling `work`. It is for installing first content and job records, not for changing content results depend on.
+- `invalidate(owner, affected, mutate, { expected, disableOwner })` advances the epoch, deletes every whole result that depends on the affected owner, connection or source (with your copies, through `purgeResults`) and the source content (through `purgeSources`), runs `mutate`, and writes a deletion record, all in one transaction: a binding or `mutate` that throws undoes all of it. With `expected`, it changes nothing and answers `stale` unless the owner is active at that ticket's epoch. `disableOwner` leaves the owner inactive and needs `{ kind: 'owner' }`. Replacing or removing a source's content goes through `invalidate`, so results made from the old content go with it.
+- `blockOwner(owner, mutate)` makes the owner inactive with a new epoch, runs `mutate` and writes an owner-wide deletion record. Commit it before a purge: if the purge then fails, nothing of the owner's is committed or delivered until `activateOwner` succeeds again. After a purge of one connection, `activateOwner` makes the owner's other sources deliverable again.
+- `expireResults(owner, limit)` removes at most `limit` expired results (1 to 1,000, 100 unless given), earliest first, with your copies, and answers how many it removed. A result is never delivered past its expiry, whether this runs or not.
+
+A deletion record holds its sequence and id, the owner, the affected scope's opaque keys, the epoch it set, when it was written and whether it left the owner inactive: never a result, a payload or a message id. `readTombstones(afterSequence, limit)` pages through the records in the order they committed, after `afterSequence` (0 for the first page), at most `limit` at a time (1 to 1,000, 100 unless given). It reads every owner's records, for an operator's recovery: never hand it to an account's session. After a database is restored, `replayTombstones(records)` with every record newer than the backup makes each affected owner inactive and purges all of that owner's results and source content, whatever the record's scope; replaying the same records again is harmless, and the owner needs `activateOwner` again. The records live in the same database as the results, so a backup holds only the records older than itself: keep a copy of them outside it to replay from.
 
 ## On a device
 
