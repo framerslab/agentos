@@ -25,7 +25,8 @@
  * With `enableMidUtteranceFailover`, a session is the chain's facade: it keeps
  * the last `ringBufferCapacityMs` of audio and, when the session in use fails,
  * or closes before a flush, opens the next provider the policy permits,
- * replays that audio and the frames pushed meanwhile, and goes on.
+ * replays that audio and the frames pushed meanwhile, and goes on; a backup
+ * that fails as it takes the replay is passed over for the next one.
  */
 
 import { VoiceEventEmitter } from '../VoiceEventEmitter.js';
@@ -110,10 +111,15 @@ export interface StreamingSTTChainOptions {
    * retracts an open line's interim text, still reach the facade's listeners:
    * on a switch, before the backup's; when the facade ends, before its
    * `'close'`. A provider close after flush and before the next frame emits one
-   * facade close; later audio is ignored. A frame whose duration (samples
-   * over sample rate) is not above zero and at most `ringBufferCapacityMs`
-   * ends the facade, and so does a switch no provider can take: the facade
-   * emits `'error'` (only to a listener) and then `'close'`. Default: false.
+   * facade close; later audio is ignored. A backup that fails as it takes the
+   * replay (an `'error'` or a `'close'`, or a frame it refuses) is recorded as
+   * failed and closed, and the next provider takes the same audio. A frame
+   * whose duration (samples over sample rate) is not above zero and at most
+   * `ringBufferCapacityMs`, or, in a session opened with `config.call`, one
+   * without its scope, turn and generation, ends the facade before any
+   * provider receives it, and so does a switch no provider can take: the
+   * facade emits `'error'` (only to a listener) and then `'close'`. Default:
+   * false.
    */
   enableMidUtteranceFailover?: boolean;
   /** Ring buffer capacity in ms for mid-utterance replay, and the longest frame the facade accepts. Default 3000. */
@@ -245,15 +251,17 @@ export class StreamingSTTChain implements IStreamingSTT {
    * Wraps the session a provider opened. With failover off the session is returned as it is. Otherwise the facade
    * tees audio into a ring buffer and, on the active session's error, or its close before a flush, closes it and
    * opens the next remaining provider (authorized first under a `ProviderPolicy`), replays the buffered audio when
-   * there is at least `minReplayMs` of it, then the frames pushed during the switch, and goes on. Only the active
+   * there is at least `minReplayMs` of it, then the frames pushed during the switch, and goes on. A backup that
+   * reports an error or a close while it takes that audio, or refuses a frame of it, is recorded as failed and
+   * closed, and the next remaining provider takes the same audio. Only the active
    * session's transcripts, speech events and warnings reach the facade, and the transcripts a session emits as the
    * facade closes it, which go out before anything that follows. A final that repeats one another provider already
    * gave for the same audio is dropped; an empty final, which retracts its own provider's interim text, is never
    * taken for a repeat. A close the caller asks for ends the session: it starts no
    * backup, and a backup still opening then is closed when it opens. When the session was opened with
-   * `config.call`, every frame goes to the provider session's `pushAudioScoped()`, and the facade has
-   * `pushAudioScoped()` and `reset()` when the first session has them. The facade is a `VoiceEventEmitter`, so the
-   * chain imports nothing from `node:events`.
+   * `config.call`, every frame goes to the provider session's `pushAudioScoped()`, a frame without its identity ends
+   * the facade before the ring keeps it, and the facade has `pushAudioScoped()` and `reset()` when the first session
+   * has them. The facade is a `VoiceEventEmitter`, so the chain imports nothing from `node:events`.
    */
   private wrap(initial: StreamingSTTSession, first: STTProvider, candidates: STTProvider[], config?: StreamingSTTConfig): StreamingSTTSession {
     if (!this.opts.enableMidUtteranceFailover) return initial;
@@ -270,12 +278,16 @@ export class StreamingSTTChain implements IStreamingSTT {
     let switching: Promise<void> | undefined;
     const pending: AudioFrame[] = [];
     let lostMs = 0;
+    // An error or close of the backup a switch has attached, reported before the switch ended; the switch passes over it.
+    let lost: Error | undefined;
+    // Whether a frame carries the scope, turn and generation a scoped session takes it with.
+    const identified = (frame: AudioFrame): boolean => 'scopeId' in frame && 'turnId' in frame && !!frame.generation;
     // A scoped session takes each frame with its identity; a frame without one, or a provider session that cannot
     // take it, fails the delivery rather than reaching the legacy pushAudio.
     const deliver = async (session: StreamingSTTSession, frame: AudioFrame): Promise<void> => {
       const scoped = session as Partial<ScopedStreamingSTTSession>;
       if (config?.call) {
-        if (!scoped.pushAudioScoped || !('scopeId' in frame) || !('turnId' in frame) || !frame.generation) throw new Error('scoped STT input required');
+        if (!scoped.pushAudioScoped || !identified(frame)) throw new Error('scoped STT input required');
         await scoped.pushAudioScoped(frame as Parameters<ScopedStreamingSTTSession['pushAudioScoped']>[0]);
       } else await session.pushAudio(frame);
     };
@@ -336,11 +348,18 @@ export class StreamingSTTChain implements IStreamingSTT {
       });
       // Supplier usage is not output: a retired session's final quantities still belong to its request.
       session.on('usage', (event: unknown) => facade.emit('usage', event));
+      // During a switch the active session is the backup taking the replay: its failure is left for the switch.
       session.on('error', (error: Error) => {
-        if (!closed && session === current && !switching) begin(error);
+        if (closed || session !== current) return;
+        if (switching) lost ??= error;
+        else begin(error);
       });
       session.on('close', () => {
-        if (closed || session !== current || switching) return;
+        if (closed || session !== current) return;
+        if (switching) {
+          lost ??= new Error('provider closed');
+          return;
+        }
         // A provider may end its stream once flushed, as the session contract has it (a final, then 'close').
         if (flushed) {
           current = undefined;
@@ -352,11 +371,10 @@ export class StreamingSTTChain implements IStreamingSTT {
       const from = provider;
       const failure = VoicePipelineError.classifyError(error, { kind: 'stt', provider: from.providerId });
       this.opts.breaker?.recordFailure(this.nameOf(from), failure.errorClass);
-      const replay = ring.snapshot();
-      const replayMs = ring.durationMs();
       const started = Date.now();
       const old = current;
       current = undefined;
+      lost = undefined;
       retire(old);
       for (const backup of remaining) {
         if (closed) return;
@@ -375,20 +393,40 @@ export class StreamingSTTChain implements IStreamingSTT {
           next.close();
           return;
         }
+        // Read for each backup: frames pushed during the switch that a failed backup took are in the ring by then.
+        const replay = ring.snapshot();
+        const replayMs = ring.durationMs();
         current = next;
         provider = backup;
         remaining = remaining.filter((p) => p !== backup);
         attach(next, this.nameOf(backup));
-        if (replayMs >= (this.opts.minReplayMs ?? 400)) for (const frame of replay) {
-          if (closed) return;
-          await deliver(next, frame);
-        }
-        while (pending.length && !closed) {
-          const frame = pending.shift()!;
-          ring.push(frame);
-          await deliver(next, frame);
+        try {
+          if (replayMs >= (this.opts.minReplayMs ?? 400)) for (const frame of replay) {
+            if (closed || lost) break;
+            await deliver(next, frame);
+          }
+          while (pending.length && !closed && !lost) {
+            const frame = pending.shift()!;
+            ring.push(frame);
+            await deliver(next, frame);
+          }
+        } catch (error) {
+          lost ??= error instanceof Error ? error : new Error('STT push failed');
         }
         if (closed) return;
+        if (lost) {
+          // The backup failed as it took the replay: it is recorded and closed, and the next provider takes the audio.
+          const failed = VoicePipelineError.classifyError(lost, { kind: 'stt', provider: backup.providerId });
+          this.opts.breaker?.recordFailure(this.nameOf(backup), failed.errorClass);
+          lost = undefined;
+          current = undefined;
+          try {
+            retire(next);
+          } catch {
+            /* the switch goes on to the next provider */
+          }
+          continue;
+        }
         this.activeProviderId = backup.providerId;
         this.opts.breaker?.recordSuccess(this.nameOf(backup));
         const event: ProviderFailoverEvent = { kind: 'stt', from: this.nameOf(from), to: this.nameOf(backup), reason: failure.errorClass, lostMs: Date.now() - started + lostMs };
@@ -408,6 +446,10 @@ export class StreamingSTTChain implements IStreamingSTT {
       switching = Promise.resolve();
       switching = failover(error).catch((failure: unknown) => fatal(failure instanceof Error ? failure : new Error('STT failed'))).finally(() => {
         switching = undefined;
+        // The backup failed after its replay, before the switch ended: the next switch starts from it.
+        const late = lost;
+        lost = undefined;
+        if (late && current) begin(late);
       });
     };
     attach(initial, this.nameOf(first));
@@ -418,6 +460,12 @@ export class StreamingSTTChain implements IStreamingSTT {
         const ms = frame.samples.length / frame.sampleRate * 1000;
         if (!Number.isFinite(ms) || ms <= 0 || ms > (this.opts.ringBufferCapacityMs ?? 3000)) {
           fatal(new Error('STT input bound'));
+          return;
+        }
+        // The caller's fault, not a provider's: refused before the ring or a held switch keeps the frame, so no
+        // provider is recorded as failed for it or sent it in a replay.
+        if (config?.call && !identified(frame)) {
+          fatal(new Error('scoped STT input required'));
           return;
         }
         if (switching) {
