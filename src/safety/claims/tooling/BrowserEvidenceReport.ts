@@ -217,15 +217,22 @@ export function normalizePlaywrightReport(invocationId: string, report: unknown)
 /**
  * Reconciles a run's expected invocations with what each left.
  *
- * Every problem is reported. A test enters `passed` only when every attempt passed, its key appears once in the report
- * and its spec id names no other test, in an eligible invocation observed once, whose identity is the expected one and
- * whose report has no report-level errors, counts that match its tests and an exit code of 0.
+ * Every problem of an invocation with a readable report is reported. One that left no report, or a malformed one, is
+ * reported as such, with `nonzero_exit` beside it when its exit code is a number other than 0; an unknown exit there is
+ * not reported, since the report problem already says the invocation left no evidence. A test enters `passed` only when
+ * every attempt passed, its key appears once in the report and its spec id names no other test, in an eligible
+ * invocation observed once, whose identity is the expected one and whose report has no report-level errors, counts that
+ * match its tests and an exit code of 0.
  *
  * @param manifest - What the run expects.
  * @param observed - What each invocation left, in any order.
  */
 export function reconcileInvocations(manifest: InvocationManifest, observed: readonly ObservedInvocation[]): ReconciledRun {
   const problems: ReportProblem[] = [];
+  // A non-zero exit code says how an invocation ended, so it is reported whatever the invocation's report holds.
+  const nonzeroExit = (invocationId: string, exitCode: number | null): void => {
+    if (exitCode !== null && exitCode !== 0) problems.push({ code: 'nonzero_exit', invocationId, detail: `exit code ${String(exitCode)}` });
+  };
   const invocations: NormalizedInvocation[] = [];
   const passed = new Set<string>();
   const expectedIds = new Set(manifest.invocations.map((i) => i.invocationId));
@@ -249,6 +256,7 @@ export function reconcileInvocations(manifest: InvocationManifest, observed: rea
     const o = seen.get(expected.invocationId);
     if (o === undefined || o.report === null || o.report === undefined) {
       problems.push({ code: 'missing_report', invocationId: expected.invocationId, detail: 'no report: a cancelled or crashed invocation is a failure, never an empty success' });
+      if (o !== undefined) nonzeroExit(expected.invocationId, o.exitCode);
       continue;
     }
     const id = isRaw(o.identity) ? o.identity : {};
@@ -262,6 +270,7 @@ export function reconcileInvocations(manifest: InvocationManifest, observed: rea
     const normalized = normalizePlaywrightReport(expected.invocationId, o.report);
     if (!normalized.ok) {
       problems.push(normalized.problem);
+      nonzeroExit(expected.invocationId, o.exitCode);
       continue;
     }
     const report = normalized.value;
@@ -292,7 +301,7 @@ export function reconcileInvocations(manifest: InvocationManifest, observed: rea
     if (!countsMatch) problems.push({ code: 'stats_mismatch', invocationId: expected.invocationId, detail: 'the counts do not match the tests the report holds' });
     if (report.errors > 0) problems.push({ code: 'report_errors', invocationId: expected.invocationId, detail: `${report.errors} report-level errors` });
     if (o.exitCode === null) problems.push({ code: 'unknown_exit', invocationId: expected.invocationId, detail: 'the exit code is unknown' });
-    else if (o.exitCode !== 0) problems.push({ code: 'nonzero_exit', invocationId: expected.invocationId, detail: `exit code ${String(o.exitCode)}` });
+    else nonzeroExit(expected.invocationId, o.exitCode);
     // A problem of the invocation as a whole keeps every one of its tests out of passed.
     const admissible = expected.eligible && !repeated.has(expected.invocationId) && identityMatches && countsMatch && report.errors === 0 && o.exitCode === 0;
     for (const t of report.tests) {
