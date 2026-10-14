@@ -839,18 +839,20 @@ class MoonshineBrowserSession extends VoiceEventEmitter implements StreamingSTTS
   /**
    * Ends the session at once, with no last pass: each line still open gets
    * an empty final, which retracts its interim text (call `flush()` first to
-   * keep it), then `'close'`. Idempotent.
+   * keep it), then `'close'`. Idempotent. The session has closed before
+   * these events go out, and a listener that throws on one is written as a
+   * console warning: the listeners after it still run, and `'close'` still
+   * comes, so the provider lets go of the session.
    */
   close(): void {
     if (this.closed) return;
     this.closed = true;
     this.held = [];
     this.engine?.close();
-    for (const line of this.shown.values()) {
-      this.emit('transcript', this.toEvent({ ...line, text: '', words: [] }, true));
-    }
+    const open = [...this.shown.values()];
     this.shown.clear();
-    this.emit('close');
+    for (const line of open) this.emitEach('transcript', this.toEvent({ ...line, text: '', words: [] }, true));
+    this.emitEach('close');
   }
 
   private async restart(engine: MoonshineEngine): Promise<void> {
@@ -920,15 +922,41 @@ class MoonshineBrowserSession extends VoiceEventEmitter implements StreamingSTTS
     };
   }
 
-  /** A transcription failure ends the session: `'error'` (when a listener exists), then `'close'`. */
+  /**
+   * A transcription failure ends the session: `'error'` (when a listener
+   * exists), then `close()`, which runs though an `'error'` listener throws.
+   */
   private fail(err: unknown): void {
     if (this.closed) return;
     const error = VoicePipelineError.classifyError(err, { kind: 'stt', provider: this.providerId });
     if (this.listenerCount('error') > 0) {
-      this.emit('error', error);
+      this.emitEach('error', error);
     } else {
       console.warn('[moonshine-browser-stt] error (no listener attached):', error.message);
     }
     this.close();
+  }
+
+  /**
+   * Hands an event to each of its listeners in order, as `emit()` does,
+   * except that a listener that throws is written as a console warning and
+   * the listeners after it still run. `emit()` stops at a throw and throws
+   * into its caller, which would leave the session's last events unsent: the
+   * rest of a close, or the close that follows a failure.
+   *
+   * @param eventName - One of the session's last events.
+   * @param args - What each listener is handed.
+   */
+  private emitEach(eventName: 'transcript' | 'error' | 'close', ...args: unknown[]): void {
+    for (const listener of this.rawListeners(eventName)) {
+      try {
+        (listener as (...values: unknown[]) => unknown).apply(this, args);
+      } catch (thrown) {
+        console.warn(
+          `[moonshine-browser-stt] a listener of '${eventName}' threw:`,
+          thrown instanceof Error ? thrown.message : String(thrown)
+        );
+      }
+    }
   }
 }
