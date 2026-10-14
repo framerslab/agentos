@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { digestOf } from '../../digest.js';
+import { EvidenceClaimVerifier } from '../../EvidenceClaimVerifier.js';
 import { absenceAdapter, buildAbsenceRecord, inventoryDiff, type TripwireInput } from '../AbsenceEvidence.js';
 
 const tripwire = (overrides: Partial<TripwireInput> = {}): TripwireInput => ({
@@ -58,5 +59,50 @@ describe('absence evidence', () => {
     const committed = [{ kind: 'route' as const, id: '/api/v1/me', classification: 'account' }];
     expect(inventoryDiff(committed, [{ kind: 'route', id: '/api/v1/me' }, { kind: 'route', id: '/api/v1/assistants' }])).toEqual({ unclassified: [{ kind: 'route', id: '/api/v1/assistants' }], removed: [] });
     expect(inventoryDiff(committed, [])).toEqual({ unclassified: [], removed: [{ kind: 'route', id: '/api/v1/me' }] });
+  });
+
+  it('is invalid when the commit is not a full hash, the reason is blank or a probe answers twice', () => {
+    expect(buildAbsenceRecord(tripwire(), 'HEAD', targets, notFound).problems).toEqual(['the searched commit is not a full commit hash']);
+    expect(buildAbsenceRecord(tripwire(), 'c'.repeat(12), targets, notFound).verdict).toBe('invalid');
+    expect(buildAbsenceRecord(tripwire(), 'c'.repeat(64), targets, notFound).verdict).toBe('absent');
+    expect(buildAbsenceRecord(tripwire({ scope: ['nowhere/'], noDatabaseReason: ' ', probes: [] }), 'c'.repeat(40), targets, []).problems).toEqual(['the scoped manifest is empty and no reason says why']);
+    const twice = buildAbsenceRecord(tripwire(), 'c'.repeat(40), targets, [...notFound, { method: 'GET', path: '/api/v1/bot/runs', status: 200 }]);
+    expect(twice.problems).toEqual(['the probe GET /api/v1/bot/runs was answered more than once']);
+    expect(twice.verdict).toBe('invalid');
+  });
+
+  it('lists the manifest in one order whatever order the targets come in', () => {
+    const read = [{ path: 'routes/page.tsx', text: 'export const a = 1;', kind: 'source' as const }, { path: 'routes/page.tsx', text: '<p>a</p>', kind: 'ui' as const }];
+    const forward = buildAbsenceRecord(tripwire({ probes: [] }), 'c'.repeat(40), read, []);
+    const backward = buildAbsenceRecord(tripwire({ probes: [] }), 'c'.repeat(40), [...read].reverse(), []);
+    expect(backward.manifest).toEqual(forward.manifest);
+    expect(backward.manifestDigest).toBe(forward.manifestDigest);
+  });
+
+  it('authorizes only an absent record that holds the commit, terms, manifest and reason its verdict rests on', async () => {
+    const verifier = new EvidenceClaimVerifier({ adapters: [absenceAdapter()] });
+    const claim = { claimId: 'example-bot.primary', sentenceDigest: digestOf('The example bot does not exist.'), requirements: [{ kind: 'absence' as const, ref: 'example-bot.primary' }] };
+    const refusals = async (payload: object): Promise<string[]> => {
+      const report = await verifier.verify([claim], [{ kind: 'absence', ref: 'example-bot.primary', digest: digestOf(payload), payload }]);
+      expect(report.inputErrors).toEqual([]);
+      expect(report.results).toHaveLength(1);
+      return report.results.flatMap((result) => result.failures.map((failure) => failure.detail));
+    };
+    const record = buildAbsenceRecord(tripwire(), 'c'.repeat(40), targets, notFound);
+    expect(await refusals(record)).toEqual([]);
+    expect(await refusals({ ...record, manifest: [...record.manifest, { path: 'routes/late.txt', sha256: 'f'.repeat(64) }] })).toEqual(['unverifiable: the manifest does not match its digest']);
+    expect(await refusals({ ...record, commit: 'HEAD' })).toEqual(['unverifiable: the record names no full commit hash']);
+    expect(await refusals({ ...record, terms: [] })).toEqual(['unverifiable: the record names no search term']);
+    const capability = { path: 'routes/bots.txt', line: 1, selector: { kind: 'route', pattern: '^/api/v1/bot(?:/|$)' }, excerpt: '/api/v1/bot/runs', classification: 'capability', reason: null };
+    expect(await refusals({ ...record, matches: [capability] })).toEqual(['unverifiable: the record holds a match that is not a foundation']);
+    expect(await refusals({ ...record, probes: [{ method: 'GET', path: '/api/v1/bot/runs', status: null }] })).toEqual(['unverifiable: the record holds a probe that did not answer']);
+    const empty = buildAbsenceRecord(tripwire({ scope: ['nowhere/'], noDatabaseReason: 'a published listing has no table', probes: [] }), 'c'.repeat(40), targets, []);
+    expect(await refusals(empty)).toEqual([]);
+    expect(await refusals({ ...empty, noDatabaseReason: null })).toEqual(['unverifiable: the manifest is empty and no reason says why']);
+  });
+
+  it('counts a blank classification as none', () => {
+    const committed = [{ kind: 'route' as const, id: '/api/v1/me', classification: 'account' }, { kind: 'route' as const, id: '/api/v1/assistants', classification: ' ' }];
+    expect(inventoryDiff(committed, [{ kind: 'route', id: '/api/v1/me' }, { kind: 'route', id: '/api/v1/assistants' }])).toEqual({ unclassified: [{ kind: 'route', id: '/api/v1/assistants' }], removed: [] });
   });
 });
