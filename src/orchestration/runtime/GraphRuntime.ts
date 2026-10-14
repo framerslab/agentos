@@ -411,7 +411,7 @@ export class GraphRuntime {
           ) as Array<NonNullable<typeof haltingOutcome>>;
           const merged = stateManager.mergeParallelBranches(
             baseState,
-            haltedBatch.map((outcome) => outcome.branchState),
+            haltedBatch.map((outcome) => stateAsWritten(outcome.branchState, outcome.writes)),
             haltedBatch.map((outcome) => outcome.writes),
           );
           haltState = { ...haltingOutcome.branchState, scratch: merged.scratch, artifacts: merged.artifacts };
@@ -475,7 +475,7 @@ export class GraphRuntime {
         if (successfulBranches.length > 0) {
           state = stateManager.mergeParallelBranches(
             baseState,
-            successfulBranches.map((branch) => branch.branchState),
+            successfulBranches.map((branch) => stateAsWritten(branch.branchState, branch.writes)),
             successfulBranches.map((branch) => branch.writes),
           );
 
@@ -1323,6 +1323,27 @@ function evaluateConditionExpression(expr: string, state: GraphState): unknown {
 
 function getResultEvents(result: NodeExecutionResult): GraphEvent[] {
   return Array.isArray(result.events) ? result.events : [];
+}
+
+/**
+ * The state a branch of a parallel batch gives the merge after the batch: its
+ * own state, with each scratch key it wrote holding the value it wrote.
+ *
+ * Inside the branch, a reducer registered for the key has already combined the
+ * write with the value from before the batch. The merge combines each branch's
+ * value with the value merged so far, which starts from that same value, so
+ * given the combined value it would count the value from before the batch once
+ * more for every branch that wrote the key.
+ *
+ * @param branchState - The branch's state after its node ran.
+ * @param writes      - What the branch wrote.
+ */
+function stateAsWritten(branchState: GraphState, writes: ParallelBranchWrites): GraphState {
+  if (!writes.scratch) return branchState;
+  return {
+    ...branchState,
+    scratch: { ...(branchState.scratch as Record<string, unknown>), ...writes.scratch },
+  };
 }
 
 /**

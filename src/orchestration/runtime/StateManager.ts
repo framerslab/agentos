@@ -169,6 +169,12 @@ export class StateManager {
    * the value merged so far, when there is one; otherwise the branch's value
    * replaces it, so the last branch to write a key wins.
    *
+   * The merged value starts from `baseState`'s, so a branch's value for a key with
+   * a reducer has to be the value the branch wrote: a value the reducer already
+   * combined with `baseState`'s, as `updateScratch()` leaves it, counts
+   * `baseState`'s value again. `GraphRuntime` passes each branch's state with the
+   * scratch values its node wrote.
+   *
    * The `memory`, `diagnostics`, `visitedNodes`, and `iteration` fields of
    * `baseState` are preserved unchanged — the caller is responsible for merging
    * those separately if needed.
