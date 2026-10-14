@@ -245,7 +245,7 @@ Emitted when the model requests a tool call. It carries `isFinal: false`, and `e
 - **`SANITIZE`** cannot rewrite a tool call: it is applied as a `BLOCK` that keeps your reason and reason code.
 - **`FLAG`** and **`ALLOW`** pass the chunk on, with the evaluation in its `metadata.guardrail.output`.
 
-A call with `executionMode: 'internal'` is one the runtime executes itself. AgentOS asks your guardrail about it before it runs, as a `TOOL_CALL_REQUEST` chunk holding that one call: a `BLOCK` (or a `SANITIZE`) refuses the call, the tool does not run, and the model reads a refused tool result. Your guardrail also receives the stream's chunk for the call, where a `BLOCK` ends the stream.
+A call with `executionMode: 'internal'` is one the runtime executes itself. AgentOS asks your guardrail about it before it runs, as a `TOOL_CALL_REQUEST` chunk holding that one call: a `BLOCK` (or a `SANITIZE`) refuses the call, the tool does not run, and the model reads a refused tool result. On the stream `processRequest()` returns, your guardrail also receives the stream's chunk for the call, where a `BLOCK` ends the stream; a continuation's stream carries no chunk for such a call. A refused call never becomes an actionable request, and the `FINAL_RESPONSE` lists it in `finalToolCalls`.
 
 ```typescript
 {
