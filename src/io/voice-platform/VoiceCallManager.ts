@@ -64,6 +64,8 @@ async function putState(tx: VoiceTransaction, row: VoiceRow<StoredVoiceCall>, fi
 /**
  * Atomic end intent, shared with the credential stop transaction. A terminal call is immutable here.
  * Purge fences content immediately; an active cleanup repeats from its first step after that stronger request.
+ * A purge that reaches a call already ending keeps the end reason and the ended or failed outcome of the
+ * request that began the ending; the purge shows in content retention and transcript availability.
  */
 export async function requestCallEndInTransaction(tx: VoiceTransaction, callId: string, reason: CallEndReason, now: number): Promise<VoiceCall> {
   const row = await tx.get('calls', callId);
@@ -73,8 +75,8 @@ export async function requestCallEndInTransaction(tx: VoiceTransaction, callId: 
   if (s.call.state === 'ending' && (reason !== 'purged' || s.contentFenced)) return s.call;
   const wasEnding = s.call.state === 'ending';
   meter.close(s, now, reason === 'worker_lost');
-  s.call.state = 'ending'; s.call.endReason = reason; s.endingAt ??= now;
-  s.terminalFailed = failureReasons.has(reason); s.call.inferenceGeneration = voiceInteger(s.call.inferenceGeneration + 1);
+  s.call.state = 'ending'; s.endingAt ??= now; s.call.inferenceGeneration = voiceInteger(s.call.inferenceGeneration + 1);
+  if (!wasEnding) { s.call.endReason = reason; s.terminalFailed = failureReasons.has(reason); }
   if (!wasEnding || reason === 'purged') s.credentialGeneration = voiceInteger(s.credentialGeneration + 1, 1);
   if (reason === 'purged') { s.contentFenced = true; s.call.contentRetention.state = 'revoking'; s.cleanupStep = 0; }
   await putState(tx, row);
