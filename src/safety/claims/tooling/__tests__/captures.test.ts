@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { digestOf, sha256Hex } from '../../digest.js';
+import { canonicalJson, digestOf, sha256Hex } from '../../digest.js';
 import { captureAdapter, validateCaptureSet, type CaptureManifest, type CaptureRequirement } from '../CaptureEvidence.js';
 import { runCaptures, selectDriver, type CaptureDriver } from '../CaptureDriver.js';
 import { fixtureDigest, validateFixtureManifest, type FixtureManifest } from '../FixtureManifest.js';
@@ -117,6 +117,9 @@ describe('historical captures', () => {
   const check = (p: HistoricalCapturePayload, verified = true) =>
     historicalCaptureAdapter({ captions: new Set(['history.caption.example', 'history.alt.example']), verifyBundleCapture: async () => verified, originalFor: () => ({ receiptDigest: 'r', placement: payload.placement, claimIds: payload.claimIds, requirement: required }), verifyOriginal: async () => true }).check(
       { kind: 'historical-capture', ref: p.captureId, digest: digestOf(p), payload: p }, { claimId: 'example-feature.primary', sentenceDigest: 'x', requirements: [] }, new AbortController().signal);
+  const against = (p: HistoricalCapturePayload, expected: { receiptDigest: string; placement: HistoricalCapturePayload['placement']; claimIds: readonly string[]; requirement: CaptureRequirement }) =>
+    historicalCaptureAdapter({ captions: new Set(['history.caption.example', 'history.alt.example']), verifyBundleCapture: async () => true, originalFor: () => expected, verifyOriginal: async () => true }).check(
+      { kind: 'historical-capture', ref: p.captureId, digest: digestOf(p), payload: p }, { claimId: 'example-feature.primary', sentenceDigest: 'x', requirements: [] }, new AbortController().signal);
 
   it('rejects a sibling original, changed receipt and unauthorized history route', async () => {
     expect((await check({ ...payload, claimIds: ['sibling.primary'] })).verdict).toBe('contradicted');
@@ -133,5 +136,28 @@ describe('historical captures', () => {
     expect((await check({ ...payload, placement: { ...payload.placement, kind: 'active' } })).verdict).toBe('contradicted');
     expect((await check({ ...payload, placement: { ...payload.placement, captionId: 'free.text' } })).verdict).toBe('contradicted');
     expect((await check(payload, false)).verdict).toBe('unverifiable');
+  });
+  it('supports a payload read back from its canonical JSON, whose keys come in another order', async () => {
+    // A durable store holds canonical JSON, keys sorted: the same value and digest as the payload written.
+    const readBack = JSON.parse(canonicalJson(payload)) as HistoricalCapturePayload;
+    expect(Object.keys(readBack.placement)).not.toEqual(Object.keys(payload.placement));
+    expect(digestOf(readBack)).toBe(digestOf(payload));
+    expect((await check(readBack)).verdict).toBe('supported');
+  });
+  it('contradicts a date that is not a calendar day, and supports a leap day', async () => {
+    expect((await check({ ...payload, originalDate: '2024-02-29' })).verdict).toBe('supported');
+    for (const changed of [{ ...payload, originalDate: '2026-02-30' }, { ...payload, originalDate: '2026-00-10' }, { ...payload, receiptDate: '2026-11-31' }, { ...payload, receiptDate: '2026-13-01' }]) {
+      expect(await check(changed)).toEqual({ verdict: 'contradicted', basis: 'deterministic', detail: 'a date is not a YYYY-MM-DD calendar day' });
+    }
+  });
+  it('contradicts an original whose receipt neither the payload nor the policy names', async () => {
+    expect(await against({ ...payload, originalReceiptDigest: '' }, { receiptDigest: '', placement: payload.placement, claimIds: payload.claimIds, requirement: required }))
+      .toEqual({ verdict: 'contradicted', basis: 'deterministic', detail: 'the original receipt is missing' });
+  });
+  it('contradicts an original that does not picture the requesting claim', async () => {
+    // The policy's requirement names only the sibling, so the original meets it without picturing the requesting claim.
+    const both = ['example-feature.primary', 'sibling.primary'];
+    expect(await against({ ...payload, claimIds: both, originalManifest: { ...original, claimIds: ['sibling.primary'] } }, { receiptDigest: 'r', placement: payload.placement, claimIds: both, requirement: { ...required, claimIds: ['sibling.primary'] } }))
+      .toEqual({ verdict: 'contradicted', basis: 'deterministic', detail: 'the original does not picture the requesting claim' });
   });
 });
