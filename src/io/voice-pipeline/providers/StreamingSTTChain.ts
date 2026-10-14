@@ -90,7 +90,11 @@ export interface StreamingSTTChainOptions {
    * backup has taken over, `'stt:gap'` (`{ lostMs, attempt }`) when frames
    * pushed during the switch were dropped past `maxPendingFrames`. Its
    * `flush()` waits for a switch in progress and drains the provider session
-   * in use. A provider close after flush and before the next frame emits one
+   * in use. The transcripts a provider session emits as the facade closes it,
+   * such as the empty finals with which the Moonshine browser provider
+   * retracts an open line's interim text, still reach the facade's listeners:
+   * on a switch, before the backup's; when the facade ends, before its
+   * `'close'`. A provider close after flush and before the next frame emits one
    * facade close; later audio is ignored. A frame whose duration (samples
    * over sample rate) is not above zero and at most `ringBufferCapacityMs`
    * ends the facade, and so does a switch no provider can take: the facade
@@ -194,8 +198,10 @@ export class StreamingSTTChain implements IStreamingSTT {
    * tees audio into a ring buffer and, on the active session's error, or its close before a flush, closes it and
    * opens the next remaining provider (authorized first under a `ProviderPolicy`), replays the buffered audio when
    * there is at least `minReplayMs` of it, then the frames pushed during the switch, and goes on. Only the active
-   * session's transcripts, speech events and warnings reach the facade, and a final that repeats one another
-   * provider already gave for the same audio is dropped. A close the caller asks for ends the session: it starts no
+   * session's transcripts, speech events and warnings reach the facade, and the transcripts a session emits as the
+   * facade closes it, which go out before anything that follows. A final that repeats one another provider already
+   * gave for the same audio is dropped; an empty final, which retracts its own provider's interim text, is never
+   * taken for a repeat. A close the caller asks for ends the session: it starts no
    * backup, and a backup still opening then is closed when it opens. When the session was opened with
    * `config.call`, every frame goes to the provider session's `pushAudioScoped()`, and the facade has
    * `pushAudioScoped()` and `reset()` when the first session has them. The facade is a `VoiceEventEmitter`, so the
@@ -210,6 +216,8 @@ export class StreamingSTTChain implements IStreamingSTT {
     let provider = first;
     let remaining = [...candidates];
     let closed = false;
+    // The provider session the facade is closing: the transcripts it emits as it closes still go out.
+    let retiring: StreamingSTTSession | undefined;
     let flushed = false;
     let switching: Promise<void> | undefined;
     const pending: AudioFrame[] = [];
@@ -223,12 +231,31 @@ export class StreamingSTTChain implements IStreamingSTT {
         await scoped.pushAudioScoped(frame as Parameters<ScopedStreamingSTTSession['pushAudioScoped']>[0]);
       } else await session.pushAudio(frame);
     };
-    const finish = (): void => {
+    // Closes a provider session the facade lets go of. The transcripts it emits as it closes, such as the empty finals
+    // with which a provider retracts interim text it showed, go out first.
+    const retire = (session: StreamingSTTSession | undefined): void => {
+      if (!session) return;
+      retiring = session;
+      try {
+        session.close();
+      } finally {
+        retiring = undefined;
+      }
+    };
+    // Ends the facade once: the session it last used is closed, its last transcripts going out, then 'close' is
+    // emitted. A throw from that session's close() reaches the caller after 'close', unless `quiet`.
+    const finish = (last?: StreamingSTTSession, quiet = false): void => {
       if (closed) return;
       closed = true;
       pending.length = 0;
       ring.clear();
-      facade.emit('close');
+      try {
+        retire(last);
+      } catch (error) {
+        if (!quiet) throw error;
+      } finally {
+        facade.emit('close');
+      }
     };
     const fatal = (error: Error): void => {
       if (closed) return;
@@ -237,18 +264,16 @@ export class StreamingSTTChain implements IStreamingSTT {
       } finally {
         const old = current;
         current = undefined;
-        finish();
-        try {
-          old?.close();
-        } catch {
-          /* terminal cleanup continues */
-        }
+        // Terminal cleanup goes on though the session's close() throws.
+        finish(old, true);
       }
     };
     const attach = (session: StreamingSTTSession, id: string): void => {
       session.on('transcript', (event: TranscriptEvent) => {
-        if (closed || session !== current) return;
-        if (event.isFinal && event.startMs !== undefined && event.endMs !== undefined && dedupe.evaluate({ provider: id, text: event.text, audioStartMs: event.startMs, audioEndMs: event.endMs, isFinal: true }).isDuplicate) return;
+        if (session !== retiring && (closed || session !== current)) return;
+        // An empty final retracts interim text its own provider showed and repeats no one's words, so it is never
+        // a duplicate.
+        if (event.isFinal && event.text.trim() !== '' && event.startMs !== undefined && event.endMs !== undefined && dedupe.evaluate({ provider: id, text: event.text, audioStartMs: event.startMs, audioEndMs: event.endMs, isFinal: true }).isDuplicate) return;
         facade.emit('transcript', event);
       });
       for (const name of ['vad', 'speech_start', 'speech_end'] as const) session.on(name, (...args: unknown[]) => {
@@ -284,7 +309,7 @@ export class StreamingSTTChain implements IStreamingSTT {
       const started = Date.now();
       const old = current;
       current = undefined;
-      old?.close();
+      retire(old);
       for (const backup of remaining) {
         if (closed) return;
         if (this.opts.breaker && !this.opts.breaker.isAvailable(backup.providerId)) continue;
@@ -374,8 +399,7 @@ export class StreamingSTTChain implements IStreamingSTT {
         if (closed) return;
         const old = current;
         current = undefined;
-        finish();
-        old?.close();
+        finish(old);
       },
     });
     const scoped = initial as Partial<ScopedStreamingSTTSession>;
