@@ -248,6 +248,11 @@ function newestStream(): FakeStream {
   return FakeStream.created[FakeStream.created.length - 1];
 }
 
+/** How many sessions a provider holds: its private set, which a session leaves as it closes. */
+function heldSessions(stt: MoonshineBrowserSTT): number {
+  return (stt as unknown as { sessions: Set<unknown> }).sessions.size;
+}
+
 beforeEach(() => {
   FakeStream.created.length = 0;
   FakeTranscriber.loaded.length = 0;
@@ -386,6 +391,48 @@ for (const thread of THREADS) describe(`MoonshineBrowserSTT on the ${thread} thr
     await settle();
     expect(log.events).toEqual(['close']);
     expect(warn).toHaveBeenCalledWith('[moonshine-browser-stt] error (no listener attached):', 'boom');
+    warn.mockRestore();
+  });
+
+  it('finishes closing when a listener throws on its last events: every listener still hears them, and each throw is warned of', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { stt, session, stream, log } = await open();
+    stream.passes.push([line('e', 'Open line', 0, 0.4)]);
+    session.pushAudio(frame(500));
+    await settle();
+    session.prependListener('transcript', () => {
+      throw new Error('display gone');
+    });
+    session.prependListener('close', () => {
+      throw new Error('cleanup failed');
+    });
+    expect(() => session.close()).not.toThrow();
+    expect(log.events).toEqual(['interim e Open line', 'final e ', 'close']);
+    expect(stream.closed).toBe(true);
+    expect(heldSessions(stt)).toBe(0);
+    expect(warn.mock.calls).toEqual([
+      ["[moonshine-browser-stt] a listener of 'transcript' threw:", 'display gone'],
+      ["[moonshine-browser-stt] a listener of 'close' threw:", 'cleanup failed'],
+    ]);
+    warn.mockRestore();
+  });
+
+  it("ends on a failure though an 'error' listener throws: the error, the open line retracted, then close", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { stt, session, stream, log } = await open();
+    stream.passes.push([line('f', 'Half a', 0, 0.3)]);
+    session.pushAudio(frame(500));
+    await settle();
+    session.prependListener('error', () => {
+      throw new Error('handler failed');
+    });
+    stream.failNextPass = new Error('ORT run failed: out of memory');
+    expect(() => session.pushAudio(frame(100))).not.toThrow();
+    await settle();
+    expect(log.events).toEqual(['interim f Half a', 'error', 'final f ', 'close']);
+    expect(stream.closed).toBe(true);
+    expect(heldSessions(stt)).toBe(0);
+    expect(warn.mock.calls).toEqual([["[moonshine-browser-stt] a listener of 'error' threw:", 'handler failed']]);
     warn.mockRestore();
   });
 

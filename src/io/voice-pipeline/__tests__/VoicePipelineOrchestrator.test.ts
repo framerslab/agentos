@@ -877,4 +877,22 @@ describe('VoicePipelineOrchestrator', () => {
       4_000, 8_001, 12_002, 16_000, 16_000, 16_000, 16_000, 16_000,
     ]);
   });
+
+  it.each(['stopSession()', 'a transport close'] as const)(
+    "should clear every open client line's timer on %s, so none fires after the session",
+    async (stop) => {
+      await startSession();
+      transport.emit('message', clientTranscript('1', 'one', false));
+      transport.emit('message', clientTranscript('2', 'two', false));
+      await vi.advanceTimersByTimeAsync(0);
+      // The watchdog's timer, and one timer for each open line.
+      expect(vi.getTimerCount()).toBe(3);
+
+      if (stop === 'stopSession()') await orchestrator.stopSession('done');
+      else transport.emit('close');
+
+      expect(orchestrator.state).toBe('closed');
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 });
