@@ -12,6 +12,7 @@ import type {
 } from './types.js';
 import { FallbackSTTProxy, FallbackTTSProxy } from './FallbackProxy.js';
 import { findSpeechProviderCatalogEntry } from './providerCatalog.js';
+import { assertSpeechAvailable } from './retirements.js';
 import { z } from 'zod';
 import { isScopedVoiceAdapter, VoiceAdapterManifestSchema, VoiceAdapterRuntime, type ScopedVoiceAdapter, type VoiceAdapterKind, type VoiceAdapterSelection, type OpenedVoiceAdapter, type VoiceSupplierUsageSink } from './VoiceAdapter.js';
 import { VoiceAgentSchema, type VoiceAgent } from '../voice-platform/contracts/index.js';
@@ -412,6 +413,7 @@ export class SpeechProviderResolver extends EventEmitter {
       for (const providerId of ids) {
         const adapter = this.voiceAdapters.get(`${kind}:${providerId}`); if (!adapter) throw new Error('typed voice adapter missing');
         const m = adapter.manifest; const permission = permitted.find((p) => p.providerId === providerId)!;
+        assertSpeechAvailable(m.providerId, m.modelId, Date.now(), scope.policy.mode);
         if (m.locality !== permission.locality || !m.languages.includes(agent.language) || !m.sampleRates.includes(purpose === 'tts' ? agent.tts.sampleRate : 16000) || !m.codecs.includes(purpose === 'tts' ? agent.tts.codec : 'pcm_f32le')) throw new Error('voice manifest capability refused');
         if (providerId === primary.providerId && (m.modelId !== primary.modelId || m.modelRevision !== primary.modelRevision)) throw new Error('voice model revision refused');
         if (purpose === 'tts' && !m.voices.some((v) => v.id === agent.voice.id && v.revision === agent.voice.revision)) throw new Error('voice revision refused');
@@ -474,6 +476,7 @@ export class SpeechProviderResolver extends EventEmitter {
     const purpose = kind === 'batch-stt' ? 'stt' : 'tts'; const permission = scope.policy.providers.find((p) => p.providerId === providerId && p.purposes.includes(purpose));
     if (!adapter || adapter.kind !== kind || !permission || !scope.policy.purposes.includes(purpose)) throw new Error('batch provider refused');
     const m = adapter.manifest;
+    assertSpeechAvailable(m.providerId, m.modelId, Date.now(), scope.policy.mode);
     if (m.streaming || m.locality !== permission.locality || (scope.policy.mode === 'local' && m.locality !== 'local') || m.modelId !== selection.modelId || m.modelRevision !== selection.modelRevision || !m.languages.includes(selection.language) || !m.sampleRates.includes(selection.sampleRate) || !m.codecs.includes(selection.codec)) throw new Error('batch capability refused');
     if (kind === 'batch-tts' && (!selection.voice || !m.voices.some((voice) => voice.id === selection.voice!.id && voice.revision === selection.voice!.revision))) throw new Error('batch voice refused');
     if (m.origin) await checkDestination(m.origin, (scope.policy.mode === 'hosted' ? hostedEgressPolicy : localEgressPolicy)(), network.lookup);
