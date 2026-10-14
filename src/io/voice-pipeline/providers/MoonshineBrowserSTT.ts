@@ -833,7 +833,10 @@ class MoonshineBrowserSession extends VoiceEventEmitter implements StreamingSTTS
    * final of every open line, then starts it again for what follows. Frames
    * pushed meanwhile are held and fed after the restart. Resolves once the
    * stream runs again, or the session has closed; a call during a flush
-   * shares it.
+   * shares it, a call from a listener of the flush's own finals among them.
+   * The stream stops once the code that calls `flush()` has returned, so a
+   * flush from a `'transcript'` listener on the calling thread, whose event
+   * comes from inside a pass, lets that pass deliver its events first.
    */
   flush(): Promise<void> {
     if (this.closed || !this.engine) return Promise.resolve();
@@ -868,6 +871,13 @@ class MoonshineBrowserSession extends VoiceEventEmitter implements StreamingSTTS
     this.restarting = true;
     const nextRunStartMs = this.pushedMs;
     try {
+      // On the calling thread a pass emits its line events from inside
+      // pushAudio(): a stop made there, from a listener, would complete a line
+      // before the pass's later events for it, which would then reopen it.
+      // Waiting for the calling code to return lets the pass finish, and the
+      // stop's own finals then find this flush in place.
+      await Promise.resolve();
+      if (this.closed) return;
       await engine.stop();
       if (this.closed) return;
       this.runStartMs = nextRunStartMs;
