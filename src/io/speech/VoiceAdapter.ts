@@ -87,7 +87,9 @@ export class VoiceAdapterRuntime {
       } finally {
         live = false; abort.abort();
         if (!complete) {
+          // eslint-disable-next-line no-unsafe-finally -- missing stop evidence replaces the request's own error, so an unfenced provider attempt never reads as stopped
           try { const proof = await fence(grant.attemptId); if (proof.stopped !== true || !proof.evidenceRef) throw new Error('adapter fence incomplete'); }
+          // eslint-disable-next-line no-unsafe-finally -- as above: a fence that fails marks the runtime failed and wins over the request's error
           catch { this.failure = true; throw new Error('adapter fence incomplete'); }
         }
       }
