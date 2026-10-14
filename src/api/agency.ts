@@ -32,8 +32,8 @@
  *   `EmergentAgentJudge` directly if you need runtime agent synthesis
  *   inside a custom orchestrator.
  * - Multi-turn conversational simulations where a fixed roster all
- *   speak each turn. The agency strategies pick WHICH agent runs next;
- *   they do not run all of them in parallel per turn.
+ *   speak each turn. Each `generate()` or session `send()` answers one
+ *   input, so a turn loop across calls is the caller's to write.
  *
  * `agency().session()` keeps per-session message history and usage totals
  * only. `agency()` keeps no shared memory (it does not use
@@ -140,8 +140,10 @@ export function agency(opts: AgencyOptions): Agent {
   }
 
   // 2. Compile the orchestration strategy into an executable CompiledStrategy.
-  //    When `adaptive` is true the strategy dispatcher wraps the chosen strategy
-  //    with an implicit hierarchical manager.
+  //    When `adaptive` is true the hierarchical strategy is compiled in place
+  //    of the declared one. compileStrategy()'s adaptive wrapper, which names
+  //    the declared strategy to the manager, wraps only a non-hierarchical
+  //    strategy, so it is not reached from here.
   //    Auto-detect 'graph' when any sub-agent declares `dependsOn`.
   //    `hitl.approvals.beforeTool` is not copied into the roster: it is
   //    enforced per call by the approval gate (see buildCallOptions below).
@@ -747,8 +749,9 @@ export function agency(opts: AgencyOptions): Agent {
           },
 
           /**
-           * Returns stub usage totals for this session.
-           * Real per-session accounting requires a usage ledger — see `AgentOptions.usageLedger`.
+           * Returns this session's usage totals, which the agency adds up in
+           * memory as the session's runs report usage. `agency()` writes no
+           * usage ledger.
            */
           async usage(): Promise<{ promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number }> {
             return { ...getSessionUsage(sessionUsage, sessionId) };
@@ -767,8 +770,9 @@ export function agency(opts: AgencyOptions): Agent {
     },
 
     /**
-     * Returns stub cumulative usage totals for the agency.
-     * Real accounting requires a usage ledger — see `AgentOptions.usageLedger`.
+     * Returns the usage totals the agency adds up in memory as its runs report
+     * usage: the whole agency's, or with `sessionId`, that session's.
+     * `agency()` writes no usage ledger.
      */
     async usage(sessionId?: string): Promise<{ promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number }> {
       return sessionId
@@ -847,13 +851,14 @@ export function agency(opts: AgencyOptions): Agent {
 
   /**
    * When `opts.voice.enabled` is set, attach a `listen()` method that starts a
-   * local WebSocket server and exposes a port for real-time audio I/O.
+   * WebSocket server on 127.0.0.1 (port 0, the default, picks a free port) and
+   * returns its port, its URL and a `close()`.
    *
-   * The WebSocket server acts as the transport layer; on each incoming connection
-   * the audio bytes are bridged to the agency via `generate()` / `session()` once
-   * a full-pipeline STT+TTS integration is in place.  For v1 the connection
-   * handler is a no-op stub, establishing the port and URL surface so callers
-   * can integrate their own audio transport.
+   * The server carries text, not audio, and runs no speech-to-text or
+   * text-to-speech. Each message is read as JSON; one with a `text` field is
+   * sent through the agency's `generate()`, and the reply goes back as
+   * `{ "text": ... }`. A message that is not JSON, or whose run throws, gets
+   * `{ "error": ... }` back.
    *
    * Dynamic import of `ws` keeps voice entirely optional — if the package is
    * not installed the error message tells the caller exactly what to install.
@@ -874,9 +879,8 @@ export function agency(opts: AgencyOptions): Agent {
         const actualPort = address?.port ?? port;
 
         /**
-         * Connection handler: each WebSocket client is a voice session.
-         * Bridges audio frames through the voice pipeline (STT → LLM → TTS)
-         * when the voice-pipeline module is available, otherwise logs a warning.
+         * Connection handler: each message a client sends is one text turn,
+         * read as JSON as described above. No audio is read.
          */
         wss.on('connection', async (ws: any) => {
           // Voice pipeline stub — STT/TTS bridging requires a full AudioProcessor
@@ -1174,22 +1178,20 @@ function normalizeGuardrails(
 }
 
 /**
- * Runs a list of guardrail IDs against the provided text.
+ * Reports each ID in `guardIds` as not evaluated and returns `text` unchanged.
+ * No guardrail runs: `agency()` resolves no ID to a guardrail, so nothing is
+ * blocked or sanitized and nothing is thrown. Each ID goes to
+ * `callbacks.guardrailResult` with `passed: true`, `enforced: false` and
+ * `action: 'allow'`.
  *
- * Uses a dynamic import to load the guardrail infrastructure. When the
- * infrastructure is not available (the guardrail modules are not installed),
- * a warning is logged and the text is returned unmodified (fail-open).
+ * The function first imports AgentOS's guardrail module. When that import
+ * fails, it logs a warning naming the skipped IDs and fires no event.
  *
- * For v1, guardrails are evaluated synchronously in order. Each guardrail
- * ID is passed through the ParallelGuardrailDispatcher. If a guardrail
- * blocks, an error is thrown. Sanitized text is returned when applicable.
- *
- * @param text - The input or output text to evaluate.
+ * @param text - The input or output text.
  * @param guardIds - Guardrail identifier strings.
- * @param direction - Whether this is an `"input"` or `"output"` evaluation.
- * @param callbacks - Optional callback map for firing guardrail events.
- * @returns The (possibly sanitized) text after guardrail evaluation.
- * @throws {AgencyConfigError} When a guardrail blocks the content.
+ * @param direction - `"input"` or `"output"`, named in the warning.
+ * @param callbacks - Optional callback map; each ID goes to `guardrailResult`.
+ * @returns `text`, unchanged.
  */
 async function runGuardrails(
   text: string,
@@ -1205,18 +1207,13 @@ async function runGuardrails(
     );
 
     /*
-     * Build lightweight guardrail service stubs from IDs.
-     * Each stub checks the text against a simple pattern matching strategy.
-     * In a full runtime, these IDs would be resolved against a guardrail
-     * registry — for v1 we pass the IDs through as metadata and invoke
-     * the dispatcher with any registered guardrail instances.
+     * Nothing from the module is used: no ID is resolved to a guardrail, so
+     * the text is returned as it came.
      */
     const sanitizedText = text;
 
     for (const guardId of guardIds) {
-      /* Fire a guardrailResult event indicating the guard was not evaluated.
-       * The guardrail registry is loaded but individual guards are not yet
-       * wired — `enforced: false` signals that no actual evaluation occurred. */
+      /* `enforced: false`: the guard was not evaluated. */
       callbacks?.guardrailResult?.({
         agent: '__agency__',
         guardrailId: guardId,
@@ -1230,8 +1227,8 @@ async function runGuardrails(
     return sanitizedText;
   } catch {
     /*
-     * Guardrail infrastructure not available — fail open with a warning.
-     * This is expected when the guardrail extension packs are not installed.
+     * The import of AgentOS's own guardrail module failed: log the skipped
+     * IDs and return the text.
      */
     console.warn(
       `[AgentOS][Agency] Guardrail infrastructure not available; ` +
@@ -1246,27 +1243,19 @@ async function runGuardrails(
 // ---------------------------------------------------------------------------
 
 /**
- * Injects retrieved context into the prompt when RAG is configured.
+ * Returns `prompt` unchanged: `agency()` retrieves no context. With
+ * `ragConfig.vectorStore` set it asks {@link retrieveRagContext}, which
+ * returns `null`, and when `ragConfig.documents` lists a document it logs an
+ * info message saying the documents are not used. The full runtime retrieves
+ * through the retrieval augmentor that `AgentOSConfig.retrievalAugmentor` or
+ * `AgentOSConfig.ragConfig` sets up.
  *
- * For v1 this is a shell that accepts the {@link RagConfig} and returns the
- * prompt unmodified (no-op) when no live vector store query can be performed.
- * The infrastructure exists in `src/rag/` but initialising
- * `EmbeddingManager` + `VectorStoreManager` is a heavyweight operation best
- * suited to the full `AgentOSOrchestrator` pipeline.
- *
- * When a `ragConfig.vectorStore` is configured, delegates to `retrieveRagContext()`
- * which dynamically imports the embedding manager to embed the query and search
- * the configured vector store.  See `src/rag/IVectorStore.ts` for the query API.
- *
- * When `ragConfig.documents` is set (but a live vector store is not) an info
- * message is logged directing the caller to `AgentOSOrchestrator` for full RAG.
- *
- * @param prompt - The user prompt to augment.
+ * @param prompt - The user prompt.
  * @param ragConfig - RAG configuration from `AgencyOptions.rag`.
- * @returns The (possibly augmented) prompt string.
+ * @returns `prompt`, unchanged.
  */
 async function injectRagContext(prompt: string, ragConfig: RagConfig): Promise<string> {
-  // If a vector store is configured, attempt a live retrieval query.
+  // A vector store is named: retrieveRagContext() returns null, so no context is added.
   if (ragConfig.vectorStore) {
     try {
       const ragContext = await retrieveRagContext(prompt, ragConfig);
@@ -1278,11 +1267,12 @@ async function injectRagContext(prompt: string, ragConfig: RagConfig): Promise<s
     }
   }
 
-  // If documents are specified but no vector store query succeeded, guide the caller.
+  // Documents are listed: say that agency() does not use them.
   if (ragConfig.documents && ragConfig.documents.length > 0) {
     console.info(
-      '[AgentOS][Agency] RAG document loading configured — use AgentOSOrchestrator ' +
-      'for full RAG pipeline with document indexing and retrieval.',
+      '[AgentOS][Agency] rag.documents is set, but agency() loads, indexes and retrieves no documents. ' +
+      'Retrieval runs on the full AgentOS runtime, set up through AgentOSConfig.ragConfig or ' +
+      'AgentOSConfig.retrievalAugmentor.',
     );
   }
 
@@ -1290,25 +1280,22 @@ async function injectRagContext(prompt: string, ragConfig: RagConfig): Promise<s
 }
 
 /**
- * Queries the configured vector store for chunks relevant to `query`.
+ * Returns `null`. The lightweight `agency()` initialises no embedding manager
+ * or vector store, so there is no store to query: `ragConfig.vectorStore`
+ * names a provider, and nothing here opens it.
  *
- * Dynamically imports the embedding manager, embeds the query, and searches
- * the configured vector store for relevant chunks.
- *
- * @param query - The text to embed and search for.
- * @param ragConfig - The active RAG configuration.
- * @returns A joined context string, or `null` when retrieval is unavailable.
+ * @param _query - The text a retrieval would search for (unused).
+ * @param _ragConfig - The RAG configuration (unused).
+ * @returns `null`.
  */
 async function retrieveRagContext(
   _query: string,
   _ragConfig: RagConfig,
 ): Promise<string | null> {
-  // The lightweight agency() API declares vector store intent via
-  // ragConfig.vectorStore.provider but does not initialise a live store.
-  // Full RAG retrieval (embed → search → rerank) is handled by
-  // AgentOSOrchestrator which manages EmbeddingManager + VectorStoreManager
-  // lifecycle. Returning null here falls through to the no-op path in
-  // injectRagContext() which logs guidance to use the full pipeline.
+  // The full runtime sets up the embedding manager, vector stores and
+  // retrieval augmentor (AgentOS.create() with AgentOSConfig.ragConfig, through
+  // RagMemoryInitializer). Returning null leaves the prompt unchanged in
+  // injectRagContext().
   return null;
 }
 
@@ -1345,19 +1332,6 @@ function appendSchemaHint(prompt: string, schema: unknown): string {
   return prompt + hint;
 }
 
-/**
- * Attempts to parse the result text as JSON and validate it against a Zod
- * schema provided via `opts.output`.
- *
- * The parser handles two common LLM output patterns:
- * 1. Clean JSON — the entire text is valid JSON.
- * 2. JSON in a code fence — `\`\`\`json ... \`\`\`` wrapped blocks.
- * 3. JSON object embedded in prose — the first `{ ... }` block is extracted.
- *
- * @param text - The raw result text from the strategy execution.
- * @param schema - The Zod schema (typed as `unknown` to avoid a hard zod dep).
- * @returns The parsed and validated object, or `undefined` on failure.
- */
 /**
  * Extract the first complete JSON object from raw text using brace-matching.
  *
@@ -1409,6 +1383,20 @@ function extractFirstJsonObject(text: string): unknown {
   return undefined;
 }
 
+/**
+ * Attempts to parse the result text as JSON and validate it against a Zod
+ * schema provided via `opts.output`.
+ *
+ * The parser handles three common LLM output patterns, in this order:
+ * 1. Clean JSON — the entire text is valid JSON.
+ * 2. JSON in a code fence — `\`\`\`json ... \`\`\`` wrapped blocks.
+ * 3. JSON object embedded in prose — the first `{ ... }` block is extracted.
+ *
+ * @param text - The raw result text from the strategy execution.
+ * @param schema - The Zod schema (typed as `unknown` to avoid a hard zod dep).
+ * @returns The parsed and validated object, or `undefined` when no pattern
+ *   parses and validates, or when `schema` has no `parse()`.
+ */
 function parseStructuredOutput(text: string, schema: unknown): unknown {
   const zodSchema = schema as { parse: (v: unknown) => unknown };
   if (typeof zodSchema?.parse !== 'function') return undefined;
