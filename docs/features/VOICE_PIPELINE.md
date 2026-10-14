@@ -108,7 +108,7 @@ wunderland chat \
 | [`IBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `HardCutBargeinHandler`, `SoftFadeBargeinHandler` |
 | [`IDiarizationEngine`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | none in this package (see the diarization pack); the orchestrator does not call one |
 
-`createVoiceProvidersFromEnv()` builds STT and TTS providers from the API keys in the environment.
+`createVoiceProvidersFromEnv()` builds STT and TTS providers from the API keys in the environment. Hume ends its TTS API on 13 November 2026 ([Hume's changelog](https://dev.hume.ai/voice/changelog)), so `HumeStreamingTTS` joins the TTS chain only with `ttsPreference: 'hume'`, as the first try, and never from `HUME_API_KEY` alone.
 
 ## Endpointing
 

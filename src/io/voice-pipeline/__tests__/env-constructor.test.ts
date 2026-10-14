@@ -133,11 +133,11 @@ describe('cartesia + hume env wiring', () => {
     expect(tts.providers.map((p) => p.providerId)).not.toContain('cartesia-sonic-stream');
   });
 
-  it('adds hume streaming when HUME_API_KEY is present', () => {
+  it('leaves hume out when HUME_API_KEY is present without the hume preference', () => {
     const { tts } = createVoiceProvidersFromEnv({
       env: { DEEPGRAM_API_KEY: 'd', HUME_API_KEY: 'h' },
     });
-    expect(tts.providers.map((p) => p.providerId)).toContain('hume-octave-stream');
+    expect(tts.providers.map((p) => p.providerId)).not.toContain('hume-octave-stream');
   });
 
   it('key absence = absent from chain (no throw)', () => {

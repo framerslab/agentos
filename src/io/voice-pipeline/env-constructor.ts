@@ -77,7 +77,9 @@ export interface VoiceProviderEnvConfig {
    * first (used for a paid-tier premium-voice opt-in); `'cartesia'` / `'hume'`
    * promote those vendors' streaming providers to first-try when their keys
    * are present. Either way the other vendors stay in the chain as automatic
-   * fallbacks.
+   * fallbacks, except Hume: Hume ends its TTS API on 13 November 2026, so
+   * its streaming provider joins the chain only when `'hume'` names it, never
+   * from `HUME_API_KEY` alone.
    */
   ttsPreference?: 'deepgram' | 'elevenlabs' | 'cartesia' | 'hume';
   /**
@@ -231,11 +233,14 @@ export function createVoiceProvidersFromEnv(
       })
     );
   }
-  if (humeKey) {
+  // Hume ends its TTS API on 13 November 2026 (the speech retirement register,
+  // src/io/speech/retirements.ts), so the key alone never makes it a fallback:
+  // it joins, as the first try, only when the caller names it.
+  if (humeKey && config.ttsPreference === 'hume') {
     ttsProviders.push(
       new HumeStreamingTTS({
         apiKey: humeKey,
-        priority: config.ttsPreference === 'hume' ? 4 : 14,
+        priority: 4,
       })
     );
   }
