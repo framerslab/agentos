@@ -80,6 +80,24 @@ describe('agent', () => {
     expect(message).not.toContain('requires the full AgentOS runtime');
   });
 
+  it('points guardrails and rag to the full runtime alone, and hitl to the runtime or agency()', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    agent({
+      model: 'openai:gpt-4.1-mini',
+      guardrails: ['pii-redaction'],
+      rag: { topK: 3 },
+      hitl: { approvals: { beforeTool: ['search'] }, handler: async () => ({ approved: true }) },
+    });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const message = String(warn.mock.calls[0]?.[0]);
+    // agency() reports its guardrails as not evaluated and retrieves no RAG
+    // context, so only the full runtime is named for those two.
+    expect(message).toContain('agent() accepted config that requires the full AgentOS runtime: rag, guardrails.');
+    expect(message).toContain('agent() accepted config that requires the full AgentOS runtime or agency(): hitl.');
+  });
+
   it('does not warn for lightweight-supported fields', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 

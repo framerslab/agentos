@@ -67,12 +67,23 @@ export function getDeferredLightweightAgentCapabilities(
 const ENFORCED_ON_NO_SURFACE: ReadonlySet<CapabilityKey> = new Set<CapabilityKey>(['security', 'permissions']);
 
 /**
+ * The deferred fields `agency()` applies: its approval gates (`hitl`), the
+ * specialists the hierarchical strategy spawns (`emergent`), structured output
+ * (`output`) and its provenance trail (`provenance`). The warning points the
+ * other deferred fields to the full runtime alone: `agency()` reports its
+ * guardrails as not evaluated, retrieves no RAG context, reads no `discovery`,
+ * serves `voice` as text with no speech, and wires no channels.
+ */
+const APPLIED_BY_AGENCY: ReadonlySet<CapabilityKey> = new Set<CapabilityKey>(['hitl', 'emergent', 'output', 'provenance']);
+
+/**
  * Logs one warning through `warn` when `config` sets a field that
  * {@link getDeferredLightweightAgentCapabilities} returns, and returns those
  * fields. The message has one part per group: the fields it points to the
- * full runtime or `agency()`, the memory settings other than the working
- * callback, and `security` and `permissions`, which no surface enforces.
- * `agent()` without `runtime: 'gmi'` calls it once at construction.
+ * full runtime or `agency()`, those it points to the full runtime alone, the
+ * memory settings other than the working callback, and `security` and
+ * `permissions`, which no surface enforces. `agent()` without
+ * `runtime: 'gmi'` calls it once at construction.
  */
 export function warnOnDeferredLightweightAgentCapabilities(
   config: Partial<BaseAgentConfig>,
@@ -86,11 +97,16 @@ export function warnOnDeferredLightweightAgentCapabilities(
   const parts: string[] = [];
   const enforcedNowhere = deferredCapabilities.filter((key) => ENFORCED_ON_NO_SURFACE.has(key));
   const others = deferredCapabilities.filter((key) => key !== 'memory' && !ENFORCED_ON_NO_SURFACE.has(key));
+  const runtimeOrAgency = others.filter((key) => APPLIED_BY_AGENCY.has(key));
+  const runtimeAlone = others.filter((key) => !APPLIED_BY_AGENCY.has(key));
+  if (runtimeOrAgency.length > 0) {
+    parts.push(`agent() accepted config that requires the full AgentOS runtime or agency(): ${runtimeOrAgency.join(', ')}.`);
+  }
+  if (runtimeAlone.length > 0) {
+    parts.push(`agent() accepted config that requires the full AgentOS runtime: ${runtimeAlone.join(', ')}.`);
+  }
   if (others.length > 0) {
-    parts.push(
-      `agent() accepted config that requires the full AgentOS runtime or agency(): ${others.join(', ')}. `
-        + 'The lightweight helper preserves these fields for compatibility but does not actively enforce them.',
-    );
+    parts.push('The lightweight helper preserves these fields for compatibility but does not actively enforce them.');
   }
   // The default runtime consumes only the working callback, filtered above.
   if (deferredCapabilities.includes('memory')) {
