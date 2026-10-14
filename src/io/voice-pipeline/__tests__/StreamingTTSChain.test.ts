@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { StreamingTTSChain } from '../providers/StreamingTTSChain.js';
+import { StreamingTTSChain, type TTSProviderFailoverEvent } from '../providers/StreamingTTSChain.js';
 import { CircuitBreaker } from '../CircuitBreaker.js';
 import { defaultCapabilities } from '../HealthyProvider.js';
 import type { EncodedAudioChunk, IStreamingTTS, StreamingTTSSession } from '../types.js';
@@ -293,5 +293,47 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     session.pushTokens('Hello world.');
     await expect(session.flush()).rejects.toThrow('synthesis failed');
     expect(seen).toEqual(['error', 'close']);
+  });
+
+  it('rejects a flush() that waited on a switch no provider could take', async () => {
+    const a = pushSession();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts], { enableMidSynthesisFailover: true });
+    const session = await chain.startSession();
+    const seen: string[] = [];
+    session.on('error', () => seen.push('error'));
+    session.on('close', () => seen.push('close'));
+    session.pushTokens('Hello world.');
+    // The provider fails before the flush: the flush waits on a switch that finds no provider.
+    a.emit('error', new Error('socket hang up'));
+    await expect(session.flush()).rejects.toThrow('synthesis failed');
+    expect(seen).toEqual(['error', 'close']);
+    expect(a.flush).not.toHaveBeenCalled();
+  });
+
+  it('flushes the provider a second switch opened when the backup fails as the first switch ends', async () => {
+    const a = pushSession();
+    const b = pushSession();
+    const c = pushSession();
+    const failover = vi.fn((event: TTSProviderFailoverEvent): void => {
+      // The backup's connection drops as the switch to it is reported, before that switch has ended.
+      if (event.to === 'b') b.emit('error', new Error('socket hang up'));
+    });
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts, provider('c', 30, c).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    const errors = vi.fn();
+    session.on('error', errors);
+    session.pushTokens('Hello world.');
+    a.emit('error', new Error('socket hang up'));
+    // The flush waits on the switch to b, which ends by starting the switch to c.
+    await session.flush();
+    expect(failover.mock.calls.map(([event]) => `${event.from}>${event.to}`)).toEqual(['a>b', 'b>c']);
+    expect(c.pushTokens).toHaveBeenCalledWith('Hello world.');
+    expect(c.flush).toHaveBeenCalledOnce();
+    expect(b.flush).not.toHaveBeenCalled();
+    expect(chain.currentProviderId).toBe('c');
+    expect(errors).not.toHaveBeenCalled();
   });
 });

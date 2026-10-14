@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { StreamingSTTChain } from '../providers/StreamingSTTChain.js';
+import { StreamingSTTChain, type ProviderFailoverEvent } from '../providers/StreamingSTTChain.js';
 import { defaultCapabilities } from '../HealthyProvider.js';
 import type {
   AudioFrame,
@@ -733,5 +733,69 @@ describe('StreamingSTTChain: a backup that fails as it takes over', () => {
     expect(breaker.isAvailable('a')).toBe(true);
     expect(seen).toEqual(['error scoped STT input required', 'close']);
     expect(a.pushAudioScoped).toHaveBeenCalledTimes(1);
+  });
+
+  /** Changes that leave a scoped frame without a usable identity, each refused before a provider receives it. */
+  const malformed: ReadonlyArray<[string, Record<string, unknown>]> = [
+    ['a scope id that is undefined', { scopeId: undefined }],
+    ['an empty call id', { callId: '' }],
+    ['a turn id that is not a string', { turnId: 7 }],
+    ['a generation without its transport epoch', { generation: { workerGeneration: 1, inferenceGeneration: 1 } }],
+  ];
+
+  it.each(malformed)('ends a scoped facade at a frame with %s, with no provider sent it', async (_label, change) => {
+    const { CircuitBreaker } = await import('../CircuitBreaker.js');
+    const breaker = new CircuitBreaker({ failureThreshold: 1, windowMs: 60_000, cooldownMs: 60_000 });
+    const scoped = () =>
+      Object.assign(spySession(), {
+        pushAudioScoped: vi.fn(async (_frame: ScopedAudioFrame): Promise<void> => {}),
+        reset: vi.fn(async (_identity: AudioIdentity): Promise<void> => {}),
+      });
+    const a = scoped();
+    const second = spyProvider('b', 20, scoped());
+    const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt], { breaker, enableMidUtteranceFailover: true });
+    const generation = { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 };
+    const identity: AudioIdentity = { scopeId: 'scope-a', callId: 'call-a', turnId: 'turn-a', generation };
+    const facade = (await chain.startSession({ call: identity })) as ScopedStreamingSTTSession;
+    const seen: string[] = [];
+    facade.on('error', (error: Error) => seen.push(`error ${error.message}`));
+    facade.on('close', () => seen.push('close'));
+    const frame: ScopedAudioFrame = { ...halfSecond(), ...identity, generation, sampleRate: 16_000, channels: 1, sequence: 1 };
+    await facade.pushAudioScoped(frame);
+    // A caller outside the type system: the fields are present, but one of them does not identify the frame.
+    await facade.pushAudioScoped({ ...frame, timestamp: 500, sequence: 2, ...change } as unknown as ScopedAudioFrame);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(a.pushAudioScoped).toHaveBeenCalledTimes(1);
+    expect(second.startSession).not.toHaveBeenCalled();
+    expect(breaker.isAvailable('a')).toBe(true);
+    expect(seen).toEqual(['error scoped STT input required', 'close']);
+  });
+
+  it('flushes the provider a second switch opened when the backup fails as the first switch ends', async () => {
+    const a = spySession();
+    const b = spySession();
+    const c = spySession();
+    const failover = vi.fn((event: ProviderFailoverEvent): void => {
+      // The backup's connection drops as the switch to it is reported, before that switch has ended.
+      if (event.to === 'b') b.emit('error', new Error('socket hang up'));
+    });
+    const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, spyProvider('b', 20, b).stt, spyProvider('c', 30, c).stt], {
+      enableMidUtteranceFailover: true,
+      onProviderFailover: failover,
+    });
+    const facade = await chain.startSession();
+    const errors = vi.fn();
+    facade.on('error', errors);
+    const frame = halfSecond();
+    await facade.pushAudio(frame);
+    a.emit('error', new Error('socket hang up'));
+    // The flush waits on the switch to b, which ends by starting the switch to c.
+    await facade.flush();
+    expect(failover.mock.calls.map(([event]) => `${event.from}>${event.to}`)).toEqual(['a>b', 'b>c']);
+    expect(c.pushAudio).toHaveBeenCalledWith(frame);
+    expect(c.flush).toHaveBeenCalledOnce();
+    expect(b.flush).not.toHaveBeenCalled();
+    expect(chain.currentProviderId).toBe('c');
+    expect(errors).not.toHaveBeenCalled();
   });
 });
