@@ -4,9 +4,10 @@
  * A picture of a product as evidence. Each capture's manifest binds its bytes (SHA-256) to the driver and the
  * implementation that rendered it, the source commit and the executable, interface, harness, configuration and
  * provider-fixture digests, the run, the scenario and test, the claims it shows, the page it embeds in, the audience
- * and the serving mode. A set passes when every required size and look is present exactly once and each manifest
- * matches its bytes and the requirement; a picture made at another commit passes only when that commit is named as
- * adopted, after its original provenance was verified and archived.
+ * and the serving mode. A set passes when its requirement names at least one size and one look, every required size
+ * and look is present exactly once, no two manifests share a capture id, and each manifest matches its bytes and the
+ * requirement; a picture made at another commit passes only when that commit is named as adopted, after its original
+ * provenance was verified and archived.
  */
 import type { EvidenceAdapter } from '../types.js';
 
@@ -82,12 +83,17 @@ const sizeLabel = (s: CaptureSize): string => `${s.width}x${s.height}@${s.scale}
  * Every way a set falls short of its requirement.
  *
  * @param payload - The manifests, the bytes' hashes and the requirement.
- * @returns The problems, in a fixed order: per manifest, then per required size and look.
+ * @returns The problems, in a fixed order: per manifest, then the requirement's own, then per required size and look.
  */
 export function validateCaptureSet(payload: CaptureSetPayload): string[] {
   const { manifests, bytes, requirement } = payload;
   const problems: string[] = [];
+  // A capture id keys its bytes' hash, so a second manifest under one id could offer one picture as another size
+  // or look.
+  const seen = new Set<string>();
   for (const m of manifests) {
+    if (seen.has(m.captureId)) problems.push(`${m.captureId}: named twice`);
+    seen.add(m.captureId);
     if (bytes[m.captureId] !== m.sha256) problems.push(`${m.captureId}: the hash is not the bytes' hash`);
     if (m.implementation !== requirement.implementation) problems.push(`${m.captureId}: implementation ${m.implementation}, not ${requirement.implementation}`);
     if (m.audience !== requirement.audience) problems.push(`${m.captureId}: audience ${m.audience}, not ${requirement.audience}`);
@@ -100,6 +106,9 @@ export function validateCaptureSet(payload: CaptureSetPayload): string[] {
       if (requirement.identity && m[field] !== requirement.identity[field]) problems.push(`${m.captureId}: wrong ${field}`);
     }
   }
+  // A requirement with no size or no look asks for no picture, and would pass any set, an empty one included.
+  if (requirement.sizes.length === 0) problems.push('the requirement names no size');
+  if (requirement.looks.length === 0) problems.push('the requirement names no look');
   for (const size of requirement.sizes) {
     for (const look of requirement.looks) {
       const found = manifests.filter((m) => m.width === size.width && m.height === size.height && m.scale === size.scale && m.look === look);
