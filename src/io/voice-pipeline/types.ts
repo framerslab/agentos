@@ -1292,7 +1292,10 @@ export interface IBatchSTT {
  */
 export interface BargeinContext {
   /**
-   * Duration of detected user speech before the barge-in was confirmed, in ms.
+   * Duration of the user's speech over the reply so far, in ms.
+   * `VoicePipelineOrchestrator` asks with 0 as the speech starts, then again
+   * every 100 ms while it lasts, on each of its transcripts and at its end,
+   * each time with the speech measured from its start.
    * Short durations (< 100 ms) often indicate accidental noise, lip smacks,
    * or breaths rather than intentional interruption.
    *
@@ -1378,8 +1381,13 @@ export interface IBargeinHandler {
   readonly mode: 'hard-cut' | 'soft-fade';
 
   /**
-   * Called by the pipeline when a barge-in is confirmed. The handler evaluates
-   * the context and returns the action the pipeline should execute.
+   * Called by the pipeline as the user speaks over the agent's reply.
+   * `VoicePipelineOrchestrator`, without a call profile, asks as the speech
+   * starts and again as it grows (see `BargeinContext.speechDurationMs`),
+   * until the handler answers `'cancel'` or the speech ends, so a handler
+   * that decides by the speech's duration acts once it reaches its threshold.
+   * The handler evaluates the context and returns the action the pipeline
+   * should execute.
    *
    * @param context - Contextual snapshot at the moment of interruption.
    * @returns The action to perform (or a promise resolving to one).
