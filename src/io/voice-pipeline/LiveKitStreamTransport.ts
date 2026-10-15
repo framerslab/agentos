@@ -43,8 +43,9 @@
  *   receipt on the topic.
  *
  * With a publisher the participant's text streams are read with bounds (4096
- * bytes, five seconds, four at once) and only a playback or clear receipt or
- * a `control` message with `mute`, `unmute` or `stop` is taken; anything else
+ * bytes, five seconds, four at once) and only a playback or clear receipt, a
+ * `transcript` message (as `isClientTranscriptMessage()` checks it) or a
+ * `control` message with `mute`, `unmute` or `stop` is taken; anything else
  * is reported as `'error'` and closes the transport. The participant leaving
  * the room closes it too. Outbound text is bounded as well: 16384 bytes a
  * message, four in flight, and a send not done within five seconds closes the
@@ -67,6 +68,7 @@ import { z } from 'zod';
 import type { AudioFrame, IPlaybackTransport, EncodedAudioChunk, ClientTextMessage, ServerTextMessage, PlaybackReceipt, VoiceGeneration } from './types.js';
 import { LiveKitAudioPublisher, isLiveKitSipParticipant, type LiveKitAudioPublisherOptions, type LiveKitPlayout } from './LiveKitAudioPublisher.js';
 import { PlaybackAcknowledgementSchema } from './PlaybackAcknowledgements.js';
+import { isClientTranscriptMessage } from './clientTranscript.js';
 import { LiveKitRoomAudioSource, type LiveKitParticipantLike, type LiveKitRoomLike, type LiveKitRtcModule, type LiveKitTextStreamReaderLike } from '../hearing/LiveKitRoomAudioSource.js';
 
 /** The text stream topic of the control messages when none is configured. */
@@ -121,7 +123,7 @@ export interface LiveKitStreamTransportOptions {
  */
 function closeTextReader(reader: LiveKitTextStreamReaderLike): void { void reader.close?.().catch(() => {}); }
 
-/** The client messages a speaking transport takes besides playback receipts. */
+/** The control messages a speaking transport takes besides playback receipts and transcript messages. */
 const controlSchema = z.strictObject({ type: z.literal('control'), action: z.strictObject({ type: z.enum(['mute', 'unmute', 'stop']) }) });
 
 /**
@@ -136,7 +138,7 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * |-------------|---------------------------|-----------------------------------------------|
  * | `'audio'`   | `AudioFrame`              | The participant's audio, mono Float32.        |
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
- * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `control` message with `mute`, `unmute` or `stop`. |
+ * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. |
  * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting or, with a publisher, the participant leaving or a refused message. |
  * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message. |
  *
@@ -323,7 +325,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       if (this.publisher) {
         const receipt = PlaybackAcknowledgementSchema.safeParse(value);
         if (receipt.success) { this.publisher.receiveReceipt(receipt.data); return; }
-        this.emit('message', controlSchema.parse(value));
+        // A page that transcribes on its own device sends its lines, which a session without a call profile reads.
+        this.emit('message', isClientTranscriptMessage(value) ? value : controlSchema.parse(value));
       } else this.emit('message', value as ClientTextMessage);
     }).catch((error: unknown) => {
       if (this._state !== 'open') return;
