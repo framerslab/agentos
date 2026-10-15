@@ -244,11 +244,13 @@ describe('mail deliveries', () => {
   it('a mail delivery with no mail option, or one whose option throws, is marked failed for the backoff, and the warning names the id alone', async () => {
     const outbox = new InMemoryOutbox();
     const warned: string[] = [];
-    const none = new OutboxDispatcher({ outbox, resolve: async () => undefined, logger: { warn: (m) => warned.push(m) } });
+    const clock = new FakeClock(1_000);
+    const none = new OutboxDispatcher({ outbox, clock, resolve: async () => undefined, logger: { warn: (m) => warned.push(m) } });
     await outbox.enqueue(mail('m1', 'mail:1'), 1_000);
     await none.deliverDue();
     expect((await outbox.listByRun('r1'))[0]?.attempts).toBe(1);
-    const throwing = new OutboxDispatcher({ outbox, resolve: async () => undefined, mail: async () => { throw new Error('the address is secret'); }, logger: { warn: (m) => warned.push(m) } });
+    clock.advance(1_000);
+    const throwing = new OutboxDispatcher({ outbox, clock, resolve: async () => undefined, mail: async () => { throw new Error('the address is secret'); }, logger: { warn: (m) => warned.push(m) } });
     await outbox.replay('m1', 2_000);
     await outbox.enqueue(mail('m2', 'mail:2'), 2_000);
     await throwing.deliverDue();
