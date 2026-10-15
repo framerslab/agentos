@@ -105,8 +105,9 @@ export interface StreamingSTTChainOptions {
    * from every provider session it attached, a failed one too, and, once a
    * backup has taken over, `'stt:gap'` (`{ lostMs, attempt }`) when frames
    * pushed during the switch were dropped past `maxPendingFrames`. Its
-   * `flush()` waits for a switch in progress and drains the provider session
-   * in use. The transcripts a provider session emits as the facade closes it,
+   * `flush()` waits for a switch in progress, and for the next one when the
+   * backup fails as its switch ends, and drains the provider session in use.
+   * The transcripts a provider session emits as the facade closes it,
    * such as the empty finals with which the Moonshine browser provider
    * retracts an open line's interim text, still reach the facade's listeners:
    * on a switch, before the backup's; when the facade ends, before its
@@ -453,10 +454,13 @@ export class StreamingSTTChain implements IStreamingSTT {
       switching = Promise.resolve();
       switching = failover(error).catch((failure: unknown) => fatal(failure instanceof Error ? failure : new Error('STT failed'))).finally(() => {
         switching = undefined;
-        // The backup failed after its replay, before the switch ended: the next switch starts from it.
+        // The backup failed after its replay, before the switch ended: the next switch starts from it. Returned here,
+        // that switch keeps this one unsettled until it settles, so flush() and reset(), which wait on the switch,
+        // resume only once none is under way.
         const late = lost;
         lost = undefined;
         if (late && current) begin(late);
+        return switching;
       });
     };
     attach(initial, this.nameOf(first));
