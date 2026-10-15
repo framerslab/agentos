@@ -3,7 +3,7 @@ import type { TranscriptInput } from '../../../voice-pipeline/types.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { assertMeetingFundingChange, CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
 import type { SecretBox } from '../signing.js';
-import { DuplicateIdempotencyKeyError, FencedError, nextAttemptAt, OUTBOX_GIVE_UP_MS, type IEventStore, type IJobStore, type IOutbox, type IRunStore, type ITranscriptStore, type MeetingJob, type OutboxDelivery, type RunFilter } from './types.js';
+import { DuplicateIdempotencyKeyError, FencedError, nextAttemptAt, OUTBOX_GIVE_UP_MS, type IEventStore, type IJobStore, type IOutbox, type IRunStore, type ITranscriptStore, type MeetingJob, type OutboxDelivery, type OutboxEnqueue, type RunFilter } from './types.js';
 import { abortClaimedSends, runClaimedSend, type ClaimedSends } from './claims.js';
 import type { DeliveryFence } from './fenced-outbox.js';
 
@@ -144,7 +144,9 @@ CREATE TABLE IF NOT EXISTS ${t.outbox} (
   first_attempt_at BIGINT,
   next_at BIGINT NOT NULL,
   state TEXT NOT NULL,
-  purged BOOLEAN NOT NULL DEFAULT FALSE
+  purged BOOLEAN NOT NULL DEFAULT FALSE,
+  kind TEXT NOT NULL DEFAULT 'event',
+  expires_at BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_${p}_outbox_due ON ${t.outbox} (next_at) WHERE state = 'pending';
 CREATE INDEX IF NOT EXISTS idx_${p}_outbox_run ON ${t.outbox} (run_id);
@@ -184,6 +186,8 @@ ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_settlement_json TEXT;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_cleanup_json TEXT;
 ALTER TABLE ${t.locks} ADD COLUMN IF NOT EXISTS turn_seq INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE ${t.locks} ADD COLUMN IF NOT EXISTS outbox_fenced_at BIGINT;
+ALTER TABLE ${t.outbox} ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'event';
+ALTER TABLE ${t.outbox} ADD COLUMN IF NOT EXISTS expires_at BIGINT;
 CREATE INDEX IF NOT EXISTS idx_${tablePrefix}_funding_pending ON ${t.runs} (run_id)
 WHERE funding_cleanup_json IS NOT NULL AND (funding_cleanup_json::jsonb->>'complete') = 'false';
 `;
@@ -585,19 +589,20 @@ export class SqlOutbox implements IOutbox {
     this.t = meetingStoreTables(opts.tablePrefix);
   }
   private fromRow(r: Record<string, unknown>): OutboxDelivery {
-    return { id: String(r.id), runId: String(r.run_id), destinationRef: String(r.destination_ref), eventId: String(r.event_id), type: r.type as OutboxDelivery['type'], payload: String(r.payload), attempts: num(r.attempts) ?? 0, firstAttemptAt: num(r.first_attempt_at), nextAt: num(r.next_at)!, state: r.state as OutboxDelivery['state'], purged: bool(r.purged) };
+    return { id: String(r.id), runId: String(r.run_id), destinationRef: String(r.destination_ref), eventId: String(r.event_id), type: r.type as OutboxDelivery['type'], payload: String(r.payload), attempts: num(r.attempts) ?? 0, firstAttemptAt: num(r.first_attempt_at), nextAt: num(r.next_at)!, state: r.state as OutboxDelivery['state'], purged: bool(r.purged), kind: (r.kind as OutboxDelivery['kind'] | undefined) ?? 'event', expiresAt: num(r.expires_at) };
   }
-  /** Enqueues once per delivery id, refusing new content behind the run's fence. */
-  async enqueue(d: Pick<OutboxDelivery, 'id' | 'runId' | 'destinationRef' | 'eventId' | 'type' | 'payload'>, now: number): Promise<void> {
+  /** Enqueues once per delivery id, refusing new content behind the run's fence (a mail delivery is content). */
+  async enqueue(d: OutboxEnqueue, now: number): Promise<void> {
+    const kind = d.kind ?? 'event';
     await this.opts.db.transaction(async (trx) => {
       const { fencedAt } = await lockRun(trx, this.t.locks, d.runId);
-      if (fencedAt !== undefined && CONTENT_EVENT_TYPES.has(d.type)) return;
-      await trx.run(`INSERT INTO ${this.t.outbox} (id, run_id, destination_ref, event_id, type, payload, next_at, state) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending') ON CONFLICT (id) DO NOTHING`, [d.id, d.runId, d.destinationRef, d.eventId, d.type, d.payload, now]);
+      if (fencedAt !== undefined && (kind === 'mail' || CONTENT_EVENT_TYPES.has(d.type))) return;
+      await trx.run(`INSERT INTO ${this.t.outbox} (id, run_id, destination_ref, event_id, type, payload, next_at, state, kind, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT (id) DO NOTHING`, [d.id, d.runId, d.destinationRef, d.eventId, d.type, d.payload, now, kind, d.expiresAt ?? null]);
     });
   }
-  /** Lists pending deliveries due at now, ordered by due time and id. */
+  /** Lists pending deliveries due at now, ordered by due time and id; a mail delivery past its expiry is left out. */
   async due(now: number, limit = 100): Promise<OutboxDelivery[]> {
-    return (await this.opts.db.all<Record<string, unknown>>(`SELECT * FROM ${this.t.outbox} WHERE state = 'pending' AND next_at <= ? ORDER BY next_at, id LIMIT ?`, [now, limit])).map((r) => this.fromRow(r));
+    return (await this.opts.db.all<Record<string, unknown>>(`SELECT * FROM ${this.t.outbox} WHERE state = 'pending' AND next_at <= ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY next_at, id LIMIT ?`, [now, now, limit])).map((r) => this.fromRow(r));
   }
   /** Marks a delivery accepted by its destination. */
   async markDelivered(id: string): Promise<void> {
@@ -606,18 +611,31 @@ export class SqlOutbox implements IOutbox {
   /** Advances retry backoff, giving up a day after the first failed attempt. A delivery no longer pending (delivered, or given up) is left as it is. */
   async markFailed(id: string, now: number): Promise<void> {
     await this.opts.db.transaction(async (trx) => {
-      const r = await trx.get<Record<string, unknown>>(`SELECT attempts, first_attempt_at, state FROM ${this.t.outbox} WHERE id = ? FOR UPDATE`, [id]);
+      const r = await trx.get<Record<string, unknown>>(`SELECT attempts, first_attempt_at, state, expires_at FROM ${this.t.outbox} WHERE id = ? FOR UPDATE`, [id]);
       // a late failure report from a sender that lost the race resurrects neither a delivery the destination took nor one given up
       if (!r || r.state !== 'pending') return;
       const attempts = (num(r.attempts) ?? 0) + 1;
       const first = num(r.first_attempt_at) ?? now;
-      const dead = now - first >= OUTBOX_GIVE_UP_MS;
+      const expires = num(r.expires_at);
+      const dead = now - first >= OUTBOX_GIVE_UP_MS || (expires !== undefined && now >= expires);
       await trx.run(`UPDATE ${this.t.outbox} SET attempts = ?, first_attempt_at = ?, next_at = ?, state = ? WHERE id = ?`, [attempts, first, dead ? now : nextAttemptAt(attempts, now), dead ? 'dead' : 'pending', id]);
     });
   }
-  /** Resets attempts and makes a delivery due now without restoring any purged payload. */
+  /** Resets attempts and makes a delivery due now without restoring any purged payload; a mail delivery is never replayed. */
   async replay(id: string, now: number): Promise<void> {
-    await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'pending', attempts = 0, first_attempt_at = NULL, next_at = ? WHERE id = ?`, [now, id]);
+    await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'pending', attempts = 0, first_attempt_at = NULL, next_at = ? WHERE id = ? AND kind <> 'mail'`, [now, id]);
+  }
+  /** Ends a pending delivery at once; one no longer pending is left as it is. */
+  async markDead(id: string): Promise<void> {
+    await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'dead' WHERE id = ? AND state = 'pending'`, [id]);
+  }
+  /** Moves a pending delivery's next attempt to `notBefore`, never earlier than it is, without counting an attempt. */
+  async holdUntil(id: string, notBefore: number): Promise<void> {
+    await this.opts.db.run(`UPDATE ${this.t.outbox} SET next_at = GREATEST(next_at, ?) WHERE id = ? AND state = 'pending'`, [notBefore, id]);
+  }
+  /** Ends every pending delivery of the run to the destination. */
+  async cancel(runId: string, destinationRef: string): Promise<void> {
+    await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'dead' WHERE run_id = ? AND destination_ref = ? AND state = 'pending'`, [runId, destinationRef]);
   }
   /**
    * Fences new content and scrubs content deliveries, including delivered rows; content-free deliveries keep their type
@@ -630,7 +648,8 @@ export class SqlOutbox implements IOutbox {
       await lockRun(trx, this.t.locks, runId);
       await trx.run(`UPDATE ${this.t.locks} SET fenced_at = COALESCE(fenced_at, ?) WHERE run_id = ?`, [Date.now(), runId]);
       const types = [...CONTENT_EVENT_TYPES];
-      await trx.run(`UPDATE ${this.t.outbox} SET payload = '', type = 'bot:purged', purged = TRUE WHERE run_id = ? AND type IN (${types.map(() => '?').join(', ')})`, [runId, ...types]);
+      await trx.run(`UPDATE ${this.t.outbox} SET payload = '', type = 'bot:purged', purged = TRUE WHERE run_id = ? AND kind = 'event' AND type IN (${types.map(() => '?').join(', ')})`, [runId, ...types]);
+      await trx.run(`UPDATE ${this.t.outbox} SET payload = '', purged = TRUE, state = 'dead' WHERE run_id = ? AND kind = 'mail'`, [runId]);
     });
     // again once the scrub has committed: a send claimed while it ran may have read the row before it was emptied
     abortClaimedSends(this.claims, runId);

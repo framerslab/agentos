@@ -177,26 +177,40 @@ export interface OutboxDelivery {
   state: 'pending' | 'delivered' | 'dead';
   /** Set when a purge emptied the delivery. */
   purged: boolean;
+  /** What the delivery is: a run event to a webhook registration (`event`, the default), or a mail the host renders and sends (`mail`). */
+  kind: 'event' | 'mail';
+  /** A mail delivery's expiry: it is not due after it, and `markFailed` ends it `dead` at it. Absent on an event delivery. */
+  expiresAt?: number;
 }
 
-/** Outbound deliveries: retried with backoff for a day, replayable, content-free after a purge. */
+/** What `enqueue` takes: the delivery's fields, the kind and the expiry optional (an event with no expiry when absent). */
+export type OutboxEnqueue = Pick<OutboxDelivery, 'id' | 'runId' | 'destinationRef' | 'eventId' | 'type' | 'payload'> & Partial<Pick<OutboxDelivery, 'kind' | 'expiresAt'>>;
+
+/** Outbound deliveries: retried with backoff for a day, replayable, content-free after a purge; mail deliveries delivered at most once within their expiry. */
 export interface IOutbox {
   /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
   forget?(runId: string): Promise<void>;
   /**
    * Adds a pending delivery, due at `now`; a repeated id preserves the first delivery and its retry state. After `purgeContent` for the run, a delivery of a content event (a type in
    * `CONTENT_EVENT_TYPES`) is not stored: the purge is the outbox's fence. A delivery of any other type (`bot:left`,
-   * `bot:purged`, `bot:done` and the rest) is stored.
+   * `bot:purged`, `bot:done` and the rest) is stored. A mail delivery (`kind: 'mail'`) is content: behind the fence it is
+   * stored empty and dead, and `purgeContent` empties it with the content events.
    */
-  enqueue(delivery: Pick<OutboxDelivery, 'id' | 'runId' | 'destinationRef' | 'eventId' | 'type' | 'payload'>, now: number): Promise<void>;
-  /** Pending deliveries due at now, ordered by nextAt then id ascending; default limit 100. */
+  enqueue(delivery: OutboxEnqueue, now: number): Promise<void>;
+  /** Pending deliveries due at now, ordered by nextAt then id ascending, a mail delivery past its expiry left out; default limit 100. */
   due(now: number, limit?: number): Promise<OutboxDelivery[]>;
   /** Records that the destination took the delivery. */
   markDelivered(id: string): Promise<void>;
-  /** Records a failed attempt: due again after the backoff of {@link nextAttemptAt}, or `dead` a day after the first failed attempt. A delivery that is no longer pending, delivered or dead, is left as it is. */
+  /** Records a failed attempt: due again after the backoff of {@link nextAttemptAt}, or `dead` a day after the first failed attempt, or at a mail delivery's expiry. A delivery that is no longer pending, delivered or dead, is left as it is. */
   markFailed(id: string, now: number): Promise<void>;
-  /** Makes a delivery pending again, due at `now`, with its attempts counted afresh (a manual replay). */
+  /** Makes a delivery pending again, due at `now`, with its attempts counted afresh (a manual replay); a mail delivery is never replayed, and the call changes nothing. */
   replay(id: string, now: number): Promise<void>;
+  /** Optional (the library's stores have it). Ends a pending delivery at once (a destination's permanent refusal); one no longer pending is left as it is. */
+  markDead?(id: string): Promise<void>;
+  /** Optional (the library's stores have it). Moves a pending delivery's next attempt to `notBefore` without counting an attempt (a cap that holds it). */
+  holdUntil?(id: string, notBefore: number): Promise<void>;
+  /** Optional (the library's stores have it). Ends every pending delivery of the run to the destination (an address that declined). */
+  cancel?(runId: string, destinationRef: string): Promise<void>;
   /**
    * Empties every content delivery of the run (a type in `CONTENT_EVENT_TYPES`), delivered ones included, so a replay
    * after a purge sends the content-free `bot:purged` in its place. A delivery of any other type (`bot:done`,

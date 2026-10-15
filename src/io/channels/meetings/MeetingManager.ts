@@ -36,7 +36,6 @@ import {
   type ProviderEventType,
   type SendBotRequest,
   type SendBotResult,
-  type TranscriptTurn,
   type SupplierUsage,
 } from './types.js';
 
