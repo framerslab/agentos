@@ -32,7 +32,7 @@ Memory adapters require scope and call identity on reads and writes. Conversatio
 
 The call profile requires awaited synthesis output. The playback queue counts decoded bytes and duration, including in-flight output, within its configured two-second ceiling. A successful socket send is not playback acknowledgement. Synthesis `flush_complete` does not end speaking until that generation's acknowledged queue drains. Interruption cancels model and tool work, cancels synthesis and clears playback before an old completion can affect the new generation.
 
-`LiveKitStreamTransport` keeps listen-only construction. Speaking construction explicitly supplies its outbound publisher, which owns one track, conversion and acknowledged native cleanup. Raw PCM16 and declared WAV PCM16 are accepted at the publishing boundary; unsupported compression is refused, not interpreted as samples.
+`LiveKitStreamTransport` keeps listen-only construction. Speaking construction explicitly supplies its outbound publisher, which owns one track, conversion and acknowledged native cleanup. In native playout, the default, the track acknowledges each chunk by playing it out, so a phone caller bridged by LiveKit SIP or a plain LiveKit page hears the call and a clear needs no answer; participant playout keeps the receipt protocol for a page that asks for it ([Speaking in the room](VOICE_PIPELINE.md#speaking-in-the-room)). Raw PCM16 and declared WAV PCM16 are accepted at the publishing boundary; unsupported compression is refused, not interpreted as samples.
 
 ## Money and cleanup
 
