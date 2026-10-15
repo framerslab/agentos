@@ -98,14 +98,20 @@ export interface LiveKitAudioPublisherOptions {
    * fixed once the participant is in the room; a chunk sent before then plays natively.
    */
   playout?: LiveKitPlayout;
-  /** The call's scope: required for participant playout; in native playout, a chunk that carries a scope must carry this one. */
+  /**
+   * The call's scope: required for participant playout; in native playout, a chunk that carries a scope must carry
+   * this one, and without it a chunk that carries a scope is refused.
+   */
   scopeId?: string;
-  /** The call: required for participant playout; in native playout, a chunk that carries a call must carry this one. */
+  /**
+   * The call: required for participant playout; in native playout, a chunk that carries a call must carry this one,
+   * and without it a chunk that carries a call is refused.
+   */
   callId?: string;
   /**
    * The call's current generation, read at every admission and after each native step: required for participant
-   * playout; in native playout, a chunk that carries a generation must carry this one, and stops playing when it
-   * changes.
+   * playout; in native playout, a chunk that carries a generation must carry this one and stops playing when it
+   * changes, and without this reader a chunk that carries a generation is refused.
    */
   generation?(): VoiceGeneration;
   /** The published track's rate. */
@@ -314,7 +320,8 @@ export class LiveKitAudioPublisher {
    * Admits one raw or WAV PCM16 chunk, decoded and resampled once at this boundary.
    *
    * In native playout chunks queue in order. A chunk may carry no call identity; one that carries a scope, a call or
-   * a generation must carry the publisher's. A chunk without a sequence takes the next of the publisher's own, from 1.
+   * a generation must carry the publisher's, so a publisher without them refuses it. A chunk without a sequence takes
+   * the next of the publisher's own, from 1.
    * The send resolves once the chunk's frames are on the track's native queue, which waits while the queue is full,
    * or once a clear, a close or a newer generation has discarded it.
    *
@@ -328,7 +335,8 @@ export class LiveKitAudioPublisher {
   private async sendNative(chunk: EncodedAudioChunk): Promise<void> {
     if (this.closed) throw new Error('publisher closed');
     const { scopeId, callId } = this.options; const call = chunk.generation ? this.options.generation?.() : undefined;
-    if ((chunk.scopeId !== undefined && scopeId !== undefined && chunk.scopeId !== scopeId) || (chunk.callId !== undefined && callId !== undefined && chunk.callId !== callId) || (chunk.generation && call && !sameVoiceGeneration(chunk.generation, call)) || (chunk.sequence !== undefined && (!Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1))) throw new Error('publisher scope or generation refused');
+    // A scope, a call or a generation the chunk carries must be the publisher's, which a publisher without one lacks.
+    if ((chunk.scopeId !== undefined && chunk.scopeId !== scopeId) || (chunk.callId !== undefined && chunk.callId !== callId) || (chunk.generation && (!call || !sameVoiceGeneration(chunk.generation, call))) || (chunk.sequence !== undefined && (!Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1))) throw new Error('publisher scope or generation refused');
     const pcm = this.decode(chunk);
     const entry: NativeChunk = { generation: chunk.generation ? { ...chunk.generation } : undefined, sequence: chunk.sequence ?? this.nextSequence++, playedSamples: pcm.samples, sampleRate: pcm.sampleRate, cancellation: this.cancellation, captured: Promise.resolve() };
     const previous = this.queued;
