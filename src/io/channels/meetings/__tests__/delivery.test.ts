@@ -255,6 +255,7 @@ describe('mail deliveries', () => {
       enqueue: (d, now) => inner.enqueue(d, now), due: (now, limit) => inner.due(now, limit), markDelivered: (id) => inner.markDelivered(id),
       markFailed: (id, now) => inner.markFailed(id, now), replay: (id, now) => inner.replay(id, now), purgeContent: (id) => inner.purgeContent(id),
       listByRun: (id) => inner.listByRun(id), markDead: async () => false, holdUntil: (id, at) => inner.holdUntil(id, at),
+      endExpired: (now) => inner.endExpired(now), // the sweep is the store's own, as a wrapper passes it through
     };
     const clock = new FakeClock(1_000);
     const dispatcher = new OutboxDispatcher({ outbox: cannotEnd, clock, resolve: async () => undefined, mail: async () => ({ outcome: 'unknown' }), logger: { warn: (m) => warned.push(m) } });
