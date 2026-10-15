@@ -12,8 +12,11 @@
  * directive of its fallback list that the policy names (`script-src-elem`, `script-src`, `default-src` for scripts;
  * `img-src`, `default-src` for images; `connect-src`, `default-src` for connections; `worker-src`, `child-src`,
  * `script-src`, `default-src` for workers). A wildcard is reported in that directive and in `script-src`, `img-src`,
- * `connect-src` and `worker-src` wherever they appear. A same-origin request to a path no endpoint registers is the
- * page's own and is left alone; one to a registered endpoint's path is checked whatever its method.
+ * `connect-src` and `worker-src` wherever they appear. A registered origin passes only when that directive names it
+ * exactly as written, so a source a browser would also accept for it (`'self'` for the page's own origin, the host
+ * without its scheme, the default port written out, a trailing slash, the scheme or host in other letter case) is
+ * reported as missing, never certified. A same-origin request to a path no endpoint registers is the page's own and
+ * is left alone; one to a registered endpoint's path is checked whatever its method.
  */
 
 /** A consent phase. */
