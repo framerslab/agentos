@@ -37,7 +37,7 @@ Each token is a [`Token`](../../src/cognition/nlp/types.ts):
 | Field | Value |
 |---|---|
 | `text` | The token as the stages left it. |
-| `original` | The text the tokenizer cut, before any stage ran. |
+| `original` | The text the tokenizer cut, before any stage ran; for `CodeTokenizer`, the whole identifier the part came from. |
 | `position` | Where the token starts in the input, in UTF-16 code units. |
 | `stem` | Set by `PorterStemmer`. |
 | `lemma` | Set by `WordNetLemmatizer`. |
@@ -130,7 +130,7 @@ A saved index holds stemmed terms, so it is restored with the same pipeline: see
 
 ## Where it runs
 
-`@framers/agentos/cognition/nlp` runs in Node. `StopWordFilter`, `PorterStemmer` and `WordNetLemmatizer` load the CommonJS `natural` package, a dependency of `@framers/agentos`, through `createRequire` from `node:module`, and the module also loads the text statistics classes, which import `fs/promises` and `natural`. Nothing in it calls a model or needs a key.
+`@framers/agentos/cognition/nlp` runs in Node. `StopWordFilter`, `PorterStemmer` and `WordNetLemmatizer` load the CommonJS `natural` package, a dependency of `@framers/agentos`, through `createRequire` from `node:module`, and the module also loads the text statistics classes, which import `fs/promises` and `natural`. The pipeline classes call no model and need no key.
 
 A page in a browser tokenizes with `lexicalTokens` from `@framers/agentos/cognition/library/browser`: lower-case runs of letters and digits in any script, nothing stemmed ([Words and snippets](../features/LIBRARY_INDEX.md#words-and-snippets)).
 

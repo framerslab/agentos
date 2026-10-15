@@ -4,7 +4,7 @@ description: "Text processing, statistics and search in AgentOS: tokenizers, sto
 
 # Text Processing & Search
 
-AgentOS processes, measures, searches and scores text with classes and functions a host calls directly, with no agent in the loop. The memory and retrieval layers are built from the same parts.
+AgentOS processes, measures, searches and scores text with classes and functions a host calls directly, with no agent in the loop. The memory and retrieval layers use the same parts: `HybridRetriever` searches with a `BM25Index`, `LibraryIndex` fuses its legs with `reciprocalRankFusion`, and `RetrievalAugmentor` reranks with `RerankerService`.
 
 ```mermaid
 flowchart LR
@@ -40,11 +40,11 @@ flowchart LR
 |---|---|---|---|
 | `LexicalIndex`, `lexicalTokens`, `snippetAround`, `chunkTurns` | `@framers/agentos/cognition/library/browser` | A browser or Node | No |
 | Text pipeline and presets | `@framers/agentos/cognition/nlp` | Node: it loads `natural` through `node:module` | No |
-| `StatisticalUtilityAI` | The package root, `@framers/agentos/cognition/nlp` | Node | No |
-| `LLMUtilityAI` | The package root, `@framers/agentos/cognition/nlp` | Node | Yes: a provider's key or a local model server |
+| `StatisticalUtilityAI` | The package root, `@framers/agentos/cognition/nlp`, `@framers/agentos/cognition/nlp/ai_utilities` | Node | No |
+| `LLMUtilityAI` | The package root, `@framers/agentos/cognition/nlp`, `@framers/agentos/cognition/nlp/ai_utilities` | Node | Yes: a provider's key or a local model server |
 | `BM25Index`, `HybridSearcher`, `SemanticChunker` | `@framers/agentos/cognition/rag` | Node | `HybridSearcher` calls the embedder you give it |
 | `reciprocalRankFusion` | `@framers/agentos/cognition/memory` | Node | No |
-| Rerankers | `@framers/agentos/cognition/rag/reranking` | Node | The local cross-encoder runs a model in-process; Cohere and the LLM judge call out |
+| Rerankers | `@framers/agentos/cognition/rag/reranking` | Node; the modules import no Node module | The local cross-encoder runs a model in-process; Cohere and the LLM judge call out |
 
 ## Examples
 
@@ -55,7 +55,7 @@ Four examples in the repository's `examples/` folder run with no API key:
 | [`text-processing-pipeline.mjs`](../../examples/text-processing-pipeline.mjs) | The three preset pipelines over a paragraph and a line of code; tokens with positions and stems; a pipeline built stage by stage |
 | [`text-statistics.mjs`](../../examples/text-statistics.mjs) | `StatisticalUtilityAI`'s measures over one text |
 | [`text-search-bm25.mjs`](../../examples/text-search-bm25.mjs) | `BM25Index` with any, all and prefix matching, saved as JSON and restored; a stemming pipeline; `LexicalIndex` with snippets |
-| [`text-hybrid-search.mjs`](../../examples/text-hybrid-search.mjs) | `HybridSearcher` over an in-memory vector store, with a stand-in embedder, and each result's ranks |
+| [`text-hybrid-search.mjs`](../../examples/text-hybrid-search.mjs) | `HybridSearcher` over an in-memory vector store, with a stand-in embedder written in the example, and each result's ranks |
 
 They import the package by its name, which resolves to the build through the package's `exports` map. From a clone:
 
