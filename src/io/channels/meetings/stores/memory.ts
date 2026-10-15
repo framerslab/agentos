@@ -309,16 +309,19 @@ export class InMemoryOutbox implements IOutbox {
     if (now - d.firstAttemptAt >= OUTBOX_GIVE_UP_MS || (d.expiresAt !== undefined && now >= d.expiresAt)) d.state = 'dead';
     else d.nextAt = nextAttemptAt(d.attempts, now);
   }
-  async markDead(id: string): Promise<void> {
+  async markDead(id: string): Promise<boolean> {
     const d = this.deliveries.get(id);
     if (d && d.state === 'pending') d.state = 'dead';
+    return true;
   }
-  async holdUntil(id: string, notBefore: number): Promise<void> {
+  async holdUntil(id: string, notBefore: number): Promise<boolean> {
     const d = this.deliveries.get(id);
     if (d && d.state === 'pending') d.nextAt = Math.max(d.nextAt, notBefore);
+    return true;
   }
-  async cancel(runId: string, destinationRef: string): Promise<void> {
+  async cancel(runId: string, destinationRef: string): Promise<boolean> {
     for (const d of this.deliveries.values()) if (d.runId === runId && d.destinationRef === destinationRef && d.state === 'pending') d.state = 'dead';
+    return true;
   }
   async replay(id: string, now: number): Promise<void> {
     const d = this.deliveries.get(id);

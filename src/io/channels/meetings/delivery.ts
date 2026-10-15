@@ -246,12 +246,20 @@ export class OutboxDispatcher {
       await outbox.markFailed(d.id, this.now());
       return 'failed';
     }
-    // held on an object: an assignment inside the closure is not seen by the narrowing of a plain variable
-    const held: { answer: MailOutcome } = { answer: { outcome: 'retry' } };
+    // The outcome is recorded inside the claim, before it is released, so a second pass cannot take the row while a
+    // durable record of this pass's send is still being written; a delivery that expired since `due` returned it is
+    // ended without a send. Held on an object: an assignment inside the closure is not seen by a plain variable's narrowing.
+    const held: { result: 'delivered' | 'failed' | 'held' } = { result: 'failed' };
     const deliver = async (fresh: OutboxDelivery, signal: AbortSignal): Promise<void> => {
       signal.throwIfAborted();
-      held.answer = await mail(fresh, signal);
+      if (fresh.expiresAt !== undefined && this.now() >= fresh.expiresAt) {
+        await this.endDead(fresh.id);
+        held.result = 'failed';
+        return;
+      }
+      const answer = await mail(fresh, signal);
       signal.throwIfAborted();
+      held.result = await this.record(fresh.id, answer);
     };
     try {
       const claimed = outbox.sendClaimed;
@@ -263,22 +271,31 @@ export class OutboxDispatcher {
       await outbox.markFailed(d.id, this.now());
       return 'failed';
     }
-    const answer = held.answer;
+    return held.result;
+  }
+
+  /** Records a mail's outcome: delivered, dead at once, held until a time, or a failed attempt for the backoff. */
+  private async record(id: string, answer: MailOutcome): Promise<'delivered' | 'failed' | 'held'> {
+    const outbox = this.options.outbox;
     switch (answer.outcome) {
       case 'sent':
-        await outbox.markDelivered(d.id);
+        await outbox.markDelivered(id);
         return 'delivered';
       case 'dead':
-        if (outbox.markDead) await outbox.markDead(d.id);
-        else await outbox.markFailed(d.id, this.now());
+        await this.endDead(id);
         return 'failed';
       case 'hold':
-        if (outbox.holdUntil) await outbox.holdUntil(d.id, answer.notBefore);
-        else await outbox.markFailed(d.id, this.now());
+        if (!outbox.holdUntil || !(await outbox.holdUntil(id, answer.notBefore))) await outbox.markFailed(id, this.now());
         return 'held';
       default:
-        await outbox.markFailed(d.id, this.now());
+        await outbox.markFailed(id, this.now());
         return 'failed';
     }
+  }
+
+  /** Ends a delivery at once where the outbox can, else as a failed attempt. */
+  private async endDead(id: string): Promise<void> {
+    const outbox = this.options.outbox;
+    if (!outbox.markDead || !(await outbox.markDead(id))) await outbox.markFailed(id, this.now());
   }
 }

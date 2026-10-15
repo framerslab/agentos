@@ -205,12 +205,12 @@ export interface IOutbox {
   markFailed(id: string, now: number): Promise<void>;
   /** Makes a delivery pending again, due at `now`, with its attempts counted afresh (a manual replay); a mail delivery is never replayed, and the call changes nothing. */
   replay(id: string, now: number): Promise<void>;
-  /** Optional (the library's stores have it). Ends a pending delivery at once (a destination's permanent refusal); one no longer pending is left as it is. */
-  markDead?(id: string): Promise<void>;
-  /** Optional (the library's stores have it). Moves a pending delivery's next attempt to `notBefore` without counting an attempt (a cap that holds it). */
-  holdUntil?(id: string, notBefore: number): Promise<void>;
-  /** Optional (the library's stores have it). Ends every pending delivery of the run to the destination (an address that declined). */
-  cancel?(runId: string, destinationRef: string): Promise<void>;
+  /** Optional (the library's stores have it). Ends a pending delivery at once (a destination's permanent refusal); one no longer pending is left as it is. True when the outbox recorded it; false from a wrapper whose outbox cannot, whose caller records a failed attempt instead. */
+  markDead?(id: string): Promise<boolean>;
+  /** Optional (the library's stores have it). Moves a pending delivery's next attempt to `notBefore` without counting an attempt (a cap that holds it). True when recorded; false from a wrapper whose outbox cannot. */
+  holdUntil?(id: string, notBefore: number): Promise<boolean>;
+  /** Optional (the library's stores have it). Ends every pending delivery of the run to the destination (an address that declined). True when recorded; false from a wrapper whose outbox cannot. */
+  cancel?(runId: string, destinationRef: string): Promise<boolean>;
   /**
    * Empties every content delivery of the run (a type in `CONTENT_EVENT_TYPES`), delivered ones included, so a replay
    * after a purge sends the content-free `bot:purged` in its place. A delivery of any other type (`bot:done`,

@@ -256,4 +256,24 @@ describe('mail deliveries', () => {
     expect(warned.length).toBeGreaterThanOrEqual(2);
     expect(warned.every((m) => !m.includes('secret'))).toBe(true);
   });
+
+  it('a mail that expired since the pass began is ended without a send, and the outcome is recorded inside the claim', async () => {
+    const outbox = new InMemoryOutbox();
+    const clock = new FakeClock(1_000);
+    const sent: string[] = [];
+    const dispatcher = new OutboxDispatcher({
+      outbox, clock, resolve: async () => undefined,
+      mail: async (d) => {
+        sent.push(d.destinationRef);
+        clock.advance(10_000); // the first send takes long enough for the second mail to expire
+        return { outcome: 'sent' };
+      },
+    });
+    await outbox.enqueue(mail('m1', 'mail:1', 100_000), 1_000);
+    await outbox.enqueue(mail('m2', 'mail:2', 5_000), 1_000);
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 1, failed: 1 });
+    expect(sent).toEqual(['mail:1']);
+    const byRef = Object.fromEntries((await outbox.listByRun('r1')).map((d) => [d.destinationRef, d.state]));
+    expect(byRef).toEqual({ 'mail:1': 'delivered', 'mail:2': 'dead' });
+  });
 });

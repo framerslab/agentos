@@ -1711,12 +1711,15 @@ export class MeetingManager {
     let billed = isBilledEnd(run) ? seconds : 0;
     try {
       await this.stores.transcript.fence(run.runId);
-      if (this.config.beforeComplete) {
+      if (this.config.beforeComplete && run.completionHookAt === undefined) {
         try {
           await this.config.beforeComplete(run, await this.allTurns(run.runId));
         } catch (err) {
           this.config.logger?.warn(`[MeetingManager] beforeComplete of ${run.runId}: ${err instanceof Error ? err.name : 'error'}`);
         }
+        // written before the settle, so a cleanup tried again after a later step failed does not run the step twice
+        const hooked = await this.stores.runs.update(run.runId, { completionHookAt: this.now() }, 'left');
+        if (hooked) run = hooked;
       }
       await this.settleRunFunding(run, billed);
       if (run.funding) {

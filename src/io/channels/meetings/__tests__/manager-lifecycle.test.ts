@@ -922,4 +922,26 @@ describe('the completion hook', () => {
     expect((await h.stores.runs.get(requestedId))?.state).toBe('failed');
     expect(calls).toEqual([]);
   });
+
+  it('runs once when the cleanup after it fails and is tried again, and the run still ends done', async () => {
+    const calls: string[] = [];
+    const h = harness({ beforeComplete: async (run) => void calls.push(run.runId) });
+    const runId = await heard(h, 'account');
+    const deleteRoom = h.rooms.deleteRoom.bind(h.rooms);
+    let failed = false;
+    h.rooms.deleteRoom = async (name: string) => {
+      if (!failed) {
+        failed = true;
+        throw new Error('the room service is down');
+      }
+      await deleteRoom(name);
+    };
+    await h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))).toMatchObject({ state: 'left', cleanupPending: true });
+    expect((await h.stores.runs.get(runId))?.completionHookAt).toBeDefined();
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(calls).toEqual([runId]);
+  });
 });

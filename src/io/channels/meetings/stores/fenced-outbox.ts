@@ -243,21 +243,19 @@ export class FencedOutbox implements IOutbox {
     return this.inner.replay(id, now);
   }
 
-  /** Ends a pending delivery at once in the wrapped outbox. */
-  async markDead(id: string): Promise<void> {
-    await this.inner.markDead?.(id);
+  /** Ends a pending delivery at once in the wrapped outbox; false when the wrapped outbox has no such method. */
+  async markDead(id: string): Promise<boolean> {
+    return this.inner.markDead ? this.inner.markDead(id) : false;
   }
 
-  /** Holds a pending delivery in the wrapped outbox until `notBefore`. */
-  async holdUntil(id: string, notBefore: number): Promise<void> {
-    await this.inner.holdUntil?.(id, notBefore);
+  /** Holds a pending delivery in the wrapped outbox until `notBefore`; false when the wrapped outbox has no such method. */
+  async holdUntil(id: string, notBefore: number): Promise<boolean> {
+    return this.inner.holdUntil ? this.inner.holdUntil(id, notBefore) : false;
   }
 
-  /** Ends the run's pending deliveries to a destination in the wrapped outbox, under the run's guard. */
-  async cancel(runId: string, destinationRef: string): Promise<void> {
-    await this.locked(runId, async () => {
-      await this.inner.cancel?.(runId, destinationRef);
-    });
+  /** Ends the run's pending deliveries to a destination in the wrapped outbox, under the run's guard; false when the wrapped outbox has no such method. */
+  async cancel(runId: string, destinationRef: string): Promise<boolean> {
+    return this.locked(runId, async () => (this.inner.cancel ? this.inner.cancel(runId, destinationRef) : false));
   }
 
   /** Every delivery of the run in the wrapped outbox. */
