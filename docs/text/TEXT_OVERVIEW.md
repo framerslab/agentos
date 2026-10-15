@@ -44,7 +44,7 @@ flowchart LR
 | `LLMUtilityAI` | The package root, `@framers/agentos/cognition/nlp`, `@framers/agentos/cognition/nlp/ai_utilities` | Node | Yes: a provider's key or a local model server |
 | `BM25Index`, `HybridSearcher`, `SemanticChunker` | `@framers/agentos/cognition/rag` | Node | `HybridSearcher` calls the embedder you give it |
 | `reciprocalRankFusion` | `@framers/agentos/cognition/memory` | Node | No |
-| Rerankers | `@framers/agentos/cognition/rag/reranking` | Node; the modules import no Node module | The local cross-encoder runs a model in-process; Cohere and the LLM judge call out |
+| Rerankers | `@framers/agentos/cognition/rag/reranking` | Node; its modules import no Node module of their own | The local cross-encoder runs a model in-process; Cohere and the LLM judge call out |
 
 ## Examples
 
@@ -57,7 +57,7 @@ Four examples in the repository's `examples/` folder run with no API key:
 | [`text-search-bm25.mjs`](../../examples/text-search-bm25.mjs) | `BM25Index` with any, all and prefix matching, saved as JSON and restored; a stemming pipeline; `LexicalIndex` with snippets |
 | [`text-hybrid-search.mjs`](../../examples/text-hybrid-search.mjs) | `HybridSearcher` over an in-memory vector store, with a stand-in embedder written in the example, and each result's ranks |
 
-They import the package by its name, which resolves to the build through the package's `exports` map. From a clone:
+They import the package by its name, which resolves to the build through the package's `exports` map, and CI runs all four against each build. From a clone:
 
 ```bash
 pnpm install && pnpm run build
