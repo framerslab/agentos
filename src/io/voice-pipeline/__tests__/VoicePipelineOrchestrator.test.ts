@@ -44,15 +44,19 @@
  *   a detector without isBackchannel() gets every client final joined
  * - A lone final that ends with a question mark, such as "Right?" after a statement, is the user's turn; the session
  *   tells the detector the agent listens as it starts, so a lone "sure" as its first utterance is the user's turn
+ * - On the HeuristicEndpointDetector, a transcriber that sends each keyed final before its end of speech, as Deepgram
+ *   does and marks with beforeSpeechEnd, has every turn handed to the agent, the second one included
  * - With the stock handlers, barge-in follows the user's speech as it grows: the handler is asked at its start and
  *   every 100 ms while it lasts, with the speech so far, the reply's text and the audio sent. HardCut cancels once the
  *   speech reaches minSpeechMs and lets a shorter sound go. SoftFade's pause holds the reply's audio, and the speech's
  *   end decides: a final with words cancels the reply and becomes the user's turn, from the STT session or a client's
- *   line, whether it comes before or after the end of speech; a backchannel or no final within 1,500 ms resumes the
- *   reply where it paused, and a reply whose synthesis completed during the pause ends after the resume. SoftFade
- *   cancels at cancelMs before any final, and a stop during a pause leaves no timer behind. falseInterruptionMs sets how
- *   long a pause waits for the final, from the end of speech: a final with words within it cuts the reply though the
- *   handler answers it late, and the constructor refuses one that is not a finite number of zero or more
+ *   line, whether it comes before or after the end of speech, keyed by an item or not; a backchannel or no final
+ *   within 1,500 ms resumes the reply where it paused, and a reply whose synthesis completed during the pause ends
+ *   after the resume; a final with words that comes after the resume, while the reply plays, cuts it and becomes the
+ *   user's turn. SoftFade cancels at cancelMs before any final, and a stop during a pause leaves no timer behind.
+ *   falseInterruptionMs sets how long a pause waits for the final, from the end of speech: a final with words within
+ *   it cuts the reply though the handler answers it late, and the constructor refuses one that is not a finite number
+ *   of zero or more
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -1376,6 +1380,35 @@ describe('VoicePipelineOrchestrator', () => {
   });
 
   // --------------------------------------------------------------------------
+  // Turns: a transcriber that sends each final before its end of speech
+  // --------------------------------------------------------------------------
+
+  /**
+   * The user says `text` as DeepgramStreamingSTT reports it: a start of speech, then the final, keyed by an item and
+   * marked `beforeSpeechEnd`, then the end of speech. Deepgram sends a segment's final before the end of speech of its
+   * utterance (`speech_final`), the other order from OpenAI Realtime's.
+   */
+  async function sayFinalFirst(text: string, itemId: string): Promise<void> {
+    sttSession.emit('speech_start');
+    sttSession.emit('transcript', { text, confidence: 0.9, words: [], isFinal: true, itemId, beforeSpeechEnd: true });
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  it('should hand the agent each turn of a transcriber that sends its keyed finals before their end of speech, as Deepgram does', async () => {
+    const { detector, turns } = await startWithDetector('It is booked.');
+    const late = vi.fn();
+    detector.on('late_final', late);
+
+    await sayFinalFirst('Book a table for two.', 'dg:1');
+    ttsSession.emit('flush_complete');
+    await sayFinalFirst('At seven tonight.', 'dg:2');
+
+    expect(turns()).toEqual(['Book a table for two.', 'At seven tonight.']);
+    expect(late).not.toHaveBeenCalled();
+  });
+
+  // --------------------------------------------------------------------------
   // Barge-in: the stock handlers, asked as the user's speech grows
   // --------------------------------------------------------------------------
 
@@ -1384,9 +1417,12 @@ describe('VoicePipelineOrchestrator', () => {
     return { audio: Buffer.from([0]), format: 'opus', sampleRate: 24000, durationMs: 100, text };
   }
 
-  /** A final transcript from the STT session, keyed by an item when `itemId` is given. */
-  function sttFinal(text: string, itemId?: string) {
-    return { text, confidence: 0.9, words: [], isFinal: true, ...(itemId ? { itemId } : {}) };
+  /**
+   * A final transcript from the STT session, keyed by an item when `itemId` is given, and marked `beforeSpeechEnd` when
+   * `beforeSpeechEnd` is, as DeepgramStreamingSTT marks the finals it sends before their end of speech.
+   */
+  function sttFinal(text: string, itemId?: string, beforeSpeechEnd = false) {
+    return { text, confidence: 0.9, words: [], isFinal: true, ...(itemId ? { itemId } : {}), ...(beforeSpeechEnd ? { beforeSpeechEnd } : {}) };
   }
 
   /**
@@ -1604,29 +1640,60 @@ describe('VoicePipelineOrchestrator', () => {
     expect(turns).toEqual(['Book a table for two.', 'Make it three.']);
   });
 
+  it.each([
+    { order: 'without an item', itemId: undefined },
+    { order: 'keyed by an item', itemId: 'item_B' },
+  ])(
+    "cuts a reply that resumed when no final came within falseInterruptionMs, once the speech's final with words comes $order, and hands the words to the agent",
+    async ({ itemId }) => {
+      const { sent, states, turns } = await speakingWith(new SoftFadeBargeinHandler());
+
+      sttSession.emit('speech_start');
+      await vi.advanceTimersByTimeAsync(400);
+      ttsSession.emit('audio', replyChunk('two')); // held by the pause
+      sttSession.emit('speech_end');
+      await vi.advanceTimersByTimeAsync(1_600); // no final within 1,500 ms: the reply resumes
+      expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two']);
+
+      // The final comes late, while the resumed reply plays.
+      ttsSession.emit('audio', replyChunk('three'));
+      sttSession.emit('transcript', sttFinal('No, Tuesday.', itemId));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two', 'audio three', 'barge_in cancel']);
+      expect(ttsSession.cancel).toHaveBeenCalledOnce();
+      expect(agentSession.abort).toHaveBeenCalledOnce();
+      expect(states.slice(0, 2)).toEqual(['interrupting', 'listening']);
+      expect(turns).toEqual(['Book a table for two.', 'No, Tuesday.']);
+      expect(agentSession.sendText).toHaveBeenLastCalledWith('No, Tuesday.', expect.objectContaining({ endpointReason: 'punctuation' }));
+    },
+  );
+
   it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])('refuses a falseInterruptionMs of %s', (falseInterruptionMs) => {
     expect(() => new VoicePipelineOrchestrator(makeConfig({ falseInterruptionMs }))).toThrow(RangeError);
   });
 
   it.each([
-    { order: 'before its end of speech', text: 'wait, change that to three', itemId: undefined },
-    { order: 'before its end of speech, punctuated', text: 'Wait, change that to three.', itemId: undefined },
-    { order: 'after its end of speech, keyed by an item', text: 'wait, change that to three', itemId: 'item_B' },
+    { order: 'before its end of speech', text: 'wait, change that to three', itemId: undefined, finalFirst: true },
+    { order: 'before its end of speech, punctuated', text: 'Wait, change that to three.', itemId: undefined, finalFirst: true },
+    { order: 'before its end of speech, keyed by an item', text: 'wait, change that to three', itemId: 'item_B', finalFirst: true },
+    { order: 'after its end of speech, keyed by an item', text: 'wait, change that to three', itemId: 'item_B', finalFirst: false },
   ])(
     "cancels the reply held on a pause when the speech had words, its final $order, and hands them to the agent as the user's turn",
-    async ({ text, itemId }) => {
+    async ({ text, itemId, finalFirst }) => {
       const { sent, states, turns } = await speakingWith(new SoftFadeBargeinHandler());
 
       sttSession.emit('speech_start');
       await vi.advanceTimersByTimeAsync(900);
       ttsSession.emit('audio', replyChunk('two')); // held by the pause
-      if (itemId) {
+      if (finalFirst) {
+        // Deepgram sends a keyed final before the end of speech of its utterance, and marks it so.
+        sttSession.emit('transcript', sttFinal(text, itemId, itemId !== undefined));
+        sttSession.emit('speech_end');
+      } else {
         // OpenAI Realtime sends an utterance's final after its end of speech.
         sttSession.emit('speech_end');
         sttSession.emit('transcript', sttFinal(text, itemId));
-      } else {
-        sttSession.emit('transcript', sttFinal(text));
-        sttSession.emit('speech_end');
       }
       await vi.advanceTimersByTimeAsync(0);
 
