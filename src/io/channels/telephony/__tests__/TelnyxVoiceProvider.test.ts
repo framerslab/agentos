@@ -198,10 +198,20 @@ describe('TelnyxVoiceProvider', () => {
   // ── verifyWebhook ──────────────────────────────────────────────────────
 
   describe('verifyWebhook()', () => {
-    it('should return valid: true when no public key is configured (development mode skip)', () => {
-      // Without a public key, verification is intentionally skipped.
-      const ctx = makeWebhookCtx('{}');
-      expect(provider.verifyWebhook(ctx)).toEqual({ valid: true });
+    it('should refuse every webhook when no public key is configured, in either profile', () => {
+      // An unsigned key press, which anyone who can reach the webhook URL could post.
+      const ctx = makeWebhookCtx(makeEventBody('call.dtmf.received', { digit: '1' }));
+      const refused = { valid: false, error: 'No publicKey configured to verify Telnyx webhooks' };
+      expect(provider.verifyWebhook(ctx)).toEqual(refused);
+      for (const protocol of ['legacy', 'carrier'] as const) {
+        const withoutKey = new TelnyxVoiceProvider({
+          apiKey: API_KEY,
+          connectionId: CONNECTION_ID,
+          protocol,
+          fetchImpl: fetchMock as typeof fetch,
+        });
+        expect(withoutKey.verifyWebhook(ctx)).toEqual(refused);
+      }
     });
 
     it('should return valid: false when signature headers are missing and publicKey is set', () => {
