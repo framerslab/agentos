@@ -36,7 +36,7 @@ export { writeDurableJson, removeDurableJson } from './durableJson.js';
 export { signEnvelope, envelopeHeaders, verifyEnvelope, mintWorkerToken, hashWorkerToken, workerTokenMatches, SecretBox, DEFAULT_ENVELOPE_HEADERS, ENVELOPE_WINDOW_MS } from './signing.js';
 export type { EnvelopeHeaderNames } from './signing.js';
 export { OutboxDispatcher, httpsSend, isPublicAddress, DestinationRefusedError } from './delivery.js';
-export type { OutboxDispatcherOptions, DeliveryRequest, DeliverySend, DeliveryDestination, AddressLookup } from './delivery.js';
+export type { OutboxDispatcherOptions, DeliveryRequest, DeliverySend, DeliveryDestination, AddressLookup, MailOutcome, MailSend } from './delivery.js';
 export { MockMeetingBotProvider, mockEventContext } from './providers/mock.js';
 /** Visitor-bound authority with a host-owned transactional store. */
 export * from './DemoRunCapability.js';

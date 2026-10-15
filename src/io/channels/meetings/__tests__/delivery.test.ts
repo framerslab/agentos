@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { DestinationRefusedError, httpsSend, isPublicAddress, OutboxDispatcher, type DeliveryRequest } from '../delivery.js';
+import { DestinationRefusedError, httpsSend, isPublicAddress, OutboxDispatcher, type DeliveryRequest, type MailOutcome } from '../delivery.js';
 import { FakeClock, InMemoryOutbox } from '../stores/memory.js';
 import { verifyEnvelope } from '../signing.js';
 import { harness } from './manager-harness.js';
@@ -221,5 +221,39 @@ describe('OutboxDispatcher', () => {
     // a content delivery the purge emptied sends its ids alone
     expect(bodies.get(chat.eventId)).toEqual({ id: chat.eventId, type: 'bot:purged', runId });
     expect(JSON.stringify([...bodies.values()])).not.toContain('we start at nine');
+  });
+});
+
+describe('mail deliveries', () => {
+  const mail = (id: string, ref: string, expiresAt = 10_000_000) => ({ id, runId: 'r1', destinationRef: ref, eventId: 'r1:notes', type: 'bot:done' as const, payload: 'sealed', kind: 'mail' as const, expiresAt });
+
+  it('hands a mail delivery to the mail option and records each outcome', async () => {
+    const outbox = new InMemoryOutbox();
+    const clock = new FakeClock(1_000);
+    const answers: Record<string, MailOutcome> = { 'mail:1': { outcome: 'sent' }, 'mail:2': { outcome: 'dead' }, 'mail:3': { outcome: 'hold', notBefore: 50_000 }, 'mail:4': { outcome: 'retry' } };
+    const dispatcher = new OutboxDispatcher({ outbox, clock, resolve: async () => undefined, send: async () => ({ status: 500 }), mail: async (d) => answers[d.destinationRef]! });
+    for (const ref of ['mail:1', 'mail:2', 'mail:3', 'mail:4']) await outbox.enqueue(mail(ref, ref), 1_000);
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 1, failed: 2 });
+    const byRef = Object.fromEntries((await outbox.listByRun('r1')).map((d) => [d.destinationRef, d]));
+    expect(byRef['mail:1']?.state).toBe('delivered');
+    expect(byRef['mail:2']?.state).toBe('dead');
+    expect(byRef['mail:3']).toMatchObject({ state: 'pending', nextAt: 50_000, attempts: 0 });
+    expect(byRef['mail:4']).toMatchObject({ state: 'pending', attempts: 1 });
+  });
+
+  it('a mail delivery with no mail option, or one whose option throws, is marked failed for the backoff, and the warning names the id alone', async () => {
+    const outbox = new InMemoryOutbox();
+    const warned: string[] = [];
+    const none = new OutboxDispatcher({ outbox, resolve: async () => undefined, logger: { warn: (m) => warned.push(m) } });
+    await outbox.enqueue(mail('m1', 'mail:1'), 1_000);
+    await none.deliverDue();
+    expect((await outbox.listByRun('r1'))[0]?.attempts).toBe(1);
+    const throwing = new OutboxDispatcher({ outbox, resolve: async () => undefined, mail: async () => { throw new Error('the address is secret'); }, logger: { warn: (m) => warned.push(m) } });
+    await outbox.replay('m1', 2_000);
+    await outbox.enqueue(mail('m2', 'mail:2'), 2_000);
+    await throwing.deliverDue();
+    expect((await outbox.listByRun('r1')).find((d) => d.id === 'm2')?.attempts).toBe(1);
+    expect(warned.length).toBeGreaterThanOrEqual(2);
+    expect(warned.every((m) => !m.includes('secret'))).toBe(true);
   });
 });

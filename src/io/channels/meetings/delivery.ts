@@ -63,6 +63,19 @@ export interface DeliveryDestination {
   secret: string;
 }
 
+/** What a host's mail send answers for one mail delivery. */
+export type MailOutcome =
+  | { outcome: 'sent' }
+  /** A refusal no retry can change: the delivery ends dead. */
+  | { outcome: 'dead' }
+  /** A failure of the moment: the outbox's backoff. */
+  | { outcome: 'retry' }
+  /** A cap that holds the mail: the delivery's next attempt moves to `notBefore` and no attempt is counted. */
+  | { outcome: 'hold'; notBefore: number };
+
+/** Sends one mail delivery as the host does (the unseal, its checks, the send) and answers its outcome; a throw counts as `retry`. */
+export type MailSend = (delivery: OutboxDelivery, signal: AbortSignal) => Promise<MailOutcome>;
+
 /**
  * The default send: the checked egress module's hosted profile (https on 443 to a name whose every address is public,
  * the connection its own and pinned to the checked address, TLS validating the name), no redirect followed (a 3xx is
@@ -130,6 +143,8 @@ export interface OutboxDispatcherOptions {
   resolve: (destinationRef: string) => Promise<DeliveryDestination | undefined>;
   /** How each delivery is posted; {@link httpsSend} when absent. */
   send?: DeliverySend;
+  /** Sends a delivery of kind `mail`; absent, such a delivery fails for its backoff and the warning names it. */
+  mail?: MailSend;
   /** The envelope's header names; the library's defaults when absent. */
   names?: EnvelopeHeaderNames;
   /** What is due, and the envelope's timestamp, by this clock; the wall clock when absent. */
@@ -176,6 +191,12 @@ export class OutboxDispatcher {
     let delivered = 0;
     let failed = 0;
     for (const d of await this.options.outbox.due(this.now(), this.options.batch ?? 50)) {
+      if (d.kind === 'mail') {
+        const outcome = await this.sendMail(d);
+        if (outcome === 'delivered') delivered += 1;
+        else if (outcome === 'failed') failed += 1;
+        continue;
+      }
       const destination = await this.destinationOf(d);
       if (!destination) {
         await this.options.outbox.markFailed(d.id, this.now());
@@ -210,5 +231,52 @@ export class OutboxDispatcher {
       failed += 1;
     }
     return { delivered, failed };
+  }
+
+  /**
+   * One mail delivery through the host's send, under the outbox's claim when it has one; the outcome recorded as the
+   * host answered it (`dead` and `hold` through the outbox's own methods where it has them, else as a failed attempt).
+   * Skipped when the claim found the delivery gone, no longer pending, being sent already or cancelled by a purge.
+   */
+  private async sendMail(d: OutboxDelivery): Promise<'delivered' | 'failed' | 'held' | 'skipped'> {
+    const mail = this.options.mail;
+    const outbox = this.options.outbox;
+    if (!mail) {
+      this.options.logger?.warn(`[OutboxDispatcher] ${d.id}: no mail send`);
+      await outbox.markFailed(d.id, this.now());
+      return 'failed';
+    }
+    let answer: MailOutcome = { outcome: 'retry' };
+    const deliver = async (fresh: OutboxDelivery, signal: AbortSignal): Promise<void> => {
+      signal.throwIfAborted();
+      answer = await mail(fresh, signal);
+      signal.throwIfAborted();
+    };
+    try {
+      const claimed = outbox.sendClaimed;
+      if (claimed) {
+        if (!(await claimed.call(outbox, d, deliver))) return 'skipped';
+      } else await deliver(d, new AbortController().signal);
+    } catch (err) {
+      this.options.logger?.warn(`[OutboxDispatcher] ${d.id}: ${err instanceof Error ? err.name : 'error'}`);
+      await outbox.markFailed(d.id, this.now());
+      return 'failed';
+    }
+    switch (answer.outcome) {
+      case 'sent':
+        await outbox.markDelivered(d.id);
+        return 'delivered';
+      case 'dead':
+        if (outbox.markDead) await outbox.markDead(d.id);
+        else await outbox.markFailed(d.id, this.now());
+        return 'failed';
+      case 'hold':
+        if (outbox.holdUntil) await outbox.holdUntil(d.id, answer.notBefore);
+        else await outbox.markFailed(d.id, this.now());
+        return 'held';
+      default:
+        await outbox.markFailed(d.id, this.now());
+        return 'failed';
+    }
   }
 }
