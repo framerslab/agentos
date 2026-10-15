@@ -1,3 +1,9 @@
+## [0.13.149](https://github.com/framerslab/agentos/compare/v0.13.148...v0.13.149) (2026-10-15)
+
+### fix
+
+* record messages in history only once across retries (#380) ([15cc212](https://github.com/framerslab/agentos/commit/15cc21266a0340e9965d5616bf9fbd2cc6e422f4))
+
 ## [0.13.148](https://github.com/framerslab/agentos/compare/v0.13.147...v0.13.148) (2026-10-15)
 
 ### fix
