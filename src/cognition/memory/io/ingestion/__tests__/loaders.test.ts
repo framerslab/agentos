@@ -487,20 +487,21 @@ describe('HtmlLoader', () => {
   // A pattern that scans from a '<' to the end of the page when nothing closes
   // it, such as /<[^>]+>/g, takes about n^2/2 steps on each page below: one
   // scan from every '<', or from every '<p', '<script>', '<style>' or '<title>'
-  // left unclosed. That is 2 * 10^10 steps or more for each page here, which no
-  // runner takes within 2 seconds (and minutes at a megabyte), all of it on the
-  // caller's event loop. A read that visits each character a bounded number of
-  // times takes milliseconds at these sizes, so the 2-second bound leaves a
-  // slow or busy runner a wide margin and still fails every quadratic pass.
+  // left unclosed. That is 2 * 10^10 steps or more for each page here, ten
+  // seconds or more on a hosted CI runner, and minutes at a megabyte, all of it
+  // on the caller's event loop. A read that visits each character a bounded
+  // number of times takes milliseconds at these sizes, so the 2-second bound
+  // leaves a slow or busy runner a wide margin and fails every quadratic pass
+  // by a factor of five or more.
   it.each<[string, string, string]>([
     ['200,000 "<" with no ">"', '<'.repeat(200_000), '<'.repeat(200_000)],
     ['100,000 "<p" with no ">"', '<p'.repeat(100_000), '<p'.repeat(100_000)],
     [
-      '25,000 "<script>" and 25,000 "<style>" never closed, then 400,000 characters of text',
-      '<script>'.repeat(25_000) + '<style>'.repeat(25_000) + 'shown(1); '.repeat(40_000),
-      'shown(1); '.repeat(40_000).trim(),
+      '50,000 "<script>" and 50,000 "<style>" never closed, then 1,200,000 characters of text',
+      '<script>'.repeat(50_000) + '<style>'.repeat(50_000) + 'shown(1); '.repeat(120_000),
+      'shown(1); '.repeat(120_000).trim(),
     ],
-    ['100,000 "<title>" never closed', '<title>'.repeat(100_000), ''],
+    ['140,000 "<title>" never closed', '<title>'.repeat(140_000), ''],
   ])('reads %s within 2 seconds, to the text the page holds', async (_case, html, text) => {
     const source = Buffer.from(html, 'utf8');
 
