@@ -1,3 +1,13 @@
+## [0.13.148](https://github.com/framerslab/agentos/compare/v0.13.147...v0.13.148) (2026-10-15)
+
+### fix
+
+* **voice-pipeline:** a LiveKit reply plays to its end before the session listens, pauses when told, and starts once the caller hears it (#509) ([e4924cc](https://github.com/framerslab/agentos/commit/e4924cca7a1b381634bb95edf6a36e5c1ceafaa4))
+
+### docs
+
+* text processing, statistics and search as their own section, with examples (#502) ([052f754](https://github.com/framerslab/agentos/commit/052f7545734d20e80bf0ffa5bda0eb4c67e3a0da))
+
 ## [0.13.147](https://github.com/framerslab/agentos/compare/v0.13.146...v0.13.147) (2026-10-15)
 
 ### fix
