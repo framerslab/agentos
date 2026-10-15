@@ -54,14 +54,14 @@
  * - A watchdog timer prevents a session without a call profile from staying in
  *   LISTENING forever if the user walks away (default 30 s). The watchdog
  *   resets after each completed turn.
- * - An endpoint detector that takes `setAgentContext()` hears what the agent
- *   is doing: neither speaking nor having asked anything as the session
- *   starts, speaking as each reply starts, and not speaking as the reply
- *   ends or a barge-in cuts it, with whether the reply's text, trimmed, ends
- *   with `?`. From the session's first utterance, `HeuristicEndpointDetector`
- *   drops a backchannel such as "uh huh" or "Sure." said over the agent or
- *   after a statement, keeps a lone one that answers a question as the
- *   user's turn, and never takes a final that ends with `?` for one.
+ * - An endpoint detector that takes `setAgentContext()` hears whether the
+ *   agent holds the floor: not as the session starts, from the moment each
+ *   user turn completes, and not again once the reply ends or a barge-in
+ *   cuts it. From the session's first utterance, `HeuristicEndpointDetector`
+ *   drops a backchannel such as "uh huh" or "Sure." only while the agent
+ *   holds the floor, takes every final said while the agent listens as the
+ *   user's, a lone "okay" included, and never takes a final that ends with
+ *   `?` for a backchannel.
  */
 
 import { EventEmitter } from 'node:events';
@@ -339,15 +339,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   }
 
   /**
-   * Tells the endpoint detector the agent has stopped speaking, as its reply ends or a barge-in cuts it, and whether
-   * the reply asked a question: its text, trimmed, ends with `?`. After a question the detector keeps a lone
-   * backchannel such as "yeah" as the user's answer. The orchestrator holds the reply's text and how long its audio
-   * played, not which words were heard, so a reply a barge-in cut is judged by the text it had received.
+   * Tells the endpoint detector the agent no longer holds the floor, as its reply ends or a barge-in cuts it. The user
+   * holds it then, so the detector takes a lone "okay" or "yeah" as the user's turn, whatever the reply said.
    *
    * @param endpoint - The session's endpoint detector; one without `setAgentContext()` is told nothing.
    */
   private _replyEnded(endpoint: IEndpointDetector): void {
-    endpoint.setAgentContext?.({ speaking: false, askedQuestion: this.text.trim().endsWith('?') });
+    endpoint.setAgentContext?.({ speaking: false });
   }
 
   /**
@@ -371,8 +369,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * 1. Validates the orchestrator is in `'idle'` state and has its four components.
    * 2. Resets the endpoint detector with `'session'`, so a detector an earlier session used carries nothing of that
    *    session into this one, such as a wait for the late final of its last turn, then tells a detector that takes
-   *    `setAgentContext()` that the agent neither speaks nor has asked anything, so it reads backchannels by the
-   *    agent's context from the session's first utterance.
+   *    `setAgentContext()` that the agent does not hold the floor, so it reads backchannels by the agent's context
+   *    from the session's first utterance.
    * 3. Creates STT and TTS sub-sessions from the provided factories.
    * 4. Wires all event handlers (transport -> STT -> endpoint -> agent -> TTS -> transport, and a client's
    *    transcript messages -> endpoint).
@@ -413,9 +411,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     // This session's STT session sends no final of an earlier session's turns, so a detector an earlier session used
     // waits for none.
     overrides.endpointDetector.reset('session');
-    // The agent has said nothing yet. Told so, a detector reads backchannels by the agent's context from the session's
-    // first utterance; HeuristicEndpointDetector keeps its exact-phrase rule only for a caller that reports none.
-    overrides.endpointDetector.setAgentContext?.({ speaking: false, askedQuestion: false });
+    // The user holds the floor until a turn completes. Told so, a detector reads backchannels by the agent's context
+    // from the session's first utterance; HeuristicEndpointDetector keeps its exact-phrase rule only for a caller that
+    // reports none.
+    overrides.endpointDetector.setAgentContext?.({ speaking: false });
     this.transport = transport;
     this.agent = agent;
     this.endpoint = overrides.endpointDetector;
@@ -464,11 +463,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       this._watchSend(() => transport.sendControl({ type: 'agent_thinking' }));
       this.supervise(async () => {
         if (this.current === 'closed') return;
+        // The agent holds the floor from the moment the user's turn completes, before its reply has a word: the
+        // detector drops a backchannel such as "uh huh" until the reply ends or a barge-in cuts it.
+        endpoint.setAgentContext?.({ speaking: true });
         const tokens = agent.sendText(event.transcript, { speakers: [], endpointReason: event.reason, speechDurationMs: event.durationMs, wasInterrupted: false, transcriptConfidence: event.confidence });
         // The reply gets its record before its audio is sent.
         this._currentReply = { audioRefusalReported: false };
-        // While the agent speaks, the detector drops a backchannel such as "uh huh".
-        endpoint.setAgentContext?.({ speaking: true, askedQuestion: false });
         this.stateTo('speaking');
         this.text = '';
         this.playedMs = 0;

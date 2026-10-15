@@ -684,23 +684,33 @@ export interface TurnCompleteEvent {
 /**
  * What the agent is doing, as `VoicePipelineOrchestrator` reports it to its
  * endpoint detector through `IEndpointDetector.setAgentContext()`, so the
- * detector can tell a backchannel said over the agent, or after a statement,
- * from a one-word answer to a question.
+ * detector can tell a backchannel, a response the user makes while the agent
+ * holds the floor, from the user's own turn.
  *
  * @example
  * ```typescript
- * // The agent's reply "Shall I book it?" has ended.
- * detector.setAgentContext?.({ speaking: false, askedQuestion: true });
+ * // The user's turn has completed: the agent holds the floor until its reply ends or a barge-in cuts it.
+ * detector.setAgentContext?.({ speaking: true });
  * ```
  */
 export interface EndpointAgentContext {
-  /** Whether the agent is speaking a reply. */
+  /**
+   * The agent holds the floor: its turn has begun and its reply has not
+   * ended. `VoicePipelineOrchestrator` reports `true` from the moment a
+   * user's turn completes until the reply ends or a barge-in cuts it.
+   */
   speaking: boolean;
   /**
-   * Whether the agent's last reply asked a question: its text, trimmed, ends
-   * with `?`. It matters while the agent is not speaking.
+   * Whether the agent's last reply asked a question.
+   *
+   * @deprecated Ignored. A backchannel is a response made while the other
+   * party holds the floor, so `speaking` alone decides whether a final is
+   * one, and a reply's punctuation does not say whether it expects an answer
+   * ("Tell me the time you would like." asks without `?`). The property stays
+   * so that code which sets it still compiles; `VoicePipelineOrchestrator`
+   * does not set it.
    */
-  askedQuestion: boolean;
+  askedQuestion?: boolean;
 }
 
 /**
@@ -779,24 +789,23 @@ export interface IEndpointDetector extends EventEmitterLike {
   reset(scope?: 'turn' | 'session'): void;
 
   /**
-   * Tells the detector what the agent is doing. `VoicePipelineOrchestrator`
-   * calls it as its session starts, after the reset with `'session'`
-   * (`speaking: false`, `askedQuestion: false`), as the agent starts speaking
-   * a reply (`speaking: true`), and as the reply ends or a barge-in cuts it
-   * (`speaking: false`, with `askedQuestion` when the reply's text, trimmed,
-   * ends with `?`). From the first call until a reset with `'session'`,
-   * {@link HeuristicEndpointDetector} reads a final with trailing `.`, `,`,
-   * `!` or an ellipsis ("Sure.") as its phrase, and never takes one that ends
-   * with `?` ("Okay?") for a backchannel; it drops a backchannel such as
-   * "yeah" while the agent speaks, and while it listens after a reply that
-   * asked no question, and after a question a lone backchannel is the user's
-   * answer and forms a turn. Until the first call, and again after a reset
-   * with `'session'`, it drops a final whose whole text, trimmed and
-   * lowercased, is a backchannel phrase, whatever the agent is doing, so a
-   * caller that never calls it, such as a listen session, keeps that rule. A
-   * detector without this method is told nothing.
+   * Tells the detector whether the agent holds the floor.
+   * `VoicePipelineOrchestrator` calls it as its session starts, after the
+   * reset with `'session'` (`speaking: false`), as a user's turn completes
+   * and the agent takes the floor (`speaking: true`), and as the agent's
+   * reply ends or a barge-in cuts it (`speaking: false`). From the first call
+   * until a reset with `'session'`, {@link HeuristicEndpointDetector} reads a
+   * final with trailing `.`, `,`, `!` or an ellipsis ("Sure.") as its phrase,
+   * never takes one that ends with `?` ("Okay?") for a backchannel, and drops
+   * a backchannel such as "yeah" only while the agent holds the floor: while
+   * the agent listens, every final is the user's, a lone "okay" included.
+   * Until the first call, and again after a reset with `'session'`, it drops
+   * a final whose whole text, trimmed and lowercased, is a backchannel
+   * phrase, whatever the agent is doing, so a caller that never calls it,
+   * such as a listen session, keeps that rule. A detector without this method
+   * is told nothing.
    *
-   * @param context - Whether the agent speaks, and whether its last reply asked a question.
+   * @param context - Whether the agent holds the floor; its deprecated `askedQuestion` is ignored.
    */
   setAgentContext?(context: EndpointAgentContext): void;
 
