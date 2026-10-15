@@ -68,6 +68,8 @@ await mem.close();
 
 [`LoaderRegistry`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/LoaderRegistry.ts) maps extensions to loaders. A folder scan considers only files whose extension a loader claims. `registry.register(loader)` adds a loader for its `supportedExtensions`, replacing an earlier one for the same extension.
 
+PowerPoint, Excel, OpenDocument, RTF and EPUB files are read from their bytes by `OfficeLoader`, which the registry does not register ([below](#powerpoint-excel-opendocument-rtf-and-epub-files)).
+
 Reading through the global `fetch`, `UrlLoader` throws on a non-2xx response. A `text/html` response goes to the HTML loader, `application/pdf` to the PDF loader, and every other content type, Markdown included, is kept as raw text with `format: 'text'`.
 
 ### An address a person gives a server
@@ -181,7 +183,7 @@ A read still shares its process: the caps end the worker, and a fault the worker
 ### PowerPoint, Excel, OpenDocument, RTF and EPUB files
 
 ```ts
-import { OfficeLoader, DocumentTooLargeError } from '@framers/agentos/cognition/memory';
+import { OfficeLoader, DocumentTooLargeError } from '@framers/agentos/cognition/memory/office';
 
 const loader = new OfficeLoader({
   maxInflatedBytes: 32 * 1024 * 1024,
@@ -198,6 +200,8 @@ try {
 ```
 
 [`OfficeLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/OfficeLoader.ts) reads `.pptx`, `.xlsx`, `.odt`, `.ods`, `.odp`, `.rtf` and `.epub` documents in memory through [officeparser](https://github.com/harshankur/officeParser), an optional peer dependency: `npm install officeparser` (the peer range is `^8.1.1`; officeparser 8.1.1 asks for Node.js 22.13 or later). The package is imported on the first read, and a read without it throws an error that starts `OfficeLoader needs the optional peer dependency officeparser`. `LoaderRegistry` does not register the loader, so `Memory.ingest()` does not read these formats: a host builds the loader and calls `load` itself.
+
+The loader has an entry of its own, `@framers/agentos/cognition/memory/office`, which exports `OfficeLoader`, `OFFICE_TYPES`, `ScannedDocumentError` and `DocumentTooLargeError`, the same class `DocxLoader` throws. Importing the entry loads no package and no Node built-in: officeparser loads on the first `load`, and officeparser loads pdf.js and tesseract.js only to read a scanned PDF, so a host that never reads an office document loads none of the three. `@framers/agentos/cognition/memory` exports the same names. [`examples/office-documents.mjs`](../../examples/office-documents.mjs) reads an OpenDocument text and an EPUB book from that entry, refuses a document past a bound and a PDF while OCR is off, and reads the files named on its command line (`node examples/office-documents.mjs deck.pptx`).
 
 `load(bytes, { format })` takes the file's bytes and its format's name: `pptx`, `xlsx`, `odt`, `ods`, `odp`, `rtf` or `epub`, with or without a leading dot (`OFFICE_TYPES` maps each extension to its name). It reads no file from a path and does not guess a format from the bytes, so a path throws, and so does a call that names none of the formats. `content` is the document's text as officeparser writes it, with comments and pictures left out; `metadata` carries `wordCount`, and `pageCount` when officeparser reports a page count.
 
@@ -344,7 +348,8 @@ Declared and not read: `ingestion.extractImages`, `ingestion.ocrEnabled`, `inges
 | [`io/ingestion/PdfLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/PdfLoader.ts) | unpdf with the OCR and Docling fallbacks |
 | [`io/ingestion/OcrPdfLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/OcrPdfLoader.ts) | tesseract.js OCR |
 | [`io/ingestion/DoclingLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/DoclingLoader.ts) | Python Docling subprocess |
-| [`io/ingestion/OfficeLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/OfficeLoader.ts) | `OfficeLoader`, `OFFICE_TYPES` and `ScannedDocumentError`: the office formats through officeparser, and a scanned PDF by OCR |
+| [`io/ingestion/OfficeLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/OfficeLoader.ts) | `OfficeLoader`, `OFFICE_TYPES` and `ScannedDocumentError`: the office formats through officeparser, and a scanned PDF by OCR; the entry `@framers/agentos/cognition/memory/office` |
+| [`io/ingestion/DocumentTooLargeError.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/DocumentTooLargeError.ts) | `DocumentTooLargeError`, which the Word and office loaders and `loadIsolated` throw, in a module that imports nothing |
 | [`io/ingestion/loadIsolated.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/loadIsolated.ts) | `loadIsolated`, `DocumentTooComplexError` and `DocumentReadTimeoutError` |
 | [`io/ingestion/isolatedLoadWorker.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/isolatedLoadWorker.ts) | The worker thread's entry: one read with the loader of its kind |
 | [`io/ingestion/FolderScanner.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/FolderScanner.ts) | Folder walking and glob filters |
