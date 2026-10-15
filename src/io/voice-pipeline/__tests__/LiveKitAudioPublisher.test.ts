@@ -204,6 +204,36 @@ describe('native playout', () => {
     await expect(f.publisher.waitForPlayback(generation, 1, new AbortController().signal)).rejects.toThrow('publisher drain timeout');
     await f.publisher.close();
   });
+  /** A publisher left to its default playout and without a call identity, published by `room`'s local participant. */
+  const unidentified = (room: FakeRoom, receiptTimeoutMs = 1000) => new LiveKitAudioPublisher({ sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs, rtc: fakePublishingRtc() }, room.localParticipant, async () => {});
+  it('captures nothing until a participant has subscribed to the track', async () => {
+    const room = new FakeRoom(); let subscribe!: () => void;
+    room.subscription = new Promise<void>((resolve) => { subscribe = resolve; });
+    const publisher = unidentified(room);
+    const sent = publisher.sendAudio(unscoped()); await settle();
+    expect(room.localParticipant.publishTrack).toHaveBeenCalledOnce(); expect(FakeAudioSource.created[0]!.capturedSamples).toBe(0);
+    subscribe(); await sent;
+    expect(FakeAudioSource.created[0]!.capturedSamples).toBe(960);
+    await publisher.close();
+  });
+  it('waits for a subscription no longer than receiptTimeoutMs, then plays', async () => {
+    const room = new FakeRoom(); room.subscription = new Promise<void>(() => {});
+    const publisher = unidentified(room, 20);
+    await publisher.sendAudio(unscoped());
+    expect(FakeAudioSource.created[0]!.capturedSamples).toBe(960);
+    await publisher.close();
+  });
+  it('refuses a chunk that carries a scope, a call or a generation when the publisher has none of its own', async () => {
+    const room = new FakeRoom(); const publisher = unidentified(room);
+    for (const chunk of [{ ...unscoped(), scopeId: 'scope-b' }, { ...unscoped(), callId: 'call-b' }, { ...unscoped(), generation }]) {
+      await expect(publisher.sendAudio(chunk)).rejects.toThrow('publisher scope or generation refused');
+    }
+    expect(room.localParticipant.publishTrack).not.toHaveBeenCalled();
+    // A chunk that carries none still plays.
+    await publisher.sendAudio(unscoped());
+    expect(FakeAudioSource.created[0]!.capturedSamples).toBe(960);
+    await publisher.close();
+  });
 });
 describe('loading @livekit/rtc-node', () => {
   const generation: VoiceGeneration = { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 };

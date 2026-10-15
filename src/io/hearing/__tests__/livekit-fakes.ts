@@ -104,7 +104,8 @@ export class FakeAudioStream {
 /**
  * An rtc-node room: its remote participants and their publications, the text
  * stream handlers by topic, and a local participant whose `sendText`,
- * `publishTrack` and `unpublishTrack` are mocks.
+ * `publishTrack` and `unpublishTrack` are mocks. A track the local participant
+ * publishes answers `waitForSubscription()` with `subscription`.
  */
 export class FakeRoom extends EventEmitter {
   /**
@@ -112,12 +113,21 @@ export class FakeRoom extends EventEmitter {
    * disconnected before the source listened.
    */
   isConnected = true;
+  /**
+   * What a published track's `waitForSubscription()` returns, as rtc-node's
+   * `LocalTrackPublication` resolves it once a participant has subscribed to
+   * the track: subscribed already, unless a test holds it.
+   */
+  subscription: Promise<void> = Promise.resolve();
   readonly remoteParticipants = new Map<string, FakeParticipant>();
   readonly textHandlers = new Map<string, LiveKitTextStreamHandler>();
   readonly localParticipant = {
     identity: 'agent',
     sendText: vi.fn(async (_text: string, _options?: unknown) => ({})),
-    publishTrack: vi.fn(async (_track: unknown, _options: { source: number }) => ({ sid: 'TR_AGENT' })),
+    publishTrack: vi.fn(async (_track: unknown, _options: { source: number }) => ({
+      sid: 'TR_AGENT',
+      waitForSubscription: () => this.subscription,
+    })),
     unpublishTrack: vi.fn(async (_sid: string, _stopOnUnpublish?: boolean) => undefined),
   };
 
