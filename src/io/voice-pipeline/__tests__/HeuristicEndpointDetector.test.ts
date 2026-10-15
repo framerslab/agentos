@@ -11,6 +11,7 @@
  * - Correct transcript text and confidence are carried in the turn_complete event
  * - Backchannel phrases are detected, suppressed from accumulation, and emitted separately
  * - Backchannel matching is case-insensitive and whitespace-tolerant
+ * - A backchannel is recognized whatever its trailing punctuation (. , ! ? and the ellipsis)
  * - Silence timeout fallback fires turn_complete with reason 'silence_timeout'
  * - No turn_complete fires without accumulated text
  * - No turn_complete fires for interim (non-final) transcripts
@@ -228,6 +229,26 @@ describe('HeuristicEndpointDetector', () => {
     detector.pushTranscript(transcript('  Uh Huh  '));
     expect(handler).toHaveBeenCalledOnce();
   });
+
+  /**
+   * Providers punctuate a backchannel differently: the phrase is read trimmed, lowercased and without trailing
+   * punctuation (. , ! ? and the ellipsis), so each of these is one, as "yeah" is.
+   */
+  it.each(['Sure.', 'Yeah!', 'Okay?', 'Uh huh,', 'Right...', 'Mm hmm\u2026', 'Yep !'])(
+    'should detect %j as a backchannel phrase, whatever its trailing punctuation',
+    (text) => {
+      const backchannel = vi.fn();
+      const turn = vi.fn();
+      detector.on('backchannel_detected', backchannel);
+      detector.on('turn_complete', turn);
+
+      detector.pushTranscript(transcript(text));
+      detector.pushVadEvent(speechEnd());
+
+      expect(backchannel).toHaveBeenCalledWith({ text });
+      expect(turn).not.toHaveBeenCalled();
+    },
+  );
 
   // -------------------------------------------------------------------------
   // Silence timeout fallback

@@ -468,6 +468,46 @@ for (const thread of THREADS) describe(`MoonshineBrowserSTT on the ${thread} thr
     warn.mockRestore();
   });
 
+  /**
+   * A listener can throw any value, and String() throws for some: an object without a prototype, and a revoked proxy,
+   * whose prototype cannot even be read. The warning names the value's type, and the close still finishes.
+   */
+  it.each<[string, () => unknown]>([
+    ['an object without a prototype', () => Object.create(null)],
+    [
+      'a revoked proxy',
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      },
+    ],
+  ])('finishes closing when a listener throws %s, which String() cannot print, and warns of it by its type', async (_name, unprintable) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { stt, session, stream, log } = await open();
+      stream.passes.push([line('g', 'Open line', 0, 0.4)]);
+      session.pushAudio(frame(500));
+      await settle();
+      session.prependListener('transcript', () => {
+        throw unprintable();
+      });
+      session.prependListener('close', () => {
+        throw unprintable();
+      });
+      expect(() => session.close()).not.toThrow();
+      expect(log.events).toEqual(['interim g Open line', 'final g ', 'close']);
+      expect(stream.closed).toBe(true);
+      expect(heldSessions(stt)).toBe(0);
+      expect(warn.mock.calls).toEqual([
+        ["[moonshine-browser-stt] a listener of 'transcript' threw:", 'an unprintable object'],
+        ["[moonshine-browser-stt] a listener of 'close' threw:", 'an unprintable object'],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("ends on a failure though an 'error' listener throws: the error, the open line retracted, then close", async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { stt, session, stream, log } = await open();

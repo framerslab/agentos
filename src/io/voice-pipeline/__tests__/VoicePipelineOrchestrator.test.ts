@@ -35,6 +35,12 @@
  *   what arrives from the other is dropped, and the drop is reported once
  * - A session started on a detector an earlier session used hands its first final to the agent: no late final of
  *   the earlier session's last turn is awaited
+ * - A detector the host hands to one session after another loses each session's listeners as it stops, and as a
+ *   start fails, with no listener-limit warning
+ * - On the HeuristicEndpointDetector, a backchannel said while the agent speaks is dropped, keyed by an item or not
+ *   and whatever its trailing punctuation; after a reply ending in a question a lone one is the user's turn, after
+ *   one that asked nothing it is dropped; a client's lone backchannel reaches the detector on its own, and a
+ *   detector without isBackchannel() gets every client final joined
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -1043,5 +1049,203 @@ describe('VoicePipelineOrchestrator', () => {
     expect(late).not.toHaveBeenCalled();
     expect(secondAgent.sendText).toHaveBeenCalledWith('What about Friday?', expect.objectContaining({ endpointReason: 'punctuation' }));
     await second.stopSession();
+  });
+
+  /**
+   * A host can hand one endpoint detector to one session after another. Each session removes the listeners it added
+   * to the detector when it stops, by `stopSession()` or by its transport closing, and when its start fails, so no
+   * closed session stays reachable from the detector and the detector's listeners do not pile up past Node's limit.
+   */
+  it('should remove the listeners it added to a detector the host hands to one session after another', async () => {
+    const detector = new HeuristicEndpointDetector();
+    const hostTurns = vi.fn();
+    detector.on('turn_complete', hostTurns);
+    const counts = () =>
+      Object.fromEntries(
+        ['turn_complete', 'error', 'backchannel_detected', 'late_final'].map((event) => [event, detector.listenerCount(event)]),
+      );
+    const before = counts();
+    const warnings: Error[] = [];
+    const onWarning = (warning: Error): void => {
+      warnings.push(warning);
+    };
+    process.on('warning', onWarning);
+    try {
+      for (let session = 0; session < 5; session++) {
+        const sessionTransport = createMockTransport();
+        const pipeline = new VoicePipelineOrchestrator(makeConfig());
+        await pipeline.startSession(sessionTransport, createMockAgentSession(), {
+          streamingSTT: createMockSTT(createMockSTTSession()),
+          streamingTTS: createMockTTS(createMockTTSSession()),
+          endpointDetector: detector,
+          bargeinHandler: createMockBargeinHandler(),
+        });
+        // A session stops by the host's call or by its transport closing.
+        if (session % 2 === 0) await pipeline.stopSession();
+        else sessionTransport.emit('close');
+        expect(pipeline.state).toBe('closed');
+      }
+      const failing = new VoicePipelineOrchestrator(makeConfig());
+      await expect(
+        failing.startSession(createMockTransport(), createMockAgentSession(), {
+          streamingSTT: { providerId: 'mock-stt', isStreaming: false, startSession: vi.fn().mockRejectedValue(new Error('no connection')) },
+          streamingTTS: createMockTTS(createMockTTSSession()),
+          endpointDetector: detector,
+          bargeinHandler: createMockBargeinHandler(),
+        }),
+      ).rejects.toThrow('no connection');
+      // Node hands a listener-limit warning to process 'warning' on the next tick.
+      await new Promise<void>((resolve) => process.nextTick(resolve));
+
+      expect(counts()).toEqual(before);
+      expect(detector.listeners('turn_complete')).toEqual([hostTurns]);
+      expect(warnings.map((warning) => warning.name)).not.toContain('MaxListenersExceededWarning');
+    } finally {
+      process.off('warning', onWarning);
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // Backchannels: the HeuristicEndpointDetector, told what the agent is doing
+  // --------------------------------------------------------------------------
+
+  /**
+   * Starts a session on a real HeuristicEndpointDetector, with an agent that answers every turn with `reply` and a
+   * barge-in handler that lets a reply go on while the user speaks. Gives the texts the agent is handed and the
+   * backchannels the detector reports.
+   */
+  async function startWithDetector(reply: string) {
+    const detector = new HeuristicEndpointDetector();
+    const backchannels: string[] = [];
+    detector.on('backchannel_detected', (event: { text: string }) => backchannels.push(event.text));
+    agentSession = createMockAgentSession([reply]);
+    await orchestrator.startSession(transport, agentSession, {
+      streamingSTT: createMockSTT(sttSession),
+      streamingTTS: createMockTTS(ttsSession),
+      endpointDetector: detector,
+      bargeinHandler: createMockBargeinHandler({ type: 'ignore' }),
+    });
+    const turns = (): string[] => vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text);
+    return { detector, backchannels, turns };
+  }
+
+  /**
+   * The user says `text`, as the STT session reports it: a start of speech, then the final and the end of speech, the
+   * end first for a final keyed by an item (OpenAI Realtime sends an utterance's final after its end of speech).
+   */
+  async function say(text: string, itemId?: string): Promise<void> {
+    const final = { text, confidence: 0.9, words: [], isFinal: true, ...(itemId ? { itemId } : {}) };
+    sttSession.emit('speech_start');
+    if (itemId) {
+      sttSession.emit('speech_end');
+      sttSession.emit('transcript', final);
+    } else {
+      sttSession.emit('transcript', final);
+      sttSession.emit('speech_end');
+    }
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  it('should drop an item-keyed backchannel said while the agent speaks, whatever its trailing punctuation', async () => {
+    const { detector, backchannels, turns } = await startWithDetector('It is booked.');
+    const detectorTurns = vi.fn();
+    detector.on('turn_complete', detectorTurns);
+    await say('Book a table for two.');
+    expect(orchestrator.state).toBe('speaking');
+
+    await say('Uh huh.', 'item_A');
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(backchannels).toEqual(['Uh huh.']);
+    expect(detectorTurns).toHaveBeenCalledOnce(); // the first turn: none ended on the backchannel
+    expect(turns()).toEqual(['Book a table for two.']);
+  });
+
+  it("should drop a backchannel said while the agent speaks, though the agent's last reply asked a question", async () => {
+    const { backchannels, turns } = await startWithDetector('Shall I book it?');
+    await say('Book a table for two.');
+    ttsSession.emit('flush_complete');
+    await say('Yes, for seven.');
+    expect(orchestrator.state).toBe('speaking');
+
+    await say('Sure.');
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(backchannels).toEqual(['Sure.']);
+    expect(turns()).toEqual(['Book a table for two.', 'Yes, for seven.']);
+  });
+
+  it("should hand the agent a lone 'yeah' that answers a reply ending in a question", async () => {
+    const { backchannels, turns } = await startWithDetector('Shall I book it?');
+    await say('Book a table for two.');
+    ttsSession.emit('flush_complete');
+
+    await say('yeah');
+    // No terminal punctuation: the silence timeout ends the turn.
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(turns()).toEqual(['Book a table for two.', 'yeah']);
+    expect(backchannels).toEqual([]);
+  });
+
+  it("should drop a lone 'uh huh' after a reply that asked no question, and hand the agent no turn", async () => {
+    const { backchannels, turns } = await startWithDetector('It is booked.');
+    await say('Book a table for two.');
+    ttsSession.emit('flush_complete');
+
+    await say('uh huh');
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(turns()).toEqual(['Book a table for two.']);
+    expect(backchannels).toEqual(['uh huh']);
+  });
+
+  it.each([
+    { after: 'a statement', reply: 'It is booked.', turn: 'I think we should go ahead', dropped: ['yeah'] },
+    { after: 'a question', reply: 'Shall I book it?', turn: 'I think we should yeah go ahead', dropped: [] },
+  ])(
+    "after $after, should hand the agent a client's lines 'I think we should', 'yeah' and 'go ahead' as $turn",
+    async ({ reply, turn, dropped }) => {
+      const { backchannels, turns } = await startWithDetector(reply);
+      transport.emit('message', clientTranscript('1', 'Book a table for two.', true));
+      await vi.advanceTimersByTimeAsync(0);
+      ttsSession.emit('flush_complete');
+
+      transport.emit('message', clientTranscript('2', 'I think we should', true));
+      transport.emit('message', clientTranscript('3', 'yeah', true));
+      transport.emit('message', clientTranscript('4', 'go ahead', true));
+      await vi.advanceTimersByTimeAsync(1_500);
+
+      expect(turns()).toEqual(['Book a table for two.', turn]);
+      expect(backchannels).toEqual(dropped);
+    },
+  );
+
+  it('should join every client final for a detector without isBackchannel() or setAgentContext(), as before', async () => {
+    await startSession(); // the mock detector has neither
+    const log = logDetector();
+    endpoint.emit('turn_complete', makeTurnComplete());
+    await vi.advanceTimersByTimeAsync(0);
+    ttsSession.emit('flush_complete');
+
+    transport.emit('message', clientTranscript('2', 'I think we should', true));
+    transport.emit('message', clientTranscript('3', 'yeah', true));
+    transport.emit('message', clientTranscript('4', 'go ahead', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log).toEqual([
+      'reset',
+      'vad speech_start',
+      'final I think we should',
+      'vad speech_end',
+      'vad speech_start',
+      'final I think we should yeah',
+      'vad speech_end',
+      'vad speech_start',
+      'final I think we should yeah go ahead',
+      'vad speech_end',
+    ]);
   });
 });
