@@ -273,7 +273,9 @@ export class StreamingSTTChain implements IStreamingSTT {
    * onto its own input timeline (the audio pushed since it opened, or since its last `reset()`), so a final the
    * backup transcribes again from the replay meets the one the failed provider gave for the same audio. A backup that
    * cannot open because the `config.connectionHooks` refused its socket ends the facade with that
-   * `SttConnectionAuthorizationError`: no further provider is tried for a funding refusal.
+   * `SttConnectionAuthorizationError`, and so does an `'error'` that is one from the session in use (a refused
+   * reconnect of its own, or a frame past its funded limit), during a switch as well: no further provider is tried
+   * for a funding refusal.
    */
   private wrap(initial: StreamingSTTSession, first: STTProvider, candidates: STTProvider[], config?: StreamingSTTConfig): StreamingSTTSession {
     if (!this.opts.enableMidUtteranceFailover) return initial;
@@ -383,6 +385,12 @@ export class StreamingSTTChain implements IStreamingSTT {
       // During a switch the active session is the backup taking the replay: its failure is left for the switch.
       session.on('error', (error: Error) => {
         if (closed || session !== current) return;
+        // A funding refusal, such as a provider's own reconnect or a replay frame past the funded limit, is no
+        // outage: it ends the facade, during a switch as well, and no other provider is opened for it.
+        if (error instanceof SttConnectionAuthorizationError) {
+          fatal(error);
+          return;
+        }
         if (switching) lost ??= error;
         else begin(error);
       });
