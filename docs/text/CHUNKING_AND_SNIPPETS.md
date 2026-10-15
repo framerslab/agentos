@@ -47,7 +47,7 @@ snippetAround('The refund goes back to the card that paid.', lexicalTokens('refu
 | `preserveCodeBlocks` | true | Keep each fenced code block as one chunk; a block longer than `maxSize` is split as step 2 below says |
 | `respectHeadings` | true | Start a chunk at each Markdown heading |
 
-`chunk(text, metadata)` answers the chunks in order, `[]` for an empty text:
+`chunk(text, metadata)` answers the chunks in order, `[]` for a text that is empty or white space alone:
 
 1. It reads the text line by line. With `preserveCodeBlocks`, a line that starts with three backticks, after any leading white space, opens a block that runs to the next such line and becomes one `code-block` chunk. A block left open runs to the end of the text, and the chunk that was gathering when it opened then comes out twice, before the block and again after it. With `respectHeadings`, a heading line (`#` to `######` at the start of the line, then white space) starts a `heading` chunk. A blank line ends the current chunk only once it holds `targetSize` characters; until then paragraphs gather.
 2. A chunk longer than `maxSize`, a heading or code-block chunk among them, is split again, and each part takes the type of the split that made it: at blank lines, packing paragraphs up to `targetSize` (`paragraph`); a part still longer than `maxSize`, or a chunk with no blank line, at sentence ends (`.`, `!` or `?` and white space), packing sentences up to `targetSize` (`sentence`); a part still longer, or with no sentence end, every `targetSize` characters, moved back to the last space when that space lies more than `minSize` characters in (`fixed`).
