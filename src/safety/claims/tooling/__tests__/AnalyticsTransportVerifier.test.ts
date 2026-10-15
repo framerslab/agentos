@@ -98,4 +98,16 @@ describe('analytics transports', () => {
       'pricing: a payload value carries a query string or a fragment',
     ]);
   });
+
+  it('reports a page that is not a registered route whatever else is wrong with its request, and leaves the page its own requests', () => {
+    expect(verifyAnalyticsTransports(input({ requests: [{ phase: 'before_consent', method: 'POST', url: 'https://collect.example.test/event', body: '{}', route: 'account' }] }))).toEqual([
+      'account: the page is not a registered public route',
+      'account: a request to https://collect.example.test/event before consent',
+    ]);
+    expect(verifyAnalyticsTransports(input({ requests: [{ phase: 'granted', method: 'GET', url: 'https://other.example.test/pixel.gif', body: null, route: 'account' }] }))).toEqual([
+      'account: the page is not a registered public route',
+      'account: a request to an unregistered destination https://other.example.test/pixel.gif',
+    ]);
+    expect(verifyAnalyticsTransports(input({ requests: [{ phase: 'before_consent', method: 'GET', url: 'https://site.example.test/account/settings', body: null, route: 'account' }] }))).toEqual([]);
+  });
 });
