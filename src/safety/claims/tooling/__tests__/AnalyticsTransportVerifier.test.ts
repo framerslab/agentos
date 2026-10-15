@@ -47,4 +47,55 @@ describe('analytics transports', () => {
       'account: a payload value carries a query string or a fragment',
     ]);
   });
+
+  it('reads the policy as a browser does: a repeated directive keeps its first value, a directive that is not ASCII is skipped', () => {
+    expect(parseCsp('connect-src *; connect-src https://collect.example.test')).toEqual({ 'connect-src': ['*'] });
+    expect(parseCsp("default-src *; img-src 'self' https://pi\u00f1a.example.test")).toEqual({ 'default-src': ['*'] });
+    expect(verifyAnalyticsTransports(input({ csp: parseCsp('script-src https://cdn.example.test; connect-src *; connect-src https://collect.example.test') }))).toEqual([
+      'example-analytics: connect-src lacks https://collect.example.test',
+      'connect-src holds the wildcard *',
+    ]);
+  });
+
+  it('checks each kind of origin against the directive a browser applies to it, and still reports a wildcard in a directive a more specific one shadows', () => {
+    expect(verifyAnalyticsTransports(input({ csp: parseCsp('default-src *; script-src https://cdn.example.test; connect-src https://collect.example.test') }))).toEqual([
+      'default-src holds the wildcard *',
+    ]);
+    expect(verifyAnalyticsTransports(input({ csp: parseCsp('script-src https://cdn.example.test; connect-src https://collect.example.test; child-src *') }))).toEqual([
+      'child-src holds the wildcard *',
+    ]);
+    expect(verifyAnalyticsTransports(input({ csp: parseCsp("script-src https://cdn.example.test; script-src-elem 'self'; connect-src https://collect.example.test") }))).toEqual([
+      'example-analytics: script-src-elem lacks https://cdn.example.test',
+    ]);
+    expect(verifyAnalyticsTransports(input({ csp: parseCsp("script-src *; script-src-elem 'self' https://cdn.example.test; connect-src https://collect.example.test") }))).toEqual([
+      'script-src holds the wildcard *',
+    ]);
+  });
+
+  it('checks a request to a same-origin endpoint whatever its method, and leaves the page its own requests', () => {
+    const relay: AnalyticsTransport = { ...transport, integration: 'example-relay', script: [], connect: [], endpoints: [{ method: 'POST', origin: 'https://site.example.test', path: '/api/event' }] };
+    expect(verifyAnalyticsTransports(input({ transports: [relay], requests: [{ phase: 'before_consent', method: 'GET', url: 'https://site.example.test/api/event?name=pageview', body: null, route: 'home' }] }))).toEqual([
+      'home: a request to an unregistered destination https://site.example.test/api/event',
+    ]);
+    expect(verifyAnalyticsTransports(input({ transports: [relay], requests: [{ phase: 'before_consent', method: 'GET', url: 'https://site.example.test/pricing', body: null, route: 'pricing' }] }))).toEqual([]);
+  });
+
+  it('tests every value against a forbidden pattern from its start, whatever flags the pattern carries', () => {
+    const pattern = /@/g;
+    const body = JSON.stringify({ name: 'person@example.test', route: 'home' });
+    const sent = (route: string) => ({ phase: 'granted' as const, method: 'POST', url: 'https://collect.example.test/event', body, route });
+    expect(verifyAnalyticsTransports(input({ forbidden: [pattern], requests: [sent('home'), sent('pricing')] }))).toEqual([
+      'home: a payload value matches a forbidden pattern',
+      'pricing: a payload value matches a forbidden pattern',
+    ]);
+    expect(pattern.lastIndex).toBe(0);
+  });
+
+  it('finds a query string or a fragment in a path and in a protocol-relative address', () => {
+    const sent = (route: string, name: string) => ({ phase: 'granted' as const, method: 'POST', url: 'https://collect.example.test/event', body: JSON.stringify({ name, route }), route });
+    expect(verifyAnalyticsTransports(input({ requests: [sent('home', '/pricing?ref=mail'), sent('pricing', '//site.example.test/#top')] }))).toEqual([
+      'home: a payload value carries a query string or a fragment',
+      'pricing: a payload value carries a query string or a fragment',
+    ]);
+  });
 });
