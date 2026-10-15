@@ -58,13 +58,15 @@ IDF(t)   = ln((N - n(t) + 0.5) / (n(t) + 0.5) + 1)
 | `toJSON()` | The index as plain JSON. |
 | `LexicalIndex.fromJSON(json, { tokenize })` | A saved index restored. |
 
-`match: 'any'` (the default) ranks every document that holds at least one of the query's words; `match: 'all'` keeps only those that hold every one. `prefix: true` lets a stored word match when it begins with a query word, so `pass` finds `password`; when several stored words begin with one query word, a document scores by the best of them for that word.
+`match: 'any'` (the default) ranks every document that holds at least one of the query's words; `match: 'all'` keeps only those that hold every one. `prefix: true` lets a stored word match when it begins with a query word, so `pass` finds `password`; when several stored words begin with one query word, a document scores by the best of them for that word. A query the tokenizer reads no words in answers `[]`.
 
 The index keeps no text: a hit carries its id, score and metadata, and the caller keeps the texts and places a snippet with [`snippetAround`](./CHUNKING_AND_SNIPPETS.md#snippets).
 
-`toJSON()` answers version 1 of the format: `{ v: 1, k1, b, documents, terms }`, with each document as `[id, length]` or `[id, length, metadata]` and each term as `[term, postings]`, a posting being `[the document's position in documents, the term's count in it]`. It holds terms, not texts, so `fromJSON` is given the tokenizer the index was made with. A saved index of another version throws, and so does one `toJSON()` could not have written: `k1` or `b` not a finite number, a part out of shape, an id, a term or a document position given twice, a length that is not a whole number of 0 or more, or a count under 1. The error names what is wrong. Metadata is saved as given, so keep it to values JSON can hold.
+`toJSON()` answers version 1 of the format: `{ v: 1, k1, b, documents, terms }`, with each document as `[id, length]` or `[id, length, metadata]` and each term as `[term, postings]`, a posting being `[the document's position in documents, the term's count in it]`. It holds terms, not texts, so `fromJSON` is given the tokenizer the index was made with. A saved index of another version throws, and so does one `toJSON()` could not have written: `k1` or `b` not a finite number, a part out of shape, a document id or a term given twice, a document position given twice in one term's postings, a position past the last document, a length that is not a whole number of 0 or more, or a count under 1. The error names what is wrong. Metadata is saved as given, so keep it to values JSON can hold.
 
-[Library Index: On a device](../features/LIBRARY_INDEX.md#on-a-device) builds a page's index from a transcript's passages with `lexicalTokens`.
+### In a browser
+
+A page imports `@framers/agentos/cognition/library/browser`. It exports `LexicalIndex`, `lexicalTokens`, `snippetAround` and `chunkTurns` with their types, and the page's own storage: a key-value store over IndexedDB or memory, an outbox and `reconcileList`. Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph. [Library Index: On a device](../features/LIBRARY_INDEX.md#on-a-device) lists every export and builds a page's index from a transcript's passages with `lexicalTokens`.
 
 ## BM25Index
 
@@ -131,11 +133,11 @@ reciprocalRankFusion(
 
 | Function | What it does |
 |---|---|
-| `normalizeUrl(url)` | Drops the `http://` or `https://`, a leading `www.`, trailing slashes, and the `utm_*`, `ref`, `source`, `fbclid` and `gclid` parameters. |
+| `normalizeUrl(url)` | Drops the `http://` or `https://`, a leading `www.`, the slashes the URL ends with, and each `utm_*`, `ref`, `source`, `fbclid` and `gclid` parameter with the `?` or `&` before it, then a `?` left at the end. |
 | `computeRRF(candidates, k = 60)` | Sets each candidate's `rrfScore` to the sum of `1 / (k + rank)` over its `providerRanks`, and sorts the array best first. |
 | `computeWeightedRRF(candidates, weights, k = 60)` | The same, with each term multiplied by `weights[provider]`, 1 for a provider not in `weights`. |
 | `semanticDedup(candidates, threshold = 0.85)` | Merges candidates whose normalized URLs are equal, then those whose snippets' term-frequency vectors have a cosine of at least `threshold`. A merged candidate keeps every provider's rank, the first one's text, the other's `content` when it had none, and the higher `relevanceScore`. |
-| `buildVocabulary(texts)`, `buildTfVector(text, vocabulary)` | The vocabulary and the vectors `semanticDedup` compares: lower-cased words split at non-word characters, each count divided by the text's word count. |
+| `buildVocabulary(texts)`, `buildTfVector(text, vocabulary)` | The vocabulary and the vectors `semanticDedup` compares: lower-cased words split at every character other than an ASCII letter, digit or underscore (so `café` gives `caf`), each count divided by the text's word count. |
 
 `WebSearchService` records each provider's ranks from 0 and weighs each provider by its `weight`, so a provider's first result adds `weight / 60`.
 
@@ -143,7 +145,8 @@ reciprocalRankFusion(
 
 - [`LibraryIndex`](../features/LIBRARY_INDEX.md) searches the sources of a library over a vector store, lexical, dense or hybrid, inside a tenant and access groups.
 - `PostgresVectorStore.lexicalSearch()` and `hybridSearch()` rank with PostgreSQL full-text search (`ts_rank`, not BM25) ([Postgres + pgvector Backend](../memory/POSTGRES_BACKEND.md#lexical-search-and-the-words-of-a-hybrid-search)).
-- The SQL brain keeps an FTS5 index over its memory traces, which `recall()` and the `memory_search` tool query ([SQLite Brain Storage](../memory/MEMORY_STORAGE.md)).
+- `SqlVectorStore.hybridSearch()` scores BM25 over the collection's rows itself and fuses it with the dense ranking, by RRF unless asked for a weighted sum ([RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md#retrieval-strategies-implemented)).
+- The SQLite brain keeps an FTS5 index over its memory traces, which `recall()` and the `memory_search` tool query ([SQLite Brain Storage](../memory/MEMORY_STORAGE.md)).
 - The `QueryRouter` falls back to keyword matching over its corpus when it has no embeddings ([Query Router](../QUERY_ROUTER.md)).
 
 ## Where it runs
