@@ -98,9 +98,9 @@ afterEach(() => {
 /**
  * Tests for {@link RedirectOAuthFlow}: the authorization code grant with PKCE split across a web server's two
  * requests, the flow's own parameters kept whatever extraParams name, an authorization endpoint's own query kept, the
- * state checked before any call, the standard token calls with an empty access token refused, one refresh at a time
- * per kept grant with the access token held in memory and never handed to the store, revocation, and keep, refresh
- * and forget of one key taking turns.
+ * state checked before any call, the standard token calls with an empty access token or a body that is not a JSON
+ * object refused, one refresh at a time per kept grant with the access token held in memory and never handed to the
+ * store, revocation, and keep, refresh and forget of one key taking turns.
  */
 describe('RedirectOAuthFlow', () => {
   it('begins with an address on the authorization endpoint, answering a new state and verifier to keep', () => {
@@ -329,6 +329,38 @@ describe('RedirectOAuthFlow', () => {
     expect(refused.message).not.toContain(fakeSecret);
     expect(refused.message).not.toContain('\n');
     expect(refused.stack).not.toContain(fakeSecret);
+  });
+
+  it('reads a token answer whose body is JSON but not an object as a refusal', async () => {
+    // Each body is valid JSON with no fields to read; the code or refresh token sent picks the answer.
+    const answers: Record<string, { status: number; body: string }> = {
+      'null-200': { status: 200, body: 'null' },
+      'null-400': { status: 400, body: 'null' },
+      'array-200': { status: 200, body: '[]' },
+      'string-200': { status: 200, body: '"access-1"' },
+      'number-200': { status: 200, body: '42' },
+    };
+    const { fetchImpl } = endpoint((request) => {
+      const answer = answers[request.form.get('code') ?? request.form.get('refresh_token') ?? ''];
+      if (answer === undefined) throw new Error('the stand-in has no answer for this request');
+      return new Response(answer.body, { status: answer.status, headers: { 'content-type': 'application/json' } });
+    });
+    const { store } = sealedStore();
+    const flow = new ExampleFlow(store, fetchImpl);
+    const begun = flow.begin({ redirectUri: REDIRECT });
+
+    for (const [code, { status }] of Object.entries(answers)) {
+      const refused = await rejection(
+        flow.complete({ code, state: begun.state, expectedState: begun.state, codeVerifier: begun.codeVerifier, redirectUri: REDIRECT }),
+      );
+      expect(refused).toBeInstanceOf(OAuthGrantRefused);
+      expect(refused).toMatchObject({ reason: 'exchange', status, providerError: undefined });
+    }
+
+    await store.save('grant-1', { accessToken: '', refreshToken: 'null-200', expiresAt: 0 });
+    const refused = await rejection(flow.accessToken('grant-1'));
+    expect(refused).toBeInstanceOf(OAuthGrantRefused);
+    expect(refused).toMatchObject({ reason: 'refresh', status: 200, providerError: undefined });
   });
 
   it('refreshes at the cached token boundary and never falls back after a refused refresh', async () => {
