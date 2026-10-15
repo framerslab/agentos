@@ -313,6 +313,31 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     expect(errors).not.toHaveBeenCalled();
   });
 
+  it('flushes the backup when the provider fails in the promise job right after flush() is called and never settles its own flush', async () => {
+    const a = pushSession();
+    a.flush.mockImplementation(() => new Promise<void>(() => {}));
+    const b = pushSession();
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    session.pushTokens('Hello world.');
+    // The provider's error is queued ahead of anything the flush awaits, so it lands before the flush resumes.
+    void Promise.resolve().then(() => a.emit('error', new Error('socket hang up')));
+    const flushing = session.flush();
+    const outcome = await Promise.race([
+      flushing.then(() => 'flushed'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 20)),
+    ]);
+    expect(outcome).toBe('flushed');
+    expect(failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b' });
+    expect(b.pushTokens).toHaveBeenCalledWith('Hello world.');
+    expect(b.flush).toHaveBeenCalledOnce();
+    expect(chain.currentProviderId).toBe('b');
+  });
+
   it('rejects flush() when the flush fails and no provider can take over', async () => {
     const a = pushSession();
     a.flush.mockRejectedValue(new Error('socket closed'));
