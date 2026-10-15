@@ -132,7 +132,7 @@ A saved index holds stemmed terms, so it is restored with the same pipeline: see
 
 `@framers/agentos/cognition/nlp` runs in Node. `StopWordFilter`, `PorterStemmer` and `WordNetLemmatizer` load the CommonJS `natural` package, a dependency of `@framers/agentos`, through `createRequire` from `node:module`, and the module also loads the text statistics classes, which import `fs/promises` and `natural`. The pipeline classes call no model and need no key.
 
-A page in a browser tokenizes with `lexicalTokens` from `@framers/agentos/cognition/library/browser`: lower-case runs of letters and digits in any script, nothing stemmed ([Words and snippets](../features/LIBRARY_INDEX.md#words-and-snippets)).
+A page in a browser tokenizes with `lexicalTokens` from `@framers/agentos/cognition/library/browser`: words of letters, digits and combining marks in any script, read in NFC and in lower case, nothing stemmed ([Words and snippets](../features/LIBRARY_INDEX.md#words-and-snippets)).
 
 ## Examples
 

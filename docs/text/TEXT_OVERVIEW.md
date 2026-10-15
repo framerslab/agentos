@@ -1,5 +1,5 @@
 ---
-description: "Text processing, statistics and search in AgentOS: tokenizers, stop words and stemmers, statistical text measures with LLM-backed variants, BM25 and hybrid search with reciprocal rank fusion, chunking, snippets and reranking."
+description: "Text processing, statistics and search in AgentOS: tokenizers, stop words and stemmers, statistical text measures with LLM-backed variants, BM25, fuzzy and hybrid search with reciprocal rank fusion, chunking, snippets and reranking."
 ---
 
 # Text Processing & Search
@@ -28,6 +28,7 @@ flowchart LR
 | Split text into words, drop stop words, stem | `TextProcessingPipeline`, `createProsePipeline()`, `createRagPipeline()`, `createCodePipeline()` | [Text Processing Pipeline](./TEXT_PROCESSING.md) |
 | Count, compare and classify text: sentences, n-grams, keywords, readability, similarity, language, summaries | `StatisticalUtilityAI`, `LLMUtilityAI`, `HybridUtilityAI` | [Text Statistics and Classification](./TEXT_STATISTICS.md) |
 | Search by keywords, save the index as JSON, search in a browser | `LexicalIndex`, `BM25Index` | [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md) |
+| Search records as someone types, with typos, word beginnings and field weights, and mark the matches | `FuzzyIndex` | [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md#fuzzyindex) |
 | Fuse keyword and vector search | `HybridSearcher`, `reciprocalRankFusion()` | [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md#hybridsearcher) |
 | Cut documents and transcripts into passages, show a hit's words | `SemanticChunker`, `chunkTurns()`, `ChunkingEngine`, `snippetAround()` | [Chunking and Snippets](./CHUNKING_AND_SNIPPETS.md) |
 | Reorder retrieved passages | `RerankerService` and its providers | [Reranking](./RERANKING.md) |
@@ -38,7 +39,7 @@ flowchart LR
 
 | Part | Import | Runs in | Calls a model |
 |---|---|---|---|
-| `LexicalIndex`, `lexicalTokens`, `snippetAround`, `chunkTurns` | `@framers/agentos/cognition/library/browser` | A browser or Node | No |
+| `LexicalIndex`, `FuzzyIndex`, `lexicalTokens`, `snippetAround`, `chunkTurns` | `@framers/agentos/cognition/library/browser` | A browser or Node | No |
 | Text pipeline and presets | `@framers/agentos/cognition/nlp` | Node: it loads `natural` through `node:module` | No |
 | `StatisticalUtilityAI` | The package root, `@framers/agentos/cognition/nlp`, `@framers/agentos/cognition/nlp/ai_utilities` | Node | No |
 | `LLMUtilityAI` | The package root, `@framers/agentos/cognition/nlp`, `@framers/agentos/cognition/nlp/ai_utilities` | Node | Yes: a provider's key or a local model server |
