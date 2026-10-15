@@ -498,4 +498,24 @@ describe('startListenSession', () => {
       warn.mockRestore();
     }
   });
+  it("drops a lone 'sure' as a backchannel and writes 'Sure.', on a detector an agent session left listening", async () => {
+    const detector = new HeuristicEndpointDetector();
+    // The agent session that used the detector last told it the agent listens. A listen session has no agent: its
+    // start forgets that report, so a backchannel is its exact phrase again, dropped whatever anyone is doing.
+    detector.setAgentContext({ speaking: false, askedQuestion: false });
+    const backchannels: string[] = [];
+    detector.on('backchannel_detected', (event: { text: string }) => backchannels.push(event.text));
+    const { provider, sessions } = stt();
+    const sink = new ArraySink();
+    const session = await startListenSession(transport(), sink, { streamingSTT: provider, runId: 'r1', endpointDetector: detector, reconnect: false });
+    sessions[0].emit('speech_start');
+    sessions[0].emit('transcript', final('sure', 0, 400));
+    sessions[0].emit('speech_end');
+    sessions[0].emit('speech_start');
+    sessions[0].emit('transcript', final('Sure.', 600, 900));
+    sessions[0].emit('speech_end');
+    await vi.waitFor(() => expect(sink.turns.map((turn) => turn.text)).toEqual(['Sure.']));
+    expect(backchannels).toEqual(['sure']);
+    await session.close('purged');
+  });
 });

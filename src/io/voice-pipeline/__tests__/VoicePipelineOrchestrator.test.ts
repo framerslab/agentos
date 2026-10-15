@@ -37,12 +37,13 @@
  *   the earlier session's last turn is awaited
  * - A detector the host hands to one session after another loses each session's listeners as it stops, and as a
  *   start fails, with no listener-limit warning
- * - On the HeuristicEndpointDetector, a backchannel said while the agent speaks is dropped, keyed by an item or not
- *   and whatever its trailing punctuation; after a reply ending in a question a lone one is the user's turn, after
- *   one that asked nothing it is dropped; a client's lone backchannel reaches the detector on its own, and a
- *   detector without isBackchannel() gets every client final joined
+ * - On the HeuristicEndpointDetector, a backchannel is dropped only while the agent holds the floor: said while the
+ *   agent speaks, keyed by an item or not and whatever its trailing punctuation, or after the user's turn completed
+ *   and before the reply has a word; while the agent listens a lone one is the user's turn, after a statement as
+ *   after a question; a client's lone backchannel said while the agent speaks reaches the detector on its own, and
+ *   a detector without isBackchannel() gets every client final joined
  * - A lone final that ends with a question mark, such as "Right?" after a statement, is the user's turn; the session
- *   sets the detector's agent context as it starts, so a lone "Sure." is a backchannel from its first utterance
+ *   tells the detector the agent listens as it starts, so a lone "sure" as its first utterance is the user's turn
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -1179,6 +1180,34 @@ describe('VoicePipelineOrchestrator', () => {
     expect(turns()).toEqual(['Book a table for two.', 'Yes, for seven.']);
   });
 
+  it("should drop a lone 'yeah' said after the user's turn completes and before the reply has a word, though the agent's last reply asked a question", async () => {
+    const { backchannels, turns } = await startWithDetector('Shall I book it?');
+    await say('Book a table for two.');
+    ttsSession.emit('flush_complete');
+    // The agent thinks before the first word of its next reply.
+    let speak = (): void => {};
+    const thinking = new Promise<void>((resolve) => {
+      speak = resolve;
+    });
+    vi.mocked(agentSession.sendText).mockReturnValueOnce({
+      [Symbol.asyncIterator]: async function* () {
+        await thinking;
+        yield 'It is booked.';
+      },
+    });
+    await say('Yes, for seven.');
+
+    // The floor is the agent's from the moment the user's turn completes.
+    await say('yeah');
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(backchannels).toEqual(['yeah']);
+
+    speak();
+    await vi.advanceTimersByTimeAsync(0);
+    ttsSession.emit('flush_complete');
+    expect(turns()).toEqual(['Book a table for two.', 'Yes, for seven.']);
+  });
+
   it("should hand the agent a lone 'yeah' that answers a reply ending in a question", async () => {
     const { backchannels, turns } = await startWithDetector('Shall I book it?');
     await say('Book a table for two.');
@@ -1192,16 +1221,24 @@ describe('VoicePipelineOrchestrator', () => {
     expect(backchannels).toEqual([]);
   });
 
-  it("should drop a lone 'uh huh' after a reply that asked no question, and hand the agent no turn", async () => {
+  /**
+   * A backchannel is a response made while the other party holds the floor. Once the agent's reply has ended the user
+   * holds it, so a lone "okay" after a statement is the user's turn, a minimal one: what to answer is the agent's call.
+   */
+  it.each([
+    { said: 'okay', itemId: undefined },
+    { said: 'Uh huh.', itemId: 'item_A' },
+  ])('should hand the agent a lone $said said while it listens after a statement', async ({ said, itemId }) => {
     const { backchannels, turns } = await startWithDetector('It is booked.');
     await say('Book a table for two.');
     ttsSession.emit('flush_complete');
 
-    await say('uh huh');
+    await say(said, itemId);
+    // "okay" has no terminal punctuation: the silence timeout ends its turn.
     await vi.advanceTimersByTimeAsync(1_500);
 
-    expect(turns()).toEqual(['Book a table for two.']);
-    expect(backchannels).toEqual(['uh huh']);
+    expect(turns()).toEqual(['Book a table for two.', said]);
+    expect(backchannels).toEqual([]);
   });
 
   it("should hand the agent a lone 'Right?' after a reply that asked no question: a question mark is never a backchannel", async () => {
@@ -1218,36 +1255,49 @@ describe('VoicePipelineOrchestrator', () => {
   it("should read a backchannel by the agent's context from the session's first utterance", async () => {
     const { backchannels, turns } = await startWithDetector('It is booked.');
 
-    // The session sets the detector's agent context as it starts: a lone "Sure." is a backchannel, as "sure" is.
-    await say('Sure.');
+    // The session tells the detector the agent listens as it starts: a lone "sure" is the user's turn, which a
+    // detector told nothing would drop by its exact phrase.
+    await say('sure');
     await vi.advanceTimersByTimeAsync(1_500);
-    expect(backchannels).toEqual(['Sure.']);
-    expect(turns()).toEqual([]);
-
-    await say('Book a table for two.');
-    expect(turns()).toEqual(['Book a table for two.']);
+    expect(backchannels).toEqual([]);
+    expect(turns()).toEqual(['sure']);
   });
 
   it.each([
-    { after: 'a statement', reply: 'It is booked.', turn: 'I think we should go ahead', dropped: ['yeah'] },
-    { after: 'a question', reply: 'Shall I book it?', turn: 'I think we should yeah go ahead', dropped: [] },
+    { after: 'a statement', reply: 'It is booked.' },
+    { after: 'a question', reply: 'Shall I book it?' },
   ])(
-    "after $after, should hand the agent a client's lines 'I think we should', 'yeah' and 'go ahead' as $turn",
-    async ({ reply, turn, dropped }) => {
+    "after $after, should hand the agent a client's lines 'I think we should', 'yeah' and 'go ahead' as one turn, its 'yeah' kept",
+    async ({ reply }) => {
       const { backchannels, turns } = await startWithDetector(reply);
       transport.emit('message', clientTranscript('1', 'Book a table for two.', true));
       await vi.advanceTimersByTimeAsync(0);
       ttsSession.emit('flush_complete');
 
+      // The agent listens: the user holds the floor, so a "yeah" in the user's own turn is words of that turn.
       transport.emit('message', clientTranscript('2', 'I think we should', true));
       transport.emit('message', clientTranscript('3', 'yeah', true));
       transport.emit('message', clientTranscript('4', 'go ahead', true));
       await vi.advanceTimersByTimeAsync(1_500);
 
-      expect(turns()).toEqual(['Book a table for two.', turn]);
-      expect(backchannels).toEqual(dropped);
+      expect(turns()).toEqual(['Book a table for two.', 'I think we should yeah go ahead']);
+      expect(backchannels).toEqual([]);
     },
   );
+
+  it("should drop a client's lone 'uh huh' line said while the agent speaks, and leave the agent's turns as they were", async () => {
+    const { backchannels, turns } = await startWithDetector('It is booked.');
+    transport.emit('message', clientTranscript('1', 'Book a table for two.', true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('speaking');
+
+    transport.emit('message', clientTranscript('2', 'uh huh', true));
+    await vi.advanceTimersByTimeAsync(1_500);
+    ttsSession.emit('flush_complete');
+
+    expect(backchannels).toEqual(['uh huh']);
+    expect(turns()).toEqual(['Book a table for two.']);
+  });
 
   it('should join every client final for a detector without isBackchannel() or setAgentContext(), as before', async () => {
     await startSession(); // the mock detector has neither

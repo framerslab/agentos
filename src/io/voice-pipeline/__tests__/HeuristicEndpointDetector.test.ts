@@ -11,8 +11,9 @@
  * - Correct transcript text and confidence are carried in the turn_complete event
  * - Backchannel phrases are detected, suppressed from accumulation, and emitted separately
  * - Backchannel matching is case-insensitive and whitespace-tolerant
- * - Once an agent context is set, a backchannel is recognized whatever its trailing punctuation (. , ! and the
- *   ellipsis), and a final that ends with a question mark, after any spaces or other punctuation, is never one
+ * - Once an agent context is set, a backchannel said while the agent holds the floor is recognized whatever its
+ *   trailing punctuation (. , ! and the ellipsis), and a final that ends with a question mark, after any spaces or
+ *   other punctuation, is never one
  * - Silence timeout fallback fires turn_complete with reason 'silence_timeout'
  * - No turn_complete fires without accumulated text
  * - No turn_complete fires for interim (non-final) transcripts
@@ -23,9 +24,9 @@
  *   also when it arrives while the transcriber reports the next utterance; a standalone VAD's start of speech ends
  *   that window
  * - Each late_final listener gets the final when one before it throws; the throw is written as a console warning
- * - By the agent's context (setAgentContext()): a backchannel is dropped while the agent speaks and after a reply
- *   that asked nothing, and kept as the user's turn after a question, keyed by an item or not; isBackchannel()
- *   answers by the same rule; a turn's end keeps the context
+ * - By the agent's context (setAgentContext()): a backchannel is dropped only while the agent holds the floor, and
+ *   while the agent listens a lone one is the user's turn whatever its last reply asked, keyed by an item or not;
+ *   isBackchannel() answers by the same rule; a turn's end keeps the context
  * - Until a context is set, and again after a reset for a new session, a backchannel is its exact phrase, trimmed
  *   and lowercased, dropped whatever the agent is doing, keyed by an item or not, as before the context existed
  *
@@ -239,7 +240,7 @@ describe('HeuristicEndpointDetector', () => {
   /**
    * Providers punctuate a backchannel differently: once a caller sets the agent's context, as the orchestrator does
    * at a session's start, the phrase is read trimmed, lowercased and without trailing punctuation (. , ! and the
-   * ellipsis), so each of these is one, as "yeah" is.
+   * ellipsis), so each of these, said while the agent holds the floor, is one, as "yeah" is.
    */
   it.each(['Sure.', 'Yeah!', 'Uh huh,', 'Right...', 'Mm hmm\u2026', 'Yep !'])(
     'should detect %j as a backchannel phrase, whatever its trailing punctuation, once the agent context is set',
@@ -248,7 +249,7 @@ describe('HeuristicEndpointDetector', () => {
       const turn = vi.fn();
       detector.on('backchannel_detected', backchannel);
       detector.on('turn_complete', turn);
-      detector.setAgentContext({ speaking: false, askedQuestion: false });
+      detector.setAgentContext({ speaking: true, askedQuestion: false });
 
       detector.pushTranscript(transcript(text));
       detector.pushVadEvent(speechEnd());
@@ -260,7 +261,7 @@ describe('HeuristicEndpointDetector', () => {
 
   /**
    * A question mark is never stripped: a final that ends with one, after any spaces or other trailing punctuation,
-   * asks something, so it is the user's turn and not an acknowledgement.
+   * asks something, so it is the user's turn and not an acknowledgement, even said while the agent holds the floor.
    */
   it.each(['Okay?', 'Right?!', 'Yeah ?'])(
     'should not take %j, which ends with a question mark, for a backchannel phrase',
@@ -269,7 +270,7 @@ describe('HeuristicEndpointDetector', () => {
       const turn = vi.fn();
       detector.on('backchannel_detected', backchannel);
       detector.on('turn_complete', turn);
-      detector.setAgentContext({ speaking: false, askedQuestion: false });
+      detector.setAgentContext({ speaking: true, askedQuestion: false });
 
       detector.pushTranscript(transcript(text));
       detector.pushVadEvent(speechEnd());
@@ -804,27 +805,32 @@ describe("HeuristicEndpointDetector: backchannels by the agent's context", () =>
     expect(turns).toEqual([]);
   });
 
-  it("answers isBackchannel() by the same rule: the exact phrase until a context is set, then the reading and the context, which a turn's end keeps and a session's start unsets", () => {
+  it("answers isBackchannel() by the same rule: the exact phrase until a context is set, then the reading while the agent holds the floor and nothing while it listens, by a context a turn's end keeps and a session's start unsets", () => {
     // Before any report: the whole text, trimmed and lowercased, is a phrase, whatever the agent is doing.
     expect(detector.isBackchannel(' Sure ')).toBe(true);
     expect(detector.isBackchannel('Sure.')).toBe(false);
     expect(detector.isBackchannel('Sure thing.')).toBe(false);
 
-    detector.setAgentContext({ speaking: false, askedQuestion: false });
+    // The agent holds the floor: the phrase without its trailing punctuation, whatever the agent's last reply asked.
+    detector.setAgentContext({ speaking: true, askedQuestion: true });
     expect(detector.isBackchannel('Sure.')).toBe(true);
+    expect(detector.isBackchannel('Mm-hmm...')).toBe(true);
     // A question mark is never stripped, after spaces or other punctuation either.
     expect(detector.isBackchannel('Sure?')).toBe(false);
     expect(detector.isBackchannel('Sure? ')).toBe(false);
     expect(detector.isBackchannel('Sure?!')).toBe(false);
-
-    detector.setAgentContext({ speaking: false, askedQuestion: true });
-    expect(detector.isBackchannel('Sure.')).toBe(false);
-    detector.reset();
-    expect(detector.isBackchannel('Sure.')).toBe(false);
-
-    detector.setAgentContext({ speaking: true, askedQuestion: true });
-    expect(detector.isBackchannel('Mm-hmm...')).toBe(true);
     expect(detector.isBackchannel('Mm-hmm?')).toBe(false);
+    detector.reset();
+    expect(detector.isBackchannel('Sure.')).toBe(true);
+
+    // The agent listens: the user holds the floor, so no final is a backchannel, after a statement or a question.
+    detector.setAgentContext({ speaking: false, askedQuestion: false });
+    expect(detector.isBackchannel('sure')).toBe(false);
+    expect(detector.isBackchannel('Uh huh.')).toBe(false);
+    detector.setAgentContext({ speaking: false, askedQuestion: true });
+    expect(detector.isBackchannel('sure')).toBe(false);
+    detector.reset();
+    expect(detector.isBackchannel('sure')).toBe(false);
 
     detector.reset('session');
     expect(detector.isBackchannel('Sure.')).toBe(false);
