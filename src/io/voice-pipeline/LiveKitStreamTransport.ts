@@ -15,10 +15,11 @@
  * Control messages travel as LiveKit text streams on one topic (default
  * `'agentos.voice'`), to and from the selected participant alone; another
  * sender's stream on the topic is closed unread. `sendControl()` sends a JSON
- * {@link ServerTextMessage}. Without a publisher, every JSON message the
- * participant sends is emitted as `'message'`, and a message that is not
- * JSON, or a text stream that fails while it is read, emits `'error'` while
- * the transport stays open.
+ * {@link ServerTextMessage}; to a phone caller bridged by LiveKit SIP, which
+ * reads no text streams, it sends nothing and resolves. Without a publisher,
+ * every JSON message the participant sends is emitted as `'message'`, and a
+ * message that is not JSON, or a text stream that fails while it is read,
+ * emits `'error'` while the transport stays open.
  *
  * ## Audio (outbound)
  * Without the `publisher` option the transport publishes nothing:
@@ -26,16 +27,28 @@
  * `sendAudio()` carries a handler of its own, so a caller that does not wait
  * for it raises no unhandled rejection. With it, the transport speaks on one
  * microphone track through {@link LiveKitAudioPublisher}: its input must be
- * mono at 16 kHz, `readyForPlayback()` publishes the track, `sendAudio()`
- * takes one raw or WAV-wrapped PCM16 chunk at a time, and `waitForPlayback()`
- * resolves only after the native queue has drained and the participant has
- * sent its playback receipt on the topic. The participant's text streams are
- * then read with bounds (4096 bytes, five seconds, four at once) and only a
- * playback or clear receipt or a `control` message with `mute`, `unmute` or
- * `stop` is taken; anything else is reported as `'error'` and closes the
- * transport. The participant leaving the room closes it too. Outbound text is
- * bounded as well: 16384 bytes a message, four in flight, and a send not done
- * within five seconds closes the transport.
+ * mono at 16 kHz, `readyForPlayback()` publishes the track, and `sendAudio()`
+ * takes raw or WAV-wrapped PCM16. How a chunk counts as played is the
+ * publisher's playout mode, fixed by `readyForPlayback()` or the first
+ * `sendAudio()`:
+ * - Native playout, the default and the only mode for a SIP participant:
+ *   every participant subscribed to the track hears it, chunks queue on the
+ *   track in order, `waitForPlayback()` resolves once the track has played
+ *   the chunk out, `clearPlayback()` needs no answer, and a `barge_in`
+ *   message that cancels clears the track as it is sent.
+ * - Participant playout, when `publisher.playout` is `'participant'` or the
+ *   participant's `agentos.playout` attribute is: one chunk at a time,
+ *   announced to the participant, and `waitForPlayback()` resolves only after
+ *   the native queue has drained and the participant has sent its playback
+ *   receipt on the topic.
+ *
+ * With a publisher the participant's text streams are read with bounds (4096
+ * bytes, five seconds, four at once) and only a playback or clear receipt or
+ * a `control` message with `mute`, `unmute` or `stop` is taken; anything else
+ * is reported as `'error'` and closes the transport. The participant leaving
+ * the room closes it too. Outbound text is bounded as well: 16384 bytes a
+ * message, four in flight, and a send not done within five seconds closes the
+ * transport.
  *
  * ## Lifetime
  * `close()` stops reading audio, drops the frames a pause held, unregisters
@@ -52,9 +65,9 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AudioFrame, IPlaybackTransport, EncodedAudioChunk, ClientTextMessage, ServerTextMessage, PlaybackReceipt, VoiceGeneration } from './types.js';
-import { LiveKitAudioPublisher, type LiveKitAudioPublisherOptions } from './LiveKitAudioPublisher.js';
+import { LiveKitAudioPublisher, isLiveKitSipParticipant, type LiveKitAudioPublisherOptions, type LiveKitPlayout } from './LiveKitAudioPublisher.js';
 import { PlaybackAcknowledgementSchema } from './PlaybackAcknowledgements.js';
-import { LiveKitRoomAudioSource, type LiveKitRoomLike, type LiveKitRtcModule, type LiveKitTextStreamReaderLike } from '../hearing/LiveKitRoomAudioSource.js';
+import { LiveKitRoomAudioSource, type LiveKitParticipantLike, type LiveKitRoomLike, type LiveKitRtcModule, type LiveKitTextStreamReaderLike } from '../hearing/LiveKitRoomAudioSource.js';
 
 /** The text stream topic of the control messages when none is configured. */
 export const LIVEKIT_TRANSPORT_DEFAULT_TOPIC = 'agentos.voice';
@@ -94,8 +107,9 @@ export interface LiveKitStreamTransportOptions {
   rtc?: LiveKitRtcModule;
   /**
    * Speaks on one track of the room's local participant, which must offer
-   * `publishTrack()` and `unpublishTrack()`. Absent means listen-only: audio
-   * output is rejected.
+   * `publishTrack()` and `unpublishTrack()`, in native playout unless
+   * `playout` or the participant asks for receipts. Absent means listen-only:
+   * audio output is rejected.
    */
   publisher?: LiveKitAudioPublisherOptions;
 }
@@ -113,7 +127,8 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
 /**
  * {@link IPlaybackTransport} over a LiveKit room: inbound audio from one
  * participant, control messages as text streams on a topic and, with
- * `publisher`, acknowledged audio on one published track.
+ * `publisher`, the agent's audio on one published track, which every
+ * participant subscribed to it hears.
  *
  * ## Events emitted
  *
@@ -179,7 +194,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     // option leaves the topic free; until it is read, the source holds nothing.
     this.source = new LiveKitRoomAudioSource({ room: options.room, participantIdentity: options.participantIdentity,
       sampleRate: options.sampleRate, frameSizeMs: options.frameSizeMs, rtc: options.rtc, strictMono: !!options.publisher });
-    if (options.publisher) this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message), { rtc: options.rtc });
+    if (options.publisher) this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message), { rtc: options.rtc, participant: () => this.linkedParticipant() });
     this.on('pause', () => { if (this._state === 'open') this.paused = true; });
     this.on('resume', () => {
       if (this._state !== 'open') return; this.paused = false;
@@ -198,6 +213,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   }
   /** Physical state; call reconnecting state remains the manager's responsibility. */
   get state(): 'connecting' | 'open' | 'closing' | 'closed' { return this._state; }
+  /** The publisher's playout mode once `readyForPlayback()` or the first `sendAudio()` fixed it; `undefined` before, and for a listen-only transport. */
+  get playout(): LiveKitPlayout | undefined { return this.publisher?.playout; }
   /** Waits for the one speaking track. Listen-only readiness allocates nothing. */
   async readyForPlayback(): Promise<void> { if (this._state !== 'open') throw new Error('transport closed'); await this.publisher?.ready(); }
   /** Listen-only construction still rejects; speaking delegates to the one native conversion boundary. */
@@ -205,7 +222,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     const result = this.publisher ? this.publisher.sendAudio(chunk) : Promise.reject(new Error('LiveKitStreamTransport does not publish audio: it carries what the agent hears and its control messages'));
     result.catch(() => {}); return result;
   }
-  /** Speaking completion requires both native drain and the selected participant's receiver receipt. */
+  /** Resolves once the chunk has played: in native playout once the track has played it out, in participant playout once the native queue has drained and the participant's receipt has come. */
   waitForPlayback(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
     if (!this.publisher) return Promise.reject(new Error('LiveKitStreamTransport does not publish audio'));
     return this.publisher.waitForPlayback(generation, sequence, signal);
@@ -232,11 +249,21 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     } finally { if (timer) clearTimeout(timer); this.sendingControls--; }
   }
   /**
-   * Existing server messages retain their wire representation. Call-profile messages carry their captured scope and generation.
+   * Sends one JSON message to the participant as a text stream on the topic. Existing server messages retain their
+   * wire representation; call-profile messages carry their captured scope and generation. A SIP participant reads no
+   * text streams, so nothing is sent to one and the send resolves. In native playout a `barge_in` message that cancels
+   * first clears what the track holds, as a page clears the audio it plays.
    *
    * @throws {Error} When the transport is not open or the room has no local participant.
    */
-  sendControl(message: ServerTextMessage): Promise<void> { return this.sendWire(message); }
+  async sendControl(message: ServerTextMessage): Promise<void> {
+    if (this._state !== 'open') throw new Error('LiveKitStreamTransport: cannot send while ' + this._state);
+    if (message.type === 'barge_in' && message.action.type === 'cancel' && this.publisher?.playout === 'native') await this.publisher.clearPlayback();
+    if (isLiveKitSipParticipant(this.linkedParticipant())) return;
+    await this.sendWire(message);
+  }
+  /** The participant the transport hears and answers, while it is in the room. */
+  private linkedParticipant(): LiveKitParticipantLike | undefined { return this.options.room.remoteParticipants.get(this.options.participantIdentity); }
   /** Stops input synchronously without disconnecting the host-owned room. Native cleanup is awaited through whenClosed. */
   close(_code?: number, _reason?: string): void {
     if (this._state === 'closing' || this._state === 'closed') return; this._state = 'closing';

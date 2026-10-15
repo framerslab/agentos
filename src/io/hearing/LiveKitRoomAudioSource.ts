@@ -80,6 +80,10 @@ export interface LiveKitTrackPublicationLike {
 export interface LiveKitParticipantLike {
   readonly identity: string;
   readonly trackPublications: ReadonlyMap<string, LiveKitTrackPublicationLike>;
+  /** rtc-node's `ParticipantKind`: `3` (`SIP`) for a phone caller LiveKit SIP brought into the room. */
+  readonly kind?: number;
+  /** The participant's attributes, as a string key-value store. */
+  readonly attributes?: Readonly<Record<string, string>>;
 }
 
 /** A text stream reader (rtc-node `TextStreamReader`). */
