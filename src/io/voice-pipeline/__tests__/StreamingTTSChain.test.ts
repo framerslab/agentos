@@ -310,15 +310,20 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     expect(a.flush).not.toHaveBeenCalled();
   });
 
-  it('flushes the provider a second switch opened when the backup fails as the first switch ends', async () => {
+  it.each([
+    ['at once', false],
+    ['after a timer, as a connection does', true],
+  ] as const)('flushes the provider a second switch opened when the backup fails as the first switch ends (the next opens %s)', async (_label, slow) => {
     const a = pushSession();
     const b = pushSession();
     const c = pushSession();
+    const third = provider('c', 30, c);
+    if (slow) third.startSession.mockImplementation(() => new Promise<StreamingTTSSession>((resolve) => setTimeout(() => resolve(c), 0)));
     const failover = vi.fn((event: TTSProviderFailoverEvent): void => {
       // The backup's connection drops as the switch to it is reported, before that switch has ended.
       if (event.to === 'b') b.emit('error', new Error('socket hang up'));
     });
-    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts, provider('c', 30, c).tts], {
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts, third.tts], {
       enableMidSynthesisFailover: true,
       onProviderFailover: failover,
     });

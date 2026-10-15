@@ -771,15 +771,20 @@ describe('StreamingSTTChain: a backup that fails as it takes over', () => {
     expect(seen).toEqual(['error scoped STT input required', 'close']);
   });
 
-  it('flushes the provider a second switch opened when the backup fails as the first switch ends', async () => {
+  it.each([
+    ['at once', false],
+    ['after a timer, as a connection does', true],
+  ] as const)('flushes the provider a second switch opened when the backup fails as the first switch ends (the next opens %s)', async (_label, slow) => {
     const a = spySession();
     const b = spySession();
     const c = spySession();
+    const third = spyProvider('c', 30, c);
+    if (slow) third.startSession.mockImplementation(() => new Promise<StreamingSTTSession>((resolve) => setTimeout(() => resolve(c), 0)));
     const failover = vi.fn((event: ProviderFailoverEvent): void => {
       // The backup's connection drops as the switch to it is reported, before that switch has ended.
       if (event.to === 'b') b.emit('error', new Error('socket hang up'));
     });
-    const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, spyProvider('b', 20, b).stt, spyProvider('c', 30, c).stt], {
+    const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, spyProvider('b', 20, b).stt, third.stt], {
       enableMidUtteranceFailover: true,
       onProviderFailover: failover,
     });
