@@ -3,9 +3,17 @@
  *
  * Checks analytics delivery against what a page registered and the policy it actually served: each transport's
  * origins in the matching directive with no wildcard, no request and no stored state before consent, after refusal
- * or after withdrawal, every request to a registered endpoint (the page's own origin aside), payloads with allowed
- * keys and bounded values that match no forbidden pattern and carry no query string or fragment, and every observed
- * page a registered route. It reads observations; it sends nothing.
+ * or after withdrawal, every request to a registered endpoint, payloads with allowed keys and bounded values that
+ * match no forbidden pattern and carry no query string or fragment, and every observed page a registered route. It
+ * reads observations; it sends nothing.
+ *
+ * The policy is read as a browser enforces it (Content Security Policy Level 3): a directive named twice keeps its
+ * first value, a directive that is not ASCII is skipped, and each kind of origin is checked against the first
+ * directive of its fallback list that the policy names (`script-src-elem`, `script-src`, `default-src` for scripts;
+ * `img-src`, `default-src` for images; `connect-src`, `default-src` for connections; `worker-src`, `child-src`,
+ * `script-src`, `default-src` for workers). A wildcard is reported in that directive and in `script-src`, `img-src`,
+ * `connect-src` and `worker-src` wherever they appear. A same-origin request to a path no endpoint registers is the
+ * page's own and is left alone; one to a registered endpoint's path is checked whatever its method.
  */
 
 /** A consent phase. */
@@ -37,7 +45,11 @@ export interface AnalyticsTransport {
   endpoints: readonly AnalyticsEndpoint[];
   /** The browser-storage keys the integration owns. */
   storageKeys: readonly string[];
-  /** The payload keys it may send, and the longest value it may send. */
+  /**
+   * The payload keys it may send, and the longest value it may send. A value that is not a string is checked as its
+   * JSON text, so the keys inside an object value are bounded by its length and the forbidden patterns, not by
+   * `allowedKeys`.
+   */
   payload: { allowedKeys: readonly string[]; maxValueLength: number };
 }
 
@@ -80,28 +92,60 @@ export interface TransportCheckInput {
   requests: readonly ObservedRequest[];
   /** The storage keys observed, by phase. */
   storage: readonly ObservedStorage[];
-  /** Patterns no payload value may match. */
+  /**
+   * Patterns no payload value may match. Each value is tested from its start whatever flags a pattern carries, and
+   * the patterns given are not changed.
+   */
   forbidden: readonly RegExp[];
 }
 
+/** A character outside ASCII, which makes a browser skip the directive that holds it. */
+const NOT_ASCII = /\P{ASCII}/u;
+
 /**
- * Parses a `Content-Security-Policy` header value.
+ * Parses a `Content-Security-Policy` header value as a browser parses one policy (Content Security Policy Level 3,
+ * "Parse a serialized CSP"): a directive that holds a character outside ASCII is skipped, and a directive named
+ * again is ignored, so the first one stands.
  *
- * @param header - The header's value.
+ * @param header - One serialized policy. A value that joins several policies with commas is not split into them.
  * @returns Each directive's source list, by its name in lower case.
  */
 export function parseCsp(header: string): CspDirectives {
-  const out: Record<string, string[]> = {};
+  const out = new Map<string, string[]>();
   for (const part of header.split(';')) {
+    if (NOT_ASCII.test(part)) continue;
     const [name, ...sources] = part.trim().split(/\s+/);
-    if (name !== undefined && name !== '') out[name.toLowerCase()] = sources;
+    if (name === undefined || name === '') continue;
+    const key = name.toLowerCase();
+    if (!out.has(key)) out.set(key, sources);
   }
-  return out;
+  return Object.fromEntries(out);
 }
 
-const DIRECTIVES = [['script', 'script-src'], ['img', 'img-src'], ['connect', 'connect-src'], ['worker', 'worker-src']] as const;
+/**
+ * Each kind of origin a transport registers, the directive named for that kind, and the directives a browser applies
+ * to a request of that kind, most specific first (Content Security Policy Level 3, "Get the effective directive for
+ * request" and "Get fetch directive fallback list").
+ */
+const DIRECTIVES = [
+  ['script', 'script-src', ['script-src-elem', 'script-src', 'default-src']],
+  ['img', 'img-src', ['img-src', 'default-src']],
+  ['connect', 'connect-src', ['connect-src', 'default-src']],
+  ['worker', 'worker-src', ['worker-src', 'child-src', 'script-src', 'default-src']],
+] as const;
 const PHASE_WORDS: Readonly<Record<Exclude<ConsentPhase, 'granted'>, string>> = { before_consent: 'before consent', denied: 'after refusal', withdrawn: 'after withdrawal' };
 const isWildcard = (source: string): boolean => source === '*' || /^[a-z][a-z0-9+.-]*:$/i.test(source) || source.includes('*');
+/** The start of an address: a scheme with `//`, or a `/`, which also begins a protocol-relative address. */
+const ADDRESS = /^(?:[a-z][a-z0-9+.-]*:\/\/|\/)/i;
+
+/** The directive a browser applies from a fallback list: the first one the policy names, with its sources. */
+function applied(csp: CspDirectives, fallbacks: readonly string[]): { name: string; sources: readonly string[] } | undefined {
+  for (const name of fallbacks) {
+    const sources = csp[name];
+    if (sources !== undefined) return { name, sources };
+  }
+  return undefined;
+}
 
 function payloadEntries(body: string | null): [string, string][] | null {
   if (body === null || body === '') return [];
@@ -122,15 +166,30 @@ function payloadEntries(body: string | null): [string, string][] | null {
  */
 export function verifyAnalyticsTransports(input: TransportCheckInput): string[] {
   const problems: string[] = [];
+  // A policy problem is said once, however many transports or kinds of origin reach the same directive.
+  const policy = new Set<string>();
   for (const transport of input.transports) {
-    for (const [field, directive] of DIRECTIVES) {
-      const sources = input.csp[directive] ?? (directive === 'worker-src' ? input.csp['script-src'] : undefined) ?? input.csp['default-src'] ?? [];
-      for (const origin of transport[field]) if (!sources.includes(origin)) problems.push(`${transport.integration}: ${directive} lacks ${origin}`);
+    for (const [field, directive, fallbacks] of DIRECTIVES) {
+      const found = applied(input.csp, fallbacks);
+      for (const origin of transport[field]) if (!(found?.sources ?? []).includes(origin)) policy.add(`${transport.integration}: ${found?.name ?? directive} lacks ${origin}`);
     }
   }
-  for (const [, directive] of DIRECTIVES) {
-    for (const source of input.csp[directive] ?? []) if (isWildcard(source) && source !== 'data:') problems.push(`${directive} holds the wildcard ${source}`);
+  const scanned = new Set<string>();
+  for (const [, directive, fallbacks] of DIRECTIVES) {
+    for (const name of [directive, applied(input.csp, fallbacks)?.name]) {
+      if (name === undefined || scanned.has(name)) continue;
+      scanned.add(name);
+      for (const source of input.csp[name] ?? []) if (isWildcard(source) && source !== 'data:') policy.add(`${name} holds the wildcard ${source}`);
+    }
   }
+  problems.push(...policy);
+  // Copies, so a global or sticky pattern's lastIndex carries nothing from one value to the next or back to the caller.
+  const forbidden = input.forbidden.map((re) => new RegExp(re.source, re.flags));
+  const isForbidden = (value: string): boolean =>
+    forbidden.some((re) => {
+      re.lastIndex = 0;
+      return re.test(value);
+    });
   const endpoints = input.transports.flatMap((t) => t.endpoints.map((e) => ({ transport: t, endpoint: e })));
   for (const request of input.requests) {
     let url: URL;
@@ -140,7 +199,7 @@ export function verifyAnalyticsTransports(input: TransportCheckInput): string[] 
       problems.push(`${request.route}: a request to a malformed address`);
       continue;
     }
-    if (url.origin === input.pageOrigin && !endpoints.some(({ endpoint }) => endpoint.origin === url.origin && endpoint.path === url.pathname && endpoint.method === request.method.toUpperCase())) continue;
+    if (url.origin === input.pageOrigin && !endpoints.some(({ endpoint }) => endpoint.origin === url.origin && endpoint.path === url.pathname)) continue;
     const match = endpoints.find(({ endpoint }) => endpoint.origin === url.origin && endpoint.path === url.pathname && endpoint.method === request.method.toUpperCase());
     if (match === undefined) {
       problems.push(`${request.route}: a request to an unregistered destination ${url.origin}${url.pathname}`);
@@ -160,8 +219,8 @@ export function verifyAnalyticsTransports(input: TransportCheckInput): string[] 
     for (const [key] of entries) if (!allowed.has(key)) problems.push(`${request.route}: the payload key ${key} is not allowed`);
     const values = entries.map(([, v]) => v);
     if (values.some((v) => v.length > match.transport.payload.maxValueLength)) problems.push(`${request.route}: a payload value is longer than ${match.transport.payload.maxValueLength}`);
-    if (values.some((v) => input.forbidden.some((re) => re.test(v)))) problems.push(`${request.route}: a payload value matches a forbidden pattern`);
-    if (values.some((v) => /^https?:\/\//.test(v) && (v.includes('?') || v.includes('#')))) problems.push(`${request.route}: a payload value carries a query string or a fragment`);
+    if (values.some(isForbidden)) problems.push(`${request.route}: a payload value matches a forbidden pattern`);
+    if (values.some((v) => ADDRESS.test(v) && (v.includes('?') || v.includes('#')))) problems.push(`${request.route}: a payload value carries a query string or a fragment`);
   }
   for (const transport of input.transports) {
     for (const state of input.storage) {
