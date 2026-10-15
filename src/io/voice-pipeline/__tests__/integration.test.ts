@@ -283,9 +283,9 @@ describe('voice pipeline -- full conversational loop integration', () => {
   // ============================================================================
 
   /**
-   * With minSpeechMs=300, the orchestrator passes speechDurationMs=0 (instant
-   * detection), which is below the threshold. The handler returns 'ignore'
-   * and TTS continues uninterrupted.
+   * With minSpeechMs=300, the orchestrator first asks with speechDurationMs=0,
+   * as the speech starts, which is below the threshold. The handler returns
+   * 'ignore' and TTS continues uninterrupted while the speech is measured.
    */
   it('scenario 2a: barge-in below threshold is ignored (TTS continues)', async () => {
     await startSession({ silenceTimeoutMs: 500 }, { minSpeechMs: 300 });
@@ -302,7 +302,7 @@ describe('voice pipeline -- full conversational loop integration', () => {
 
     expect(orchestrator.state).toBe('speaking');
 
-    // Simulate speech_start during SPEAKING -- speechDurationMs: 0 < 300 ms -> 'ignore'
+    // Simulate speech_start during SPEAKING: the first ask, speechDurationMs: 0 < 300 ms -> 'ignore'
     sttSession.emit('speech_start');
     await vi.advanceTimersByTimeAsync(0);
 
@@ -313,9 +313,10 @@ describe('voice pipeline -- full conversational loop integration', () => {
   });
 
   /**
-   * With minSpeechMs=0, ANY detection triggers cancel. The orchestrator passes
-   * speechDurationMs=0 which equals the threshold, so the handler returns
-   * 'cancel'. TTS is stopped, agent is aborted, state returns to LISTENING.
+   * With minSpeechMs=0, ANY detection triggers cancel. The orchestrator's first
+   * ask, as the speech starts, passes speechDurationMs=0, which equals the
+   * threshold, so the handler returns 'cancel'. TTS is stopped, agent is
+   * aborted, state returns to LISTENING.
    */
   it('scenario 2b: barge-in at/above threshold cancels TTS and returns to LISTENING', async () => {
     await startSession({ silenceTimeoutMs: 500 }, { minSpeechMs: 0 });
@@ -332,7 +333,7 @@ describe('voice pipeline -- full conversational loop integration', () => {
 
     expect(orchestrator.state).toBe('speaking');
 
-    // Simulate speech_start with speechDurationMs: 0 >= minSpeechMs: 0 -> 'cancel'
+    // Simulate speech_start: the first ask, speechDurationMs: 0 >= minSpeechMs: 0 -> 'cancel'
     sttSession.emit('speech_start');
     await vi.advanceTimersByTimeAsync(0);
 

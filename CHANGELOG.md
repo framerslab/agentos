@@ -1,3 +1,9 @@
+## [0.13.147](https://github.com/framerslab/agentos/compare/v0.13.146...v0.13.147) (2026-10-15)
+
+### fix
+
+* **voice-pipeline:** measure an interruption as it grows, hold the audio on a pause, and resume after a false interruption (#493) ([ada1ce4](https://github.com/framerslab/agentos/commit/ada1ce41971979e25104b2f8c228324c30a64f7e))
+
 ## [0.13.146](https://github.com/framerslab/agentos/compare/v0.13.145...v0.13.146) (2026-10-15)
 
 ### fix
