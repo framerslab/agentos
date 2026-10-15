@@ -62,12 +62,18 @@
  *   holds the floor, takes every final said while the agent listens as the
  *   user's, a lone "okay" included, and never takes a final that ends with
  *   `?` for a backchannel.
- * - Without a call profile, speech that starts while the agent speaks is
+ * - Without a call profile, speech that starts while the agent speaks
+ *   interrupts the reply until the floor is decided (`Interruption`). It is
  *   measured from its start: the barge-in handler is asked with
  *   `speechDurationMs: 0`, then every `BARGEIN_ASK_INTERVAL_MS` (100 ms)
  *   while the speech lasts, on each of its transcripts and at its end, each
- *   time with the speech so far, until it answers `cancel` or the speech
- *   ends.
+ *   time with the speech so far, until it answers `cancel` or the floor is
+ *   decided. A `pause` holds the reply's audio while the TTS session goes on.
+ *   When the speech ends, a final with words cuts the reply; an empty final,
+ *   a backchannel or no final within `falseInterruptionMs` is a false
+ *   interruption, and the reply resumes: a `resume` control, then the audio
+ *   the pause held. The endpoint detector hears the speech once the floor is
+ *   decided, so the speech that cuts a reply is the user's turn.
  */
 
 import { EventEmitter } from 'node:events';
@@ -103,6 +109,7 @@ import {
   type ScopedTranscriptEvent,
   type TurnCompleteEvent,
   type ScopedTurnCompleteEvent,
+  type VadEvent,
   type VadFrameEvent,
   type StreamingTTSUsageEvent,
   type VoiceGeneration,
@@ -134,14 +141,28 @@ const CLIENT_TURN_MAX_TEXT = 16_000;
  */
 const BARGEIN_ASK_INTERVAL_MS = 100;
 
+/**
+ * How long a reply paused by barge-in waits, after the speech that paused it ends, for that speech's final before it
+ * resumes, by default (`VoicePipelineConfig.falseInterruptionMs`).
+ */
+const DEFAULT_FALSE_INTERRUPTION_MS = 1_500;
+
 /** What the user's speech does, from the STT session's events or a client's transcript lines. */
 interface SpeechEdges {
   /** Speech began: a synthetic VAD event, and, while the agent speaks, an interruption of the reply. */
   start(): Promise<void>;
   /** Speech ended: a synthetic VAD event. */
   end(): void;
-  /** A transcript of the speech arrived: during an interruption, the barge-in handler is asked again. */
-  heard(): void;
+  /**
+   * A transcript of the speech arrived: during an interruption, a final counts toward the decision, and the barge-in
+   * handler is asked again.
+   */
+  heard(text: string, isFinal: boolean): void;
+  /**
+   * Tells the endpoint detector something of the speech: at once, or, during an interruption, once the floor is
+   * decided, in the order it came (`Interruption.told`).
+   */
+  tell(work: () => void): void;
 }
 
 /** The parts of a session without a call profile that its replies and their interruptions act on. */
@@ -160,17 +181,40 @@ interface ReplyParts {
 
 /**
  * The user's speech over the agent's reply, in a session without a call profile: from a speech start while the
- * pipeline is `speaking` until the barge-in handler cancels the reply or the speech ends (`_interrupt`).
+ * pipeline is `speaking` until the floor is decided (`_interrupt`). The barge-in handler's `cancel` cuts the reply
+ * (`_cutReply`); otherwise the speech's end decides (`_settleInterruption`): speech that never paused the reply ends
+ * with the reply going on (`_endInterruption`), and a paused reply is cut by a final with words or resumes
+ * (`_resumeReply`).
  */
 interface Interruption {
   /** Speech of the segments that have ended, in milliseconds. */
   spokenMs: number;
   /** When the segment being spoken started, on `Date.now()`'s clock, or `null` between segments. */
   segmentAt: number | null;
-  /** Whether the handler answered `pause`: the transport is sent the first one. */
+  /** When the last segment ended, on `Date.now()`'s clock: the wait for a final counts from it. */
+  endedAt: number;
+  /** How many segments of speech started: a start after an end, before the decision, adds one. */
+  segments: number;
+  /** How many finals arrived, empty ones included: an ended speech with fewer finals than segments waits for one. */
+  finals: number;
+  /** Whether a final had words other than a backchannel the endpoint detector recognizes. */
+  words: boolean;
+  /** Whether the handler answered `pause`: the transport is sent the first one, and the reply's audio is held. */
   paused: boolean;
+  /** The reply's audio that arrived during the pause, in order. */
+  audio: EncodedAudioChunk[];
+  /** Whether the reply's synthesis completed during the pause: the reply ends once the held audio is sent. */
+  synthesized: boolean;
+  /**
+   * What the endpoint detector would have been told of the speech since its first start, in order. It is told once
+   * the floor is decided: as the agent holds the floor when the reply goes on, so a backchannel stays out of the
+   * conversation, and as the user holds it when the reply is cut, so the speech is the user's turn.
+   */
+  told: Array<() => void>;
   /** The timer that asks the handler again while a segment lasts. */
   tick?: ReturnType<typeof setTimeout>;
+  /** The timer that resumes a paused reply when no final comes within `falseInterruptionMs` of the speech's end. */
+  wait?: ReturnType<typeof setTimeout>;
   /** Whether an ask is in flight. */
   asking: boolean;
   /** Whether something asked meanwhile: the handler is asked once more when the ask in flight returns. */
@@ -309,8 +353,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * closed session's handlers then neither stay reachable from the detector nor count toward its listener limit.
    */
   private readonly endpointListeners: Array<{ event: string; listener: VoiceEventListener }> = [];
-  /** The user's speech over the reply being spoken, while it lasts (`_interrupt`). */
+  /** The user's speech over the reply being spoken, until the floor is decided (`_interrupt`). */
   private interruption?: Interruption;
+  /**
+   * How long a paused reply waits, after the speech that paused it ends, for that speech's final
+   * (`VoicePipelineConfig.falseInterruptionMs`).
+   */
+  private readonly falseInterruptionMs: number;
 
   /**
    * Create a new orchestrator with the given pipeline configuration.
@@ -319,9 +368,18 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * to wire up components and transition to `'listening'`.
    *
    * @param config - Top-level pipeline configuration specifying providers and options.
+   * @throws {RangeError} When `config.falseInterruptionMs` is given and is not a finite number of zero or more.
    */
   constructor(private readonly config: VoicePipelineConfig) {
     super();
+    const falseInterruptionMs = config.falseInterruptionMs ?? DEFAULT_FALSE_INTERRUPTION_MS;
+    // NaN or Infinity is no time to wait, and a negative number is no duration; zero waits for no final.
+    if (!Number.isFinite(falseInterruptionMs) || falseInterruptionMs < 0) {
+      throw new RangeError(
+        `VoicePipelineOrchestrator: falseInterruptionMs must be a finite number of zero or more, got ${String(falseInterruptionMs)}`
+      );
+    }
+    this.falseInterruptionMs = falseInterruptionMs;
   }
 
   /** Current pipeline state (read-only); a call profile moves through the same states. */
@@ -400,13 +458,27 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Opens an interruption as the user starts to speak over the reply, and asks the barge-in handler with
-   * `speechDurationMs: 0`; a timer asks again every `BARGEIN_ASK_INTERVAL_MS` while the speech lasts.
+   * `speechDurationMs: 0`; a timer asks again every `BARGEIN_ASK_INTERVAL_MS` while the speech lasts. Until the floor
+   * is decided, what the endpoint detector is told of the speech waits in the interruption (`SpeechEdges.tell`).
    *
    * @param parts - The session's parts.
    * @returns Resolves once the handler's first answer is acted on; rejects when the handler throws or rejects.
    */
   private _interrupt(parts: ReplyParts): Promise<void> {
-    const open: Interruption = { spokenMs: 0, segmentAt: Date.now(), paused: false, asking: false, again: false };
+    const open: Interruption = {
+      spokenMs: 0,
+      segmentAt: Date.now(),
+      endedAt: 0,
+      segments: 1,
+      finals: 0,
+      words: false,
+      paused: false,
+      audio: [],
+      synthesized: false,
+      told: [],
+      asking: false,
+      again: false,
+    };
     this.interruption = open;
     this._tick(open, parts);
     return this._askBargein(open, parts);
@@ -430,26 +502,32 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   }
 
   /**
-   * A segment of speech starts in an interruption after the last one ended: it is measured from now, and the handler
-   * is asked as it lasts. A start while a segment lasts changes nothing.
+   * A segment of speech starts in an interruption after the last one ended: it is measured from now, the handler is
+   * asked as it lasts, and a paused reply stops waiting for a final, since the speech goes on. A start while a segment
+   * lasts changes nothing.
    *
    * @param open - The interruption.
    * @param parts - The session's parts.
    */
   private _segmentStarted(open: Interruption, parts: ReplyParts): void {
     if (open.segmentAt !== null) return;
+    open.segments += 1;
     open.segmentAt = Date.now();
+    clearTimeout(open.wait);
+    open.wait = undefined;
     this._tick(open, parts);
   }
 
   /**
-   * The segment being spoken ends: its speech is added to the interruption's, and its timer stops.
+   * The segment being spoken ends: its speech is added to the interruption's, its timer stops, and the wait for its
+   * final counts from now.
    *
    * @param open - The interruption.
    */
   private _segmentEnded(open: Interruption): void {
     if (open.segmentAt === null) return;
-    open.spokenMs += Math.max(0, Date.now() - open.segmentAt);
+    open.endedAt = Date.now();
+    open.spokenMs += Math.max(0, open.endedAt - open.segmentAt);
     open.segmentAt = null;
     clearTimeout(open.tick);
     open.tick = undefined;
@@ -469,10 +547,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   /**
    * Asks the barge-in handler about the interruption, with the speech measured now, the reply's text so far and the
    * duration of its audio sent, and acts on the answer: `cancel` cuts the reply (`_cutReply`), the first `pause` is
-   * sent to the transport, and any other answer changes nothing. One ask is in flight at a time: one asked for
-   * meanwhile follows it, with the speech measured then. An answer that comes back after the interruption or the
-   * reply has ended is not acted on. Once the answers are in and the speech has ended, the interruption ends and the
-   * reply goes on.
+   * sent to the transport and holds the reply's audio, and any other answer changes nothing; a handler's `resume`
+   * leaves the decision to the speech's end. One ask is in flight at a time: one asked for meanwhile follows it, with
+   * the speech measured then. An answer that comes back after the floor was decided or the reply ended is not acted
+   * on. Once the answers are in, an ended speech decides the floor (`_settleInterruption`).
    *
    * @param open - The interruption.
    * @param parts - The session's parts.
@@ -505,16 +583,42 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     } finally {
       open.asking = false;
     }
-    if (open.segmentAt === null) this._closeInterruption(open);
+    this._settleInterruption(open, parts);
+  }
+
+  /**
+   * Decides the floor once the interruption's speech has ended and the handler's answers are in. Speech that never
+   * paused the reply ends with the reply going on (`_endInterruption`). A paused reply is cut when a final had words,
+   * one that came while the handler was still answering included; it resumes (`_resumeReply`) when each segment's
+   * final has come without words, as an empty final or a backchannel such as "uh huh", or when `falseInterruptionMs`
+   * have passed since the speech ended with no final with words: a false interruption.
+   *
+   * @param open - The interruption.
+   * @param parts - The session's parts.
+   * @param waited - Whether `falseInterruptionMs` have passed since the speech ended.
+   */
+  private _settleInterruption(open: Interruption, parts: ReplyParts, waited = false): void {
+    if (this.interruption !== open || open.segmentAt !== null) return;
+    if (!open.paused) this._endInterruption(open);
+    else if (open.words) this._cutReply(open, { type: 'cancel' }, parts);
+    else if (waited || open.finals >= open.segments) this._resumeReply(open, parts);
+    else {
+      // The wait counts from the end of speech, however long the handler took to answer since; a clock set back
+      // waits no longer than falseInterruptionMs.
+      const leftMs = Math.min(this.falseInterruptionMs, Math.max(0, open.endedAt + this.falseInterruptionMs - Date.now()));
+      open.wait ??= setTimeout(() => this.supervise(() => this._settleInterruption(open, parts, true)), leftMs);
+    }
   }
 
   /**
    * Cuts the reply: the pipeline goes `interrupting`, the TTS session is cancelled, the agent's request aborted and the
-   * transport sent `barge_in` with `action`; then the endpoint detector is reset and told the user holds the floor, and
-   * the pipeline returns to `listening`.
+   * transport sent `barge_in` with `action`; the audio a pause held is never sent. Then the endpoint detector is reset
+   * and told the user holds the floor, the pipeline returns to `listening`, and the detector is told the speech that
+   * cut the reply, in the order it came, as the user's turn.
    *
    * @param open - The interruption that cuts the reply.
-   * @param action - The `cancel` the transport is sent.
+   * @param action - The `cancel` the transport is sent: the handler's, or `{ type: 'cancel' }` when a final with words
+   *   cuts a paused reply.
    * @param parts - The session's parts.
    */
   private _cutReply(open: Interruption, action: BargeinAction, parts: ReplyParts): void {
@@ -528,17 +632,89 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this._replyEnded(parts.endpoint);
     this.stateTo('listening');
     this.resetWatchdog();
+    this._replay(open);
   }
 
   /**
-   * Ends an interruption: its timer stops, and it is no longer the session's.
+   * Resumes a paused reply after a false interruption. The endpoint detector is told the speech as the agent holds the
+   * floor, so a backchannel stays out of the conversation; the transport is sent `barge_in` with `resume`, then the
+   * audio the pause held, in order; and a reply whose synthesis completed during the pause ends.
+   *
+   * @param open - The interruption.
+   * @param parts - The session's parts.
+   */
+  private _resumeReply(open: Interruption, parts: ReplyParts): void {
+    if (this.interruption !== open) return;
+    this._closeInterruption(open);
+    this._replay(open);
+    if (this.current !== 'speaking') return;
+    this._watchSend(() => parts.transport.sendControl({ type: 'barge_in', action: { type: 'resume' } }));
+    for (const chunk of open.audio) this._sendReplyAudio(parts.transport, chunk);
+    if (open.synthesized) this._replyDone(parts);
+  }
+
+  /**
+   * Ends an interruption whose speech never paused the reply: the reply goes on, and the endpoint detector is told the
+   * speech as the agent holds the floor.
+   *
+   * @param open - The interruption.
+   */
+  private _endInterruption(open: Interruption): void {
+    this._closeInterruption(open);
+    this._replay(open);
+  }
+
+  /**
+   * Ends an interruption as the session's: its timers stop. What it holds is the caller's to send, tell or drop.
    *
    * @param open - The interruption.
    */
   private _closeInterruption(open: Interruption): void {
     clearTimeout(open.tick);
+    clearTimeout(open.wait);
     open.tick = undefined;
+    open.wait = undefined;
     if (this.interruption === open) this.interruption = undefined;
+  }
+
+  /**
+   * Tells the endpoint detector what an interruption held for it, in order, each through `supervise()`: a failure ends
+   * the session, and the rest is dropped.
+   *
+   * @param open - The interruption.
+   */
+  private _replay(open: Interruption): void {
+    for (const work of open.told.splice(0)) {
+      if (this.current === 'closed') return;
+      this.supervise(work);
+    }
+  }
+
+  /**
+   * Sends a chunk of the reply's audio to the transport, counted in the reply's played duration.
+   *
+   * @param transport - The session's transport.
+   * @param chunk - The chunk.
+   */
+  private _sendReplyAudio(transport: IStreamTransport, chunk: EncodedAudioChunk): void {
+    this.playedMs += chunk.durationMs;
+    this._watchSend(() => transport.sendAudio(chunk), this._currentReply);
+  }
+
+  /**
+   * Ends the reply once its audio is sent: the pipeline returns to `listening`, the transport is sent `agent_done`, the
+   * endpoint detector is reset and told the user holds the floor, and the watchdog starts.
+   *
+   * @param parts - The session's parts.
+   */
+  private _replyDone(parts: ReplyParts): void {
+    this.stateTo('listening');
+    this._watchSend(() => parts.transport.sendControl({ type: 'agent_done', text: this.text, durationMs: this.playedMs }));
+    this.supervise(() => {
+      parts.endpoint.reset();
+      this._replyEnded(parts.endpoint);
+    });
+    this.resetWatchdog();
   }
 
   /**
@@ -632,31 +808,47 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     const tts = this.tts;
     const endpoint = this.endpoint;
     const parts: ReplyParts = { transport, agent, tts, endpoint, bargein: overrides.bargeinHandler };
-    // The user's speech: the STT session's speech_start and speech_end, or a client's transcript lines
+    // The user's speech: the STT session's speech_start, speech_end and transcripts, or a client's transcript lines
     // (_wireClientTranscripts). Each edge goes to the endpoint detector as a synthetic VAD event, and a start while the
-    // agent speaks interrupts the reply: the barge-in handler is asked as the speech grows (`_interrupt`).
+    // agent speaks interrupts the reply until the floor is decided (`_interrupt`): the barge-in handler is asked as the
+    // speech grows, and what the detector is told of the speech waits for the decision.
     const speech: SpeechEdges = {
       start: async () => {
         if (this.current === 'closed') return;
-        endpoint.pushVadEvent({ type: 'speech_start', timestamp: Date.now(), source: 'stt' });
+        const event: VadEvent = { type: 'speech_start', timestamp: Date.now(), source: 'stt' };
         const open = this.interruption;
         if (open) {
-          // The user speaks again before the handler has decided: the same interruption, measured across both.
+          // The user speaks again before the floor is decided: the same interruption, measured across both.
+          speech.tell(() => endpoint.pushVadEvent(event));
           this._segmentStarted(open, parts);
           await this._askBargein(open, parts);
-        } else if (this.current === 'speaking') await this._interrupt(parts);
+        } else {
+          endpoint.pushVadEvent(event);
+          if (this.current === 'speaking') await this._interrupt(parts);
+        }
       },
       end: () => {
         if (this.current === 'closed') return;
-        endpoint.pushVadEvent({ type: 'speech_end', timestamp: Date.now(), source: 'stt' });
+        const event: VadEvent = { type: 'speech_end', timestamp: Date.now(), source: 'stt' };
+        speech.tell(() => endpoint.pushVadEvent(event));
         const open = this.interruption;
         if (!open) return;
         this._segmentEnded(open);
         this.supervise(() => this._askBargein(open, parts));
       },
-      heard: () => {
+      heard: (text, isFinal) => {
         const open = this.interruption;
-        if (open) this.supervise(() => this._askBargein(open, parts));
+        if (!open) return;
+        if (isFinal) {
+          open.finals += 1;
+          // A backchannel such as "uh huh", said while the agent holds the floor, makes no claim to it.
+          if (text.trim() && !endpoint.isBackchannel?.(text)) open.words = true;
+        }
+        this.supervise(() => this._askBargein(open, parts));
+      },
+      tell: (work) => {
+        if (this.interruption) this.interruption.told.push(work);
+        else work();
       },
     };
     transport.on('audio', (frame: AudioFrame) => {
@@ -667,9 +859,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     });
     stt.on('transcript', (event: TranscriptEvent) => {
       if (this.current === 'closed') return;
-      this.supervise(() => endpoint.pushTranscript(event));
+      this.supervise(() => speech.tell(() => endpoint.pushTranscript(event)));
       this._watchSend(() => transport.sendControl({ type: 'transcript', text: event.text, isFinal: event.isFinal, confidence: event.confidence }));
-      speech.heard();
+      this.supervise(() => speech.heard(event.text, event.isFinal));
     });
     this._onEndpoint(endpoint, 'turn_complete', (event: TurnCompleteEvent) => {
       if (this.current !== 'listening') return;
@@ -704,20 +896,26 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     });
     tts.on('audio', (chunk: EncodedAudioChunk) => {
       if (this.current !== 'speaking') return;
-      this.playedMs += chunk.durationMs;
-      this._watchSend(() => transport.sendAudio(chunk), this._currentReply);
+      // A pause holds the reply's audio until the reply resumes or is cut.
+      if (this.interruption?.paused) this.interruption.audio.push(chunk);
+      else this._sendReplyAudio(transport, chunk);
     });
     tts.on('flush_complete', () => {
       if (this.current !== 'speaking') return;
-      // Speech over the reply that has not cut it ends with it.
-      if (this.interruption) this._closeInterruption(this.interruption);
-      this.stateTo('listening');
-      this._watchSend(() => transport.sendControl({ type: 'agent_done', text: this.text, durationMs: this.playedMs }));
-      this.supervise(() => {
-        endpoint.reset();
-        this._replyEnded(endpoint);
-      });
-      this.resetWatchdog();
+      const open = this.interruption;
+      if (open?.paused) {
+        // The reply ends once the audio the pause holds is sent (`_resumeReply`), and not at all when it is cut.
+        open.synthesized = true;
+        return;
+      }
+      if (open) {
+        // Speech over the reply that never paused it ends with it, told as said while the agent held the floor.
+        this._endInterruption(open);
+        // Cast needed because TypeScript keeps `this.current` narrowed by the check above; telling the detector can
+        // fail and end the session.
+        if ((this.current as PipelineState) !== 'speaking') return;
+      }
+      this._replyDone(parts);
     });
     stt.on('speech_start', () => this.supervise(() => speech.start()));
     stt.on('speech_end', () => this.supervise(() => speech.end()));
@@ -743,9 +941,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * and the client's lines stand in for the STT session's speech events: the
    * first line to open while none is open is a speech start (while the agent
    * speaks, an interruption of the reply, whose first answer from the
-   * barge-in handler comes before the line's text reaches the detector; each
-   * message after it asks the handler again), and the final that closes the
-   * last open line is a speech end, after its text.
+   * barge-in handler comes before the line's text; each message after it
+   * asks the handler again, and the detector is told the lines' text once
+   * the floor is decided, each final joined then), and the final that closes
+   * the last open line is a speech end, after its text.
    *
    * The detector keeps one final without an `itemId` per turn, each replacing
    * the last, and a client makes one line per speech segment (Moonshine
@@ -878,21 +1077,26 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     }
     if (text) {
       const event = transcriptEventFromClient(message);
-      if (message.isFinal) {
-        // A backchannel the detector would drop reaches it on its own, so the detector drops and reports it; joined
-        // with the turn's finals, it would be words of the turn.
-        if (!endpoint.isBackchannel?.(text)) {
-          // A turn's text stops growing at CLIENT_TURN_MAX_TEXT: later finals are left out.
-          if (lines.finals.join(' ').length < CLIENT_TURN_MAX_TEXT) lines.finals.push(text);
-          event.text = lines.finals.join(' ').slice(0, CLIENT_TURN_MAX_TEXT);
+      // Joined as the detector is told it: during an interruption, once the floor is decided, so a final that cut the
+      // reply starts the user's turn.
+      speech.tell(() => {
+        if (message.isFinal) {
+          // A backchannel the detector would drop reaches it on its own, so the detector drops and reports it; joined
+          // with the turn's finals, it would be words of the turn.
+          if (!endpoint.isBackchannel?.(text)) {
+            // A turn's text stops growing at CLIENT_TURN_MAX_TEXT: later finals are left out.
+            if (lines.finals.join(' ').length < CLIENT_TURN_MAX_TEXT) lines.finals.push(text);
+            event.text = lines.finals.join(' ').slice(0, CLIENT_TURN_MAX_TEXT);
+          }
+          // The text is the turn's, or a lone backchannel's, not the line's: with the line's itemId, a detector
+          // that keeps finals per item would join the turn's lines a second time.
+          delete event.itemId;
         }
-        // The text is the turn's, or a lone backchannel's, not the line's: with the line's itemId, a detector
-        // that keeps finals per item would join the turn's lines a second time.
-        delete event.itemId;
-      }
-      endpoint.pushTranscript(event);
+        endpoint.pushTranscript(event);
+      });
     }
-    speech.heard();
+    // An empty final closes its line with no words: an interruption counts it as a final.
+    speech.heard(text, message.isFinal);
     if (message.isFinal) {
       clearTimeout(lines.open.get(itemId));
       lines.open.delete(itemId);
@@ -1023,8 +1227,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Without a call profile the session moves to `'closed'` and emits `'close'` at once, then aborts the agent's
    * request, closes the STT and TTS sessions, resets the endpoint detector and removes the listeners the session added
    * to it, and closes the transport, unless the transport has closed itself. The promise rejects when one of those
-   * throws. An interruption of the reply under way ends with the session, its timer stopped. Safe to call more than
-   * once: a later call returns the first one's outcome.
+   * throws. An interruption of the reply under way ends with the session: its timers stop, and the audio and speech
+   * it holds are neither sent nor told. Safe to call more than once: a later call returns the first one's outcome.
    *
    * @param reason - Optional human-readable reason for diagnostics.
    */
@@ -1035,7 +1239,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this.stateTo('closed');
     if (this.watchdog) clearTimeout(this.watchdog);
     this.endClientLines?.();
-    // An interruption's timer goes with the session.
+    // An interruption's timers go with the session, and nothing it holds is sent or told.
     if (this.interruption) this._closeInterruption(this.interruption);
     this._emitEach(this, 'close');
     if (this.publicSession) this._emitEach(this.publicSession, 'close');

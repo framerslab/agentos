@@ -173,7 +173,9 @@ export class SoftFadeBargeinHandler implements IBargeinHandler {
    *
    * 3. Otherwise (ignoreMs <= speech < cancelMs) -> `{ type: 'pause', fadeMs }`
    *    Probably intentional but not yet certain. Fade out TTS gracefully so the
-   *    user can be heard. If the speech stops, the pipeline can resume playback.
+   *    user can be heard. `VoicePipelineOrchestrator` holds the reply's audio
+   *    meanwhile; when the speech ends, a final with words cancels the reply,
+   *    and an empty final, a backchannel or none resumes it.
    *
    * @param context - Snapshot of the barge-in state at the moment of detection.
    * @returns The pipeline action to execute. Always synchronous (no Promise).

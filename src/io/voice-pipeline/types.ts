@@ -1312,7 +1312,9 @@ export interface BargeinContext {
   interruptedText: string;
 
   /**
-   * How many milliseconds of audio had been played at the point of interruption.
+   * How many milliseconds of the reply's audio had been sent to the transport
+   * when the handler is asked. `VoicePipelineOrchestrator` counts audio a
+   * pause holds once it is sent.
    * Combined with `interruptedText`, this allows the agent to estimate
    * how much of the response the user actually heard.
    */
@@ -1344,7 +1346,12 @@ export type BargeinAction =
       injectMarker?: string;
     }
   | {
-      /** Fade out TTS audio over `fadeMs` milliseconds then pause. */
+      /**
+       * Fade out TTS audio over `fadeMs` milliseconds then pause.
+       * `VoicePipelineOrchestrator` sends the transport this action and holds
+       * the reply's audio until the reply is cancelled or, after a false
+       * interruption, resumed with `'resume'`.
+       */
       type: 'pause';
       /** Duration of the fade-out in milliseconds. @defaultValue 150 */
       fadeMs?: number;
@@ -1352,7 +1359,9 @@ export type BargeinAction =
   | {
       /**
        * Resume TTS playback from where it was paused (only valid after a prior
-       * `'pause'` action).
+       * `'pause'` action). `VoicePipelineOrchestrator` sends it in the
+       * `barge_in` message after a false interruption, followed by the audio
+       * the pause held; a handler that answers it changes nothing there.
        */
       type: 'resume';
     }
@@ -1384,10 +1393,10 @@ export interface IBargeinHandler {
    * Called by the pipeline as the user speaks over the agent's reply.
    * `VoicePipelineOrchestrator`, without a call profile, asks as the speech
    * starts and again as it grows (see `BargeinContext.speechDurationMs`),
-   * until the handler answers `'cancel'` or the speech ends, so a handler
-   * that decides by the speech's duration acts once it reaches its threshold.
-   * The handler evaluates the context and returns the action the pipeline
-   * should execute.
+   * until the handler answers `'cancel'` or the speech's end decides, so a
+   * handler that decides by the speech's duration acts once it reaches its
+   * threshold. The handler evaluates the context and returns the action the
+   * pipeline should execute.
    *
    * @param context - Contextual snapshot at the moment of interruption.
    * @returns The action to perform (or a promise resolving to one).
@@ -1570,6 +1579,18 @@ export interface VoicePipelineConfig {
    * @defaultValue 30000
    */
   maxTurnDurationMs?: number;
+
+  /**
+   * How long a reply paused by barge-in waits, after the user's speech ends,
+   * for that speech's final transcript, in milliseconds. A final with words
+   * cancels the reply; an empty final, a backchannel the endpoint detector
+   * recognizes, or no final within this time is a false interruption, and
+   * the reply resumes. Read without a call profile. A finite number of zero
+   * or more: `VoicePipelineOrchestrator`'s constructor throws a `RangeError`
+   * otherwise.
+   * @defaultValue 1500
+   */
+  falseInterruptionMs?: number;
 
   /**
    * Provider-level STT options merged into `StreamingSTTConfig.providerOptions`.

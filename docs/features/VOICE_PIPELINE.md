@@ -17,7 +17,7 @@ graph LR
     Endpoint -->|turn_complete| Agent[IVoicePipelineAgentSession]
     Agent -->|token stream| TTS[IStreamingTTS session]
     TTS -->|audio chunks| Transport
-    STT -->|speech_start while speaking| Bargein[IBargeinHandler]
+    STT -->|speech while speaking| Bargein[IBargeinHandler]
     Bargein -->|cancel| TTS
 ```
 
@@ -39,7 +39,7 @@ stateDiagram-v2
 ```
 
 - On `turn_complete` the orchestrator sends `agent_thinking`, calls `agentSession.sendText(transcript, metadata)`, sends `agent_speaking` and pushes each token to TTS. When TTS reports `flush_complete` it sends `agent_done` with the spoken text and the played duration, resets the endpoint detector and returns to `listening`.
-- On a barge-in `cancel` it cancels the TTS session, calls `agentSession.abort()`, sends `barge_in` and returns to `listening` at once. A decision the handler returns after the reply has ended is not acted on.
+- On a barge-in `cancel` it cancels the TTS session, calls `agentSession.abort()`, sends `barge_in` and returns to `listening` at once. A barge-in `pause` keeps it `speaking` until the user's speech ends ([Barge-in](#barge-in)). A decision the handler returns after the reply has ended is not acted on.
 - A transport `close`, `stopSession()` or a failure (below) moves any state to `closed`. The orchestrator and the session it returned emit `close`; the orchestrator then calls `agentSession.abort()`, closes the STT and TTS sessions, resets the endpoint detector and closes the transport, unless the transport has closed itself. A pending `waitForUserTurn()` rejects, as does one called after the close.
 - An `'error'` from the STT session, the TTS session, the transport or the endpoint detector, and a turn whose agent stream throws or whose TTS `flush()` rejects, end that session and no other. The orchestrator reports `Error('voice pipeline failed')` as its `'error'`, and as the returned session's `'error'` when that has a listener, or writes it as a console warning when nothing listens for the orchestrator's `'error'`; the report carries none of the failure's own text, which can hold what was said.
 - While `listening`, a watchdog gives the endpoint detector a synthetic `speech_end` after `maxTurnDurationMs` (default `30000`); the detector decides whether that ends the turn.
@@ -74,12 +74,12 @@ wss.on('connection', async (ws) => {
     streamingSTT: new DeepgramStreamingSTT({ apiKey: process.env.DEEPGRAM_API_KEY! }),
     streamingTTS: new ElevenLabsStreamingTTS({ apiKey: process.env.ELEVENLABS_API_KEY! }),
     endpointDetector: new HeuristicEndpointDetector(),
-    bargeinHandler: new HardCutBargeinHandler({ minSpeechMs: 0 }), // see Barge-in
+    bargeinHandler: new HardCutBargeinHandler(),
   });
 });
 ```
 
-`AgentSessionVoiceAdapter` sends each turn through the agent session's stream with the supplied abort signal, `session.stream(text, { abortSignal })`, and hands its text deltas to TTS; abort cancels that upstream request: `abort()` aborts the signal, so the turn ends as an aborted `stream()` ends ([Cancellation](../getting-started/HIGH_LEVEL_API.md#cancellation)), and `whenIdle()` resolves once the turn's stream has unwound. A turn whose `sendText()` was called before an `abort()` and has not been read yet is cancelled too: it never reaches the session and yields nothing. One turn runs at a time: iterating a second `sendText()` while one is active throws. Direct injected construction still owns its component choices. The config's `stt` and `tts` strings are required by the type and not read by the orchestrator; it reads `language` and `sttOptions` for the STT session, `voice`, `format`, `ttsOptions` and `ttsExpressiveness` for the TTS session, and `maxTurnDurationMs` for the watchdog. A configured `voiceSession()` delegates to `VoiceSessionFactory`, which freezes the scoped provider plan and refuses unsupported options before opening models.
+`AgentSessionVoiceAdapter` sends each turn through the agent session's stream with the supplied abort signal, `session.stream(text, { abortSignal })`, and hands its text deltas to TTS; abort cancels that upstream request: `abort()` aborts the signal, so the turn ends as an aborted `stream()` ends ([Cancellation](../getting-started/HIGH_LEVEL_API.md#cancellation)), and `whenIdle()` resolves once the turn's stream has unwound. A turn whose `sendText()` was called before an `abort()` and has not been read yet is cancelled too: it never reaches the session and yields nothing. One turn runs at a time: iterating a second `sendText()` while one is active throws. Direct injected construction still owns its component choices. The config's `stt` and `tts` strings are required by the type and not read by the orchestrator; it reads `language` and `sttOptions` for the STT session, `voice`, `format`, `ttsOptions` and `ttsExpressiveness` for the TTS session, `maxTurnDurationMs` for the watchdog, and `falseInterruptionMs` for a reply paused by barge-in. A configured `voiceSession()` delegates to `VoiceSessionFactory`, which freezes the scoped provider plan and refuses unsupported options before opening models.
 
 `agent({ voice: { enabled: true, session: { factory, agent: revision } } })` exposes `voiceSession({ scope, funding, slot })`, which prepares the scoped call through `factory.startSession()`. The captured factory and revision do not change when the caller mutates its options. That form refuses any other field in `voice` or `session`, `enabled: false` and `runtime: 'gmi'` at construction; the agent's text calls stay text calls, and its exported configuration reads `voice` as `{ enabled: true }`. Other legacy voice fields of a [`VoiceConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) remain deferred and produce a construction warning: `agent()` accepts them and does not read them. `agency({ voice: { enabled: true } }).listen()` accepts JSON text only; binary input receives `audio_not_supported` and close code 1003. It performs no speech recognition or synthesis ([Agency API](../orchestration/AGENCY_API.md)).
 
@@ -124,16 +124,21 @@ Without a call profile, the orchestrator feeds the detectors the STT session's `
 
 ## Barge-in
 
-Without a call profile, the orchestrator asks the barge-in handler when the STT session reports `speech_start` while the pipeline is `speaking`, and passes `speechDurationMs: 0`, since the speech has just started. A call profile measures the speech instead and needs no handler ([Call profile](#call-profile)).
+Without a call profile, speech that starts while the pipeline is `speaking` interrupts the reply until the floor is decided. The orchestrator measures the speech from its `speech_start`, or from the opening of a client's line, and asks the barge-in handler as it grows: at the start with `speechDurationMs: 0`, then every 100 ms while the speech lasts, on each of its transcripts and at its end, each time with the speech so far, the reply's text so far (`interruptedText`) and the duration of the reply's audio sent (`playedDurationMs`), until the handler answers `cancel` or the floor is decided. Speech that starts again before the floor is decided belongs to the same interruption, measured across its segments. A call profile measures the speech from its VAD frames instead and needs no handler ([Call profile](#call-profile)).
 
-| Handler | Decision | With the orchestrator |
+| Handler | Decision | With the orchestrator, at the defaults |
 |------|----------|----------|
-| `HardCutBargeinHandler` | `cancel` when `speechDurationMs` is at least `minSpeechMs` (default `300`), else `ignore` | cancels only with `minSpeechMs: 0`; at the default it never cancels |
-| `SoftFadeBargeinHandler` | `ignore` below `ignoreMs` (default `100`), `cancel` at `cancelMs` (default `2000`) or more, else `pause` with `fadeMs` (default `200`) | at the defaults it always ignores; with `ignoreMs: 0` it answers `pause` |
+| `HardCutBargeinHandler` | `cancel` when `speechDurationMs` is at least `minSpeechMs` (default `300`), else `ignore` | cancels once the user has spoken over the reply for 300 ms; a shorter sound lets the reply go on |
+| `SoftFadeBargeinHandler` | `ignore` below `ignoreMs` (default `100`), `cancel` at `cancelMs` (default `2000`) or more, else `pause` with `fadeMs` (default `200`) | pauses the reply once the user has spoken over it for 100 ms and cancels it at 2000 ms; when the speech ends sooner, its final decides |
 
-- `cancel`: the pipeline goes `interrupting` and back to `listening`, as described under State Machine.
-- `pause`: the orchestrator sends `barge_in` with the action and keeps speaking; the client fades the audio. The orchestrator takes no action on a later `resume`.
-- A `cancel` action carries `injectMarker: '[interrupted]'`; the client receives it in the `barge_in` message, and nothing writes it into the conversation history.
+- `cancel`: the pipeline goes `interrupting` and back to `listening`, as described under State Machine. The endpoint detector is then told the speech that cut the reply, as the user holds the floor, so its words become the user's turn.
+- `pause`: the orchestrator sends `barge_in` with the action, and the client fades the audio. The pipeline stays `speaking` and the TTS session goes on synthesizing, while the orchestrator stops sending the reply's audio and holds each chunk that arrives; `playedDurationMs`, and the `durationMs` of `agent_done`, count only the audio sent. When the speech ends, its final decides:
+  - A final with words cancels the reply: the orchestrator sends `barge_in` with `{ type: 'cancel' }` and drops the held audio, and the words reach the agent as the user's turn.
+  - An empty final, a backchannel the endpoint detector's `isBackchannel()` recognizes, such as "uh huh", or no final within `falseInterruptionMs` of the end of speech is a false interruption: the orchestrator sends `barge_in` with `{ type: 'resume' }`, then the held audio in order, and the reply goes on where it paused. The detector hears the speech as said while the agent holds the floor, so a backchannel stays out of the conversation. A reply whose synthesis completed during the pause ends, with `agent_done`, once its held audio is sent. `falseInterruptionMs` is a `VoicePipelineConfig` option, default `1500`; the constructor throws a `RangeError` unless it is a finite number of zero or more.
+- `ignore` changes nothing, and speech that never paused the reply ends with the reply going on. A `resume` from the handler changes nothing either: the end of the speech decides.
+- The endpoint detector hears the speech's first start at once, and the rest of the speech, its transcripts, ends and later starts, once the floor is decided, in the order it came.
+- A transport decides what `pause` and `resume` do to audio it already holds. `TelephonyStreamTransport` with `protocol: 'carrier'` clears the carrier's queue on `pause`, as on `cancel`, and ignores `resume`, so a resumed reply goes on from the first chunk the pause held.
+- A `cancel` from a stock handler carries `injectMarker: '[interrupted]'`; the client receives it in the `barge_in` message, and nothing writes it into the conversation history.
 - There is no `disabled` handler, and the config's `bargeIn` field is not read. To never interrupt, pass a handler whose `handleBargein()` returns `{ type: 'ignore' }`.
 
 ## Extension Packs
@@ -169,6 +174,8 @@ A client that transcribes on its own device sends `transcript` messages ([`Clien
 { type: 'agent_speaking', text: '' }
 { type: 'agent_done', text: 'Hi there!', durationMs: 1840 }
 { type: 'barge_in', action: { type: 'cancel', injectMarker: '[interrupted]' } }
+{ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } }
+{ type: 'barge_in', action: { type: 'resume' } }
 
 // Binary messages: each TTS audio chunk, in the TTS provider's output format
 ```

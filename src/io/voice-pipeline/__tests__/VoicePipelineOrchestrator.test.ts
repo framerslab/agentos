@@ -50,7 +50,9 @@
  *   end decides: a final with words cancels the reply and becomes the user's turn, from the STT session or a client's
  *   line, whether it comes before or after the end of speech; a backchannel or no final within 1,500 ms resumes the
  *   reply where it paused, and a reply whose synthesis completed during the pause ends after the resume. SoftFade
- *   cancels at cancelMs before any final, and a stop during a pause leaves no timer behind
+ *   cancels at cancelMs before any final, and a stop during a pause leaves no timer behind. falseInterruptionMs sets how
+ *   long a pause waits for the final, from the end of speech: a final with words within it cuts the reply though the
+ *   handler answers it late, and the constructor refuses one that is not a finite number of zero or more
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -1487,6 +1489,62 @@ describe('VoicePipelineOrchestrator', () => {
     expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two']);
     expect(states).toEqual([]);
     expect(turns).toEqual(['Book a table for two.']);
+  });
+
+  it('resumes the reply held on a pause after the falseInterruptionMs it is given when no final comes', async () => {
+    const { sent } = await speakingWith(new SoftFadeBargeinHandler(), { config: { falseInterruptionMs: 500 } });
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(400);
+    ttsSession.emit('audio', replyChunk('two'));
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(499);
+    expect(sent).toEqual(['audio one', 'barge_in pause']);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two']);
+  });
+
+  /** SoftFadeBargeinHandler's answers, each 10 ms after the ask, as a handler that awaits something answers. */
+  function lateSoftFade(): IBargeinHandler {
+    const softFade = new SoftFadeBargeinHandler();
+    return {
+      mode: 'soft-fade',
+      handleBargein: (context) =>
+        new Promise<BargeinAction>((resolve) => setTimeout(() => resolve(softFade.handleBargein(context)), 10)),
+    };
+  }
+
+  it('counts the wait for the final from the end of speech, however long the handler takes to answer', async () => {
+    const { sent } = await speakingWith(lateSoftFade());
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(400);
+    sttSession.emit('speech_end'); // answered 20 ms later
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(sent).toEqual(['audio one', 'barge_in pause']);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume']);
+  });
+
+  it('cuts the reply held on a pause when a final with words comes within falseInterruptionMs, though the handler answers late', async () => {
+    const { sent, turns } = await speakingWith(lateSoftFade());
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(400);
+    sttSession.emit('speech_end'); // the wait for its final ends 1,500 ms from now
+    await vi.advanceTimersByTimeAsync(1_495);
+    // The final's ask is still in flight when the wait ends.
+    sttSession.emit('transcript', sttFinal('Make it three.'));
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in cancel']);
+    expect(turns).toEqual(['Book a table for two.', 'Make it three.']);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])('refuses a falseInterruptionMs of %s', (falseInterruptionMs) => {
+    expect(() => new VoicePipelineOrchestrator(makeConfig({ falseInterruptionMs }))).toThrow(RangeError);
   });
 
   it.each([
