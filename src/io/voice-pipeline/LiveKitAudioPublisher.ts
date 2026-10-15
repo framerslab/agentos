@@ -89,7 +89,8 @@ export interface LiveKitAudioPublisherOptions {
   /**
    * How playback is acknowledged ({@link LiveKitPlayout}). Unset, the publisher plays natively unless the participant
    * declares {@link LIVEKIT_PLAYOUT_ATTRIBUTE} as `'participant'` and these options carry the call identity. A SIP
-   * participant is always played natively. `'participant'` requires `scopeId`, `callId` and `generation`.
+   * participant is always played natively. `'participant'` requires `scopeId`, `callId` and `generation`. The mode is
+   * fixed once the participant is in the room; a chunk sent before then plays natively.
    */
   playout?: LiveKitPlayout;
   /** The call's scope: required for participant playout; in native playout, a chunk that carries a scope must carry this one. */
@@ -120,7 +121,10 @@ export interface LiveKitAudioPublisherOptions {
 export interface LiveKitPublisherBinding {
   /** The transport's `@livekit/rtc-node` module; the publisher's own `rtc` option comes first. */
   rtc?: unknown;
-  /** Reads the participant the transport speaks to, once, when the playout mode is fixed. */
+  /**
+   * Reads the participant the transport speaks to, or `undefined` while it is not in the room, until the playout mode
+   * is fixed: the mode waits for the participant.
+   */
   participant?(): LiveKitPlayoutParticipant | undefined;
 }
 /**
@@ -170,7 +174,7 @@ export class LiveKitAudioPublisher {
   private cancellation = 0;
   private clearWork?: Promise<void>;
   private pending?: PlaybackReceipt;
-  /** The playout mode, fixed at the first readiness or admission. */
+  /** The playout mode, fixed at the first readiness or admission that finds the participant in the room. */
   private mode?: LiveKitPlayout;
   /** Native playout: the end of the queue of chunks being captured, and of a clear; it never rejects. */
   private queued: Promise<void> = Promise.resolve();
@@ -194,24 +198,40 @@ export class LiveKitAudioPublisher {
     if ((options.playout !== undefined && options.playout !== 'native' && options.playout !== 'participant') || (options.playout === 'participant' && !this.identified()) || ![16000, 24000, 48000].includes(options.sampleRate) || !Number.isSafeInteger(options.maxBytes) || options.maxBytes < 2 || !Number.isSafeInteger(options.maxDurationMs) || options.maxDurationMs <= 0 || options.maxDurationMs > 2000) throw new Error('invalid livekit publisher bound');
     this.acks = new PlaybackAcknowledgements(options.receiptTimeoutMs);
   }
-  /** The playout mode once {@link ready} or the first {@link sendAudio} has fixed it; `undefined` before. */
+  /**
+   * The playout mode once {@link ready} or {@link sendAudio} has fixed it, which waits for the participant to be in the
+   * room; `undefined` before.
+   */
   get playout(): LiveKitPlayout | undefined { return this.mode; }
   /** Whether the options carry the call identity participant playout needs. */
   private identified(): boolean { return !!this.options.scopeId && !!this.options.callId && typeof this.options.generation === 'function'; }
-  /** Fixes the mode once: native for a SIP participant, else the host's setting, else what the participant declares. */
+  /**
+   * Fixes the mode once: native for a SIP participant, else the host's setting, else what the participant declares.
+   * While the participant the binding reads is not in the room nothing is fixed, and the chunk being admitted plays
+   * natively: nobody is there to announce it to, and a phone caller who joins later is played natively too.
+   */
   private fixMode(): LiveKitPlayout {
     if (this.mode) return this.mode;
     const participant = this.binding.participant?.();
+    if (typeof this.binding.participant === 'function' && !participant) return 'native';
     if (isLiveKitSipParticipant(participant)) this.mode = 'native';
     else if (this.options.playout) this.mode = this.options.playout;
     else this.mode = this.identified() && participant?.attributes?.[LIVEKIT_PLAYOUT_ATTRIBUTE] === 'participant' ? 'participant' : 'native';
     return this.mode;
   }
-  /** Fixes the playout mode, then publishes exactly once, before the host records connected readiness. */
+  /**
+   * Fixes the playout mode when the participant is in the room, then publishes exactly once, before the host records
+   * connected readiness.
+   */
   ready(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('publisher closed'));
+    if (!this.preparation) this.fixMode();
+    return this.prepare();
+  }
+  /** Publishes the track exactly once; later calls share that work. The mode is fixed by the caller, not here. */
+  private prepare(): Promise<void> {
+    if (this.closed) return Promise.reject(new Error('publisher closed'));
     if (this.preparation) return this.preparation;
-    this.fixMode();
     this.preparation = (async () => {
       const rtc = publishingRtc(this.options.rtc ?? this.binding.rtc ?? (await loadLiveKitRtc()));
       if (this.closed) throw new Error('publisher closed'); this.rtc = rtc;
@@ -282,7 +302,7 @@ export class LiveKitAudioPublisher {
     entry.captured = (async () => {
       await previous;
       if (!this.current(entry.generation, entry.cancellation)) return;
-      try { await this.ready(); } catch (error) { if (!this.current(entry.generation, entry.cancellation)) return; throw error; }
+      try { await this.prepare(); } catch (error) { if (!this.current(entry.generation, entry.cancellation)) return; throw error; }
       const rtc = this.rtc!;
       for (const output of this.convert(rtc, pcm).frames) {
         if (!this.current(entry.generation, entry.cancellation)) return;
@@ -301,7 +321,7 @@ export class LiveKitAudioPublisher {
     const receipt: PlaybackReceipt = { generation, sequence: chunk.sequence, playedSamples: pcm.samples, sampleRate: pcm.sampleRate };
     this.acks.begin(receipt); this.pending = receipt;
     const work = (async () => {
-      await this.ready(); this.live(generation, captured); const rtc = this.rtc!;
+      await this.prepare(); this.live(generation, captured); const rtc = this.rtc!;
       const { frames, publishedSamples } = this.convert(rtc, pcm);
       await this.send({ type: 'audio', scopeId: this.options.scopeId, callId: this.options.callId, generation, sequence: receipt.sequence,
         publicationId: this.publication, encoding: 'pcm16le', channels: 1, samples: pcm.samples, sampleRate: pcm.sampleRate,
@@ -383,15 +403,15 @@ export class LiveKitAudioPublisher {
   receiveReceipt(input: unknown): boolean { return this.mode === 'participant' ? this.acks.receive(input) : false; }
   /**
    * Discards what is queued: invalidates at once, clears the native queue, waits for a capture in flight to return
-   * and clears it again. In native playout that is all, with no answer asked, and without a `generation` it clears
-   * whatever the track holds; a clear of another generation than the last chunk's does nothing. In participant
-   * playout it then sends `clear` and waits for the participant's `cleared` answer; it needs the `generation`.
+   * and clears it again. In native playout, and before the mode is fixed, that is all, with no answer asked, and
+   * without a `generation` it clears whatever the track holds; a clear of another generation than the last chunk's
+   * does nothing. In participant playout it then sends `clear` and waits for the participant's `cleared` answer; it
+   * needs the `generation`.
    */
   clearPlayback(generation?: VoiceGeneration): Promise<void> {
     if (this.closed) return this.closing ?? Promise.resolve();
     if (this.clearWork) return this.clearWork;
     if (this.mode === 'participant') return generation ? this.clearForReceipt(generation) : Promise.resolve();
-    if (!this.mode) return Promise.resolve();
     const latest = this.latest;
     if (generation && latest?.generation && !sameVoiceGeneration(latest.generation, generation)) return Promise.resolve();
     this.cancellation++; this.source?.clearQueue(); const queued = this.queued;

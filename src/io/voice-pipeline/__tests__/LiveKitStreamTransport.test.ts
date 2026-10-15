@@ -971,6 +971,31 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     transport.close();
     await transport.whenClosed();
   });
+
+  it('plays a chunk sent before the participant joins natively, and fixes the mode once the participant is in the room', async () => {
+    const room = new FakeRoom();
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...receipts, ...speaking, rtc: fakePublishingRtc() },
+    });
+    // Nobody is there to announce the chunk to: it plays on the track, and the mode waits.
+    await transport.sendAudio(scopedChunk(1));
+    expect(transport.playout).toBeUndefined();
+    const playback = transport.waitForPlayback(firstGeneration, 1, new AbortController().signal);
+    FakeAudioSource.created[0]!.playOut();
+    expect(await playback).toMatchObject({ sequence: 1, playedSamples: 320, sampleRate: 16_000 });
+    expect(room.localParticipant.sendText).not.toHaveBeenCalled();
+    // The page joins: the host's participant playout holds from its first chunk.
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    await transport.sendAudio(scopedChunk(2));
+    expect(transport.playout).toBe('participant');
+    expect(sentTypes(room)).toEqual(['audio']);
+    transport.close();
+    await transport.whenClosed();
+  });
 });
 
 /**

@@ -29,8 +29,9 @@
  * microphone track through {@link LiveKitAudioPublisher}: its input must be
  * mono at 16 kHz, `readyForPlayback()` publishes the track, and `sendAudio()`
  * takes raw or WAV-wrapped PCM16. How a chunk counts as played is the
- * publisher's playout mode, fixed by `readyForPlayback()` or the first
- * `sendAudio()`:
+ * publisher's playout mode, fixed by `readyForPlayback()` or `sendAudio()`
+ * once the participant is in the room; a chunk sent before then plays
+ * natively:
  * - Native playout, the default and the only mode for a SIP participant:
  *   every participant subscribed to the track hears it, chunks queue on the
  *   track in order, `waitForPlayback()` resolves once the track has played
@@ -221,7 +222,10 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   }
   /** Physical state; call reconnecting state remains the manager's responsibility. */
   get state(): 'connecting' | 'open' | 'closing' | 'closed' { return this._state; }
-  /** The publisher's playout mode once `readyForPlayback()` or the first `sendAudio()` fixed it; `undefined` before, and for a listen-only transport. */
+  /**
+   * The publisher's playout mode once `readyForPlayback()` or `sendAudio()` fixed it, which waits for the participant
+   * to be in the room; `undefined` before, and for a listen-only transport.
+   */
   get playout(): LiveKitPlayout | undefined { return this.publisher?.playout; }
   /** Waits for the one speaking track. Listen-only readiness allocates nothing. */
   async readyForPlayback(): Promise<void> { if (this._state !== 'open') throw new Error('transport closed'); await this.publisher?.ready(); }
@@ -264,14 +268,14 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   /**
    * Sends one JSON message to the participant as a text stream on the topic. Existing server messages retain their
    * wire representation; call-profile messages carry their captured scope and generation. A SIP participant reads no
-   * text streams, so nothing is sent to one and the send resolves. In native playout a `barge_in` message that cancels
-   * first clears what the track holds, as a page clears the audio it plays.
+   * text streams, so nothing is sent to one and the send resolves. Outside participant playout a `barge_in` message
+   * that cancels first clears what the track holds, as a page clears the audio it plays.
    *
    * @throws {Error} When the transport is not open or the room has no local participant.
    */
   async sendControl(message: ServerTextMessage): Promise<void> {
     if (this._state !== 'open') throw new Error('LiveKitStreamTransport: cannot send while ' + this._state);
-    if (message.type === 'barge_in' && message.action.type === 'cancel' && this.publisher?.playout === 'native') await this.publisher.clearPlayback();
+    if (message.type === 'barge_in' && message.action.type === 'cancel' && this.publisher && this.publisher.playout !== 'participant') await this.publisher.clearPlayback();
     if (isLiveKitSipParticipant(this.linkedParticipant())) return;
     await this.sendWire(message);
   }
