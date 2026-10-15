@@ -158,7 +158,10 @@ function publishingRtc(input: unknown): LiveKitPublishingRtc {
   if (!rtc || typeof rtc.AudioSource !== 'function' || typeof rtc.AudioFrame !== 'function' || typeof rtc.AudioResampler !== 'function' || typeof rtc.LocalAudioTrack?.createAudioTrack !== 'function' || typeof rtc.TrackPublishOptions !== 'function' || typeof rtc.TrackSource?.SOURCE_MICROPHONE !== 'number') throw new Error('livekit publishing SDK unavailable');
   return rtc as LiveKitPublishingRtc;
 }
-/** A chunk native playout admitted: what its receipt reports, the clear count it was admitted under, and its capture. */
+/**
+ * A chunk native playout admitted: what its receipt reports, the clear count it was admitted under, the hold count
+ * under which the track began to take it, and its capture.
+ */
 interface NativeChunk {
   generation?: VoiceGeneration;
   sequence: number;
@@ -166,6 +169,11 @@ interface NativeChunk {
   sampleRate: number;
   /** A clear or a close after admission increments the count and discards the chunk. */
   cancellation: number;
+  /**
+   * The hold count as the track began to take the chunk's first frame; unset until then. A pause since then cleared
+   * what the queue held of the chunk, so the chunk does not count as played, whenever the pause came.
+   */
+  holds?: number;
   /** Settles once the chunk's frames are captured, or once the chunk was discarded. */
   captured: Promise<void>;
 }
@@ -198,7 +206,10 @@ export class LiveKitAudioPublisher {
   private nextSequence = 1;
   /** Native playout: the hold a barge-in pause put on the track, until a resume, a clear or a close releases it. */
   private hold?: { released: Promise<void>; release: () => void };
-  /** Native playout: how many holds have begun, so that a frame captured while one began is cleared as it lands. */
+  /**
+   * Native playout: how many holds have begun, so that a frame captured while one began is cleared as it lands, and a
+   * chunk the track had begun to take when one began does not count as played.
+   */
   private holds = 0;
   /** Ends the wait for the first subscription, so that a close does not wait it out. */
   private stopWaiting?: () => void;
@@ -291,6 +302,11 @@ export class LiveKitAudioPublisher {
   private live(generation: VoiceGeneration, captured: number): void {
     if (!this.current(generation, captured)) throw new Error('publisher cancelled');
   }
+  /**
+   * Whether a native chunk has not all played on account of the track: a pause came since the track began to take it,
+   * clearing what the queue held of it, or the track never took it.
+   */
+  private emptied(entry: NativeChunk): boolean { return entry.holds !== this.holds; }
   /** Inspects and bounds one chunk before any native call, so a refused chunk publishes nothing. */
   private decode(chunk: EncodedAudioChunk): Pcm16View {
     const pcm = inspectPcm16(chunk); const expected = Math.ceil(pcm.samples * this.options.sampleRate / pcm.sampleRate);
@@ -349,7 +365,7 @@ export class LiveKitAudioPublisher {
         // A pause holds the track: no frame is captured until it is released.
         while (this.hold) await this.hold.released;
         if (!this.current(entry.generation, entry.cancellation)) return;
-        const holds = this.holds;
+        const holds = this.holds; entry.holds ??= holds;
         await this.capture(rtc, output);
         // A pause that began while the frame was captured cleared the queue before the frame reached it.
         if (this.holds !== holds && this.hold) this.source?.clearQueue();
@@ -385,8 +401,9 @@ export class LiveKitAudioPublisher {
    *
    * In native playout the wait is for the last chunk admitted: once its frames are captured, the track's native queue
    * must play out (`AudioSource.waitForPlayout()`), and the receipt is the publisher's own, with the chunk's samples
-   * and rate. A queue that a clear or a pause emptied does not count as played. In participant playout both the
-   * native drain and the participant's receipt are required; the native drain alone does not count.
+   * and rate. A queue that a clear emptied does not count as played, nor does a chunk the track had begun to take when
+   * a pause came, whether the pause came before this wait or during it. In participant playout both the native drain
+   * and the participant's receipt are required; the native drain alone does not count.
    */
   async waitForPlayback(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
     return this.mode === 'participant' ? this.waitForReceipt(generation, sequence, signal) : this.waitForTrack(generation, sequence, signal);
@@ -402,16 +419,16 @@ export class LiveKitAudioPublisher {
     });
     const played = (async () => {
       await entry.captured;
-      if (!this.current(entry.generation, entry.cancellation)) throw new Error('publisher cancelled');
-      const holds = this.holds;
+      // A pause since the track began to take the chunk cleared what the queue held of it, even one before this wait.
+      if (!this.current(entry.generation, entry.cancellation) || this.emptied(entry)) throw new Error('publisher cancelled');
       await this.source!.waitForPlayout();
       // A pause emptied the queue meanwhile, and what it held has not played.
-      if (this.holds !== holds) throw new Error('publisher cancelled');
+      if (this.emptied(entry)) throw new Error('publisher cancelled');
     })();
     played.catch(() => {});
     try {
       await Promise.race([played, stopped]);
-      if (signal.aborted || !this.current(entry.generation, entry.cancellation)) throw new Error('publisher cancelled');
+      if (signal.aborted || !this.current(entry.generation, entry.cancellation) || this.emptied(entry)) throw new Error('publisher cancelled');
       return { generation: { ...(entry.generation ?? generation) }, sequence, playedSamples: entry.playedSamples, sampleRate: entry.sampleRate };
     } finally {
       if (timer) clearTimeout(timer); if (abort) signal.removeEventListener('abort', abort);
@@ -455,8 +472,9 @@ export class LiveKitAudioPublisher {
    * Holds the track, as a barge-in `pause` asks, outside participant playout: what its native queue holds is cleared
    * at once, a frame whose capture was under way is cleared as it lands, and nothing more is captured until
    * {@link resume}, a clear or a close. The chunks handed over meanwhile wait, in order, and a resume plays them from
-   * the first the track had not taken; the audio the queue held when the pause came is not heard. A hold already in
-   * place stays as it is, and in participant playout nothing is held: the page holds the audio it plays.
+   * the first the track had not taken; the audio the queue held when the pause came is not heard, and a chunk the track
+   * had begun to take does not count as played ({@link waitForPlayback}). A hold already in place stays as it is, and in
+   * participant playout nothing is held: the page holds the audio it plays.
    */
   pause(): void {
     if (this.closed || this.mode === 'participant' || this.hold) return;
