@@ -35,7 +35,7 @@ restored.search('password reset').map((hit) => hit.id); // ['faq-1']
 
 ## Scoring
 
-Both indexes score a document `D` for a query with BM25:
+`LexicalIndex` and `BM25Index` score a document `D` for a query with BM25:
 
 ```
 score(D) = Σ over the query's words t of  IDF(t) × tf(t, D) × (k1 + 1) / (tf(t, D) + k1 × (1 - b + b × |D| / avgdl))
@@ -63,7 +63,7 @@ IDF(t)   = ln((N - n(t) + 0.5) / (n(t) + 0.5) + 1)
 
 The index keeps no text: a hit carries its id, score and metadata, and the caller keeps the texts and places a snippet with [`snippetAround`](./CHUNKING_AND_SNIPPETS.md#snippets).
 
-`toJSON()` answers version 1 of the format: `{ v: 1, k1, b, documents, terms }`, with each document as `[id, length]` or `[id, length, metadata]` and each term as `[term, postings]`, a posting being `[the document's position in documents, the term's count in it]`. It holds terms, not texts, so `fromJSON` is given the tokenizer the index was made with. A saved index of another version throws, and so does one `toJSON()` could not have written: `k1` or `b` not a finite number, a part out of shape, a document id or a term given twice, a document position given twice in one term's postings, a position past the last document, a length that is not a whole number of 0 or more, or a count under 1. The error names what is wrong. Metadata is saved as given, so keep it to values JSON can hold.
+`toJSON()` answers version 1 of the format: `{ v: 1, k1, b, documents, terms }`, with each document as `[id, length]` or `[id, length, metadata]` and each term as `[term, postings]`, a posting being `[the document's position in documents, the term's count in it]`. It holds terms, not texts, so `fromJSON` is given the tokenizer the index was made with. A saved index of another version throws, and so does one `toJSON()` could not have written: `k1` or `b` not a finite number, a part out of shape, a document id or a term given twice, a document position given twice in one term's postings, a position that is not a document's, a length that is not a whole number of 0 or more, or a count that is not a whole number of 1 or more. The error names what is wrong. Metadata is saved as given, so keep it to values JSON can hold.
 
 ### In a browser
 
@@ -184,7 +184,7 @@ reciprocalRankFusion(
 
 ## Where it runs
 
-`LexicalIndex`, through `@framers/agentos/cognition/library/browser`, runs in a browser; nothing that entry reaches imports a Node module or a package. `BM25Index`, `HybridSearcher`, `InMemoryVectorStore` and `@framers/agentos/cognition/rag` run in Node. Neither index calls a model; `HybridSearcher` calls the embedder it is given once per search, and a hosted embedder needs its provider's key.
+`LexicalIndex` and `FuzzyIndex`, through `@framers/agentos/cognition/library/browser`, run in a browser; nothing that entry reaches imports a Node module or a package. `BM25Index`, `HybridSearcher`, `InMemoryVectorStore` and `@framers/agentos/cognition/rag` run in Node. No index calls a model; `HybridSearcher` calls the embedder it is given once per search, and a hosted embedder needs its provider's key.
 
 ## Examples
 
