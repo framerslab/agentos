@@ -7,8 +7,9 @@
  * stemming in every language.
  *
  * PostgresVectorStore.lexicalSearch builds its query from runs of letters and digits in lower case. On a text in NFC
- * whose words hold no combining mark, as precomposed Latin, Greek and Cyrillic, Chinese and Japanese are written, it
- * reads the words this rule reads.
+ * that holds no combining mark once in lower case, as precomposed Latin, Greek and Cyrillic, Chinese and Japanese are
+ * written, it reads the words this rule reads. A capital I with a dot (U+0130) is the exception there: lower case turns
+ * it into an i and a combining dot, which this rule keeps in its word and the store's runs split at.
  *
  * @module agentos/cognition/library/tokens
  */
