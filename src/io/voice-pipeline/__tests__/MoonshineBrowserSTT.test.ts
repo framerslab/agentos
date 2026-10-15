@@ -118,6 +118,37 @@ describe('loadMoonshineWasm', () => {
     }
   });
 
+  /**
+   * An import can fail with any value, and String() throws for some: an object without a prototype, and a revoked
+   * proxy, which refuses even the read of its code. The error names such a value by its type and keeps it as the
+   * cause.
+   */
+  it.each<[string, () => unknown]>([
+    ['an object without a prototype', () => Object.create(null)],
+    [
+      'a revoked proxy',
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      },
+    ],
+  ])('names an import failure by its type when the import fails with %s, which String() cannot print', async (_name, unprintable) => {
+    const failure = unprintable();
+    let failed: (Error & { cause?: unknown }) | undefined;
+    try {
+      await loadMoonshineWasm(async () => {
+        throw failure;
+      });
+    } catch (err) {
+      failed = err as Error & { cause?: unknown };
+    }
+    expect(failed?.message).toBe(
+      '@moonshine-ai/moonshine-wasm could not be imported for the Moonshine browser speech-to-text provider: an unprintable object'
+    );
+    expect(failed?.cause).toBe(failure);
+  });
+
   it('imports the package by its name', async () => {
     const asked: string[] = [];
     const module = { marker: true };

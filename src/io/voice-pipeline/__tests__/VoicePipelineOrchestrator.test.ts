@@ -41,6 +41,8 @@
  *   and whatever its trailing punctuation; after a reply ending in a question a lone one is the user's turn, after
  *   one that asked nothing it is dropped; a client's lone backchannel reaches the detector on its own, and a
  *   detector without isBackchannel() gets every client final joined
+ * - A lone final that ends with a question mark, such as "Right?" after a statement, is the user's turn; the session
+ *   sets the detector's agent context as it starts, so a lone "Sure." is a backchannel from its first utterance
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -1200,6 +1202,30 @@ describe('VoicePipelineOrchestrator', () => {
 
     expect(turns()).toEqual(['Book a table for two.']);
     expect(backchannels).toEqual(['uh huh']);
+  });
+
+  it("should hand the agent a lone 'Right?' after a reply that asked no question: a question mark is never a backchannel", async () => {
+    const { backchannels, turns } = await startWithDetector('It is booked.');
+    await say('Book a table for two.');
+    ttsSession.emit('flush_complete');
+
+    await say('Right?');
+
+    expect(turns()).toEqual(['Book a table for two.', 'Right?']);
+    expect(backchannels).toEqual([]);
+  });
+
+  it("should read a backchannel by the agent's context from the session's first utterance", async () => {
+    const { backchannels, turns } = await startWithDetector('It is booked.');
+
+    // The session sets the detector's agent context as it starts: a lone "Sure." is a backchannel, as "sure" is.
+    await say('Sure.');
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(backchannels).toEqual(['Sure.']);
+    expect(turns()).toEqual([]);
+
+    await say('Book a table for two.');
+    expect(turns()).toEqual(['Book a table for two.']);
   });
 
   it.each([
