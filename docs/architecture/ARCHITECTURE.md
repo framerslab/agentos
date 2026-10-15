@@ -725,7 +725,7 @@ Seven [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cor
 
 ### Chunking Strategies
 
-[`SemanticChunker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/chunking/SemanticChunker.ts) in `cognition/rag/chunking/` splits text at headings, then paragraphs, then sentences, keeps fenced code blocks whole, and falls back to fixed-size splits for text with no boundaries.
+[`SemanticChunker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/chunking/SemanticChunker.ts) in `cognition/rag/chunking/` splits text at headings, then paragraphs, then sentences, keeps a fenced code block whole unless it is longer than `maxSize` (2,000 characters unless set), and falls back to fixed-size splits for text with no boundaries ([Chunking and Snippets](../text/CHUNKING_AND_SNIPPETS.md#semanticchunker)).
 
 ### Reranking
 
@@ -1000,7 +1000,7 @@ The real-time voice conversation pipeline lives in `io/voice-pipeline/` and is o
 IDLE -------> startSession() ---------> LISTENING
 LISTENING --> turn_complete ----------> PROCESSING
 PROCESSING -> LLM tokens start -------> SPEAKING
-SPEAKING ---> TTS flush_complete -----> LISTENING
+SPEAKING ---> TTS flush_complete -----> LISTENING (once played out, on a transport that reports it)
 SPEAKING ---> barge-in (cancel) ------> INTERRUPTING -> LISTENING
 ANY --------> transport disconnect ---> CLOSED
 ANY --------> stopSession() ----------> CLOSED

@@ -15,10 +15,11 @@
  * Control messages travel as LiveKit text streams on one topic (default
  * `'agentos.voice'`), to and from the selected participant alone; another
  * sender's stream on the topic is closed unread. `sendControl()` sends a JSON
- * {@link ServerTextMessage}. Without a publisher, every JSON message the
- * participant sends is emitted as `'message'`, and a message that is not
- * JSON, or a text stream that fails while it is read, emits `'error'` while
- * the transport stays open.
+ * {@link ServerTextMessage}; to a phone caller bridged by LiveKit SIP, which
+ * reads no text streams, it sends nothing and resolves. Without a publisher,
+ * every JSON message the participant sends is emitted as `'message'`, and a
+ * message that is not JSON, or a text stream that fails while it is read,
+ * emits `'error'` while the transport stays open.
  *
  * ## Audio (outbound)
  * Without the `publisher` option the transport publishes nothing:
@@ -26,16 +27,33 @@
  * `sendAudio()` carries a handler of its own, so a caller that does not wait
  * for it raises no unhandled rejection. With it, the transport speaks on one
  * microphone track through {@link LiveKitAudioPublisher}: its input must be
- * mono at 16 kHz, `readyForPlayback()` publishes the track, `sendAudio()`
- * takes one raw or WAV-wrapped PCM16 chunk at a time, and `waitForPlayback()`
- * resolves only after the native queue has drained and the participant has
- * sent its playback receipt on the topic. The participant's text streams are
- * then read with bounds (4096 bytes, five seconds, four at once) and only a
- * playback or clear receipt or a `control` message with `mute`, `unmute` or
- * `stop` is taken; anything else is reported as `'error'` and closes the
- * transport. The participant leaving the room closes it too. Outbound text is
- * bounded as well: 16384 bytes a message, four in flight, and a send not done
- * within five seconds closes the transport.
+ * mono at 16 kHz, `readyForPlayback()` publishes the track and waits, at most
+ * `receiptTimeoutMs`, for a participant to subscribe to it (a first chunk
+ * sent before then waits the same way), and `sendAudio()` takes raw or
+ * WAV-wrapped PCM16. How a chunk counts as played is the publisher's playout
+ * mode, fixed by `readyForPlayback()` or `sendAudio()` once the participant
+ * is in the room; a chunk sent before then plays natively:
+ * - Native playout, the default and the only mode for a SIP participant:
+ *   every participant subscribed to the track hears it, chunks queue on the
+ *   track in order, `waitForPlayback()` resolves once the track has played
+ *   the chunk out, `waitForPlayout()` once it has played out every chunk
+ *   sent, `clearPlayback()` needs no answer, and a `barge_in` message acts
+ *   on the track as it is sent: a cancel clears it, a pause holds it, and a
+ *   resume releases it.
+ * - Participant playout, when `publisher.playout` is `'participant'` or the
+ *   participant's `agentos.playout` attribute is: one chunk at a time,
+ *   announced to the participant, and `waitForPlayback()` resolves only after
+ *   the native queue has drained and the participant has sent its playback
+ *   receipt on the topic.
+ *
+ * With a publisher the participant's text streams are read with bounds (4096
+ * bytes, five seconds, four at once) and only a playback or clear receipt, a
+ * `transcript` message (as `isClientTranscriptMessage()` checks it) or a
+ * `control` message with `mute`, `unmute` or `stop` is taken; anything else
+ * is reported as `'error'` and closes the transport. The participant leaving
+ * the room closes it too. Outbound text is bounded as well: 16384 bytes a
+ * message, four in flight, and a send not done within five seconds closes the
+ * transport.
  *
  * ## Lifetime
  * `close()` stops reading audio, drops the frames a pause held, unregisters
@@ -52,9 +70,10 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AudioFrame, IPlaybackTransport, EncodedAudioChunk, ClientTextMessage, ServerTextMessage, PlaybackReceipt, VoiceGeneration } from './types.js';
-import { LiveKitAudioPublisher, type LiveKitAudioPublisherOptions } from './LiveKitAudioPublisher.js';
+import { LiveKitAudioPublisher, isLiveKitSipParticipant, type LiveKitAudioPublisherOptions, type LiveKitPlayout } from './LiveKitAudioPublisher.js';
 import { PlaybackAcknowledgementSchema } from './PlaybackAcknowledgements.js';
-import { LiveKitRoomAudioSource, type LiveKitRoomLike, type LiveKitRtcModule, type LiveKitTextStreamReaderLike } from '../hearing/LiveKitRoomAudioSource.js';
+import { isClientTranscriptMessage } from './clientTranscript.js';
+import { LiveKitRoomAudioSource, type LiveKitParticipantLike, type LiveKitRoomLike, type LiveKitRtcModule, type LiveKitTextStreamReaderLike } from '../hearing/LiveKitRoomAudioSource.js';
 
 /** The text stream topic of the control messages when none is configured. */
 export const LIVEKIT_TRANSPORT_DEFAULT_TOPIC = 'agentos.voice';
@@ -87,12 +106,16 @@ export interface LiveKitStreamTransportOptions {
    * oldest are dropped and reported as a `gap` on resume. Default 2000.
    */
   bufferMs?: number;
-  /** The `@livekit/rtc-node` module the host imports; imported on first use when omitted. */
+  /**
+   * The `@livekit/rtc-node` module the host imports, which serves the publisher too unless `publisher.rtc` names
+   * another; imported on first use when omitted.
+   */
   rtc?: LiveKitRtcModule;
   /**
    * Speaks on one track of the room's local participant, which must offer
-   * `publishTrack()` and `unpublishTrack()`. Absent means listen-only: audio
-   * output is rejected.
+   * `publishTrack()` and `unpublishTrack()`, in native playout unless
+   * `playout` or the participant asks for receipts. Absent means listen-only:
+   * audio output is rejected.
    */
   publisher?: LiveKitAudioPublisherOptions;
 }
@@ -104,13 +127,14 @@ export interface LiveKitStreamTransportOptions {
  */
 function closeTextReader(reader: LiveKitTextStreamReaderLike): void { void reader.close?.().catch(() => {}); }
 
-/** The client messages a speaking transport takes besides playback receipts. */
+/** The control messages a speaking transport takes besides playback receipts and transcript messages. */
 const controlSchema = z.strictObject({ type: z.literal('control'), action: z.strictObject({ type: z.enum(['mute', 'unmute', 'stop']) }) });
 
 /**
  * {@link IPlaybackTransport} over a LiveKit room: inbound audio from one
  * participant, control messages as text streams on a topic and, with
- * `publisher`, acknowledged audio on one published track.
+ * `publisher`, the agent's audio on one published track, which every
+ * participant subscribed to it hears.
  *
  * ## Events emitted
  *
@@ -118,7 +142,7 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * |-------------|---------------------------|-----------------------------------------------|
  * | `'audio'`   | `AudioFrame`              | The participant's audio, mono Float32.        |
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
- * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `control` message with `mute`, `unmute` or `stop`. |
+ * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. |
  * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting or, with a publisher, the participant leaving or a refused message. |
  * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message. |
  *
@@ -142,6 +166,8 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  */
 export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTransport {
   readonly id = randomUUID();
+  /** `'pcm'` with a publisher, which plays raw or WAV PCM16 alone; `undefined` for a listen-only transport. */
+  readonly playbackFormat?: 'pcm';
   private _state: 'connecting' | 'open' | 'closing' | 'closed' = 'open';
   private readonly topic: string;
   private readonly source: LiveKitRoomAudioSource;
@@ -176,7 +202,10 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     // option leaves the topic free; until it is read, the source holds nothing.
     this.source = new LiveKitRoomAudioSource({ room: options.room, participantIdentity: options.participantIdentity,
       sampleRate: options.sampleRate, frameSizeMs: options.frameSizeMs, rtc: options.rtc, strictMono: !!options.publisher });
-    if (options.publisher) this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message));
+    if (options.publisher) {
+      this.playbackFormat = 'pcm';
+      this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message), { rtc: options.rtc, participant: () => this.linkedParticipant() });
+    }
     this.on('pause', () => { if (this._state === 'open') this.paused = true; });
     this.on('resume', () => {
       if (this._state !== 'open') return; this.paused = false;
@@ -195,18 +224,31 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   }
   /** Physical state; call reconnecting state remains the manager's responsibility. */
   get state(): 'connecting' | 'open' | 'closing' | 'closed' { return this._state; }
-  /** Waits for the one speaking track. Listen-only readiness allocates nothing. */
+  /**
+   * The publisher's playout mode once `readyForPlayback()` or `sendAudio()` fixed it, which waits for the participant
+   * to be in the room; `undefined` before, and for a listen-only transport.
+   */
+  get playout(): LiveKitPlayout | undefined { return this.publisher?.playout; }
+  /**
+   * Publishes the one speaking track and waits for a participant to subscribe to it, at most
+   * `publisher.receiptTimeoutMs`. Listen-only readiness allocates nothing.
+   */
   async readyForPlayback(): Promise<void> { if (this._state !== 'open') throw new Error('transport closed'); await this.publisher?.ready(); }
   /** Listen-only construction still rejects; speaking delegates to the one native conversion boundary. */
   sendAudio(chunk: EncodedAudioChunk): Promise<void> {
     const result = this.publisher ? this.publisher.sendAudio(chunk) : Promise.reject(new Error('LiveKitStreamTransport does not publish audio: it carries what the agent hears and its control messages'));
     result.catch(() => {}); return result;
   }
-  /** Speaking completion requires both native drain and the selected participant's receiver receipt. */
+  /** Resolves once the chunk has played: in native playout once the track has played it out, in participant playout once the native queue has drained and the participant's receipt has come. */
   waitForPlayback(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
     if (!this.publisher) return Promise.reject(new Error('LiveKitStreamTransport does not publish audio'));
     return this.publisher.waitForPlayback(generation, sequence, signal);
   }
+  /**
+   * Resolves once the track has played out what the transport was handed: every chunk sent so far, and any sent while
+   * it waits; what a clear or a pause discarded counts as played out. A listen-only transport resolves at once.
+   */
+  async waitForPlayout(): Promise<void> { await this.publisher?.waitForPlayout(); }
   /** Discards only this physical path's queued output; a closed path must finish native cleanup. */
   async clearPlayback(generation: VoiceGeneration): Promise<void> {
     if (this._state === 'closed') { await this.closing; return; }
@@ -229,11 +271,26 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     } finally { if (timer) clearTimeout(timer); this.sendingControls--; }
   }
   /**
-   * Existing server messages retain their wire representation. Call-profile messages carry their captured scope and generation.
+   * Sends one JSON message to the participant as a text stream on the topic. Existing server messages retain their
+   * wire representation; call-profile messages carry their captured scope and generation. A SIP participant reads no
+   * text streams, so nothing is sent to one and the send resolves. Outside participant playout a `barge_in` message
+   * first acts on the track, as a page acts on the audio it plays: a `cancel` clears what the track holds, a `pause`
+   * holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases it.
    *
    * @throws {Error} When the transport is not open or the room has no local participant.
    */
-  sendControl(message: ServerTextMessage): Promise<void> { return this.sendWire(message); }
+  async sendControl(message: ServerTextMessage): Promise<void> {
+    if (this._state !== 'open') throw new Error('LiveKitStreamTransport: cannot send while ' + this._state);
+    if (message.type === 'barge_in' && this.publisher && this.publisher.playout !== 'participant') {
+      if (message.action.type === 'cancel') await this.publisher.clearPlayback();
+      else if (message.action.type === 'pause') this.publisher.pause();
+      else if (message.action.type === 'resume') this.publisher.resume();
+    }
+    if (isLiveKitSipParticipant(this.linkedParticipant())) return;
+    await this.sendWire(message);
+  }
+  /** The participant the transport hears and answers, while it is in the room. */
+  private linkedParticipant(): LiveKitParticipantLike | undefined { return this.options.room.remoteParticipants.get(this.options.participantIdentity); }
   /** Stops input synchronously without disconnecting the host-owned room. Native cleanup is awaited through whenClosed. */
   close(_code?: number, _reason?: string): void {
     if (this._state === 'closing' || this._state === 'closed') return; this._state = 'closing';
@@ -293,7 +350,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       if (this.publisher) {
         const receipt = PlaybackAcknowledgementSchema.safeParse(value);
         if (receipt.success) { this.publisher.receiveReceipt(receipt.data); return; }
-        this.emit('message', controlSchema.parse(value));
+        // A page that transcribes on its own device sends its lines, which a session without a call profile reads.
+        this.emit('message', isClientTranscriptMessage(value) ? value : controlSchema.parse(value));
       } else this.emit('message', value as ClientTextMessage);
     }).catch((error: unknown) => {
       if (this._state !== 'open') return;

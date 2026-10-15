@@ -19,6 +19,7 @@ const SECTION_ORDER = [
   'Cognitive Pipeline',
   'Memory',
   'RAG & Retrieval',
+  'Text Processing & Search',
   'Personas',
   'Orchestration',
   'Tools & Capabilities',
@@ -212,6 +213,16 @@ const publicationManifest = [
   agentosDoc('MEMORY_DOCUMENT_INGESTION.md', 'features/memory-document-ingestion.md', 'Document Ingestion', 'RAG & Retrieval', 6),
   agentosDoc('INCREMENTAL_VECTOR_INGESTION.md', 'features/incremental-vector-ingestion.md', 'Incremental Vector Ingestion', 'RAG & Retrieval', 7),
   agentosDoc('features/LIBRARY_INDEX.md', 'features/library-index.md', 'Library Index', 'RAG & Retrieval', 7.5),
+
+  // Text processing, statistics and search
+  agentosDoc('text/TEXT_OVERVIEW.md', 'text/index.md', 'Text Processing & Search', 'Text Processing & Search', 1, {
+    categoryIndex: true,
+  }),
+  agentosDoc('text/TEXT_PROCESSING.md', 'text/text-processing.md', 'Text Processing Pipeline', 'Text Processing & Search', 2),
+  agentosDoc('text/TEXT_STATISTICS.md', 'text/text-statistics.md', 'Text Statistics and Classification', 'Text Processing & Search', 3),
+  agentosDoc('text/LEXICAL_AND_HYBRID_SEARCH.md', 'text/lexical-and-hybrid-search.md', 'Lexical and Hybrid Search', 'Text Processing & Search', 4),
+  agentosDoc('text/CHUNKING_AND_SNIPPETS.md', 'text/chunking-and-snippets.md', 'Chunking and Snippets', 'Text Processing & Search', 5),
+  agentosDoc('text/RERANKING.md', 'text/reranking.md', 'Reranking', 'Text Processing & Search', 6),
 
   agentosDoc('GUARDRAILS_USAGE.md', 'features/guardrails.md', 'Guardrails', 'Guardrails & Safety', 1),
   staticDoc('features/guardrails-architecture.md', 'features/guardrails-architecture.md', 'Guardrails Architecture', 'Guardrails & Safety', 1.5),

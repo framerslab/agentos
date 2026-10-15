@@ -11,6 +11,9 @@
  * exists per funding reference in a scope and one hold per operation in a scope. Amounts are whole micro-dollars; times
  * are epoch milliseconds.
  *
+ * A store may also keep versioned documents ({@link CreditDocumentRow}) for an allocator built on these rows, such as
+ * supplier transcription credit; they commit or roll back with the rows of the same transaction.
+ *
  * @module safety/runtime/CompoundCreditStore
  */
 
@@ -216,6 +219,16 @@ export class CreditConflictError extends Error {
   }
 }
 
+/** A library-owned versioned document, committed with the scope's native credit rows. */
+export interface CreditDocumentRow {
+  scopeId: string;
+  documentId: string;
+  /** The document's JSON text. */
+  value: string;
+  /** The row's version, for compare-and-set. */
+  version: number;
+}
+
 /** The rows of one transaction. Every method reads or writes inside it. */
 export interface CreditTransaction {
   /** The scope's account, locked for the rest of the transaction; undefined when there is none. */
@@ -262,6 +275,13 @@ export interface CreditTransaction {
    * settled or released hold, its `supplierOpenMicro`. Scoped to one scope when `scopeId` is given, across the platform otherwise.
    */
   openSupplierMicro(scopeId?: string): Promise<number>;
+  /**
+   * Optional extension state, read while the scope account is locked. Both document methods are optional, so a store
+   * written before them still implements this interface; an allocator that needs them refuses a store without them.
+   */
+  getDocument?(scopeId: string, documentId: string): Promise<CreditDocumentRow | undefined>;
+  /** Compare-and-set document write in this transaction; version starts at one. */
+  putDocument?(row: CreditDocumentRow): Promise<void>;
 }
 
 /** A store of compound credit rows. */
@@ -289,10 +309,14 @@ interface CreditState {
   attempts: Map<string, CreditAttemptRow[]>;
   entries: Map<string, CreditEntryRow>;
   supplierDays: Map<string, SupplierDayRow>;
+  documents: Map<string, CreditDocumentRow>;
 }
 
 function emptyState(): CreditState {
-  return { accounts: new Map(), lots: new Map(), holds: new Map(), allocations: new Map(), attempts: new Map(), entries: new Map(), supplierDays: new Map() };
+  return {
+    accounts: new Map(), lots: new Map(), holds: new Map(), allocations: new Map(),
+    attempts: new Map(), entries: new Map(), supplierDays: new Map(), documents: new Map(),
+  };
 }
 
 const byCreation = <T extends { createdAt: number }>(key: (row: T) => string) => (a: T, b: T): number =>
@@ -419,6 +443,15 @@ class MemoryCreditTransaction implements CreditTransaction {
       else open += h.supplierOpenMicro;
     }
     return open;
+  }
+  async getDocument(scopeId: string, documentId: string): Promise<CreditDocumentRow | undefined> {
+    const row = this.s.documents.get(JSON.stringify([scopeId, documentId]));
+    return row ? { ...row } : undefined;
+  }
+  async putDocument(row: CreditDocumentRow): Promise<void> {
+    const key = JSON.stringify([row.scopeId, row.documentId]);
+    checkVersion('documents', key, this.s.documents.get(key)?.version, row.version);
+    this.s.documents.set(key, { ...row });
   }
 }
 

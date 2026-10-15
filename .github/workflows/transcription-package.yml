@@ -1,0 +1,58 @@
+name: Transcription package
+
+# Installs the package into an empty project and runs the transcription and credit consumer
+# (scripts/fixtures/transcription-consumer.ts) against its declarations and code with network access
+# refused. A pull request or a push checks the candidate built here; a run dispatched on a release tag
+# checks that version as the registry serves it. No step references a repository secret.
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  installed:
+    name: Installed transcription package
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TRANSCRIPTION_PACKAGE_SOURCE: ${{ github.event_name == 'workflow_dispatch' && 'published' || 'candidate' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install repository dependencies
+        run: pnpm install
+
+      - name: Build candidate package
+        if: github.event_name != 'workflow_dispatch'
+        run: pnpm run build
+
+      - name: Compile the TypeScript package driver
+        run: |
+          pnpm exec tsc scripts/transcription-package.test.ts --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --skipLibCheck --esModuleInterop --types node --outDir "$RUNNER_TEMP/transcription-driver"
+          printf '%s\n' '{"type":"module"}' > "$RUNNER_TEMP/transcription-driver/package.json"
+
+      - name: Consume the independently installed package
+        run: node "$RUNNER_TEMP/transcription-driver/transcription-package.test.js"
+
+      - name: Keep package evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcription-package-evidence
+          path: transcription-package-evidence.json
+          if-no-files-found: error

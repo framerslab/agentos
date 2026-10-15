@@ -4,11 +4,11 @@
  * LiveKit for the hearing layer and the voice pipeline: transcripts written
  * into a LiveKit room as LiveKit's own transcription text streams, a room
  * participant's audio as `AudioFrame`s, and an `IStreamTransport` over a
- * room. The transcription output takes the host's connected
- * `@livekit/rtc-node` `Room`, described by a structural type. The audio source
- * and the transport are Node only and run on the optional peer
- * `@livekit/rtc-node`, loaded on first use or passed in by the host, so this
- * entry imports no LiveKit package.
+ * room, which with a publisher also speaks into it. The transcription output
+ * takes the host's connected `@livekit/rtc-node` `Room`, described by a
+ * structural type. The audio source and the transport are Node only and run
+ * on the optional peer `@livekit/rtc-node`, loaded on first use or passed in
+ * by the host, so this entry imports no LiveKit package.
  *
  * @example
  * ```typescript
@@ -43,3 +43,10 @@ export {
   LIVEKIT_TRANSPORT_DEFAULT_TOPIC,
   type LiveKitStreamTransportOptions,
 } from '../voice-pipeline/LiveKitStreamTransport.js';
+export {
+  isLiveKitSipParticipant,
+  LIVEKIT_PLAYOUT_ATTRIBUTE,
+  type LiveKitAudioPublisherOptions,
+  type LiveKitPlayout,
+  type LiveKitPlayoutParticipant,
+} from '../voice-pipeline/LiveKitAudioPublisher.js';

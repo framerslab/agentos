@@ -1,3 +1,20 @@
+## [0.13.147](https://github.com/framerslab/agentos/compare/v0.13.146...v0.13.147) (2026-10-15)
+
+### fix
+
+* **voice-pipeline:** measure an interruption as it grows, hold the audio on a pause, and resume after a false interruption (#493) ([ada1ce4](https://github.com/framerslab/agentos/commit/ada1ce41971979e25104b2f8c228324c30a64f7e))
+
+## [0.13.146](https://github.com/framerslab/agentos/compare/v0.13.145...v0.13.146) (2026-10-15)
+
+### fix
+
+* **memory:** HtmlLoader strips tags and reads the title in linear time (#505) ([c688e72](https://github.com/framerslab/agentos/commit/c688e728887b3f4d2423606d41b6cc123d4d3982))
+* **voice-pipeline:** LiveKit speaks to SIP callers and plain LiveKit clients through a native playout mode (#496) ([3e09a25](https://github.com/framerslab/agentos/commit/3e09a253ce38f3228cf57fd4043aa3b4c847bb33))
+
+### feat
+
+* **voice:** supplier request-cost evidence, bounded transcription credit and time-based text funding, with the hosted selector on the safety runtime entry (#501) ([f5ec0ae](https://github.com/framerslab/agentos/commit/f5ec0ae2d10655559c7ee1528e776eec378c214c))
+
 ## [0.13.145](https://github.com/framerslab/agentos/compare/v0.13.144...v0.13.145) (2026-10-15)
 
 ### perf

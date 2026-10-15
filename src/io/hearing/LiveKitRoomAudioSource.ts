@@ -80,6 +80,10 @@ export interface LiveKitTrackPublicationLike {
 export interface LiveKitParticipantLike {
   readonly identity: string;
   readonly trackPublications: ReadonlyMap<string, LiveKitTrackPublicationLike>;
+  /** rtc-node's `ParticipantKind`: `3` (`SIP`) for a phone caller LiveKit SIP brought into the room. */
+  readonly kind?: number;
+  /** The participant's attributes, as a string key-value store. */
+  readonly attributes?: Readonly<Record<string, string>>;
 }
 
 /** A text stream reader (rtc-node `TextStreamReader`). */
@@ -137,8 +141,10 @@ export interface LiveKitRtcModule {
 }
 
 /**
- * Loads `@livekit/rtc-node`, the optional peer the LiveKit room audio source
- * and transport run on.
+ * Loads `@livekit/rtc-node`, the optional peer the LiveKit room audio source,
+ * the transport and its publisher run on. The default import carries
+ * `webpackIgnore` and `@vite-ignore`, so a bundled server leaves it to the
+ * runtime.
  *
  * @param importer - How to import a module; the default is a dynamic `import()`.
  * @returns The module.
@@ -146,7 +152,7 @@ export interface LiveKitRtcModule {
  *   fails; the import's own error is its `cause`.
  */
 export async function loadLiveKitRtc(
-  importer: (specifier: string) => Promise<unknown> = (specifier) => import(/* @vite-ignore */ specifier)
+  importer: (specifier: string) => Promise<unknown> = (specifier) => import(/* webpackIgnore: true */ /* @vite-ignore */ specifier)
 ): Promise<LiveKitRtcModule> {
   try {
     return (await importer(RTC_NODE)) as LiveKitRtcModule;
