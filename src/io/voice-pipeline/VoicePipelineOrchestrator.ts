@@ -38,7 +38,9 @@
  *
  * - The orchestrator does not resolve providers from ExtensionManager: every
  *   component is injected via {@link VoicePipelineOverrides}.
- * - Event wiring is done once during `startSession()` and never rewired.
+ * - Event wiring is done once during `startSession()` and never rewired. The
+ *   endpoint detector is the host's, which can hand it to one session after
+ *   another: a stop removes the listeners the session added to it.
  * - Without a call profile, a client that transcribes on its own device sends
  *   `transcript` messages ({@link ClientTranscriptMessage}) in place of audio;
  *   they reach the endpoint detector as the STT session's transcripts do, each
@@ -95,6 +97,7 @@ import {
 } from './types.js';
 import { isClientTranscriptMessage, transcriptEventFromClient } from './clientTranscript.js';
 import { describeReason, isError } from './describeReason.js';
+import type { VoiceEventListener } from './VoiceEventEmitter.js';
 
 /**
  * How long a client's open transcript line lasts with no message before it is
@@ -243,6 +246,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   private speechSource?: 'audio' | 'client';
   /** Whether the session has reported dropping speech from its other source; it reports that once. */
   private speechSourceDropReported = false;
+  /**
+   * The listeners this session added to its endpoint detector, each with its event (`_onEndpoint`). The host owns the
+   * detector and can hand it to one session after another, so the stop removes exactly these (`_releaseEndpoint`): a
+   * closed session's handlers then neither stay reachable from the detector nor count toward its listener limit.
+   */
+  private readonly endpointListeners: Array<{ event: string; listener: VoiceEventListener }> = [];
 
   /**
    * Create a new orchestrator with the given pipeline configuration.
@@ -296,6 +305,28 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   /** An unlistened `'error'` would throw into the emitter: each part's error ends this session instead. */
   private watch(source: EventEmitter): void {
     source.on('error', () => this.reportFailure());
+  }
+
+  /**
+   * Adds a listener to the session's endpoint detector and records it in `endpointListeners`, so the stop removes it,
+   * and no listener the host or another session added.
+   *
+   * @param endpoint - The session's endpoint detector.
+   * @param event - The detector's event.
+   * @param listener - What the session runs on it.
+   */
+  private _onEndpoint(endpoint: IEndpointDetector, event: string, listener: VoiceEventListener): void {
+    endpoint.on(event, listener);
+    this.endpointListeners.push({ event, listener });
+  }
+
+  /**
+   * Removes the listeners this session added to its endpoint detector (`_onEndpoint`), as the session stops. An emit
+   * already under way, such as the `turn_complete` whose listener stopped the session, still calls them: an emitter
+   * calls the listeners present when the emit began.
+   */
+  private _releaseEndpoint(): void {
+    for (const { event, listener } of this.endpointListeners.splice(0)) this.endpoint?.off(event, listener);
   }
 
   /**
@@ -363,7 +394,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this.agent = agent;
     this.endpoint = overrides.endpointDetector;
     this.watch(transport);
-    this.watch(this.endpoint);
+    // As watch() does for the other parts, and recorded: the detector is the host's and outlives the session.
+    this._onEndpoint(this.endpoint, 'error', () => this.reportFailure());
     try {
       this.stt = await overrides.streamingSTT.startSession({ language: this.config.language, providerOptions: this.config.sttOptions });
       this.watch(this.stt);
@@ -393,7 +425,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       this.supervise(() => endpoint.pushTranscript(event));
       this._watchSend(() => transport.sendControl({ type: 'transcript', text: event.text, isFinal: event.isFinal, confidence: event.confidence }));
     });
-    endpoint.on('turn_complete', (event: TurnCompleteEvent) => {
+    this._onEndpoint(endpoint, 'turn_complete', (event: TurnCompleteEvent) => {
       if (this.current !== 'listening') return;
       // Re-emitted for waitForUserTurn() and for hosts that listen on the orchestrator or on the session.
       this._emitEach(this, 'turn_complete', event);
@@ -522,7 +554,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       for (const timer of lines.open.values()) clearTimeout(timer);
       lines.open.clear();
     };
-    endpoint.on('turn_complete', () => {
+    this._onEndpoint(endpoint, 'turn_complete', () => {
       lines.finals = [];
     });
     // `flush_complete` and a barge-in's cancel reset the detector as they return to listening.
@@ -751,9 +783,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Terminal stop. Call-profile cleanup rejects if its native fence or disposal is incomplete.
    *
    * Without a call profile the session moves to `'closed'` and emits `'close'` at once, then aborts the agent's
-   * request, closes the STT and TTS sessions, resets the endpoint detector and closes the transport, unless the
-   * transport has closed itself. The promise rejects when one of those throws. Safe to call more than once: a later
-   * call returns the first one's outcome.
+   * request, closes the STT and TTS sessions, resets the endpoint detector and removes the listeners the session added
+   * to it, and closes the transport, unless the transport has closed itself. The promise rejects when one of those
+   * throws. Safe to call more than once: a later call returns the first one's outcome.
    *
    * @param reason - Optional human-readable reason for diagnostics.
    */
@@ -773,6 +805,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       () => this.stt?.close(),
       () => this.tts?.close(),
       () => this.endpoint?.reset(),
+      () => this._releaseEndpoint(),
       // A transport that closed itself is not closed again; the WebSocket transport would read 'closing' ever after.
       () => {
         if (transport && transport.state !== 'closed') transport.close(1000, reason);
