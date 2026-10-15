@@ -572,8 +572,19 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
       throw new Error(`Message ${messageId} not found in history`);
     }
 
+    // Refresh the message's position in histories so later messages cannot
+    // evict it before further retries complete.
+    this.refreshInHistory(status.targetAgentId, message);
+    if (message.fromAgentId !== status.targetAgentId) {
+      this.refreshInHistory(message.fromAgentId, message);
+    }
+
+    // Mark in-flight so concurrent retry callers see a non-failed status
+    // and do not redeliver in parallel.
+    status.status = 'pending';
     status.retryCount++;
-    return this.deliverMessage(message);
+    // Skip history on retry so the message is recorded only once.
+    return this.deliverMessage(message, { skipHistory: true });
   }
 
   // ==========================================================================
@@ -672,7 +683,10 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
   // Private Helpers
   // ==========================================================================
 
-  private async deliverMessage(message: AgentMessage): Promise<DeliveryStatus> {
+  private async deliverMessage(
+    message: AgentMessage,
+    options: { skipHistory?: boolean } = {},
+  ): Promise<DeliveryStatus> {
     const startTime = Date.now();
     const targetAgentId = message.toAgentId!;
 
@@ -680,9 +694,13 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
     this.stats.totalMessagesSent++;
     this.stats.messagesByType[message.type] = (this.stats.messagesByType[message.type] ?? 0) + 1;
 
-    // Store in history
-    this.addToHistory(targetAgentId, message);
-    this.addToHistory(message.fromAgentId, message);
+    // Store in history on the first send only. Retries re-use the existing entry.
+    if (!options.skipHistory) {
+      this.addToHistory(targetAgentId, message);
+      if (message.fromAgentId !== targetAgentId) {
+        this.addToHistory(message.fromAgentId, message);
+      }
+    }
 
     const resolvedPendingRequest = this.resolvePendingRequest(message);
 
@@ -786,6 +804,19 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
   private meetsMinPriority(actual: MessagePriority, minimum: MessagePriority): boolean {
     const priorities: MessagePriority[] = ['low', 'normal', 'high', 'urgent'];
     return priorities.indexOf(actual) >= priorities.indexOf(minimum);
+  }
+
+  private refreshInHistory(agentId: string, message: AgentMessage): void {
+    const history = this.messageHistory.get(agentId) ?? [];
+    const idx = history.findIndex((m) => m.messageId === message.messageId);
+    if (idx >= 0) {
+      history.splice(idx, 1);
+    }
+    history.push(message);
+    if (history.length > this.maxHistoryPerAgent) {
+      history.shift();
+    }
+    this.messageHistory.set(agentId, history);
   }
 
   private addToHistory(agentId: string, message: AgentMessage): void {
