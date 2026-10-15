@@ -71,6 +71,9 @@ describe('LexicalIndex', () => {
     expect(restore({ ...one, terms: [['word', [[0, 0]]]] })).toThrow(badPosting);
     expect(restore({ ...one, terms: [['word', [[0, 1], [0, 1]]]] })).toThrow(refused('terms[0] holds the position 0 twice'));
     expect(restore({ ...one, terms: [['word', [[0, 1]]], ['word', [[0, 1]]]] })).toThrow(refused('terms[1] repeats an earlier term'));
+    // addDocument() refuses an empty id, and removeDocument() drops a term with no document left.
+    expect(restore({ ...tuning, documents: [['', 1]], terms: [] })).toThrow(refused('documents[0] has an empty id'));
+    expect(restore({ ...one, terms: [['word', []]] })).toThrow(refused('terms[0] holds no postings'));
   });
 
   it('replaces a document added again, and forgets a removed one', () => {

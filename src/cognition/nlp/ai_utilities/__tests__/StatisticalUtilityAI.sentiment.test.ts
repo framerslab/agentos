@@ -1,98 +1,162 @@
 /**
- * @fileoverview Tests for StatisticalUtilityAI AFINN-based sentiment analysis.
- *
- * KNOWN LIMITATION: The installed version of the `natural` library does not
- * support the AFINN lexicon for English (`Type afinn for Language en not
- * supported`). The implementation falls back to a neutral analyzer that always
- * returns 0. Tests below validate the method contract, return structure, and
- * graceful degradation. Tests that would verify actual positive/negative
- * scoring are marked with `.todo` until the underlying AFINN support is fixed.
+ * @fileoverview StatisticalUtilityAI.analyzeSentiment: the lexicons `natural` ships, chosen by the
+ * language code, a custom lexicon from `sentimentConfig.lexiconPath` or from a call's
+ * `lexiconNameOrPath`, negation, and the scale of the score.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { StatisticalUtilityAI } from '../StatisticalUtilityAI';
+import { GMIErrorCode } from '../../../../core/utils/errors.js';
 
 let util: StatisticalUtilityAI;
+let tmpDir: string | undefined;
 
 beforeEach(async () => {
   util = new StatisticalUtilityAI('test-stat');
   await util.initialize({ utilityId: 'test-stat', defaultLanguage: 'en' });
 });
 
-describe('analyzeSentiment', () => {
-  // ---- Structure & contract tests (pass with the neutral fallback) ----
+afterEach(() => {
+  if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  tmpDir = undefined;
+});
 
-  it('returns a well-formed SentimentResult for positive text', async () => {
-    const result = await util.analyzeSentiment(
-      'This is wonderful and amazing, I love it so much',
-    );
-    expect(result).toBeDefined();
-    expect(result).toHaveProperty('score');
-    expect(result).toHaveProperty('polarity');
-    expect(result).toHaveProperty('comparative');
-    expect(result).toHaveProperty('intensity');
-    expect(result).toHaveProperty('positiveTokens');
-    expect(result).toHaveProperty('negativeTokens');
-    expect(typeof result.score).toBe('number');
-    expect(['positive', 'negative', 'neutral']).toContain(result.polarity);
+/** Writes a lexicon file into this test's temporary folder and answers its path. */
+function lexiconFile(name: string, content: string): string {
+  tmpDir ??= fs.mkdtempSync(path.join(os.tmpdir(), 'stat-lexicon-'));
+  const file = path.join(tmpDir, name);
+  fs.writeFileSync(file, content, 'utf8');
+  return file;
+}
+
+const words = (list?: Array<{ token: string }>): string[] => (list ?? []).map((entry) => entry.token);
+
+describe('analyzeSentiment in English (AFINN)', () => {
+  it('scores a plainly positive sentence above zero', async () => {
+    const result = await util.analyzeSentiment('Thank you, this is wonderful and I love it.');
+    expect(result.score).toBeGreaterThan(0.5);
+    expect(result.polarity).toBe('positive');
+    expect(result.intensity).toBe(Math.abs(result.score));
+    expect(words(result.positiveTokens)).toEqual(expect.arrayContaining(['thank', 'wonderful', 'love']));
+    expect(result.negativeTokens).toEqual([]);
   });
 
-  it('returns a well-formed SentimentResult for negative text', async () => {
-    const result = await util.analyzeSentiment(
-      'This is terrible and awful, I hate everything about it',
-    );
-    expect(result).toBeDefined();
-    expect(typeof result.score).toBe('number');
-    expect(['positive', 'negative', 'neutral']).toContain(result.polarity);
+  it('scores a plainly negative sentence below zero', async () => {
+    const result = await util.analyzeSentiment('This update is terrible, I hate it and the app is useless.');
+    expect(result.score).toBeLessThan(-0.5);
+    expect(result.polarity).toBe('negative');
+    expect(words(result.negativeTokens)).toEqual(expect.arrayContaining(['terrible', 'hate', 'useless']));
+    expect(result.positiveTokens).toEqual([]);
   });
 
-  it('returns neutral polarity when AFINN fallback is active', async () => {
-    // With the neutral fallback analyzer, all text evaluates as neutral
-    const result = await util.analyzeSentiment(
-      'The table is in the room next to the door',
-    );
+  it('scores a sentence with no sentiment word 0', async () => {
+    const result = await util.analyzeSentiment('The table is in the room next to the door.');
+    expect(result.score).toBe(0);
     expect(result.polarity).toBe('neutral');
-    expect(Math.abs(result.comparative ?? 0)).toBeLessThanOrEqual(0.05);
+    expect(result.comparative).toBe(0);
+    expect(result.positiveTokens).toEqual([]);
+    expect(result.negativeTokens).toEqual([]);
   });
 
-  it('comparative field is a number', async () => {
-    const result = await util.analyzeSentiment('good day');
-    expect(result.comparative).toBeDefined();
-    expect(typeof result.comparative).toBe('number');
-  });
-
-  it('positiveTokens and negativeTokens are arrays', async () => {
-    const result = await util.analyzeSentiment('happy joyful wonderful');
-    expect(Array.isArray(result.positiveTokens)).toBe(true);
-    expect(Array.isArray(result.negativeTokens)).toBe(true);
-  });
-
-  it('intensity is a non-negative number', async () => {
-    const result = await util.analyzeSentiment('absolutely superb fantastic');
-    expect(typeof result.intensity).toBe('number');
-    expect(result.intensity).toBeGreaterThanOrEqual(0);
-  });
-
-  it('handles empty string gracefully', async () => {
+  it('answers neutral for an empty text', async () => {
     const result = await util.analyzeSentiment('');
-    expect(result).toBeDefined();
+    expect(result.score).toBe(0);
+    expect(result.comparative).toBe(0);
     expect(result.polarity).toBe('neutral');
   });
 
-  // ---- Tests that require actual AFINN scoring (blocked by library issue) ----
+  it('maps the sum of the word values into -1 to 1 as VADER maps its compound score', async () => {
+    // terrible is -3 in AFINN: -3 / sqrt(3 * 3 + 15).
+    const one = await util.analyzeSentiment('terrible');
+    expect(one.score).toBeCloseTo(-3 / Math.sqrt(24), 12);
+    expect(one.intensity).toBeCloseTo(3 / Math.sqrt(24), 12);
+    // comparative is natural's: the sum over the number of words.
+    expect(one.comparative).toBe(-3);
+    expect((await util.analyzeSentiment('This is terrible')).comparative).toBe(-1);
+    expect((await util.analyzeSentiment('terrible', { language: 'en-GB' })).score).toBe(one.score);
+  });
 
-  it.todo(
-    'returns positive score and positive polarity for clearly positive text (requires AFINN fix)',
-  );
-  it.todo(
-    'returns negative score and negative polarity for clearly negative text (requires AFINN fix)',
-  );
-  it.todo(
-    'intensity is proportional to sentiment strength (requires AFINN fix)',
-  );
-  it.todo(
-    'populates positiveTokens with scored entries for positive text (requires AFINN fix)',
-  );
-  it.todo(
-    'populates negativeTokens with scored entries for negative text (requires AFINN fix)',
-  );
+  it('flips a word that a negation among the three words before it, in its clause, negates', async () => {
+    expect((await util.analyzeSentiment('This is not good')).polarity).toBe('negative');
+    expect((await util.analyzeSentiment("I don't like it")).polarity).toBe('negative');
+    // "no" negates "problem" (-2 becomes 2); "great" is in the next clause and keeps its 3.
+    const result = await util.analyzeSentiment('No problem, this is great');
+    expect(result.polarity).toBe('positive');
+    expect(result.positiveTokens).toEqual([
+      { token: 'problem', score: 2 },
+      { token: 'great', score: 3 },
+    ]);
+  });
+});
+
+describe('analyzeSentiment in other languages', () => {
+  it('scores Spanish with the Spanish AFINN lexicon', async () => {
+    const positive = await util.analyzeSentiment('El servicio fue excelente y el producto es maravilloso', { language: 'es' });
+    const negative = await util.analyzeSentiment('La comida fue horrible y el servicio terrible', { language: 'es-MX' });
+    expect(positive.score).toBeGreaterThan(0.5);
+    expect(negative.score).toBeLessThan(-0.5);
+    expect((await util.analyzeSentiment('no es bueno', { language: 'es' })).polarity).toBe('negative');
+    // The English lexicon holds none of the Spanish words.
+    expect((await util.analyzeSentiment('excelente y maravilloso', { language: 'en' })).score).toBe(0);
+  });
+
+  it('scores French with the pattern lexicon', async () => {
+    const positive = await util.analyzeSentiment('Le repas était parfait et le service magnifique', { language: 'fr' });
+    const negative = await util.analyzeSentiment('Le repas était horrible et le service mauvais', { language: 'fr' });
+    expect(positive.score).toBeGreaterThan(0.5);
+    expect(negative.score).toBeLessThan(-0.5);
+  });
+
+  it('reads a call without a language in the configured default language', async () => {
+    const spanish = new StatisticalUtilityAI('spanish-default');
+    await spanish.initialize({ defaultLanguage: 'es' });
+    expect((await spanish.analyzeSentiment('excelente')).polarity).toBe('positive');
+  });
+
+  it('scores 0 in a language natural has no lexicon for', async () => {
+    const result = await util.analyzeSentiment('Это ужасно', { language: 'ru' });
+    expect(result.score).toBe(0);
+    expect(result.polarity).toBe('neutral');
+  });
+});
+
+describe('analyzeSentiment with a custom lexicon', () => {
+  it('adds the entries of sentimentConfig.lexiconPath to the built-in lexicon', async () => {
+    const file = lexiconFile('custom.tsv', 'blorft\t4\nsnarvy\t-4\n# a comment line\ngood\t-1\n');
+    const custom = new StatisticalUtilityAI('custom-lexicon');
+    await custom.initialize({ sentimentConfig: { lexiconPath: file } });
+    expect((await custom.analyzeSentiment('blorft')).polarity).toBe('positive');
+    expect((await custom.analyzeSentiment('snarvy')).polarity).toBe('negative');
+    // An entry replaces the built-in value of its word, and the rest of AFINN stays.
+    expect((await custom.analyzeSentiment('good')).polarity).toBe('negative');
+    expect((await custom.analyzeSentiment('terrible')).polarity).toBe('negative');
+  });
+
+  it('reads a relative lexiconPath under resourcePath, and a lexicon written as JSON', async () => {
+    lexiconFile('custom.json', JSON.stringify({ blorft: 3 }));
+    const custom = new StatisticalUtilityAI('resource-lexicon');
+    await custom.initialize({ resourcePath: tmpDir, sentimentConfig: { lexiconPath: 'custom.json' } });
+    expect((await custom.analyzeSentiment('blorft')).score).toBeCloseTo(3 / Math.sqrt(24), 12);
+  });
+
+  it('scores with the custom lexicon alone in a language natural has none for', async () => {
+    const file = lexiconFile('sv.tsv', 'bra\t1\ndålig\t-1\n');
+    const custom = new StatisticalUtilityAI('swedish-lexicon');
+    await custom.initialize({ defaultLanguage: 'sv', sentimentConfig: { lexiconPath: file } });
+    expect((await custom.analyzeSentiment('Det var bra')).polarity).toBe('positive');
+    expect((await custom.analyzeSentiment('Det var dålig')).polarity).toBe('negative');
+  });
+
+  it('takes a lexicon by name or by path for one call', async () => {
+    // gorgeous is in natural's English senticon lexicon and not in AFINN.
+    expect((await util.analyzeSentiment('gorgeous')).score).toBe(0);
+    expect((await util.analyzeSentiment('gorgeous', { lexiconNameOrPath: 'senticon' })).polarity).toBe('positive');
+    const file = lexiconFile('call.tsv', 'gorgeous\t-2\n');
+    expect((await util.analyzeSentiment('gorgeous', { lexiconNameOrPath: file })).polarity).toBe('negative');
+    await expect(
+      util.analyzeSentiment('bueno', { language: 'es', lexiconNameOrPath: 'pattern' }),
+    ).rejects.toMatchObject({ code: GMIErrorCode.NOT_SUPPORTED });
+  });
 });

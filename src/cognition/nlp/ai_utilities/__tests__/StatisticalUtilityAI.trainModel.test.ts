@@ -132,3 +132,55 @@ describe('error handling', () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe('the default model, and how a model reads texts', () => {
+  // Every word here stems to something other than itself. A model that learned the words as written, asked about
+  // stems, would share no word with the text, and the two classes would tie on their equal priors.
+  const tickets = [
+    { text: 'invoices overdue, payments failed', label: 'billing' },
+    { text: 'payments bouncing, invoices unpaid', label: 'billing' },
+    { text: 'parcels arrived damaged, boxes crushed', label: 'shipping' },
+    { text: 'parcels delayed, boxes missing', label: 'shipping' },
+  ];
+  const ticket = 'boxes crushed, parcels delayed';
+  const ask = { candidateClasses: ['billing', 'shipping'], method: 'naive_bayes' };
+
+  it('reads the texts it learns as it reads the text it classifies', async () => {
+    await util.trainModel(tickets, 'text_classifier_naive_bayes', { modelId: 'tickets' });
+    expect((await util.classifyText(ticket, { ...ask, modelId: 'tickets' })).bestClass).toBe('shipping');
+  });
+
+  it('classifies with the model trainModel keeps under its default id', async () => {
+    const trained = await util.trainModel(tickets, 'text_classifier_naive_bayes');
+    expect(trained.modelId).toBe('default_bayes_classifier');
+    expect((await util.classifyText(ticket, ask)).bestClass).toBe('shipping');
+  });
+
+  it('loads classifierConfig.naiveBayes.defaultModelId from modelStoragePath when it initializes', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stat-nb-'));
+    const naiveBayes = { modelStoragePath: tmpDir, defaultModelId: 'tickets' };
+    const trainer = new StatisticalUtilityAI('trainer');
+    await trainer.initialize({ classifierConfig: { naiveBayes } });
+    expect((await trainer.trainModel(tickets, 'text_classifier_naive_bayes')).modelId).toBe('tickets');
+    expect((await trainer.saveTrainedModel('tickets')).pathOrStoreId).toBe(path.join(tmpDir, 'tickets.nbc.json'));
+
+    const reader = new StatisticalUtilityAI('reader');
+    await reader.initialize({ classifierConfig: { naiveBayes } });
+    expect((await reader.checkHealth()).details.loadedClassifierModels).toEqual(['tickets']);
+    expect((await reader.classifyText(ticket, ask)).bestClass).toBe('shipping');
+  });
+
+  it('keeps the stemmer a model learned with across a save and a load', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stat-nb-'));
+    const file = path.join(tmpDir, 'lancaster.nbc.json');
+    await util.trainModel(tickets, 'text_classifier_naive_bayes', { modelId: 'lancaster', stemmer: 'lancaster' });
+    const before = await util.classifyText(ticket, { ...ask, modelId: 'lancaster' });
+    expect(before.bestClass).toBe('shipping');
+    expect((await util.saveTrainedModel('lancaster', 'text_classifier_naive_bayes', file)).success).toBe(true);
+
+    const reader = new StatisticalUtilityAI('reader');
+    await reader.initialize({});
+    expect((await reader.loadTrainedModel('lancaster', 'text_classifier_naive_bayes', file)).success).toBe(true);
+    expect(await reader.classifyText(ticket, { ...ask, modelId: 'lancaster' })).toEqual(before);
+  });
+});

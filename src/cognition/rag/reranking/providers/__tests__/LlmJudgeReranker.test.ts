@@ -67,3 +67,52 @@ describe('LlmJudgeReranker', () => {
     expect(result.results.length).toBe(3);
   });
 });
+
+describe('LlmJudgeReranker results', () => {
+  // Scores 8, 3, 7, 2, 9: by score, doc-4, doc-0, doc-2, doc-1, doc-3.
+  const scores = '[8, 3, 7, 2, 9]';
+  const ids = (results: Array<{ id: string }>) => results.map((result) => result.id);
+  const request = { providerId: 'llm-judge', modelId: 'gpt-4o-mini' };
+
+  it('answers every passage it scored when the request sets no topN: the ranked ones, then the rest by score', async () => {
+    const llmCallFn = vi.fn().mockResolvedValueOnce(scores).mockResolvedValueOnce('["doc-4", "doc-0"]');
+    const reranker = new LlmJudgeReranker({ llmCallFn, pointwiseTopK: 3 });
+    const { results } = await reranker.rerank(makeInput(5), request);
+    // The ranking left doc-2 out of the three it was given; it follows them by its score.
+    expect(ids(results)).toEqual(['doc-4', 'doc-0', 'doc-2', 'doc-1', 'doc-3']);
+    const relevance = results.map((result) => result.relevanceScore);
+    expect([...relevance].sort((a, b) => b - a)).toEqual(relevance);
+    expect(new Set(relevance).size).toBe(relevance.length);
+  });
+
+  it('answers up to topN, past pointwiseTopK', async () => {
+    const llmCallFn = vi.fn().mockResolvedValueOnce(scores).mockResolvedValueOnce('["doc-0", "doc-4"]');
+    const reranker = new LlmJudgeReranker({ llmCallFn, pointwiseTopK: 2 });
+    const { results } = await reranker.rerank(makeInput(5), { ...request, topN: 4 });
+    expect(ids(results)).toEqual(['doc-0', 'doc-4', 'doc-2', 'doc-1']);
+  });
+
+  it('keeps one copy of an id the ranking repeats and passes over one it was not given', async () => {
+    const llmCallFn = vi.fn().mockResolvedValueOnce(scores).mockResolvedValueOnce('["doc-4", "doc-4", "doc-9", "doc-0"]');
+    const reranker = new LlmJudgeReranker({ llmCallFn, pointwiseTopK: 3 });
+    const { results } = await reranker.rerank(makeInput(5), { ...request, topN: 3 });
+    expect(ids(results)).toEqual(['doc-4', 'doc-0', 'doc-2']);
+  });
+
+  it('stops waiting for a model call after timeoutMs, and the scores order the passages', async () => {
+    const llmCallFn = vi.fn().mockResolvedValueOnce(scores).mockReturnValueOnce(new Promise<string>(() => {}));
+    const reranker = new LlmJudgeReranker({ llmCallFn, pointwiseTopK: 3, timeoutMs: 50 });
+    const { results } = await reranker.rerank(makeInput(5), { ...request, topN: 2 });
+    expect(ids(results)).toEqual(['doc-4', 'doc-0']);
+  }, 5000);
+
+  it("takes the request's timeoutMs before its own", async () => {
+    const llmCallFn = vi.fn()
+      .mockReturnValueOnce(new Promise<string>(() => {}))
+      .mockResolvedValueOnce('["doc-1", "doc-0"]');
+    const reranker = new LlmJudgeReranker({ llmCallFn, timeoutMs: 60_000 });
+    const { results } = await reranker.rerank(makeInput(2), { ...request, timeoutMs: 50 });
+    // The scoring call never answered, so both passages scored 0; the ranking call answered.
+    expect(ids(results)).toEqual(['doc-1', 'doc-0']);
+  }, 5000);
+});

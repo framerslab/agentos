@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { StatisticalUtilityAI, StatisticalUtilityAIConfig } from '../StatisticalUtilityAI';
 import { IUtilityAI, TokenizationOptions, SummarizationOptions } from '../IUtilityAI';
 
@@ -44,6 +47,30 @@ describe('StatisticalUtilityAI', () => {
     const options: SummarizationOptions = { method: 'first_n_sentences', desiredLength: 2 };
     const summary = await statUtility.summarize(text, options);
     expect(summary).toBe("Sentence one. Sentence two.");
+  });
+
+  it('reads a desiredLength of 1 or less as a fraction of the sentences, 0 included', async () => {
+    const text = 'The river rose. Crews closed the bridge. Traffic moved north. Schools opened late. The rain stopped.';
+    const first = (desiredLength: number) => statUtility.summarize(text, { method: 'first_n_sentences', desiredLength });
+    // 0 of the sentences is none, and a summary keeps at least one; 0.4 of five is two.
+    expect(await first(0)).toBe('The river rose.');
+    expect(await first(0.4)).toBe('The river rose. Crews closed the bridge.');
+    // A number that is not a number keeps the default of three.
+    expect(await first(Number.NaN)).toBe('The river rose. Crews closed the bridge. Traffic moved north.');
+  });
+
+  it('reads an absolute customStopWordsPaths file as given when resourcePath is set', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stat-stop-'));
+    try {
+      const file = path.join(dir, 'stop.txt');
+      fs.writeFileSync(file, 'river\n', 'utf8');
+      const custom = new StatisticalUtilityAI();
+      await custom.initialize({ resourcePath: path.join(dir, 'resources'), customStopWordsPaths: { en: file } });
+      // The file replaces the English list: "river" goes, and "the" stays.
+      expect(await custom.normalizeText('The river rose', { removeStopWords: true })).toBe('the rose');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('should use language-specific stemmers when available', async () => {
