@@ -12,12 +12,12 @@ describe('FuzzyIndex in a browser', () => {
     const index = new FuzzyIndex({ fields: { title: 100, keywords: 10, body: 1 } });
     index.addDocuments([
       { id: 'a', fields: { title: 'Enclosure samples', keywords: ['factory'], body: 'The samples leave the factory on Friday.' } },
-      { id: 'b', fields: { title: 'My résumé', body: 'Two pages, sent on Monday.' } },
+      { id: 'b', fields: { title: 'My re\u0301sume\u0301', body: 'Two pages, sent on Monday.' } },
     ]);
     const [typo] = index.search('firday');
     expect(typo.id).toBe('a');
     expect(typo.passages).toEqual([{ text: 'The samples leave the factory on Friday.', marks: [{ start: 33, end: 39 }] }]);
-    expect(index.search('resume')[0].fields.title).toEqual({ text: 'My résumé', marks: [{ start: 3, end: 9 }] });
+    expect(index.search('resume')[0].fields.title).toEqual({ text: 'My r\u00e9sum\u00e9', marks: [{ start: 3, end: 9 }] });
     const copy = FuzzyIndex.fromJSON(JSON.parse(JSON.stringify(index.toJSON())));
     expect(ids(copy.search('firday resume', { match: 'any' }))).toEqual(['b', 'a']);
     expect(copy.search('firday resume', { match: 'any' })).toEqual(index.search('firday resume', { match: 'any' }));

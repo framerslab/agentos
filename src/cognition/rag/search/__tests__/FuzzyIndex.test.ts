@@ -103,11 +103,11 @@ describe('FuzzyIndex', () => {
 
     // An apostrophe inside a word keeps it one word, and a curly one is read as a straight one.
     const quoted = new FuzzyIndex({ fields: { title: 1 } });
-    quoted.addDocument({ id: 'q', fields: { title: 'The Professor’s notes' } });
+    quoted.addDocument({ id: 'q', fields: { title: 'The Professor\u2019s notes' } });
     const [professor] = quoted.search("professor's");
     expect(professor.score).toBe(1);
-    expect(words(professor.fields.title as Marked)).toEqual(['Professor’s']);
-    expect(words(quoted.search('professor')[0].fields.title as Marked)).toEqual(['Professor’s']);
+    expect(words(professor.fields.title as Marked)).toEqual(['Professor\u2019s']);
+    expect(words(quoted.search('professor')[0].fields.title as Marked)).toEqual(['Professor\u2019s']);
 
     // An offset counts UTF-16 units: the emoji before the word is two of them.
     const emoji = new FuzzyIndex({ fields: { body: 1 } });
@@ -150,21 +150,21 @@ describe('FuzzyIndex', () => {
     ]);
     // A Chinese or Japanese full stop ends a sentence with no space after it; a danda ends one before white space.
     const scripts = filled({}, [
-      { id: 'ja', fields: { body: '東京へ行く。大阪も好き。' } },
-      { id: 'hi', fields: { body: 'मैं घर गया। फिर सोया।' } },
+      { id: 'ja', fields: { body: '\u6771\u4eac\u3078\u884c\u304f\u3002\u5927\u962a\u3082\u597d\u304d\u3002' } },
+      { id: 'hi', fields: { body: '\u092e\u0948\u0902 \u0918\u0930 \u0917\u092f\u093e\u0964 \u092b\u093f\u0930 \u0938\u094b\u092f\u093e\u0964' } },
     ]);
-    expect(scripts.search('大阪')[0].passages.map((passage) => passage.text)).toEqual(['大阪も好き。']);
-    expect(scripts.search('घर')[0].passages.map((passage) => passage.text)).toEqual(['मैं घर गया।']);
+    expect(scripts.search('\u5927\u962a')[0].passages.map((passage) => passage.text)).toEqual(['\u5927\u962a\u3082\u597d\u304d\u3002']);
+    expect(scripts.search('\u0918\u0930')[0].passages.map((passage) => passage.text)).toEqual(['\u092e\u0948\u0902 \u0918\u0930 \u0917\u092f\u093e\u0964']);
   });
 
   it('clips a long passage to about passageWidth characters around its first match, at white space, with an ellipsis for what is left out', () => {
     const long = `${'word '.repeat(60)}factory${' more'.repeat(60)}.`;
     const wide = filled({}, [{ id: 'l', fields: { body: long } }]);
     const [passage] = wide.search('factory')[0].passages;
-    expect(passage.text).toBe(`…${'word '.repeat(10)}factory${' more'.repeat(20)}…`);
+    expect(passage.text).toBe(`\u2026${'word '.repeat(10)}factory${' more'.repeat(20)}\u2026`);
     expect(words(passage)).toEqual(['factory']);
     const narrow = filled({ passageWidth: 40 }, [{ id: 'l', fields: { body: long } }]);
-    expect(narrow.search('factory')[0].passages[0].text).toBe(`…${'word '.repeat(2)}factory${' more'.repeat(4)}…`);
+    expect(narrow.search('factory')[0].passages[0].text).toBe(`\u2026${'word '.repeat(2)}factory${' more'.repeat(4)}\u2026`);
   });
 
   it('shows the opening of the text, unmarked, when only a short field matched, and nothing when there is no text', () => {
@@ -202,20 +202,20 @@ describe('FuzzyIndex', () => {
 
   it('reads a decomposed accent inside its word, in NFC, folds case and accents, and keeps the vowel signs of Devanagari', () => {
     const index = filled({}, [
-      { id: 'r', fields: { title: 'İstanbul trip', body: 'My résumé is ready.' } },
-      { id: 'h', fields: { body: 'नई किताब' } },
+      { id: 'r', fields: { title: '\u0130stanbul trip', body: 'My re\u0301sume\u0301 is ready.' } },
+      { id: 'h', fields: { body: '\u0928\u0908 \u0915\u093f\u0924\u093e\u092c' } },
     ]);
-    for (const query of ['résumé', 'résumé', 'RESUME', 'resume']) {
+    for (const query of ['r\u00e9sum\u00e9', 're\u0301sume\u0301', 'RESUME', 'resume']) {
       const [hit] = index.search(query);
       expect(hit?.score, query).toBe(1);
       // The text comes back in NFC, the accented word marked whole.
-      expect(hit?.fields.body, query).toEqual({ text: 'My résumé is ready.', marks: [{ start: 3, end: 9 }] });
+      expect(hit?.fields.body, query).toEqual({ text: 'My r\u00e9sum\u00e9 is ready.', marks: [{ start: 3, end: 9 }] });
     }
     // A capital I with a dot folds to an i.
     expect(index.search('istanbul')[0].score).toBe(100);
-    const [book] = index.search('किताब');
+    const [book] = index.search('\u0915\u093f\u0924\u093e\u092c');
     expect(book.id).toBe('h');
-    expect(words(book.fields.body as Marked)).toEqual(['किताब']);
+    expect(words(book.fields.body as Marked)).toEqual(['\u0915\u093f\u0924\u093e\u092c']);
   });
 
   it('answers at most topK hits, 10 unless given, and every hit for Infinity', () => {
@@ -236,7 +236,7 @@ describe('FuzzyIndex', () => {
 
   it('finds nothing for an empty query, spaces, punctuation or a mark with no letter', () => {
     const index = filled();
-    for (const query of ['', '   ', '?! ,', '́']) expect(index.search(query), JSON.stringify(query)).toEqual([]);
+    for (const query of ['', '   ', '?! ,', '\u0301']) expect(index.search(query), JSON.stringify(query)).toEqual([]);
   });
 
   it('is saved as JSON and restored with the same answers and settings', () => {

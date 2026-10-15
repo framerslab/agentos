@@ -14,16 +14,16 @@ describe('lexicalTokens', () => {
   it('keeps a combining mark inside its word, and reads a decomposed text as its composed form', () => {
     // "Résumé" with each accent a combining mark, "naïve" with a combining diaeresis, and a Devanagari word whose
     // vowel signs are marks.
-    expect(lexicalTokens('Résumé and naïve')).toEqual(['résumé', 'and', 'naïve']);
-    expect(lexicalTokens('résumé')).toEqual(lexicalTokens('résumé'));
-    expect(lexicalTokens('नई किताब')).toEqual(['नई', 'किताब']);
+    expect(lexicalTokens('Re\u0301sume\u0301 and nai\u0308ve')).toEqual(['r\u00e9sum\u00e9', 'and', 'na\u00efve']);
+    expect(lexicalTokens('r\u00e9sum\u00e9')).toEqual(lexicalTokens('re\u0301sume\u0301'));
+    expect(lexicalTokens('\u0928\u0908 \u0915\u093f\u0924\u093e\u092c')).toEqual(['\u0928\u0908', '\u0915\u093f\u0924\u093e\u092c']);
     // A mark with no letter or digit before it starts no word.
-    expect(lexicalTokens('a ́b')).toEqual(['a', 'b']);
+    expect(lexicalTokens('a \u0301b')).toEqual(['a', 'b']);
   });
 
   it('places a snippet at a decomposed word that a composed query word begins, and the other way round', () => {
-    expect(snippetAround('My résumé is ready', ['résum']).at).toBe(3);
-    expect(snippetAround('Off to déjà vu', ['déjà']).at).toBe(7);
+    expect(snippetAround('My re\u0301sume\u0301 is ready', ['r\u00e9sum']).at).toBe(3);
+    expect(snippetAround('Off to d\u00e9j\u00e0 vu', ['de\u0301ja\u0300']).at).toBe(7);
   });
 
   it('places a snippet in whole words around the first word a query word begins', () => {
