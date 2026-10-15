@@ -543,6 +543,20 @@ export interface TranscriptEvent {
   endMs?: number;
 
   /**
+   * `true` on a result the provider sends before the end of speech of the
+   * speech it transcribes: the session's `'speech_end'` for that speech
+   * follows it. `DeepgramStreamingSTT` sets it on every result: it emits a
+   * segment's final before the `'speech_end'` that Deepgram's `speech_final`
+   * or `UtteranceEnd` raises. A provider that sends an utterance's final
+   * after that utterance's `'speech_end'`, as `OpenAIRealtimeTranscriptionSTT`
+   * does, leaves it undefined. {@link HeuristicEndpointDetector} reads it on
+   * a final that carries an `itemId`: such a final belongs to the speech it
+   * arrives in, never to a turn that has ended, and that speech's
+   * `'speech_end'` pairs with it.
+   */
+  beforeSpeechEnd?: boolean;
+
+  /**
    * Language of `text`: the code the provider detected, or the language the
    * session was configured with (for example `'en'`). Undefined when neither
    * is known.
@@ -878,9 +892,10 @@ export interface IEndpointDetector extends EventEmitterLike {
    *
    * @param scope - `'turn'` (the default) ends a turn, and a final of that turn
    *   can still arrive after it ({@link HeuristicEndpointDetector} drops such a
-   *   late final and reports it as `'late_final'`); `'session'` starts a
-   *   session, whose transcriber sends no final of an earlier session's turns,
-   *   so nothing from before it is awaited.
+   *   late final and reports it as `'late_final'`, and never takes a final
+   *   marked `beforeSpeechEnd` for one); `'session'` starts a session, whose
+   *   transcriber sends no final of an earlier session's turns, so nothing
+   *   from before it is awaited.
    */
   reset(scope?: 'turn' | 'session'): void;
 
