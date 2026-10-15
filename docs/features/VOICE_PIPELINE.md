@@ -688,7 +688,61 @@ The reader sends the interval as `YYYY-MM-DDTHH:MM:SS+00:00`, one of the forms t
 
 Two identical reads detect some pagination changes; they do not establish reporting completeness. A host still bounds spending after the evidence interval with reservations, retains unreconciled local liabilities and refuses credit when external spending escapes that boundary. Take a new console baseline only after previous requests have drained or have positive fencing evidence. Deepgram attaches promotional credit to an account's first project ([Managing Projects](https://developers.deepgram.com/guides/deep-dives/managing-projects)); if credit spans several projects, collect and reconcile all their costs before using it, since a single-project result is insufficient.
 
-The output's `costMicro` is supplier usage evidence, not a customer charge or a prepaid mark, and the reader decides no coverage. A host's credit allocation binds the evidence to its current funding-record version and settles coverage per request. Never mark all requests from one vendor prepaid merely because that vendor once had a promotional credit.
+The output's `costMicro` is supplier usage evidence, not a customer charge or a prepaid mark, and the reader decides no coverage. `refreshTranscriptionCredit()` ([Supplier credit allocation](#supplier-credit-allocation)) binds the evidence to its current funding-record version and reconciles coverage per request. Never mark all requests from one vendor prepaid merely because that vendor once had a promotional credit.
+
+## Supplier credit allocation
+
+```typescript
+import {
+  admitLowestCostTranscription,
+  bindTranscriptionConnection,
+  settleTranscriptionInterval,
+  SqlCompoundCreditStore,
+} from '@framers/agentos/safety/runtime';
+
+// Supplier promotions under a table prefix of their own, apart from customer credit.
+const supplier = new SqlCompoundCreditStore({ db, tablePrefix: 'supplier_credit' });
+await supplier.ensureSchema(); // or the host's migration of compoundCreditDdl('supplier_credit')
+const scopeId = 'deepgram-promotion';
+
+// Admission selects an entry and reserves its whole estimate in the host's own transaction, before any audio.
+const admission = await db.transaction(async (trx) => {
+  const admitted = await supplier.withStorageTransaction(trx, (t) => admitLowestCostTranscription(t, {
+    scopeId, reservationId: sessionId, entries, prices, availableVendors: ['deepgram', 'openai'],
+    estimatedSeconds: 3_600, creditVersion: record.version, at: Date.now(),
+  }));
+  await saveSession(trx, sessionId, admitted); // with the host's gross spend reservation
+  return admitted;
+});
+const entry = admission.selection.serving;
+
+// The first socket claims that reservation before its audio.
+await db.transaction((trx) => supplier.withStorageTransaction(trx, (t) =>
+  bindTranscriptionConnection(t, { scopeId, reservationId: sessionId, connectionId, entry, at: Date.now() })));
+
+// Each cumulative usage report settles once by its id: this interval's list price and how it was funded.
+const receipt = await db.transaction((trx) => supplier.withStorageTransaction(trx, (t) =>
+  settleTranscriptionInterval(t, {
+    scopeId, reservationId: sessionId, connectionId, entry,
+    reportId: `${connectionId}:${usage.audioSeconds}:${usage.final}`,
+    audioSeconds: usage.audioSeconds, final: usage.final, supplierRequestId: usage.supplierRequestId, at: Date.now(),
+  })));
+// receipt.grossMicro === receipt.prepaidMicro + receipt.chargedMicro
+```
+
+The Node entry `@framers/agentos/safety/runtime` exports an allocator for a supplier's promotional transcription credit ([`TranscriptionCredit.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/TranscriptionCredit.ts)) over `CreditTransaction`. Keep supplier promotions under a `SqlCompoundCreditStore` table prefix of their own, separate from customer credit and supplier-day accounting, with one scope per promotional pool. The allocator reuses the native accounts, lots, holds, allocations and immutable entries, and adds compare-and-set documents for the funding record, each reservation's cumulative state and each interval's receipt. `SqlCompoundCreditStore` keeps them in a `documents` table: `ensureSchema()` adds it to an existing store, and a host that runs its own migrations adds it from `compoundCreditDdl(prefix)`. A third-party store implements the optional `getDocument` and `putDocument` before it can serve the allocator, which refuses a store without them; every other credit operation keeps its interface.
+
+`makeTranscriptionCreditRecord` binds the vendor, the console amount in whole micro-dollars, its exact read instant, the project, the verified usage contract and the expiry into an immutable version. `configureTranscriptionCredit` activates that record unchecked, or disables credit with `record: null`. No credit is usable before `refreshTranscriptionCredit` accepts usage evidence for that version. `failTranscriptionCreditCheck` counts at most one failed check per UTC day, and a successful refresh clears the count. Allocation stops at three failed days, at a check 24 hours old, at the record's expiry and when the record is disabled. Disabling or replacing a record never changes a committed receipt.
+
+The host verifies the usage reader's contract ([Supplier usage evidence](#supplier-usage-evidence)). Every Deepgram reservation counts against the credit until its final report, whatever its promotional hold: the part of its gross estimate not yet measured stays outstanding, and its measured usage stays deducted as local cost. That includes sockets admitted before a successful check and explicit sockets that hold no credit; neither a refresh nor a released hold erases either amount. Measured Deepgram usage carries the socket's `supplierRequestId`, which the allocator binds to one reservation. Evidence that lists that finished request reconciles it exactly once: its supplier cost counts through the reported total, and its local list-price cost leaves the deduction. Until then local costs stay deducted on top of the supplier's high-water total, so the allocator can exhaust its conservative headroom before the supplier's console does; it never returns that uncertainty to the free pool. A new console baseline requires admissions to pause, every reservation to settle, and positive stop evidence (`baselineFence`) observed before the console read. The host fences any spending outside the allocator as well. A disabled version cannot be reactivated; a new console reading makes a new version.
+
+Call `admitLowestCostTranscription` in the same transaction as the host's admission. It reads the checked snapshot, selects with `selectLowestCostSttEntry()` ([Hosted transcription cost selection](#hosted-transcription-cost-selection)) and reserves the estimate before the transaction commits; a retry with the same inputs answers the same admission. `bindTranscriptionConnection` claims that reservation for the first socket's `connectionId`. Every reconnect, rollover or fallback calls `reserveTranscriptionCredit` for its own entry and binds its own `connectionId` before audio. A named-vendor policy calls `reserveTranscriptionCredit` directly and never widens its permitted chain. Without an available promotional balance the reservation holds zero promotional dollars, which neither authorizes gross supplier spending nor waives the host's customer budget.
+
+`settleTranscriptionInterval` takes authenticated cumulative measured seconds and a durable report id. It prices the difference between cumulative list-price totals, so periodic reports never round the same audio twice. A repeated report answers its stored receipt; a changed retry, a smaller total and a report after the final one are refused. `grossMicro`, `prepaidMicro` and `chargedMicro` describe that interval alone. An interval that crosses the last covered micro-dollar carries both amounts, so neither a vendor nor a session is marked prepaid as a whole. Exhausted credit, stale evidence or a disabled record leave later usage charged even when the session started with credit.
+
+Only a final report releases unused credit. A missing worker heartbeat or an expired lease is not evidence of zero usage: keep the hold until the host has positive termination evidence and a measured or conservative upper-bound total. A reservation that was committed but provably never opened is bound to a recovery identity and settled with a final zero. Keep these dedicated supplier holds out of `reconcileCompoundCredit` and `settleCompoundCredit`.
+
+Take the supplier scope before any customer account lock, in admission, settlement and reconciliation alike. `SqlCompoundCreditStore.withStorageTransaction(transaction, callback)` binds these rows to the host's open adapter transaction without beginning, committing or retrying one; the schema must already exist. Retry the whole host transaction on a `CreditConflictError`, test a cancelled authorization before commit, and make no provider request while the transaction holds its locks. Promotional accounting and the host's full gross spend reservation commit or roll back together.
 
 ## Call profile
 

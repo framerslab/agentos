@@ -101,6 +101,7 @@ export type {
   CreditAllocationRow,
   CreditAttemptRow,
   CreditAttemptState,
+  CreditDocumentRow,
   CreditEntryFilter,
   CreditEntryKind,
   CreditEntryRow,
@@ -168,3 +169,24 @@ export { COMPOUND_CREDIT_DDL, SqlCompoundCreditStore, compoundCreditDdl } from '
 export type { SqlCompoundCreditStoreOptions } from './SqlCompoundCreditStore.js';
 export { buildMarginReport, marginReport, readMarginPeriod } from './MarginReport.js';
 export type { MarginAllocationPolicy, MarginPeriodInput, MarginReport, MarginReportQuery, MarginSettlement } from './MarginReport.js';
+
+// Supplier transcription credit: a vendor's promotional balance, reserved before audio and allocated from measured usage.
+export {
+  makeTranscriptionCreditRecord,
+  configureTranscriptionCredit,
+  refreshTranscriptionCredit,
+  failTranscriptionCreditCheck,
+  transcriptionCreditSnapshot,
+  reserveTranscriptionCredit,
+  admitLowestCostTranscription,
+  bindTranscriptionConnection,
+  settleTranscriptionInterval,
+} from './TranscriptionCredit.js';
+export type {
+  TranscriptionCreditRecordInput,
+  TranscriptionCreditRecord,
+  ReserveTranscriptionCreditInput,
+  TranscriptionAdmission,
+  TranscriptionIntervalInput,
+  TranscriptionIntervalAllocation,
+} from './TranscriptionCredit.js';

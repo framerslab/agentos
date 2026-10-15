@@ -12,7 +12,7 @@ import { runCompoundCreditLedgerContract } from './compoundCreditLedger.contract
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 const RUN = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-const TABLES = ['accounts', 'lots', 'holds', 'allocations', 'attempts', 'entries', 'supplier_days'];
+const TABLES = ['accounts', 'lots', 'holds', 'allocations', 'attempts', 'entries', 'supplier_days', 'documents'];
 const made: string[] = [];
 let db: StorageAdapter | undefined;
 

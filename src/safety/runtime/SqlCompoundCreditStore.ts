@@ -4,7 +4,8 @@
  * account takes the account row's lock with a write, so two transactions on one account queue there; every versioned
  * write is a compare-and-set that must change exactly one row. Table names come from a checked prefix, so stores with
  * different prefixes share one database apart. A host that runs its own migrations copies {@link compoundCreditDdl}'s
- * text for its prefix and passes `ensureSchema: false`.
+ * text for its prefix and passes `ensureSchema: false`. A host whose own writes must commit with the credit rows passes
+ * its open adapter transaction to {@link SqlCompoundCreditStore.withStorageTransaction}.
  *
  * Give the store an adapter of its own (or the host's own pool), never a provenance-wrapped adapter whose write hooks
  * can turn a `run()` into a no-op.
@@ -17,6 +18,7 @@ import {
   type CreditAccountRow,
   type CreditAllocationRow,
   type CreditAttemptRow,
+  type CreditDocumentRow,
   type CreditEntryFilter,
   type CreditEntryRow,
   type CreditHoldFilter,
@@ -46,6 +48,7 @@ interface CreditTables {
   attempts: string;
   entries: string;
   supplierDays: string;
+  documents: string;
 }
 
 function creditTables(tablePrefix: string | undefined): CreditTables {
@@ -62,6 +65,7 @@ function creditTables(tablePrefix: string | undefined): CreditTables {
     attempts: `${prefix}_attempts`,
     entries: `${prefix}_entries`,
     supplierDays: `${prefix}_supplier_days`,
+    documents: `${prefix}_documents`,
   };
 }
 
@@ -166,6 +170,13 @@ CREATE TABLE IF NOT EXISTS ${t.supplierDays} (
   day_utc TEXT PRIMARY KEY,
   settled_micro BIGINT NOT NULL,
   version BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${t.documents} (
+  scope_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  value_json TEXT NOT NULL,
+  version BIGINT NOT NULL,
+  PRIMARY KEY (scope_id, document_id)
 );
 `;
 }
@@ -382,6 +393,20 @@ class SqlCreditTransaction implements CreditTransaction {
     );
     return num(row?.open_micro);
   }
+  async getDocument(scopeId: string, documentId: string): Promise<CreditDocumentRow | undefined> {
+    const row = await this.db.get<Row>(
+      `SELECT * FROM ${this.t.documents} WHERE scope_id = ? AND document_id = ?`, [scopeId, documentId],
+    );
+    return row ? { scopeId: String(row.scope_id), documentId: String(row.document_id),
+      value: String(row.value_json), version: num(row.version) } : undefined;
+  }
+  async putDocument(row: CreditDocumentRow): Promise<void> {
+    await this.casWrite(this.t.documents, JSON.stringify([row.scopeId, row.documentId]), row.version,
+      [`INSERT INTO ${this.t.documents} (scope_id, document_id, value_json, version) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+        [row.scopeId, row.documentId, row.value, row.version]],
+      [`UPDATE ${this.t.documents} SET value_json = ?, version = ? WHERE scope_id = ? AND document_id = ? AND version = ?`,
+        [row.value, row.version, row.scopeId, row.documentId, row.version - 1]]);
+  }
 }
 
 /** Compound credit over SQL. */
@@ -402,12 +427,17 @@ export class SqlCompoundCreditStore implements ICompoundCreditStore {
     this.tables = creditTables(options.tablePrefix);
   }
 
-  /** Creates the tables unless they answer a read already; does nothing with `ensureSchema: false`. */
+  /**
+   * Creates the tables unless the first and the newest of them, `accounts` and `documents`, answer a read already;
+   * does nothing with `ensureSchema: false`. A store made before the documents table gains it; every statement of the
+   * DDL is idempotent.
+   */
   ensureSchema(): Promise<void> {
     if (this.options.ensureSchema === false) return Promise.resolve();
     this.schemaReady ??= (async () => {
       try {
         await this.options.db.get(`SELECT 1 FROM ${this.tables.accounts} LIMIT 1`);
+        await this.options.db.get(`SELECT 1 FROM ${this.tables.documents} LIMIT 1`);
       } catch {
         await this.options.db.exec(ddlOf(this.tables));
       }
@@ -416,6 +446,19 @@ export class SqlCompoundCreditStore implements ICompoundCreditStore {
       throw err;
     });
     return this.schemaReady;
+  }
+
+  /**
+   * Uses this store's rows inside the host's existing storage transaction, so host writes and credit rows commit or
+   * roll back together. It neither begins, commits, retries nor closes a transaction: the host owns commit, rollback,
+   * retry and lock ordering, and an error reaches the host's enclosing transaction. The schema must already exist.
+   *
+   * @param transaction - The host's active adapter transaction on this store's database.
+   * @param fn - Credit work, plus any host writes that must commit with it.
+   * @returns What `fn` answers.
+   */
+  withStorageTransaction<T>(transaction: StorageAdapter, fn: (trx: CreditTransaction) => Promise<T>): Promise<T> {
+    return fn(new SqlCreditTransaction(transaction, this.tables));
   }
 
   async withTransaction<T>(fn: (trx: CreditTransaction) => Promise<T>): Promise<T> {
