@@ -725,7 +725,7 @@ Seven [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cor
 
 ### Chunking Strategies
 
-[`SemanticChunker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/chunking/SemanticChunker.ts) in `cognition/rag/chunking/` splits text at headings, then paragraphs, then sentences, keeps fenced code blocks whole, and falls back to fixed-size splits for text with no boundaries.
+[`SemanticChunker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/chunking/SemanticChunker.ts) in `cognition/rag/chunking/` splits text at headings, then paragraphs, then sentences, keeps a fenced code block whole unless it is longer than `maxSize` (2,000 characters unless set), and falls back to fixed-size splits for text with no boundaries ([Chunking and Snippets](../text/CHUNKING_AND_SNIPPETS.md#semanticchunker)).
 
 ### Reranking
 
