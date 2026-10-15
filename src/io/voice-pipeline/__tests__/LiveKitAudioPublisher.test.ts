@@ -258,6 +258,13 @@ describe('native playout', () => {
     expect(FakeAudioSource.created[0]!.capturedSamples).toBe(960);
     await publisher.close();
   });
+  it('stops waiting for a subscription when it closes, and plays nothing', async () => {
+    const room = new FakeRoom(); room.subscription = new Promise<void>(() => {});
+    const publisher = unidentified(room, 30000);
+    const sent = publisher.sendAudio(unscoped()); await settle();
+    await publisher.close(); await expect(sent).resolves.toBeUndefined();
+    expect(FakeAudioSource.created[0]!.capturedSamples).toBe(0); expect(room.localParticipant.unpublishTrack).toHaveBeenCalledOnce();
+  });
   it('refuses a chunk that carries a scope, a call or a generation when the publisher has none of its own', async () => {
     const room = new FakeRoom(); const publisher = unidentified(room);
     for (const chunk of [{ ...unscoped(), scopeId: 'scope-b' }, { ...unscoped(), callId: 'call-b' }, { ...unscoped(), generation }]) {

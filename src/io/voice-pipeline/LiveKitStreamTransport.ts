@@ -27,11 +27,12 @@
  * `sendAudio()` carries a handler of its own, so a caller that does not wait
  * for it raises no unhandled rejection. With it, the transport speaks on one
  * microphone track through {@link LiveKitAudioPublisher}: its input must be
- * mono at 16 kHz, `readyForPlayback()` publishes the track, and `sendAudio()`
- * takes raw or WAV-wrapped PCM16. How a chunk counts as played is the
- * publisher's playout mode, fixed by `readyForPlayback()` or `sendAudio()`
- * once the participant is in the room; a chunk sent before then plays
- * natively:
+ * mono at 16 kHz, `readyForPlayback()` publishes the track and waits, at most
+ * `receiptTimeoutMs`, for a participant to subscribe to it (a first chunk
+ * sent before then waits the same way), and `sendAudio()` takes raw or
+ * WAV-wrapped PCM16. How a chunk counts as played is the publisher's playout
+ * mode, fixed by `readyForPlayback()` or `sendAudio()` once the participant
+ * is in the room; a chunk sent before then plays natively:
  * - Native playout, the default and the only mode for a SIP participant:
  *   every participant subscribed to the track hears it, chunks queue on the
  *   track in order, `waitForPlayback()` resolves once the track has played
@@ -228,7 +229,10 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * to be in the room; `undefined` before, and for a listen-only transport.
    */
   get playout(): LiveKitPlayout | undefined { return this.publisher?.playout; }
-  /** Waits for the one speaking track. Listen-only readiness allocates nothing. */
+  /**
+   * Publishes the one speaking track and waits for a participant to subscribe to it, at most
+   * `publisher.receiptTimeoutMs`. Listen-only readiness allocates nothing.
+   */
   async readyForPlayback(): Promise<void> { if (this._state !== 'open') throw new Error('transport closed'); await this.publisher?.ready(); }
   /** Listen-only construction still rejects; speaking delegates to the one native conversion boundary. */
   sendAudio(chunk: EncodedAudioChunk): Promise<void> {

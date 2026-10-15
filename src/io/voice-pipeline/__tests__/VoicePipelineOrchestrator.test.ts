@@ -236,6 +236,15 @@ describe('VoicePipelineOrchestrator', () => {
     expect(orchestrator.state).toBe('idle');
   });
 
+  it('asks a transport that has readyForPlayback() to get ready as the session starts, and starts though that fails', async () => {
+    const readyForPlayback = vi.fn().mockRejectedValue(new Error('track not published'));
+    (transport as any).readyForPlayback = readyForPlayback;
+    await startSession();
+    expect(readyForPlayback).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+  });
+
   it('should transition to listening when startSession is called', async () => {
     await startSession();
     expect(orchestrator.state).toBe('listening');

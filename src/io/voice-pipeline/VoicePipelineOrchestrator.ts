@@ -802,11 +802,14 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    *    session into this one, such as a wait for the late final of its last turn, then tells a detector that takes
    *    `setAgentContext()` that the agent does not hold the floor, so it reads backchannels by the agent's context
    *    from the session's first utterance.
-   * 3. Creates STT and TTS sub-sessions from the provided factories.
-   * 4. Wires all event handlers (transport -> STT -> endpoint -> agent -> TTS -> transport, and a client's
+   * 3. Asks a transport that has `readyForPlayback()` to get its playback ready, without waiting for it: a speaking
+   *    `LiveKitStreamTransport` publishes its track, so the participant has subscribed before the first reply plays.
+   *    A failure there fails the first reply's send, which reports it.
+   * 4. Creates STT and TTS sub-sessions from the provided factories.
+   * 5. Wires all event handlers (transport -> STT -> endpoint -> agent -> TTS -> transport, and a client's
    *    transcript messages -> endpoint).
-   * 5. Transitions to `'listening'` and starts the watchdog timer.
-   * 6. Returns a {@link VoicePipelineSession} handle.
+   * 6. Transitions to `'listening'` and starts the watchdog timer.
+   * 7. Returns a {@link VoicePipelineSession} handle.
    *
    * A sub-session that fails to start closes the session, its transport included, and rejects this call.
    *
@@ -852,6 +855,16 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this.watch(transport);
     // As watch() does for the other parts, and recorded: the detector is the host's and outlives the session.
     this._onEndpoint(this.endpoint, 'error', () => this.reportFailure());
+    // A track published as the session starts has its subscriber before the first reply plays. Not waited for: a
+    // failure fails the first reply's send, which reports it.
+    const playback = transport as Partial<IPlaybackTransport>;
+    if (typeof playback.readyForPlayback === 'function') {
+      try {
+        void Promise.resolve(playback.readyForPlayback()).catch(() => {});
+      } catch {
+        // As a rejection: the first reply's send reports it.
+      }
+    }
     try {
       this.stt = await overrides.streamingSTT.startSession({ language: this.config.language, providerOptions: this.config.sttOptions });
       this.watch(this.stt);

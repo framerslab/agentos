@@ -37,8 +37,13 @@ export interface LiveKitPublishingRtc {
   TrackPublishOptions: new () => { source: number };
   TrackSource: { SOURCE_MICROPHONE: number };
 }
+/** A published track, as rtc-node's `LocalTrackPublication`: its id, and the wait for a participant to subscribe to it. */
+interface PublishedTrack {
+  sid?: string;
+  waitForSubscription?(): Promise<void>;
+}
 interface PublishingParticipant {
-  publishTrack(track: LiveKitPublishingTrack, options: { source: number }): Promise<{ sid?: string }>;
+  publishTrack(track: LiveKitPublishingTrack, options: { source: number }): Promise<PublishedTrack>;
   unpublishTrack(sid: string, stopOnUnpublish?: boolean): Promise<void>;
 }
 
@@ -109,7 +114,10 @@ export interface LiveKitAudioPublisherOptions {
   maxBytes: number;
   /** A chunk's longest audio and the length of the track's native queue, in milliseconds; at most 2000. */
   maxDurationMs: number;
-  /** The deadline of a playback wait, and in participant playout of a receipt and a clear, from 1 to 30000 milliseconds. */
+  /**
+   * The deadline of a playback wait, and in participant playout of a receipt and a clear, from 1 to 30000 milliseconds;
+   * also the longest the track waits, once published, for a participant to subscribe to it before it plays.
+   */
   receiptTimeoutMs: number;
   /**
    * The `@livekit/rtc-node` module, or a structural one. A transport passes its own `rtc` when this is omitted; with
@@ -186,6 +194,8 @@ export class LiveKitAudioPublisher {
   private hold?: { released: Promise<void>; release: () => void };
   /** Native playout: how many holds have begun, so that a frame captured while one began is cleared as it lands. */
   private holds = 0;
+  /** Ends the wait for the first subscription, so that a close does not wait it out. */
+  private stopWaiting?: () => void;
   /**
    * @param options - The host's options: the playout mode, the call identity, the track's rate and the bounds.
    * @param participant - The room's local participant, which publishes the track.
@@ -224,15 +234,18 @@ export class LiveKitAudioPublisher {
     return this.mode;
   }
   /**
-   * Fixes the playout mode when the participant is in the room, then publishes exactly once, before the host records
-   * connected readiness.
+   * Fixes the playout mode when the participant is in the room, then publishes exactly once and waits for a participant
+   * to subscribe to the track, at most `receiptTimeoutMs`, before the host records connected readiness.
    */
   ready(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('publisher closed'));
     if (!this.preparation) this.fixMode();
     return this.prepare();
   }
-  /** Publishes the track exactly once; later calls share that work. The mode is fixed by the caller, not here. */
+  /**
+   * Publishes the track exactly once, then waits for a participant to subscribe to it, at most `receiptTimeoutMs`, so
+   * that nothing is captured before anyone hears it; later calls share that work. The mode is fixed by the caller.
+   */
   private prepare(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('publisher closed'));
     if (this.preparation) return this.preparation;
@@ -245,7 +258,23 @@ export class LiveKitAudioPublisher {
       const publication = await this.participant.publishTrack(this.track, options);
       if (!publication.sid) throw new Error('publication id missing'); this.publication = publication.sid;
       if (this.closed) throw new Error('publisher closed');
+      // A participant that subscribes after a capture misses what played before it; LiveKit's own publish-wav example
+      // waits for the subscription before its first capture too.
+      await this.subscription(publication);
+      if (this.closed) throw new Error('publisher closed');
     })(); return this.preparation;
+  }
+  /**
+   * Waits for a participant to subscribe to the published track (rtc-node's
+   * `LocalTrackPublication.waitForSubscription()`), at most `receiptTimeoutMs` and no longer than the publisher is open.
+   * A publication without the method, or whose wait fails, is not waited for: the track plays as it is.
+   */
+  private async subscription(publication: PublishedTrack): Promise<void> {
+    if (typeof publication.waitForSubscription !== 'function') return;
+    const subscribed = (async () => { await publication.waitForSubscription!(); })().catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bounded = new Promise<void>((resolve) => { timer = setTimeout(resolve, this.options.receiptTimeoutMs); this.stopWaiting = resolve; });
+    try { await Promise.race([subscribed, bounded]); } finally { clearTimeout(timer); this.stopWaiting = undefined; }
   }
   /** Whether work admitted at `captured` with `generation` may still play: open, not cleared since, of the call's generation. */
   private current(generation: VoiceGeneration | undefined, captured: number): boolean {
@@ -467,7 +496,7 @@ export class LiveKitAudioPublisher {
   /** Confirms unpublication and native disposal once. Rejection is incomplete cleanup, never stop evidence. */
   close(): Promise<void> {
     if (this.closing) return this.closing;
-    this.closed = true; this.cancellation++; this.acks.close(); this.release();
+    this.closed = true; this.cancellation++; this.acks.close(); this.release(); this.stopWaiting?.();
     const failures: unknown[] = [];
     try { this.source?.clearQueue(); } catch (error) { failures.push(error); }
     this.closing = (async () => {
