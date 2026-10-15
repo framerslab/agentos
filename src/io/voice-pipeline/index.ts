@@ -274,4 +274,9 @@ export {
   type SttChainVendor,
   type SttEntry,
 } from './env-constructor.js';
-export { DEEPGRAM_STREAMING_PRICING, deepgramStreamingPricing } from './providers/deepgramPricing.js';
+export {
+  DEEPGRAM_PRE_RECORDED_PRICING,
+  DEEPGRAM_STREAMING_PRICING,
+  deepgramPreRecordedPricing,
+  deepgramStreamingPricing,
+} from './providers/deepgramPricing.js';
