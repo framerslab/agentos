@@ -161,6 +161,15 @@ function payloadEntries(body: string | null): [string, string][] | null {
   }
 }
 
+/** The address as a URL, or `null` when it is not an absolute URL. */
+function parseAddress(address: string): URL | null {
+  try {
+    return new URL(address);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Every way the observations break the registrations and the policy.
  *
@@ -195,16 +204,14 @@ export function verifyAnalyticsTransports(input: TransportCheckInput): string[] 
     });
   const endpoints = input.transports.flatMap((t) => t.endpoints.map((e) => ({ transport: t, endpoint: e })));
   for (const request of input.requests) {
-    let url: URL;
-    try {
-      url = new URL(request.url);
-    } catch {
+    const url = parseAddress(request.url);
+    if (url !== null && url.origin === input.pageOrigin && !endpoints.some(({ endpoint }) => endpoint.origin === url.origin && endpoint.path === url.pathname)) continue;
+    // The page's route is checked on every request but its own, before any other problem ends the request's checks.
+    if (!input.routeIds.has(request.route)) problems.push(`${request.route}: the page is not a registered public route`);
+    if (url === null) {
       problems.push(`${request.route}: a request to a malformed address`);
       continue;
     }
-    if (url.origin === input.pageOrigin && !endpoints.some(({ endpoint }) => endpoint.origin === url.origin && endpoint.path === url.pathname)) continue;
-    // The page's route is checked before a destination or consent problem ends the request's other checks.
-    if (!input.routeIds.has(request.route)) problems.push(`${request.route}: the page is not a registered public route`);
     const match = endpoints.find(({ endpoint }) => endpoint.origin === url.origin && endpoint.path === url.pathname && endpoint.method === request.method.toUpperCase());
     if (match === undefined) {
       problems.push(`${request.route}: a request to an unregistered destination ${url.origin}${url.pathname}`);
