@@ -587,7 +587,7 @@ Notes:
 
 ## Reranking and the Reranker Chain {#reranker-chain}
 
-If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augmentor builds a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) and registers the built-in providers its `providers` list names: `cohere` (needs `apiKey`) and `local` (an offline cross-encoder through Transformers.js: `@huggingface/transformers`, or `@xenova/transformers`). Reranking is opt-in per request with `RagRetrievalOptions.rerankerConfig.enabled: true`.
+If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augmentor builds a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) and registers the built-in providers its `providers` list names: `cohere` (needs `apiKey`) and `local` (an offline cross-encoder through Transformers.js: `@huggingface/transformers`, or `@xenova/transformers`). Reranking is opt-in per request: with `RagRetrievalOptions.rerankerConfig.enabled: true`, or, on a request without `rerankerConfig`, with a `policy` whose `reranker` is `'always'`.
 
 `RerankerService.rerankChain(query, chunks, stages)` runs several providers one after another, each stage keeping its `topK`. The caller passes the stages; no config file or research depth sets a chain.
 
