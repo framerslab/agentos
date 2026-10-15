@@ -108,6 +108,10 @@ describe('analytics transports', () => {
       'account: the page is not a registered public route',
       'account: a request to an unregistered destination https://other.example.test/pixel.gif',
     ]);
+    expect(verifyAnalyticsTransports(input({ requests: [{ phase: 'granted', method: 'GET', url: 'not an address', body: null, route: 'account' }] }))).toEqual([
+      'account: the page is not a registered public route',
+      'account: a request to a malformed address',
+    ]);
     expect(verifyAnalyticsTransports(input({ requests: [{ phase: 'before_consent', method: 'GET', url: 'https://site.example.test/account/settings', body: null, route: 'account' }] }))).toEqual([]);
   });
 });
