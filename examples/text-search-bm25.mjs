@@ -7,8 +7,8 @@
 //   - BM25Index with its built-in tokenizer, searched with any word, every word and by prefix
 //   - toJSON() and BM25Index.fromJSON(): the index saved as a string and restored
 //   - BM25Index with createRagPipeline(), which stems, so "run" finds "running"
-//   - LexicalIndex with lexicalTokens, the index a browser page imports, and a snippet
-//     around each hit
+//   - LexicalIndex with lexicalTokens from the browser entry, which a page imports and
+//     Node runs too, and a snippet around each hit
 //
 // Usage (no API key):
 //   pnpm install && pnpm run build
@@ -16,7 +16,7 @@
 
 import { createRagPipeline } from '@framers/agentos/cognition/nlp';
 import { BM25Index } from '@framers/agentos/cognition/rag';
-import { LexicalIndex, lexicalTokens, snippetAround } from '@framers/agentos/cognition/library';
+import { LexicalIndex, lexicalTokens, snippetAround } from '@framers/agentos/cognition/library/browser';
 
 const docs = [
   { id: 'faq-1', text: 'Reset a password from the sign-in page.', metadata: { section: 'account' } },

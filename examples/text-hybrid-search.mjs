@@ -86,6 +86,8 @@ for (const fusionMethod of ['rrf', 'weighted-sum', 'interleave']) {
   const results = await searcher.search(query, 'handbook', 3);
   console.log(`\n=== ${fusionMethod} ===\n`);
   for (const result of results) {
+    // A result only BM25 found has no textContent: InMemoryVectorStore has no fetchByIds to fill it in.
+    // 'weighted-sum' sets no ranks, and 'interleave' one rank for each result, from the list it came from.
     const heading = (result.textContent ?? '').split('\n')[0];
     console.log(
       `${result.id.padEnd(11)} score ${result.score.toFixed(4)}  vector rank ${result.denseRank ?? '-'}  ` +
