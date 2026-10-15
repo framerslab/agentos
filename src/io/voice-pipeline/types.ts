@@ -780,13 +780,21 @@ export interface IEndpointDetector extends EventEmitterLike {
 
   /**
    * Tells the detector what the agent is doing. `VoicePipelineOrchestrator`
-   * calls it as the agent starts speaking a reply (`speaking: true`), and as
-   * the reply ends or a barge-in cuts it (`speaking: false`, with
-   * `askedQuestion` when the reply's text, trimmed, ends with `?`).
-   * {@link HeuristicEndpointDetector} drops a backchannel such as "yeah"
-   * while the agent speaks, and while it listens after a reply that asked no
-   * question; after a question, a lone backchannel is the user's answer and
-   * forms a turn. A detector without this method is told nothing.
+   * calls it as its session starts, after the reset with `'session'`
+   * (`speaking: false`, `askedQuestion: false`), as the agent starts speaking
+   * a reply (`speaking: true`), and as the reply ends or a barge-in cuts it
+   * (`speaking: false`, with `askedQuestion` when the reply's text, trimmed,
+   * ends with `?`). From the first call until a reset with `'session'`,
+   * {@link HeuristicEndpointDetector} reads a final with trailing `.`, `,`,
+   * `!` or an ellipsis ("Sure.") as its phrase, and never takes one that ends
+   * with `?` ("Okay?") for a backchannel; it drops a backchannel such as
+   * "yeah" while the agent speaks, and while it listens after a reply that
+   * asked no question, and after a question a lone backchannel is the user's
+   * answer and forms a turn. Until the first call, and again after a reset
+   * with `'session'`, it drops a final whose whole text, trimmed and
+   * lowercased, is a backchannel phrase, whatever the agent is doing, so a
+   * caller that never calls it, such as a listen session, keeps that rule. A
+   * detector without this method is told nothing.
    *
    * @param context - Whether the agent speaks, and whether its last reply asked a question.
    */
