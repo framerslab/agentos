@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LiveKitAudioPublisher, type LiveKitPublishingRtc, type PublishedAudioFrame } from '../LiveKitAudioPublisher.js';
 import { LiveKitStreamTransport } from '../LiveKitStreamTransport.js';
 import type { AudioFrame, EncodedAudioChunk, VoiceGeneration } from '../types.js';
-import { FakeAudioStream, FakeRoom, FakePublication, FakeTrack, fakeRtc, rtcFrame, settle } from '../../hearing/__tests__/livekit-fakes.js';
+import { FakeAudioSource, FakeAudioStream, FakeRoom, FakePublication, FakeTrack, fakePublishingRtc, fakeRtc, rtcFrame, settle } from '../../hearing/__tests__/livekit-fakes.js';
+
+/** The host's setting that keeps the receipt protocol: each chunk counts as played once the participant answers for it. */
+const receipts = { playout: 'participant' } as const;
 
 function fixture() {
   let generation: VoiceGeneration = { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 };
@@ -31,7 +34,7 @@ function fixture() {
     TrackPublishOptions: class { source = 0; }, TrackSource: { SOURCE_MICROPHONE: 2 },
   };
   const participant = { publishTrack: vi.fn(async () => ({ sid: 'track-a' })), unpublishTrack: vi.fn(async () => {}) };
-  const publisher = new LiveKitAudioPublisher({ scopeId: 'scope-a', callId: 'call-a', generation: () => generation, sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc }, participant, async (message) => { messages.push(message); });
+  const publisher = new LiveKitAudioPublisher({ ...receipts, scopeId: 'scope-a', callId: 'call-a', generation: () => generation, sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc }, participant, async (message) => { messages.push(message); });
   const chunk = (sampleRate = 16000, sequence = 1): EncodedAudioChunk => ({ scopeId: 'scope-a', callId: 'call-a', generation: { ...generation }, sequence, audio: Buffer.alloc(sampleRate / 50 * 2), format: 'pcm', container: 'raw', sampleRate, durationMs: 20, text: '' });
   const ack = (c: EncodedAudioChunk) => publisher.receiveReceipt({ type: 'playback', generation: c.generation, sequence: c.sequence, playedSamples: c.audio.length / 2, sampleRate: c.sampleRate });
   return { publisher, rtc, participant, chunk, ack, captures, messages, clear, sourceClose, trackClose, sources, resample, flush, resamplerClose,
@@ -140,5 +143,81 @@ describe('optional transport publisher', () => {
     const large = reader('x'.repeat(4097)); room.textHandlers.get('agentos.voice')!(large, { identity: 'participant-a' }); await settle();
     expect(errors[0]?.message).toBe('livekit control refused'); expect(large.close).toHaveBeenCalled();
     transport.close(); await transport.whenClosed();
+  });
+});
+
+describe('native playout', () => {
+  const generation: VoiceGeneration = { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 };
+  /** A chunk as a session without a call profile sends it: no scope, call, generation or sequence. */
+  const unscoped = (sampleRate = 16000): EncodedAudioChunk => ({ audio: Buffer.alloc(sampleRate / 50 * 2), format: 'pcm', container: 'raw', sampleRate, durationMs: 20, text: '' });
+  /** A publisher left to its default playout, with no participant that declares receipts. */
+  function native(receiptTimeoutMs = 1000) {
+    const messages: Record<string, unknown>[] = [];
+    const participant = { publishTrack: vi.fn(async () => ({ sid: 'track-a' })), unpublishTrack: vi.fn(async () => {}) };
+    const publisher = new LiveKitAudioPublisher({ scopeId: 'scope-a', callId: 'call-a', generation: () => generation, sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs, rtc: fakePublishingRtc() }, participant, async (message) => { messages.push(message); });
+    return { publisher, messages, participant, source: () => FakeAudioSource.created[0]! };
+  }
+  beforeEach(() => { FakeAudioSource.created.length = 0; });
+  it('plays chunks without a call identity, announces none of them, and acknowledges one once the track has played it out', async () => {
+    const f = native();
+    await f.publisher.sendAudio(unscoped(24000)); await f.publisher.sendAudio(unscoped(16000));
+    expect(f.source().capturedSamples).toBe(1920); expect(f.messages).toEqual([]); expect(f.participant.publishTrack).toHaveBeenCalledOnce();
+    let played = false; const playback = f.publisher.waitForPlayback(generation, 2, new AbortController().signal).then((receipt) => { played = true; return receipt; });
+    await settle(); expect(played).toBe(false);
+    f.source().playOut();
+    expect(await playback).toEqual({ generation, sequence: 2, playedSamples: 320, sampleRate: 16000 });
+    await f.publisher.close(); expect(f.participant.unpublishTrack).toHaveBeenCalledOnce();
+  });
+  it('clears the track without asking the participant, and a cleared chunk never counts as played', async () => {
+    const f = native();
+    await f.publisher.sendAudio(unscoped());
+    const failed = expect(f.publisher.waitForPlayback(generation, 1, new AbortController().signal)).rejects.toThrow('cancelled');
+    await f.publisher.clearPlayback(generation); await failed;
+    expect(f.source().clears).toBe(2); expect(f.messages).toEqual([]);
+    await f.publisher.sendAudio(unscoped()); const next = f.publisher.waitForPlayback(generation, 2, new AbortController().signal);
+    f.source().playOut(); expect(await next).toMatchObject({ sequence: 2, playedSamples: 320, sampleRate: 16000 });
+    await f.publisher.close();
+  });
+  it('resolves each send a clear cuts short, and captures nothing it discarded', async () => {
+    const f = native(); await f.publisher.ready();
+    let release!: () => void; f.source().gate = new Promise<void>((resolve) => { release = resolve; });
+    const first = f.publisher.sendAudio(unscoped()); const second = f.publisher.sendAudio(unscoped());
+    await settle(); const cleared = f.publisher.clearPlayback(generation); release();
+    await expect(first).resolves.toBeUndefined(); await expect(second).resolves.toBeUndefined(); await cleared;
+    expect(f.source().capturedSamples).toBe(960); expect(f.source().clears).toBe(2); expect(f.messages).toEqual([]);
+    await f.publisher.close();
+  });
+  it('waits for the track to play out no longer than receiptTimeoutMs', async () => {
+    const f = native(20);
+    await f.publisher.sendAudio(unscoped());
+    await expect(f.publisher.waitForPlayback(generation, 1, new AbortController().signal)).rejects.toThrow('publisher drain timeout');
+    await f.publisher.close();
+  });
+});
+describe('loading @livekit/rtc-node', () => {
+  const generation: VoiceGeneration = { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 };
+  /** Any import of the peer fails, as when it is not installed. */
+  const missing = () => vi.doMock('@livekit/rtc-node', () => { throw new Error("Cannot find package '@livekit/rtc-node'"); });
+  beforeEach(() => { FakeAudioSource.created.length = 0; });
+  it('names the package and how to install it when the peer is missing', async () => {
+    missing();
+    try {
+      const participant = { publishTrack: vi.fn(async () => ({ sid: 'track-a' })), unpublishTrack: vi.fn(async () => {}) };
+      const publisher = new LiveKitAudioPublisher({ scopeId: 'scope-a', callId: 'call-a', generation: () => generation, sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000 }, participant, async () => {});
+      await expect(publisher.ready()).rejects.toThrow('@livekit/rtc-node is required for the LiveKit room audio source and transport. Install it: npm install @livekit/rtc-node');
+      expect(participant.publishTrack).not.toHaveBeenCalled(); await publisher.close();
+    } finally { vi.doUnmock('@livekit/rtc-node'); }
+  });
+  it("publishes through the transport's rtc module, so one module serves input and output and nothing is imported", async () => {
+    missing();
+    try {
+      const room = new FakeRoom(); room.addParticipant('participant-a', new FakePublication(new FakeTrack('microphone')));
+      const transport = new LiveKitStreamTransport({ room, participantIdentity: 'participant-a', sampleRate: 16000, rtc: { ...fakeRtc(), ...fakePublishingRtc() },
+        publisher: { scopeId: 'scope-a', callId: 'call-a', generation: () => generation, sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000 } });
+      await transport.readyForPlayback();
+      expect(room.localParticipant.publishTrack).toHaveBeenCalledOnce(); expect(FakeAudioSource.created).toHaveLength(1);
+      await vi.waitFor(() => expect(FakeAudioStream.opened).toHaveLength(1));
+      transport.close(); await transport.whenClosed();
+    } finally { vi.doUnmock('@livekit/rtc-node'); }
   });
 });
