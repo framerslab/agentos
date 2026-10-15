@@ -280,6 +280,75 @@ export interface IStreamTransport extends EventEmitterLike {
 // ============================================================================
 
 /**
+ * A hosted socket's immutable identity, established before any network
+ * opening. The built-in Deepgram and OpenAI streaming adapters give one to
+ * every socket they try, retries, reconnects and rollovers included, and pass
+ * it to {@link SttConnectionHooks.authorize} before the WebSocket upgrade.
+ */
+export interface SttConnectionOpening {
+  /** UUID unique across providers, retries, rollovers and process restarts. */
+  readonly connectionId: string;
+  /** Adapter id, such as `deepgram-streaming`. */
+  readonly providerId: string;
+  /** Exact hosted `vendor:model` entry used to reserve and price this socket. */
+  readonly entry: string;
+  /** Exact model used on the wire. */
+  readonly model: string;
+}
+
+/**
+ * Built-in hosted usage, with the identity shared by authorization and
+ * settlement: one immutable cumulative report per interval and exactly one
+ * final report for every socket a built-in adapter tried.
+ */
+export interface SttMeasuredUsageEvent extends StreamingSTTUsageEvent {
+  /** The socket's {@link SttConnectionOpening.connectionId}. */
+  readonly connectionId: string;
+  /** The socket's {@link SttConnectionOpening.entry}. */
+  readonly entry: string;
+  /** The socket's {@link SttConnectionOpening.model}. */
+  readonly model: string;
+  /** The supplier's request id for this socket, when the supplier reported one. */
+  readonly supplierRequestId?: string;
+}
+
+/**
+ * Host accounting at the socket boundary, separate from provider permission
+ * (`ProviderPolicy` still decides which providers may open). Honored by the
+ * built-in Deepgram and OpenAI streaming adapters.
+ */
+export interface SttConnectionHooks {
+  /**
+   * Reserve against `opening.entry` and `opening.connectionId` before resolving.
+   * Rejection forbids this socket and does not authorize a vendor fallback.
+   * The host must test `signal.aborted` inside its transaction before commit
+   * and roll back or release any late acquisition. No socket opens after abort.
+   */
+  authorize(opening: SttConnectionOpening, signal: AbortSignal): Promise<void>;
+  /**
+   * Finite per-socket funded audio ceiling, in wire seconds. Deepgram rolls to
+   * an independently authorized socket of the same vendor before exceeding it.
+   */
+  audioCeiling?(opening: SttConnectionOpening): number;
+  /**
+   * Synchronous check of prospective cumulative wire seconds before each send,
+   * including replay and overlap. `false` ends the provider with an
+   * authorization error; must not throw.
+   */
+  beforeAudio?(opening: SttConnectionOpening, nextAudioSeconds: number): boolean;
+  /**
+   * Receive cumulative and exactly one final report for every attempted socket,
+   * including final zero for a failed or denied opening. Unadopted OpenAI openings
+   * use `connectionIndex` zero; all billing identity uses `connectionId`.
+   * Queue durable processing synchronously and never throw. This is mirrored
+   * by the session's `'usage'` event for adopted sockets: consume one path, not both.
+   */
+  usage(event: SttMeasuredUsageEvent): void;
+  /** Maximum authorization wait before abort, in milliseconds. Default 10000. */
+  authorizationTimeoutMs?: number;
+}
+
+/**
  * Configuration passed to `IStreamingSTT.startSession()` when opening a new
  * speech recognition stream.
  *
@@ -329,6 +398,9 @@ export interface StreamingSTTConfig {
    * speaker adaptation models) without modifying the interface.
    */
   providerOptions?: Record<string, unknown>;
+
+  /** Optional accounting hooks honored by built-in Deepgram and OpenAI streaming adapters. */
+  connectionHooks?: SttConnectionHooks;
 
   /** Call-profile identity; scoped adapters capture this and update it only through reset. */
   call?: AudioIdentity;
@@ -479,6 +551,12 @@ export interface TranscriptEvent {
 export interface StreamingSTTUsageEvent {
   /** Provider that received the audio (its `IStreamingSTT.providerId`). */
   providerId: string;
+
+  /** Built-in hosted socket UUID; custom adapters may omit it. Never substitute a local index. */
+  connectionId?: string;
+
+  /** Exact hosted `vendor:model` entry; custom adapters may omit it. */
+  entry?: string;
 
   /** Model the connection transcribed with, when the provider names one. */
   model?: string;

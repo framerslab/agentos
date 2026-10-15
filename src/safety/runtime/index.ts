@@ -66,7 +66,12 @@ export {
   openAIModelPricing,
   openAITranscriptionPricing,
 } from '../../core/llm/providers/implementations/openaiPricing.js';
-export { DEEPGRAM_STREAMING_PRICING, deepgramStreamingPricing } from '../../io/voice-pipeline/providers/deepgramPricing.js';
+export {
+  DEEPGRAM_PRE_RECORDED_PRICING,
+  DEEPGRAM_STREAMING_PRICING,
+  deepgramPreRecordedPricing,
+  deepgramStreamingPricing,
+} from '../../io/voice-pipeline/providers/deepgramPricing.js';
 
 // Compound credit: rational rates, funding lots, holds, every-attempt budgets and the margin report.
 export {

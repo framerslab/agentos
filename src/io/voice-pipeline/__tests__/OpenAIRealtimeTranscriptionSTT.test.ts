@@ -1066,6 +1066,8 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
       {
         providerId: 'openai-realtime-transcription',
         model: 'gpt-4o-mini-transcribe',
+        entry: 'openai:gpt-4o-mini-transcribe',
+        connectionId: expect.any(String),
         connectionIndex: 1,
         audioSeconds: 0.1,
         final: true,
@@ -1251,6 +1253,8 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
       {
         providerId: 'openai-realtime-transcription',
         model: 'gpt-4o-mini-transcribe',
+        entry: 'openai:gpt-4o-mini-transcribe',
+        connectionId: expect.any(String),
         connectionIndex: 1,
         audioSeconds: 0.5,
         final: false,
@@ -2152,6 +2156,8 @@ describe('OpenAIRealtimeTranscriptionSTT: behind the failover chain of createVoi
       {
         providerId: 'openai-realtime-transcription',
         model: 'gpt-4o-mini-transcribe',
+        entry: 'openai:gpt-4o-mini-transcribe',
+        connectionId: expect.any(String),
         connectionIndex: 1,
         audioSeconds: 0.5,
         final: false,

@@ -15,5 +15,17 @@ export {
   type LexicalIndexJSON,
   type LexicalSearchOptions,
 } from '../rag/search/LexicalIndex.js';
+export {
+  FuzzyIndex,
+  withinOneEdit,
+  type FuzzyDocument,
+  type FuzzyHit,
+  type FuzzyIndexConfig,
+  type FuzzyIndexJSON,
+  type FuzzySearchOptions,
+  type FuzzyToken,
+  type FuzzyTokenizer,
+  type Marked,
+} from '../rag/search/FuzzyIndex.js';
 // A page's storage: the key-value store, the outbox and the comparison of a server's list with the device's cache.
 export * from '../../core/storage/browser/index.js';
