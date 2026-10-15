@@ -367,8 +367,9 @@ export class LiveKitAudioPublisher {
         if (!this.current(entry.generation, entry.cancellation)) return;
         const holds = this.holds; entry.holds ??= holds;
         await this.capture(rtc, output);
-        // A pause that began while the frame was captured cleared the queue before the frame reached it.
-        if (this.holds !== holds && this.hold) this.source?.clearQueue();
+        // A pause that began while the frame was captured cleared the queue before the frame reached it, so the frame
+        // is cleared as it lands, even when a resume came first: what the queue held at the pause is not heard.
+        if (this.holds !== holds) this.source?.clearQueue();
       }
     })();
     this.queued = entry.captured.catch(() => {}); this.latest = entry;
@@ -470,11 +471,11 @@ export class LiveKitAudioPublisher {
   receiveReceipt(input: unknown): boolean { return this.mode === 'participant' ? this.acks.receive(input) : false; }
   /**
    * Holds the track, as a barge-in `pause` asks, outside participant playout: what its native queue holds is cleared
-   * at once, a frame whose capture was under way is cleared as it lands, and nothing more is captured until
-   * {@link resume}, a clear or a close. The chunks handed over meanwhile wait, in order, and a resume plays them from
-   * the first the track had not taken; the audio the queue held when the pause came is not heard, and a chunk the track
-   * had begun to take does not count as played ({@link waitForPlayback}). A hold already in place stays as it is, and in
-   * participant playout nothing is held: the page holds the audio it plays.
+   * at once, a frame whose capture was under way is cleared as it lands, even when a resume came first, and nothing
+   * more is captured until {@link resume}, a clear or a close. The chunks handed over meanwhile wait, in order, and a
+   * resume plays them from the first the track had not taken; the audio the queue held when the pause came is not
+   * heard, and a chunk the track had begun to take does not count as played ({@link waitForPlayback}). A hold already
+   * in place stays as it is, and in participant playout nothing is held: the page holds the audio it plays.
    */
   pause(): void {
     if (this.closed || this.mode === 'participant' || this.hold) return;
