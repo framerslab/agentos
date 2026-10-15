@@ -59,6 +59,7 @@ import {
   type ProviderCapabilities,
 } from '../HealthyProvider.js';
 import { VoicePipelineError } from '../VoicePipelineError.js';
+import { describeReason } from '../describeReason.js';
 
 /** The optional peer this module runs on. */
 const MOONSHINE_WASM = '@moonshine-ai/moonshine-wasm';
@@ -1056,7 +1057,10 @@ class MoonshineBrowserSession extends VoiceEventEmitter implements StreamingSTTS
    * except that a listener that throws is written as a console warning and
    * the listeners after it still run. `emit()` stops at a throw and throws
    * into its caller, which would leave the session's last events unsent: the
-   * rest of a close, or the close that follows a failure.
+   * rest of a close, or the close that follows a failure. The warning gives
+   * the throw's text from `describeReason()`, which names a value `String()`
+   * cannot print (an object without a prototype, a revoked proxy) by its
+   * type, where formatting it would throw from the warning itself.
    *
    * @param eventName - One of the session's last events.
    * @param args - What each listener is handed.
@@ -1066,10 +1070,7 @@ class MoonshineBrowserSession extends VoiceEventEmitter implements StreamingSTTS
       try {
         (listener as (...values: unknown[]) => unknown).apply(this, args);
       } catch (thrown) {
-        console.warn(
-          `[moonshine-browser-stt] a listener of '${eventName}' threw:`,
-          thrown instanceof Error ? thrown.message : String(thrown)
-        );
+        console.warn(`[moonshine-browser-stt] a listener of '${eventName}' threw:`, describeReason(thrown));
       }
     }
   }
