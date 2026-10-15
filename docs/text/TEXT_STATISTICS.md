@@ -38,7 +38,7 @@ The classes are exported from the package root, from `@framers/agentos/cognition
 
 ## StatisticalUtilityAI
 
-`initialize(config)` takes `defaultLanguage` (`'en'` unless given), `customStopWordsPaths` (a file per language code, one stop word a line, read from `resourcePath` when it is set), `classifierConfig.naiveBayes` (`modelStoragePath`, `defaultModelId`, `defaultAlpha` 0.05) and `sentimentConfig.defaultLexiconLanguage` (`'en'`). The class logs its progress with `console`.
+`initialize(config)` takes `defaultLanguage` (`'en'` unless given), `customStopWordsPaths` (a file per language code, one stop word a line, read from `resourcePath` when it is set), `classifierConfig.naiveBayes` (`modelStoragePath`, `defaultModelId`, `defaultAlpha` 0.05) and `sentimentConfig.defaultLexiconLanguage` (`'en'`). The config type's other fields, `defaultStopWordsLanguage`, `summarizerConfig`, `languageDetectionConfig` and `readabilitySyllableAlgorithm`, are not read. The class logs its progress with `console`.
 
 | Method | What it answers |
 |---|---|
@@ -63,7 +63,7 @@ The classes are exported from the package root, from `@framers/agentos/cognition
 
 It answers `{ score: 0, polarity: 'neutral' }` with empty word lists for every text. The class asks `natural`'s `SentimentAnalyzer` for the AFINN lexicon of the language code (`en`); `natural` names the languages of its lexicons in full (`English`, `Spanish`), refuses the code, and the class falls back to an analyzer that scores every text 0. `initialize()` logs the fallback as a warning: `Failed to initialize sentiment analyzer for 'en'`. `sentimentConfig.lexiconPath` is not read.
 
-A score from a model comes from `LLMUtilityAI.analyzeSentiment()`. A `HybridUtilityAI` that holds a statistical class sends sentiment there, so it answers neutral too. A GMI's sentiment tracking calls this method on the GMI's utility class, so on `gmi()`, whose class is a `StatisticalUtilityAI`, every scored turn is neutral ([Adaptive Prompt Intelligence](../ADAPTIVE_PROMPT_INTELLIGENCE.md) lists the events that still fire).
+A score from a model comes from `LLMUtilityAI.analyzeSentiment()`. A `HybridUtilityAI` that holds a statistical class sends sentiment there, so it answers neutral too. A GMI's sentiment tracking calls this method on the GMI's utility class, so on `gmi()`, whose class is a `StatisticalUtilityAI`, every scored turn is neutral ([Adaptive Prompt Intelligence](../ADAPTIVE_PROMPT_INTELLIGENCE.md) lists the events that fire with it).
 
 ### Classification
 
@@ -124,7 +124,7 @@ A call uses the model it is given (`options.modelId`, or `llmModelId` for simila
 | Method | What it does |
 |---|---|
 | `summarize(text, { method, desiredLength, maxInputLength })` | `'abstractive_llm'` (the default) asks for a paragraph and `'key_points_llm'` for bullet points; `desiredLength` becomes an instruction. The text is cut to `maxInputLength` characters, 8,000 unless given, and the reply is held to 500 tokens, or to three quarters of a `desiredLength` above 100. Any other method throws `NOT_SUPPORTED`. |
-| `classifyText()`, `analyzeSentiment()`, `extractKeywords()`, `detectLanguage()`, `calculateReadability()` | Ask the model for JSON, with `responseFormat: { type: 'json_object' }`. A reply that does not parse goes back to the model once for repair. When it still does not parse, or lacks the fields asked for, classification, sentiment and readability throw a `GMIError` with code `PARSING_ERROR`. Keywords and language ask for a JSON array: a reply that is not an array answers `[]` for keywords and `[{ language: 'und', confidence: 0.1 }]` for language. `detectLanguage()` answers at most `maxCandidates`, 1 unless given. |
+| `classifyText()`, `analyzeSentiment()`, `extractKeywords()`, `detectLanguage()`, `calculateReadability()` | Ask the model for JSON, with `responseFormat: { type: 'json_object' }`. A reply that does not parse goes back to the model once for repair. When it still does not parse, or lacks the fields asked for, classification, sentiment and readability throw a `GMIError` with code `PARSING_ERROR`. Keywords and language ask for a JSON array: a reply that is not an array answers `[]` for keywords and `[{ language: 'und', confidence: 0.1 }]` for language. `detectLanguage()` sends the text's first 1,000 characters and answers at most `maxCandidates`, 1 unless given. |
 | `calculateSimilarity(a, b, { method })` | `'llm_semantic'` (the default) asks the model for a score and clamps it to 0 to 1, and throws `PARSING_ERROR` when the reply holds no number; any other method throws `NOT_SUPPORTED`. |
 | `normalizeText(text, options)` | One model call whose instructions follow the options; stop words and stemming are not asked for. |
 | `tokenize()`, `generateNGrams()` | Plain JavaScript: words split at white space after common ASCII punctuation is turned into spaces, sentences split after `.`, `!` and `?`, both lower-cased unless `toLowerCase: false`; n-grams with `includePartial` supported. |

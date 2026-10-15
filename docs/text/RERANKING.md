@@ -52,7 +52,7 @@ A provider implements [`IRerankerProvider`](../../src/cognition/rag/reranking/IR
 | Id | Class | Needs | Defaults |
 |---|---|---|---|
 | `local` | [`LocalCrossEncoderReranker`](../../src/cognition/rag/reranking/providers/LocalCrossEncoderReranker.ts) `({ providerId: 'local', defaultModelId, batchSize, maxSequenceLength, cacheDir, device })` | Transformers.js: `@huggingface/transformers`, an optional dependency of the package, or `@xenova/transformers`. It loads the model on its first call. | Model `cross-encoder/ms-marco-MiniLM-L-6-v2`, batches of 32, sequences of 512 tokens; `LOCAL_RERANKER_MODELS` lists five model ids |
-| `cohere` | [`CohereReranker`](../../src/cognition/rag/reranking/providers/CohereReranker.ts) `({ providerId: 'cohere', apiKey, baseUrl, defaultModelId })` | A Cohere API key; without one `isAvailable()` answers false and `rerank()` throws. | Model `rerank-v3.5`, requests to `https://api.cohere.ai/v1/rerank`, 30 seconds before a request is abandoned; `COHERE_RERANKER_MODELS` lists seven model ids |
+| `cohere` | [`CohereReranker`](../../src/cognition/rag/reranking/providers/CohereReranker.ts) `({ providerId: 'cohere', apiKey, baseUrl, defaultModelId, defaultTimeoutMs })` | A Cohere API key; without one `isAvailable()` answers false and `rerank()` throws. | Model `rerank-v3.5`, requests to `https://api.cohere.ai/v1/rerank`, 30 seconds before a request is abandoned (a `timeoutMs` in the request, which `RerankerService` always sets, comes first); `COHERE_RERANKER_MODELS` lists seven model ids |
 | `llm-judge` | [`LlmJudgeReranker`](../../src/cognition/rag/reranking/providers/LlmJudgeReranker.ts) `({ llmCallFn, scoringModel, rankingModel, maxPointwiseDocuments, pointwiseTopK, batchSize })` | Your `llmCallFn(system, user, model?)`, which answers the model's text | Scores up to 100 passages from 0 to 10 in batches of 10 with `scoringModel`, reading each passage's first 200 characters (a batch whose reply does not parse scores 0), then has `rankingModel` order the best 20; when that call fails, the order of the scores stands |
 
 ## RerankerService
@@ -67,7 +67,7 @@ A provider implements [`IRerankerProvider`](../../src/cognition/rag/reranking/IR
 
 ## Where a reranker plugs in
 
-- `RetrievalAugmentor` builds a `RerankerService` from `rerankerServiceConfig`, registers the `cohere` provider (when its entry has an `apiKey`) and the `local` one that config names, and reranks a request that sets `rerankerConfig.enabled` ([RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md#reranker-chain)).
+- `RetrievalAugmentor` builds a `RerankerService` from `rerankerServiceConfig`, registers the `cohere` provider (when its entry has an `apiKey`) and the `local` one that config names, and reranks a request that sets `rerankerConfig.enabled`, or one with no `rerankerConfig` whose retrieval `policy` sets `reranker: 'always'` ([RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md#reranker-chain)).
 - `CognitiveMemoryManager` takes a `rerankerService` and blends 0.7 of each trace's cognitive score with 0.3 of the rerank score ([Memory retrieval reranking](../memory/RAG_MEMORY_CONFIGURATION.md#memory-retrieval-reranking)).
 - `HybridRetriever` takes a `rerankerService` and reranks the fused pool before it truncates ([Hybrid BM25 + Dense Retriever](../architecture/hybrid-retriever.md)).
 - `WebSearchService` takes `reranker` and `rerankChain` and runs the chain over its fused results, unless a search passes `rerank: false`; a reranking error leaves the fused order.
