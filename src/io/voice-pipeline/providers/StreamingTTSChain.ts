@@ -432,10 +432,15 @@ export class StreamingTTSChain implements IStreamingTTS {
       // The request counts as flushed only once the session in use completed its flush with no switch since; a
       // failure, a close or a refused flush of it switches, and the backup that took the text is flushed instead,
       // without waiting for the failed session's own flush to settle. A switch the flush waited for, here or below,
-      // that ended the facade fails the flush.
+      // that ended the facade fails the flush. The flush waits only while a switch is under way and does not yield
+      // otherwise: a switch that began during a yield would leave it flushing the session that failed, past the signal
+      // that lets go of it.
       flush: async (): Promise<void> => {
-        const waited = switching !== undefined;
-        await switching;
+        let waited = false;
+        while (switching) {
+          waited = true;
+          await switching;
+        }
         if (closed) {
           if (waited && faulted) throw new Error('synthesis failed');
           return;
@@ -462,7 +467,7 @@ export class StreamingTTSChain implements IStreamingTTS {
             }
             begin(failure);
           }
-          await switching;
+          while (switching) await switching;
           if (closed) {
             if (faulted) throw new Error('synthesis failed');
             return;
