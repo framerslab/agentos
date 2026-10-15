@@ -72,6 +72,15 @@ export {
   deepgramPreRecordedPricing,
   deepgramStreamingPricing,
 } from '../../io/voice-pipeline/providers/deepgramPricing.js';
+// The hosted transcription selector beside the prices it orders: the same functions the voice pipeline exports, for
+// server admission that loads no audio provider.
+export { selectLowestCostSttEntry, sttLanguageOptions } from '../../io/voice-pipeline/LowestCostStt.js';
+export type {
+  SttPriceRow,
+  SttCreditSnapshot,
+  LowestCostSttOptions,
+  LowestCostSttSelection,
+} from '../../io/voice-pipeline/LowestCostStt.js';
 
 // Compound credit: rational rates, funding lots, holds, every-attempt budgets and the margin report.
 export {

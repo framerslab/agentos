@@ -769,6 +769,47 @@ await settleTimedTextBudget(t, { scopeId, budgetId: sessionId, initialAudioMicro
 
 [`TimedTextBudget.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/TimedTextBudget.ts) funds a listening session's text by elapsed time, apart from its transcription sockets: reconnects, rollovers and fallbacks never touch it. A part of `partMicro` funds each `sliceMs` from the session's start. `renewTimedTextBudget` reserves the next part through the host's callback once its boundary has passed and `allowed` is true, once per slice: a renewal before the first boundary is refused, and a repeat within a slice reserves nothing. A refused allowance throws before any reservation, so the session stops before more text. Report text cost cumulatively from one serialized text lane, and drain that lane's in-flight request before renewing. `settleTimedTextBudget` settles each part once, at most its `partMicro` of text, the first combined with the initial audio; a second call changes nothing. The state is one document in the host's credit transaction, under the locks the host already holds.
 
+## Hosted transcription integration
+
+```typescript
+import { selectLowestCostSttEntry, type SttPriceRow } from '@framers/agentos/safety/runtime';
+
+// Synthetic prices and no credit; a host uses its verified tariff rows.
+const prices: SttPriceRow[] = [
+  { entry: 'deepgram:nova-3', microPerMinute: 4_800 },
+  { entry: 'openai:gpt-4o-mini-transcribe', microPerMinute: 3_000 },
+];
+const selection = selectLowestCostSttEntry(prices.map((row) => row.entry), prices, {
+  availableVendors: ['deepgram', 'openai'],
+  nowMs: Date.UTC(2026, 9, 14),
+  estimatedSeconds: 60,
+});
+// selection.serving is openai:gpt-4o-mini-transcribe; its fallback is deepgram:nova-3.
+// The host still authorizes both policy and spend before opening either socket.
+```
+
+`@framers/agentos/io/voice-pipeline` serves provider construction, provider policy, connection hooks and the Deepgram usage reader. Server admission and accounting import the pure selector, the transcription price readers, the credit operations and the SQL store from `@framers/agentos/safety/runtime`, which loads no audio provider. Both entries export the same `selectLowestCostSttEntry` and `sttLanguageOptions`. Selection reads no environment variable or credential.
+
+| Boundary | API | Host responsibility |
+|---|---|---|
+| Price lookup | `deepgramStreamingPricing`, `deepgramPreRecordedPricing`, `openAITranscriptionPricing` | Choose the verified tariff for the actual model and request mode; a missing row is an error, never a free request |
+| Pure order | `selectLowestCostSttEntry`, `sttLanguageOptions` | Supply the offered entries, the vendors actually available, their prices and the current version-bound credit snapshot |
+| Atomic admission | `admitLowestCostTranscription` | Persist the chosen chain and the ordinary gross spend reservation in the same transaction |
+| Named vendor | `reserveTranscriptionCredit` | Keep a single-vendor chain and reserve gross spend separately |
+| Socket opening | `SttConnectionHooks.authorize`, `bindTranscriptionConnection` | Bind the actual entry and connection UUID before audio; reserve separately for every reconnect, rollover and fallback socket |
+| Usage | `SttMeasuredUsageEvent`, `settleTranscriptionInterval` | Queue each cumulative report durably and settle it once; keep each interval's entry, seconds and prepaid and charged amounts |
+| Supplier evidence | `readDeepgramUsage`, `refreshTranscriptionCredit` | Verify complete scope and cost semantics, the reporting delay and the credit's validity before using the evidence |
+| Failed check | `failTranscriptionCreditCheck` | Record every failed check; one failure counts per UTC day, and stale or failed evidence is never shown as current |
+| Configuration | `makeTranscriptionCreditRecord`, `configureTranscriptionCredit` | Validate the complete funding record; a missing or partial record authorizes no credit |
+| Text funding | `createTimedTextBudget`, `renewTimedTextBudget`, `settleTimedTextBudget` | Reserve each slice's text part through the host's spend adapter once its allowance is checked |
+| Database transaction | `SqlCompoundCreditStore.withStorageTransaction` | Pass the open adapter transaction and keep one commit and rollback boundary |
+
+For an explicit named-vendor choice, offer only that vendor and leave cross-vendor failover off. Resolve a private device choice with the host's device policy before hosted selection; a failed device preparation never turns it into a hosted session. For a lowest-cost hosted chain, set `enableMidUtteranceFailover: true` on the chain and give each vendor its own key. Configure Deepgram with `mipOptOut: true`, the actual `inputSampleRate` and, when periodic settlement is needed, a positive `usageIntervalMs`. Selection is fixed at admission: changed prices or credit apply to later sessions.
+
+The selector's zero effective price is an admission estimate, not a prepaid receipt; only an interval's allocation marks usage prepaid. Replayed and overlapping audio is measured on every socket that receives it. Customer allowances, derived-text processing, provider availability, consent controls and product copy stay host policies.
+
+The `Transcription package` workflow ([`transcription-package.yml`](https://github.com/framerslab/agentos/blob/master/.github/workflows/transcription-package.yml)) installs the packed package into an empty project and runs [`transcription-consumer.ts`](https://github.com/framerslab/agentos/blob/master/scripts/fixtures/transcription-consumer.ts) against it with network access refused. The consumer compiles against the installed declarations and exercises the selector from both entries, the price readers, credit configuration and refresh, two simultaneous admissions over one credited minute, a split prepaid and charged receipt and time-based text funding. A run dispatched on a release tag downloads that version from the registry, matches its tarball to the registry's integrity and runs the same consumer. It calls no speech provider; wire behavior, sample-rate conversion and database concurrency are covered by the source suites in CI.
+
 ## Call profile
 
 `overrides.callProfile` ([`CallPipelineProfile`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts)) runs the session as one scoped call. `startSession()` then returns the call's own session and reads neither `endpointDetector` nor `bargeinHandler`. It throws when the config sets `diarization: true`, when the agent session has no `abort()`, when `minSpeechMs`, `maxTextCharacters` or `maxSynthesisRequests` is not a positive safe integer, and when the transport lacks `waitForPlayback()` and `clearPlayback()` ([`IPlaybackTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)). `LiveKitStreamTransport` has both and speaks only with its `publisher` option ([Speaking in the room](#speaking-in-the-room)); without it, the first reply's send rejects and fails the call. An STT session without `pushAudioScoped()` and `reset()` ([`ScopedStreamingSTTSession`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)) closes the call, and `startSession()` rejects.
