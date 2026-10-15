@@ -200,6 +200,8 @@ export function verifyAnalyticsTransports(input: TransportCheckInput): string[] 
       continue;
     }
     if (url.origin === input.pageOrigin && !endpoints.some(({ endpoint }) => endpoint.origin === url.origin && endpoint.path === url.pathname)) continue;
+    // The page's route is checked before a destination or consent problem ends the request's other checks.
+    if (!input.routeIds.has(request.route)) problems.push(`${request.route}: the page is not a registered public route`);
     const match = endpoints.find(({ endpoint }) => endpoint.origin === url.origin && endpoint.path === url.pathname && endpoint.method === request.method.toUpperCase());
     if (match === undefined) {
       problems.push(`${request.route}: a request to an unregistered destination ${url.origin}${url.pathname}`);
@@ -209,7 +211,6 @@ export function verifyAnalyticsTransports(input: TransportCheckInput): string[] 
       problems.push(`${request.route}: a request to ${url.origin}${url.pathname} ${PHASE_WORDS[request.phase]}`);
       continue;
     }
-    if (!input.routeIds.has(request.route)) problems.push(`${request.route}: the page is not a registered public route`);
     const entries = payloadEntries(request.body) === null ? null : [...(payloadEntries(request.body) ?? []), ...new URLSearchParams(url.search).entries()];
     if (entries === null) {
       problems.push(`${request.route}: a payload that is neither an object nor a form`);
