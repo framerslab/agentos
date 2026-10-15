@@ -1,3 +1,5 @@
+Release notes after 0.13.150 are on the [GitHub releases](https://github.com/framerslab/agentos/releases); this file holds the history up to it.
+
 ## [0.13.150](https://github.com/framerslab/agentos/compare/v0.13.149...v0.13.150) (2026-10-15)
 
 ### fix
