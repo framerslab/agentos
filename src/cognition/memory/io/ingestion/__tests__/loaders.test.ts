@@ -277,6 +277,106 @@ describe('MarkdownLoader', () => {
 // HtmlLoader
 // ---------------------------------------------------------------------------
 
+/**
+ * The text HtmlLoader gave for markup with no `&` while it stripped tags with
+ * regular expressions: those expressions as they were, then its whitespace
+ * step. Markup with no `&` holds no entity, so the entity step is left out.
+ * The expressions take about n^2/2 steps on crafted markup, so only short
+ * strings go through them here.
+ *
+ * @param html - Markup with no `&`.
+ */
+function textByRegex(html: string): string {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<\/?(p|div|section|article|header|footer|h[1-6]|li|tr|blockquote)[^>]*>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<hr\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * The title HtmlLoader gave for markup with no `&` while it read the title with
+ * a regular expression: that expression as it was.
+ *
+ * @param html - Markup with no `&`.
+ */
+function titleByRegex(html: string): string | undefined {
+  const match = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  return match ? match[1].trim() || undefined : undefined;
+}
+
+/**
+ * Pieces the pages of the comparison below are put together from: tags of
+ * every kind the loader treats apart, in both cases, closed, unclosed and cut
+ * short, a quoted attribute holding `<`, and names spelled with characters that
+ * fold to an ASCII letter only outside ASCII (`ſ`, the Kelvin sign, `ı`, `İ`),
+ * which a regular expression with the `i` flag and no `u` flag does not match.
+ * None holds `&`.
+ */
+const MARKUP_PIECES = [
+  '<', '>', '/', ' ', '\n', '\t', 'a', 'p', 'P', 'h', '1', '7', 'r', '_', '"', '=', '-', '!',
+  'script', 'STYLE', 'title', 'li', 'tr', 'div', 'header', 'blockquote',
+  '<p>', '</p>', '<P class="x">', '<pre>', '<div>', '</DIV >', '<h1>', '</h6>', '<h7>', '<header>', '<head>',
+  '<li>', '<link rel=x>', '<tr>', '<track>', '<blockquote>', '<bloc\u212Aquote>', '<section', '<article>', '</footer>',
+  '<br>', '<BR/>', '<br \n/>', '<br / >', '<hr>', '<hr/>', '<b>', '<>', '<<>', '<!-- c -->', '<a title="x<y">',
+  '<script>', '<SCRIPT type="t">', '<scripts>', '<script', '</script>', '</SCRIPT>', '</script >', '<\u017Fcript>',
+  '<style>', '<Style media="x">', '</style>', '</STYLE>', '<styles>',
+  '<title>', '<TITLE lang=x>', '<titles>', '</title>', '</Title>', '<t\u0131tle>', '</t\u0130tle>',
+  'if (a < b || c > d)', 'x = "</scr" + "ipt>";', 'Hello', 'world',
+];
+
+/**
+ * Numbers in [0, 1) from a fixed seed (mulberry32), so every run builds the
+ * same pages.
+ *
+ * @param seed - The seed.
+ */
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+/** A well-formed page with a script, a style, entities and a quoted attribute holding `<`. */
+const WELL_FORMED_PAGE = [
+  '<!DOCTYPE html>',
+  '<html lang="en">',
+  '<head>',
+  '<meta charset="utf-8">',
+  '<title>Quarterly review &amp; plan</title>',
+  '<style>p { color: #333; }</style>',
+  '<script>if (a < b && c > d) { show("</p>"); }</script>',
+  '</head>',
+  '<body>',
+  '<header><h1>Review</h1></header>',
+  '<p>The review moved to <strong>Thursday</strong>.<br>Bring the &quot;draft&quot; notes from ' +
+    '<a href="/notes" title="drafts < 2 days old">the folder</a>.</p>',
+  '<ul><li>Budget &mdash; final</li><li>Hiring</li></ul>',
+  '<hr/>',
+  '<footer>&copy; 2026</footer>',
+  '</body>',
+  '</html>',
+].join('\n');
+
+/**
+ * The text HtmlLoader reads from {@link WELL_FORMED_PAGE}: the title's words
+ * kept as text, the script and the style one space each, each block tag a line
+ * break, and at most one blank line in a row.
+ */
+const WELL_FORMED_PAGE_TEXT =
+  'Quarterly review & plan\n \n \n\nReview\n\nThe review moved to Thursday.\n' +
+  'Bring the "draft" notes from the folder.\n\nBudget — final\n\nHiring\n\n© 2026';
+
 describe('HtmlLoader', () => {
   it('strips HTML tags and returns plain text', async () => {
     const filePath = path.join(tmpDir, 'page.html');
@@ -353,6 +453,66 @@ describe('HtmlLoader', () => {
     const loader = new HtmlLoader();
     expect(loader.canLoad('file.md')).toBe(false);
     expect(loader.canLoad('file.txt')).toBe(false);
+  });
+
+  it('reads a well-formed page to its text and title, an attribute holding "<" included', async () => {
+    const doc = await new HtmlLoader().load(Buffer.from(WELL_FORMED_PAGE, 'utf8'));
+
+    expect(doc.content).toBe(WELL_FORMED_PAGE_TEXT);
+    expect(doc.metadata).toEqual({ title: 'Quarterly review & plan', wordCount: 23 });
+    expect(doc.format).toBe('html');
+  });
+
+  it('reads 2,000 pages of pieced-together markup to the text and title its regular expressions gave', async () => {
+    const loader = new HtmlLoader();
+    const random = seededRandom(0x5eed);
+    for (let page = 0; page < 2_000; page += 1) {
+      let html = '';
+      const pieces = 1 + Math.floor(random() * 24);
+      for (let piece = 0; piece < pieces; piece += 1) {
+        html += MARKUP_PIECES[Math.floor(random() * MARKUP_PIECES.length)];
+      }
+
+      const doc = await loader.load(Buffer.from(html, 'utf8'));
+
+      // The page is on both sides, so a failure shows it.
+      expect({ html, content: doc.content, title: doc.metadata.title }).toEqual({
+        html,
+        content: textByRegex(html),
+        title: titleByRegex(html),
+      });
+    }
+  });
+
+  // A pattern that scans from a '<' to the end of the page when nothing closes
+  // it, such as /<[^>]+>/g, takes about n^2/2 steps on each page below: one
+  // scan from every '<', or from every '<p', '<script>', '<style>' or '<title>'
+  // left unclosed. That is 2 * 10^10 steps or more for each page here, which no
+  // runner takes within 2 seconds (and minutes at a megabyte), all of it on the
+  // caller's event loop. A read that visits each character a bounded number of
+  // times takes milliseconds at these sizes, so the 2-second bound leaves a
+  // slow or busy runner a wide margin and still fails every quadratic pass.
+  it.each<[string, string, string]>([
+    ['200,000 "<" with no ">"', '<'.repeat(200_000), '<'.repeat(200_000)],
+    ['100,000 "<p" with no ">"', '<p'.repeat(100_000), '<p'.repeat(100_000)],
+    [
+      '25,000 "<script>" and 25,000 "<style>" never closed, then 400,000 characters of text',
+      '<script>'.repeat(25_000) + '<style>'.repeat(25_000) + 'shown(1); '.repeat(40_000),
+      'shown(1); '.repeat(40_000).trim(),
+    ],
+    ['100,000 "<title>" never closed', '<title>'.repeat(100_000), ''],
+  ])('reads %s within 2 seconds, to the text the page holds', async (_case, html, text) => {
+    const source = Buffer.from(html, 'utf8');
+
+    const started = performance.now();
+    const doc = await new HtmlLoader().load(source);
+    const elapsed = performance.now() - started;
+
+    expect(elapsed).toBeLessThan(2_000);
+    // Compared whole, not diffed: a diff of strings this long is a slow step of its own.
+    expect(doc.content.length).toBe(text.length);
+    expect(doc.content === text).toBe(true);
+    expect(doc.metadata.title).toBeUndefined();
   });
 });
 
