@@ -82,8 +82,8 @@ export default {
       npmPublish: true
     }],
 
-    // Create the GitHub release, with the refreshed test-count badge attached;
-    // the README's badge reads it from the latest release.
+    // Create the GitHub release, with the refreshed test-count badge attached.
+    // The README's badge reads the copy shipped in the npm package, through unpkg.
     ['@semantic-release/github', {
       successComment: false,
       failComment: false,
