@@ -36,6 +36,7 @@ import {
   type ProviderEventType,
   type SendBotRequest,
   type SendBotResult,
+  type TranscriptTurn,
   type SupplierUsage,
 } from './types.js';
 
@@ -88,6 +89,13 @@ export interface MeetingManagerConfig {
    * deliveries whatever this says.
    */
   scrubUnkeptOutbox?: boolean;
+  /**
+   * Optional. The host's step before a run's settle and scrub, awaited with the run as it stands in `left` and every
+   * turn the run stored, once the transcript is fenced (no turn can arrive after it). A step that throws is logged by
+   * its error's name, and the completion goes on: the run ends `done` and a run not kept loses its content all the
+   * same. It is not run for a run the stop phrase or a purge ended, nor for a failed run (neither has turns to give).
+   */
+  beforeComplete?: (run: MeetingRunRecord, turns: readonly TranscriptTurn[]) => Promise<void>;
   /** How long a dispatch lease lasts; renewed every third of it while a dispatch is in flight. Default 60000. */
   leaseTtlMs?: number;
   /** How long after `in_call` the notice may go unconfirmed before the run leaves with `notice_failed`. Default 30000. */
@@ -1704,6 +1712,13 @@ export class MeetingManager {
     let billed = isBilledEnd(run) ? seconds : 0;
     try {
       await this.stores.transcript.fence(run.runId);
+      if (this.config.beforeComplete) {
+        try {
+          await this.config.beforeComplete(run, await this.allTurns(run.runId));
+        } catch (err) {
+          this.config.logger?.warn(`[MeetingManager] beforeComplete of ${run.runId}: ${err instanceof Error ? err.name : 'error'}`);
+        }
+      }
       await this.settleRunFunding(run, billed);
       if (run.funding) {
         const settled = await this.stores.runs.get(run.runId);
@@ -1743,6 +1758,19 @@ export class MeetingManager {
   private countedSeconds(stored: number | undefined, reported: number | undefined): number | undefined {
     if (reported === undefined) return stored;
     return stored === undefined ? reported : Math.max(stored, reported);
+  }
+
+  /** Every turn of the run, in order, read in pages of 500. */
+  private async allTurns(runId: string): Promise<TranscriptTurn[]> {
+    const turns: TranscriptTurn[] = [];
+    let from = 0;
+    for (;;) {
+      const page = await this.stores.transcript.read(runId, from, 500);
+      turns.push(...page);
+      const last = page[page.length - 1];
+      if (page.length < 500 || last === undefined) return turns;
+      from = last.seq;
+    }
   }
 
   private async crash(run: MeetingRunRecord, at: number, seconds: number | undefined): Promise<void> {
