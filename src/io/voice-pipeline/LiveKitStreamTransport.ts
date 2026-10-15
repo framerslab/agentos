@@ -87,7 +87,10 @@ export interface LiveKitStreamTransportOptions {
    * oldest are dropped and reported as a `gap` on resume. Default 2000.
    */
   bufferMs?: number;
-  /** The `@livekit/rtc-node` module the host imports; imported on first use when omitted. */
+  /**
+   * The `@livekit/rtc-node` module the host imports, which serves the publisher too unless `publisher.rtc` names
+   * another; imported on first use when omitted.
+   */
   rtc?: LiveKitRtcModule;
   /**
    * Speaks on one track of the room's local participant, which must offer
@@ -176,7 +179,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     // option leaves the topic free; until it is read, the source holds nothing.
     this.source = new LiveKitRoomAudioSource({ room: options.room, participantIdentity: options.participantIdentity,
       sampleRate: options.sampleRate, frameSizeMs: options.frameSizeMs, rtc: options.rtc, strictMono: !!options.publisher });
-    if (options.publisher) this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message));
+    if (options.publisher) this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message), { rtc: options.rtc });
     this.on('pause', () => { if (this._state === 'open') this.paused = true; });
     this.on('resume', () => {
       if (this._state !== 'open') return; this.paused = false;

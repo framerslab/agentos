@@ -1,6 +1,7 @@
 import { inspectPcm16 } from './audioFormat.js';
 import { PlaybackAcknowledgements } from './PlaybackAcknowledgements.js';
 import { sameVoiceGeneration, type EncodedAudioChunk, type PlaybackReceipt, type VoiceGeneration } from './types.js';
+import { loadLiveKitRtc } from '../hearing/LiveKitRoomAudioSource.js';
 
 /** Structural rtc-node frame; buffers passed to the SDK own their complete Int16 allocation. */
 export interface PublishedAudioFrame { data: Int16Array; sampleRate: number; channels: number; samplesPerChannel: number }
@@ -31,12 +32,28 @@ export interface LiveKitAudioPublisherOptions {
   scopeId: string; callId: string; generation(): VoiceGeneration;
   sampleRate: 16000 | 24000 | 48000;
   maxBytes: number; maxDurationMs: number; receiptTimeoutMs: number;
-  /** Actual optional peer module or a structural fixture; import occurs only when publishing is selected. */
+  /**
+   * The `@livekit/rtc-node` module, or a structural one. A transport passes its own `rtc` when this is omitted; with
+   * neither, the module is imported when the track is first published.
+   */
   rtc?: unknown;
 }
-/** Loads only the optional publishing peer; no native dependency enters browser imports or listen-only construction. */
-export async function loadLiveKitPublishingRtc(importer: (name: string) => Promise<unknown> = (name) => import(/* @vite-ignore */ name)): Promise<LiveKitPublishingRtc> {
-  return publishingRtc(await importer('@livekit/rtc-node'));
+/** What a transport hands its publisher besides the host's options. */
+export interface LiveKitPublisherBinding {
+  /** The transport's `@livekit/rtc-node` module; the publisher's own `rtc` option comes first. */
+  rtc?: unknown;
+}
+/**
+ * Loads the optional publishing peer through {@link loadLiveKitRtc}, so a missing package is named with how to install
+ * it; no native dependency enters browser imports or listen-only construction.
+ *
+ * @param importer - How to import a module; the default is {@link loadLiveKitRtc}'s dynamic `import()`.
+ * @returns The module's publishing parts.
+ * @throws {Error} Naming `@livekit/rtc-node` and how to install it when the import fails, or
+ *   `livekit publishing SDK unavailable` when the module lacks a publishing part.
+ */
+export async function loadLiveKitPublishingRtc(importer?: (name: string) => Promise<unknown>): Promise<LiveKitPublishingRtc> {
+  return publishingRtc(await loadLiveKitRtc(importer));
 }
 function publishingRtc(input: unknown): LiveKitPublishingRtc {
   const rtc = input as Partial<LiveKitPublishingRtc> | undefined;
@@ -58,7 +75,15 @@ export class LiveKitAudioPublisher {
   private cancellation = 0;
   private clearWork?: Promise<void>;
   private pending?: PlaybackReceipt;
-  constructor(private readonly options: LiveKitAudioPublisherOptions, participant: unknown, private readonly send: (message: Record<string, unknown>) => Promise<void>) {
+  /**
+   * @param options - The host's options: the call identity, the track's rate and the bounds.
+   * @param participant - The room's local participant, which publishes the track.
+   * @param send - Sends one JSON message to the participant on the transport's topic.
+   * @param binding - What the transport hands over besides the options: its rtc module.
+   * @throws {Error} `livekit publishing participant required` when `participant` cannot publish a track, and
+   *   `invalid livekit publisher bound` when an option is refused.
+   */
+  constructor(private readonly options: LiveKitAudioPublisherOptions, participant: unknown, private readonly send: (message: Record<string, unknown>) => Promise<void>, private readonly binding: LiveKitPublisherBinding = {}) {
     const local = participant as Partial<PublishingParticipant> | undefined;
     if (!local || typeof local.publishTrack !== 'function' || typeof local.unpublishTrack !== 'function') throw new Error('livekit publishing participant required');
     this.participant = local as PublishingParticipant;
@@ -70,7 +95,7 @@ export class LiveKitAudioPublisher {
     if (this.closed) return Promise.reject(new Error('publisher closed'));
     if (this.preparation) return this.preparation;
     this.preparation = (async () => {
-      const rtc = this.options.rtc ? publishingRtc(this.options.rtc) : await loadLiveKitPublishingRtc();
+      const rtc = publishingRtc(this.options.rtc ?? this.binding.rtc ?? (await loadLiveKitRtc()));
       if (this.closed) throw new Error('publisher closed'); this.rtc = rtc;
       this.source = new rtc.AudioSource(this.options.sampleRate, 1, this.options.maxDurationMs);
       this.track = rtc.LocalAudioTrack.createAudioTrack('voice', this.source);
