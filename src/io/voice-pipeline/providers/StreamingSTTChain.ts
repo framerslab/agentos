@@ -116,7 +116,8 @@ export interface StreamingSTTChainOptions {
    * failed and closed, and the next provider takes the same audio. A frame
    * whose duration (samples over sample rate) is not above zero and at most
    * `ringBufferCapacityMs`, or, in a session opened with `config.call`, one
-   * without its scope, turn and generation, ends the facade before any
+   * without its scope, call and turn ids (non-empty strings) and its
+   * generation (three finite numeric fences), ends the facade before any
    * provider receives it, and so does a switch no provider can take: the
    * facade emits `'error'` (only to a listener) and then `'close'`. Default:
    * false.
@@ -280,8 +281,14 @@ export class StreamingSTTChain implements IStreamingSTT {
     let lostMs = 0;
     // An error or close of the backup a switch has attached, reported before the switch ended; the switch passes over it.
     let lost: Error | undefined;
-    // Whether a frame carries the scope, turn and generation a scoped session takes it with.
-    const identified = (frame: AudioFrame): boolean => 'scopeId' in frame && 'turnId' in frame && !!frame.generation;
+    // Whether a frame carries the identity a scoped session takes it with: its scope, call and turn ids as non-empty
+    // strings and a generation whose three fences are finite numbers. Fields that are present but hold anything else
+    // identify nothing.
+    const identified = (frame: AudioFrame): boolean => {
+      const { scopeId, callId, turnId, generation } = frame as AudioFrame & Partial<AudioIdentity>;
+      if (![scopeId, callId, turnId].every((id) => typeof id === 'string' && id.length > 0)) return false;
+      return !!generation && [generation.workerGeneration, generation.inferenceGeneration, generation.transportEpoch].every((fence) => Number.isFinite(fence));
+    };
     // A scoped session takes each frame with its identity; a frame without one, or a provider session that cannot
     // take it, fails the delivery rather than reaching the legacy pushAudio.
     const deliver = async (session: StreamingSTTSession, frame: AudioFrame): Promise<void> => {
