@@ -14,9 +14,9 @@ runCompoundCreditStoreContract('sqlite', make, { concurrent: false });
 runCompoundCreditLedgerContract('sqlite', make, { concurrent: false });
 
 describe('compoundCreditDdl', () => {
-  it('names seven tables and their indexes under a prefix, and refuses a prefix that does not fit an identifier', () => {
+  it('names eight tables and their indexes under a prefix, and refuses a prefix that does not fit an identifier', () => {
     const ddl = compoundCreditDdl('acme_credit');
-    for (const table of ['accounts', 'lots', 'holds', 'allocations', 'attempts', 'entries', 'supplier_days']) {
+    for (const table of ['accounts', 'lots', 'holds', 'allocations', 'attempts', 'entries', 'supplier_days', 'documents']) {
       expect(ddl).toContain(`CREATE TABLE IF NOT EXISTS acme_credit_${table} (`);
     }
     expect(ddl).toContain('CREATE UNIQUE INDEX IF NOT EXISTS idx_acme_credit_lots_funding ON acme_credit_lots (scope_id, funding_ref)');

@@ -72,6 +72,15 @@ export {
   deepgramPreRecordedPricing,
   deepgramStreamingPricing,
 } from '../../io/voice-pipeline/providers/deepgramPricing.js';
+// The hosted transcription selector beside the prices it orders: the same functions the voice pipeline exports, for
+// server admission that loads no audio provider.
+export { selectLowestCostSttEntry, sttLanguageOptions } from '../../io/voice-pipeline/LowestCostStt.js';
+export type {
+  SttPriceRow,
+  SttCreditSnapshot,
+  LowestCostSttOptions,
+  LowestCostSttSelection,
+} from '../../io/voice-pipeline/LowestCostStt.js';
 
 // Compound credit: rational rates, funding lots, holds, every-attempt budgets and the margin report.
 export {
@@ -101,6 +110,7 @@ export type {
   CreditAllocationRow,
   CreditAttemptRow,
   CreditAttemptState,
+  CreditDocumentRow,
   CreditEntryFilter,
   CreditEntryKind,
   CreditEntryRow,
@@ -168,3 +178,34 @@ export { COMPOUND_CREDIT_DDL, SqlCompoundCreditStore, compoundCreditDdl } from '
 export type { SqlCompoundCreditStoreOptions } from './SqlCompoundCreditStore.js';
 export { buildMarginReport, marginReport, readMarginPeriod } from './MarginReport.js';
 export type { MarginAllocationPolicy, MarginPeriodInput, MarginReport, MarginReportQuery, MarginSettlement } from './MarginReport.js';
+
+// Supplier transcription credit: a vendor's promotional balance, reserved before audio and allocated from measured usage.
+export {
+  makeTranscriptionCreditRecord,
+  configureTranscriptionCredit,
+  refreshTranscriptionCredit,
+  failTranscriptionCreditCheck,
+  transcriptionCreditSnapshot,
+  reserveTranscriptionCredit,
+  admitLowestCostTranscription,
+  bindTranscriptionConnection,
+  settleTranscriptionInterval,
+} from './TranscriptionCredit.js';
+export type {
+  TranscriptionCreditRecordInput,
+  TranscriptionCreditRecord,
+  ReserveTranscriptionCreditInput,
+  TranscriptionAdmission,
+  TranscriptionIntervalInput,
+  TranscriptionIntervalAllocation,
+} from './TranscriptionCredit.js';
+
+// Text funding by elapsed time for a listening session, independent of its transcription sockets.
+export {
+  createTimedTextBudget,
+  readTimedTextBudget,
+  reportTimedTextBudget,
+  renewTimedTextBudget,
+  settleTimedTextBudget,
+} from './TimedTextBudget.js';
+export type { TimedTextBudgetView } from './TimedTextBudget.js';

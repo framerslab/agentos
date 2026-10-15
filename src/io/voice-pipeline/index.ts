@@ -292,3 +292,14 @@ export type {
 
 // A host's refusal of a hosted transcription socket (`StreamingSTTConfig.connectionHooks`); never retried as an outage.
 export { SttConnectionAuthorizationError } from './SttConnectionAuthorizationError.js';
+
+// A Deepgram project's request costs for supplier-credit reconciliation; reads no balance and grants no credit.
+export { readDeepgramUsage, DeepgramUsageReadError } from './providers/DeepgramUsage.js';
+export type {
+  DeepgramUsageFailureCode,
+  DeepgramUsageContract,
+  DeepgramRequestCost,
+  DeepgramUsageEvidence,
+  DeepgramUsageReadOptions,
+  DeepgramUsageFetch,
+} from './providers/DeepgramUsage.js';
