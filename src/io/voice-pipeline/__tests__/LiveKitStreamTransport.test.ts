@@ -972,6 +972,30 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     await transport.whenClosed();
   });
 
+  it('holds the track for a phone caller on a barge-in pause, sending the caller nothing, and releases it on resume', async () => {
+    const room = new FakeRoom();
+    room.addSipCaller('sip_caller', new FakePublication(new FakeTrack('TR_CALLER')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'sip_caller',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    await transport.sendAudio(toneChunk(1));
+    await transport.sendControl({ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } });
+    expect(FakeAudioSource.created[0]!.clears).toBe(1);
+    const held = transport.sendAudio(toneChunk(2));
+    await settle();
+    expect(capturedTones()).toEqual([1]);
+    await transport.sendControl({ type: 'barge_in', action: { type: 'resume' } });
+    await held;
+    expect(capturedTones()).toEqual([1, 2]);
+    expect(room.localParticipant.sendText).not.toHaveBeenCalled();
+    transport.close();
+    await transport.whenClosed();
+  });
+
   it('plays a chunk sent before the participant joins natively, and fixes the mode once the participant is in the room', async () => {
     const room = new FakeRoom();
     const transport = new LiveKitStreamTransport({

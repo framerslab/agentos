@@ -36,8 +36,9 @@
  *   every participant subscribed to the track hears it, chunks queue on the
  *   track in order, `waitForPlayback()` resolves once the track has played
  *   the chunk out, `waitForPlayout()` once it has played out every chunk
- *   sent, `clearPlayback()` needs no answer, and a `barge_in` message that
- *   cancels clears the track as it is sent.
+ *   sent, `clearPlayback()` needs no answer, and a `barge_in` message acts
+ *   on the track as it is sent: a cancel clears it, a pause holds it, and a
+ *   resume releases it.
  * - Participant playout, when `publisher.playout` is `'participant'` or the
  *   participant's `agentos.playout` attribute is: one chunk at a time,
  *   announced to the participant, and `waitForPlayback()` resolves only after
@@ -241,7 +242,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   }
   /**
    * Resolves once the track has played out what the transport was handed: every chunk sent so far, and any sent while
-   * it waits; what a clear discarded counts as played out. A listen-only transport resolves at once.
+   * it waits; what a clear or a pause discarded counts as played out. A listen-only transport resolves at once.
    */
   async waitForPlayout(): Promise<void> { await this.publisher?.waitForPlayout(); }
   /** Discards only this physical path's queued output; a closed path must finish native cleanup. */
@@ -269,13 +270,18 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * Sends one JSON message to the participant as a text stream on the topic. Existing server messages retain their
    * wire representation; call-profile messages carry their captured scope and generation. A SIP participant reads no
    * text streams, so nothing is sent to one and the send resolves. Outside participant playout a `barge_in` message
-   * that cancels first clears what the track holds, as a page clears the audio it plays.
+   * first acts on the track, as a page acts on the audio it plays: a `cancel` clears what the track holds, a `pause`
+   * holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases it.
    *
    * @throws {Error} When the transport is not open or the room has no local participant.
    */
   async sendControl(message: ServerTextMessage): Promise<void> {
     if (this._state !== 'open') throw new Error('LiveKitStreamTransport: cannot send while ' + this._state);
-    if (message.type === 'barge_in' && message.action.type === 'cancel' && this.publisher && this.publisher.playout !== 'participant') await this.publisher.clearPlayback();
+    if (message.type === 'barge_in' && this.publisher && this.publisher.playout !== 'participant') {
+      if (message.action.type === 'cancel') await this.publisher.clearPlayback();
+      else if (message.action.type === 'pause') this.publisher.pause();
+      else if (message.action.type === 'resume') this.publisher.resume();
+    }
     if (isLiveKitSipParticipant(this.linkedParticipant())) return;
     await this.sendWire(message);
   }
