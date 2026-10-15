@@ -4,7 +4,8 @@
  * All HTTP calls are intercepted via an injected `fetchImpl` -- no real
  * network traffic is made. Tests cover:
  * - Ed25519 webhook verification (portal and DER keys, tampering, replay
- *   window, no public key, missing headers, bad key format).
+ *   window, no public key, the development opt-in, missing headers, bad key
+ *   format).
  * - Event mapping for all supported Telnyx Call Control event types.
  * - Hangup cause mapping (`normal_clearing` vs. other causes).
  * - Voicemail detection via `call.machine.detection.ended`.
@@ -17,6 +18,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { TelnyxVoiceProvider } from '../providers/telnyx.js';
+import { resetLoggerFactory, setLoggerFactory } from '../../../../core/logging/loggerFactory.js';
 import type { WebhookContext } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -212,6 +214,71 @@ describe('TelnyxVoiceProvider', () => {
         });
         expect(withoutKey.verifyWebhook(ctx)).toEqual(refused);
       }
+    });
+
+    it('should accept a webhook unverified only when allowUnverifiedWebhooks is true, and warn once through the host logger', () => {
+      const ctx = makeWebhookCtx(makeEventBody('call.dtmf.received', { digit: '1' }));
+      for (const protocol of ['legacy', 'carrier'] as const) {
+        const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+        const development = new TelnyxVoiceProvider({
+          apiKey: API_KEY,
+          connectionId: CONNECTION_ID,
+          protocol,
+          allowUnverifiedWebhooks: true,
+          logger,
+          fetchImpl: fetchMock as typeof fetch,
+        });
+        expect(development.verifyWebhook(ctx)).toEqual({ valid: true });
+        expect(development.verifyWebhook(ctx)).toEqual({ valid: true });
+        expect(logger.warn).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('allowUnverifiedWebhooks'));
+      }
+      // Only true opens it: a string such as 'false', read from the environment, is truthy and leaves the refusal in place.
+      for (const allowUnverifiedWebhooks of [false, 'false' as unknown as boolean]) {
+        const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+        const withoutKey = new TelnyxVoiceProvider({
+          apiKey: API_KEY,
+          connectionId: CONNECTION_ID,
+          allowUnverifiedWebhooks,
+          logger,
+          fetchImpl: fetchMock as typeof fetch,
+        });
+        expect(withoutKey.verifyWebhook(ctx)).toEqual({ valid: false, error: 'No publicKey configured to verify Telnyx webhooks' });
+        expect(logger.warn).not.toHaveBeenCalled();
+      }
+    });
+
+    it('should write the development warning through createLogger when the host passes no logger', async () => {
+      const warn = vi.fn();
+      setLoggerFactory((name) => ({ info: vi.fn(), warn: (message: string) => warn(name, message), error: vi.fn() }));
+      try {
+        const development = new TelnyxVoiceProvider({
+          apiKey: API_KEY,
+          connectionId: CONNECTION_ID,
+          allowUnverifiedWebhooks: true,
+          fetchImpl: fetchMock as typeof fetch,
+        });
+        expect(development.verifyWebhook(makeWebhookCtx('{}'))).toEqual({ valid: true });
+        // The provider imports the logging module to write the warning, so it arrives after the constructor returns.
+        await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+        expect(warn).toHaveBeenCalledExactlyOnceWith('TelnyxVoiceProvider', expect.stringContaining('allowUnverifiedWebhooks'));
+      } finally {
+        resetLoggerFactory();
+      }
+    });
+
+    it('should still check a configured public key when allowUnverifiedWebhooks is true, without a warning', () => {
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const providerWithKey = new TelnyxVoiceProvider({
+        apiKey: API_KEY,
+        connectionId: CONNECTION_ID,
+        publicKey: Buffer.alloc(32).toString('base64'), // dummy key
+        allowUnverifiedWebhooks: true,
+        logger,
+        fetchImpl: fetchMock as typeof fetch,
+      });
+      const ctx = makeWebhookCtx(makeEventBody('call.dtmf.received', { digit: '1' }));
+      expect(providerWithKey.verifyWebhook(ctx)).toEqual({ valid: false, error: 'Missing Telnyx signature headers' });
+      expect(logger.warn).not.toHaveBeenCalled();
     });
 
     it('should return valid: false when signature headers are missing and publicKey is set', () => {
