@@ -650,6 +650,46 @@ Deepgram opens with the language `sttLanguageOptions()` gives its entry ([Hosted
 
 Deepgram's `usageIntervalMs` defaults to zero for one final report; a positive value adds cumulative reports while the connection is open. Its final report is emitted once across explicit close, remote close and failed upgrade cleanup. Configure `mipOptOut: true` to send `mip_opt_out=true`; a per-session false value cannot undo that setting. These changes preserve the general-purpose library's existing opt-out and failover defaults. Hosts that require those policies set them explicitly.
 
+## Supplier usage evidence
+
+```typescript
+import {
+  readDeepgramUsage,
+  DeepgramUsageReadError,
+  type DeepgramUsageContract,
+} from '@framers/agentos/io/voice-pipeline';
+
+// The host's own verified record of its account's billing behavior; the library does not certify it.
+declare const contract: DeepgramUsageContract;
+const nowMs = Date.now();
+try {
+  const evidence = await readDeepgramUsage({
+    projectId: process.env.DEEPGRAM_PROJECT_ID!,
+    apiKey: process.env.DEEPGRAM_USAGE_KEY!, // server-side only; never stored with the evidence
+    fromMs: baselineMs, // a whole second, less than 90 days before nowMs
+    throughMs: Math.floor((nowMs - contract.maxReportingLagMs) / 1000) * 1000,
+    nowMs,
+    contract,
+  });
+  await reconcileSupplierUsage(evidence); // evidence.costMicro and one row per request
+} catch (error) {
+  if (!(error instanceof DeepgramUsageReadError)) throw error;
+  recordFailedCheck(error.code); // keep the last successful result; a failure is never zero usage
+}
+```
+
+`readDeepgramUsage()` ([`DeepgramUsage.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/DeepgramUsage.ts)) reads the project's request-cost records from [List Project Requests](https://developers.deepgram.com/reference/manage/requests/list), whose response example includes `response.details.usd`; the [Logs & Usage guide](https://developers.deepgram.com/docs/using-logs-usage) names that field as the request's cost in US dollars. The deprecated [project usage response](https://developers.deepgram.com/reference/manage/usage/get) documents no monetary totals, and the [usage breakdown](https://developers.deepgram.com/reference/manage/usage/breakdown/get) documents quantities. These references were read on 15 October 2026. A quantity aggregate is not a monetary balance.
+
+Before using the reader to support supplier credit, the host supplies a dated `DeepgramUsageContract` verified against its billing arrangement: complete project scope, costs covering all request categories and privacy settings, timestamp boundaries, pagination and a maximum final-cost reporting delay. The contract has an evidence version and a validity end. The type does not certify those facts. Deepgram publishes no bound on that delay: its guide describes requests whose response is not recorded yet as pending and says to give them time. No verified delay means no usable contract. The interval must end at least that far behind the check time.
+
+The reader enumerates every request without vendor-model, endpoint, status or key filters, rejects missing costs and incomplete responses, rounds each nonnegative USD amount upward to a micro-dollar and checks two complete traversals for agreement. HTTP redirects, duplicate request ids, shifted pages, changed costs, a timeout or a page/response-size limit all fail the check, with a fixed `code` on `DeepgramUsageReadError` and no response content. A record listed before its response or cost is recorded fails the check too; the guide's own example lists a request with `"response": null`. The returned evidence contains request identities, times and costs only. Neither a balance response nor a missing field becomes zero.
+
+The reader sends the interval as `YYYY-MM-DDTHH:MM:SS+00:00`, one of the forms the endpoint documents, so `fromMs` and `throughMs` fall on whole seconds, and `throughMs` is inclusive. Deepgram keeps request logs readable for 90 days, so an interval that starts 90 days or more before the check is refused instead of read short; a host that reconciles over a longer period stores each interval's evidence before it ages out.
+
+Two identical reads detect some pagination changes; they do not establish reporting completeness. A host still bounds spending after the evidence interval with reservations, retains unreconciled local liabilities and refuses credit when external spending escapes that boundary. Take a new console baseline only after previous requests have drained or have positive fencing evidence. Deepgram attaches promotional credit to an account's first project ([Managing Projects](https://developers.deepgram.com/guides/deep-dives/managing-projects)); if credit spans several projects, collect and reconcile all their costs before using it, since a single-project result is insufficient.
+
+The output's `costMicro` is supplier usage evidence, not a customer charge or a prepaid mark, and the reader decides no coverage. A host's credit allocation binds the evidence to its current funding-record version and settles coverage per request. Never mark all requests from one vendor prepaid merely because that vendor once had a promotional credit.
+
 ## Call profile
 
 `overrides.callProfile` ([`CallPipelineProfile`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts)) runs the session as one scoped call. `startSession()` then returns the call's own session and reads neither `endpointDetector` nor `bargeinHandler`. It throws when the config sets `diarization: true`, when the agent session has no `abort()`, when `minSpeechMs`, `maxTextCharacters` or `maxSynthesisRequests` is not a positive safe integer, and when the transport lacks `waitForPlayback()` and `clearPlayback()` ([`IPlaybackTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)). `LiveKitStreamTransport` has both and speaks only with its `publisher` option ([Speaking in the room](#speaking-in-the-room)); without it, the first reply's send rejects and fails the call. An STT session without `pushAudioScoped()` and `reset()` ([`ScopedStreamingSTTSession`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)) closes the call, and `startSession()` rejects.
