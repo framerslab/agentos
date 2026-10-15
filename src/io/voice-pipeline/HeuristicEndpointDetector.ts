@@ -17,9 +17,17 @@
  *    `'silence_timeout'`. The timeout acts as a safety net for STT providers
  *    that don't produce terminal punctuation reliably.
  *
- * 3. Backchannel phrases (e.g. "uh huh", "yeah") are recognised, suppressed
- *    from accumulation, and re-emitted as `'backchannel_detected'` events so
- *    the pipeline can decide whether to suppress an agent response.
+ * 3. Backchannel phrases (e.g. "uh huh", "yeah") are recognised whatever a
+ *    provider's punctuation: a final is one when its text, trimmed,
+ *    lowercased and stripped of trailing `.`, `,`, `!`, `?` and ellipses, is
+ *    one of the phrases, with or without an `itemId`. While the agent speaks,
+ *    and while it listens after a reply that asked no question, a backchannel
+ *    is suppressed from accumulation and re-emitted as
+ *    `'backchannel_detected'`; after a reply that asked a question, a lone
+ *    one is the user's answer and accumulates as any final does. The pipeline
+ *    reports the agent's state through `setAgentContext()`; before its first
+ *    report, and after a reset with `'session'`, the agent neither speaks nor
+ *    has asked anything.
  *
  * 4. A `speech_end` that finds no final transcript leaves the decision to the
  *    first final that arrives before speech resumes, for providers that
@@ -77,7 +85,7 @@
  */
 
 import { EventEmitter } from 'node:events';
-import type { IEndpointDetector, TranscriptEvent, VadEvent, TurnCompleteEvent } from './types.js';
+import type { EndpointAgentContext, IEndpointDetector, TranscriptEvent, VadEvent, TurnCompleteEvent } from './types.js';
 import { describeReason } from './describeReason.js';
 
 // ---------------------------------------------------------------------------
@@ -109,7 +117,9 @@ const TERMINAL_PUNCTUATION = /[.?!]$/;
 
 /**
  * Normalised backchannel phrases that indicate the listener is acknowledging
- * but not taking a full conversational turn. Compared after `.trim().toLowerCase()`.
+ * but not taking a full conversational turn. Compared with a final's text as
+ * {@link backchannelKey} reads it: trimmed, lowercased and without trailing
+ * punctuation.
  *
  * These 13 phrases were selected because:
  * - They are the most common English-language backchannel markers in the
@@ -139,6 +149,30 @@ const BACKCHANNEL_PHRASES: ReadonlySet<string> = new Set([
   'yup',
   'gotcha',
 ]);
+
+/**
+ * A character {@link backchannelKey} strips from the end of a final's text:
+ * a full stop (three of them make an ellipsis), a comma, an exclamation or
+ * question mark, the ellipsis character, or a space among them.
+ */
+const TRAILING_PUNCTUATION = /[\s.,!?\u2026]/u;
+
+/**
+ * A final's text as it is compared with {@link BACKCHANNEL_PHRASES}: trimmed,
+ * lowercased and stripped of trailing punctuation, so "Sure." and "Uh huh!"
+ * read as "sure" and "uh huh" whichever provider punctuated them. The text is
+ * read back from its end one character at a time, so its length costs a
+ * single pass.
+ *
+ * @param text - A final's text.
+ * @returns The text to look up among the phrases.
+ */
+function backchannelKey(text: string): string {
+  const key = text.trim().toLowerCase();
+  let end = key.length;
+  while (end > 0 && TRAILING_PUNCTUATION.test(key[end - 1])) end -= 1;
+  return key.slice(0, end);
+}
 
 // ---------------------------------------------------------------------------
 // Options
@@ -177,7 +211,7 @@ export interface HeuristicEndpointDetectorOptions {
  * | Event                    | Payload                  | Description                        |
  * |--------------------------|--------------------------|------------------------------------|
  * | `'turn_complete'`        | {@link TurnCompleteEvent}| User turn has ended.               |
- * | `'backchannel_detected'` | `{ text: string }`       | Backchannel phrase was recognised.  |
+ * | `'backchannel_detected'` | `{ text: string }`       | A backchannel was suppressed (see `isBackchannel()`). |
  * | `'late_final'`           | {@link TranscriptEvent}  | A completed turn's late final.     |
  *
  * `'late_final'` carries, as it was pushed, an item-keyed final that
@@ -325,6 +359,15 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    */
   private lastSpeechEnd: { timestamp: number; at: number } | null = null;
 
+  /**
+   * What the agent is doing, as the pipeline last reported it through
+   * {@link setAgentContext}. Before the first report, and after a reset with
+   * `'session'`, the agent neither speaks nor has asked anything, so a
+   * backchannel is suppressed; a reset with `'turn'` leaves it, since it
+   * describes the agent's last reply, not the user's turn.
+   */
+  private agentContext: EndpointAgentContext = { speaking: false, askedQuestion: false };
+
   // ---------------------------------------------------------------------------
   // Constructor
   // ---------------------------------------------------------------------------
@@ -354,6 +397,43 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   }
 
   // ---------------------------------------------------------------------------
+  // IEndpointDetector -- the agent's context and backchannels
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Records what the agent is doing. While the agent speaks, a backchannel is
+   * suppressed; while it listens, a backchannel is suppressed after a reply
+   * that asked no question and kept after one that asked a question, so a
+   * lone "yeah" that answers "Shall I book it?" accumulates as the user's
+   * turn and completes at its end of speech. `VoicePipelineOrchestrator`
+   * reports as each reply starts, and as it ends or a barge-in cuts it.
+   *
+   * See `IEndpointDetector.setAgentContext()`.
+   *
+   * @param context - Whether the agent speaks, and whether its last reply asked a question.
+   */
+  setAgentContext(context: EndpointAgentContext): void {
+    this.agentContext = { speaking: context.speaking, askedQuestion: context.askedQuestion };
+  }
+
+  /**
+   * Whether a final with this text would be suppressed as a backchannel now:
+   * the text, trimmed, lowercased and stripped of trailing `.`, `,`, `!`, `?`
+   * and ellipses, is one of the backchannel phrases, and the agent speaks or
+   * its last reply asked no question. The detector decides its own finals,
+   * with and without an `itemId`, by this method.
+   *
+   * See `IEndpointDetector.isBackchannel()`.
+   *
+   * @param text - A final's text.
+   * @returns `true` when such a final would be suppressed and reported as `'backchannel_detected'`.
+   */
+  isBackchannel(text: string): boolean {
+    const { speaking, askedQuestion } = this.agentContext;
+    return (speaking || !askedQuestion) && BACKCHANNEL_PHRASES.has(backchannelKey(text));
+  }
+
+  // ---------------------------------------------------------------------------
   // IEndpointDetector -- pushTranscript
   // ---------------------------------------------------------------------------
 
@@ -367,10 +447,12 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * 2. Their text is unstable -- a word ending with "." may be revised in
    *    the next interim result, causing false turn-completion signals.
    *
-   * If the final text is a recognised backchannel phrase, the detector emits
-   * `'backchannel_detected'` and returns WITHOUT accumulating the text. This
-   * prevents a subsequent `speech_end` event from triggering `turn_complete`
-   * for what was merely an acknowledgement, not a real conversational turn.
+   * If the final is a backchannel the agent's context suppresses (see
+   * {@link isBackchannel}), the detector emits `'backchannel_detected'` and
+   * returns WITHOUT accumulating the text. This prevents a subsequent
+   * `speech_end` event from triggering `turn_complete` for what was merely an
+   * acknowledgement, not a real conversational turn. After a reply that asked
+   * a question, a lone backchannel is the answer, and accumulates.
    *
    * A final with an `itemId` is kept with the turn's other item-keyed finals,
    * and the turn's text joins them, unless it is a completed turn's late
@@ -392,15 +474,15 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     }
 
     const text = transcript.text;
-    const normalised = text.trim().toLowerCase();
 
     // A final with no words (a provider retracting interim text it showed)
     // leaves the turn's text as it is.
-    if (!normalised) return;
+    if (!text.trim()) return;
 
     // Check for backchannel phrases BEFORE accumulating. This ensures that
-    // "uh huh" followed by speech_end does NOT produce a turn_complete.
-    if (BACKCHANNEL_PHRASES.has(normalised)) {
+    // "uh huh" followed by speech_end does NOT produce a turn_complete, unless
+    // it answers a question the agent's last reply asked.
+    if (this.isBackchannel(text)) {
       this.emit('backchannel_detected', { text });
       return;
     }
@@ -545,12 +627,16 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * session's turns, so no late final is awaited after it.
    *
    * @param scope - `'turn'` (the default) ends a turn; `'session'` starts a
-   *   session, and ends the wait for a late final of the turns before it.
+   *   session, ends the wait for a late final of the turns before it, and
+   *   forgets the agent's context (see {@link setAgentContext}), which a
+   *   reset with `'turn'` keeps.
    */
   reset(scope: 'turn' | 'session' = 'turn'): void {
     // A turn in which speech started can still get a final after it has ended; a session that starts gets none of an
     // earlier session's turns.
     this.awaitingNextSpeechEnd = scope === 'turn' && (this.awaitingNextSpeechEnd || this.turnStartMs !== null);
+    // The agent's context is its last reply's, which the end of a turn leaves as it was; a new session has had none.
+    if (scope === 'session') this.agentContext = { speaking: false, askedQuestion: false };
     this._clearSilenceTimer();
     this.accumulatedText = '';
     this.speechActive = false;
@@ -596,7 +682,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * final answers the oldest `speech_end` still waiting for one; with none
    * waiting, one that stopped waiting without its final; with neither, the
    * transcriber's next `speech_end`, which pairs with it when it comes. A
-   * backchannel or a final with no words answers one too and adds no text.
+   * backchannel the agent's context suppresses (see {@link isBackchannel}) or
+   * a final with no words answers one too and adds no text.
    * Once speech has ended in this turn, the turn is decided again. A
    * backchannel is announced last, so a `'backchannel_detected'` listener
    * that throws leaves the final recorded and the turn decided. A final that
@@ -615,8 +702,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
       return;
     }
 
-    const normalised = transcript.text.trim().toLowerCase();
-    const backchannel = BACKCHANNEL_PHRASES.has(normalised);
+    const hasWords = transcript.text.trim() !== '';
+    const backchannel = hasWords && this.isBackchannel(transcript.text);
 
     if (!this.itemFinals.has(itemId)) {
       this._dropExpiredSpeechEnds(Date.now());
@@ -630,7 +717,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
         this.finalsWithoutSpeechEnd += 1;
       }
     }
-    const text = normalised && !backchannel ? transcript.text : '';
+    const text = hasWords && !backchannel ? transcript.text : '';
     this.itemFinals.set(itemId, { text, startMs: transcript.startMs });
     if (text) this.lastConfidence = transcript.confidence;
     this.accumulatedText = this._joinItemFinals();

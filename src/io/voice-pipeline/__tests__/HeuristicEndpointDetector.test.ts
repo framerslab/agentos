@@ -22,6 +22,9 @@
  *   also when it arrives while the transcriber reports the next utterance; a standalone VAD's start of speech ends
  *   that window
  * - Each late_final listener gets the final when one before it throws; the throw is written as a console warning
+ * - By the agent's context (setAgentContext()): a backchannel is dropped while the agent speaks and after a reply
+ *   that asked nothing, and kept as the user's turn after a question, keyed by an item or not; isBackchannel()
+ *   answers by the same rule; a session's start forgets the context and a turn's end keeps it
  *
  * The silence_timeout cases use a 100 ms detector instance and a short
  * setTimeout await -- fast enough for CI while remaining deterministic. The
@@ -30,7 +33,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
-import type { TranscriptEvent, VadEvent } from '../types.js';
+import type { TranscriptEvent, TurnCompleteEvent, VadEvent } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -722,5 +725,74 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("HeuristicEndpointDetector: backchannels by the agent's context", () => {
+  let detector: HeuristicEndpointDetector;
+  let turns: string[];
+  let backchannels: string[];
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    detector = new HeuristicEndpointDetector({ silenceTimeoutMs: 1_000 });
+    turns = [];
+    backchannels = [];
+    detector.on('turn_complete', (event: TurnCompleteEvent) => turns.push(event.transcript));
+    detector.on('backchannel_detected', (event: { text: string }) => backchannels.push(event.text));
+  });
+
+  afterEach(() => {
+    detector.reset();
+    vi.useRealTimers();
+  });
+
+  it('keeps a lone backchannel that answers a question, keyed by an item or not, as a turn that completes at its end of speech', () => {
+    detector.setAgentContext({ speaking: false, askedQuestion: true });
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(transcript('yeah'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    vi.advanceTimersByTime(1_000); // no terminal punctuation: the silence timeout ends the turn
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('Sure.', 'item_A', 0));
+
+    expect(turns).toEqual(['yeah', 'Sure.']);
+    expect(backchannels).toEqual([]);
+  });
+
+  it('drops a backchannel while the agent speaks, keyed by an item or not, whatever its last reply asked', () => {
+    detector.setAgentContext({ speaking: true, askedQuestion: true });
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(transcript('Okay!'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('uh huh', 'item_A', 0));
+    vi.advanceTimersByTime(1_000);
+
+    expect(backchannels).toEqual(['Okay!', 'uh huh']);
+    expect(turns).toEqual([]);
+  });
+
+  it("answers isBackchannel() by the same reading and context, and forgets the agent's context at a session's start, not at a turn's end", () => {
+    // Before any report the agent neither speaks nor has asked anything: a backchannel is dropped.
+    expect(detector.isBackchannel('Sure.')).toBe(true);
+    expect(detector.isBackchannel('Sure thing.')).toBe(false);
+
+    detector.setAgentContext({ speaking: false, askedQuestion: true });
+    expect(detector.isBackchannel('Sure.')).toBe(false);
+    detector.reset();
+    expect(detector.isBackchannel('Sure.')).toBe(false);
+
+    detector.setAgentContext({ speaking: true, askedQuestion: true });
+    expect(detector.isBackchannel('Mm-hmm...')).toBe(true);
+
+    detector.setAgentContext({ speaking: false, askedQuestion: true });
+    detector.reset('session');
+    expect(detector.isBackchannel('Sure.')).toBe(true);
   });
 });

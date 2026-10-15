@@ -682,6 +682,28 @@ export interface TurnCompleteEvent {
 }
 
 /**
+ * What the agent is doing, as `VoicePipelineOrchestrator` reports it to its
+ * endpoint detector through `IEndpointDetector.setAgentContext()`, so the
+ * detector can tell a backchannel said over the agent, or after a statement,
+ * from a one-word answer to a question.
+ *
+ * @example
+ * ```typescript
+ * // The agent's reply "Shall I book it?" has ended.
+ * detector.setAgentContext?.({ speaking: false, askedQuestion: true });
+ * ```
+ */
+export interface EndpointAgentContext {
+  /** Whether the agent is speaking a reply. */
+  speaking: boolean;
+  /**
+   * Whether the agent's last reply asked a question: its text, trimmed, ends
+   * with `?`. It matters while the agent is not speaking.
+   */
+  askedQuestion: boolean;
+}
+
+/**
  * Detects turn boundaries in a continuous audio/transcript stream.
  * Combines VAD events with linguistic signals to decide when the user
  * has finished speaking.
@@ -694,6 +716,7 @@ export interface TurnCompleteEvent {
  * | `'speech_start'`       | *(none)*                | The user has started speaking.         |
  * | `'barge_in_detected'`  | *(none)*                | User spoke while TTS was playing.      |
  * | `'late_final'`         | {@link TranscriptEvent} | A final that arrived after its turn ended, which the turn does not take. |
+ * | `'backchannel_detected'` | `{ text: string }`    | A final the detector dropped as a backchannel (see `isBackchannel()`). |
  *
  * A detector that drops such a final from its turns emits `'late_final'`
  * with the final as it was pushed, once per final it drops
@@ -754,6 +777,35 @@ export interface IEndpointDetector extends EventEmitterLike {
    *   so nothing from before it is awaited.
    */
   reset(scope?: 'turn' | 'session'): void;
+
+  /**
+   * Tells the detector what the agent is doing. `VoicePipelineOrchestrator`
+   * calls it as the agent starts speaking a reply (`speaking: true`), and as
+   * the reply ends or a barge-in cuts it (`speaking: false`, with
+   * `askedQuestion` when the reply's text, trimmed, ends with `?`).
+   * {@link HeuristicEndpointDetector} drops a backchannel such as "yeah"
+   * while the agent speaks, and while it listens after a reply that asked no
+   * question; after a question, a lone backchannel is the user's answer and
+   * forms a turn. A detector without this method is told nothing.
+   *
+   * @param context - Whether the agent speaks, and whether its last reply asked a question.
+   */
+  setAgentContext?(context: EndpointAgentContext): void;
+
+  /**
+   * Whether the detector would drop a final with this text as a backchannel
+   * now: the same phrases, the same reading of the text and the same agent
+   * context as for its own finals. `VoicePipelineOrchestrator` asks it of
+   * each final from a client that transcribes on its own device, and hands
+   * one it answers `true` for to the detector on its own, which drops it and
+   * reports it as `'backchannel_detected'`, instead of joining it into the
+   * turn's text. A detector without this method gets every client final
+   * joined with the turn's earlier ones.
+   *
+   * @param text - A final's text.
+   * @returns `true` when the detector would drop the final as a backchannel.
+   */
+  isBackchannel?(text: string): boolean;
 }
 
 // ============================================================================
