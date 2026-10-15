@@ -11,6 +11,21 @@ describe('lexicalTokens', () => {
     expect(lexicalTokens('  ...  ')).toEqual([]);
   });
 
+  it('keeps a combining mark inside its word, and reads a decomposed text as its composed form', () => {
+    // "Résumé" with each accent a combining mark, "naïve" with a combining diaeresis, and a Devanagari word whose
+    // vowel signs are marks.
+    expect(lexicalTokens('Résumé and naïve')).toEqual(['résumé', 'and', 'naïve']);
+    expect(lexicalTokens('résumé')).toEqual(lexicalTokens('résumé'));
+    expect(lexicalTokens('नई किताब')).toEqual(['नई', 'किताब']);
+    // A mark with no letter or digit before it starts no word.
+    expect(lexicalTokens('a ́b')).toEqual(['a', 'b']);
+  });
+
+  it('places a snippet at a decomposed word that a composed query word begins, and the other way round', () => {
+    expect(snippetAround('My résumé is ready', ['résum']).at).toBe(3);
+    expect(snippetAround('Off to déjà vu', ['déjà']).at).toBe(7);
+  });
+
   it('places a snippet in whole words around the first word a query word begins', () => {
     const text = `${'alpha '.repeat(30)}the Budgets grew ${'omega '.repeat(40)}`;
     const snippet = snippetAround(text, ['budget']);
