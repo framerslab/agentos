@@ -190,3 +190,13 @@ export type {
   TranscriptionIntervalInput,
   TranscriptionIntervalAllocation,
 } from './TranscriptionCredit.js';
+
+// Text funding by elapsed time for a listening session, independent of its transcription sockets.
+export {
+  createTimedTextBudget,
+  readTimedTextBudget,
+  reportTimedTextBudget,
+  renewTimedTextBudget,
+  settleTimedTextBudget,
+} from './TimedTextBudget.js';
+export type { TimedTextBudgetView } from './TimedTextBudget.js';

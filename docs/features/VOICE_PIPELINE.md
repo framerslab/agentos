@@ -744,6 +744,31 @@ Only a final report releases unused credit. A missing worker heartbeat or an exp
 
 Take the supplier scope before any customer account lock, in admission, settlement and reconciliation alike. `SqlCompoundCreditStore.withStorageTransaction(transaction, callback)` binds these rows to the host's open adapter transaction without beginning, committing or retrying one; the schema must already exist. Retry the whole host transaction on a `CreditConflictError`, test a cancelled authorization before commit, and make no provider request while the transaction holds its locks. Promotional accounting and the host's full gross spend reservation commit or roll back together.
 
+### Text funding by elapsed time
+
+```typescript
+import {
+  createTimedTextBudget,
+  renewTimedTextBudget,
+  reportTimedTextBudget,
+  settleTimedTextBudget,
+} from '@framers/agentos/safety/runtime';
+
+// At admission, before the first text request; the first part is the session's initial reservation.
+await createTimedTextBudget(t, { scopeId, budgetId: sessionId, at: startedAt, sliceMs: 3_600_000,
+  partMicro: textPartMicro, initialReservationId });
+// After each request on the session's one serialized text lane.
+await reportTimedTextBudget(t, scopeId, sessionId, cumulativeTextMicro);
+// At each hour boundary, once the host has checked the session's current allowance.
+await renewTimedTextBudget(t, { scopeId, budgetId: sessionId, at: Date.now(), cumulativeMicro: cumulativeTextMicro,
+  allowed }, (micro, expiresAtMs) => spend.reserve(micro, expiresAtMs));
+// At the session's end: each part settles once, the first with the initial audio.
+await settleTimedTextBudget(t, { scopeId, budgetId: sessionId, initialAudioMicro },
+  (reservationId, grossMicro) => spend.settle(reservationId, grossMicro));
+```
+
+[`TimedTextBudget.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/TimedTextBudget.ts) funds a listening session's text by elapsed time, apart from its transcription sockets: reconnects, rollovers and fallbacks never touch it. A part of `partMicro` funds each `sliceMs` from the session's start. `renewTimedTextBudget` reserves the next part through the host's callback once its boundary has passed and `allowed` is true, once per slice: a renewal before the first boundary is refused, and a repeat within a slice reserves nothing. A refused allowance throws before any reservation, so the session stops before more text. Report text cost cumulatively from one serialized text lane, and drain that lane's in-flight request before renewing. `settleTimedTextBudget` settles each part once, at most its `partMicro` of text, the first combined with the initial audio; a second call changes nothing. The state is one document in the host's credit transaction, under the locks the host already holds.
+
 ## Call profile
 
 `overrides.callProfile` ([`CallPipelineProfile`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts)) runs the session as one scoped call. `startSession()` then returns the call's own session and reads neither `endpointDetector` nor `bargeinHandler`. It throws when the config sets `diarization: true`, when the agent session has no `abort()`, when `minSpeechMs`, `maxTextCharacters` or `maxSynthesisRequests` is not a positive safe integer, and when the transport lacks `waitForPlayback()` and `clearPlayback()` ([`IPlaybackTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)). `LiveKitStreamTransport` has both and speaks only with its `publisher` option ([Speaking in the room](#speaking-in-the-room)); without it, the first reply's send rejects and fails the call. An STT session without `pushAudioScoped()` and `reset()` ([`ScopedStreamingSTTSession`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)) closes the call, and `startSession()` rejects.
