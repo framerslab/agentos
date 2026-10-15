@@ -244,6 +244,7 @@ Provider fallback is on by default for `generateText()`, `streamText()`, `agent(
 - **[Architecture](https://docs.agentos.sh/architecture/system-architecture)**: system design, layer breakdown
 - **[Cognitive Memory](https://docs.agentos.sh/features/cognitive-memory)**: 8 mechanisms with 30+ APA citations
 - **[RAG Configuration](https://docs.agentos.sh/features/rag-memory)**: vector stores, embeddings, sources
+- **[Text Processing & Search](https://docs.agentos.sh/text)**: tokenizers and stemming, BM25 and hybrid search, text statistics, chunking, reranking
 - **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, fail-open and fail-closed guards
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
 - **[Blog](https://docs.agentos.sh/blog)**: engineering posts, benchmark publications, transparency audits
