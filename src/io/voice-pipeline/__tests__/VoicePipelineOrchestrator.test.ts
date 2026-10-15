@@ -53,7 +53,8 @@
  *   line, whether it comes before or after the end of speech, keyed by an item or not; a backchannel or no final
  *   within 1,500 ms resumes the reply where it paused, and a reply whose synthesis completed during the pause ends
  *   after the resume; a final with words that comes after the resume, while the reply plays, cuts it and becomes the
- *   user's turn. SoftFade cancels at cancelMs before any final, and a stop during a pause leaves no timer behind.
+ *   user's turn, and speech that starts after the resume pauses the reply again and resumes it on its own final.
+ *   SoftFade cancels at cancelMs before any final, and a stop during a pause leaves no timer behind.
  *   falseInterruptionMs sets how long a pause waits for the final, from the end of speech: a final with words within
  *   it cuts the reply though the handler answers it late, and the constructor refuses one that is not a finite number
  *   of zero or more
@@ -1668,6 +1669,28 @@ describe('VoicePipelineOrchestrator', () => {
       expect(agentSession.sendText).toHaveBeenLastCalledWith('No, Tuesday.', expect.objectContaining({ endpointReason: 'punctuation' }));
     },
   );
+
+  it("pauses a resumed reply again when the user speaks again, and resumes it on that speech's own final", async () => {
+    const { sent, states } = await speakingWith(new SoftFadeBargeinHandler());
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(400);
+    sttSession.emit('speech_end'); // a sound with no words: no final comes
+    await vi.advanceTimersByTimeAsync(1_600); // the reply resumes, and listens on for that final
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume']);
+
+    sttSession.emit('speech_start'); // the user speaks again
+    await vi.advanceTimersByTimeAsync(100);
+    ttsSession.emit('audio', replyChunk('two')); // held by the new pause
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'barge_in pause']);
+
+    sttSession.emit('transcript', sttFinal('uh huh'));
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+    // The backchannel is this speech's final: the reply resumes at once, without waiting for the first sound's.
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'barge_in pause', 'barge_in resume', 'audio two']);
+    expect(states).toEqual([]);
+  });
 
   it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])('refuses a falseInterruptionMs of %s', (falseInterruptionMs) => {
     expect(() => new VoicePipelineOrchestrator(makeConfig({ falseInterruptionMs }))).toThrow(RangeError);

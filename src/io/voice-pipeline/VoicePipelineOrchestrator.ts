@@ -75,8 +75,10 @@
  *   When the speech ends, a final with words cuts the reply; an empty final,
  *   a backchannel or no final within `falseInterruptionMs` is a false
  *   interruption, and the reply resumes: a `resume` control, then the audio
- *   the pause held. The endpoint detector hears the speech once the floor is
- *   decided, so the speech that cuts a reply is the user's turn.
+ *   the pause held. A reply that resumed before the speech's final came goes
+ *   on listening for it until the reply ends: a final with words that comes
+ *   then still cuts the reply. The endpoint detector hears the speech once
+ *   the floor is decided, so the speech that cuts a reply is the user's turn.
  * - Without a call profile, a reply ends when its TTS session reports
  *   `flush_complete`, or, on a transport that reports its playout
  *   (`IStreamTransport.waitForPlayout()`, as a speaking
@@ -193,7 +195,8 @@ interface ReplyParts {
  * pipeline is `speaking` until the floor is decided (`_interrupt`). The barge-in handler's `cancel` cuts the reply
  * (`_cutReply`); otherwise the speech's end decides (`_settleInterruption`): speech that never paused the reply ends
  * with the reply going on (`_endInterruption`), and a paused reply is cut by a final with words or resumes
- * (`_resumeReply`).
+ * (`_resumeReply`). A reply that resumed when no final came within `falseInterruptionMs` keeps the interruption
+ * listening for that final until the reply ends (`lingering`): a final with words then cuts the reply.
  */
 interface Interruption {
   /** Speech of the segments that have ended, in milliseconds. */
@@ -208,8 +211,17 @@ interface Interruption {
   finals: number;
   /** Whether a final had words other than a backchannel the endpoint detector recognizes. */
   words: boolean;
-  /** Whether the handler answered `pause`: the transport is sent the first one, and the reply's audio is held. */
+  /** Whether the handler answered `pause` during the interruption: a final with words then cuts the reply. */
   paused: boolean;
+  /** Whether the reply's audio is held: from a `pause`, which the transport is sent, until the reply resumes. */
+  holding: boolean;
+  /**
+   * Whether the reply resumed when `falseInterruptionMs` passed with a segment's final still to come. The interruption
+   * then listens for finals until the reply ends: a final with words cuts the reply. The finals it waited for count as
+   * come, so speech that follows is decided on its own finals, and a `pause` holds the reply again only while the user
+   * speaks.
+   */
+  lingering: boolean;
   /** The reply's audio that arrived during the pause, in order. */
   audio: EncodedAudioChunk[];
   /**
@@ -485,6 +497,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       finals: 0,
       words: false,
       paused: false,
+      holding: false,
+      lingering: false,
       audio: [],
       synthesized: false,
       told: [],
@@ -558,11 +572,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Asks the barge-in handler about the interruption, with the speech measured now, the reply's text so far and the
-   * duration of its audio sent, and acts on the answer: `cancel` cuts the reply (`_cutReply`), the first `pause` is
-   * sent to the transport and holds the reply's audio, and any other answer changes nothing; a handler's `resume`
-   * leaves the decision to the speech's end. One ask is in flight at a time: one asked for meanwhile follows it, with
-   * the speech measured then. An answer that comes back after the floor was decided or the reply ended is not acted
-   * on. Once the answers are in, an ended speech decides the floor (`_settleInterruption`).
+   * duration of its audio sent, and acts on the answer: `cancel` cuts the reply (`_cutReply`), a `pause` while the
+   * reply's audio flows is sent to the transport and holds that audio (in an interruption that listens on after a
+   * resume, only while the user speaks), and any other answer changes nothing; a handler's `resume` leaves the decision
+   * to the speech's end. One ask is in flight at a time: one asked for meanwhile follows it, with the speech measured
+   * then. An answer that comes back after the floor was decided or the reply ended is not acted on. Once the answers
+   * are in, an ended speech decides the floor (`_settleInterruption`).
    *
    * @param open - The interruption.
    * @param parts - The session's parts.
@@ -587,8 +602,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
           this._cutReply(open, action, parts);
           return;
         }
-        if (action.type === 'pause' && !open.paused) {
+        // After a resume, a final that comes late pauses nothing: only the user's speech holds the reply again.
+        if (action.type === 'pause' && !open.holding && !(open.lingering && open.segmentAt === null)) {
           open.paused = true;
+          open.holding = true;
           this._watchSend(() => parts.transport.sendControl({ type: 'barge_in', action }));
         }
       } while (open.again);
@@ -603,7 +620,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * paused the reply ends with the reply going on (`_endInterruption`). A paused reply is cut when a final had words,
    * one that came while the handler was still answering included; it resumes (`_resumeReply`) when each segment's
    * final has come without words, as an empty final or a backchannel such as "uh huh", or when `falseInterruptionMs`
-   * have passed since the speech ended with no final with words: a false interruption.
+   * have passed since the speech ended with no final with words: a false interruption. A reply that resumed with a
+   * final still to come (`lingering`) plays on until it ends, and a final with words that comes meanwhile cuts it.
    *
    * @param open - The interruption.
    * @param parts - The session's parts.
@@ -614,7 +632,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (!open.paused) this._endInterruption(open);
     else if (open.words) this._cutReply(open, { type: 'cancel' }, parts);
     else if (waited || open.finals >= open.segments) this._resumeReply(open, parts);
-    else {
+    else if (open.holding) {
       // The wait counts from the end of speech, however long the handler took to answer since; a clock set back
       // waits no longer than falseInterruptionMs.
       const leftMs = Math.min(this.falseInterruptionMs, Math.max(0, open.endedAt + this.falseInterruptionMs - Date.now()));
@@ -648,27 +666,46 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   }
 
   /**
-   * Resumes a paused reply after a false interruption. The endpoint detector is told the speech as the agent holds the
-   * floor, so a backchannel stays out of the conversation; the transport is sent `barge_in` with `resume`, then the
-   * audio the pause held, in order; and a reply that ended during the pause ends once that audio has played
-   * (`_finishReply`).
+   * Resumes a paused reply after a false interruption: the transport is sent `barge_in` with `resume`, then the audio
+   * the pause held, in order, and a reply that ended during the pause ends once that audio has played
+   * (`_finishReply`). When each segment's final has come, the interruption ends here, and the endpoint detector is
+   * told the speech as the agent holds the floor, so a backchannel stays out of the conversation. When
+   * `falseInterruptionMs` passed first, the interruption listens on for finals until the reply ends (`lingering`), and
+   * what the detector is told of the speech waits with it: a final with words then cuts the reply
+   * (`_settleInterruption`). The finals it waited for count as come, so speech that follows, which can pause the reply
+   * again, resumes it here on its own finals.
    *
    * @param open - The interruption.
    * @param parts - The session's parts.
    */
   private _resumeReply(open: Interruption, parts: ReplyParts): void {
     if (this.interruption !== open) return;
-    this._closeInterruption(open);
-    this._replay(open);
-    if (this.current !== 'speaking') return;
+    if (open.finals < open.segments && !open.synthesized) {
+      // A final still to come can cut the reply until it ends; a reply that ended during the pause ends once the audio
+      // the pause held has played, so nothing is left to cut.
+      clearTimeout(open.wait);
+      open.wait = undefined;
+      open.finals = open.segments;
+      open.lingering = true;
+    }
+    // The interruption ends here unless it listens on, and with a reply that ends here in any case.
+    if (!open.lingering || open.synthesized) {
+      this._closeInterruption(open);
+      this._replay(open);
+      if (this.current !== 'speaking') return;
+    }
+    // A lingering interruption holds nothing unless speech that started after the resume paused the reply again.
+    if (!open.holding) return;
+    open.holding = false;
     this._watchSend(() => parts.transport.sendControl({ type: 'barge_in', action: { type: 'resume' } }));
-    for (const chunk of open.audio) this._sendReplyAudio(parts.transport, chunk);
+    for (const chunk of open.audio.splice(0)) this._sendReplyAudio(parts.transport, chunk);
     if (open.synthesized) this._finishReply(parts);
   }
 
   /**
-   * Ends an interruption whose speech never paused the reply: the reply goes on, and the endpoint detector is told the
-   * speech as the agent holds the floor.
+   * Ends an interruption whose speech never paused the reply, or, as the reply ends, one that listened on after a resume
+   * (`lingering`): the reply goes on or has ended, and the endpoint detector is told the speech as the agent holds the
+   * floor.
    *
    * @param open - The interruption.
    */
@@ -744,14 +781,15 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Ends a reply whose audio has played. One that a pause holds ends after the resume, once the audio the pause held has
-   * played (`_resumeReply`), and not at all when it is cut; speech over it that never paused it ends with it, told as
-   * said while the agent held the floor; then the reply is done (`_replyDone`).
+   * played (`_resumeReply`), and not at all when it is cut; speech over it that never paused it, or whose final had not
+   * come when the reply resumed (`lingering`), ends with it, told as said while the agent held the floor; then the reply
+   * is done (`_replyDone`).
    *
    * @param parts - The session's parts.
    */
   private _settleReply(parts: ReplyParts): void {
     const open = this.interruption;
-    if (open?.paused) {
+    if (open?.holding) {
       open.synthesized = true;
       return;
     }
@@ -983,13 +1021,14 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         return;
       }
       // A pause holds the reply's audio until the reply resumes or is cut; a chunk the transport cannot play is never held.
-      if (this.interruption?.paused) this.interruption.audio.push(chunk);
+      const open = this.interruption;
+      if (open?.holding) open.audio.push(chunk);
       else this._sendReplyAudio(transport, chunk);
     });
     tts.on('flush_complete', () => {
       if (this.current !== 'speaking') return;
       const open = this.interruption;
-      if (open?.paused) {
+      if (open?.holding) {
         // The reply ends once the audio the pause holds is sent and has played (`_resumeReply`), and not at all when
         // it is cut.
         open.synthesized = true;
