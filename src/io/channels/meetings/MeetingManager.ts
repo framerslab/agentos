@@ -93,6 +93,10 @@ export interface MeetingManagerConfig {
    * turn the run stored, once the transcript is fenced (no turn can arrive after it). A step that throws is logged by
    * its error's name, and the completion goes on: the run ends `done` and a run not kept loses its content all the
    * same. It is not run for a run the stop phrase or a purge ended, nor for a failed run (neither has turns to give).
+   * It runs once per run: the cleanup claims the run before the step (`completionHookClaimedAt`), so a tick's cleanup
+   * that overlaps a report's, or another instance's, waits for it rather than running it again, and the scrub of a run
+   * not kept comes after the step whichever cleanup finishes; a claim a stopped process left is taken over once it is
+   * {@link COMPLETION_HOOK_LEASE_MS} old.
    */
   beforeComplete?: (run: MeetingRunRecord, turns: readonly TranscriptTurn[]) => Promise<void>;
   /** How long a dispatch lease lasts; renewed every third of it while a dispatch is in flight. Default 60000. */
@@ -248,6 +252,9 @@ const CONTENT_REPORTS: ReadonlySet<ProviderEventType> = new Set<ProviderEventTyp
 type LoopPass = 'dispatch' | 'upkeep';
 /** How many of the loop's intervals a pass may run before the next one starts beside it: a pass this old is held by a call that does not answer. */
 const STUCK_PASS_INTERVALS = 5;
+
+/** How long a cleanup's claim on the run's `beforeComplete` step holds: a claim older than this is taken over (the process that wrote it stopped mid-step). */
+export const COMPLETION_HOOK_LEASE_MS = 600_000;
 
 /**
  * A run's limits: the defaults, each replaced by the request's own value where it gives one. A limit given as
@@ -1712,14 +1719,30 @@ export class MeetingManager {
     try {
       await this.stores.transcript.fence(run.runId);
       if (this.config.beforeComplete && run.completionHookAt === undefined) {
-        try {
-          await this.config.beforeComplete(run, await this.allTurns(run.runId));
-        } catch (err) {
-          this.config.logger?.warn(`[MeetingManager] beforeComplete of ${run.runId}: ${err instanceof Error ? err.name : 'error'}`);
+        // one cleanup runs the step: the run is claimed before it, so a tick's cleanup that overlaps this report's (the
+        // step awaits the host's model for seconds), or another instance's, does not run it again; one that finds the
+        // step claimed and not yet done leaves the run to a later tick, so the scrub never runs while the step still
+        // reads the turns, and takes a claim over once it is COMPLETION_HOOK_LEASE_MS old (its process stopped mid-step)
+        const claimed = await this.claimCompletionHook(run.runId);
+        if (claimed === undefined) {
+          const latest = await this.stores.runs.get(run.runId);
+          if (latest === undefined || latest.state !== 'left') return;
+          if (latest.completionHookAt === undefined) {
+            await this.stores.runs.update(run.runId, { reportedSeconds: seconds, cleanupPending: true }, 'left');
+            return;
+          }
+          run = latest;
+        } else {
+          run = claimed;
+          try {
+            await this.config.beforeComplete(run, await this.allTurns(run.runId));
+          } catch (err) {
+            this.config.logger?.warn(`[MeetingManager] beforeComplete of ${run.runId}: ${err instanceof Error ? err.name : 'error'}`);
+          }
+          // written before the settle, so a cleanup tried again after a later step failed does not run the step twice
+          const hooked = await this.stores.runs.update(run.runId, { completionHookAt: this.now() }, 'left');
+          if (hooked) run = hooked;
         }
-        // written before the settle, so a cleanup tried again after a later step failed does not run the step twice
-        const hooked = await this.stores.runs.update(run.runId, { completionHookAt: this.now() }, 'left');
-        if (hooked) run = hooked;
       }
       await this.settleRunFunding(run, billed);
       if (run.funding) {
@@ -1760,6 +1783,25 @@ export class MeetingManager {
   private countedSeconds(stored: number | undefined, reported: number | undefined): number | undefined {
     if (reported === undefined) return stored;
     return stored === undefined ? reported : Math.max(stored, reported);
+  }
+
+  /**
+   * Claims the run's `beforeComplete` step for this cleanup: the claim's time is written on the row when the step has
+   * not run and no claim younger than {@link COMPLETION_HOOK_LEASE_MS} holds it. The claimed row, or undefined when
+   * the step is done or another cleanup holds it. Decided and written as one where the run store has `updateWith`; a
+   * read and a state-checked write otherwise.
+   */
+  private async claimCompletionHook(runId: string): Promise<MeetingRunRecord | undefined> {
+    const now = this.now();
+    const decide = (current: MeetingRunRecord): Partial<MeetingRunRecord> | undefined => {
+      if (current.state !== 'left' || current.completionHookAt !== undefined) return undefined;
+      if (current.completionHookClaimedAt !== undefined && now - current.completionHookClaimedAt < COMPLETION_HOOK_LEASE_MS) return undefined;
+      return { completionHookClaimedAt: now };
+    };
+    if (this.stores.runs.updateWith) return this.stores.runs.updateWith(runId, decide);
+    const current = await this.stores.runs.get(runId);
+    const patch = current === undefined ? undefined : decide(current);
+    return patch === undefined ? undefined : this.stores.runs.update(runId, patch, 'left');
   }
 
   /** Every turn of the run, in order, read in pages of 500. */

@@ -258,6 +258,11 @@ export class FencedOutbox implements IOutbox {
     return this.locked(runId, async () => (this.inner.cancel ? this.inner.cancel(runId, destinationRef) : false));
   }
 
+  /** Ends the expired mail deliveries in the wrapped outbox; none when the wrapped outbox has no such method. */
+  async endExpired(now: number): Promise<number> {
+    return this.inner.endExpired ? this.inner.endExpired(now) : 0;
+  }
+
   /** Every delivery of the run in the wrapped outbox. */
   listByRun(runId: string): Promise<OutboxDelivery[]> {
     return this.inner.listByRun(runId);

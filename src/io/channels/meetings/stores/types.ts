@@ -165,7 +165,7 @@ export interface OutboxDelivery {
   eventId: string;
   /** The event's type; `bot:purged` once a purge emptied the delivery. */
   type: MeetingEventType;
-  /** The body to send; empty once a purge emptied the delivery. */
+  /** The body to send; empty once a purge emptied the delivery, and empty once a mail delivery ended (delivered, dead, cancelled or expired), so a mail's body outlives no pending delivery. */
   payload: string;
   /** The failed attempts so far. */
   attempts: number;
@@ -199,18 +199,20 @@ export interface IOutbox {
   enqueue(delivery: OutboxEnqueue, now: number): Promise<void>;
   /** Pending deliveries due at now, ordered by nextAt then id ascending, a mail delivery past its expiry left out; default limit 100. */
   due(now: number, limit?: number): Promise<OutboxDelivery[]>;
-  /** Records that the destination took the delivery. */
+  /** Records that the destination took the delivery; a mail delivery's body is emptied with it. */
   markDelivered(id: string): Promise<void>;
-  /** Records a failed attempt: due again after the backoff of {@link nextAttemptAt}, or `dead` a day after the first failed attempt, or at a mail delivery's expiry. A delivery that is no longer pending, delivered or dead, is left as it is. */
+  /** Records a failed attempt: due again after the backoff of {@link nextAttemptAt}, or `dead` a day after the first failed attempt, or at a mail delivery's expiry (its body emptied). A delivery that is no longer pending, delivered or dead, is left as it is. */
   markFailed(id: string, now: number): Promise<void>;
   /** Makes a delivery pending again, due at `now`, with its attempts counted afresh (a manual replay); a mail delivery is never replayed, and the call changes nothing. */
   replay(id: string, now: number): Promise<void>;
-  /** Optional (the library's stores have it). Ends a pending delivery at once (a destination's permanent refusal); one no longer pending is left as it is. True when the outbox recorded it; false from a wrapper whose outbox cannot, whose caller records a failed attempt instead. */
+  /** Optional (the library's stores have it). Ends a pending delivery at once (a destination's permanent refusal, or an outcome the destination never answered), a mail's body emptied; one no longer pending is left as it is. True when the outbox recorded it; false from a wrapper whose outbox cannot, whose caller records a failed attempt instead. */
   markDead?(id: string): Promise<boolean>;
   /** Optional (the library's stores have it). Moves a pending delivery's next attempt to `notBefore` without counting an attempt (a cap that holds it). True when recorded; false from a wrapper whose outbox cannot. */
   holdUntil?(id: string, notBefore: number): Promise<boolean>;
-  /** Optional (the library's stores have it). Ends every pending delivery of the run to the destination (an address that declined). True when recorded; false from a wrapper whose outbox cannot. */
+  /** Optional (the library's stores have it). Ends every pending delivery of the run to the destination (an address that declined), their bodies emptied. True when recorded; false from a wrapper whose outbox cannot. */
   cancel?(runId: string, destinationRef: string): Promise<boolean>;
+  /** Optional (the library's stores have it). Ends every pending mail delivery whose expiry has passed at `now`, dead with its body emptied, so an expired body waits for no attempt; the count ended. `OutboxDispatcher` calls it at the start of each pass. */
+  endExpired?(now: number): Promise<number>;
   /**
    * Empties every content delivery of the run (a type in `CONTENT_EVENT_TYPES`), delivered ones included, so a replay
    * after a purge sends the content-free `bot:purged` in its place. A delivery of any other type (`bot:done`,

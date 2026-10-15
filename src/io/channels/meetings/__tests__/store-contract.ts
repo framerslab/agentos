@@ -237,6 +237,34 @@ export function meetingStoreContract(name: string, make: () => Promise<ContractS
         await o.enqueue({ id: 'm9', runId: 'r6', destinationRef: 'mail:4', eventId: 'r6:notes', type: 'bot:done', payload: 'sealed', kind: 'mail', expiresAt: 90_000 }, 2_000);
         expect((await o.listByRun('r6')).find((d) => d.id === 'm9')).toBeUndefined();
       });
+
+      it("a mail's body goes with its end, delivered, dead, cancelled, given up at its expiry or ended by the sweep; an event's stays", async () => {
+        const o = stores.outbox;
+        if (!o.markDead || !o.cancel || !o.endExpired) throw new Error("the library's stores implement the mail methods");
+        const mail = (id: string, ref: string) => ({ id, runId: 'r7', destinationRef: ref, eventId: 'r7:notes', type: 'bot:done' as const, payload: 'sealed', kind: 'mail' as const, expiresAt: 90_000 });
+        for (const [id, ref] of [['m10', 'mail:1'], ['m11', 'mail:2'], ['m12', 'mail:3'], ['m13', 'mail:4'], ['m14', 'mail:5']] as const) await o.enqueue(mail(id, ref), 1_000);
+        await o.enqueue({ id: 'e7', runId: 'r7', destinationRef: 'w1', eventId: 'r7:left', type: 'bot:left', payload: '{"a":1}' }, 1_000);
+        await o.markDelivered('m10');
+        await o.markDead('m11');
+        await o.cancel('r7', 'mail:3');
+        await o.markFailed('m13', 90_000);
+        await o.markDelivered('e7');
+        expect(await o.endExpired(89_999)).toBe(0);
+        expect(await o.endExpired(90_000)).toBe(1);
+        const rows = Object.fromEntries((await o.listByRun('r7')).map((d) => [d.id, { state: d.state, payload: d.payload, purged: d.purged }]));
+        expect(rows).toEqual({
+          m10: { state: 'delivered', payload: '', purged: false },
+          m11: { state: 'dead', payload: '', purged: false },
+          m12: { state: 'dead', payload: '', purged: false },
+          m13: { state: 'dead', payload: '', purged: false },
+          m14: { state: 'dead', payload: '', purged: false },
+          e7: { state: 'delivered', payload: '{"a":1}', purged: false },
+        });
+        // a failed attempt before the expiry keeps the body for the next one
+        await o.enqueue(mail('m15', 'mail:6'), 2_000);
+        await o.markFailed('m15', 3_000);
+        expect((await o.listByRun('r7')).find((d) => d.id === 'm15')).toMatchObject({ state: 'pending', payload: 'sealed', attempts: 1 });
+      });
     });
 
     describe('runs', () => {

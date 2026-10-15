@@ -18,7 +18,7 @@ export type {
   ProviderCommand,
   ProviderUsage,
 } from './IMeetingBotProvider.js';
-export { MeetingManager, NoCapacityError, DispatchRefusedError } from './MeetingManager.js';
+export { MeetingManager, NoCapacityError, DispatchRefusedError, COMPLETION_HOOK_LEASE_MS } from './MeetingManager.js';
 export type { MeetingManagerConfig, MeetingManagerStores, MeetingManagerEvent, MeetingManagerEventHandler } from './MeetingManager.js';
 export { MeetingTranscriptSink } from './MeetingTranscriptSink.js';
 export { MeetingRoom } from './MeetingRoom.js';

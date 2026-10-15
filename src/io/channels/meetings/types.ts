@@ -304,6 +304,8 @@ export interface MeetingRunRecord {
   creationContext?: string;
   /** When the host's `beforeComplete` step ran for the run, whether it resolved or threw: a cleanup tried again does not run it twice. */
   completionHookAt?: number;
+  /** When a cleanup claimed the `beforeComplete` step: one cleanup runs it, and a claim older than the manager's lease is taken over. */
+  completionHookClaimedAt?: number;
   /** Immutable server-selected funding. Absence preserves legacy entitlement callers. */
   funding?: MeetingFundingSnapshot;
   /** Write-once actual block reservation or compound hold id. */

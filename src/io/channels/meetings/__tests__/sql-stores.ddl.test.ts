@@ -22,6 +22,7 @@ describe('meetingStoresDdl', () => {
     expect(ddl).toContain('last_report_at BIGINT');
     expect(ddl).toContain('last_usage_source_at BIGINT');
     expect(ddl).toContain('completion_hook_at BIGINT');
+    expect(ddl).toContain('completion_hook_claimed_at BIGINT');
     expect(ddl).toContain("  purged BOOLEAN NOT NULL DEFAULT FALSE,\n  kind TEXT NOT NULL DEFAULT 'event',\n  expires_at BIGINT\n);");
     expect(() => meetingStoresDdl('a'.repeat(39))).toThrow();
   });

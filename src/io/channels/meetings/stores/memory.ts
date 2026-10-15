@@ -296,9 +296,14 @@ export class InMemoryOutbox implements IOutbox {
   async due(now: number, limit = 100): Promise<OutboxDelivery[]> {
     return [...this.deliveries.values()].filter((d) => d.state === 'pending' && d.nextAt <= now && (d.expiresAt === undefined || now < d.expiresAt)).sort((a, b) => a.nextAt - b.nextAt || a.id.localeCompare(b.id)).slice(0, limit).map((d) => ({ ...d }));
   }
+  /** Ends a delivery in the state given; a mail's body goes with it, so it outlives no pending delivery. */
+  private end(d: OutboxDelivery, state: 'delivered' | 'dead'): void {
+    d.state = state;
+    if (d.kind === 'mail') d.payload = '';
+  }
   async markDelivered(id: string): Promise<void> {
     const d = this.deliveries.get(id);
-    if (d) d.state = 'delivered';
+    if (d) this.end(d, 'delivered');
   }
   async markFailed(id: string, now: number): Promise<void> {
     const d = this.deliveries.get(id);
@@ -306,12 +311,12 @@ export class InMemoryOutbox implements IOutbox {
     if (!d || d.state !== 'pending') return;
     d.attempts += 1;
     d.firstAttemptAt ??= now;
-    if (now - d.firstAttemptAt >= OUTBOX_GIVE_UP_MS || (d.expiresAt !== undefined && now >= d.expiresAt)) d.state = 'dead';
+    if (now - d.firstAttemptAt >= OUTBOX_GIVE_UP_MS || (d.expiresAt !== undefined && now >= d.expiresAt)) this.end(d, 'dead');
     else d.nextAt = nextAttemptAt(d.attempts, now);
   }
   async markDead(id: string): Promise<boolean> {
     const d = this.deliveries.get(id);
-    if (d && d.state === 'pending') d.state = 'dead';
+    if (d && d.state === 'pending') this.end(d, 'dead');
     return true;
   }
   async holdUntil(id: string, notBefore: number): Promise<boolean> {
@@ -320,8 +325,17 @@ export class InMemoryOutbox implements IOutbox {
     return true;
   }
   async cancel(runId: string, destinationRef: string): Promise<boolean> {
-    for (const d of this.deliveries.values()) if (d.runId === runId && d.destinationRef === destinationRef && d.state === 'pending') d.state = 'dead';
+    for (const d of this.deliveries.values()) if (d.runId === runId && d.destinationRef === destinationRef && d.state === 'pending') this.end(d, 'dead');
     return true;
+  }
+  async endExpired(now: number): Promise<number> {
+    let ended = 0;
+    for (const d of this.deliveries.values()) {
+      if (d.kind !== 'mail' || d.state !== 'pending' || d.expiresAt === undefined || now < d.expiresAt) continue;
+      this.end(d, 'dead');
+      ended += 1;
+    }
+    return ended;
   }
   async replay(id: string, now: number): Promise<void> {
     const d = this.deliveries.get(id);

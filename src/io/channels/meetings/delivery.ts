@@ -68,6 +68,8 @@ export type MailOutcome =
   | { outcome: 'sent' }
   /** A refusal no retry can change: the delivery ends dead. */
   | { outcome: 'dead' }
+  /** The destination may have acted but never answered (a sender that takes no idempotency key): the delivery ends dead, never tried again, and the warning says `unknown`, so the host looks before it sends again. */
+  | { outcome: 'unknown' }
   /** A failure of the moment: the outbox's backoff. */
   | { outcome: 'retry' }
   /** A cap that holds the mail: the delivery's next attempt moves to `notBefore` and no attempt is counted. */
@@ -190,6 +192,8 @@ export class OutboxDispatcher {
   async deliverDue(): Promise<{ delivered: number; failed: number }> {
     let delivered = 0;
     let failed = 0;
+    // an expired mail waits for no attempt: ended first, its body emptied, where the outbox can
+    await this.options.outbox.endExpired?.(this.now());
     for (const d of await this.options.outbox.due(this.now(), this.options.batch ?? 50)) {
       if (d.kind === 'mail') {
         const outcome = await this.sendMail(d);
@@ -274,7 +278,7 @@ export class OutboxDispatcher {
     return held.result;
   }
 
-  /** Records a mail's outcome: delivered, dead at once, held until a time, or a failed attempt for the backoff. */
+  /** Records a mail's outcome: delivered, dead at once (a refusal, or an outcome never answered), held until a time, or a failed attempt for the backoff. */
   private async record(id: string, answer: MailOutcome): Promise<'delivered' | 'failed' | 'held'> {
     const outbox = this.options.outbox;
     switch (answer.outcome) {
@@ -282,6 +286,10 @@ export class OutboxDispatcher {
         await outbox.markDelivered(id);
         return 'delivered';
       case 'dead':
+        await this.endDead(id);
+        return 'failed';
+      case 'unknown':
+        this.options.logger?.warn(`[OutboxDispatcher] ${id}: outcome unknown`);
         await this.endDead(id);
         return 'failed';
       case 'hold':
