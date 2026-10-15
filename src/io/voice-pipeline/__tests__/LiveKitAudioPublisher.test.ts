@@ -187,6 +187,17 @@ describe('native playout', () => {
     expect(f.source().capturedSamples).toBe(960); expect(f.source().clears).toBe(2); expect(f.messages).toEqual([]);
     await f.publisher.close();
   });
+  it('needs no call identity, and refuses participant playout without one', async () => {
+    const participant = { publishTrack: vi.fn(async () => ({ sid: 'track-a' })), unpublishTrack: vi.fn(async () => {}) };
+    const bounds = { sampleRate: 48000 as const, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc: fakePublishingRtc() };
+    expect(() => new LiveKitAudioPublisher({ ...bounds, playout: 'participant' }, participant, async () => {})).toThrow('invalid livekit publisher bound');
+    const publisher = new LiveKitAudioPublisher(bounds, participant, async () => {});
+    expect(publisher.playout).toBeUndefined();
+    await publisher.sendAudio(unscoped()); expect(publisher.playout).toBe('native');
+    const playback = publisher.waitForPlayback(generation, 1, new AbortController().signal); FakeAudioSource.created[0]!.playOut();
+    expect(await playback).toMatchObject({ sequence: 1, playedSamples: 320, sampleRate: 16000 });
+    await publisher.close();
+  });
   it('waits for the track to play out no longer than receiptTimeoutMs', async () => {
     const f = native(20);
     await f.publisher.sendAudio(unscoped());

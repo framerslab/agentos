@@ -592,6 +592,7 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     for (let i = 0; i < 3; i++) s.tts.emit('audio', pcmChunk());
     // Each 20 ms chunk at 24 kHz is 480 samples, 960 on the 48 kHz track.
     await vi.waitFor(() => expect(capturedSamples()).toBe(3 * 960));
+    expect(s.transport.playout).toBe('native');
     expect(room.localParticipant.sendText).not.toHaveBeenCalled();
     expect(s.errors).toEqual([]);
     await s.orchestrator.stopSession('done');
@@ -659,6 +660,7 @@ describe('LiveKitStreamTransport speaking in the room', () => {
       publisher: { ...speaking, rtc: fakePublishingRtc() },
     });
     await transport.sendAudio(scopedChunk(1));
+    expect(transport.playout).toBe('participant');
     expect(sentTypes(room)).toEqual(['audio']);
     let played = false;
     const playback = transport.waitForPlayback(firstGeneration, 1, new AbortController().signal).then((receipt) => {
@@ -687,6 +689,7 @@ describe('LiveKitStreamTransport speaking in the room', () => {
       publisher: { ...receipts, ...speaking, rtc: fakePublishingRtc() },
     });
     await transport.sendAudio(scopedChunk(1));
+    expect(transport.playout).toBe('native');
     const playback = transport.waitForPlayback(firstGeneration, 1, new AbortController().signal);
     FakeAudioSource.created[0]!.playOut();
     expect(await playback).toMatchObject({ sequence: 1, playedSamples: 320, sampleRate: 16_000 });
