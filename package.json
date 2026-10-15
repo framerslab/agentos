@@ -195,6 +195,11 @@
       "default": "./dist/cognition/memory/index.js",
       "types": "./dist/cognition/memory/index.d.ts"
     },
+    "./cognition/memory/office": {
+      "types": "./dist/cognition/memory/io/ingestion/OfficeLoader.d.ts",
+      "import": "./dist/cognition/memory/io/ingestion/OfficeLoader.js",
+      "default": "./dist/cognition/memory/io/ingestion/OfficeLoader.js"
+    },
     "./cognition/memory/retrieval/typed-network": {
       "import": "./dist/cognition/memory/retrieval/typed-network/index.js",
       "default": "./dist/cognition/memory/retrieval/typed-network/index.js",

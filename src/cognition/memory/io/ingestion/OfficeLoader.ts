@@ -11,12 +11,23 @@
  * refuses a document that reaches a bound, one officeparser only warns of
  * included, with {@link DocumentTooLargeError}.
  *
+ * This module is the package's entry `@framers/agentos/cognition/memory/office`.
+ * Importing it loads no package and no Node built-in: officeparser is
+ * imported by the first `load`, and officeparser imports pdf.js and
+ * tesseract.js only to read a scanned PDF; `DocumentTooLargeError` comes from
+ * a module that imports nothing. The memory module's index exports the same
+ * names.
+ *
  * @module memory/ingestion/OfficeLoader
  */
 
 import type { DocumentMetadata, LoadOptions, LoadedDocument } from '../facade/types.js';
-import { DocumentTooLargeError } from './DocxLoader.js';
+import { DocumentTooLargeError } from './DocumentTooLargeError.js';
 import type { IDocumentLoader } from './IDocumentLoader.js';
+
+// The error this loader throws past a bound, the one DocxLoader throws, so a
+// caller of this entry can check for it without importing another.
+export { DocumentTooLargeError };
 
 // ---------------------------------------------------------------------------
 // Formats
