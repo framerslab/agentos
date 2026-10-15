@@ -280,3 +280,12 @@ export {
   deepgramPreRecordedPricing,
   deepgramStreamingPricing,
 } from './providers/deepgramPricing.js';
+
+// Price ordering over the hosted transcription entries a host offers, before a chain is built.
+export { selectLowestCostSttEntry, sttLanguageOptions } from './LowestCostStt.js';
+export type {
+  SttPriceRow,
+  SttCreditSnapshot,
+  LowestCostSttOptions,
+  LowestCostSttSelection,
+} from './LowestCostStt.js';

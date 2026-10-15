@@ -555,6 +555,52 @@ const stt = new StreamingSTTChain([localStt, remoteStt], { policy, enableMidUtte
 - **Redaction.** Under a policy, `onProviderFailed` and the `provider_failed` metric carry `provider opening failed` in place of the provider's message, and the STT facade's `warning` carries no provider text.
 - **The call boundary.** `assertCallProviderPolicy()` refuses `legacyProviderPolicy`, so a call built through it never runs on the environment's keys. Reopening the same provider is `ReconnectingSTT`'s ([A transcriber that reconnects](#a-transcriber-that-reconnects)) and widens no policy.
 
+## Hosted transcription cost selection
+
+`selectLowestCostSttEntry()` ([`LowestCostStt.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/LowestCostStt.ts)) orders explicitly offered hosted entries before a chain is built. Supply applicable streaming price rows in whole micro-dollars per minute and the vendors the host can actually open. A configured price does not make a vendor available. Unknown prices for available entries are refused. Ties keep the offered order, and the result holds one best fallback entry from each other available vendor.
+
+```typescript
+import {
+  selectLowestCostSttEntry,
+  type SttPriceRow,
+} from '@framers/agentos/io/voice-pipeline';
+
+// Synthetic values illustrate the contract; use verified provider rows in a host.
+const prices: SttPriceRow[] = [
+  { entry: 'deepgram:nova-3', microPerMinute: 5_000 },
+  { entry: 'openai:gpt-4o-mini-transcribe', microPerMinute: 3_000 },
+];
+const nowMs = Date.UTC(2026, 9, 14, 12);
+const selected = selectLowestCostSttEntry(
+  ['openai:gpt-4o-mini-transcribe', 'deepgram:nova-3'],
+  prices,
+  {
+    availableVendors: ['openai', 'deepgram'],
+    nowMs,
+    estimatedSeconds: 60,
+    creditVersion: 'funding-a',
+    credit: {
+      vendor: 'deepgram',
+      version: 'funding-a',
+      checkedAtMs: nowMs - 1_000,
+      remainingMicro: 20_000,
+      reservedMicro: 5_000,
+      failedDays: 0,
+    },
+  },
+);
+// selected.serving is deepgram:nova-3; its fallback is openai:gpt-4o-mini-transcribe.
+// Acquire the matching credit hold in the same transaction before opening audio.
+```
+
+Credit is effective only when its version matches the complete current funding record, its successful check is less than 24 hours old, fewer than three distinct check days have failed, and the entire estimated liability fits after outstanding holds. Missing or invalid credit uses list-price order. Updating the configured vendor, amount or read instant must change the record version. A changed record cannot reuse an old cache.
+
+`language` decides which entries can serve, and `sttLanguageOptions(entry, language)` returns the language option to open the chosen entry with. An explicit tag such as `es` or `en-US` is kept for every vendor. Without one, a Deepgram entry gets `en-US`, the provider's own default, and another vendor's entry gets none. `null` asks for automatic language: the Deepgram rows price one named language, so a Deepgram entry is left out (`sttLanguageOptions()` returns `null` for it), and an OpenAI entry is opened without a language field, for automatic recognition. A value that is not a language tag throws a `RangeError`.
+
+The helper makes no reservation and reads no secret or environment variable. Read its snapshot and acquire the selected hold under one transaction before using the result. A concurrent admission must see the preceding hold. Keep locally settled usage deducted until it is reconciled with the supplier's report. Continue recording each provider's measured usage at its list price; mark only actual allocated supplier funding as prepaid.
+
+Pass the resulting entry order through the host's explicit `ProviderPolicy` ([Provider policy](#provider-policy)) and normal opening authorization. This helper does not authorize fallback, override a private-device choice, or widen an explicit single-vendor choice. An empty availability result is `undefined`, which the host must handle before constructing a chain. Deepgram's pre-recorded rows (`deepgramPreRecordedPricing()`) are a separate lookup and never price a live chain.
+
 ## Call profile
 
 `overrides.callProfile` ([`CallPipelineProfile`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts)) runs the session as one scoped call. `startSession()` then returns the call's own session and reads neither `endpointDetector` nor `bargeinHandler`. It throws when the config sets `diarization: true`, when the agent session has no `abort()`, when `minSpeechMs`, `maxTextCharacters` or `maxSynthesisRequests` is not a positive safe integer, and when the transport lacks `waitForPlayback()` and `clearPlayback()` ([`IPlaybackTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)). `LiveKitStreamTransport` has both and speaks only with its `publisher` option ([Speaking in the room](#speaking-in-the-room)); without it, the first reply's send rejects and fails the call. An STT session without `pushAudioScoped()` and `reset()` ([`ScopedStreamingSTTSession`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)) closes the call, and `startSession()` rejects.
