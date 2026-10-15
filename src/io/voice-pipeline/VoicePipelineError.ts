@@ -6,6 +6,8 @@
  * matching error.message.
  */
 
+import { describeReason, isError } from './describeReason.js';
+
 export type HealthErrorClass =
   | 'auth'
   | 'quota'
@@ -43,15 +45,18 @@ export class VoicePipelineError extends Error {
    * Best-effort classification of an arbitrary error into a voice-pipeline
    * error with a well-known errorClass. Preserves the original error as
    * `cause` so upstream inspection can still recover provider-specific
-   * detail.
+   * detail. A value that is no `Error` gets its message from
+   * `describeReason()`, so one `String()` cannot print (an object without a
+   * prototype, a revoked proxy) is named by its type, `an unprintable
+   * object`, where formatting it would throw from the classification.
    */
   static classifyError(
     err: unknown,
     meta: { kind: VoicePipelineErrorInit['kind']; provider: string }
   ): VoicePipelineError {
-    const raw = err instanceof Error ? err : new Error(String(err));
+    const raw = isError(err) ? err : new Error(describeReason(err));
     const msg = raw.message ?? '';
-    const code = (err as { code?: string } | null)?.code ?? '';
+    const code = errorCode(err);
 
     let errorClass: HealthErrorClass = 'unknown';
     let retryable = true;
@@ -83,6 +88,22 @@ export class VoicePipelineError extends Error {
       cause: err,
       retryable,
     });
+  }
+}
+
+/**
+ * A failure value's `code`, such as Node's `'ECONNRESET'`, or `''` when it
+ * has none or refuses the read: a revoked proxy throws on every property
+ * read.
+ *
+ * @param err - What a provider threw or rejected with.
+ * @returns The value's `code`, or `''`.
+ */
+function errorCode(err: unknown): unknown {
+  try {
+    return (err as { code?: unknown } | null | undefined)?.code ?? '';
+  } catch {
+    return '';
   }
 }
 
