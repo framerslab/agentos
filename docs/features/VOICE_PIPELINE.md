@@ -336,7 +336,7 @@ Unless `overrides.reconnect` is `false`, the listen session wraps its transcribe
 
 When the provider's session errors or closes without the caller asking, a new session of the same provider opens and hears the replayed audio first, then the frames that came meanwhile, then live audio. Each session's `startMs` and `endMs` are moved onto one timeline, the audio pushed since the session began. Queue overflow leaves a gap after the replay: with one second buffered and three seconds arriving into a two-second queue, the replay remains at 0–1000 ms and the retained queue starts at 2000 ms. End bounds are exclusive, so a final ending exactly at the replay boundary keeps its original end time.
 
-`TranscriptDedupe` drops a final that repeats one already emitted over the same audio. Only finals with finite `startMs` and `endMs` and `endMs > startMs` enter its history; other finals bypass it without accumulating retained observations. `OpenAIRealtimeTranscriptionSTT` reports these bounds, while `DeepgramStreamingSTT` and `ElevenLabsStreamingSTT` do not, so with those a final transcribed again from the replay can arrive twice. Each reconnect emits `stt:reconnected` (`{ attempt, replayedMs }`) and `stt:gap` (`{ attempt, lostMs }`, the time the reconnect took).
+`TranscriptDedupe` drops a final that repeats one already emitted over the same audio. Only finals with finite `startMs` and `endMs` and `endMs > startMs` enter its history; other finals bypass it without accumulating retained observations. `OpenAIRealtimeTranscriptionSTT` and `DeepgramStreamingSTT` report these bounds, while `ElevenLabsStreamingSTT` does not, so with it a final transcribed again from the replay can arrive twice. Each reconnect emits `stt:reconnected` (`{ attempt, replayedMs }`) and `stt:gap` (`{ attempt, lostMs }`, the time the reconnect took).
 
 A `flush()` during reconnect waits for the replacement and its replay and queued audio, then flushes that session. A close during the flush, or after it before further provider activity or pushed audio, ends the stream without reconnecting. A transcript, speech event, usage report or warning after a completed flush clears that terminal-close expectation, so a later close-only network failure reconnects. Deepgram can end its stream while flushing ([CloseStream](https://developers.deepgram.com/docs/close-stream)).
 
@@ -452,7 +452,7 @@ capture.setStream(otherStream); // another microphone, or a mix the page made, o
 capture.stop(); // every node disconnected and every listener removed; no block is handed on after it
 ```
 
-The blocks keep the context's sample rate, which a frame built from them carries in `sampleRate`. `DeepgramStreamingSTT` and `ElevenLabsStreamingSTT` read their audio as 16 kHz whatever a frame's `sampleRate` says, so blocks bound for them are resampled to 16 kHz first.
+The blocks keep the context's sample rate, which a frame built from them carries in `sampleRate`. `ElevenLabsStreamingSTT` reads its audio as 16 kHz whatever a frame's `sampleRate` says, so blocks bound for it are resampled to 16 kHz first; `DeepgramStreamingSTT` and `OpenAIRealtimeTranscriptionSTT` convert each frame from its own `sampleRate`.
 
 A second `start()` leaves a running capture as it is, and a `stop()` while the module loads leaves nothing built. `stop()` removes the listeners as well, so a capture started again hands its blocks to the listeners added after it. `stop()` also posts the worklet's processor a stop message: its `process()` then answers `false`, so the browser can end the node, which no longer has an input. A `start()` that fails, on a module that did not load or a stream with no audio track, leaves nothing connected, and the next `start()` tries again. A `setStream()` keeps the samples the worklet holds toward its next block, which open the first block after the change, so no sample the worklet took in before the change is dropped. Given a stream with no audio track, `setStream()` throws, and the capture keeps hearing the stream it had.
 
@@ -600,6 +600,55 @@ Credit is effective only when its version matches the complete current funding r
 The helper makes no reservation and reads no secret or environment variable. Read its snapshot and acquire the selected hold under one transaction before using the result. A concurrent admission must see the preceding hold. Keep locally settled usage deducted until it is reconciled with the supplier's report. Continue recording each provider's measured usage at its list price; mark only actual allocated supplier funding as prepaid.
 
 Pass the resulting entry order through the host's explicit `ProviderPolicy` ([Provider policy](#provider-policy)) and normal opening authorization. This helper does not authorize fallback, override a private-device choice, or widen an explicit single-vendor choice. An empty availability result is `undefined`, which the host must handle before constructing a chain. Deepgram's pre-recorded rows (`deepgramPreRecordedPricing()`) are a separate lookup and never price a live chain.
+
+## Connection authorization and measured usage
+
+```typescript
+import {
+  DeepgramStreamingSTT,
+  OpenAIRealtimeTranscriptionSTT,
+  StreamingSTTChain,
+  SttConnectionAuthorizationError,
+} from '@framers/agentos/io/voice-pipeline';
+
+const chain = new StreamingSTTChain(
+  [
+    new DeepgramStreamingSTT({ apiKey: process.env.DEEPGRAM_API_KEY!, mipOptOut: true, inputSampleRate: 48_000 }),
+    new OpenAIRealtimeTranscriptionSTT({ apiKey: process.env.OPENAI_API_KEY! }),
+  ],
+  { enableMidUtteranceFailover: true },
+);
+const session = await chain.startSession({
+  language: 'en',
+  connectionHooks: {
+    // Reserve for this exact socket; check signal.aborted before committing.
+    authorize: async (opening, signal) => { await holds.reserve(opening.entry, opening.connectionId, signal); },
+    // Synchronous: false refuses the frame and ends the provider.
+    beforeAudio: (opening, nextAudioSeconds) => holds.covers(opening.connectionId, nextAudioSeconds),
+    // Cumulative reports and one final report per attempted socket; queue them, never throw.
+    usage: (event) => settlements.enqueue(event.connectionId, event.audioSeconds, event.final),
+  },
+});
+session.on('error', (error) => {
+  if (error instanceof SttConnectionAuthorizationError) endForFunding();
+});
+```
+
+Deepgram and OpenAI streaming transcription establish a UUID `connectionId` before opening each socket. `StreamingSTTConfig.connectionHooks.authorize(opening, signal)` can acquire the host's funding reservation for that exact `entry` and `connectionId`. It resolves before the WebSocket upgrade and before any audio. Every OpenAI reconnect and rollover asks again. Provider permission remains with `ProviderPolicy`; funding approval does not widen it. A rejected or timed-out authorization is a `SttConnectionAuthorizationError`, which the chain does not retry as a vendor outage.
+
+The default authorization timeout is 10 seconds. Hosts must check the abort signal inside their reservation transaction before commit and release any acquisition that completes after cancellation. Socket cancellation and timeout prevent a late approval from opening a connection. A final zero report closes an unsuccessful opening. A host reconciles a hold by its identity if its worker disappears before reporting; a missing report never proves zero usage.
+
+An optional synchronous `connectionHooks.beforeAudio(opening, nextAudioSeconds)` checks prospective cumulative wire seconds immediately before every audio send, including backlog, replay and both overlap sockets. It must not throw. Returning false sends none of that frame and ends the provider with `SttConnectionAuthorizationError`, preserving final measured use and preventing cross-vendor retry. The hook is optional for existing consumers; a host claiming a bounded reservation supplies it.
+
+An optional `connectionHooks.audioCeiling(opening)` gives a socket's funded ceiling in wire seconds. `DeepgramStreamingSTT` then returns one session over successive sockets of the same vendor: it drains and closes a socket at its ceiling and opens the next through the same authorization, opt-out and conversion, with transcript times continuing on one clock. A refused successor ends the session with `SttConnectionAuthorizationError`; no frame goes past a funded ceiling and no other vendor is tried.
+
+`connectionHooks.usage(event)` receives immutable cumulative `audioSeconds` and one final report per attempted socket, including unsuccessful openings. It must synchronously queue processing and never throw. Adopted sessions also emit the same `usage` event. Use one of these delivery paths for settlement, with durable idempotence keyed by `connectionId`; do not add their identical totals together. `connectionIndex` remains the provider session's local adopted index and is not a unique identity. An unadopted OpenAI opening reports index zero through the hook only. Built-in usage includes `entry`, `model` and `connectionId`; older custom adapters may still emit the original `StreamingSTTUsageEvent` shape and cannot be assumed suitable for this accounting path.
+
+Deepgram accepts `inputSampleRate` as an optional frame-rate assertion and converts to 16 kHz mono PCM16. Without that assertion it reads each frame's rate. The shared converter preserves phase between short frames and refuses a rate that is not a positive whole number and a sample that is not finite. Both live audio and a chain's replay traverse the provider conversion. OpenAI retains its 24 kHz output and existing overlap accounting. Measured seconds count samples handed successfully to each socket, including replay and rollover overlap; they are not a provider invoice or proof the remote endpoint processed every sample. Supplier reconciliation is a separate usage-API operation.
+
+Deepgram opens with the language `sttLanguageOptions()` gives its entry ([Hosted transcription cost selection](#hosted-transcription-cost-selection)): an explicit tag, or `en-US` without one. A value that is not a language tag, such as `multi`, is refused before any socket opens, since only the single-language rows are priced. Its transcripts carry `itemId`, `startMs` and `endMs` on the socket's audio clock: every interim and the final of one segment share an `itemId`, and the next segment gets a new one. Through a failover facade, a backup's times move onto the facade's input timeline, so a final the backup transcribes again from the replay is dropped as a repeat.
+
+Deepgram's `usageIntervalMs` defaults to zero for one final report; a positive value adds cumulative reports while the connection is open. Its final report is emitted once across explicit close, remote close and failed upgrade cleanup. Configure `mipOptOut: true` to send `mip_opt_out=true`; a per-session false value cannot undo that setting. These changes preserve the general-purpose library's existing opt-out and failover defaults. Hosts that require those policies set them explicitly.
 
 ## Call profile
 
@@ -846,7 +895,7 @@ session.close();
 | `usageIntervalMs` | `0` | `'usage'` reports for open connections at this interval; `0` reports each connection once, when it closes. |
 | `rollover` | below | `false` keeps a single connection. |
 
-Events: `transcript` (with `itemId`, `startMs` and `endMs` on the session's audio clock, and `language`); `speech_start` and `speech_end`; `usage` ([`StreamingSTTUsageEvent`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts): `providerId`, `model`, `connectionIndex`, `audioSeconds`, `final`); `warning` (a `VoicePipelineError`, for a server error the session survives, an item whose transcription failed, or a `rollover.approve` that threw); and `error` followed by `close` when the session cannot go on: a reconnect refused as unauthorised, or failures beyond the retries. A failed item that had shown interim text gets a final with empty text, so a display keyed by `itemId` drops it.
+Events: `transcript` (with `itemId`, `startMs` and `endMs` on the session's audio clock, and `language`); `speech_start` and `speech_end`; `usage` ([`SttMeasuredUsageEvent`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts): `providerId`, `model`, `entry`, `connectionId`, `connectionIndex`, `audioSeconds`, `final`; see [Connection authorization and measured usage](#connection-authorization-and-measured-usage)); `warning` (a `VoicePipelineError`, for a server error the session survives, an item whose transcription failed, or a `rollover.approve` that threw); and `error` followed by `close` when the session cannot go on: a reconnect refused as unauthorised, or failures beyond the retries. A failed item that had shown interim text gets a final with empty text, so a display keyed by `itemId` drops it.
 
 **Ending a session.** Call `flush()` before `close()`: it commits the turn in progress and waits for its final, while `close()` ends every connection at once and discards audio not yet committed. With `turnDetection: null`, `flush()` commits the buffer. Under server turn detection it commits only while the server reports speech in progress, so an utterance that began within the voice detector's reporting latency before the call (the time the server takes to send `input_audio_buffer.speech_started`) is not committed, and the `close()` that follows discards it.
 

@@ -289,3 +289,6 @@ export type {
   LowestCostSttOptions,
   LowestCostSttSelection,
 } from './LowestCostStt.js';
+
+// A host's refusal of a hosted transcription socket (`StreamingSTTConfig.connectionHooks`); never retried as an outage.
+export { SttConnectionAuthorizationError } from './SttConnectionAuthorizationError.js';

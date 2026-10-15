@@ -32,7 +32,17 @@
  * - a server `error` the session survives, or a failed item → `'warning'`
  *   (a {@link VoicePipelineError})
  * - a failure the session cannot recover from → `'error'`, then `'close'`
- * - the audio of each connection → `'usage'` ({@link StreamingSTTUsageEvent})
+ * - the audio of each connection → `'usage'` (an `SttMeasuredUsageEvent`, a
+ *   {@link StreamingSTTUsageEvent} with the connection's identity)
+ *
+ * ## Connection accounting
+ *
+ * Every connection, the first, a reconnect's and a rollover's, gets its own
+ * UUID `connectionId` and awaits `StreamingSTTConfig.connectionHooks.authorize`
+ * before its socket is constructed; a refusal is a
+ * {@link SttConnectionAuthorizationError}, which is never retried as an outage.
+ * A connection that never joins the session reports a final zero through
+ * `connectionHooks.usage` alone.
  *
  * ## Long sessions
  *
@@ -52,7 +62,6 @@ import type {
   StreamingSTTConfig,
   AudioFrame,
   TranscriptEvent,
-  StreamingSTTUsageEvent,
 } from '../types.js';
 import {
   defaultCapabilities,
@@ -61,6 +70,9 @@ import {
   type ProviderCapabilities,
 } from '../HealthyProvider.js';
 import { VoicePipelineError } from '../VoicePipelineError.js';
+import { StreamResampler } from './StreamResampler.js';
+import { SttConnectionMeter } from './SttConnectionMeter.js';
+import { SttConnectionAuthorizationError } from '../SttConnectionAuthorizationError.js';
 
 // ---------------------------------------------------------------------------
 // Protocol constants and defaults
@@ -164,8 +176,10 @@ export interface OpenAIRealtimeTranscriptionRollover {
    * throw, to refuse it: the session keeps its current connection until
    * `hardStopMs`, finishes the items it holds, and closes. An answer that has
    * not come by `hardStopMs` counts as a refusal, and a later one opens
-   * nothing. A host that pays for audio per connection reserves the next
-   * connection here.
+   * nothing. It is a policy check beside the funding: a host that pays for
+   * audio per connection reserves each one, rollovers included, through
+   * `StreamingSTTConfig.connectionHooks.authorize`, keyed by the connection's
+   * `connectionId` rather than this numeric index.
    */
   approve?: (request: OpenAIRealtimeRolloverRequest) => boolean | Promise<boolean>;
 }
@@ -269,6 +283,7 @@ interface SessionSettings {
   maxBufferedMs: number;
   finalTimeoutMs: number;
   usageIntervalMs: number;
+  connectionHooks: StreamingSTTConfig['connectionHooks'];
   rollover: ResolvedRollover | null;
 }
 
@@ -368,60 +383,6 @@ function buildSessionUpdate(options: {
       },
     },
   };
-}
-
-/**
- * Linear-interpolation resampler for a stream of mono Float32 frames. It keeps
- * its place across frames: output sample `k` lies at input position
- * `k * fromRate / toRate`, counted from the first frame at the current rate,
- * and is produced once the input reaches that position. So the audio it
- * produces stays as long as the audio it was given, at most one input sample
- * behind, however the frames are cut. Rounding each frame's length on its own
- * drifts instead: 128 samples at 44.1 kHz would become 70 at 24 kHz every
- * time where 69.66 are due, 0.49 percent more audio than was pushed.
- */
-class StreamResampler {
-  /** Rate of the frames so far; a frame at another rate starts the count again. */
-  private fromRate = 0;
-  /** Input samples taken at the current rate. */
-  private consumed = 0;
-  /** Output samples produced at the current rate. */
-  private produced = 0;
-  /** The last sample of the previous frame, for an output that falls between two frames. */
-  private previous = 0;
-
-  constructor(private readonly toRate: number) {}
-
-  /**
-   * Resamples one frame. Its output's length follows the audio given so far,
-   * not the frame alone, so it varies by a sample from frame to frame.
-   */
-  process(input: Float32Array, fromRate: number): Float32Array {
-    if (input.length === 0) return input;
-    if (fromRate !== this.fromRate) {
-      this.fromRate = fromRate;
-      this.consumed = 0;
-      this.produced = 0;
-    }
-    if (fromRate === this.toRate) return input;
-    const first = this.consumed;
-    const last = first + input.length - 1;
-    // Output sample k is due once the input reaches k * fromRate / toRate (whole numbers, so exact).
-    const due = Math.floor((last * this.toRate) / fromRate) + 1;
-    const output = new Float32Array(Math.max(0, due - this.produced));
-    for (let i = 0; i < output.length; i++) {
-      const scaled = (this.produced + i) * fromRate;
-      const left = Math.floor(scaled / this.toRate);
-      const fraction = (scaled - left * this.toRate) / this.toRate;
-      const a = left < first ? this.previous : input[left - first];
-      const b = fraction === 0 ? a : input[left + 1 - first];
-      output[i] = a + (b - a) * fraction;
-    }
-    this.produced += output.length;
-    this.consumed = last + 1;
-    this.previous = input[input.length - 1];
-    return output;
-  }
 }
 
 /** Mono Float32 samples at 24 kHz → base64 PCM16 (little-endian). */
@@ -602,6 +563,8 @@ class TranscriptionConnection {
   private readonly idleWaiters = new Set<() => void>();
   /** Fails the connect in progress; set from the connect timer's start until the connect resolves or fails. */
   private abortConnect: ((err: Error) => void) | undefined;
+  /** This socket's identity, authorization and usage reports, fixed before it opens. */
+  readonly meter: SttConnectionMeter;
 
   constructor(
     private readonly settings: SessionSettings,
@@ -609,15 +572,36 @@ class TranscriptionConnection {
       onEvent: (connection: TranscriptionConnection, event: ServerEvent) => void;
       onDrop: (connection: TranscriptionConnection, reason: Error) => void;
     }
-  ) {}
+  ) {
+    this.meter = new SttConnectionMeter(
+      settings.providerId,
+      `openai:${settings.model}`,
+      settings.model,
+      settings.connectionHooks
+    );
+  }
+
+  /**
+   * Reserves for this exact socket before the upgrade or any configuration
+   * message, then opens it ({@link connectSocket}).
+   *
+   * @throws {SttConnectionAuthorizationError} When the host's hooks refuse the socket, or {@link close} ended
+   *   the authorization; no socket is constructed.
+   */
+  async connect(): Promise<void> {
+    await this.meter.authorize();
+    if (this.isClosed()) throw new SttConnectionAuthorizationError();
+    await this.connectSocket();
+  }
 
   /**
    * Opens the socket, sends the session update and resolves once the server
    * confirms it. Rejects on a refused upgrade (with the HTTP status and body),
    * on a server `error` before the confirmation, on an early close, after
-   * `connectTimeoutMs`, and when {@link close} abandons it.
+   * `connectTimeoutMs`, and when {@link close} abandons it. A connect that
+   * fails reports the socket's final zero.
    */
-  connect(): Promise<void> {
+  private connectSocket(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let ready = false;
       let settled = false;
@@ -629,10 +613,12 @@ class TranscriptionConnection {
         this.state = 'closed';
         const ws = this.ws;
         this.ws = null;
+        this.meter.cancelAuthorization();
+        this.meter.report(0, 0, true);
         try {
           ws?.terminate();
         } catch {
-          // The upgrade never completed; there is nothing to release.
+          // An upgrade that never completed has no live socket to close.
         }
         reject(err);
       };
@@ -712,6 +698,8 @@ class TranscriptionConnection {
         const reason =
           this.lastError ?? new Error(`openai realtime transcription ws closed unexpectedly (${code})`);
         this.dropReason = reason;
+        // Confirmed and closed before the session adopted it: its final report goes to the host alone.
+        if (this.index === 0) this.meter.report(0, this.samplesSent / REALTIME_SAMPLE_RATE, true);
         this.handlers.onDrop(this, reason);
       });
     });
@@ -728,9 +716,16 @@ class TranscriptionConnection {
    * Appends one encoded frame to this connection's input buffer, and says
    * whether the socket took it. A socket that is closing takes nothing before
    * its close is reported: the frame is then not counted as sent, so the
-   * session can hold it for the connection that takes over.
+   * session can hold it for the connection that takes over. A frame the
+   * host's `beforeAudio` refuses is not sent, and the refusal ends the session.
    */
   sendAudio(frame: EncodedFrame): boolean {
+    if (this.state !== 'open') return false;
+    const next = (this.samplesSent + frame.samples) / REALTIME_SAMPLE_RATE;
+    if (this.settings.connectionHooks?.beforeAudio?.(this.meter.opening, next) === false) {
+      this.handlers.onDrop(this, new SttConnectionAuthorizationError());
+      return false;
+    }
     if (!this.send({ type: 'input_audio_buffer.append', audio: frame.base64 })) return false;
     if (this.baseMs === undefined) this.baseMs = frame.startMs;
     if (this.uncommittedFromMs === undefined) this.uncommittedFromMs = frame.startMs;
@@ -780,16 +775,24 @@ class TranscriptionConnection {
     for (const finish of [...this.idleWaiters]) finish();
   }
 
-  /** Closes the socket from this side, or abandons a connect still in progress. Idempotent. */
+  /**
+   * Closes the socket from this side, or abandons an authorization or a
+   * connect still in progress. Idempotent. A connection the session never
+   * adopted reports its final usage to the host here; an adopted one is
+   * reported by the session.
+   */
   close(): void {
+    this.meter.cancelAuthorization();
     if (this.abortConnect) {
       this.abortConnect(new Error('openai realtime transcription connect abandoned: the session closed'));
       return;
     }
+    if (this.index === 0) this.meter.report(0, this.samplesSent / REALTIME_SAMPLE_RATE, true);
     if (this.state === 'closed') return;
     const ws = this.ws;
     this.release();
     if (ws && ws.readyState === WebSocket.OPEN) ws.close(1000, 'session closed');
+    else ws?.terminate();
   }
 
   /**
@@ -927,10 +930,12 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    */
   pushAudio(frame: AudioFrame): void {
     if (this.closed || frame.samples.length === 0 || !(frame.sampleRate > 0)) return;
+    // Converted first: a frame the converter refuses (a fractional rate, a sample that is not finite) throws before
+    // it moves the session's audio clock.
+    const resampled = this.resampler.process(frame.samples, frame.sampleRate);
     const startMs = this.sessionAudioMs;
     const durationMs = (frame.samples.length / frame.sampleRate) * 1000;
     this.sessionAudioMs += durationMs;
-    const resampled = this.resampler.process(frame.samples, frame.sampleRate);
     // A very short frame may complete no 24 kHz sample yet; the next frame carries its audio.
     if (resampled.length === 0) return;
     const encoded: EncodedFrame = { ...encodePcm16(resampled), startMs, durationMs };
@@ -939,7 +944,8 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     for (const connection of receivers) {
       if (connection.sendAudio(encoded)) taken = true;
     }
-    if (!taken) this.hold(encoded);
+    // A refusal by the host's beforeAudio closes the session during the sends: nothing is held for it then.
+    if (!taken && !this.closed) this.hold(encoded);
   }
 
   /**
@@ -1091,6 +1097,11 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    */
   private handleDrop(connection: TranscriptionConnection, reason: Error): void {
     if (this.closed) return;
+    // The host refused audio past its funded limit: the session ends, with no reconnect to retry the refusal.
+    if (reason instanceof SttConnectionAuthorizationError) {
+      this.fail(reason);
+      return;
+    }
     // Not adopted (it has no index yet): its socket closed in the turn that confirmed it.
     if (connection.index === 0) return;
     if (Date.now() - connection.readyAt > this.settings.connectTimeoutMs) this.failures = 0;
@@ -1167,6 +1178,8 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
       try {
         await connection.connect();
       } catch (err) {
+        // A funding refusal is no failed attempt: it uses no retry and opens no other socket.
+        if (err instanceof SttConnectionAuthorizationError) throw err;
         lastError = toError(err);
         continue;
       } finally {
@@ -1754,14 +1767,8 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
 
   private emitUsage(connection: TranscriptionConnection, final: boolean): void {
     if (connection.index === 0) return;
-    const usage: StreamingSTTUsageEvent = {
-      providerId: this.settings.providerId,
-      model: this.settings.model,
-      connectionIndex: connection.index,
-      audioSeconds: connection.samplesSent / REALTIME_SAMPLE_RATE,
-      final,
-    };
-    this.emit('usage', usage);
+    const usage = connection.meter.report(connection.index, connection.samplesSent / REALTIME_SAMPLE_RATE, final);
+    if (usage) this.emit('usage', usage);
   }
 
   private reportUsage(): void {
@@ -1833,6 +1840,7 @@ function resolveSettings(
     maxBufferedMs: config.maxBufferedMs ?? 10_000,
     finalTimeoutMs: config.finalTimeoutMs ?? 5_000,
     usageIntervalMs: config.usageIntervalMs ?? 0,
+    connectionHooks: sessionConfig.connectionHooks,
     rollover: rollover
       ? {
           afterMs: rollover.afterMs ?? 55 * MINUTE_MS,
