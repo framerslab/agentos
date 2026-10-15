@@ -89,7 +89,8 @@ export interface StreamingTTSChainOptions {
    * is a failure like any other. The facade's `flush()` resolves once the
    * session in use has completed its flush: it waits for a switch under way,
    * and for the next one when the backup fails as its switch ends, and then
-   * flushes the backup that took the text. A switch no provider can take
+   * flushes the backup that took the text, without waiting for the failed
+   * provider's own flush to settle. A switch no provider can take
    * ends the facade with `'error'` (only to a listener) and then `'close'`;
    * a `flush()` that waited for it rejects with `synthesis failed`, and text
    * pushed after that throws. When the first session implements
@@ -215,11 +216,28 @@ export class StreamingTTSChain implements IStreamingTTS {
     // An error or close of the backup a switch has attached, reported before the switch ended; the switch passes over it.
     let lost: Error | undefined;
     let sink: ((chunk: EncodedAudioChunk) => Promise<void>) | undefined;
+    // A promise the facade settles itself.
+    const deferred = (): { promise: Promise<void>; resolve: () => void } => {
+      let resolve: () => void = () => {};
+      const promise = new Promise<void>((settle) => {
+        resolve = () => settle();
+      });
+      return { promise, resolve };
+    };
+    // Settles when the facade lets go of the session in use, as a switch starts or the facade ends, and is then
+    // replaced: a flush waits on that session's own flush only until then, since a provider whose connection dropped
+    // mid-flush may never settle it.
+    let leaving = deferred();
+    const letGo = (): void => {
+      leaving.resolve();
+      leaving = deferred();
+    };
     const finish = (): void => {
       if (closed) return;
       closed = true;
       tokens = [];
       characters = 0;
+      letGo();
       facade.emit('close');
     };
     const fatal = (error: Error): void => {
@@ -381,6 +399,9 @@ export class StreamingTTSChain implements IStreamingTTS {
         if (late && current) begin(late);
         return switching;
       });
+      // The facade lets go of the session that failed: a flush waiting on that session's own flush goes on to the
+      // switch.
+      letGo();
     };
     // A request starts anew after a cancel or a completed flush: its text has produced no audio yet.
     const admit = (text: string): void => {
@@ -409,8 +430,9 @@ export class StreamingTTSChain implements IStreamingTTS {
         }
       },
       // The request counts as flushed only once the session in use completed its flush with no switch since; a
-      // failure, a close or a refused flush of it switches, and the backup that took the text is flushed instead. A
-      // switch the flush waited for, here or below, that ended the facade fails the flush.
+      // failure, a close or a refused flush of it switches, and the backup that took the text is flushed instead,
+      // without waiting for the failed session's own flush to settle. A switch the flush waited for, here or below,
+      // that ended the facade fails the flush.
       flush: async (): Promise<void> => {
         const waited = switching !== undefined;
         await switching;
@@ -421,9 +443,10 @@ export class StreamingTTSChain implements IStreamingTTS {
         if (cancelled || !current) return;
         for (;;) {
           const session: StreamingTTSSession = current;
+          const left = leaving.promise;
           let failure: Error | undefined;
           try {
-            await session.flush();
+            await Promise.race([session.flush(), left]);
           } catch (error) {
             failure = error instanceof Error ? error : new Error('TTS flush failed');
           }
