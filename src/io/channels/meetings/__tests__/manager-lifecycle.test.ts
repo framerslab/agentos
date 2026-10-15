@@ -972,6 +972,23 @@ describe('the completion hook', () => {
     expect(calls).toEqual([runId]);
   });
 
+  it('a total a done report gives while the step runs is the one settled and kept', async () => {
+    let begun!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { begun = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const h = harness({ beforeComplete: async () => { begun(); await gate; } });
+    const runId = await heard(h, 'none');
+    const ended = h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    await started;
+    await h.report(runId, 'done', { seconds: 180 }); // its cleanup finds the step claimed and leaves its total on the row
+    expect((await h.stores.runs.get(runId))).toMatchObject({ state: 'left', reportedSeconds: 180 });
+    release();
+    await ended;
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reportedSeconds: 180, billedSeconds: 180 });
+    expect(h.entitlement.settled).toEqual([['res-1', 180]]);
+  });
+
   it('a claim another cleanup left holds the step for the lease, and is taken over once it is that old', async () => {
     const calls: string[] = [];
     const h = harness({ beforeComplete: async (run) => void calls.push(run.runId) });

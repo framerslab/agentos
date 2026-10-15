@@ -11,7 +11,7 @@
 import { EgressRefusedError, checkedRequest, hostedEgressPolicy, type AddressLookup } from '../../../safety/egress/CheckedEgress.js';
 import { isPublicAddress } from '../../../safety/egress/addresses.js';
 import { DEFAULT_ENVELOPE_HEADERS, envelopeHeaders, type EnvelopeHeaderNames } from './signing.js';
-import type { IClock, IOutbox, OutboxDelivery } from './stores/types.js';
+import { OUTBOX_GIVE_UP_MS, type IClock, type IOutbox, type OutboxDelivery } from './stores/types.js';
 
 /**
  * Whether an address, as text, is public: the checked egress module's rule, kept here under its first name, which
@@ -145,7 +145,7 @@ export interface OutboxDispatcherOptions {
   resolve: (destinationRef: string) => Promise<DeliveryDestination | undefined>;
   /** How each delivery is posted; {@link httpsSend} when absent. */
   send?: DeliverySend;
-  /** Sends a delivery of kind `mail`; absent, such a delivery fails for its backoff and the warning names it. */
+  /** Sends a delivery of kind `mail`; absent, such a delivery fails for its backoff and the warning names it. With it, the outbox needs `markDead`, so an `unknown` outcome can end its delivery rather than retry a send the destination may have made. */
   mail?: MailSend;
   /** The envelope's header names; the library's defaults when absent. */
   names?: EnvelopeHeaderNames;
@@ -165,6 +165,7 @@ export class OutboxDispatcher {
 
   /** @param options - The outbox, the destinations and the send: {@link OutboxDispatcherOptions}. */
   constructor(private readonly options: OutboxDispatcherOptions) {
+    if (options.mail !== undefined && typeof options.outbox.markDead !== 'function') throw new TypeError('OutboxDispatcher: a mail send needs an outbox with markDead, so an unknown outcome ends its delivery');
     this.send = options.send ?? httpsSend();
   }
 
@@ -263,7 +264,7 @@ export class OutboxDispatcher {
       }
       const answer = await mail(fresh, signal);
       signal.throwIfAborted();
-      held.result = await this.record(fresh.id, answer);
+      held.result = await this.record(fresh, answer);
     };
     try {
       const claimed = outbox.sendClaimed;
@@ -279,8 +280,9 @@ export class OutboxDispatcher {
   }
 
   /** Records a mail's outcome: delivered, dead at once (a refusal, or an outcome never answered), held until a time, or a failed attempt for the backoff. */
-  private async record(id: string, answer: MailOutcome): Promise<'delivered' | 'failed' | 'held'> {
+  private async record(d: OutboxDelivery, answer: MailOutcome): Promise<'delivered' | 'failed' | 'held'> {
     const outbox = this.options.outbox;
+    const id = d.id;
     switch (answer.outcome) {
       case 'sent':
         await outbox.markDelivered(id);
@@ -288,10 +290,20 @@ export class OutboxDispatcher {
       case 'dead':
         await this.endDead(id);
         return 'failed';
-      case 'unknown':
+      case 'unknown': {
+        // never a retry: the destination may have acted. Ended where the outbox can; where a wrapper's outbox cannot end
+        // it, held until its expiry, which ends it; failed for the backoff only when it can do neither (and says so)
         this.options.logger?.warn(`[OutboxDispatcher] ${id}: outcome unknown`);
-        await this.endDead(id);
+        if (outbox.markDead && (await outbox.markDead(id))) return 'failed';
+        const until = d.expiresAt ?? this.now() + OUTBOX_GIVE_UP_MS;
+        if (outbox.holdUntil && (await outbox.holdUntil(id, until))) {
+          this.options.logger?.warn(`[OutboxDispatcher] ${id}: outcome unknown held until its expiry; the outbox cannot end a delivery`);
+          return 'held';
+        }
+        this.options.logger?.warn(`[OutboxDispatcher] ${id}: outcome unknown and the outbox can neither end nor hold the delivery`);
+        await outbox.markFailed(id, this.now());
         return 'failed';
+      }
       case 'hold':
         if (!outbox.holdUntil || !(await outbox.holdUntil(id, answer.notBefore))) await outbox.markFailed(id, this.now());
         return 'held';

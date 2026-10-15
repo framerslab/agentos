@@ -1713,8 +1713,8 @@ export class MeetingManager {
       return;
     }
     const now = this.now();
-    const counted = this.countedSeconds(run.reportedSeconds, reportedSeconds);
-    const seconds = counted ?? Math.max(0, Math.round(((run.leftAt ?? now) - (run.dispatchedAt ?? run.joinAt)) / 1000));
+    let counted = this.countedSeconds(run.reportedSeconds, reportedSeconds);
+    let seconds = counted ?? Math.max(0, Math.round(((run.leftAt ?? now) - (run.dispatchedAt ?? run.joinAt)) / 1000));
     let billed = isBilledEnd(run) ? seconds : 0;
     try {
       await this.stores.transcript.fence(run.runId);
@@ -1728,7 +1728,8 @@ export class MeetingManager {
           const latest = await this.stores.runs.get(run.runId);
           if (latest === undefined || latest.state !== 'left') return;
           if (latest.completionHookAt === undefined) {
-            await this.stores.runs.update(run.runId, { reportedSeconds: seconds, cleanupPending: true }, 'left');
+            // the total this report gave is kept on the row for the cleanup that holds the step, which settles it
+            await this.stores.runs.update(run.runId, { reportedSeconds: this.countedSeconds(latest.reportedSeconds, seconds), cleanupPending: true }, 'left');
             return;
           }
           run = latest;
@@ -1743,6 +1744,11 @@ export class MeetingManager {
           const hooked = await this.stores.runs.update(run.runId, { completionHookAt: this.now() }, 'left');
           if (hooked) run = hooked;
         }
+        // a total a done report gave while the step ran was stored on the row by that report's cleanup: it is the one
+        // settled and kept, never the smaller one this cleanup began with
+        counted = this.countedSeconds(run.reportedSeconds, counted);
+        seconds = counted ?? seconds;
+        billed = isBilledEnd(run) ? seconds : 0;
       }
       await this.settleRunFunding(run, billed);
       if (run.funding) {
