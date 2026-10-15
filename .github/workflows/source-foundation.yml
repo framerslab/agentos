@@ -87,10 +87,10 @@ jobs:
         run: |
           set -euo pipefail
           cd "$CONSUMER_DIR"
-          # Bundler resolution, as the account-sources pack compiles: the SQL adapter's declaration files re-export
-          # through extensionless paths, which NodeNext resolution does not follow. Node's own resolution of the
-          # installed JavaScript is exercised when the compiled contract runs.
-          node node_modules/typescript/bin/tsc --strict --module ESNext --moduleResolution Bundler --target ES2022 --lib ES2022,DOM --types node --skipLibCheck --outDir out ./*.ts
+          # Node's own resolution, the strictest a consumer compiles under: each import the contracts name resolves
+          # through the package's export map as Node resolves it. --skipLibCheck leaves the packages' internal
+          # declaration errors to their own builds.
+          node node_modules/typescript/bin/tsc --strict --module NodeNext --moduleResolution NodeNext --target ES2022 --lib ES2022,DOM --types node --skipLibCheck --outDir out ./*.ts
       - name: Record registry integrity and reject workspace resolution
         shell: bash
         run: |

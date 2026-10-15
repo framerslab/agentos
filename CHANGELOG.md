@@ -1,3 +1,13 @@
+## [0.13.143](https://github.com/framerslab/agentos/compare/v0.13.142...v0.13.143) (2026-10-15)
+
+### feat
+
+* **rag:** add FuzzyIndex, ranked search with prefix and one-edit matching, field weights, marks and passages (#498) ([35e88de](https://github.com/framerslab/agentos/commit/35e88de44d5424fab635a9578e40a7e906842740))
+
+### test
+
+* **sources:** compile the installed foundation contract under Node's own resolution (#500) ([ea2db78](https://github.com/framerslab/agentos/commit/ea2db7826cf81fa8c829fa5107e8942eb58eb580))
+
 ## [0.13.142](https://github.com/framerslab/agentos/compare/v0.13.141...v0.13.142) (2026-10-15)
 
 ### test
