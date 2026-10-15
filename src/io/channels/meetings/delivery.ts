@@ -246,10 +246,11 @@ export class OutboxDispatcher {
       await outbox.markFailed(d.id, this.now());
       return 'failed';
     }
-    let answer: MailOutcome = { outcome: 'retry' };
+    // held on an object: an assignment inside the closure is not seen by the narrowing of a plain variable
+    const held: { answer: MailOutcome } = { answer: { outcome: 'retry' } };
     const deliver = async (fresh: OutboxDelivery, signal: AbortSignal): Promise<void> => {
       signal.throwIfAborted();
-      answer = await mail(fresh, signal);
+      held.answer = await mail(fresh, signal);
       signal.throwIfAborted();
     };
     try {
@@ -262,6 +263,7 @@ export class OutboxDispatcher {
       await outbox.markFailed(d.id, this.now());
       return 'failed';
     }
+    const answer = held.answer;
     switch (answer.outcome) {
       case 'sent':
         await outbox.markDelivered(d.id);
