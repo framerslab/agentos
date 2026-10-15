@@ -186,6 +186,54 @@ function kindOf(stored: string, storedLetters: number, wanted: string, wantedLet
   return 0;
 }
 
+/** Two words in the order of their UTF-16 units, so the words that begin alike stand together. */
+function byUnits(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Two words in the order of their UTF-16 units read from the end, so the words that end alike stand together and a
+ * word stands before every word it ends.
+ */
+function byUnitsFromEnd(a: string, b: string): number {
+  for (let i = a.length - 1, j = b.length - 1; i >= 0 && j >= 0; i -= 1, j -= 1) {
+    const difference = a.charCodeAt(i) - b.charCodeAt(j);
+    if (difference !== 0) return difference;
+  }
+  return a.length - b.length;
+}
+
+/** Where `word` stands in `sorted`, a list in the order `compare` gives: the first place whose word is not before it. */
+function placeOf(sorted: readonly string[], word: string, compare: (a: string, b: string) => number): number {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (compare(sorted[middle], word) < 0) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+/** Two lists in the order `compare` gives, as one list in that order, each word once. */
+function mergedInOrder(a: readonly string[], b: readonly string[], compare: (a: string, b: string) => number): string[] {
+  const out: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    let next: string;
+    if (j >= b.length || (i < a.length && compare(a[i], b[j]) <= 0)) {
+      next = a[i];
+      i += 1;
+    } else {
+      next = b[j];
+      j += 1;
+    }
+    if (out.length === 0 || compare(out[out.length - 1], next) !== 0) out.push(next);
+  }
+  return out;
+}
+
 /** A stretch of a text, from `start` up to `end`. */
 interface Span {
   start: number;
@@ -417,6 +465,13 @@ function documentsProblem(json: FuzzyIndexJSON): string | undefined {
  * another field shows the opening of its text, unmarked. A mark is a whole word at UTF-16 offsets into the text as the
  * index holds it, in NFC; the marks of a text are in order and never overlap.
  *
+ * A search reads the words near each query word's, not every word the index holds: it looks a query word up in two
+ * orders of the index's words, by how they begin and by how they end. It reads the words that begin with the query
+ * word's first half, the query word itself and the words it begins among them, the words that end with its second
+ * half, and the one word with the two letters on either side of its middle swapped; a query word under
+ * `editMinLength` letters reads only the words it begins. The first search after a document is added brings the two
+ * orders up to date. The fields of the hits a search answers are then read again to mark them.
+ *
  * Pure and synchronous: it reads and writes nothing outside itself and imports nothing but the library's word rule,
  * so a page can hold it. It is saved with {@link FuzzyIndex.toJSON} and restored with {@link FuzzyIndex.fromJSON}.
  *
@@ -450,6 +505,17 @@ export class FuzzyIndex {
   private readonly documents = new Map<string, StoredDocument>();
   /** Every folded word the documents hold. */
   private readonly terms = new Map<string, Term>();
+  /**
+   * The words of `terms` in the order of their UTF-16 units, as of the last search: the words that begin as a query
+   * word begins stand together. It may hold words removed since, which a search skips.
+   */
+  private byStart: string[] = [];
+  /** The same words in the order of their units read from the end: the words that end as a query word ends stand together. */
+  private byEnd: string[] = [];
+  /** The words added to `terms` since the two orders were last brought up to date. */
+  private addedTerms: string[] = [];
+  /** How many words were removed from `terms` since then. */
+  private removedTerms = 0;
   /** The place the next document added takes. */
   private nextSeq = 0;
 
@@ -547,9 +613,13 @@ export class FuzzyIndex {
       if (entry === undefined) {
         entry = { letters: lettersIn(term), postings: new Map() };
         this.terms.set(term, entry);
+        this.addedTerms.push(term);
       }
       entry.postings.set(id, weight);
     }
+    // A document added again and again between searches adds its own words again each time: put them in order before
+    // the list of them outgrows the index's words.
+    if (this.addedTerms.length > this.terms.size + 1024) this.refreshOrders();
   }
 
   /** Adds several documents, in order. A document that is refused throws, and those before it stay added. */
@@ -565,10 +635,64 @@ export class FuzzyIndex {
       const entry = this.terms.get(term);
       if (entry === undefined) continue;
       entry.postings.delete(id);
-      if (entry.postings.size === 0) this.terms.delete(term);
+      if (entry.postings.size === 0) {
+        this.terms.delete(term);
+        this.removedTerms += 1;
+      }
     }
     this.documents.delete(id);
     return true;
+  }
+
+  /**
+   * Brings the two orders of the index's words up to date: the words added since are put in their places and the
+   * words removed since are dropped. Words removed alone stay until they could be half of an order, a search skipping
+   * them meanwhile.
+   */
+  private refreshOrders(): void {
+    if (this.addedTerms.length === 0 && this.removedTerms * 2 <= this.byStart.length) return;
+    const held = (term: string): boolean => this.terms.has(term);
+    const added = this.addedTerms.filter(held);
+    this.byStart = mergedInOrder(this.byStart.filter(held), [...added].sort(byUnits), byUnits);
+    this.byEnd = mergedInOrder(this.byEnd.filter(held), added.sort(byUnitsFromEnd), byUnitsFromEnd);
+    this.addedTerms = [];
+    this.removedTerms = 0;
+  }
+
+  /**
+   * Calls `visit` with each word of the index a query word can match, each once, from the two orders brought up to
+   * date. The words the query word begins, and the query word itself, stand together in the order by start. A word one
+   * edit from it, letter by letter, keeps one of its halves whole: an edit in the second half leaves the first half as
+   * the word's start, and an edit in the first half leaves the second half as its end, but for the two letters on
+   * either side of the middle swapped, which makes one word to look up. So where edits count (`editMinLength` letters
+   * or more), the words read are those that begin with the query word's first half or end with its second; a query
+   * word of one letter has no halves, and reads every word.
+   */
+  private eachCandidate(word: string, letters: number, visit: (term: string, entry: Term) => void): void {
+    const take = (term: string): void => {
+      const entry = this.terms.get(term);
+      if (entry !== undefined) visit(term, entry);
+    };
+    const { byStart, byEnd } = this;
+    if (letters < this.editMinLength) {
+      for (let at = placeOf(byStart, word, byUnits); at < byStart.length && byStart[at].startsWith(word); at += 1) take(byStart[at]);
+      return;
+    }
+    const points = Array.from(word);
+    const middle = Math.floor(points.length / 2);
+    if (middle === 0) {
+      for (const [term, entry] of this.terms) visit(term, entry);
+      return;
+    }
+    const head = points.slice(0, middle).join('');
+    const tail = points.slice(middle).join('');
+    for (let at = placeOf(byStart, head, byUnits); at < byStart.length && byStart[at].startsWith(head); at += 1) take(byStart[at]);
+    for (let at = placeOf(byEnd, tail, byUnitsFromEnd); at < byEnd.length && byEnd[at].endsWith(tail); at += 1) {
+      // A word that begins with the head was read with the words above.
+      if (!byEnd[at].startsWith(head)) take(byEnd[at]);
+    }
+    const swapped = [...points.slice(0, middle - 1), points[middle], points[middle - 1], ...points.slice(middle + 1)].join('');
+    if (!swapped.startsWith(head) && !swapped.endsWith(tail)) take(swapped);
   }
 
   /** The query's words, read in NFC by the tokenizer and folded, each once, in the order they were typed. */
@@ -594,13 +718,14 @@ export class FuzzyIndex {
     if (match !== 'all' && match !== 'any') throw new RangeError("FuzzyIndex.search: match is not 'all' or 'any'.");
     const wanted = this.queryWords(query);
     if (wanted.length === 0 || topK === 0) return [];
+    this.refreshOrders();
     const wantedLetters = wanted.map(lettersIn);
     // For each document a query word matched: each query word's best match, its kind times its field's weight.
     const best = new Map<string, number[]>();
     wanted.forEach((word, place) => {
-      for (const [term, entry] of this.terms) {
+      this.eachCandidate(word, wantedLetters[place], (term, entry) => {
         const kind = kindOf(term, entry.letters, word, wantedLetters[place], this.editMinLength);
-        if (kind === 0) continue;
+        if (kind === 0) return;
         for (const [id, weight] of entry.postings) {
           let row = best.get(id);
           if (row === undefined) {
@@ -609,7 +734,7 @@ export class FuzzyIndex {
           }
           row[place] = Math.max(row[place], kind * weight);
         }
-      }
+      });
     });
     const ranked: Array<{ document: StoredDocument; score: number }> = [];
     for (const [id, row] of best) {
