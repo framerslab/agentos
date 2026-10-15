@@ -32,7 +32,7 @@
  * is handled at the transport level rather than per-callback.
  */
 
-import type { EventEmitter } from 'node:events';
+import type { EventEmitterLike } from './VoiceEventEmitter.js';
 
 // ============================================================================
 // Section 1 -- Raw audio types
@@ -91,6 +91,15 @@ export interface AudioFrame {
    * See `DiarizedSegment.speakerId` for the post-diarization label.
    */
   speakerHint?: string;
+
+  /** Validated wire packet sequence when supplied by the capture boundary. */
+  sequence?: number;
+
+  /** Channel count at the capture boundary; omitted means the legacy mono convention. */
+  channels?: number;
+
+  /** Optional call fence; required by {@link ScopedAudioFrame}. */
+  generation?: VoiceGeneration;
 }
 
 /**
@@ -145,6 +154,21 @@ export interface EncodedAudioChunk {
    * accurately when playback is cut short.
    */
   text: string;
+
+  /** Container of the declared codec; omitted preserves legacy metadata. */
+  container?: 'raw' | 'wav' | 'mp3' | 'ogg';
+
+  /** Captured tenant scope; required on call-profile output. */
+  scopeId?: string;
+
+  /** Captured call; required on call-profile output. */
+  callId?: string;
+
+  /** Call fence captured when this synthesis request started. */
+  generation?: VoiceGeneration;
+
+  /** Monotonic playback chunk sequence within the inference generation. */
+  sequence?: number;
 }
 
 // ============================================================================
@@ -206,7 +230,7 @@ export type TransportControlMessage =
  *
  * @see {@link WebSocketStreamTransport} for the canonical WebSocket implementation.
  */
-export interface IStreamTransport extends EventEmitter {
+export interface IStreamTransport extends EventEmitterLike {
   /**
    * Stable identifier for this transport connection (e.g. a UUID or socket ID).
    * Used as a correlation key in logs and metrics.
@@ -254,6 +278,75 @@ export interface IStreamTransport extends EventEmitter {
 // ============================================================================
 // Section 3 -- Streaming STT (Speech-to-Text)
 // ============================================================================
+
+/**
+ * A hosted socket's immutable identity, established before any network
+ * opening. The built-in Deepgram and OpenAI streaming adapters give one to
+ * every socket they try, retries, reconnects and rollovers included, and pass
+ * it to {@link SttConnectionHooks.authorize} before the WebSocket upgrade.
+ */
+export interface SttConnectionOpening {
+  /** UUID unique across providers, retries, rollovers and process restarts. */
+  readonly connectionId: string;
+  /** Adapter id, such as `deepgram-streaming`. */
+  readonly providerId: string;
+  /** Exact hosted `vendor:model` entry used to reserve and price this socket. */
+  readonly entry: string;
+  /** Exact model used on the wire. */
+  readonly model: string;
+}
+
+/**
+ * Built-in hosted usage, with the identity shared by authorization and
+ * settlement: one immutable cumulative report per interval and exactly one
+ * final report for every socket a built-in adapter tried.
+ */
+export interface SttMeasuredUsageEvent extends StreamingSTTUsageEvent {
+  /** The socket's {@link SttConnectionOpening.connectionId}. */
+  readonly connectionId: string;
+  /** The socket's {@link SttConnectionOpening.entry}. */
+  readonly entry: string;
+  /** The socket's {@link SttConnectionOpening.model}. */
+  readonly model: string;
+  /** The supplier's request id for this socket, when the supplier reported one. */
+  readonly supplierRequestId?: string;
+}
+
+/**
+ * Host accounting at the socket boundary, separate from provider permission
+ * (`ProviderPolicy` still decides which providers may open). Honored by the
+ * built-in Deepgram and OpenAI streaming adapters.
+ */
+export interface SttConnectionHooks {
+  /**
+   * Reserve against `opening.entry` and `opening.connectionId` before resolving.
+   * Rejection forbids this socket and does not authorize a vendor fallback.
+   * The host must test `signal.aborted` inside its transaction before commit
+   * and roll back or release any late acquisition. No socket opens after abort.
+   */
+  authorize(opening: SttConnectionOpening, signal: AbortSignal): Promise<void>;
+  /**
+   * Finite per-socket funded audio ceiling, in wire seconds. Deepgram rolls to
+   * an independently authorized socket of the same vendor before exceeding it.
+   */
+  audioCeiling?(opening: SttConnectionOpening): number;
+  /**
+   * Synchronous check of prospective cumulative wire seconds before each send,
+   * including replay and overlap. `false` ends the provider with an
+   * authorization error; must not throw.
+   */
+  beforeAudio?(opening: SttConnectionOpening, nextAudioSeconds: number): boolean;
+  /**
+   * Receive cumulative and exactly one final report for every attempted socket,
+   * including final zero for a failed or denied opening. Unadopted OpenAI openings
+   * use `connectionIndex` zero; all billing identity uses `connectionId`.
+   * Queue durable processing synchronously and never throw. This is mirrored
+   * by the session's `'usage'` event for adopted sockets: consume one path, not both.
+   */
+  usage(event: SttMeasuredUsageEvent): void;
+  /** Maximum authorization wait before abort, in milliseconds. Default 10000. */
+  authorizationTimeoutMs?: number;
+}
 
 /**
  * Configuration passed to `IStreamingSTT.startSession()` when opening a new
@@ -305,6 +398,12 @@ export interface StreamingSTTConfig {
    * speaker adaptation models) without modifying the interface.
    */
   providerOptions?: Record<string, unknown>;
+
+  /** Optional accounting hooks honored by built-in Deepgram and OpenAI streaming adapters. */
+  connectionHooks?: SttConnectionHooks;
+
+  /** Call-profile identity; scoped adapters capture this and update it only through reset. */
+  call?: AudioIdentity;
 }
 
 /**
@@ -453,6 +552,12 @@ export interface StreamingSTTUsageEvent {
   /** Provider that received the audio (its `IStreamingSTT.providerId`). */
   providerId: string;
 
+  /** Built-in hosted socket UUID; custom adapters may omit it. Never substitute a local index. */
+  connectionId?: string;
+
+  /** Exact hosted `vendor:model` entry; custom adapters may omit it. */
+  entry?: string;
+
   /** Model the connection transcribed with, when the provider names one. */
   model?: string;
 
@@ -486,7 +591,7 @@ export interface StreamingSTTUsageEvent {
  *
  * See `IStreamingSTT.startSession()` for the factory method that creates these sessions.
  */
-export interface StreamingSTTSession extends EventEmitter {
+export interface StreamingSTTSession extends EventEmitterLike {
   /**
    * Push a raw audio frame into the recognition stream. Frames must arrive
    * in capture order; gaps or out-of-order frames degrade accuracy.
@@ -655,6 +760,38 @@ export interface TurnCompleteEvent {
 }
 
 /**
+ * What the agent is doing, as `VoicePipelineOrchestrator` reports it to its
+ * endpoint detector through `IEndpointDetector.setAgentContext()`, so the
+ * detector can tell a backchannel, a response the user makes while the agent
+ * holds the floor, from the user's own turn.
+ *
+ * @example
+ * ```typescript
+ * // The user's turn has completed: the agent holds the floor until its reply ends or a barge-in cuts it.
+ * detector.setAgentContext?.({ speaking: true });
+ * ```
+ */
+export interface EndpointAgentContext {
+  /**
+   * The agent holds the floor: its turn has begun and its reply has not
+   * ended. `VoicePipelineOrchestrator` reports `true` from the moment a
+   * user's turn completes until the reply ends or a barge-in cuts it.
+   */
+  speaking: boolean;
+  /**
+   * Whether the agent's last reply asked a question.
+   *
+   * @deprecated Ignored. A backchannel is a response made while the other
+   * party holds the floor, so `speaking` alone decides whether a final is
+   * one, and a reply's punctuation does not say whether it expects an answer
+   * ("Tell me the time you would like." asks without `?`). The property stays
+   * so that code which sets it still compiles; `VoicePipelineOrchestrator`
+   * does not set it.
+   */
+  askedQuestion?: boolean;
+}
+
+/**
  * Detects turn boundaries in a continuous audio/transcript stream.
  * Combines VAD events with linguistic signals to decide when the user
  * has finished speaking.
@@ -666,11 +803,23 @@ export interface TurnCompleteEvent {
  * | `'turn_complete'`      | {@link TurnCompleteEvent} | The user's turn has ended.           |
  * | `'speech_start'`       | *(none)*                | The user has started speaking.         |
  * | `'barge_in_detected'`  | *(none)*                | User spoke while TTS was playing.      |
+ * | `'late_final'`         | {@link TranscriptEvent} | A final that arrived after its turn ended, which the turn does not take. |
+ * | `'backchannel_detected'` | `{ text: string }`    | A final the detector dropped as a backchannel (see `isBackchannel()`). |
+ *
+ * A detector that drops such a final from its turns emits `'late_final'`
+ * with the final as it was pushed, once per final it drops
+ * ({@link HeuristicEndpointDetector} does, for an item-keyed final that
+ * arrives after a reset ended its turn and before the next `speech_end`, a
+ * standalone VAD's next `speech_start` or a reset with `'session'`, while the
+ * transcriber's next utterance is spoken included).
+ * `VoicePipelineOrchestrator` does not listen for it, so the conversation
+ * leaves those words out; `startListenSession` writes the final to its sink
+ * as a turn of its own.
  *
  * @see {@link HeuristicEndpointDetector} for the rule-based implementation.
  * @see {@link AcousticEndpointDetector} for the purely acoustic implementation.
  */
-export interface IEndpointDetector extends EventEmitter {
+export interface IEndpointDetector extends EventEmitterLike {
   /**
    * Active detection strategy:
    * - `'acoustic'` -- pure silence-timeout based (no transcript analysis).
@@ -703,9 +852,55 @@ export interface IEndpointDetector extends EventEmitter {
 
   /**
    * Reset all internal state (timers, partial transcripts) without destroying
-   * the detector instance. Called at the start of each new turn.
+   * the detector instance. Called at the start of each new turn, and with
+   * `'session'` as a session starts on the detector
+   * (`VoicePipelineOrchestrator.startSession()` and `startListenSession()`
+   * make that call), so a detector a host hands to one session after another
+   * starts each with nothing an earlier session left.
+   *
+   * @param scope - `'turn'` (the default) ends a turn, and a final of that turn
+   *   can still arrive after it ({@link HeuristicEndpointDetector} drops such a
+   *   late final and reports it as `'late_final'`); `'session'` starts a
+   *   session, whose transcriber sends no final of an earlier session's turns,
+   *   so nothing from before it is awaited.
    */
-  reset(): void;
+  reset(scope?: 'turn' | 'session'): void;
+
+  /**
+   * Tells the detector whether the agent holds the floor.
+   * `VoicePipelineOrchestrator` calls it as its session starts, after the
+   * reset with `'session'` (`speaking: false`), as a user's turn completes
+   * and the agent takes the floor (`speaking: true`), and as the agent's
+   * reply ends or a barge-in cuts it (`speaking: false`). From the first call
+   * until a reset with `'session'`, {@link HeuristicEndpointDetector} reads a
+   * final with trailing `.`, `,`, `!` or an ellipsis ("Sure.") as its phrase,
+   * never takes one that ends with `?` ("Okay?") for a backchannel, and drops
+   * a backchannel such as "yeah" only while the agent holds the floor: while
+   * the agent listens, every final is the user's, a lone "okay" included.
+   * Until the first call, and again after a reset with `'session'`, it drops
+   * a final whose whole text, trimmed and lowercased, is a backchannel
+   * phrase, whatever the agent is doing, so a caller that never calls it,
+   * such as a listen session, keeps that rule. A detector without this method
+   * is told nothing.
+   *
+   * @param context - Whether the agent holds the floor; its deprecated `askedQuestion` is ignored.
+   */
+  setAgentContext?(context: EndpointAgentContext): void;
+
+  /**
+   * Whether the detector would drop a final with this text as a backchannel
+   * now: the same phrases, the same reading of the text and the same agent
+   * context as for its own finals. `VoicePipelineOrchestrator` asks it of
+   * each final from a client that transcribes on its own device, and hands
+   * one it answers `true` for to the detector on its own, which drops it and
+   * reports it as `'backchannel_detected'`, instead of joining it into the
+   * turn's text. A detector without this method gets every client final
+   * joined with the turn's earlier ones.
+   *
+   * @param text - A final's text.
+   * @returns `true` when the detector would drop the final as a backchannel.
+   */
+  isBackchannel?(text: string): boolean;
 }
 
 // ============================================================================
@@ -812,7 +1007,7 @@ export interface DiarizedSegment extends TranscriptSegment {
  *
  * See `IDiarizationEngine.startSession()` for the factory method that creates these sessions.
  */
-export interface DiarizationSession extends EventEmitter {
+export interface DiarizationSession extends EventEmitterLike {
   /**
    * Push a raw audio frame for diarization analysis.
    *
@@ -929,6 +1124,9 @@ export interface StreamingTTSConfig {
    * they support and ignore the rest; see {@link TTSExpressiveness}.
    */
   expressiveness?: TTSExpressiveness;
+
+  /** Optional scoped synthesis request. A call-profile provider reports this identity on every chunk and usage event. */
+  call?: AudioIdentity & { requestId: string };
 }
 
 /**
@@ -946,7 +1144,7 @@ export interface StreamingTTSConfig {
  *
  * See `IStreamingTTS.startSession()` for the factory method that creates these sessions.
  */
-export interface StreamingTTSSession extends EventEmitter {
+export interface StreamingTTSSession extends EventEmitterLike {
   /**
    * Push one or more LLM output tokens into the synthesis buffer.
    * The session will chunk and synthesise them according to `StreamingTTSConfig.chunkingMode`.
@@ -972,6 +1170,12 @@ export interface StreamingTTSSession extends EventEmitter {
    * Terminate the session and release provider-side resources.
    */
   close(): void;
+
+  /** Opt-in pull contract. Await the sink before producing another chunk; never also emit that chunk as audio. */
+  setAudioSink?(sink: (chunk: EncodedAudioChunk) => Promise<void>): void;
+
+  /** Bounded text admission; the call profile requires this alongside setAudioSink. */
+  writeTokens?(tokens: string): Promise<void>;
 }
 
 /**
@@ -1354,6 +1558,9 @@ export interface VoiceTurnMetadata {
    * Aggregate STT confidence for the complete transcript, in the range [0, 1].
    */
   transcriptConfidence: number;
+
+  /** Required on call-profile reasoning requests; absent on legacy sessions. */
+  identity?: AudioIdentity;
 }
 
 // ============================================================================
@@ -1492,7 +1699,7 @@ export type PipelineState =
  *
  * See `VoicePipelineOrchestrator.startSession()` for the factory method that creates these sessions.
  */
-export interface VoicePipelineSession extends EventEmitter {
+export interface VoicePipelineSession extends EventEmitterLike {
   /**
    * Unique, stable identifier for this session (UUID).
    */
@@ -1524,8 +1731,52 @@ export interface VoicePipelineSession extends EventEmitter {
 // ============================================================================
 
 /**
+ * A transcript the client made itself, sent in place of audio by a client
+ * that transcribes on its own device (for example with `MoonshineBrowserSTT`
+ * in a browser). It carries the {@link TranscriptEvent} fields a display and
+ * an endpoint detector read; every interim and the final of one line carry
+ * the same `itemId`, and the final comes once, when the line is complete.
+ * `toClientTranscriptMessage()` makes one from a `TranscriptEvent`;
+ * `isClientTranscriptMessage()` checks one a server received, and
+ * `transcriptEventFromClient()` turns it back into a `TranscriptEvent`.
+ * `VoicePipelineOrchestrator` takes a session's speech from the first source
+ * it receives: a session that received audio first drops these messages, and
+ * one that received a message first drops the audio.
+ *
+ * @example
+ * ```typescript
+ * sttSession.on('transcript', (event: TranscriptEvent) => {
+ *   socket.send(JSON.stringify(toClientTranscriptMessage(event)));
+ * });
+ * ```
+ */
+export interface ClientTranscriptMessage {
+  /** Discriminator of the client message. */
+  type: 'transcript';
+  /** The line's text so far (interim), or its whole text (final); at most 4,000 characters. */
+  text: string;
+  /** Identifier of the line, at most 128 characters; every interim and the final of one line carry the same one. */
+  itemId: string;
+  /** `true` once the line is complete and will not be revised. */
+  isFinal: boolean;
+  /** Aggregate confidence of `text` in [0, 1]; read as 1 when absent. */
+  confidence?: number;
+  /**
+   * Start of the line's audio, in milliseconds counted from the first frame
+   * the client transcribed in this session.
+   */
+  startMs?: number;
+  /** End of the line's audio, on the same clock as `startMs`. */
+  endMs?: number;
+  /** Language of `text` (for example `'en'`), at most 64 characters. */
+  language?: string;
+}
+
+/**
  * Messages sent from the client (browser/app) to the server over the transport.
  * All messages are JSON-serialised.
+ * A client that transcribes on its own device sends
+ * {@link ClientTranscriptMessage}s in place of audio.
  *
  * @see {@link ServerTextMessage} for the server-to-client counterpart.
  *
@@ -1554,7 +1805,8 @@ export type ClientTextMessage =
       type: 'control';
       /** The control action to perform. */
       action: TransportControlMessage;
-    };
+    }
+  | ClientTranscriptMessage;
 
 // ============================================================================
 // Section 11 -- Wire protocol: server -> client messages
@@ -1700,4 +1952,171 @@ export interface ITranscriptInputSink extends ITranscriptSink {
    * @returns The stored turn, or undefined when a fence or terminal run drops it.
    */
   appendNext(turn: TranscriptInput): Promise<TranscriptTurn | undefined>;
+}
+
+// ============================================================================
+// Section 13 -- Scoped call runtime seams
+// ============================================================================
+
+/** Independent worker, inference and physical-transport fences. */
+export interface VoiceGeneration {
+  /** Advances only when a fenced worker replaces the previous one. */
+  workerGeneration: number;
+  /** Advances on each interruption, so output of an earlier inference cannot play. */
+  inferenceGeneration: number;
+  /** Advances on each reattachment of a physical transport. */
+  transportEpoch: number;
+}
+
+/** Stable recognition identity captured at admission, never assigned to a delayed completion. */
+export interface AudioIdentity {
+  /** The scope the audio belongs to. */
+  scopeId: string;
+  /** The call the audio belongs to. */
+  callId: string;
+  /** The recognition turn the audio belongs to. */
+  turnId: string;
+  /** The fences in force when the audio was admitted. */
+  generation: Readonly<VoiceGeneration>;
+}
+
+/** One normalized mono frame; sequence increases for the lifetime of the call, across resets. */
+export interface ScopedAudioFrame extends AudioFrame, AudioIdentity {
+  /** Always 16 kHz. */
+  sampleRate: 16000;
+  /** Always mono. */
+  channels: 1;
+  /** The frame's position in the call's input, starting at 1. */
+  sequence: number;
+  /** The fences in force when the frame was admitted. */
+  generation: VoiceGeneration;
+}
+
+/** One classified frame, with duration measured from samples rather than wall-clock silence. */
+export interface VadFrameEvent extends VadEvent, AudioIdentity {
+  /** Always a voice activity model, never a recognizer's inference. */
+  source: 'vad';
+  /** The sequence of the classified frame. */
+  sequence: number;
+  /** Duration of the classified audio, from its sample count. */
+  durationMs: number;
+  /** Whether the frame was classified as speech. */
+  speech: boolean;
+}
+
+/** Scoped recognition result. The producer preserves the input turn and generation. */
+export interface ScopedTranscriptEvent extends TranscriptEvent, AudioIdentity {}
+
+/** Scoped endpoint result. The producer preserves the input turn and generation. */
+export interface ScopedTurnCompleteEvent extends TurnCompleteEvent, AudioIdentity {}
+
+/** Content-free loss record. Resets never convert a missing interval into silence or billable speech. */
+export interface AudioGapEvent extends AudioIdentity {
+  /** A full queue, the transport, the provider, or an out-of-order or skipped sequence. */
+  reason: 'overflow' | 'transport' | 'provider' | 'sequence';
+  /** Lost audio in milliseconds, including queued audio the gap discarded. */
+  lostMs: number;
+  /** The last sequence admitted before the gap. */
+  afterSequence: number;
+}
+
+/** Factory-owned VAD. Emits vad(VadFrameEvent), error(Error); reset fences all prior asynchronous work. */
+export interface IVadSession extends EventEmitterLike {
+  /** Classifies one frame; resolves once the frame is admitted. The samples are read-only. */
+  pushAudio(frame: ScopedAudioFrame): Promise<void>;
+  /** Discards retained audio and pending work, and labels later events with `identity`. */
+  reset(identity: AudioIdentity): Promise<void>;
+  /** Classifies retained audio and emits its events. */
+  flush(): Promise<void>;
+  /** Releases the session; it accepts no audio afterwards. */
+  dispose(): Promise<void>;
+}
+
+/** Audio-aware endpointing. Emits turn_complete(ScopedTurnCompleteEvent), error(Error). */
+export interface IAudioEndpointDetector extends EventEmitterLike {
+  /** Detection strategy, as {@link IEndpointDetector.mode}. */
+  readonly mode: 'acoustic' | 'heuristic' | 'semantic';
+  /** Retains one frame for the detector's window; resolves once admitted. The samples are read-only. */
+  pushAudio(frame: ScopedAudioFrame): Promise<void>;
+  /** Consumes one classified frame, which may ask the detector to evaluate its window. */
+  pushVadEvent(event: VadFrameEvent): Promise<void>;
+  /** Consumes one scoped recognition result. */
+  pushTranscript(event: ScopedTranscriptEvent): Promise<void>;
+  /** Discards the window and pending work, and labels later results with `identity`. */
+  reset(identity: AudioIdentity): Promise<void>;
+  /** Releases the detector; it emits nothing afterwards. */
+  dispose(): Promise<void>;
+}
+
+/** Call-profile STT explicitly binds asynchronous results to their admitted input identity. */
+export interface ScopedStreamingSTTSession extends StreamingSTTSession {
+  /** Admits one frame for recognition; resolves once it is admitted. Transcripts of it carry the frame's identity. The samples are read-only. */
+  pushAudioScoped(frame: ScopedAudioFrame): Promise<void>;
+  /** Resets recognition without replay; late results retain their old identity. */
+  reset(identity: AudioIdentity): Promise<void>;
+}
+
+/** Playback acknowledged by a transport, not merely queued or sent to a socket. */
+export interface PlaybackReceipt {
+  /** The fences of the played chunk. */
+  generation: VoiceGeneration;
+  /** The played chunk's sequence within its inference generation. */
+  sequence: number;
+  /** Samples of the chunk that played. */
+  playedSamples: number;
+  /** Rate of `playedSamples`, in Hz. */
+  sampleRate: number;
+}
+
+/** Speaking transports implement these methods in addition to IStreamTransport. */
+export interface IPlaybackTransport extends IStreamTransport {
+  /** Resolves only when this chunk has played. Abort rejects the wait; clearPlayback discards physical queued data. */
+  waitForPlayback(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt>;
+  /** Resolves after the publisher has discarded this generation's pending audio. */
+  clearPlayback(generation: VoiceGeneration): Promise<void>;
+  /** Optional physical setup barrier; completes before a call is considered connected. */
+  readyForPlayback?(): Promise<void>;
+}
+
+/** Cumulative supplier work for one synthesis request, including cancelled work. */
+export interface StreamingTTSUsageEvent extends AudioIdentity {
+  /** Provider that synthesized (its `IStreamingTTS.providerId`). */
+  providerId: string;
+  /** The synthesis request the report counts. */
+  requestId: string;
+  /** Characters the provider accepted so far. */
+  acceptedCharacters: number;
+  /** Samples the provider generated so far, played or not. */
+  generatedSamples: number;
+  /** Rate of `generatedSamples`, in Hz. */
+  sampleRate: number;
+  /** The request's state at this report. */
+  status: 'running' | 'completed' | 'cancelled' | 'failed';
+  /** `true` on the request's last report. */
+  final: boolean;
+}
+
+/**
+ * Compares all fences; the caller separately checks scope and call.
+ *
+ * @param a - One generation.
+ * @param b - The other generation.
+ * @returns `true` when the worker generation, inference generation and transport epoch are all equal.
+ */
+export function sameVoiceGeneration(a: Readonly<VoiceGeneration>, b: Readonly<VoiceGeneration>): boolean {
+  return a.workerGeneration === b.workerGeneration && a.inferenceGeneration === b.inferenceGeneration && a.transportEpoch === b.transportEpoch;
+}
+
+/**
+ * Copies and validates a fence so a host cannot mutate an active request's identity.
+ *
+ * @param value - The identity to copy.
+ * @returns A frozen copy, with a frozen copy of its generation.
+ * @throws {Error} When an id is empty, longer than 128 characters or not a string, or a fence is not a positive safe integer.
+ */
+export function copyAudioIdentity(value: AudioIdentity): AudioIdentity {
+  if (![value.scopeId, value.callId, value.turnId].every((x) => typeof x === 'string' && x.length > 0 && x.length <= 128)) throw new Error('invalid audio identity');
+  const g = value.generation;
+  if (![g.workerGeneration, g.inferenceGeneration, g.transportEpoch].every((x) => Number.isSafeInteger(x) && x > 0)) throw new Error('invalid audio generation');
+  return Object.freeze({ scopeId: value.scopeId, callId: value.callId, turnId: value.turnId, generation: Object.freeze({ ...g }) });
 }

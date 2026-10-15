@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import { FakeClock } from '../stores/memory.js';
-import { DuplicateIdempotencyKeyError, FencedError, type IRunStore, type IJobStore, type ITranscriptStore, type IEventStore, type IOutbox } from '../stores/types.js';
+import { DuplicateIdempotencyKeyError, FencedError, type IRunStore, type IJobStore, type ITranscriptStore, type IEventStore, type IOutbox, type OutboxDelivery } from '../stores/types.js';
 import type { MeetingRunRecord } from '../types.js';
 
 /** The stores one contract case runs against, made fresh for each case, and how to close them. */
 export interface ContractStores {
-  runs: IRunStore;
+  runs: IRunStore & Required<Pick<IRunStore, 'updateWith'>>;
   jobs: IJobStore;
   transcript: ITranscriptStore & Required<Pick<ITranscriptStore, 'appendNext'>>;
   events: IEventStore;
-  outbox: IOutbox;
+  outbox: IOutbox & Required<Pick<IOutbox, 'sendClaimed'>>;
   close?: () => Promise<void>;
 }
 
@@ -137,6 +137,21 @@ export function meetingStoreContract(name: string, make: () => Promise<ContractS
         for (let i = 0; i < 20; i++) await o.markFailed('d1', 86_400_000 + i);
         expect((await o.listByRun('r1')).find((d) => d.id === 'd1')?.state).toBe('dead');
       });
+      it('a failure reported after the destination took a delivery, or after it was given up, changes nothing', async () => {
+        const o = stores.outbox;
+        await o.enqueue({ id: 'd1', runId: 'r1', destinationRef: 'hook-1', eventId: 'e1', type: 'bot:done', payload: '{}' }, 0);
+        await o.markDelivered('d1');
+        await o.markFailed('d1', 10); // a sender that lost the race reports its attempt late
+        const delivered = (await o.listByRun('r1')).find((d) => d.id === 'd1');
+        expect(delivered).toMatchObject({ state: 'delivered', attempts: 0, nextAt: 0 });
+        expect(delivered?.firstAttemptAt).toBeUndefined();
+        expect(await o.due(10)).toEqual([]);
+        await o.enqueue({ id: 'd2', runId: 'r1', destinationRef: 'hook-1', eventId: 'e2', type: 'bot:done', payload: '{}' }, 0);
+        await o.markFailed('d2', 0);
+        await o.markFailed('d2', 86_400_000); // a day after the first failure: given up
+        await o.markFailed('d2', 86_400_001);
+        expect((await o.listByRun('r1')).find((d) => d.id === 'd2')).toMatchObject({ state: 'dead', attempts: 2 });
+      });
       it('after a purge refuses a content delivery for the run and takes a content-free one', async () => {
         const o = stores.outbox;
         await o.purgeContent('r1');
@@ -156,6 +171,99 @@ export function meetingStoreContract(name: string, make: () => Promise<ContractS
         const rows = await o.listByRun('r1');
         expect(rows.find((d) => d.id === 'd1')).toMatchObject({ type: 'bot:purged', payload: '', purged: true });
         expect(rows.find((d) => d.id === 'd2')).toMatchObject({ type: 'bot:done', payload: '{"billedSeconds":90}', purged: false, state: 'pending' });
+      });
+      it('sendClaimed sends a delivery as it stands now, skips one no longer pending, and a purge of the run aborts the send', async () => {
+        const o = stores.outbox;
+        const delivery = (id: string, runId: string) => ({ id, runId, destinationRef: 'hook-1', eventId: id, type: 'bot:transcript' as const, payload: '{"text":"x"}' });
+        await o.enqueue(delivery('d1', 'r1'), 0);
+        await o.enqueue(delivery('d2', 'r2'), 0);
+        const [d1, d2] = await o.due(0);
+        await o.purgeContent('r1');
+        const sent: OutboxDelivery[] = [];
+        const record = async (fresh: OutboxDelivery): Promise<void> => { sent.push(fresh); };
+        // the row `due` returned still carries the content; the send gets the emptied one
+        expect(await o.sendClaimed(d1!, record)).toBe(true);
+        expect(sent).toEqual([expect.objectContaining({ id: 'd1', type: 'bot:purged', payload: '', purged: true })]);
+        await o.markDelivered('d1');
+        expect(await o.sendClaimed(d1!, record)).toBe(false);
+        expect(await o.sendClaimed({ ...d2!, id: 'gone' }, record)).toBe(false);
+        expect(sent).toHaveLength(1);
+        let signal: AbortSignal | undefined;
+        expect(await o.sendClaimed(d2!, async (fresh, s) => {
+          signal = s;
+          expect(fresh.payload).toBe('{"text":"x"}');
+          await o.purgeContent('r2');
+          s.throwIfAborted();
+        })).toBe(false);
+        expect(signal?.aborted).toBe(true);
+        await expect(o.sendClaimed(d2!, async () => { throw new Error('refused'); })).rejects.toThrow('refused');
+      });
+
+      it('a mail delivery is due until its expiry, dies at it, is held without an attempt, and is never replayed', async () => {
+        const o = stores.outbox;
+        if (!o.markDead || !o.holdUntil || !o.cancel) throw new Error("the library's stores implement the mail methods");
+        const now = 1_000;
+        await o.enqueue({ id: 'm1', runId: 'r5', destinationRef: 'mail:1', eventId: 'r5:notes', type: 'bot:done', payload: 'sealed', kind: 'mail', expiresAt: now + 86_400_000 }, now);
+        expect((await o.due(now)).map((d) => d.id)).toEqual(['m1']);
+        expect((await o.listByRun('r5'))[0]).toMatchObject({ kind: 'mail', expiresAt: now + 86_400_000, state: 'pending' });
+        await o.holdUntil('m1', now + 3_600_000);
+        expect(await o.due(now + 1)).toEqual([]);
+        expect((await o.listByRun('r5'))[0]).toMatchObject({ attempts: 0, nextAt: now + 3_600_000 });
+        expect((await o.due(now + 3_600_000)).map((d) => d.id)).toEqual(['m1']);
+        expect(await o.due(now + 86_400_000)).toEqual([]);
+        await o.markFailed('m1', now + 86_400_000);
+        expect((await o.listByRun('r5'))[0]?.state).toBe('dead');
+        await o.replay('m1', now + 86_400_001);
+        expect((await o.listByRun('r5'))[0]?.state).toBe('dead');
+      });
+
+      it('an event delivery keeps its kind and its backoff, and markDead, cancel and a purge end mail deliveries', async () => {
+        const o = stores.outbox;
+        if (!o.markDead || !o.holdUntil || !o.cancel) throw new Error("the library's stores implement the mail methods");
+        await o.enqueue({ id: 'e6', runId: 'r6', destinationRef: 'w1', eventId: 'r6:left', type: 'bot:left', payload: '{}' }, 1_000);
+        expect((await o.listByRun('r6'))[0]).toMatchObject({ kind: 'event', state: 'pending' });
+        expect((await o.listByRun('r6'))[0]?.expiresAt).toBeUndefined();
+        await o.enqueue({ id: 'm6', runId: 'r6', destinationRef: 'mail:1', eventId: 'r6:notes', type: 'bot:done', payload: 'sealed', kind: 'mail', expiresAt: 90_000 }, 1_000);
+        await o.enqueue({ id: 'm7', runId: 'r6', destinationRef: 'mail:2', eventId: 'r6:notes', type: 'bot:done', payload: 'sealed', kind: 'mail', expiresAt: 90_000 }, 1_000);
+        await o.enqueue({ id: 'm8', runId: 'r6', destinationRef: 'mail:3', eventId: 'r6:notes', type: 'bot:done', payload: 'sealed', kind: 'mail', expiresAt: 90_000 }, 1_000);
+        await o.markDead('m6');
+        await o.cancel('r6', 'mail:2');
+        const states = Object.fromEntries((await o.listByRun('r6')).map((d) => [d.id, d.state]));
+        expect(states).toEqual({ e6: 'pending', m6: 'dead', m7: 'dead', m8: 'pending' });
+        await o.purgeContent('r6');
+        const after = (await o.listByRun('r6')).find((d) => d.id === 'm8');
+        expect(after).toMatchObject({ payload: '', purged: true, state: 'dead', kind: 'mail' });
+        expect((await o.listByRun('r6')).find((d) => d.id === 'e6')).toMatchObject({ type: 'bot:left', payload: '{}' });
+        await o.enqueue({ id: 'm9', runId: 'r6', destinationRef: 'mail:4', eventId: 'r6:notes', type: 'bot:done', payload: 'sealed', kind: 'mail', expiresAt: 90_000 }, 2_000);
+        expect((await o.listByRun('r6')).find((d) => d.id === 'm9')).toBeUndefined();
+      });
+
+      it("a mail's body goes with its end, delivered, dead, cancelled, given up at its expiry or ended by the sweep; an event's stays", async () => {
+        const o = stores.outbox;
+        if (!o.markDead || !o.cancel || !o.endExpired) throw new Error("the library's stores implement the mail methods");
+        const mail = (id: string, ref: string) => ({ id, runId: 'r7', destinationRef: ref, eventId: 'r7:notes', type: 'bot:done' as const, payload: 'sealed', kind: 'mail' as const, expiresAt: 90_000 });
+        for (const [id, ref] of [['m10', 'mail:1'], ['m11', 'mail:2'], ['m12', 'mail:3'], ['m13', 'mail:4'], ['m14', 'mail:5']] as const) await o.enqueue(mail(id, ref), 1_000);
+        await o.enqueue({ id: 'e7', runId: 'r7', destinationRef: 'w1', eventId: 'r7:left', type: 'bot:left', payload: '{"a":1}' }, 1_000);
+        await o.markDelivered('m10');
+        await o.markDead('m11');
+        await o.cancel('r7', 'mail:3');
+        await o.markFailed('m13', 90_000);
+        await o.markDelivered('e7');
+        expect(await o.endExpired(89_999)).toBe(0);
+        expect(await o.endExpired(90_000)).toBe(1);
+        const rows = Object.fromEntries((await o.listByRun('r7')).map((d) => [d.id, { state: d.state, payload: d.payload, purged: d.purged }]));
+        expect(rows).toEqual({
+          m10: { state: 'delivered', payload: '', purged: false },
+          m11: { state: 'dead', payload: '', purged: false },
+          m12: { state: 'dead', payload: '', purged: false },
+          m13: { state: 'dead', payload: '', purged: false },
+          m14: { state: 'dead', payload: '', purged: false },
+          e7: { state: 'delivered', payload: '{"a":1}', purged: false },
+        });
+        // a failed attempt before the expiry keeps the body for the next one
+        await o.enqueue(mail('m15', 'mail:6'), 2_000);
+        await o.markFailed('m15', 3_000);
+        expect((await o.listByRun('r7')).find((d) => d.id === 'm15')).toMatchObject({ state: 'pending', payload: 'sealed', attempts: 1 });
       });
     });
 
@@ -190,6 +298,17 @@ export function meetingStoreContract(name: string, make: () => Promise<ContractS
         expect(cleared?.leaveCommandedAt).toBe(5);
         expect(cleared?.captureSuspendedAt).toBeUndefined();
         expect(cleared?.aloneSince).toBeUndefined();
+      });
+      it('decides an updateWith patch on the row as the store holds it, and writes nothing when the patch is none', async () => {
+        const r = stores.runs;
+        await r.insert({ runId: 'r1', ownerRef: 'a', providerName: 'mock', platform: 'google_meet', state: 'in_call', keep: 'none', meetingUrl: 'u', botName: 'b', notice: { text: 'n', version: '1', lateArrivalText: 's' }, stopPhrase: 'stop', limits: { waitingRoomMs: 1, aloneMs: 1, totalMs: 1 }, requestedAt: 0, joinAt: 0, billedSeconds: 0 });
+        await r.update('r1', { reportedSeconds: 60, lastUsageSourceAt: 5 });
+        // a patch decided on an older read would lower the total: decided on the stored row, it keeps the larger one
+        expect(await r.updateWith('r1', (current) => ({ reportedSeconds: Math.max(current.reportedSeconds ?? 0, 30) }))).toMatchObject({ state: 'in_call', reportedSeconds: 60 });
+        expect(await r.updateWith('r1', (current) => (current.lastUsageSourceAt !== undefined && current.lastUsageSourceAt >= 5 ? undefined : { lastUsageSourceAt: 5, state: 'left' }))).toBeUndefined();
+        expect(await r.get('r1')).toMatchObject({ state: 'in_call', reportedSeconds: 60, lastUsageSourceAt: 5 });
+        expect(await r.updateWith('r1', () => ({ state: 'left', leftAt: 7 }))).toMatchObject({ state: 'left', leftAt: 7, reportedSeconds: 60 });
+        expect(await r.updateWith('r9', () => ({ reportedSeconds: 1 }))).toBeUndefined();
       });
     });
 

@@ -2,11 +2,12 @@
  * @file shared.ts
  * Shared utilities for strategy compilers.
  *
- * Centralises `isAgent()`, `mergeDefaults()`, `resolveAgent()`, and
- * `checkBeforeAgent()` so every strategy compiler uses a single implementation.
- * This avoids subtle divergence in how configs are merged or how HITL gates
- * are evaluated across sequential, parallel, debate, review-loop, and
- * hierarchical strategies.
+ * Centralises `isAgent()`, `mergeDefaults()`, `resolveAgent()`, and the
+ * `beforeAgent` gate, `checkBeforeAgentInput()` (with `checkBeforeAgent()`
+ * beside it for a caller that sends the input as given), so every strategy
+ * compiler uses a single implementation. This avoids subtle divergence in how
+ * configs are merged or how HITL gates are evaluated across the sequential,
+ * parallel, debate, review-loop, hierarchical and graph strategies.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects and invokes strategy compilers.
  */
@@ -314,7 +315,8 @@ export interface BeforeAgentGate {
   /**
    * The input the agent receives when it runs: the strategy's input, with the
    * approver's instructions appended when the approval carries them. The
-   * post-approval check read it, and the strategy's input on its own.
+   * post-approval check read it, the strategy's input on its own, and each
+   * text the strategy built that input from.
    */
   input: string;
 }
@@ -381,10 +383,20 @@ export async function checkBeforeAgent(
  * from a check that matches only there. The strategy sends the returned
  * `input`, the text the check read.
  *
+ * A strategy that builds the input from other texts and writes more after
+ * them (the task, other agents' output) passes those texts as `parts`, and the
+ * check reads each of them on its own too: it reads its texts as JSON, where a
+ * line break inside a text is escaped, so a statement it matches only at the
+ * end of a text (an unconditional `DELETE FROM <table>`, `rm -rf .`) no longer
+ * matches once the strategy's text follows it.
+ *
  * @param name - The agent's declared name in the roster.
  * @param context - The input the strategy passes the agent.
  * @param agentCalls - Agent call records accumulated so far in this run.
  * @param agencyConfig - The full agency configuration containing HITL settings.
+ * @param parts - The texts the strategy built `context` from, each read on its
+ *   own by the post-approval check. An empty text, or one equal to `context`,
+ *   adds nothing.
  * @returns The decision (`null` when no gate applies) and the agent's input.
  *
  * @example
@@ -399,14 +411,16 @@ export async function checkBeforeAgentInput(
   context: string,
   agentCalls: AgentCallRecord[],
   agencyConfig: AgencyOptions,
+  parts: readonly string[] = [],
 ): Promise<BeforeAgentGate> {
-  return runBeforeAgentGate(name, context, agentCalls, agencyConfig, true);
+  return runBeforeAgentGate(name, context, agentCalls, agencyConfig, true, parts);
 }
 
 /**
  * The `beforeAgent` gate both entry points share: asks the handler, then
  * runs the post-approval check over the input the agent receives, which
- * carries the approver's instructions only when `appliesInstructions` is set.
+ * carries the approver's instructions only when `appliesInstructions` is set,
+ * and over each of `parts` on its own.
  */
 async function runBeforeAgentGate(
   name: string,
@@ -414,6 +428,7 @@ async function runBeforeAgentGate(
   agentCalls: AgentCallRecord[],
   agencyConfig: AgencyOptions,
   appliesInstructions: boolean,
+  parts: readonly string[] = [],
 ): Promise<BeforeAgentGate> {
   const beforeAgent = agencyConfig.hitl?.approvals?.beforeAgent;
   const handler = agencyConfig.hitl?.handler;
@@ -457,13 +472,19 @@ async function runBeforeAgentGate(
   // beside the input the agent is sent: two code-safety patterns match a
   // statement only at the end of the text they read (an unconditional
   // `DELETE FROM <table>`, `rm -rf .`), and with the instructions after it
-  // such a statement no longer ends the text.
+  // such a statement no longer ends the text. For the same reason it reads
+  // each text the strategy built its input from on its own: the strategy's
+  // own text after the task or after another agent's output would hide such
+  // a statement at the end of either.
   if (decision.approved && agencyConfig.hitl?.guardrailOverride !== false) {
     const { runPostApprovalGuardrails } = await import('../../agency.js');
     const postGuardrails = agencyConfig.hitl?.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'];
+    const checked: Record<string, unknown> = input === context ? { input } : { input: context, sent: input };
+    const ownParts = parts.filter((part) => part !== '' && part !== context);
+    if (ownParts.length > 0) checked.parts = ownParts;
     const overrideResult = await runPostApprovalGuardrails(
       `agent:${name}`,
-      input === context ? { input } : { input: context, sent: input },
+      checked,
       postGuardrails,
       agencyConfig.on,
     );

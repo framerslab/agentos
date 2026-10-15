@@ -58,6 +58,10 @@ export class MockMeetingBotProvider implements IMeetingBotProvider {
   alive = new Map<string, number>();
   /** When set, dispatch rejects with it (a worker with no slot). */
   dispatchError: Error | undefined;
+  /** When set, `usage()` rejects with it: a scheduler that cannot be reached. */
+  usageError: Error | undefined;
+  /** When set, `command()` records the command and then rejects with it. */
+  commandError: Error | undefined;
   /** Runs inside `dispatch`, before it records anything: a test puts a race here (a cancel while the dispatch is in flight). */
   beforeDispatch: ((input: DispatchInput) => Promise<void>) | undefined;
 
@@ -104,6 +108,7 @@ export class MockMeetingBotProvider implements IMeetingBotProvider {
     const list = this.commands.get(runId) ?? [];
     list.push(command);
     this.commands.set(runId, list);
+    if (this.commandError) throw this.commandError;
   }
 
   async deleteRun(input: { runId: string }): Promise<{ deleted: boolean }> {
@@ -112,6 +117,7 @@ export class MockMeetingBotProvider implements IMeetingBotProvider {
   }
 
   async usage(input: { runIds?: string[] }): Promise<ProviderUsage[]> {
+    if (this.usageError) throw this.usageError;
     const ids = input.runIds ?? [...this.alive.keys()];
     return ids.map((runId) => ({ runId, alive: this.alive.has(runId), seconds: this.alive.get(runId) ?? 0 }));
   }

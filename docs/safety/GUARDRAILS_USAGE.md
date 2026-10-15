@@ -361,7 +361,7 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `evaluateStreamingChunks` | `boolean` | `false` | Evaluate TEXT_DELTA chunks (real-time) vs only FINAL_RESPONSE |
-| `evaluateToolCalls` | `boolean` | `false` | Evaluate TOOL_CALL_REQUEST chunks: a block keeps an actionable call from the host and ends the stream, a sanitize is applied as a block. See [Tool Calls](#tool-calls) |
+| `evaluateToolCalls` | `boolean` | `false` | Evaluate tool calls: a block refuses a call the runtime runs itself before it runs, and keeps an actionable call from the host and ends the stream; a sanitize is applied as a block. See [Tool Calls](#tool-calls) |
 | `maxStreamingEvaluations` | `number` | `undefined` | Rate limit streaming evaluations per guarded stream (the turn's stream and each continuation stream count on their own) |
 | `canSanitize` | `boolean` | `false` | Run this guardrail in Phase 1 so SANITIZE results chain deterministically |
 | `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required |
@@ -426,6 +426,22 @@ const neverDo = await PhraseListGuardrail.create({
 
 `PhraseListGuardrail.create` refuses an empty list, a list that does not load, and judge entries without a judge; `reload()` swaps the list in whole and keeps the last good one when the new one fails. The judge fails closed: a throw, an answer without `block` and `confidence`, or a confidence under `judgeThreshold` (default 0.7) blocks. `createLlmPhraseJudge` takes `fallbackProviders: []` by default, so the judge reaches only the provider it was given.
 
+`phraseMatches(entries, text)` runs the same match with no guard and no judge: the text goes through the same normalisation, the entries compile with the same word boundaries, and the entries that occur come back in list order. A `judge` entry comes back like any other; what a match means is the caller's to decide. It throws on an entry whose phrase normalises to nothing, as `PhraseListGuardrail.create` does.
+
+```typescript
+import { phraseMatches, type PhraseEntry } from '@framers/agentos';
+
+const entries: PhraseEntry[] = [
+  { phrase: 'coming soon', match: 'word', onMatch: 'block', ruleId: 'timing' },
+  { phrase: 'next', match: 'word', onMatch: 'judge', ruleId: 'timing' },
+  { phrase: 'in\\s+beta', match: 'regex', onMatch: 'block', ruleId: 'stage' },
+];
+
+phraseMatches(entries, 'Exports are COMING SOON.').map((e) => e.phrase); // ['coming soon']
+phraseMatches(entries, 'The nextcloud connector'); // []: a word entry keeps its word boundaries
+phraseMatches(entries, 'Now in beta').map((e) => e.ruleId); // ['stage']
+```
+
 ### Hard limits in the persona
 
 `IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter, when the file is loaded as a persona) renders as the last block of the system prompt of every GMI turn for that persona, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
@@ -453,10 +469,10 @@ class ShellCommandGuard implements IGuardrailService {
 }
 ```
 
-- **Block.** The stream ends with the guard's verdict in place of the chunk: the error chunk, or the final response holding `replacementText`. The stream never hands the host an actionable call (`executionMode: 'external'`), so the host does not execute it. In hold mode the text held before the call is dropped with it. The runtime saved the pause for that call before the chunk went out, and `getPendingExternalToolRequest()` returns it until the conversation's next turn ends: a host that resumes saved pauses after a restart does not run a call whose stream ended in a block.
+- **Block.** The stream ends with the guard's verdict in place of the chunk: the error chunk, or the final response holding `replacementText`. The stream never hands the host an actionable call (`executionMode: 'external'`), so the host does not execute it. In hold mode the text held before the call is dropped with it, and a block on that text withholds the call too. AgentOS drops the pause the runtime saved for the call when the turn stopped for it, before the verdict reaches the host. `getPendingExternalToolRequest()` no longer returns the call, the conversation answers it with a refused tool result (code `AUTH_PERMISSION_DENIED`) so the history stays well formed, and the stream is closed, so `handleToolResult()` cannot continue it. The stream is closed even when the conversation store refuses that save, and AgentOS logs a warning. The conversation in memory drops the pause all the same, and the conversation's next save (on its next turn, before it is evicted from memory, or at shutdown) stores it without the pause: a restart finds the pause stored only when no such save succeeded before the process stopped. A host that wraps a stream with `wrapOutputGuardrails()` itself reads the withheld calls in the verdict's `toolCallIds` (`onVerdict`).
 - **Sanitize.** A guard cannot rewrite a tool call. A `SANITIZE` is applied as a `BLOCK` that keeps the guard's reason and reason code.
 - **Flag and allow.** The chunk goes on with the evaluation in `metadata.guardrail.output`.
-- **Calls the runtime runs itself.** A call with `executionMode: 'internal'` runs inside the turn without waiting for the output guards: a block ends the stream but does not stop that call. To stop such a call before it runs, gate the tool: with a `hitlManager` and `toolOrchestratorConfig.hitl.enabled`, the tool orchestrator asks for an approval before a tool with `hasSideEffects: true` runs ([Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)).
+- **Calls the runtime runs itself.** AgentOS asks the guard about each call with `executionMode: 'internal'` before the call runs, as a `TOOL_CALL_REQUEST` chunk holding that one call, on `processRequest()`, `handleToolResult()` and `resumeExternalToolRequest()` alike. A block (or a sanitize) refuses the call: the tool does not run, and the model reads a refused tool result (code `AUTH_PERMISSION_DENIED`, with the guard's reason), as it reads a permission refusal. On the stream `processRequest()` returns, the guard also judges the stream's chunk for the call, so it is asked about such a call twice; a block there ends the host's stream with the verdict while the turn finishes inside the runtime. A continuation's stream carries no chunk for the calls the GMI runs itself. A refused call never becomes an actionable request and no pending request is saved for it; the `FINAL_RESPONSE` lists it in `finalToolCalls` beside the calls that ran. To have a person approve a tool before it runs, gate the tool: with a `hitlManager` and `toolOrchestratorConfig.hitl.enabled`, the tool orchestrator asks for an approval before a tool with `hasSideEffects: true` runs ([Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)).
 - **Several guards.** The guards that evaluate tool calls run in parallel on each tool-call chunk; the first block in registration order is the verdict.
 
 **Why it is opt-in.** A guard written for text may read any chunk it is given as text: one that takes every non-final chunk for a `TEXT_DELTA` reads `textDelta` as `undefined`, and a fail-closed guard that throws on it would block every tool call. A guard that sets `evaluateToolCalls` is written to read tool calls, and a guard without it never receives one. A guard that has a tool-call branch already, as the code-safety pack's guard does, runs it once its config sets the flag.

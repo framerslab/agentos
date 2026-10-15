@@ -145,6 +145,9 @@ const publicationManifest = [
   agentosDoc('TOOL_CALLING_AND_LOADING.md', 'architecture/tool-calling-and-loading.md', 'Tool Calling & Lazy Loading', 'Tools & Capabilities', 11),
   agentosDoc('LLM_PROVIDERS.md', 'architecture/llm-providers.md', 'LLM Providers', 'Architecture', 12),
   agentosDoc('KEY_ROTATION.md', 'architecture/key-rotation.md', 'API Key Rotation', 'Architecture', 12.5),
+  // The page documents the claude-code-cli and gemini-cli provider bridges, so it sits with the
+  // provider pages. Its dest keeps the URL it was first published at, so links to it hold.
+  agentosDoc('features/CLI_ERROR_CODES.md', 'extensions/built-in/cli-error-codes.md', 'CLI Error Codes', 'Architecture', 12.7),
   agentosDoc('STREAMING_SEMANTICS.md', 'architecture/streaming-semantics.md', 'Streaming Semantics', 'Architecture', 13),
   agentosDoc('OAUTH_AUTH.md', 'architecture/oauth-auth.md', 'OAuth Auth', 'Architecture', 14),
 
@@ -217,9 +220,10 @@ const publicationManifest = [
   agentosDoc('CREATING_GUARDRAILS.md', 'features/creating-guardrails.md', 'Creating Custom Guardrails', 'Guardrails & Safety', 2),
   agentosDoc('SAFETY_PRIMITIVES.md', 'features/safety-primitives.md', 'Safety Primitives', 'Guardrails & Safety', 3),
 
+  agentosDoc('features/VOICE_PLATFORM.md', 'features/voice-platform.md', 'Voice Platform Runtime', 'Voice & Speech', 0.5),
   agentosDoc('VOICE_PIPELINE.md', 'features/voice-pipeline.md', 'Voice Pipeline', 'Voice & Speech', 1),
   agentosDoc('SPEECH_PROVIDERS.md', 'features/speech-providers.md', 'Speech Providers', 'Voice & Speech', 2),
-  agentosDoc('MEETING_BOTS.md', 'features/meeting-bots.md', 'Meeting Bots', 'Voice & Speech', 3),
+  agentosDoc('MEETING_BOTS.md', 'features/meeting-bots.md', 'Meeting Bots', 'Voice & Speech', 4),
   agentosDoc('TELEPHONY_PROVIDERS.md', 'features/telephony-providers.md', 'Telephony Providers', 'Voice & Speech', 3),
 
   agentosDoc('IMAGE_GENERATION.md', 'features/image-generation.md', 'Image Generation', 'Media Generation', 1),
@@ -330,9 +334,6 @@ const publicationManifest = [
   builtInExtension('research/news-search', 'extensions/built-in/news-search.md', 'News Search', 3),
   builtInExtension('system/cli-executor', 'extensions/built-in/cli-executor.md', 'CLI Executor', 4),
   agentosDoc('features/CLI_REGISTRY.md', 'extensions/built-in/cli-registry.md', 'CLI Registry', 'Extensions', 5, {
-    group: 'Official Extensions',
-  }),
-  agentosDoc('features/CLI_ERROR_CODES.md', 'extensions/built-in/cli-error-codes.md', 'CLI Error Codes', 'Extensions', 5.5, {
     group: 'Official Extensions',
   }),
   builtInExtension('auth', 'extensions/built-in/auth.md', 'Auth', 6),

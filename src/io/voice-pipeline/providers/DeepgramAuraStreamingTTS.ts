@@ -282,6 +282,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
       const chunk: EncodedAudioChunk = {
         audio: audioBuffer,
         format: 'pcm',
+        container: this.container,
         sampleRate: this.sampleRate,
         durationMs,
         text: this.accumulatedText,

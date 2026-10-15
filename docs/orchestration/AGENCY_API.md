@@ -74,7 +74,9 @@ run limits (the token, cost, time and call limits on `controls`, checked when a
 run ends and before the next one starts) and structured Zod output (`output`).
 These apply to the team rather than per-agent. `agency()` accepts
 `guardrails`, `security`, `permissions`, `observability`, `rag` and `memory`
-without applying them; the full runtime configures each of these itself.
+without applying them. The full runtime sets guardrails, observability,
+retrieval and memory through its own config, and no surface acts on
+`security` or `permissions`.
 
 ```mermaid
 graph TB
@@ -128,7 +130,7 @@ agentos's lower-level primitives.
 | Code review pipeline: one PR, parallel reviewers (style + security + tests) produce one review | Yes (use `parallel` or `graph`) | Fan-out / fan-in over a single input |
 | Multi-agent debate to consensus on a single question | Yes (use `debate`) | The strategy is built for it |
 | Long-running world simulation where a fixed roster of agents all run in parallel every turn against an evolving world state (e.g. paracosm) | **No** | Each simulation turn is closer to N independent `agent().session()` calls coordinated by your loop than to one `agency().generate()` call. Build your own turn loop; use `agent()` + (optionally) [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts) / [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts) for runtime synthesis |
-| Multi-turn conversation with persistent agent roster, shared [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts), and persistent specialists from `spawn_specialist` across turns | **Not yet** | `agency().session()` exists but only persists message history + usage. Roster, shared memory, and `tier: 'session'` synthesised specialists reset between `.send()` calls. Build your own multi-call coordination on top, or [open an issue](https://github.com/framerslab/agentos/issues) describing the use case |
+| Multi-turn conversation with persistent agent roster, shared [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts), and persistent specialists from `spawn_specialist` across turns | **No** | `agency().session()` keeps the session's message history and usage totals. `agency()` keeps no shared memory, and each `.send()` starts from the configured roster: a specialist `spawn_specialist` adds during one call is gone in the next, whatever `emergent.tier` names. Build your own multi-call coordination on top, or [open an issue](https://github.com/framerslab/agentos/issues) describing the use case |
 | Companion app where a single agent has a persistent identity across many user turns | **No** — use `agent()` directly | `agent().session()` already covers this. agency() is overkill for single-agent stateful chat |
 
 The shared rule: if your problem decomposes into "one external request →
@@ -613,7 +615,6 @@ const research = agency({
   strategy: 'hierarchical',
   emergent: {
     enabled: true,
-    tier: 'session',          // 'session' | 'agent' | 'shared'
     judge: true,              // EmergentAgentJudge gates each spawn
     planner: {
       maxSpecialists: 3,      // hard cap per run; default 5
@@ -623,11 +624,14 @@ const research = agency({
 });
 ```
 
-| `tier` | Lifetime of synthesised agents |
-|---|---|
-| `"session"` | Discarded when the `generate()` call ends |
-| `"agent"` | Persist for the lifetime of the agency instance |
-| `"shared"` | Persist globally across all agency instances |
+A specialist the manager spawns stays in the roster until the run that spawned
+it ends. Every run starts from the configured roster, since
+[`hierarchical.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/strategies/hierarchical.ts)
+copies it at the start of each run, so the specialist is gone in the next
+`generate()`, `stream()` or session `send()`, and in a retry that a failed
+`output` validation starts. `emergent.tier` (`'session'`, `'agent'` or
+`'shared'`) is accepted and not read, so no tier keeps a specialist past its
+run.
 
 | `planner` field | Default | Effect |
 |---|---|---|
@@ -843,10 +847,18 @@ the full runtime: see [Memory Model](../MEMORY_MODEL.md), [Cognitive Memory](../
 
 When `voice.enabled` is `true` the agency exposes a `listen()` method that
 starts a WebSocket server on `127.0.0.1` and returns its port, URL and a
-`close()` function. Each message a client sends must be JSON with a `text`
-field; the agency runs `generate()` on it and replies with `{ "text": "..." }`.
-`agency()` reads no other `voice` field and handles no audio: put
-speech-to-text and text-to-speech in front of the socket (the
+`close()` function. Each message a client sends must be one JSON object whose
+only field is a non-empty `text` string of at most 16384 characters; the agency
+runs `generate()` on it and replies with `{ "text": "..." }`. A connection
+carries one request at a time, and a frame over 65536 bytes closes it. Errors
+come back as `{ "error": { "code": "...", "message": "..." } }` with the codes
+`invalid_message`, `request_in_progress`, `generation_failed` (the
+generation's own error is not sent) and `output_unavailable` (a reply that is
+not text or exceeds 32768 bytes). `agency()` reads no other `voice` field and
+handles no audio: a binary frame receives `audio_not_supported` and close code
+1003, and frames that arrive while a connection is closing are ignored. For
+spoken calls use `VoiceSessionFactory`, or put speech-to-text and
+text-to-speech in front of the socket (the
 [Voice Pipeline](/features/voice-pipeline) and its providers live in
 `src/io/voice-pipeline/`).
 
@@ -864,7 +876,7 @@ console.log(`WebSocket ready at ${server.url}`);
 await server.close();
 ```
 
-Requires the `ws` package (`npm install ws`).
+The `ws` package the listener uses is a dependency of `@framers/agentos`.
 
 ### Channel adapters
 

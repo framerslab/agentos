@@ -89,16 +89,18 @@ has this form. A file whose path makes no valid id, such as any file in a folder
 name starts with a dot (`.meta/`, `.store/`), is not a page: the store does not list
 or index it.
 
-Both checks are on the path the id names, not on where a link leads. A link inside
-`memory/` is followed like any other file there, for reads and for writes: what it
-points to, inside the folder or outside it, is part of the wiki, and a compile that
-merges into a page that is a link rewrites the file the link points to. The store
+Both checks are on the path the id names, not on where a link leads. The store
+follows a link inside `memory/` like any other file there, for reads and for writes:
+what it points to, inside the folder or outside it, is part of the wiki, and a compile
+that merges into a page that is a link rewrites the file the link points to. The store
 never makes a link, and no page id makes one, so only whoever can write the folder
 can add one. Let only people and tools you trust as much as the agent's own process
 write to `memory/`, and check a `memory/` folder you did not make for links before an
 agent uses it. A check on where links lead would refuse every link that points
 outside the folder, which a wiki that links shared notes in on purpose relies on, so
-the store does not check where links lead.
+the store does not check where links lead. The soul loader, which reads `index.md`
+into the system prompt and starts the folder, follows no link: see
+[Loading a Soul](#loading-a-soul).
 
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
 and is left untouched on disk.
@@ -194,6 +196,8 @@ const inline = parseSoul(`---\nname: Tester\n---\nYou are a test agent.`);
 ```
 
 Both file forms create `memory/` beside SOUL.md (seeding `memory/index.md` from a legacy `MEMORY.md`) when it does not exist.
+
+The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, MEMORY.md and `memory/index.md`) never through a symbolic link at the soul's folder or below it, never waiting, and only when each is a regular file. A file that is a link, or a named pipe or anything else that is not a regular file, is skipped with a warning; a skipped SOUL.md throws as a missing one does, unless `requireSoul` is `false`. The soul's folder itself may not be a link; the folder that holds it may. When the loader starts `memory/`, it makes `memory/` and `memory/.meta/` one folder at a time and `memory/index.md` and `memory/.meta/index.json` only where nothing is, so it writes through no link and opens no file already there. A link or anything else that is not a folder in the place of `memory/` or `memory/.meta/`, or a link or anything else that is not a regular file in the place of `memory/index.md`, `memory/.meta/index.json` or `MEMORY.md`, is left as it is, with a warning, and nothing is made through it or in it.
 
 ## Loading Order at Agent Boot
 

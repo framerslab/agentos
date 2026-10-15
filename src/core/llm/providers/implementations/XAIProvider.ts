@@ -22,6 +22,7 @@ import {
   ProviderEmbeddingResponse,
 } from '../IProvider';
 import { OpenAIProvider } from './OpenAIProvider';
+import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
 // ---------------------------------------------------------------------------
 // Configuration

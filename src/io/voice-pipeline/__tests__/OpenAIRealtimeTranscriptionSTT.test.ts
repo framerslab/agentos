@@ -114,7 +114,14 @@ import { createVoiceProvidersFromEnv } from '../env-constructor.js';
 import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
 import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
 import { HardCutBargeinHandler } from '../HardCutBargeinHandler.js';
-import type { StreamingSTTSession, TranscriptEvent, StreamingSTTUsageEvent } from '../types.js';
+import { startListenSession } from '../ListenSession.js';
+import type {
+  ITranscriptInputSink,
+  StreamingSTTSession,
+  StreamingSTTUsageEvent,
+  TranscriptEvent,
+  TranscriptTurn,
+} from '../types.js';
 // Default import: the 'ws' types only expose WebSocket as the default export
 // under this tsconfig (TS2595 on a named import). vi.mock supplies the same
 // mock class for both the default and named bindings.
@@ -1059,6 +1066,8 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
       {
         providerId: 'openai-realtime-transcription',
         model: 'gpt-4o-mini-transcribe',
+        entry: 'openai:gpt-4o-mini-transcribe',
+        connectionId: expect.any(String),
         connectionIndex: 1,
         audioSeconds: 0.1,
         final: true,
@@ -1244,6 +1253,8 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
       {
         providerId: 'openai-realtime-transcription',
         model: 'gpt-4o-mini-transcribe',
+        entry: 'openai:gpt-4o-mini-transcribe',
+        connectionId: expect.any(String),
         connectionIndex: 1,
         audioSeconds: 0.5,
         final: false,
@@ -1641,6 +1652,25 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
   });
 });
 
+/**
+ * A turn of two utterances whose second transcript is slow: the second end of speech waits the silence timeout
+ * for its final and stops waiting, and the turn ends on the first clause. The second final is left to the test.
+ */
+async function turnWithSlowSecondFinal(socket: FakeSocket): Promise<void> {
+  socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+  socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+  socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+  socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_300 });
+  socket.serve({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: 'item_A',
+    transcript: 'Book a table for two.',
+  });
+  socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_B', audio_end_ms: 2_200 });
+  socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_B', previous_item_id: 'item_A' });
+  await vi.advanceTimersByTimeAsync(1_500);
+}
+
 describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', () => {
   /**
    * The orchestrator over the real provider, the real HeuristicEndpointDetector and
@@ -1673,7 +1703,7 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
       endpointDetector: new HeuristicEndpointDetector(),
       bargeinHandler: new HardCutBargeinHandler(),
     });
-    return { orchestrator, agentSession, socket: Sockets.instances[Sockets.instances.length - 1] };
+    return { orchestrator, agentSession, ttsSession, socket: Sockets.instances[Sockets.instances.length - 1] };
   }
 
   /** One utterance as OpenAI reports it: its end of speech and its commit come before its transcript. */
@@ -1682,6 +1712,29 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
     socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: itemId, audio_end_ms: 900 });
     socket.serve({ type: 'input_audio_buffer.committed', item_id: itemId, previous_item_id: null });
     socket.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: itemId, transcript });
+  }
+
+  /**
+   * Two utterances of one turn, apart by a pause longer than the server's end-of-speech silence: the second
+   * begins before the first one's transcript arrives, and each final follows its own end of speech.
+   */
+  function twoUtterances(socket: FakeSocket, first: string, second: string): void {
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_300 });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: first,
+    });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_B', audio_end_ms: 2_200 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_B', previous_item_id: 'item_A' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: second,
+    });
   }
 
   it('hands the agent a turn whose final comes after the end of speech', async () => {
@@ -1778,6 +1831,313 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
     warn.mockRestore();
     await orchestrator.stopSession();
   });
+
+  it("hands the agent one turn when an utterance's final arrives after the next utterance has started", async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    twoUtterances(socket, 'Book a table for two.', 'At seven tonight.');
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two. At seven tonight.');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
+    await orchestrator.stopSession();
+  });
+
+  it('keeps a first clause without terminal punctuation when its final arrives after the next utterance has started', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    twoUtterances(socket, 'Book a table for two', 'At seven tonight.');
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two At seven tonight.');
+    await orchestrator.stopSession();
+  });
+
+  it('joins the finals in the order their utterances began when the later one arrives first', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_300 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_B', audio_end_ms: 2_200 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_B', previous_item_id: 'item_A' });
+    // Completion events of different utterances can arrive out of order: the second one's comes first.
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'At seven tonight.',
+    });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Book a table for two.',
+    });
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two. At seven tonight.');
+    await orchestrator.stopSession();
+  });
+
+  it("waits for a later utterance's final for at most the silence timeout, then ends the turn on the words it holds", async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    // The server took a noise for speech: its transcript is empty, and the provider emits no final for it.
+    twoUtterances(socket, 'Book a table for two.', '');
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); // 1.5 s of silence since that end of speech
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two.');
+    await orchestrator.stopSession();
+  });
+
+  it('does not wait for the final of a speech end older than the silence timeout', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    utterance(socket, 'item_N', ''); // a noise the server took for speech: no final
+    await vi.advanceTimersByTimeAsync(2_000);
+    utterance(socket, 'item_A', 'What time is it?');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('What time is it?');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
+    await orchestrator.stopSession();
+  });
+
+  it('joins finals with one space and keeps the punctuation fast path when a transcript has spaces around it', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    twoUtterances(socket, 'Book a table for two. ', ' At seven tonight. ');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two. At seven tonight.');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
+    await orchestrator.stopSession();
+  });
+
+  it("ends the turn on the finals it holds when the turn-duration watchdog's end of speech comes", async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_300 });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Book a table for two.',
+    });
+    // The second utterance runs on: the server reports no end of speech for it.
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); // maxTurnDurationMs (30 s by default) without a turn
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two.');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
+    await orchestrator.stopSession();
+  });
+
+  it("keeps a final that arrives after its turn has completed out of the user's next turn", async () => {
+    fakeClock();
+    const { orchestrator, agentSession, ttsSession, socket } = await pipeline();
+    await turnWithSlowSecondFinal(socket);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two.');
+    ttsSession.emit('flush_complete'); // the reply has played: the orchestrator resets the detector for the next turn
+
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'At seven tonight',
+    }); // the slow final, after its turn
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_C', audio_start_ms: 6_000 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_C', audio_end_ms: 7_000 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_C', previous_item_id: 'item_B' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_C',
+      transcript: 'What about Friday?',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(agentSession.sendText).toHaveBeenCalledTimes(2);
+    expect(agentSession.sendText.mock.calls[1][0]).toBe('What about Friday?');
+    await orchestrator.stopSession();
+  });
+
+  it('keeps the words of an utterance in progress when the reply ends, and drops the late final of the turn before it', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, ttsSession, socket } = await pipeline();
+    await turnWithSlowSecondFinal(socket);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+
+    // The user speaks again before the reply has finished, and the reply ends during that utterance:
+    // the orchestrator resets the detector between its start and its end of speech.
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_C', audio_start_ms: 6_000 });
+    ttsSession.emit('flush_complete');
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'At seven tonight',
+    }); // the first turn's slow final
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_C', audio_end_ms: 7_000 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_C', previous_item_id: 'item_B' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_C',
+      transcript: 'What about Friday?',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(agentSession.sendText).toHaveBeenCalledTimes(2);
+    expect(agentSession.sendText.mock.calls[1][0]).toBe('What about Friday?');
+    await orchestrator.stopSession();
+  });
+
+  it("hands the agent the user's next utterance when the turn before it gets its late final while that utterance is spoken", async () => {
+    fakeClock();
+    const { orchestrator, agentSession, ttsSession, socket } = await pipeline();
+    await turnWithSlowSecondFinal(socket);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    ttsSession.emit('flush_complete'); // the reply has played: the orchestrator resets the detector for the next turn
+
+    // The user speaks again, and the first turn's slow final arrives while they speak.
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_C', audio_start_ms: 6_000 });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'At seven tonight.',
+    });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_C', audio_end_ms: 7_000 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_C', previous_item_id: 'item_B' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_C',
+      transcript: 'What about Friday?',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The slow final ends no turn of its own: the user's next turn is the words they spoke.
+    expect(agentSession.sendText).toHaveBeenCalledTimes(2);
+    expect(agentSession.sendText.mock.calls[1][0]).toBe('What about Friday?');
+    await orchestrator.stopSession();
+  });
+});
+
+describe('OpenAIRealtimeTranscriptionSTT: turns in a listen session', () => {
+  /**
+   * A listen session over the real provider and the real HeuristicEndpointDetector (1.5 s of silence ends a turn
+   * without terminal punctuation), with a mock transport and a sink that numbers the turns it stores.
+   */
+  async function listening(options: { turnDetection?: null } = {}) {
+    const transport = new EventEmitter() as any;
+    transport.id = 'listen-test';
+    transport.state = 'open';
+    transport.sendAudio = vi.fn();
+    transport.sendControl = vi.fn();
+    transport.close = vi.fn();
+    const turns: TranscriptTurn[] = [];
+    const sink: ITranscriptInputSink = {
+      append: async (turn) => {
+        turns.push(turn);
+      },
+      appendNext: async (input) => {
+        const seq = turns.length + 1;
+        const turn = { ...input, seq, turnId: `${input.runId}:${seq}` };
+        turns.push(turn);
+        return turn;
+      },
+    };
+    const detector = new HeuristicEndpointDetector();
+    const session = await startListenSession(transport, sink, {
+      streamingSTT: new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, ...options }),
+      runId: 'run-1',
+      endpointDetector: detector,
+      reconnect: false,
+    });
+    return { session, transport, turns, detector, socket: Sockets.instances[Sockets.instances.length - 1] };
+  }
+
+  it('stops at once on a final with terminal punctuation that the stop flushes, with client commits', async () => {
+    fakeClock();
+    const { session, transport, turns, socket } = await listening({ turnDetection: null });
+    // With turn detection off the server reports no speech, and the stop's flush commits the audio.
+    transport.emit('audio', frame(12_000));
+    let stopped = false;
+    const stopping = session.close('stopped').then(() => {
+      stopped = true;
+    });
+    expect(sentOfType(socket, 'input_audio_buffer.commit')).toHaveLength(1);
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'We start at nine.',
+    });
+    await vi.advanceTimersByTimeAsync(250); // the session's drainMs, and none of the silence timeout
+    await settle();
+    expect(turns.map((turn) => turn.text)).toEqual(['We start at nine.']);
+    expect(stopped).toBe(true);
+    await stopping;
+    expect(vi.getTimerCount()).toBe(0); // no silence timer was left to run
+  });
+
+  it('writes a final that arrives after its turn has completed as a turn of its own, with server turn detection', async () => {
+    fakeClock();
+    const { session, turns, detector, socket } = await listening();
+    await turnWithSlowSecondFinal(socket);
+    await settle();
+    expect(turns.map((turn) => turn.text)).toEqual(['Book a table for two.']);
+
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'At seven tonight',
+    }); // the slow final, after its turn and before the next speech
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_C', audio_start_ms: 6_000 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_C', audio_end_ms: 7_000 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_C', previous_item_id: 'item_B' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_C',
+      transcript: 'What about Friday?',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await settle();
+
+    // No words are lost: the slow final is a turn of its own, between the turns around it, with its utterance's
+    // times, as a final is written without a detector.
+    expect(turns.map((turn) => [turn.text, turn.startMs, turn.endMs])).toEqual([
+      ['Book a table for two.', undefined, undefined],
+      ['At seven tonight', 1_300, 2_200],
+      ['What about Friday?', undefined, undefined],
+    ]);
+    const stopping = session.close('stopped');
+    await vi.advanceTimersByTimeAsync(250); // the session's drainMs
+    await stopping;
+    expect(detector.listenerCount('late_final')).toBe(0);
+  });
+
+  it('writes a final that arrives after its turn has completed when a stop follows, and stops without waiting for a turn', async () => {
+    fakeClock();
+    const { session, turns, socket } = await listening();
+    await turnWithSlowSecondFinal(socket);
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'At seven tonight',
+    }); // the slow final, after its turn
+    let stopped = false;
+    const stopping = session.close('stopped').then(() => {
+      stopped = true;
+    });
+    await vi.advanceTimersByTimeAsync(250); // the session's drainMs, and none of the silence timeout
+    await settle();
+    expect(turns.map((turn) => turn.text)).toEqual(['Book a table for two.', 'At seven tonight']);
+    expect(stopped).toBe(true);
+    await stopping;
+  });
 });
 
 describe('OpenAIRealtimeTranscriptionSTT: behind the failover chain of createVoiceProvidersFromEnv()', () => {
@@ -1796,6 +2156,8 @@ describe('OpenAIRealtimeTranscriptionSTT: behind the failover chain of createVoi
       {
         providerId: 'openai-realtime-transcription',
         model: 'gpt-4o-mini-transcribe',
+        entry: 'openai:gpt-4o-mini-transcribe',
+        connectionId: expect.any(String),
         connectionIndex: 1,
         audioSeconds: 0.5,
         final: false,

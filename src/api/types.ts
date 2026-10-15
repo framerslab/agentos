@@ -291,15 +291,16 @@ export interface HitlConfig {
    * {@link postApprovalGuardrails} over the tool call's name and arguments,
    * the agent's name and input, or the final text. These are fixed pattern
    * checks inside `agency()`, not guardrail packs. The agent's input is
-   * checked as the strategy passes it and, under the sequential, parallel and
-   * hierarchical strategies, which append the approval's
-   * `modifications.instructions`, as the agent receives it, instructions
-   * included, so instructions a check blocks override the approval. The
-   * final text is checked before the approval's
-   * `modifications.output` replaces it, so the replacement is not checked. If
-   * a check matches, the approval is overridden: the tool call is skipped,
-   * the agent does not run, or the final output is rejected. A
-   * `beforeEmergent` approval is not checked.
+   * checked as the strategy passes it, other agents' output included under
+   * the graph, review-loop and debate strategies, and as the agent receives
+   * it, with the approval's `modifications.instructions` that every strategy
+   * appends, so instructions a check blocks override the approval. The
+   * final text is checked as the strategy produced it and, when the
+   * approval's `modifications.output` replaces it, as the replacement, after
+   * the agency's output guardrails have read it. If a check matches, the
+   * approval is overridden: the tool call is skipped, the agent does not
+   * run, or the final output is rejected. A `beforeEmergent` approval is not
+   * checked.
    *
    * Set to `false` to disable this safety net and give full autonomy to the
    * HITL handler's decision.
@@ -780,12 +781,15 @@ export interface ApprovalDecision {
      * replace. Rewrite arguments in that hook, which runs first.
      */
     toolArgs?: unknown;
-    /** Replaces the final text, on a `beforeReturn` approval. */
+    /**
+     * Replaces the final text, on a `beforeReturn` approval. The replacement
+     * goes through the agency's output guardrails and the post-approval check
+     * first, and one the check blocks is refused as a blocked final text is.
+     */
     output?: string;
     /**
      * Added to the input of the agent a `beforeAgent` approval lets run, under
-     * the sequential, parallel and hierarchical strategies. The post-approval
-     * check reads that input with them.
+     * every strategy. The post-approval check reads that input with them.
      */
     instructions?: string;
   };
@@ -1266,10 +1270,14 @@ export interface Agent {
   /** Releases all in-memory state held by this agent. */
   close(): Promise<void>;
   /**
-   * Starts an HTTP server exposing the agent over a REST / SSE interface.
-   * Present on agency instances only.
+   * Starts a loopback WebSocket listener on 127.0.0.1 that exchanges JSON text:
+   * `{ "text": "..." }` in, `{ "text": "..." }` out, one request at a time per
+   * connection. It performs no speech recognition or synthesis; a binary frame
+   * receives an `audio_not_supported` error and close code 1003. Present on
+   * agency instances created with `voice: { enabled: true }`. Spoken calls use
+   * `VoiceSessionFactory`.
    *
-   * @param opts - Server options including optional port.
+   * @param opts - Listener options; port 0, the default, picks a free port.
    * @returns Resolves to the bound port, URL, and a `close()` teardown function.
    */
   listen?(opts?: {

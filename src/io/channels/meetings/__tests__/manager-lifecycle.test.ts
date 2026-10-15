@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { harness } from './manager-send-dispatch.test.js';
+import { harness } from './manager-harness.js';
+import { COMPLETION_HOOK_LEASE_MS } from '../MeetingManager.js';
 import { FencedError } from '../stores/types.js';
 import { MockMeetingBotProvider, mockEventContext } from '../providers/mock.js';
 
@@ -86,6 +87,21 @@ describe('the limits, the meter and the ends', () => {
     expect(h.entitlement.released).toEqual(['res-1']);
     expect(h.entitlement.settled).toEqual([]);
   });
+  it('counts the waiting room from the bot\'s arrival in it, not from the dispatch', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    h.clock.advance(60_000); // the bot takes a minute to reach the waiting room
+    await h.report(runId, 'waiting_room');
+    h.clock.advance(540_001); // ten minutes after the dispatch, nine in the waiting room
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    h.clock.advance(60_000);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'not_admitted' }]);
+  });
   it('suspends capture when the monitor goes quiet, resumes on a heartbeat, and ends when it stays quiet', async () => {
     const h = harness();
     const runId = await joined(h);
@@ -99,6 +115,39 @@ describe('the limits, the meter and the ends', () => {
     h.clock.advance(30_001);
     await h.manager.tick();
     expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'leave', reason: 'stop_monitor_failed' });
+  });
+  it('ends a run whose stop monitor never reports after the notice, once the window and the recovery wait have passed', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 2 });
+    await h.report(runId, 'notice_posted'); // no heartbeat follows: capture stays closed
+    h.clock.advance(60_000);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    h.clock.advance(1);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stop_monitor_failed' }]);
+    await h.report(runId, 'left', { seconds: 61 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stop_monitor_failed', billedSeconds: 0 });
+  });
+  it('a second leave keeps the first one\'s reason and kill deadline: a leave for a failed stop monitor stays unbilled', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    h.clock.advance(30_001);
+    await h.manager.tick(); // the monitor is quiet: capture suspended
+    h.clock.advance(30_001);
+    await h.manager.tick(); // still quiet: the bot is told to leave, unbilled
+    const leaving = await h.stores.runs.get(runId);
+    expect(leaving).toMatchObject({ state: 'leaving', reason: 'stop_monitor_failed' });
+    h.clock.advance(10_000);
+    expect(await h.manager.leaveBot(runId, 'stopped_by_owner')).toBe(true);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stop_monitor_failed', leaveCommandedAt: leaving?.leaveCommandedAt });
+    await h.report(runId, 'left', { seconds: 70 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stop_monitor_failed', billedSeconds: 0 });
+    expect(h.entitlement.settled).toEqual([]);
   });
   it('a capture one manager suspended is resumed by the manager that hears the monitor recover, after a restart too', async () => {
     const h = harness();
@@ -163,6 +212,33 @@ describe('the limits, the meter and the ends', () => {
     await h.manager.tick();
     expect(h.provider.commands.get(id2)?.some((c) => c.name === 'leave')).toBe(false);
   });
+  it('a report that no one is left, overtaken by one that someone joined, does not bring back an alone timer that had run out', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    await h.report(runId, 'participant_left', { participantRef: 'p1', participantCount: 0 }); // alone from now
+    h.clock.advance(300_001); // the alone limit has passed, and no pass has run since
+    const append = h.stores.events.append.bind(h.stores.events);
+    vi.spyOn(h.stores.events, 'append').mockImplementationOnce(async (event) => {
+      // a participant joins while the next report's event is being stored
+      await h.report(runId, 'participant_joined', { participantRef: 'p2', participantCount: 1 }, h.clock.now() + 1);
+      return append(event);
+    });
+    await h.report(runId, 'participant_left', { participantRef: 'p3', participantCount: 0 });
+    await h.report(runId, 'monitor_heartbeat');
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)?.some((c) => c.name === 'leave')).toBe(false);
+    expect((await h.stores.runs.get(runId))?.aloneSince).toBe(h.clock.now());
+  });
+  it('a page seen after its run is over writes nothing to the terminal row', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot({ ...h.request, limits: { pageAwayMs: 120_000 } });
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.leaveBot(runId); // cancelled before its dispatch: the run fails, content-free
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'failed' });
+    h.clock.advance(1_000);
+    await h.manager.pageSeen(runId);
+    expect((await h.stores.runs.get(runId))?.pageSeenAt).toBeUndefined();
+  });
   it('meters usage, settles at done, drops the turns of a run that is not kept, and bills a crash after capture', async () => {
     const h = harness();
     const runId = await joined(h);
@@ -174,6 +250,32 @@ describe('the limits, the meter and the ends', () => {
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed', billedSeconds: 130 });
     expect(h.entitlement.settled).toEqual([['res-1', 130]]);
     expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
+  });
+  it('a left report the worker sends again after done does not lower the seconds a purge bills', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    await h.manager.purgeRun(runId, 'stopped_by_owner');
+    const left = mockEventContext(runId, 'left', { reason: 'stopped_by_owner', seconds: 20 }, h.clock.now(), h.provider.tokenOf(runId));
+    await h.manager.processProviderEvent('mock', left);
+    await h.report(runId, 'done', { seconds: 30 });
+    await h.manager.processProviderEvent('mock', left); // the worker's retry of its first report
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', billedSeconds: 30 });
+    expect(h.entitlement.settled).toEqual([['res-1', 30]]);
+  });
+  it('a crash reported after the bot left keeps the time it left and the seconds it counted', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    let fails = 1;
+    h.entitlement.settleThrows = () => fails-- > 0;
+    await h.report(runId, 'left', { reason: 'ended', seconds: 30 });
+    const left = await h.stores.runs.get(runId);
+    expect(left).toMatchObject({ state: 'left', cleanupPending: true, reportedSeconds: 30 });
+    h.clock.advance(5_000);
+    await h.report(runId, 'crashed', { seconds: 99 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'ended', leftAt: left?.leftAt, billedSeconds: 30 });
+    expect(h.entitlement.settled).toEqual([['res-1', 30]]);
+    expect(h.seen.filter((e) => e.type === 'bot:left')).toHaveLength(1);
   });
   it('reconciles: a dispatched run whose worker has no container is ended as crashed', async () => {
     const h = harness();
@@ -256,6 +358,34 @@ describe('the limits, the meter and the ends', () => {
     expect(await h.manager.purgeRun(runId)).toBe(true);
     expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', botName: '', purgedAt: expect.any(Number) });
+    expect(h.seen.at(-1)?.type).toBe('bot:purged');
+  });
+  it('a run that ends for want of permission is purged whatever its Keep, unbilled', async () => {
+    const h = harness();
+    const runId = await joined(h, 'k1', 'account');
+    await h.stores.transcript.append({ runId, seq: 1, turnId: `${runId}:1`, at: 1, text: 'heard before the refusal' });
+    const purged: string[] = [];
+    h.manager.addPurgeHook(async (id) => { purged.push(id); });
+    await h.report(runId, 'left', { reason: 'permission_denied', seconds: 40 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'permission_denied', botName: '', billedSeconds: 0, purgedAt: expect.any(Number) });
+    expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
+    expect(purged).toEqual([runId]);
+    expect(h.entitlement.released).toEqual(['res-1']);
+    expect(h.seen.map((e) => e.type).slice(-3)).toEqual(['bot:left', 'bot:purged', 'bot:done']);
+  });
+  it('purges a run that failed before it joined: the host\'s purge hooks run and the answer is true', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot({ ...h.request, joinAt: h.clock.now() + 100_000 });
+    const runId = r.ok ? r.run.runId : '';
+    h.clock.advance(100_000);
+    h.entitlement.revalidateAnswer = false;
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('failed');
+    const purged: string[] = [];
+    h.manager.addPurgeHook(async (id) => { purged.push(id); });
+    expect(await h.manager.purgeRun(runId)).toBe(true);
+    expect(purged).toEqual([runId]);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'failed', purgedAt: expect.any(Number) });
     expect(h.seen.at(-1)?.type).toBe('bot:purged');
   });
   it('a settle that throws keeps the run in left and is retried on the next tick; done is written after it', async () => {
@@ -383,6 +513,65 @@ describe('the limits, the meter and the ends', () => {
     expect(await h.stores.runs.get(kept)).toBeDefined();
     expect(await h.manager.transcriptSink(runId).appendNext({ runId, at: 3, text: 'late after eviction' })).toBeUndefined();
   });
+  it('drops a turn for a run whose capture has not started: the interlock does not rest on the provider alone', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 2 });
+    await h.report(runId, 'notice_posted'); // no heartbeat yet: capture is closed
+    const sink = h.manager.transcriptSink(runId);
+    expect(await sink.appendNext({ runId, at: 1, text: 'heard before capture opened' })).toBeUndefined();
+    expect(await h.manager.recordTranscript({ runId, seq: 7, turnId: `${runId}:7`, at: 1, text: 'stored by a caller' })).toBe(false);
+    expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
+    expect(h.seen.some((e) => e.type === 'bot:transcript')).toBe(false);
+    await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1); // capture opens
+    expect((await sink.appendNext({ runId, at: 2, text: 'heard once capture opened' }))?.seq).toBe(1);
+  });
+  it('keeps a final heard while startCapture is on its way to the bot, before the start is written on the run', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 2 });
+    await h.report(runId, 'notice_posted');
+    let answer: () => void = () => {};
+    let reached: () => void = () => {};
+    const commandReached = new Promise<void>((resolve) => { reached = resolve; });
+    const command = h.provider.command.bind(h.provider);
+    vi.spyOn(h.provider, 'command').mockImplementation(async (id, cmd) => {
+      if (cmd.name === 'startCapture') {
+        // the bot starts publishing as the command reaches it; its answer comes back later
+        reached();
+        await new Promise<void>((resolve) => { answer = resolve; });
+      }
+      return command(id, cmd);
+    });
+    const heartbeat = h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1); // the interlock holds: startCapture goes
+    await commandReached;
+    expect((await h.stores.runs.get(runId))?.captureStartedAt).toBeUndefined();
+    const sink = h.manager.transcriptSink(runId);
+    expect((await sink.appendNext({ runId, at: 2, text: 'the first words after the start' }))?.seq).toBe(1);
+    expect(h.seen.filter((e) => e.type === 'bot:transcript')).toHaveLength(1);
+    answer();
+    await heartbeat;
+    expect((await h.stores.runs.get(runId))?.captureStartedAt).toBeDefined();
+  });
+  it('lists the terminal runs for eviction when the first can go and at least once a minute, not on every pass', async () => {
+    const h = harness();
+    const list = vi.spyOn(h.stores.runs, 'list');
+    const terminalListings = () => list.mock.calls.filter(([filter]) => filter.states?.includes('done')).length;
+    await h.manager.tick();
+    await h.manager.tick();
+    h.clock.advance(59_999);
+    await h.manager.tick();
+    expect(terminalListings()).toBe(1);
+    h.clock.advance(1);
+    await h.manager.tick();
+    expect(terminalListings()).toBe(2);
+  });
   it('the transcript sink writes the turn and the manager records bot:transcript; behind the fence it drops the turn', async () => {
     const h = harness();
     const runId = await joined(h);
@@ -465,6 +654,25 @@ describe('a step that fails, or a race, on the way out', () => {
     expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'kill' });
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'stopped_by_owner' });
   });
+  it('a leave that a report overtakes is made from the state the report moved the run to', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    const update = h.stores.runs.update.bind(h.stores.runs);
+    let raced = false;
+    vi.spyOn(h.stores.runs, 'update').mockImplementation(async (id, patch, expected) => {
+      if (!raced && patch.state === 'leaving') {
+        raced = true;
+        await h.report(id, 'waiting_room'); // the bot's report lands between the owner's read and the leave's write
+      }
+      return update(id, patch, expected);
+    });
+    expect(await h.manager.leaveBot(runId, 'stopped_by_owner')).toBe(true);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stopped_by_owner' });
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stopped_by_owner' }]);
+  });
   it('a cancel that finds the run already dispatched is a leave from the state the run is in now', async () => {
     const h = harness();
     const sent = await h.manager.sendBot(h.request);
@@ -507,11 +715,292 @@ describe('a step that fails, or a race, on the way out', () => {
     const runId = await joined(h);
     await h.manager.purgeRun(runId, 'stopped_by_owner');
     await h.report(runId, 'left', { reason: 'stopped_by_owner', seconds: 20 });
-    vi.spyOn(h.stores.runs, 'replace').mockRejectedValueOnce(new Error('run store unavailable'));
-    await h.manager.tick().catch(() => undefined); // a pass that throws is the next pass's to retry
+    // the purge's last write is the update from purging to done: it fails once
+    const update = h.stores.runs.update.bind(h.stores.runs);
+    let failed = false;
+    vi.spyOn(h.stores.runs, 'update').mockImplementation(async (id, patch, expected) => {
+      if (!failed && patch.state === 'done') {
+        failed = true;
+        throw new Error('run store unavailable');
+      }
+      return update(id, patch, expected);
+    });
+    await expect(h.manager.tick()).rejects.toThrow('run store unavailable'); // a pass that throws is the next pass's to retry
+    expect(failed).toBe(true);
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'purging', meetingUrl: h.request.meetingUrl });
     expect(await h.manager.purgeRun(runId)).toBe(true); // the product's one purge path, tried again
     await h.manager.tick();
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', meetingUrl: '', botName: '', stopPhrase: '', notice: { text: '', lateArrivalText: '' }, purgedAt: expect.any(Number) });
     expect(h.seen.filter((e) => e.type === 'bot:purged')).toHaveLength(1);
+  });
+});
+
+describe('a report whose application fails, and the worker\'s retry of it', () => {
+  it('a stop whose purge fails is carried out on the retry of its report, and the message reaches the handlers once', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    const update = h.stores.runs.update.bind(h.stores.runs);
+    let refused = false;
+    vi.spyOn(h.stores.runs, 'update').mockImplementation(async (id, patch, expected) => {
+      if (!refused && patch.state === 'purging') {
+        refused = true;
+        throw new Error('run store unavailable');
+      }
+      return update(id, patch, expected);
+    });
+    const stop = mockEventContext(runId, 'chat_message', { text: 'please stop taking notes', sender: 'participant-1' }, h.clock.now(), h.provider.tokenOf(runId));
+    await expect(h.manager.processProviderEvent('mock', stop)).rejects.toThrow('run store unavailable');
+    expect((await h.stores.runs.get(runId))?.state).toBe('in_call');
+    expect(await h.manager.processProviderEvent('mock', stop)).toEqual({ accepted: true, applied: 1 });
+    expect((await h.stores.runs.get(runId))?.state).toBe('purging');
+    expect(h.provider.commands.get(runId)?.slice(-2)).toEqual([{ name: 'suspendCapture' }, { name: 'leave', reason: 'stopped_by_participant' }]);
+    expect(h.seen.filter((e) => e.type === 'bot:chat_message')).toHaveLength(1);
+  });
+  it('a stop goes ahead when the message\'s delivery fails, and the delivery\'s error is still raised', async () => {
+    let failing = false;
+    const h = harness({
+      destinationsFor: async () => {
+        if (failing) throw new Error('destinations unavailable');
+        return ['hook-1'];
+      },
+    });
+    const runId = await joined(h);
+    failing = true;
+    await expect(h.report(runId, 'chat_message', { text: 'stop taking notes', sender: 'participant-1' })).rejects.toThrow('destinations unavailable');
+    expect((await h.stores.runs.get(runId))?.state).toBe('purging');
+    expect(h.provider.commands.get(runId)?.slice(-2)).toEqual([{ name: 'suspendCapture' }, { name: 'leave', reason: 'stopped_by_participant' }]);
+  });
+  it('a report whose delivery failed reaches the handlers once, and is enqueued for its destination when the worker sends it again', async () => {
+    let failing = false;
+    const h = harness({
+      destinationsFor: async () => {
+        if (failing) throw new Error('destinations unavailable');
+        return ['hook-1'];
+      },
+    });
+    const runId = await joined(h);
+    const message = mockEventContext(runId, 'chat_message', { text: 'the agenda first', sender: 'participant-1' }, h.clock.now(), h.provider.tokenOf(runId));
+    failing = true;
+    await expect(h.manager.processProviderEvent('mock', message)).rejects.toThrow('destinations unavailable');
+    expect(h.seen.filter((e) => e.type === 'bot:chat_message')).toHaveLength(1); // the handlers had it before the destinations failed
+    failing = false;
+    expect(await h.manager.processProviderEvent('mock', message)).toEqual({ accepted: true, applied: 0 });
+    expect(h.seen.filter((e) => e.type === 'bot:chat_message')).toHaveLength(1);
+    const deliveries = (await h.stores.outbox.listByRun(runId)).filter((d) => d.type === 'bot:chat_message');
+    expect(deliveries).toHaveLength(1);
+    expect(JSON.parse(deliveries[0].payload)).toMatchObject({ type: 'bot:chat_message', data: { text: 'the agenda first', sender: 'participant-1' } });
+  });
+});
+
+describe('a participant who joins after the notice', () => {
+  it('is given the short notice even when the count\'s write or the event\'s delivery fails, and once, whatever the worker\'s retry', async () => {
+    let failing = false;
+    const h = harness({
+      destinationsFor: async () => {
+        if (failing) throw new Error('destinations unavailable');
+        return ['hook-1'];
+      },
+    });
+    const runId = await joined(h);
+    const notices = () => (h.provider.commands.get(runId) ?? []).filter((c) => c.name === 'postChat');
+    failing = true;
+    await expect(h.report(runId, 'participant_joined', { participantRef: 'p2', participantCount: 2 })).rejects.toThrow('destinations unavailable');
+    expect(notices()).toEqual([{ name: 'postChat', text: 'the short notice' }]);
+    failing = false;
+    // the next arrival's report fails at the run store's write of the count, and the worker sends it again
+    vi.spyOn(h.stores.runs, 'update').mockRejectedValueOnce(new Error('run store unavailable'));
+    const arrival = mockEventContext(runId, 'participant_joined', { participantRef: 'p3', participantCount: 3 }, h.clock.now(), h.provider.tokenOf(runId));
+    await expect(h.manager.processProviderEvent('mock', arrival)).rejects.toThrow('run store unavailable');
+    expect(notices()).toHaveLength(2);
+    await h.manager.processProviderEvent('mock', arrival);
+    expect(notices()).toHaveLength(2);
+  });
+});
+
+describe('the purge\'s last events', () => {
+  it('a purge whose last events fail to go out stays purging, and the next pass sends them and writes done', async () => {
+    let failing = false;
+    const h = harness({
+      destinationsFor: async () => {
+        if (failing) throw new Error('destinations unavailable');
+        return ['hook-1'];
+      },
+    });
+    const runId = await joined(h);
+    await h.manager.purgeRun(runId, 'stopped_by_owner');
+    await h.report(runId, 'left', { reason: 'stopped_by_owner', seconds: 20 });
+    failing = true;
+    await expect(h.manager.tick()).rejects.toThrow('destinations unavailable');
+    expect((await h.stores.runs.get(runId))?.state).toBe('purging');
+    failing = false;
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', botName: '', billedSeconds: 20, purgedAt: expect.any(Number) });
+    const ids = (await h.stores.outbox.listByRun(runId)).map((d) => d.id);
+    expect(ids).toEqual(expect.arrayContaining([`${runId}:bot:purged@hook-1`, `${runId}:bot:done@hook-1`]));
+    // each reached the handlers once: bot:purged before its destinations failed, bot:done on the next pass
+    expect(h.seen.filter((e) => e.type === 'bot:purged')).toHaveLength(1);
+    expect(h.seen.filter((e) => e.type === 'bot:done')).toHaveLength(1);
+  });
+});
+
+describe('an event on its way when the fence goes up', () => {
+  it('a transcript stored behind a fence that went up on its way reaches the handlers without its words', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    const append = h.stores.events.append.bind(h.stores.events);
+    vi.spyOn(h.stores.events, 'append').mockImplementation(async (event) => {
+      // the purge's fence goes up between the manager's check of the run and the store's write of the event
+      if (event.type === 'bot:transcript') await h.manager.purgeRun(runId, 'stopped_by_owner');
+      return append(event);
+    });
+    expect(await h.manager.recordTranscript({ runId, seq: 1, turnId: `${runId}:1`, at: 5, text: 'words after the stop' })).toBe(true);
+    const transcript = h.seen.find((e) => e.type === 'bot:transcript');
+    expect(transcript).toBeDefined();
+    expect(transcript?.data).toBeUndefined();
+    expect((await h.stores.events.read(runId, 0)).find((e) => e.type === 'bot:transcript')).toMatchObject({ purged: true });
+  });
+});
+
+describe('the completion hook', () => {
+  /** A run in the call with its notice up and two turns stored. */
+  async function heard(h: ReturnType<typeof harness>, keep: 'none' | 'account') {
+    const r = await h.manager.sendBot({ ...h.request, keep, idempotencyKey: `hook-${keep}` });
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 2 });
+    await h.report(runId, 'notice_posted');
+    await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1);
+    await h.stores.transcript.append({ runId, seq: 1, turnId: `${runId}:1`, at: 1, text: 'first' });
+    await h.stores.transcript.append({ runId, seq: 2, turnId: `${runId}:2`, at: 2, text: 'second' });
+    return runId;
+  }
+
+  it('runs before the scrub with every turn of a run not kept, and the run still ends done with nothing kept', async () => {
+    const seen: Array<{ runId: string; state: string; texts: string[] }> = [];
+    const h = harness({
+      beforeComplete: async (run, turns) => {
+        seen.push({ runId: run.runId, state: run.state, texts: turns.map((t) => t.text) });
+      },
+    });
+    const runId = await heard(h, 'none');
+    await h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    await h.manager.tick();
+    expect(seen).toEqual([{ runId, state: 'left', texts: ['first', 'second'] }]);
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
+  });
+
+  it('a hook that throws is logged by its name alone and the run still ends done', async () => {
+    const warned: string[] = [];
+    const h = harness({
+      beforeComplete: async () => {
+        throw new Error('the address is secret');
+      },
+      logger: { info: () => undefined, warn: (m) => warned.push(m), error: () => undefined },
+    });
+    const runId = await heard(h, 'account');
+    await h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(warned.some((m) => m.includes('beforeComplete') && m.includes(runId))).toBe(true);
+    expect(warned.every((m) => !m.includes('secret'))).toBe(true);
+  });
+
+  it('does not run for a run the stop phrase purged, nor for a run that failed before it was dispatched', async () => {
+    const calls: string[] = [];
+    const h = harness({ beforeComplete: async (run) => void calls.push(run.runId) });
+    const stopped = await heard(h, 'none');
+    await h.report(stopped, 'chat_message', { text: 'ok, STOP TAKING NOTES now', sender: 'Sam' });
+    await h.report(stopped, 'left', { reason: 'stopped_by_participant', seconds: 30 });
+    await h.report(stopped, 'done', { seconds: 30 });
+    await h.manager.tick();
+    expect((await h.stores.runs.get(stopped))?.purgedAt).toBeDefined();
+    const requested = await h.manager.sendBot({ ...h.request, idempotencyKey: 'hook-failed', joinAt: h.clock.now() + 3_600_000 });
+    const requestedId = requested.ok ? requested.run.runId : '';
+    expect(await h.manager.leaveBot(requestedId)).toBe(true);
+    await h.manager.tick();
+    expect((await h.stores.runs.get(requestedId))?.state).toBe('failed');
+    expect(calls).toEqual([]);
+  });
+
+  it('runs once when the cleanup after it fails and is tried again, and the run still ends done', async () => {
+    const calls: string[] = [];
+    const h = harness({ beforeComplete: async (run) => void calls.push(run.runId) });
+    const runId = await heard(h, 'account');
+    const deleteRoom = h.rooms.deleteRoom.bind(h.rooms);
+    let failed = false;
+    h.rooms.deleteRoom = async (name: string) => {
+      if (!failed) {
+        failed = true;
+        throw new Error('the room service is down');
+      }
+      await deleteRoom(name);
+    };
+    // the left report runs the cleanup itself: the step runs, the room's delete fails, and the run waits for the next tick
+    await h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    expect((await h.stores.runs.get(runId))).toMatchObject({ state: 'left', cleanupPending: true });
+    expect((await h.stores.runs.get(runId))?.completionHookAt).toBeDefined();
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(calls).toEqual([runId]);
+  });
+
+  it('runs once when a tick overlaps the report that ended the run: the tick leaves the run to the step, and the scrub comes after it', async () => {
+    const calls: string[] = [];
+    let begun!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { begun = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const h = harness({
+      beforeComplete: async (run) => {
+        calls.push(run.runId);
+        begun();
+        await gate; // the host's model takes its time
+      },
+    });
+    const runId = await heard(h, 'none');
+    const ended = h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    await started;
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))).toMatchObject({ state: 'left', cleanupPending: true });
+    expect((await h.stores.transcript.read(runId, 0)).map((t) => t.text)).toEqual(['first', 'second']);
+    release();
+    await ended;
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
+    expect(calls).toEqual([runId]);
+  });
+
+  it('a total a done report gives while the step runs is the one settled and kept', async () => {
+    let begun!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { begun = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const h = harness({ beforeComplete: async () => { begun(); await gate; } });
+    const runId = await heard(h, 'none');
+    const ended = h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    await started;
+    await h.report(runId, 'done', { seconds: 180 }); // its cleanup finds the step claimed and leaves its total on the row
+    expect((await h.stores.runs.get(runId))).toMatchObject({ state: 'left', reportedSeconds: 180 });
+    release();
+    await ended;
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reportedSeconds: 180, billedSeconds: 180 });
+    expect(h.entitlement.settled).toEqual([['res-1', 180]]);
+  });
+
+  it('a claim another cleanup left holds the step for the lease, and is taken over once it is that old', async () => {
+    const calls: string[] = [];
+    const h = harness({ beforeComplete: async (run) => void calls.push(run.runId) });
+    const runId = await heard(h, 'account');
+    // a claim written a moment ago by a process that stopped mid-step: this cleanup leaves the run to it
+    await h.stores.runs.update(runId, { completionHookClaimedAt: h.clock.now() - 1_000 });
+    await h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    expect((await h.stores.runs.get(runId))).toMatchObject({ state: 'left', cleanupPending: true });
+    expect(calls).toEqual([]);
+    h.clock.advance(COMPLETION_HOOK_LEASE_MS);
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(calls).toEqual([runId]);
   });
 });

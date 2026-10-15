@@ -209,7 +209,7 @@ Every entry point (`generateText`, [`streamText`](https://github.com/framerslab/
 
 | Field | Required? | Default | Notes |
 |---|---|---|---|
-| `provider` | no | auto-detected from the environment ([Environment Setup](#environment-setup)) | One of `openai`, `anthropic`, `gemini`, `openrouter`, `requesty`, `groq`, `together`, `mistral`, `xai`, `ollama`, and the CLI bridges `claude-code-cli` and `gemini-cli`. Another OpenAI-compatible service runs through `openai` with `baseUrl`. |
+| `provider` | no | auto-detected from the environment ([Environment Setup](#environment-setup)) | One of `openai`, `anthropic`, `gemini`, `openrouter`, `requesty`, `groq`, `together`, `mistral`, `xai`, `ollama`, `litellm`, and the CLI bridges `claude-code-cli` and `gemini-cli`. `litellm` is never auto-detected and needs a `model` and an `apiKey`, on the call or in `setDefaultProvider()`, because it has no default model and reads no environment variable ([LiteLLM](../features/LLM_PROVIDERS.md#litellm)). Another OpenAI-compatible service runs through `openai` with `baseUrl`. |
 | `model` | no | provider-specific (`gpt-4o`, `claude-sonnet-4-6`, `gemini-2.5-flash`, `llama3.2` for Ollama, etc.) | Pin explicitly for stability across package upgrades. Use a current model id; retired snapshots return 404. |
 | `apiKey` | no | env auto-detect (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.; full chain in [Environment Setup](#environment-setup)) | Pass explicitly for multi-tenant apps and to avoid coupling code to env var names. |
 

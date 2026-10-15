@@ -32,15 +32,16 @@
  *   `EmergentAgentJudge` directly if you need runtime agent synthesis
  *   inside a custom orchestrator.
  * - Multi-turn conversational simulations where a fixed roster all
- *   speak each turn. The agency strategies pick WHICH agent runs next;
- *   they do not run all of them in parallel per turn.
+ *   speak each turn. Each `generate()` or session `send()` answers one
+ *   input, so a turn loop across calls is the caller's to write.
  *
- * `agency().session()` exists but is shallow: it persists per-session
- * message history and usage totals only. The agent roster, the
- * `AgencyMemoryManager`, and any `tier: 'session'` synthesised
- * specialists from `spawn_specialist` are reset between `.send()` calls.
- * If you need multi-call agency state to persist, build your own
- * orchestration layer over agentos primitives.
+ * `agency().session()` keeps per-session message history and usage totals
+ * only. `agency()` keeps no shared memory (it does not use
+ * `AgencyMemoryManager`), and each `.send()` starts from the configured
+ * roster: a specialist `spawn_specialist` adds during one call is gone in
+ * the next, whatever `emergent.tier` names. If you need multi-call agency
+ * state to persist, build your own orchestration layer over agentos
+ * primitives.
  *
  * @example
  * ```ts
@@ -97,6 +98,7 @@ import {
   type AgencyProvenanceRecorder,
   type AgencyProvenanceTrail,
 } from './agency-provenance.js';
+import type { RawData, WebSocket } from 'ws';
 
 // ---------------------------------------------------------------------------
 // Public factory
@@ -139,8 +141,10 @@ export function agency(opts: AgencyOptions): Agent {
   }
 
   // 2. Compile the orchestration strategy into an executable CompiledStrategy.
-  //    When `adaptive` is true the strategy dispatcher wraps the chosen strategy
-  //    with an implicit hierarchical manager.
+  //    When `adaptive` is true the hierarchical strategy is compiled in place
+  //    of the declared one. compileStrategy()'s adaptive wrapper, which names
+  //    the declared strategy to the manager, wraps only a non-hierarchical
+  //    strategy, so it is not reached from here.
   //    Auto-detect 'graph' when any sub-agent declares `dependsOn`.
   //    `hitl.approvals.beforeTool` is not copied into the roster: it is
   //    enforced per call by the approval gate (see buildCallOptions below).
@@ -746,8 +750,9 @@ export function agency(opts: AgencyOptions): Agent {
           },
 
           /**
-           * Returns stub usage totals for this session.
-           * Real per-session accounting requires a usage ledger — see `AgentOptions.usageLedger`.
+           * Returns this session's usage totals, which the agency adds up in
+           * memory as the session's runs report usage. `agency()` writes no
+           * usage ledger.
            */
           async usage(): Promise<{ promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number }> {
             return { ...getSessionUsage(sessionUsage, sessionId) };
@@ -766,8 +771,9 @@ export function agency(opts: AgencyOptions): Agent {
     },
 
     /**
-     * Returns stub cumulative usage totals for the agency.
-     * Real accounting requires a usage ledger — see `AgentOptions.usageLedger`.
+     * Returns the usage totals the agency adds up in memory as its runs report
+     * usage: the whole agency's, or with `sessionId`, that session's.
+     * `agency()` writes no usage ledger.
      */
     async usage(sessionId?: string): Promise<{ promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number }> {
       return sessionId
@@ -845,66 +851,70 @@ export function agency(opts: AgencyOptions): Agent {
   // ---------------------------------------------------------------------------
 
   /**
-   * When `opts.voice.enabled` is set, attach a `listen()` method that starts a
-   * local WebSocket server and exposes a port for real-time audio I/O.
-   *
-   * The WebSocket server acts as the transport layer; on each incoming connection
-   * the audio bytes are bridged to the agency via `generate()` / `session()` once
-   * a full-pipeline STT+TTS integration is in place.  For v1 the connection
-   * handler is a no-op stub, establishing the port and URL surface so callers
-   * can integrate their own audio transport.
-   *
-   * Dynamic import of `ws` keeps voice entirely optional — if the package is
-   * not installed the error message tells the caller exactly what to install.
-   * The `@vite-ignore` keeps bundlers/vitest from trying to statically resolve
-   * the optional, possibly-uninstalled `ws` package at transform time (which
-   * otherwise surfaces as a "Failed to load url ws" load error in test runs).
+   * Optional loopback JSON-text listener. It performs no STT or TTS.
+   * Binary frames receive audio_not_supported and close code 1003.
+   * Use VoiceSessionFactory and its authenticated transport for spoken calls.
    */
   if (opts.voice?.enabled) {
     agentObj.listen = async (listenOpts?: { port?: number }): Promise<{ port: number; url: string; close: () => Promise<void> }> => {
-      try {
-        const ws = await import(/* @vite-ignore */ 'ws');
-        const WebSocketServer = (ws as any).WebSocketServer ?? ws.default?.Server ?? ws.Server;
-        const port = listenOpts?.port ?? 0;
-
-        const wss = new WebSocketServer({ port, host: '127.0.0.1' });
-        await new Promise<void>((resolve) => wss.on('listening', resolve));
-        const address = wss.address() as { port: number } | null;
-        const actualPort = address?.port ?? port;
-
-        /**
-         * Connection handler: each WebSocket client is a voice session.
-         * Bridges audio frames through the voice pipeline (STT → LLM → TTS)
-         * when the voice-pipeline module is available, otherwise logs a warning.
-         */
-        wss.on('connection', async (ws: any) => {
-          // Voice pipeline stub — STT/TTS bridging requires a full AudioProcessor
-          // + speech provider setup. For now, accept text frames via JSON and
-          // route them through the agent's generate() method.
-          ws.on('message', async (data: Buffer) => {
-            try {
-              const msg = JSON.parse(data.toString());
-              if (msg.text) {
-                const result = await agentObj.generate(msg.text);
-                const text = typeof result === 'string' ? result : (result as any)?.text ?? '';
-                ws.send(JSON.stringify({ text }));
-              }
-            } catch {
-              ws.send(JSON.stringify({ error: 'Invalid message format. Send JSON: { "text": "..." }' }));
-            }
-          });
-        });
-
-        return {
-          port: actualPort,
-          url: `ws://127.0.0.1:${actualPort}`,
-          close: () => new Promise<void>((resolve) => wss.close(() => resolve())),
+      const { WebSocketServer } = await import('ws');
+      const wss = new WebSocketServer({ port: listenOpts?.port ?? 0, host: '127.0.0.1', maxPayload: 65536 });
+      await new Promise<void>((resolve, reject) => {
+        const ready = (): void => { wss.off('error', failed); resolve(); };
+        const failed = (error: Error): void => { wss.off('listening', ready); reject(error); };
+        wss.once('listening', ready); wss.once('error', failed);
+      });
+      wss.on('error', () => { for (const client of wss.clients) client.terminate(); });
+      wss.on('connection', (socket: WebSocket) => {
+        let busy = false;
+        socket.on('error', () => socket.terminate());
+        const send = (value: unknown): void => {
+          if (socket.readyState !== socket.OPEN) return;
+          if (socket.bufferedAmount > 65536) { socket.close(1013, 'output unavailable'); return; }
+          socket.send(JSON.stringify(value), (error) => { if (error) socket.terminate(); });
         };
-      } catch {
-        throw new Error(
-          'Voice transport requires the ws package. Install with: npm install ws',
-        );
-      }
+        const error = (code: string, message: string): void => send({ error: { code, message } });
+        socket.on('message', (data: RawData, isBinary: boolean) => {
+          // A closing connection starts no work: ws still delivers the frames that arrive before the client's close
+          // frame, such as a text frame sent right after a refused binary one.
+          if (socket.readyState !== socket.OPEN) return;
+          if (isBinary) {
+            error('audio_not_supported', 'This listener accepts JSON text only. Use VoiceSessionFactory for audio.');
+            socket.close(1003, 'audio_not_supported'); return;
+          }
+          let text: string;
+          try {
+            const input: unknown = JSON.parse(data.toString());
+            if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('shape');
+            const message = input as Record<string, unknown>;
+            if (Object.keys(message).length !== 1 || typeof message.text !== 'string' || !message.text.trim() || message.text.length > 16384) throw new Error('shape');
+            text = message.text;
+          } catch { error('invalid_message', 'Send one JSON object with a non-empty text string, at most 16384 characters.'); return; }
+          if (busy) { error('request_in_progress', 'Wait for the current text response.'); return; }
+          busy = true;
+          void (async () => {
+            try {
+              const result = await agentObj.generate(text);
+              const output = typeof result === 'string' ? result : (result as { text?: unknown })?.text;
+              if (typeof output !== 'string' || Buffer.byteLength(output, 'utf8') > 32768) {
+                error('output_unavailable', 'Text response exceeds the listener limit.'); return;
+              }
+              send({ text: output });
+            } catch { error('generation_failed', 'Text generation failed.'); }
+            finally { busy = false; }
+          })();
+        });
+      });
+      const address = wss.address();
+      if (!address || typeof address === 'string') { wss.close(); throw new Error('text listener address unavailable'); }
+      let closing: Promise<void> | undefined;
+      return { port: address.port, url: `ws://127.0.0.1:${address.port}`, close: () => {
+        if (!closing) closing = new Promise<void>((resolve, reject) => {
+          for (const client of wss.clients) client.terminate();
+          wss.close((error) => { if (error) reject(error); else resolve(); });
+        });
+        return closing;
+      } };
     };
   }
 
@@ -1173,22 +1183,20 @@ function normalizeGuardrails(
 }
 
 /**
- * Runs a list of guardrail IDs against the provided text.
+ * Reports each ID in `guardIds` as not evaluated and returns `text` unchanged.
+ * No guardrail runs: `agency()` resolves no ID to a guardrail, so nothing is
+ * blocked or sanitized and nothing is thrown. Each ID goes to
+ * `callbacks.guardrailResult` with `passed: true`, `enforced: false` and
+ * `action: 'allow'`.
  *
- * Uses a dynamic import to load the guardrail infrastructure. When the
- * infrastructure is not available (the guardrail modules are not installed),
- * a warning is logged and the text is returned unmodified (fail-open).
+ * The function first imports AgentOS's guardrail module. When that import
+ * fails, it logs a warning naming the skipped IDs and fires no event.
  *
- * For v1, guardrails are evaluated synchronously in order. Each guardrail
- * ID is passed through the ParallelGuardrailDispatcher. If a guardrail
- * blocks, an error is thrown. Sanitized text is returned when applicable.
- *
- * @param text - The input or output text to evaluate.
+ * @param text - The input or output text.
  * @param guardIds - Guardrail identifier strings.
- * @param direction - Whether this is an `"input"` or `"output"` evaluation.
- * @param callbacks - Optional callback map for firing guardrail events.
- * @returns The (possibly sanitized) text after guardrail evaluation.
- * @throws {AgencyConfigError} When a guardrail blocks the content.
+ * @param direction - `"input"` or `"output"`, named in the warning.
+ * @param callbacks - Optional callback map; each ID goes to `guardrailResult`.
+ * @returns `text`, unchanged.
  */
 async function runGuardrails(
   text: string,
@@ -1204,18 +1212,13 @@ async function runGuardrails(
     );
 
     /*
-     * Build lightweight guardrail service stubs from IDs.
-     * Each stub checks the text against a simple pattern matching strategy.
-     * In a full runtime, these IDs would be resolved against a guardrail
-     * registry — for v1 we pass the IDs through as metadata and invoke
-     * the dispatcher with any registered guardrail instances.
+     * Nothing from the module is used: no ID is resolved to a guardrail, so
+     * the text is returned as it came.
      */
     const sanitizedText = text;
 
     for (const guardId of guardIds) {
-      /* Fire a guardrailResult event indicating the guard was not evaluated.
-       * The guardrail registry is loaded but individual guards are not yet
-       * wired — `enforced: false` signals that no actual evaluation occurred. */
+      /* `enforced: false`: the guard was not evaluated. */
       callbacks?.guardrailResult?.({
         agent: '__agency__',
         guardrailId: guardId,
@@ -1229,8 +1232,8 @@ async function runGuardrails(
     return sanitizedText;
   } catch {
     /*
-     * Guardrail infrastructure not available — fail open with a warning.
-     * This is expected when the guardrail extension packs are not installed.
+     * The import of AgentOS's own guardrail module failed: log the skipped
+     * IDs and return the text.
      */
     console.warn(
       `[AgentOS][Agency] Guardrail infrastructure not available; ` +
@@ -1245,27 +1248,19 @@ async function runGuardrails(
 // ---------------------------------------------------------------------------
 
 /**
- * Injects retrieved context into the prompt when RAG is configured.
+ * Returns `prompt` unchanged: `agency()` retrieves no context. With
+ * `ragConfig.vectorStore` set it asks {@link retrieveRagContext}, which
+ * returns `null`, and when `ragConfig.documents` lists a document it logs an
+ * info message saying the documents are not used. The full runtime retrieves
+ * through the retrieval augmentor that `AgentOSConfig.retrievalAugmentor` or
+ * `AgentOSConfig.ragConfig` sets up.
  *
- * For v1 this is a shell that accepts the {@link RagConfig} and returns the
- * prompt unmodified (no-op) when no live vector store query can be performed.
- * The infrastructure exists in `src/rag/` but initialising
- * `EmbeddingManager` + `VectorStoreManager` is a heavyweight operation best
- * suited to the full `AgentOSOrchestrator` pipeline.
- *
- * When a `ragConfig.vectorStore` is configured, delegates to `retrieveRagContext()`
- * which dynamically imports the embedding manager to embed the query and search
- * the configured vector store.  See `src/rag/IVectorStore.ts` for the query API.
- *
- * When `ragConfig.documents` is set (but a live vector store is not) an info
- * message is logged directing the caller to `AgentOSOrchestrator` for full RAG.
- *
- * @param prompt - The user prompt to augment.
+ * @param prompt - The user prompt.
  * @param ragConfig - RAG configuration from `AgencyOptions.rag`.
- * @returns The (possibly augmented) prompt string.
+ * @returns `prompt`, unchanged.
  */
 async function injectRagContext(prompt: string, ragConfig: RagConfig): Promise<string> {
-  // If a vector store is configured, attempt a live retrieval query.
+  // A vector store is named: retrieveRagContext() returns null, so no context is added.
   if (ragConfig.vectorStore) {
     try {
       const ragContext = await retrieveRagContext(prompt, ragConfig);
@@ -1277,11 +1272,12 @@ async function injectRagContext(prompt: string, ragConfig: RagConfig): Promise<s
     }
   }
 
-  // If documents are specified but no vector store query succeeded, guide the caller.
+  // Documents are listed: say that agency() does not use them.
   if (ragConfig.documents && ragConfig.documents.length > 0) {
     console.info(
-      '[AgentOS][Agency] RAG document loading configured — use AgentOSOrchestrator ' +
-      'for full RAG pipeline with document indexing and retrieval.',
+      '[AgentOS][Agency] rag.documents is set, but agency() loads, indexes and retrieves no documents. ' +
+      'Retrieval runs on the full AgentOS runtime, set up through AgentOSConfig.ragConfig or ' +
+      'AgentOSConfig.retrievalAugmentor.',
     );
   }
 
@@ -1289,25 +1285,22 @@ async function injectRagContext(prompt: string, ragConfig: RagConfig): Promise<s
 }
 
 /**
- * Queries the configured vector store for chunks relevant to `query`.
+ * Returns `null`. The lightweight `agency()` initialises no embedding manager
+ * or vector store, so there is no store to query: `ragConfig.vectorStore`
+ * names a provider, and nothing here opens it.
  *
- * Dynamically imports the embedding manager, embeds the query, and searches
- * the configured vector store for relevant chunks.
- *
- * @param query - The text to embed and search for.
- * @param ragConfig - The active RAG configuration.
- * @returns A joined context string, or `null` when retrieval is unavailable.
+ * @param _query - The text a retrieval would search for (unused).
+ * @param _ragConfig - The RAG configuration (unused).
+ * @returns `null`.
  */
 async function retrieveRagContext(
   _query: string,
   _ragConfig: RagConfig,
 ): Promise<string | null> {
-  // The lightweight agency() API declares vector store intent via
-  // ragConfig.vectorStore.provider but does not initialise a live store.
-  // Full RAG retrieval (embed → search → rerank) is handled by
-  // AgentOSOrchestrator which manages EmbeddingManager + VectorStoreManager
-  // lifecycle. Returning null here falls through to the no-op path in
-  // injectRagContext() which logs guidance to use the full pipeline.
+  // The full runtime sets up the embedding manager, vector stores and
+  // retrieval augmentor (AgentOS.create() with AgentOSConfig.ragConfig, through
+  // RagMemoryInitializer). Returning null leaves the prompt unchanged in
+  // injectRagContext().
   return null;
 }
 
@@ -1344,19 +1337,6 @@ function appendSchemaHint(prompt: string, schema: unknown): string {
   return prompt + hint;
 }
 
-/**
- * Attempts to parse the result text as JSON and validate it against a Zod
- * schema provided via `opts.output`.
- *
- * The parser handles two common LLM output patterns:
- * 1. Clean JSON — the entire text is valid JSON.
- * 2. JSON in a code fence — `\`\`\`json ... \`\`\`` wrapped blocks.
- * 3. JSON object embedded in prose — the first `{ ... }` block is extracted.
- *
- * @param text - The raw result text from the strategy execution.
- * @param schema - The Zod schema (typed as `unknown` to avoid a hard zod dep).
- * @returns The parsed and validated object, or `undefined` on failure.
- */
 /**
  * Extract the first complete JSON object from raw text using brace-matching.
  *
@@ -1408,6 +1388,20 @@ function extractFirstJsonObject(text: string): unknown {
   return undefined;
 }
 
+/**
+ * Attempts to parse the result text as JSON and validate it against a Zod
+ * schema provided via `opts.output`.
+ *
+ * The parser handles three common LLM output patterns, in this order:
+ * 1. Clean JSON — the entire text is valid JSON.
+ * 2. JSON in a code fence — `\`\`\`json ... \`\`\`` wrapped blocks.
+ * 3. JSON object embedded in prose — the first `{ ... }` block is extracted.
+ *
+ * @param text - The raw result text from the strategy execution.
+ * @param schema - The Zod schema (typed as `unknown` to avoid a hard zod dep).
+ * @returns The parsed and validated object, or `undefined` when no pattern
+ *   parses and validates, or when `schema` has no `parse()`.
+ */
 function parseStructuredOutput(text: string, schema: unknown): unknown {
   const zodSchema = schema as { parse: (v: unknown) => unknown };
   if (typeof zodSchema?.parse !== 'function') return undefined;
@@ -1507,13 +1501,31 @@ async function maybeApproveFinalResult(
     );
   }
 
+  // The text the caller receives when the approval replaces the final text:
+  // the replacement goes through the agency's output guardrails, as the
+  // strategy's text did in finalizeExecutionResult(), before the check below
+  // reads it.
+  const replacement =
+    typeof decision.modifications?.output === 'string'
+      ? await runGuardrails(
+          decision.modifications.output,
+          normalizeGuardrails(opts.guardrails)?.output ?? [],
+          'output',
+          opts.on,
+        )
+      : undefined;
+
   // --- Post-approval guardrail override ---
-  // Even after HITL approves, run guardrails as a final safety net.
+  // Even after HITL approves, run guardrails as a final safety net. The
+  // check reads the strategy's text, and the replacement beside it when the
+  // approval carries one, so a replacement the check blocks is refused as a
+  // blocked final text is.
   if (decision.approved && opts.hitl.guardrailOverride !== false) {
     const postGuardrails = opts.hitl.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'];
+    const output = (result.text as string) ?? '';
     const overrideResult = await runPostApprovalGuardrails(
       'return',
-      { output: (result.text as string) ?? '' },
+      replacement === undefined ? { output } : { output, returned: replacement },
       postGuardrails,
       opts.on,
     );
@@ -1530,11 +1542,7 @@ async function maybeApproveFinalResult(
     }
   }
 
-  if (typeof decision.modifications?.output === 'string') {
-    return { ...result, text: decision.modifications.output };
-  }
-
-  return result;
+  return replacement === undefined ? result : { ...result, text: replacement };
 }
 
 // ---------------------------------------------------------------------------
@@ -1542,32 +1550,46 @@ async function maybeApproveFinalResult(
 // ---------------------------------------------------------------------------
 
 /**
- * Result of a post-approval guardrail check.
+ * Result of a post-approval check.
  *
- * Contains the blocking guardrail's ID and reason when the override fires.
+ * Contains the blocking check's ID and reason when the override fires.
  */
 export interface GuardrailHitlOverrideResult {
-  /** Whether the guardrails passed (tool call may proceed). */
+  /** Whether every check passed (the approved action may proceed). */
   passed: boolean;
-  /** The guardrail ID that triggered the block (when `passed` is `false`). */
+  /** The ID of the check that blocked (when `passed` is `false`). */
   guardrailId?: string;
   /** Human-readable reason for the block. */
   reason?: string;
 }
 
 /**
- * Runs post-approval guardrails against tool call arguments to catch
- * destructive actions that slipped past the HITL handler.
+ * Runs the post-approval checks after an approval handler approves a tool
+ * call, an agent run or the final output.
  *
- * This is the core safety net: even when auto-approve, LLM judge, or a
- * human approves a tool call, the configured guardrails get a final say.
- * If any guardrail returns `action: 'block'`, the approval is overridden.
+ * The checks are two fixed pattern checks inside `agency()`, `code-safety`
+ * and `pii-redaction`, not the guardrail packs: any other ID passes. They
+ * run in the order `guardrailIds` lists them, each over one text,
+ * `Tool: <toolName>` and then `Arguments:` with `args` as JSON, and the
+ * first that matches returns `passed: false` with its ID and reason; the
+ * caller then overrides the approval. A check that throws is skipped. The
+ * final output is checked as the strategy produced it and, when the
+ * approval's `modifications.output` replaces it, as the replacement the
+ * caller receives, after the agency's output guardrails have read it.
  *
- * @param toolName - The tool that was approved.
- * @param args - The arguments the tool would be called with.
- * @param guardrailIds - Ordered list of guardrail IDs to evaluate.
- * @param callbacks - Optional event callback map for emitting override events.
- * @returns A result indicating whether the guardrails passed.
+ * @param toolName - The approved tool's name, `agent:<name>` for an agent
+ *   approval, or `return` for the final output.
+ * @param args - The tool call's arguments; for an agent, `{ input }` with the
+ *   strategy's input, plus `sent`, the text the agent is sent, when the
+ *   approval's instructions were appended to it, and `parts`, the task and
+ *   the other agents' output the strategy built the input from, each on its
+ *   own, under graph, review-loop and debate; for the final output,
+ *   `{ output }` with the strategy's text, plus `returned`, the approval's
+ *   replacement, when it carries one.
+ * @param guardrailIds - Ordered list of check IDs to run.
+ * @param callbacks - Optional event callback map; each check's result goes to
+ *   `guardrailResult`.
+ * @returns A result indicating whether every check passed.
  */
 export async function runPostApprovalGuardrails(
   toolName: string,
@@ -1652,19 +1674,18 @@ export async function runPostApprovalGuardrails(
 }
 
 /**
- * Built-in post-approval guardrail evaluator.
+ * The built-in post-approval checks.
  *
- * Ships with two default guardrails:
- * - `code-safety` — blocks shell commands containing destructive patterns
- *   (e.g., `rm -rf`, `DROP TABLE`, `format C:`).
- * - `pii-redaction` — blocks payloads that appear to contain unredacted PII
- *   (SSNs, credit card numbers).
+ * - `code-safety` — blocks a payload that matches one of its destructive
+ *   command and statement patterns (e.g., `rm -rf /`, `DROP TABLE`,
+ *   `format C:`).
+ * - `pii-redaction` — blocks a payload that contains what looks like an
+ *   unredacted SSN or credit card number.
  *
- * Additional guardrail IDs are treated as pass-through (allow) until a
- * registry-based resolver is wired.
+ * Any other ID passes (allow).
  *
- * @param guardId - The guardrail identifier.
- * @param payload - Serialized tool call context to evaluate.
+ * @param guardId - The check's identifier.
+ * @param payload - The serialized text to check.
  * @returns An action/reason pair.
  */
 function evaluatePostApprovalGuardrail(

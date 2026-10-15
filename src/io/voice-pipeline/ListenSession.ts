@@ -9,6 +9,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { ReconnectingSTT, type ReconnectingSTTOptions, type SttGapEvent, type SttReconnectedEvent } from './ReconnectingSTT.js';
+import { describeReason, isError } from './describeReason.js';
 import type { AudioFrame, IEndpointDetector, IStreamingSTT, IStreamTransport, ITranscriptInputSink, StreamingSTTConfig, StreamingSTTSession, TranscriptEvent, TranscriptInput, TranscriptTurn, TurnCompleteEvent, VadEvent } from './types.js';
 
 export type { ITranscriptSink, ITranscriptInputSink, TranscriptInput, TranscriptTurn } from './types.js';
@@ -31,6 +32,10 @@ export interface ListenSessionOverrides {
    * When given, its `turn_complete` events are the turns; without one, each final is a turn.
    * An empty detector transcript uses the STT finals since the previous turn, joined with spaces,
    * and their first start and last end times (including with {@link AcousticEndpointDetector}).
+   * A `late_final` it emits, a final that arrived after its turn completed and that no turn takes,
+   * is written as a turn of its own, as a final is without a detector; one with no words writes nothing.
+   * The session resets it with `'session'` as it starts, so a detector an earlier session used waits for no
+   * late final of that session's last turn.
    */
   endpointDetector?: IEndpointDetector;
   /** Passed to the transcriber's `startSession()`. */
@@ -41,7 +46,8 @@ export interface ListenSessionOverrides {
   sinkQueueLimit?: number;
   /**
    * Names who spoke a turn, from the transcriber's final. A detector turn carries its text and no words,
-   * unless empty detector text uses the accumulated STT finals and their words.
+   * unless empty detector text uses the accumulated STT finals and their words. One that throws names no one:
+   * the throw is written as a console warning, and the turn is written with no speaker.
    */
   speaker?: (event: TranscriptEvent) => string | undefined;
   /** How long a stop waits for the flushed final to arrive, before draining a pending detector turn. Default 250. */
@@ -78,8 +84,9 @@ export interface ListenSession extends EventEmitter {
   /** The counts so far. */
   stats(): ListenSessionStats;
   /**
-   * `stopped` flushes the transcriber, waits `drainMs`, then waits for a pending detector turn up to
-   * its `turnCompletionTimeoutMs` (3250 ms if omitted), plus one timer tick, before resetting. `purged` drops everything
+   * `stopped` first releases a transport pause the session asked for, so the frames the transport held reach the
+   * transcriber, then flushes it, waits `drainMs`, then waits for a pending detector turn up to its
+   * `turnCompletionTimeoutMs` (3250 ms if omitted), plus one timer tick, before resetting. `purged` drops everything
    * queued without draining. Every end releases an outstanding transport pause; resolves at `ended`.
    */
   close(reason?: ListenEndReason): Promise<void>;
@@ -89,10 +96,11 @@ export interface ListenSession extends EventEmitter {
  * Starts listening. Emits `turn` (a {@link TranscriptTurn}), `interim` (a {@link TranscriptEvent}), `stt:reconnected`,
  * `stt:gap`, `paused`, `resumed` and `ended` (`{ reason, error? }`).
  *
- * The transport's frames go to the transcriber. Each final, or with an endpoint detector each `turn_complete`, goes
- * to the sink, one write at a time in arrival order; the sink numbers it. When `sinkQueueLimit` finals wait for the
- * sink, the session emits `pause` on the transport and `paused` on itself, and `resume` and `resumed` once the queue
- * is down to half or the session ends; a final is never dropped for a slow sink. The transcriber's `speech_start`
+ * The transport's frames go to the transcriber. Each final, or with an endpoint detector each `turn_complete` and each
+ * `late_final` (a final the detector's turns left out), goes to the sink, one write at a time in arrival order; the
+ * sink numbers it. When `sinkQueueLimit` finals wait for the sink, the session emits `pause` on the transport and
+ * `paused` on itself, and `resume` and `resumed` once the queue is down to half or the session ends; a final is never
+ * dropped for a slow sink. The transcriber's `speech_start`
  * and `speech_end` reach the detector as voice activity, as the orchestrator gives them. The session ends once, for the first
  * {@link ListenEndReason}; it closes the transcriber and leaves the transport open, since the transport is the
  * caller's. A transport error ends it with `transport_failed` and the error in `ended`. Its transport listeners
@@ -115,6 +123,9 @@ export interface ListenSession extends EventEmitter {
  * ```
  */
 export async function startListenSession(transport: IStreamTransport, sink: ITranscriptInputSink, overrides: ListenSessionOverrides): Promise<ListenSession> {
+  // This session's transcriber sends no final of an earlier session's turns, so a detector an earlier session used
+  // waits for none.
+  overrides.endpointDetector?.reset('session');
   const stt = overrides.reconnect === false ? overrides.streamingSTT : new ReconnectingSTT(overrides.streamingSTT, typeof overrides.reconnect === 'object' ? overrides.reconnect : {});
   const sttSession: StreamingSTTSession = await stt.startSession(overrides.sttConfig);
   const detector = overrides.endpointDetector;
@@ -169,6 +180,9 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
     endPromise = new Promise<void>((resolve, reject) => { resolveEnd = resolve; rejectEnd = reject; });
     void (async () => {
       if (reason === 'stopped') {
+        // a pause the session asked for is released first, while audio is still taken: the frames the transport held
+        // reach the transcriber before its flush, not after the session has stopped listening
+        resume();
         // the transcriber is flushed and its last finals are still written
         state = 'draining';
         try {
@@ -183,6 +197,7 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
       transport.off('audio', onAudio);
       transport.off('close', onTransportClose);
       detector?.off('turn_complete', onTurnComplete);
+      detector?.off('late_final', onLateFinal);
       finals.length = 0;
       if (reason === 'purged') pending.length = 0;
       resume();
@@ -196,9 +211,20 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
     return endPromise;
   };
 
+  // `speaker` is the host's code, run inside the transcriber's or the detector's event: a throw would lose the turn
+  // and go into that event's emitter, so it is written as a console warning and the turn is written with no speaker.
+  const speakerOf = (event: TranscriptEvent): string | undefined => {
+    try {
+      return overrides.speaker?.(event);
+    } catch (thrown) {
+      console.warn('[listen-session] the speaker option threw; the turn is written with no speaker:', describeReason(thrown));
+      return undefined;
+    }
+  };
+
   const write = (text: string, event: TranscriptEvent): void => {
     if (!accepting() || sinkFailed) return;
-    const turn: TranscriptInput = { runId: overrides.runId, at: Date.now(), text, startMs: event.startMs, endMs: event.endMs, speaker: overrides.speaker?.(event) };
+    const turn: TranscriptInput = { runId: overrides.runId, at: Date.now(), text, startMs: event.startMs, endMs: event.endMs, speaker: speakerOf(event) };
     pending.push(turn);
     if (pending.length >= queueLimit && !paused) {
       paused = true;
@@ -217,7 +243,8 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
       } catch (err) {
         sinkFailed = true;
         pending.length = 0;
-        void end('sink_failed', err instanceof Error ? err : new Error(String(err)), true);
+        // describeReason() gives text for any value: String() throws for some a sink can reject with.
+        void end('sink_failed', isError(err) ? err : new Error(describeReason(err)), true);
         return;
       }
       if (paused && pending.length < Math.ceil(queueLimit / 2)) {
@@ -251,6 +278,14 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
     }
     // a detector turn has its text and confidence, and no audio boundaries of its own
     write(turn.transcript, { text: turn.transcript, confidence: turn.confidence, words: [], isFinal: true, durationMs: turn.durationMs });
+  };
+  const onLateFinal = (event: TranscriptEvent): void => {
+    if (!accepting()) return;
+    // a final that arrived after its turn completed is in no detector turn: it is written as a turn of its own, as a
+    // final is without a detector, and leaves the finals an empty detector turn would join
+    const held = finals.indexOf(event);
+    if (held >= 0) finals.splice(held, 1);
+    if (event.text.trim()) write(event.text, event);
   };
 
   sttSession.on('transcript', (event: TranscriptEvent) => {
@@ -286,6 +321,7 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
     if (state === 'listening') void end('stt_failed', new Error('the transcriber closed'));
   });
   detector?.on('turn_complete', onTurnComplete);
+  detector?.on('late_final', onLateFinal);
   transport.on('audio', onAudio);
   transport.on('close', onTransportClose);
   transport.on('error', onTransportError);

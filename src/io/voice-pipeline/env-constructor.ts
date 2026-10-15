@@ -9,7 +9,9 @@
  * STT chain alone, for a consumer with no speech output.
  * {@link createSttChain} builds an STT chain from a list of provider entries
  * the host chooses, such as `openai:gpt-4o-transcribe`, in place of the
- * environment's keys.
+ * environment's keys. {@link createRegisteredSttChain} builds one from
+ * entries of vendors the host registers, through the host's own factories,
+ * and reads no environment.
  */
 
 import {
@@ -41,7 +43,9 @@ import { VoiceMetricsReporter } from './VoiceMetricsReporter.js';
 import type { IStreamingSTT, IStreamingTTS } from './types.js';
 import type { HealthyProvider } from './HealthyProvider.js';
 import { openAITranscriptionPricing } from '../../core/llm/providers/implementations/openaiPricing.js';
+import { deepgramStreamingPricing } from './providers/deepgramPricing.js';
 import { parseSttEntry } from './sttEntries.js';
+import { legacyProviderPolicy } from './ProviderPolicy.js';
 
 export class NoVoiceProvidersAvailableError extends Error {
   readonly checkedEnvVars: string[];
@@ -73,7 +77,9 @@ export interface VoiceProviderEnvConfig {
    * first (used for a paid-tier premium-voice opt-in); `'cartesia'` / `'hume'`
    * promote those vendors' streaming providers to first-try when their keys
    * are present. Either way the other vendors stay in the chain as automatic
-   * fallbacks.
+   * fallbacks, except Hume: Hume ends its TTS API on 13 November 2026, so
+   * its streaming provider joins the chain only when `'hume'` names it, never
+   * from `HUME_API_KEY` alone.
    */
   ttsPreference?: 'deepgram' | 'elevenlabs' | 'cartesia' | 'hume';
   /**
@@ -227,11 +233,14 @@ export function createVoiceProvidersFromEnv(
       })
     );
   }
-  if (humeKey) {
+  // Hume ends its TTS API on 13 November 2026 (the speech retirement register,
+  // src/io/speech/retirements.ts), so the key alone never makes it a fallback:
+  // it joins, as the first try, only when the caller names it.
+  if (humeKey && config.ttsPreference === 'hume') {
     ttsProviders.push(
       new HumeStreamingTTS({
         apiKey: humeKey,
-        priority: config.ttsPreference === 'hume' ? 4 : 14,
+        priority: 4,
       })
     );
   }
@@ -243,12 +252,14 @@ export function createVoiceProvidersFromEnv(
   const stt = new StreamingSTTChain(sttProviders, {
     breaker,
     metrics,
+    policy: legacyProviderPolicy,
     enableMidUtteranceFailover: config.enableMidUtteranceFailover ?? true,
     ringBufferCapacityMs: 3000,
   });
   const tts = new StreamingTTSChain(ttsProviders, {
     breaker,
     metrics,
+    policy: legacyProviderPolicy,
     enableMidSynthesisFailover: config.enableMidSynthesisFailover ?? true,
   });
 
@@ -328,6 +339,7 @@ export function createSttChainFromEnv(config: SttProviderEnvConfig = {}): SttPro
   const stt = new StreamingSTTChain(sttProviders, {
     breaker,
     metrics,
+    policy: legacyProviderPolicy,
     enableMidUtteranceFailover: config.enableMidUtteranceFailover ?? false,
   });
 
@@ -360,7 +372,7 @@ export interface SttChainEntryOptions {
  */
 export function sttEntryPricePerMinute(entry: string): number | undefined {
   const { vendor, model } = parseSttEntry(entry);
-  const price = vendor === 'openai' ? openAITranscriptionPricing(model) : undefined;
+  const price = vendor === 'openai' ? openAITranscriptionPricing(model) : vendor === 'deepgram' ? deepgramStreamingPricing(model) : undefined;
   // A model named like a member every object inherits (`constructor`, `toString`)
   // has no row; the guard keeps the answer a number or undefined for it.
   return typeof price === 'number' ? price : undefined;
@@ -377,11 +389,11 @@ export function sttEntryPricePerMinute(entry: string): number | undefined {
  * `close`; later audio is ignored and no backup starts.
  *
  * Entries of one vendor share that vendor's provider id (every `openai`
- * entry is `openai-realtime-transcription`), so `currentProviderId`, the
- * chain's provider events and a `CircuitBreaker` in the chain options
- * cannot tell them apart: a breaker counts the failures of all of a
- * vendor's entries together, and once it trips, later sessions skip every
- * entry of that vendor.
+ * entry is `openai-realtime-transcription`), so `currentProviderId` cannot
+ * tell them apart. The chain's provider events and a `CircuitBreaker` in the
+ * chain options name each entry by that id and its place among the vendor's
+ * entries (`openai-realtime-transcription#2`): a breaker counts each entry's
+ * failures, and skips only the entries it has tripped.
  *
  * @throws {RangeError} For no entry, an entry twice, an entry
  *   {@link parseSttEntry} refuses, or a vendor with no options.
@@ -412,4 +424,41 @@ export function createSttChain(
     }
   });
   return new StreamingSTTChain(providers, chainOptions);
+}
+
+/** Host-supplied scoped factory for a registered model id. It must perform no work until its session is opened. */
+export type RegisteredSttFactory = (model: string, priority: number) => IStreamingSTT & HealthyProvider;
+
+/**
+ * Builds only explicit registered entries. Credentials and locality belong to the already-scoped factories/policy.
+ *
+ * Each entry is `<vendor>:<model>` with a vendor the registry holds; that vendor's factory is called with the model
+ * and the entry's priority (10, 20, 30 ... in the order given) and returns the provider the chain tries. The chain
+ * options apply as they are, so a `policy` in them decides which of these providers are opened and in what order:
+ * under a `ProviderPolicy` the chain keeps only the providers the policy selects, and each id it selects must belong
+ * to exactly one of them.
+ *
+ * @param entries - The entries; their order sets the priorities, the order the legacy policy tries them in.
+ * @param registry - Each registered vendor's factory.
+ * @param options - The chain's options, its policy among them.
+ * @returns The chain over the registered providers.
+ * @throws {RangeError} For no entry, an entry twice, or an entry {@link parseSttEntry} refuses for the registry's
+ *   vendors. The chain's own constructor throws as {@link StreamingSTTChain} documents.
+ *
+ * @example
+ * ```typescript
+ * const stt = createRegisteredSttChain(['local-stt:base-en'], new Map([['local-stt', (model, priority) => makeLocalStt(model, priority)]]), { policy });
+ * const session = await stt.startSession({ call: identity });
+ * ```
+ */
+export function createRegisteredSttChain(entries: readonly string[], registry: ReadonlyMap<string, RegisteredSttFactory>, options: StreamingSTTChainOptions): StreamingSTTChain {
+  if (!entries.length || new Set(entries).size !== entries.length) throw new RangeError('registered STT entries must be nonempty and unique');
+  const vendors = [...registry.keys()];
+  const providers = entries.map((entry, index) => {
+    const parsed = parseSttEntry(entry, vendors);
+    const factory = registry.get(parsed.vendor);
+    if (!factory) throw new RangeError('unregistered STT vendor');
+    return factory(parsed.model, (index + 1) * 10);
+  });
+  return new StreamingSTTChain(providers, options);
 }

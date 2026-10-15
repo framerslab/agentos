@@ -21,9 +21,10 @@
  * ## Built-in Providers
  *
  * **STT (Speech-to-Text):**
- * - {@link DeepgramStreamingSTT} — WebSocket streaming via Deepgram Nova-2. Lowest latency.
+ * - {@link DeepgramStreamingSTT}: WebSocket streaming via Deepgram Nova-3. Lowest latency.
  * - {@link ElevenLabsStreamingSTT} — Chunked REST via ElevenLabs Scribe. Uses same key as TTS.
  * - {@link OpenAIRealtimeTranscriptionSTT}: WebSocket streaming via OpenAI's Realtime API in transcription mode, keyed by item id, with a connection rollover for long sessions.
+ * - {@link MoonshineBrowserSTT}: Moonshine's streaming models on the user's own device, in the browser through WebAssembly; also in `@framers/agentos/io/voice-pipeline/browser`.
  *
  * **TTS (Text-to-Speech):**
  * - {@link ElevenLabsStreamingTTS} — WebSocket streaming via ElevenLabs. High quality voices.
@@ -107,6 +108,48 @@ export * from './types.js';
 
 // Canonical provider-family taxonomy (see provider-family.ts).
 export { ttsProviderFamily, type TtsProviderFamily } from './provider-family.js';
+
+// The voice pipeline's event emitter (Node's semantics, no import) and the
+// emitter interface the streaming contracts extend.
+export { VoiceEventEmitter, type EventEmitterLike, type VoiceEventListener } from './VoiceEventEmitter.js';
+
+// On-device streaming STT in the browser (Moonshine through WebAssembly).
+export {
+  MoonshineBrowserSTT,
+  MOONSHINE_STREAMING_MODEL_FILES,
+  checkMoonshineBrowserSupport,
+  chooseMoonshineModel,
+  readMoonshineDeviceSignals,
+  loadMoonshineWasm,
+  type MoonshineBrowserSTTConfig,
+  type MoonshineLoadProgress,
+  type MoonshineModelSize,
+  type MoonshineModelChoice,
+  type MoonshineDeviceSignals,
+  type MoonshineBrowserScope,
+  type MoonshineBrowserSupport,
+  type MoonshineBrowserSupportOptions,
+  type MoonshineBrowserRequirement,
+  type MoonshineWasmModule,
+  type MoonshineTranscriberLike,
+  type MoonshineStreamLike,
+  type MoonshineWorkerHostLike,
+  type MoonshineLineLike,
+  type MoonshineLineEvent,
+  type MoonshineLineListener,
+  type MoonshineWordLike,
+  type MoonshineLoadOptionsLike,
+  type MoonshineModelSource,
+  type MoonshineProgressReport,
+} from './providers/MoonshineBrowserSTT.js';
+
+// The client transcript message's helpers: a client that transcribes on its
+// own device sends its transcripts in place of audio.
+export {
+  toClientTranscriptMessage,
+  isClientTranscriptMessage,
+  transcriptEventFromClient,
+} from './clientTranscript.js';
 
 // Concrete barge-in handler implementations
 export { HardCutBargeinHandler } from './HardCutBargeinHandler.js';
@@ -231,3 +274,21 @@ export {
   type SttChainVendor,
   type SttEntry,
 } from './env-constructor.js';
+export {
+  DEEPGRAM_PRE_RECORDED_PRICING,
+  DEEPGRAM_STREAMING_PRICING,
+  deepgramPreRecordedPricing,
+  deepgramStreamingPricing,
+} from './providers/deepgramPricing.js';
+
+// Price ordering over the hosted transcription entries a host offers, before a chain is built.
+export { selectLowestCostSttEntry, sttLanguageOptions } from './LowestCostStt.js';
+export type {
+  SttPriceRow,
+  SttCreditSnapshot,
+  LowestCostSttOptions,
+  LowestCostSttSelection,
+} from './LowestCostStt.js';
+
+// A host's refusal of a hosted transcription socket (`StreamingSTTConfig.connectionHooks`); never retried as an outage.
+export { SttConnectionAuthorizationError } from './SttConnectionAuthorizationError.js';

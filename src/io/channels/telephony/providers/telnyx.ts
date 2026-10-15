@@ -15,13 +15,11 @@
  * All requests use Bearer token authentication: `Authorization: Bearer {apiKey}`.
  * Request bodies are JSON (unlike Twilio's form-encoded convention).
  *
- * ## Streaming after `call.answered`
+ * ## Media streaming
  *
- * This provider starts no media stream. The call is initiated via
- * `POST /v2/calls` with a `webhook_url` and no `stream_url`; when the
- * `call.answered` webhook fires, the host issues
- * `POST /v2/calls/{id}/actions/streaming_start` with the WebSocket URL.
- * Neither this provider nor the CallManager sends that request.
+ * Carrier mode includes the configured media stream URL and bidirectional
+ * PCMU RTP settings when dialing. Legacy mode leaves stream startup to the
+ * host.
  *
  * ## Webhook verification: Ed25519
  *
@@ -41,8 +39,9 @@
  *    the key as DER SPKI. As in telnyx-node, a timestamp more than 300
  *    seconds old is rejected.
  *
- * When no public key is configured, verification is skipped (returns
- * `valid: true`) to support development environments.
+ * When no public key is configured, carrier mode refuses every webhook;
+ * legacy mode skips verification (returns `valid: true`) to support
+ * development environments.
  *
  * ## Event mapping table (hangup_cause)
  *
@@ -79,6 +78,8 @@ import type {
   NormalizedCallEvent,
 } from '../types.js';
 
+import { stableCarrierEvents, callbackOccurrence } from '../CarrierEventIdentity.js';
+
 // ============================================================================
 // Config
 // ============================================================================
@@ -95,8 +96,9 @@ export interface TelnyxVoiceProviderConfig {
    * Ed25519 public key for webhook verification, base64-encoded: the 32-byte
    * key as the Telnyx portal shows it, or a DER SPKI blob.
    *
-   * When omitted, webhook verification is skipped (always returns `valid: true`).
-   * This is acceptable for development but should always be set in production.
+   * When omitted, carrier mode refuses every webhook, and legacy mode skips
+   * verification (always returns `valid: true`), which is acceptable for
+   * development only.
    */
   publicKey?: string;
   /**
@@ -110,6 +112,8 @@ export interface TelnyxVoiceProviderConfig {
    * Defaults to the global `fetch`.
    */
   fetchImpl?: typeof fetch;
+  /** Explicitly enables stable identities and documented carrier behavior; omitted keeps legacy parsing. */
+  protocol?: 'legacy' | 'carrier';
 }
 
 // ============================================================================
@@ -125,6 +129,8 @@ export interface TelnyxVoiceProviderConfig {
 interface TelnyxWebhookPayload {
   data: {
     event_type: string;
+    id?: string;
+    occurred_at?: string;
     payload: {
       call_control_id?: string;
       call_session_id?: string;
@@ -181,6 +187,9 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
   /** Provider identifier, always `'telnyx'`. */
   readonly name = 'telnyx' as const;
 
+  /** Declares whether callback ids satisfy the durable manager contract. */
+  get webhookIdentity(): 'legacy' | 'stable-v1' { return this.config.protocol === 'carrier' ? 'stable-v1' : 'legacy'; }
+
   /** Immutable configuration snapshot. */
   private readonly config: TelnyxVoiceProviderConfig;
 
@@ -210,8 +219,9 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    *
    * ## Algorithm (step by step)
    *
-   * 1. If no public key is configured, skip verification (return `valid: true`).
-   *    This supports development environments without cryptographic setup.
+   * 1. If no public key is configured, carrier mode refuses the webhook and
+   *    legacy mode skips verification (returns `valid: true`), which supports
+   *    development environments without cryptographic setup.
    * 2. Extract the `Telnyx-Timestamp` and `Telnyx-Signature-Ed25519` headers
    *    (or their `X-` prefixed forms).
    * 3. Decode the signature from base64 into a raw byte Buffer.
@@ -222,15 +232,13 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    * 8. Return the verification result.
    *
    * @param ctx - Raw webhook request context.
-   * @returns Verification result. Returns `{ valid: true }` when no public key
-   *   is configured (development mode).
+   * @returns Verification result. Without a public key it is `{ valid: true }`
+   *   in legacy mode (development) and `{ valid: false }` in carrier mode.
    */
   verifyWebhook(ctx: WebhookContext): WebhookVerificationResult {
-    // Skip verification when no public key is configured -- allows
-    // development without needing to set up Ed25519 key pairs.
-    if (!this.config.publicKey) {
-      return { valid: true };
-    }
+    // Without a public key, legacy mode skips verification so development
+    // needs no Ed25519 key pair; carrier mode refuses the webhook.
+    if (!this.config.publicKey) return this.config.protocol === 'carrier' ? { valid: false, error: 'Carrier verification key required' } : { valid: true };
 
     const timestamp = ctx.headers['telnyx-timestamp'] ?? ctx.headers['x-telnyx-timestamp'];
     const sigHeader = ctx.headers['telnyx-signature-ed25519'] ?? ctx.headers['x-telnyx-signature-ed25519'];
@@ -288,6 +296,11 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    * - `normal_clearing` / `user_busy` / `originator_cancel` -> `call-hangup-user`
    * - All other causes (e.g., `call_rejected`, `unallocated_number`) -> `call-completed`
    *
+   * A body without a `data` object holding a `payload` object yields no
+   * events. In carrier mode each event carries a stable id from
+   * {@link stableCarrierEvents}; a DTMF event's occurrence is the webhook's
+   * `data.id`, else its `data.occurred_at`, else the callback URL's `event_key`.
+   *
    * @param ctx - Raw webhook request context.
    * @returns Parsed result containing zero or more normalized events.
    */
@@ -298,6 +311,8 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
     } catch {
       return { events: [] };
     }
+
+    if (!parsed || typeof parsed !== 'object' || !parsed.data || typeof parsed.data !== 'object' || !parsed.data.payload || typeof parsed.data.payload !== 'object' || Array.isArray(parsed.data.payload)) return { events: [] };
 
     const { event_type, payload } = parsed.data;
     const providerCallId = payload.call_control_id ?? '';
@@ -329,7 +344,7 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
       }
 
       case 'call.dtmf.received': {
-        // DTMF arrives via webhook only (never over the media stream WebSocket).
+        // Webhook DTMF is handled here; media-stream DTMF is handled by the corresponding carrier parser.
         const digit = (payload.digit as string | undefined) ?? '';
         events.push({ ...base(), kind: 'call-dtmf', digit });
         break;
@@ -347,7 +362,10 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
         break;
     }
 
-    return { events };
+    if (this.config.protocol !== 'carrier') return { events };
+    if (typeof providerCallId !== 'string' || !providerCallId) return { events: [] };
+    const occurrence = typeof parsed.data.id === 'string' ? parsed.data.id : typeof parsed.data.occurred_at === 'string' ? parsed.data.occurred_at : callbackOccurrence(ctx.url);
+    return { events: stableCarrierEvents(events, { provider: this.name, account: this.config.connectionId, occurrence }) };
   }
 
   // ── Call Control ──────────────────────────────────────────────────────────
@@ -356,9 +374,10 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    * Initiate an outbound call via the Telnyx Call Control v2 API.
    *
    * POSTs to `/v2/calls` with a JSON body containing the `connection_id`,
-   * phone numbers, and webhook URL. The `mediaStreamUrl` is neither sent
-   * nor kept: the host starts a stream with the `streaming_start` action
-   * after `call.answered`.
+   * phone numbers, and webhook URL. In carrier mode a `mediaStreamUrl` is
+   * sent as `stream_url` with the inbound track and bidirectional PCMU RTP.
+   * Legacy mode neither sends nor keeps it: the host starts a stream with
+   * the `streaming_start` action after `call.answered`.
    *
    * @param input - Call initiation parameters (from/to numbers, webhook URL).
    * @returns Result containing the Telnyx `call_control_id` on success.
@@ -373,12 +392,8 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
         Authorization: this.authHeader,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        connection_id: this.config.connectionId,
-        to: input.toNumber,
-        from: input.fromNumber,
-        webhook_url: input.webhookUrl,
-      }),
+      body: JSON.stringify({ connection_id: this.config.connectionId, to: input.toNumber, from: input.fromNumber, webhook_url: input.webhookUrl,
+        ...(this.config.protocol === 'carrier' && input.mediaStreamUrl ? { stream_url: input.mediaStreamUrl, stream_track: 'inbound_track', stream_bidirectional_mode: 'rtp', stream_bidirectional_codec: 'PCMU' } : {}) }),
     });
 
     if (!response.ok) {

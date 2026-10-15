@@ -1,77 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { MeetingManager, type MeetingManagerEvent } from '../MeetingManager.js';
-import { FakeClock, InMemoryEventStore, InMemoryJobStore, InMemoryOutbox, InMemoryRunStore, InMemoryTranscriptStore } from '../stores/memory.js';
 import { MockMeetingBotProvider, mockEventContext } from '../providers/mock.js';
-import type { IEntitlementHook, ReserveResult } from '../stores/types.js';
-import { MeetingRoom, type IMeetingRoomService } from '../MeetingRoom.js';
-
-class FakeRooms implements IMeetingRoomService {
-  readonly url = 'wss://lk.test';
-  readonly created: string[] = [];
-  readonly deleted: string[] = [];
-  /** When set, createRoom rejects with it (a room service that is down). */
-  createError: Error | undefined;
-  async createRoom(input: { name: string }): Promise<void> {
-    if (this.createError) throw this.createError;
-    this.created.push(input.name);
-  }
-  async deleteRoom(name: string): Promise<void> {
-    this.deleted.push(name);
-  }
-  async mintToken(input: { room: string; identity: string; canPublish: boolean }): Promise<string> {
-    return `jwt:${input.room}:${input.identity}:${input.canPublish ? 'pub' : 'sub'}`;
-  }
-}
-
-class FakeEntitlement implements IEntitlementHook {
-  reserveAnswer: ReserveResult = { ok: true, reservationId: 'res-1', maxSeconds: 14_400 };
-  revalidateAnswer = true;
-  /** When it answers true, the next settle throws (a billing store that is down for a moment). */
-  settleThrows: (() => boolean) | undefined;
-  readonly metered: Array<[string, number]> = [];
-  readonly settled: Array<[string, number]> = [];
-  readonly released: string[] = [];
-  async reserve(): Promise<ReserveResult> {
-    return this.reserveAnswer;
-  }
-  async revalidate(): Promise<boolean> {
-    return this.revalidateAnswer;
-  }
-  async meter(id: string, s: number): Promise<void> {
-    this.metered.push([id, s]);
-  }
-  async settle(id: string, s: number): Promise<void> {
-    if (this.settleThrows?.()) throw new Error('billing is down');
-    if (!this.settled.some(([i]) => i === id)) this.settled.push([id, s]); // idempotent, as the interface asks
-  }
-  async release(id: string): Promise<void> {
-    this.released.push(id);
-  }
-}
-
-export function harness() {
-  const clock = new FakeClock(1_000_000);
-  const provider = new MockMeetingBotProvider();
-  const entitlement = new FakeEntitlement();
-  const rooms = new FakeRooms();
-  const stores = { runs: new InMemoryRunStore(), jobs: new InMemoryJobStore(), transcript: new InMemoryTranscriptStore(), events: new InMemoryEventStore(), outbox: new InMemoryOutbox(), entitlement, clock };
-  const manager = new MeetingManager({ managerId: 'm1', stores, room: new MeetingRoom(rooms), reportUrlFor: (runId, p) => `https://product.test/events/${p}/${runId}` });
-  manager.registerProvider(provider);
-  const seen: MeetingManagerEvent[] = [];
-  manager.on((e) => {
-    seen.push(e);
-  });
-  const request = { ownerRef: 'acct_1', platform: 'google_meet' as const, meetingUrl: 'https://meet.google.com/abc-defg-hij', botName: "Dana's notes", keep: 'none' as const, notice: { text: 'the notice', version: '1', lateArrivalText: 'the short notice' }, stopPhrase: 'stop taking notes', idempotencyKey: 'k1' };
-  const report = (runId: string, type: Parameters<typeof mockEventContext>[1], data: Parameters<typeof mockEventContext>[2] = {}, at = clock.now()) =>
-    manager.processProviderEvent('mock', mockEventContext(runId, type, data, at, provider.tokenOf(runId)));
-  /** Another manager on the same stores and provider: a second process, or the first one after a restart, with nothing of its memory. */
-  const peer = (managerId: string) => {
-    const other = new MeetingManager({ managerId, stores, room: new MeetingRoom(rooms), reportUrlFor: (runId, p) => `https://product.test/events/${p}/${runId}` });
-    other.registerProvider(provider);
-    return other;
-  };
-  return { clock, provider, entitlement, rooms, stores, manager, seen, request, report, peer };
-}
+import { harness } from './manager-harness.js';
 
 describe('sendBot', () => {
   it('reserves, inserts the run, schedules the job and repeats on the same idempotency key', async () => {
@@ -225,6 +154,58 @@ describe('dispatch and the interlock', () => {
     await h.report(runId, 'monitor_heartbeat', {}, 13);
     expect(h.provider.commands.get(runId)).toEqual([{ name: 'startCapture' }]);
   });
+  it('a worker clock that runs ahead keeps a quiet stop monitor counted healthy for at most one heartbeat interval more', async () => {
+    const h = harness();
+    const ahead = 3_600_000; // the worker's clock runs an hour ahead of the manager's
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining', {}, h.clock.now() + ahead);
+    await h.report(runId, 'in_call', { participantCount: 2 }, h.clock.now() + ahead);
+    await h.report(runId, 'notice_posted', {}, h.clock.now() + ahead);
+    await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + ahead + 1);
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'startCapture' }]);
+    h.clock.advance(40_000); // the monitor's window and one interval more, with no heartbeat since
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)?.at(-1)).toEqual({ name: 'suspendCapture' });
+  });
+  it('a heartbeat the worker made before the notice opens no capture when the worker\'s clock runs far ahead, in the same moment as the notice or after it', async () => {
+    const h = harness();
+    const ahead = 3_600_000; // the worker's clock runs an hour ahead of the manager's
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    const t0 = h.clock.now();
+    await h.report(runId, 'joining', {}, t0 + ahead);
+    await h.report(runId, 'in_call', { participantCount: 2 }, t0 + ahead);
+    await h.report(runId, 'notice_posted', {}, t0 + ahead + 5_000);
+    // made a second before the notice by the worker's clock, applied in the same manager millisecond: both times bound
+    // to the manager's clock plus one interval, the same time
+    await h.report(runId, 'monitor_heartbeat', {}, t0 + ahead + 4_000);
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    h.clock.advance(2_000);
+    // still from before the notice by the worker's clock, delivered two seconds later: bound to a time after the notice's
+    await h.report(runId, 'monitor_heartbeat', {}, t0 + ahead + 4_500);
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    await h.report(runId, 'monitor_heartbeat', {}, t0 + ahead + 7_000); // the monitor's first heartbeat after the notice
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'startCapture' }]);
+  });
+  it('ends a run whose stop monitor never reports after the notice within the notice\'s confirmation window more, when the worker\'s clock runs an hour ahead', async () => {
+    const h = harness();
+    const ahead = 3_600_000;
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining', {}, h.clock.now() + ahead);
+    await h.report(runId, 'in_call', { participantCount: 2 }, h.clock.now() + ahead); // the call's time bounds to ten seconds from now
+    await h.report(runId, 'notice_posted', {}, h.clock.now() + ahead); // kept on the worker's clock, an hour ahead
+    h.clock.advance(100_000); // the bounded call time, the confirmation window, then the monitor's window and the recovery wait
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId) ?? []).toEqual([]);
+    h.clock.advance(1);
+    await h.manager.tick();
+    expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stop_monitor_failed' }]);
+  });
   it('refuses a report with another token, and drops a repeated report', async () => {
     const h = harness();
     const r = await h.manager.sendBot(h.request);
@@ -343,5 +324,103 @@ describe('dispatch and the interlock', () => {
     await h.manager.tick();
     expect(h.provider.commands.get(runId)).toEqual([{ name: 'leave', reason: 'stopped_by_owner' }]);
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'leaving', reason: 'stopped_by_owner' });
+  });
+  it('records the dispatch of a bot that reported before its dispatcher lost the lease, so reconcile still watches the run', async () => {
+    const h = harness();
+    const r = await h.manager.sendBot(h.request);
+    const runId = r.ok ? r.run.runId : '';
+    // a manager that stopped after the provider started the bot and before it recorded the dispatch; the bot reported since
+    await h.stores.runs.update(runId, { state: 'dispatching', dispatchedAt: h.clock.now(), dispatch: { roomName: `bot-${runId}`, workerTokenHash: MockMeetingBotProvider.hash('t') } }, 'requested');
+    await h.stores.jobs.lease('stopped-manager', h.clock.now(), 1);
+    await h.manager.processProviderEvent('mock', mockEventContext(runId, 'joining', {}, h.clock.now(), 't'));
+    h.provider.alive.set(runId, 5);
+    h.clock.advance(10);
+    await h.manager.tick();
+    expect(await h.stores.jobs.get(runId)).toMatchObject({ dispatched: true, leaseHolder: 'm1' });
+    // its container goes: the next reconcile ends the run
+    h.provider.alive.delete(runId);
+    h.clock.advance(60_000);
+    await h.manager.tick();
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed' });
+  });
+});
+
+describe('the loop', () => {
+  it('start() runs each of its passes one at a time: a dispatch pass still running is not joined by the next one due, and the upkeep goes on beside it', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      let finish: () => void = () => {};
+      const lease = vi.spyOn(h.stores.jobs, 'lease').mockImplementationOnce(() => new Promise<undefined>((resolve) => { finish = () => resolve(undefined); }));
+      const list = vi.spyOn(h.stores.runs, 'list');
+      const limitsPasses = () => list.mock.calls.filter(([filter]) => filter.states?.includes('in_call')).length;
+      h.manager.start(1_000);
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(lease).toHaveBeenCalledTimes(1);
+      expect(limitsPasses()).toBe(3); // the limits ran in each of the three intervals while the dispatch pass waited
+      finish();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(lease).toHaveBeenCalledTimes(2);
+    } finally {
+      h.manager.stop();
+      vi.useRealTimers();
+    }
+  });
+  it('a dispatch the provider is slow to answer holds back no limit: a stop monitor that goes quiet meanwhile is still suspended', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      const capturing = await h.manager.sendBot(h.request);
+      const capturingId = capturing.ok ? capturing.run.runId : '';
+      await h.manager.tick();
+      await h.report(capturingId, 'joining');
+      await h.report(capturingId, 'in_call', { participantCount: 2 });
+      await h.report(capturingId, 'notice_posted');
+      await h.report(capturingId, 'monitor_heartbeat', {}, h.clock.now() + 1);
+      expect(h.provider.commands.get(capturingId)).toEqual([{ name: 'startCapture' }]);
+      // the next run's dispatch does not return: its worker is still pulling the bot's image
+      h.provider.beforeDispatch = () => new Promise<void>(() => {});
+      await h.manager.sendBot({ ...h.request, idempotencyKey: 'k2' });
+      h.manager.start(1_000);
+      await vi.advanceTimersByTimeAsync(1_000); // the dispatch pass takes the second run and waits on its provider
+      h.clock.advance(30_001); // the first run's stop monitor has been quiet for its window
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.provider.commands.get(capturingId)?.at(-1)).toEqual({ name: 'suspendCapture' });
+    } finally {
+      h.manager.stop();
+      vi.useRealTimers();
+    }
+  });
+  it('a pass held by a call that never answers holds the next one back five intervals at most: another run\'s quiet monitor is still suspended', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      const first = await h.manager.sendBot(h.request);
+      const firstId = first.ok ? first.run.runId : '';
+      const second = await h.manager.sendBot({ ...h.request, idempotencyKey: 'k2' });
+      const secondId = second.ok ? second.run.runId : '';
+      await h.manager.tick();
+      for (const id of [firstId, secondId]) {
+        await h.report(id, 'joining');
+        await h.report(id, 'in_call', { participantCount: 2 });
+        await h.report(id, 'notice_posted');
+      }
+      await h.report(firstId, 'monitor_heartbeat', {}, h.clock.now() + 1);
+      h.clock.advance(20_000);
+      await h.report(secondId, 'monitor_heartbeat', {}, h.clock.now() + 1); // the second run's monitor reports twenty seconds later
+      // the first run's worker froze: a command to it never answers
+      const command = h.provider.command.bind(h.provider);
+      vi.spyOn(h.provider, 'command').mockImplementation((runId, cmd) => (runId === firstId ? new Promise<void>(() => {}) : command(runId, cmd)));
+      h.manager.start(1_000);
+      h.clock.advance(10_001); // the first run's monitor has been quiet for its window: the pass suspends it and waits on the command
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((await h.stores.runs.get(firstId))?.captureSuspendedAt).toBeDefined();
+      h.clock.advance(20_000); // the second run's monitor has now been quiet for its window too
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(h.provider.commands.get(secondId)?.at(-1)).toEqual({ name: 'suspendCapture' });
+    } finally {
+      h.manager.stop();
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import { inspect } from 'node:util';
 import { describe, it, expect } from 'vitest';
 import { SealedSecretError } from '../../../../core/llm/auth/sealing.js';
 import { envelopeHeaders, hashWorkerToken, mintWorkerToken, SecretBox, signEnvelope, verifyEnvelope, workerTokenMatches } from '../signing.js';
@@ -122,6 +123,11 @@ describe('SecretBox', () => {
     const box = new SecretBox(Buffer.alloc(32, 7));
     expect(JSON.stringify(box)).toBe('"[SecretBox redacted]"');
     expect(JSON.stringify({ box })).toBe('{"box":"[SecretBox redacted]"}');
+  });
+  it('prints a redacted marker under util.inspect, as console.log does, never the key bytes', () => {
+    const box = new SecretBox(Buffer.alloc(32, 7), { previousKeys: [Buffer.alloc(32, 8)] });
+    expect(inspect(box)).toBe('[SecretBox redacted]');
+    expect(inspect({ box }, { depth: 5 })).toBe('{ box: [SecretBox redacted] }');
   });
 });
 

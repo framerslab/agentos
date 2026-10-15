@@ -55,7 +55,7 @@ describe('AgentSessionVoiceAdapter', () => {
     }
 
     expect(tokens).toEqual(['Hello', ' ', 'world']);
-    expect(mockSession.stream).toHaveBeenCalledWith('Hi there');
+    expect(mockSession.stream).toHaveBeenCalledWith('Hi there', { abortSignal: expect.any(AbortSignal) });
   });
 
   it('should stop yielding tokens after abort() is called', async () => {

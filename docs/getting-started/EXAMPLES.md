@@ -202,7 +202,7 @@ console.log('Posted:', posted);
 
 ## 4. Call Center over a WebSocket
 
-A hierarchical agency behind a local WebSocket. With `voice.enabled: true`, `agency()` attaches a `listen()` method that starts a WebSocket server on `127.0.0.1`. Each client sends JSON text frames (`{ "text": "..." }`) and receives the agency's reply as `{ "text": "..." }`. `agency()` reads no other `voice` field: it runs no speech-to-text, text-to-speech or telephony. For audio, put the [Voice Pipeline](/features/voice-pipeline) or a [telephony provider](/features/telephony-providers) in front of the socket. `listen()` needs the `ws` package (`npm install ws`).
+A hierarchical agency behind a local WebSocket. With `voice.enabled: true`, `agency()` attaches a `listen()` method that starts a WebSocket server on `127.0.0.1`. Each client sends JSON text frames (`{ "text": "..." }`) and receives the agency's reply as `{ "text": "..." }`. `agency()` reads no other `voice` field: it runs no speech-to-text, text-to-speech or telephony. For audio, put the [Voice Pipeline](/features/voice-pipeline) or a [telephony provider](/features/telephony-providers) in front of the socket: a binary frame sent to `listen()` receives an `audio_not_supported` error and close code 1003.
 
 ```typescript
 import { agency } from '@framers/agentos';

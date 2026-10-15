@@ -129,8 +129,9 @@ export abstract class RedirectOAuthFlow {
 
   /**
    * The token endpoint's call, read as JSON. An answer that is not a success, or whose `access_token` is missing or
-   * empty, throws {@link OAuthGrantRefused} with the status and an allowlisted OAuth error code only; an answer
-   * without `expires_in` is taken to last an hour.
+   * empty, throws {@link OAuthGrantRefused} with the status and an allowlisted OAuth error code only; a body that is not
+   * a JSON object (`null`, an array, a string or a number) is read as an answer with no fields, so it is refused the
+   * same way. An answer without `expires_in` is taken to last an hour.
    */
   protected async tokenRequest(reason: 'exchange' | 'refresh', form: Record<string, string>): Promise<OAuthTokenSet> {
     const response = await this.fetchImpl(this.getConfig().tokenEndpoint, {
@@ -138,7 +139,9 @@ export abstract class RedirectOAuthFlow {
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body: new URLSearchParams(form).toString(),
     });
-    const answer = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    const parsed: unknown = await response.json().catch(() => undefined);
+    // Fields are read from a JSON object alone: reading one from the literal `null` would throw a TypeError.
+    const answer = (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed : {}) as Record<string, unknown>;
     // An empty `access_token` is refused like a missing one: in this flow `''` stands for no access token in hand.
     if (!response.ok || typeof answer.access_token !== 'string' || answer.access_token === '') {
       throw new OAuthGrantRefused(reason, response.status, typeof answer.error === 'string' ? answer.error : undefined);

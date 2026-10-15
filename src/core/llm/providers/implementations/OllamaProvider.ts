@@ -32,6 +32,7 @@ import {
 } from '../IProvider';
 import { stripForeignVendorParams } from '../openrouter-only-params';
 import { OllamaProviderError } from '../errors/OllamaProviderError';
+import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
 /**
  * Configuration specific to the OllamaProvider.

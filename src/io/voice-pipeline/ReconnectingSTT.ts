@@ -12,6 +12,7 @@
 import { EventEmitter } from 'node:events';
 import { AudioRingBuffer } from './AudioRingBuffer.js';
 import { TranscriptDedupe } from './TranscriptDedupe.js';
+import { openScopedReconnect } from './scopedReconnect.js';
 import type { AudioFrame, IStreamingSTT, StreamingSTTConfig, StreamingSTTSession, TranscriptEvent } from './types.js';
 
 /** Options of {@link ReconnectingSTT}. */
@@ -74,6 +75,12 @@ const frameMs = (f: AudioFrame): number => (f.samples.length / f.sampleRate) * 1
  * no further provider activity or pushed audio, ends the stream without a
  * reconnect. Activity after a completed flush makes a later close a failure.
  *
+ * A session opened with `config.call` is scoped instead ({@link openScopedReconnect}): it takes
+ * `pushAudioScoped()` frames that carry its current identity, replays them with that identity into a new
+ * session of the same provider, and `reset()` drops the replay. The provider's sessions must implement
+ * `pushAudioScoped()` and `reset()`. A reconnect whose session fails to open ends the scoped session instead of
+ * being retried, and a reconnect never moves to another provider.
+ *
  * @example
  * ```typescript
  * const stt = new ReconnectingSTT(new DeepgramStreamingSTT({ apiKey: process.env.DEEPGRAM_API_KEY! }));
@@ -111,12 +118,23 @@ export class ReconnectingSTT implements IStreamingSTT {
   /**
    * Opens a session of the inner provider behind a session that reconnects it.
    *
-   * @param config - Passed to the inner provider for the first session and for every reconnect.
+   * @param config - Passed to the inner provider for the first session and for every reconnect. With `call` set,
+   *   the session is the scoped one of {@link openScopedReconnect}, bounded by this instance's options.
    * @returns The session, with a read-only `droppedFrames`: the queued frames dropped during reconnects so far.
+   *   With `config.call`, a `ScopedStreamingSTTSession` instead, which refuses a frame past `queueCapacityMs`
+   *   rather than dropping one and has no `droppedFrames`.
    * @throws {Error} When the first session fails to open; a session that fails to open on a reconnect is retried
-   *   within the cap.
+   *   within the cap. With `config.call`, also when the provider's first session lacks `pushAudioScoped()` or
+   *   `reset()`.
    */
   async startSession(config?: StreamingSTTConfig): Promise<StreamingSTTSession> {
+    if (config?.call) return openScopedReconnect(this.inner, { ...config, call: config.call }, {
+      capacityMs: this.capacityMs,
+      minReplayMs: this.minReplayMs,
+      maxAttempts: this.maxAttempts,
+      queueCapacityMs: this.queueCapacityMs,
+      clock: this.clock,
+    });
     const facade = new EventEmitter();
     const ring = new AudioRingBuffer({ capacityMs: this.capacityMs, sampleRate: 16_000 });
     const dedupe = new TranscriptDedupe();

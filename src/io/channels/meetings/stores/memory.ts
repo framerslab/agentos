@@ -1,5 +1,5 @@
 import type { TranscriptInput } from '../../../voice-pipeline/types.js';
-import { CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
+import { assertMeetingFundingChange, CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
 import {
   DuplicateIdempotencyKeyError,
   FencedError,
@@ -15,8 +15,10 @@ import {
   type ITranscriptStore,
   type MeetingJob,
   type OutboxDelivery,
+  type OutboxEnqueue,
   type RunFilter,
 } from './types.js';
+import { abortClaimedSends, runClaimedSend, type ClaimedSends } from './claims.js';
 
 /** The wall clock. */
 export class SystemClock implements IClock {
@@ -50,30 +52,48 @@ export class InMemoryRunStore implements IRunStore {
 
   private readonly runs = new Map<string, MeetingRunRecord>();
   async insert(run: MeetingRunRecord): Promise<void> {
-    if (this.runs.has(run.runId)) throw new Error(`run ${run.runId} exists`);
+    const next = structuredClone(run);
+    assertMeetingFundingChange(undefined, next);
+    if (this.runs.has(next.runId)) throw new Error(`run ${next.runId} exists`);
     // one run per owner and key, with no await between the check and the write: of two sends racing with one key, the second insert fails and the sender finds the first
-    const key = run.idempotencyKey;
-    if (key !== undefined && [...this.runs.values()].some((r) => r.ownerRef === run.ownerRef && r.idempotencyKey === key)) {
-      throw new DuplicateIdempotencyKeyError(run.ownerRef, key);
-    }
-    this.runs.set(run.runId, structuredClone(run));
+    const key = next.idempotencyKey;
+    if (key !== undefined && [...this.runs.values()].some((r) => r.ownerRef === next.ownerRef && r.idempotencyKey === key)) throw new DuplicateIdempotencyKeyError(next.ownerRef, key);
+    this.runs.set(next.runId, next);
   }
   async get(runId: string): Promise<MeetingRunRecord | undefined> {
     const r = this.runs.get(runId);
     return r ? structuredClone(r) : undefined;
   }
   async update(runId: string, patch: Partial<MeetingRunRecord>, expectState?: MeetingRunState | readonly MeetingRunState[]): Promise<MeetingRunRecord | undefined> {
-    const r = this.runs.get(runId);
-    if (!r) return undefined;
+    const current = this.runs.get(runId);
+    if (!current) return undefined;
     if (expectState !== undefined) {
       const allowed = Array.isArray(expectState) ? expectState : [expectState as MeetingRunState];
-      if (!allowed.includes(r.state)) return undefined;
+      if (!allowed.includes(current.state)) return undefined;
     }
-    Object.assign(r, structuredClone(patch));
-    return structuredClone(r);
+    const next = { ...current, ...structuredClone(patch) };
+    assertMeetingFundingChange(current, next);
+    this.runs.set(runId, next);
+    return structuredClone(next);
+  }
+  /**
+   * Decides the patch on a copy of the stored row and applies it with no await between them, so no other write lands in
+   * between. A patch that would change the run's persisted funding is refused, as `update` refuses it, and nothing is written.
+   */
+  async updateWith(runId: string, patchFor: (current: MeetingRunRecord) => Partial<MeetingRunRecord> | undefined): Promise<MeetingRunRecord | undefined> {
+    const current = this.runs.get(runId);
+    if (!current) return undefined;
+    const patch = patchFor(structuredClone(current));
+    if (patch === undefined) return undefined;
+    const next = { ...current, ...structuredClone(patch) };
+    assertMeetingFundingChange(current, next);
+    this.runs.set(runId, next);
+    return structuredClone(next);
   }
   async replace(run: MeetingRunRecord): Promise<void> {
-    this.runs.set(run.runId, structuredClone(run));
+    const next = structuredClone(run);
+    assertMeetingFundingChange(this.runs.get(next.runId), next);
+    this.runs.set(next.runId, next);
   }
   async list(filter: RunFilter): Promise<MeetingRunRecord[]> {
     const out: MeetingRunRecord[] = [];
@@ -89,6 +109,13 @@ export class InMemoryRunStore implements IRunStore {
   async findByIdempotencyKey(ownerRef: string, key: string): Promise<MeetingRunRecord | undefined> {
     for (const r of this.runs.values()) if (r.ownerRef === ownerRef && r.idempotencyKey === key) return structuredClone(r);
     return undefined;
+  }
+  /** At most `limit` (1 to 64) runs whose funding cleanup is unfinished, after `afterRunId`, ordered by run id. */
+  async listFundingPending(limit: number, afterRunId?: string): Promise<MeetingRunRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64) throw new Error('funding scan bound');
+    // ordered as `>` compares (UTF-16 code units), so the last run id of a page is a cursor that skips and repeats no run
+    return structuredClone([...this.runs.values()].filter((r) => r.fundingCleanup && !r.fundingCleanup.complete && (afterRunId === undefined || r.runId > afterRunId))
+      .sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0)).slice(0, limit));
   }
 }
 
@@ -257,30 +284,62 @@ export class InMemoryOutbox implements IOutbox {
   private readonly deliveries = new Map<string, OutboxDelivery>();
   /** The runs whose content was purged: the outbox's fence. */
   private readonly purgedRuns = new Set<string>();
-  async enqueue(d: Pick<OutboxDelivery, 'id' | 'runId' | 'destinationRef' | 'eventId' | 'type' | 'payload'>, now: number): Promise<void> {
+  /** The sends `sendClaimed` has under way, by run. */
+  private readonly claims: ClaimedSends = new Map();
+  async enqueue(d: OutboxEnqueue, now: number): Promise<void> {
+    const kind = d.kind ?? 'event';
     // behind the purge nothing a person said or did is taken for delivery
-    if (this.purgedRuns.has(d.runId) && CONTENT_EVENT_TYPES.has(d.type)) return;
+    if (this.purgedRuns.has(d.runId) && (kind === 'mail' || CONTENT_EVENT_TYPES.has(d.type))) return;
     if (this.deliveries.has(d.id)) return;
-    this.deliveries.set(d.id, { ...d, attempts: 0, nextAt: now, state: 'pending', purged: false });
+    this.deliveries.set(d.id, { ...d, kind, attempts: 0, nextAt: now, state: 'pending', purged: false });
   }
   async due(now: number, limit = 100): Promise<OutboxDelivery[]> {
-    return [...this.deliveries.values()].filter((d) => d.state === 'pending' && d.nextAt <= now).sort((a, b) => a.nextAt - b.nextAt || a.id.localeCompare(b.id)).slice(0, limit).map((d) => ({ ...d }));
+    return [...this.deliveries.values()].filter((d) => d.state === 'pending' && d.nextAt <= now && (d.expiresAt === undefined || now < d.expiresAt)).sort((a, b) => a.nextAt - b.nextAt || a.id.localeCompare(b.id)).slice(0, limit).map((d) => ({ ...d }));
+  }
+  /** Ends a delivery in the state given; a mail's body goes with it, so it outlives no pending delivery. */
+  private end(d: OutboxDelivery, state: 'delivered' | 'dead'): void {
+    d.state = state;
+    if (d.kind === 'mail') d.payload = '';
   }
   async markDelivered(id: string): Promise<void> {
     const d = this.deliveries.get(id);
-    if (d) d.state = 'delivered';
+    if (d) this.end(d, 'delivered');
   }
   async markFailed(id: string, now: number): Promise<void> {
     const d = this.deliveries.get(id);
-    if (!d) return;
+    // a delivery no longer pending (delivered, or given up) is left as it is
+    if (!d || d.state !== 'pending') return;
     d.attempts += 1;
     d.firstAttemptAt ??= now;
-    if (now - d.firstAttemptAt >= OUTBOX_GIVE_UP_MS) d.state = 'dead';
+    if (now - d.firstAttemptAt >= OUTBOX_GIVE_UP_MS || (d.expiresAt !== undefined && now >= d.expiresAt)) this.end(d, 'dead');
     else d.nextAt = nextAttemptAt(d.attempts, now);
+  }
+  async markDead(id: string): Promise<boolean> {
+    const d = this.deliveries.get(id);
+    if (d && d.state === 'pending') this.end(d, 'dead');
+    return true;
+  }
+  async holdUntil(id: string, notBefore: number): Promise<boolean> {
+    const d = this.deliveries.get(id);
+    if (d && d.state === 'pending') d.nextAt = Math.max(d.nextAt, notBefore);
+    return true;
+  }
+  async cancel(runId: string, destinationRef: string): Promise<boolean> {
+    for (const d of this.deliveries.values()) if (d.runId === runId && d.destinationRef === destinationRef && d.state === 'pending') this.end(d, 'dead');
+    return true;
+  }
+  async endExpired(now: number): Promise<number> {
+    let ended = 0;
+    for (const d of this.deliveries.values()) {
+      if (d.kind !== 'mail' || d.state !== 'pending' || d.expiresAt === undefined || now < d.expiresAt) continue;
+      this.end(d, 'dead');
+      ended += 1;
+    }
+    return ended;
   }
   async replay(id: string, now: number): Promise<void> {
     const d = this.deliveries.get(id);
-    if (!d) return;
+    if (!d || d.kind === 'mail') return;
     d.state = 'pending';
     d.attempts = 0;
     d.firstAttemptAt = undefined;
@@ -290,14 +349,33 @@ export class InMemoryOutbox implements IOutbox {
     this.purgedRuns.add(runId);
     for (const d of this.deliveries.values()) {
       // delivered rows too: a replay after the purge must send nothing of the content; a content-free delivery (`bot:done`) stays as it is
-      if (d.runId !== runId || !CONTENT_EVENT_TYPES.has(d.type)) continue;
+      if (d.runId !== runId || !(d.kind === 'mail' || CONTENT_EVENT_TYPES.has(d.type))) continue;
       d.payload = '';
-      d.type = 'bot:purged';
       d.purged = true;
+      if (d.kind === 'mail') d.state = 'dead';
+      else d.type = 'bot:purged';
     }
+    // a send of the run that has not written its body yet stops; the next one reads the emptied row
+    abortClaimedSends(this.claims, runId);
   }
   async listByRun(runId: string): Promise<OutboxDelivery[]> {
     return [...this.deliveries.values()].filter((d) => d.runId === runId).sort((a, b) => a.nextAt - b.nextAt || a.id.localeCompare(b.id)).map((d) => ({ ...d }));
+  }
+  /**
+   * Sends one delivery as the outbox holds it now, not as `due` returned it: one gone or no longer pending is skipped
+   * (false). The signal `send` gets aborts when `purgeContent` purges the delivery's run, so a send that has not written
+   * its body yet stops (false); any other rejection is `send`'s.
+   *
+   * @param candidate - A delivery `due` returned.
+   * @param send - Sends the fresh copy under the signal.
+   */
+  async sendClaimed(candidate: OutboxDelivery, send: (fresh: OutboxDelivery, signal: AbortSignal) => Promise<void>): Promise<boolean> {
+    return runClaimedSend(this.claims, candidate.runId, async (signal) => {
+      const d = this.deliveries.get(candidate.id);
+      if (!d || d.state !== 'pending') return false;
+      await send({ ...d }, signal);
+      return true;
+    });
   }
 }
 

@@ -21,7 +21,7 @@ graph LR
     Bargein -->|cancel| TTS
 ```
 
-The orchestrator takes every component from the caller. `startSession(transport, agentSession, overrides)` throws when `overrides` lacks `streamingSTT`, `streamingTTS`, `endpointDetector` or `bargeinHandler`; it resolves no provider from configuration or from installed extension packs. `overrides.diarizationEngine` is accepted and not used. One orchestrator runs one session; start another with a new instance.
+The legacy injected entry takes its components from the caller: `startSession(transport, agentSession, overrides)` requires explicit STT, TTS, endpoint and barge-in components. It throws when `overrides` lacks `streamingSTT` or `streamingTTS`, and, without `overrides.callProfile`, when it lacks `endpointDetector` or `bargeinHandler`; it resolves no provider from configuration or from installed extension packs. One orchestrator runs one session; start another with a new instance. `overrides.callProfile` runs the session as one scoped call ([Call profile](#call-profile)). The scoped call profile is constructed by `VoiceSessionFactory`, which uses `SpeechProviderResolver.resolveVoicePlan` and owns VAD, audio endpointing, generations and bounded acknowledged playback; a host can also pass the profile itself. The behavior described in State Machine, Quick Start, Endpointing, Barge-in, WebSocket Messages and Failures below is the legacy injected profile unless a paragraph explicitly says call profile. See [Voice platform runtime](VOICE_PLATFORM.md) for scoped calls. `overrides.diarizationEngine` is accepted and not used: neither profile makes legacy `diarizationEngine` wiring into a hosted diarization feature.
 
 ## State Machine
 
@@ -34,14 +34,17 @@ stateDiagram-v2
     speaking --> listening: TTS flush_complete
     speaking --> interrupting: barge-in cancel
     interrupting --> listening: TTS cancelled
-    listening --> closed: transport close or stopSession()
-    speaking --> closed: transport close or stopSession()
+    listening --> closed: transport close, stopSession() or a failure
+    speaking --> closed: transport close, stopSession() or a failure
 ```
 
 - On `turn_complete` the orchestrator sends `agent_thinking`, calls `agentSession.sendText(transcript, metadata)`, sends `agent_speaking` and pushes each token to TTS. When TTS reports `flush_complete` it sends `agent_done` with the spoken text and the played duration, resets the endpoint detector and returns to `listening`.
-- On a barge-in `cancel` it cancels the TTS session, calls `agentSession.abort()`, sends `barge_in` and returns to `listening` at once.
-- A transport `close` or `stopSession()` moves any state to `closed` and closes the STT and TTS sessions.
+- On a barge-in `cancel` it cancels the TTS session, calls `agentSession.abort()`, sends `barge_in` and returns to `listening` at once. A decision the handler returns after the reply has ended is not acted on.
+- A transport `close`, `stopSession()` or a failure (below) moves any state to `closed`. The orchestrator and the session it returned emit `close`; the orchestrator then calls `agentSession.abort()`, closes the STT and TTS sessions, resets the endpoint detector and closes the transport, unless the transport has closed itself. A pending `waitForUserTurn()` rejects, as does one called after the close.
+- An `'error'` from the STT session, the TTS session, the transport or the endpoint detector, and a turn whose agent stream throws or whose TTS `flush()` rejects, end that session and no other. The orchestrator reports `Error('voice pipeline failed')` as its `'error'`, and as the returned session's `'error'` when that has a listener, or writes it as a console warning when nothing listens for the orchestrator's `'error'`; the report carries none of the failure's own text, which can hold what was said.
 - While `listening`, a watchdog gives the endpoint detector a synthetic `speech_end` after `maxTurnDurationMs` (default `30000`); the detector decides whether that ends the turn.
+- A send that the transport rejects, such as one on a WebSocket that is closing, is reported as the orchestrator's `'error'`, or written as a console warning when nothing listens for `'error'`; a failed send ends neither the turn nor the session. Each refused control message is reported; of a reply's audio, only the first refused chunk is. A rejection reason that is not an `Error` is reported as an `Error` with the reason's text, and one `String()` cannot print, such as an object without a prototype or a revoked `Proxy`, as `Error('an unprintable object')`. A call profile ends the call on a failed send instead.
+- A `turn_complete` or `close` listener that throws or rejects is reported the same way, and the listeners after it still run.
 
 ## Quick Start
 
@@ -76,13 +79,13 @@ wss.on('connection', async (ws) => {
 });
 ```
 
-`AgentSessionVoiceAdapter` sends each turn through `session.stream(text)` and hands its text deltas to TTS; `abort()` stops reading the stream without cancelling the model call. The config's `stt` and `tts` strings are required by the type and not read by the orchestrator; it reads `language` and `sttOptions` for the STT session, `voice`, `format`, `ttsOptions` and `ttsExpressiveness` for the TTS session, and `maxTurnDurationMs` for the watchdog.
+`AgentSessionVoiceAdapter` sends each turn through the agent session's stream with the supplied abort signal, `session.stream(text, { abortSignal })`, and hands its text deltas to TTS; abort cancels that upstream request: `abort()` aborts the signal, so the turn ends as an aborted `stream()` ends ([Cancellation](../getting-started/HIGH_LEVEL_API.md#cancellation)), and `whenIdle()` resolves once the turn's stream has unwound. A turn whose `sendText()` was called before an `abort()` and has not been read yet is cancelled too: it never reaches the session and yields nothing. One turn runs at a time: iterating a second `sendText()` while one is active throws. Direct injected construction still owns its component choices. The config's `stt` and `tts` strings are required by the type and not read by the orchestrator; it reads `language` and `sttOptions` for the STT session, `voice`, `format`, `ttsOptions` and `ttsExpressiveness` for the TTS session, and `maxTurnDurationMs` for the watchdog. A configured `voiceSession()` delegates to `VoiceSessionFactory`, which freezes the scoped provider plan and refuses unsupported options before opening models.
 
-`agent({ voice })` accepts a [`VoiceConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) and does not read it. `agency({ voice: { enabled: true } })` adds `listen()`, which exchanges JSON text messages over a WebSocket and runs no speech recognition or synthesis ([Agency API](../orchestration/AGENCY_API.md)).
+`agent({ voice: { enabled: true, session: { factory, agent: revision } } })` exposes `voiceSession({ scope, funding, slot })`, which prepares the scoped call through `factory.startSession()`. The captured factory and revision do not change when the caller mutates its options. That form refuses any other field in `voice` or `session`, `enabled: false` and `runtime: 'gmi'` at construction; the agent's text calls stay text calls, and its exported configuration reads `voice` as `{ enabled: true }`. Other legacy voice fields of a [`VoiceConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) remain deferred and produce a construction warning: `agent()` accepts them and does not read them. `agency({ voice: { enabled: true } }).listen()` accepts JSON text only; binary input receives `audio_not_supported` and close code 1003. It performs no speech recognition or synthesis ([Agency API](../orchestration/AGENCY_API.md)).
 
 ### Wunderland CLI
 
-The [Wunderland](https://wunderland.sh) CLI's `chat --voice` starts a WebSocket voice server built on this orchestrator, with the reply streamed from the chat runtime and the model request aborted on barge-in ([flags](./TELEPHONY_PROVIDERS.md#cli-flags)):
+The [Wunderland](https://wunderland.sh) CLI's `chat --voice` starts a WebSocket voice server built on this orchestrator, with the reply streamed from the chat runtime and the model request aborted on barge-in ([flags](./TELEPHONY_PROVIDERS.md#wunderland-cli-flags)):
 
 ```sh
 wunderland chat \
@@ -105,23 +108,23 @@ wunderland chat \
 | [`IBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `HardCutBargeinHandler`, `SoftFadeBargeinHandler` |
 | [`IDiarizationEngine`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | none in this package (see the diarization pack); the orchestrator does not call one |
 
-`createVoiceProvidersFromEnv()` builds STT and TTS providers from the API keys in the environment.
+`createVoiceProvidersFromEnv()` builds STT and TTS providers from the API keys in the environment. Hume ends its TTS API on 13 November 2026 ([Hume's changelog](https://dev.hume.ai/voice/changelog)), so `HumeStreamingTTS` joins the TTS chain only with `ttsPreference: 'hume'`, as the first try, and never from `HUME_API_KEY` alone.
 
 ## Endpointing
 
 | Detector | The turn ends when | Text sent to the agent |
 |------|-------------|---------|
-| `HeuristicEndpointDetector` | speech ends and the last final transcript ends in `.`, `?` or `!`; otherwise after `silenceTimeoutMs` (default `1500`) of silence. When speech ends before any final, as it does with `OpenAIRealtimeTranscriptionSTT`, whose final for an utterance follows its end of speech, the first final that arrives before speech resumes is decided the same way when it arrives, the silence timeout still counted from the end of speech. When speech resumes before that final arrives, the next speech end decides the turn on the last final received by then: a pause that outlasts the server's end-of-speech silence (`turnDetection.silenceDurationMs`, 350 ms by default) and ends before the utterance's transcript arrives can split the turn or drop one of its clauses ([#257](https://github.com/framerslab/agentos/issues/257)) | the last final transcript with text it received; a final with no text changes nothing, and backchannel phrases such as "uh huh" are dropped |
-| `AcousticEndpointDetector` | silence lasts `utteranceEndThresholdMs` (default `3000`) after speech ends | none: its `turn_complete` carries an empty transcript, and the orchestrator sends that empty text to the agent |
+| `HeuristicEndpointDetector` | The keyed-final implementation retains the clauses of an active turn and evaluates punctuation or its silence deadline when speech ends. Revisions to one item replace that item's text. The turn ends when speech ends and the last final transcript ends in `.`, `?` or `!`; otherwise after `silenceTimeoutMs` (default `1500`) of silence. When speech ends before any final, the first final that arrives before speech resumes is decided the same way when it arrives, the silence timeout still counted from the end of speech. Finals that carry an `itemId`, as those of `OpenAIRealtimeTranscriptionSTT` do (its final for an utterance follows the utterance's end of speech), are kept per item, and the turn is decided once every speech end the transcriber reported since it began has its final, the silence timeout counted from the last speech end: an utterance that starts before the previous one's final arrives stays in the same turn. A speech end whose final has not arrived within `silenceTimeoutMs` stops holding the turn, so an utterance that gets no final, such as a noise the provider found no words in, holds it for at most that long. A final that finds no speech end waiting answers one that stopped waiting without its final, if any, or else the next speech end the moment it comes, so a final that arrives before its end of speech, such as the one a listen session's stop flushes with client commits (`turnDetection: null`), decides the turn at that speech end without waiting. A speech end from a standalone VAD or from the orchestrator's `maxTurnDurationMs` watchdog (`source: 'vad'`) gets no final of its own and decides the turn on the finals held. Finals answer speech ends in the order they arrive, so a final that arrives more than `silenceTimeoutMs` after its own speech end can answer a later one and end the turn without that utterance's words ([#390](https://github.com/framerslab/agentos/issues/390)). After a reset of a turn in which speech started, including the one at each `turn_complete`, an item-keyed final that arrives before speech ends again, or before a standalone VAD (`source: 'vad'`) reports speech starting, is that turn's late final, including one that arrives while the transcriber reports the user's next utterance (it sends an utterance's final after that utterance's end of speech): it is dropped from the conversation's turns instead of joining the next turn or paying its speech end, and reported as `late_final`, which a listen session writes as its own turn; a `late_final` listener that throws or rejects is written as a console warning, and the listeners after it still get the final. A session's start ends that wait: `VoicePipelineOrchestrator.startSession()` and `startListenSession()` reset the detector they are given with `reset('session')`, since the new session's transcriber sends no final of an earlier session's turns, so a detector a host hands to one session after another waits for no late final of the session before | the accumulated keyed turn text: with `itemId`s, the texts of the turn's finals that have words, each trimmed, joined by one space in the order their utterances began (by `startMs`; a final whose utterance has none keeps its place in the order the finals arrived). The retained unkeyed compatibility input remains supported: without `itemId`s, the last final transcript with text it received. A final with no text adds nothing. A backchannel phrase such as "uh huh" is dropped and reported as `backchannel_detected`. A caller that sets no agent context, such as a listen session, keeps the exact-phrase recognition: a final whose whole text, trimmed and lowercased, is a backchannel phrase is dropped whatever the agent is doing. Once a caller sets one through `setAgentContext()`, as `VoicePipelineOrchestrator` does at a session's start, as each user turn completes and as each reply ends or a barge-in cuts it, a final is compared trimmed, lowercased and without trailing `.`, `,`, `!` or an ellipsis, with or without an `itemId`, so "Sure." is a backchannel, while a final that ends with `?`, such as "Okay?", never is. A backchannel is then dropped only while the agent holds the floor, from the moment the user's turn completes until the agent's reply ends or a barge-in cuts it; while the agent listens every final is the user's, so a lone "okay" after "It is booked." reaches the agent as a turn |
+| `AcousticEndpointDetector` | silence reaches `utteranceEndThresholdMs` (default `3000`) after speech ends | none: the legacy detector emits an empty transcript, and the orchestrator sends that empty text to the agent. The call profile sends the agent the transcript its audio endpoint detector reports and attaches no STT text of its own |
 | `SemanticEndpointDetector` (pack `@framers/agentos-ext-endpoint-semantic`) | terminal punctuation as above; otherwise an LLM, called through the pack's `llmCall`, judges whether the turn is complete, with a silence timeout as the fallback | the transcript |
 
 Without an `llmCall`, the semantic pack's classifier answers `INCOMPLETE` and the silence timeout ends every turn without terminal punctuation.
 
-The orchestrator feeds the detectors the STT session's `speech_start` and `speech_end` events; it runs no voice activity detection of its own.
+Without a call profile, the orchestrator feeds the detectors the STT session's `speech_start` and `speech_end` events; it runs no voice activity detection of its own. A call profile takes a VAD session and an audio endpoint detector instead ([Call profile](#call-profile)).
 
 ## Barge-in
 
-The orchestrator asks the barge-in handler when the STT session reports `speech_start` while the pipeline is `speaking`, and passes `speechDurationMs: 0`, since the speech has just started.
+Without a call profile, the orchestrator asks the barge-in handler when the STT session reports `speech_start` while the pipeline is `speaking`, and passes `speechDurationMs: 0`, since the speech has just started. A call profile measures the speech instead and needs no handler ([Call profile](#call-profile)).
 
 | Handler | Decision | With the orchestrator |
 |------|----------|----------|
@@ -153,7 +156,10 @@ These packs live in [agentos-extensions](https://github.com/framerslab/agentos-e
 ### Client → Server
 
 - **Binary**: mono samples at the transport's `sampleRate`, as serialized `Float32Array` bytes by default, or as 16-bit little-endian PCM with `inboundEncoding: 'linear16'`.
-- **Text**: JSON, emitted as the transport's `message` event. The protocol type names `{ type: 'config', config }` and `{ type: 'control', action: { type: 'mute' | 'unmute' | 'config' | 'stop' } }`; the orchestrator does not act on either, so a host that offers them handles the event itself.
+- **Text**: JSON, emitted as the transport's `message` event. The protocol type names `{ type: 'config', config }` and `{ type: 'control', action: { type: 'mute' | 'unmute' | 'config' | 'stop' } }`; without a call profile the orchestrator acts on neither, so a host that offers them handles the event itself. A call profile acts on `control` with `mute`, `unmute` or `stop` and ends the call on any other message.
+- **Transcript**: `{ type: 'transcript', text: 'Hello there.', itemId: '7', isFinal: true, confidence: 0.8, startMs: 1200, endMs: 2100, language: 'en' }`, from a client that transcribes on its own device.
+
+A client that transcribes on its own device sends `transcript` messages ([`ClientTranscriptMessage`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)) in place of audio: every interim and the final of one line carry the same `itemId`, and `toClientTranscriptMessage()` makes one from a `TranscriptEvent`. Without a call profile, `VoicePipelineOrchestrator` checks each with `isClientTranscriptMessage()` and hands it to the endpoint detector as it does a transcript from its STT session, the client's lines standing in for speech start and end: the first line to open is a speech start (with barge-in while the agent speaks), and the final that closes the last open line is a speech end. Each final reaches the detector joined with the turn's earlier finals and without the line's `itemId`, so a turn of several lines reaches the agent whole, and a line that gets no message for five seconds is closed as by an empty final; a stop, or a transport close, ends every open line with the session. A final the detector's `isBackchannel()` answers `true` for reaches it on its own instead. The orchestrator sets the detector's agent context as the session starts, so `HeuristicEndpointDetector` reads these finals by its context rule from the first line, not by the exact-phrase recognition it keeps for a caller that sets none: a lone "yeah" said while the agent holds the floor, from the moment the user's turn completes until its reply ends or is cut, is dropped and reported as `backchannel_detected`, leaving the turn's text as it was, while one said as the agent listens joins the user's turn, and a line that ends with `?`, such as "Right?", is never a backchannel. A detector without `isBackchannel()` gets every final joined. Nothing is echoed back. A session takes its speech from one source, the first it receives: the transport's audio, which its STT session transcribes, or `transcript` messages. What arrives from the other is dropped, so the endpoint detector never gets two sets of speech starts, ends and finals, and the session's first drop is reported as the orchestrator's `'error'`, or written as a console warning when nothing listens for `'error'`. A call profile takes no transcripts from the client: a `transcript` message ends the call, as any message other than its three controls does. `WebSocketStreamTransport` and `LiveKitStreamTransport` deliver the message as `'message'`, as they deliver every JSON message; `WebRTCStreamTransport` emits its data channel's messages as `'control'`, which the orchestrator does not read.
 
 ### Server → Client
 
@@ -167,13 +173,13 @@ These packs live in [agentos-extensions](https://github.com/framerslab/agentos-e
 // Binary messages: each TTS audio chunk, in the TTS provider's output format
 ```
 
-The protocol type also declares `session_started`, `error` and `session_ended` messages, which the orchestrator does not send.
+The protocol type also declares `session_started`, `error` and `session_ended` messages, which the orchestrator does not send. Under a call profile each message also carries the call's `scopeId`, `callId` and `generation`, and no message of a generation the call has left is sent.
 
 ## LiveKit Rooms
 
 A listener that joins a meeting on a person's behalf is the meeting channel: see [Meeting bots](MEETING_BOTS.md).
 
-An agent that joins a LiveKit room as a participant hears a person through [`LiveKitRoomAudioSource`](https://github.com/framerslab/agentos/blob/master/src/io/hearing/LiveKitRoomAudioSource.ts) and exchanges control messages with their page through [`LiveKitStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/LiveKitStreamTransport.ts). Both run in Node on `@livekit/rtc-node` (`^1.1.0`), an optional peer dependency: install it beside AgentOS with `npm install @livekit/rtc-node`. Without it, the source's first read throws an error that names the package, and the transport emits that error as `'error'`, or writes it as a console warning when nothing listens for `'error'`, and closes.
+An agent that joins a LiveKit room as a participant hears a person through [`LiveKitRoomAudioSource`](https://github.com/framerslab/agentos/blob/master/src/io/hearing/LiveKitRoomAudioSource.ts) and exchanges control messages with their page through [`LiveKitStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/LiveKitStreamTransport.ts), which with its `publisher` option also speaks to them ([Speaking in the room](#speaking-in-the-room)). Both run in Node on `@livekit/rtc-node` (`^1.1.0`), an optional peer dependency: install it beside AgentOS with `npm install @livekit/rtc-node`. Without it, the source's first read throws an error that names the package, and a listen-only transport emits that error as `'error'`, or writes it as a console warning when nothing listens for `'error'`, and closes; a speaking transport emits `livekit input failed` instead and closes, and its `readyForPlayback()` rejects.
 
 ```typescript
 import * as rtc from '@livekit/rtc-node';
@@ -192,13 +198,48 @@ const session = await stt.startSession({ language: 'en' });
 for await (const frame of source) session.pushAudio(frame);
 ```
 
-The source opens rtc-node's `AudioStream` on the participant's microphone track (the audio publication whose source is the microphone; a screen share's audio is passed over) at the requested sample rate and one channel, and yields `AudioFrame`s: Float32 samples in [-1, 1], with the participant's identity as `speakerHint`. When the participant's track is unpublished and a new one is published, as when their page reconnects, reading moves to the new track; `trackSid` names the track being read. It ends when `close()` is called, when a `for await` loop leaves, or when the room disconnects, a room that is not connected at the first read included. A source has one reader.
+The source opens rtc-node's `AudioStream` on the participant's microphone track (the audio publication whose source is the microphone; a screen share's audio is passed over) at the requested sample rate and one channel, and yields `AudioFrame`s: Float32 samples in [-1, 1], with the participant's identity as `speakerHint`. When the participant's track is unpublished and a new one is published, as when their page reconnects, reading moves to the new track; `trackSid` names the track being read. It ends when `close()` is called, when a `for await` loop leaves, or when the room disconnects, a room that is not connected at the first read included. A source has one reader. `close()` stops the reading at once and cancels rtc-node's reader on the next microtask; `whenClosed()` resolves when that cancellation is acknowledged, rejects when it fails, and rejects before `close()`. With `strictMono: true`, which a speaking transport sets, a frame that arrives at another rate or channel count than the source asked rtc-node for, or whose data does not hold exactly `samplesPerChannel` samples, is refused: the read rejects with `livekit input format refused` and the source closes.
 
-`LiveKitStreamTransport` implements `IStreamTransport` over the same room: `'audio'` carries the participant's frames, `sendControl()` sends a JSON message to the participant as a text stream on a topic (`'agentos.voice'` unless `topic` says otherwise), and a JSON message the participant sends on that topic arrives as `'message'`. Another sender's text stream on the topic is closed unread. It does not publish audio: `sendAudio()` rejects, and a caller that does not wait for that promise raises no unhandled rejection, so a `VoicePipelineOrchestrator` given this transport hears the participant and sends its control messages, and its speech is not heard. `close()` leaves the room connected and closes the text streams still arriving.
+`LiveKitStreamTransport` implements `IPlaybackTransport`, the `IStreamTransport` with playback, over the selected participant's room audio and control streams: `'audio'` carries the participant's frames, `sendControl()` sends a JSON message to the participant as a text stream on a topic (`'agentos.voice'` unless `topic` says otherwise), and a JSON message the participant sends on that topic arrives as `'message'`. Another sender's text stream on the topic is closed unread. Listen-only construction rejects `sendAudio`: without the `publisher` option it does not publish audio, `sendAudio()` and `waitForPlayback()` reject, and a caller that does not wait for the `sendAudio()` promise raises no unhandled rejection, so a `VoicePipelineOrchestrator` given this transport hears the participant and sends its control messages, and its speech is not heard; the orchestrator reports the first refused chunk of each reply, as it reports any failed send, and not the rest of that reply's chunks. Speaking construction supplies the optional outbound publisher and awaits its readiness, bounded native output and cleanup. The publisher accepts declared raw PCM16 or WAV PCM16 and performs one conversion at the room boundary; unsupported compression is rejected. The caller awaits output acknowledgement ([Speaking in the room](#speaking-in-the-room)). `close()` leaves the room connected and closes the text streams still arriving; `whenClosed()` then resolves once the source's reader has acknowledged its cancellation, the input loop has ended and the text streams are closed, and rejects with `livekit cleanup incomplete` when one of them failed; the transport also emits that error as `'error'`, or writes it as a console warning when nothing listens for `'error'`. `whenClosed()` acknowledges owned physical cleanup before `CallTransportBinding` can reuse the transport slot. In the call profile, detachment and reattachment preserve the call while advancing its transport epoch.
 
-When a consumer emits `'pause'` on the transport, it holds up to two seconds of audio (`bufferMs`, default `2000`), drops the oldest frames beyond that limit, and on `'resume'` reports any dropped audio as `'gap'` with `{ droppedMs, reason: 'paused' }` before emitting the held frames in order.
+When a consumer emits `'pause'` on the transport, it holds up to two seconds of audio (`bufferMs`, default `2000`, a finite number of zero or more; the constructor throws otherwise), drops the oldest frames beyond that limit, and on `'resume'` reports any dropped audio as `'gap'` with `{ droppedMs, reason: 'paused' }` before emitting the held frames in order. A consumer that pauses again while the held frames are emitted stops them there, and the rest stay held for the next `'resume'`. `close()` drops what the transport held: a closed transport emits no held audio and no gap.
 
 `@framers/agentos/io/hearing/livekit` exports both, with `loadLiveKitRtc()` and the structural types the two accept (`LiveKitRoomLike`, `LiveKitRtcModule` and their parts), which a real rtc-node `Room` and module satisfy as they are.
+
+### Speaking in the room
+
+With the `publisher` option, `LiveKitStreamTransport` also speaks to the participant, on one track that the room's local participant publishes. It is built for a call profile ([Call profile](#call-profile)): its input must be mono at 16 kHz (`sampleRate: 16000`; the constructor throws `invalid livekit input bound` otherwise), its source runs with `strictMono`, and every chunk it plays is acknowledged by the page that hears it.
+
+```typescript
+import * as rtc from '@livekit/rtc-node';
+import { LiveKitStreamTransport } from '@framers/agentos/io/hearing/livekit';
+
+const transport = new LiveKitStreamTransport({
+  room, // a connected rtc-node Room; its local participant publishes the track
+  participantIdentity: 'user-1',
+  sampleRate: 16_000, // a speaking transport takes mono 16 kHz input
+  rtc,
+  publisher: {
+    scopeId: 'scope-a',
+    callId: 'call-a',
+    generation: () => currentGeneration, // the call's VoiceGeneration, read at every admission and after each native step
+    sampleRate: 48_000, // the published track's rate: 16000, 24000 or 48000
+    maxBytes: 256_000, // a chunk's PCM bytes plus the bytes it is resampled to
+    maxDurationMs: 2_000, // a chunk's longest audio and the native queue's length, at most 2000
+    receiptTimeoutMs: 5_000, // the deadline of a receipt, a drain and a clear, from 1 to 30000; above a chunk's playing time
+    rtc, // optional: imported on first use when omitted
+  },
+});
+await transport.readyForPlayback(); // publishes the track; the call counts as connected only after this
+```
+
+- **Readiness.** `readyForPlayback()` creates one native `AudioSource` (one channel at the track's rate), one `LocalAudioTrack` and one publication with the microphone source, once; later calls share that work, and a closed transport rejects it. A host records the call as connected only after it resolves: `CallTransportBinding` awaits it before it starts or reattaches the pipeline. A listen-only transport resolves it at once and allocates nothing.
+- **Audio.** `sendAudio(chunk)` takes a chunk that carries the publisher's `scopeId` and `callId`, the generation `generation()` returns and a positive whole `sequence`. The chunk is 16-bit PCM from 8000 to 192000 Hz: `format: 'pcm'` with `container: 'raw'` (the default) or `container: 'wav'` (a PCM16 mono WAV at the declared rate, whose header is read once and never played), and a `durationMs` within a millisecond of its samples; MP3 and Opus are refused with `UnsupportedAudioFormatError`. These checks and the bounds run before any native call, so a refused chunk publishes nothing. The samples are converted to 16-bit integers once and, when their rate differs from the track's, resampled by one `AudioResampler` that is pushed, flushed and closed for that chunk. The publisher then sends the participant an `audio` message on the topic (`scopeId`, `callId`, `generation`, `sequence`, `publicationId`, `encoding: 'pcm16le'`, `channels: 1`, `samples`, `sampleRate`, `publishedSamples`, `publishedSampleRate`), captures the frames one at a time, and resolves when the last capture has returned. A generation change, at admission or after any native step, cancels the chunk. One chunk is outstanding at a time: another is refused until the first's `waitForPlayback()` has settled or a `clearPlayback()` has finished.
+- **Playback.** `waitForPlayback(generation, sequence, signal)` resolves with the chunk's `PlaybackReceipt` only when the native queue has drained (`AudioSource.waitForPlayout()`) and the participant has answered `{ type: 'playback', generation, sequence, playedSamples, sampleRate }` with the chunk's own sample count and rate; an aborted `signal` rejects it. The receipt's deadline of `receiptTimeoutMs` runs from the chunk's admission and the wait's from its call, so the deadline must exceed the longest chunk's playing time and the page's delay. rtc-node's drain is local bookkeeping and does not count as playback on its own.
+- **Clearing.** `clearPlayback(generation)` cancels the chunk at once: it clears the native queue, waits for a capture in flight to return, clears the queue again, sends `{ type: 'clear', generation, clearId }` and resolves when the participant answers `{ type: 'cleared', generation, clearId }`. The next generation's chunk is admitted after that.
+- **The page.** The page that plays the track matches each `audio` message to the audio it receives, answers `playback` once that audio has played and `cleared` once it has discarded the generation's audio. Without those answers, `waitForPlayback()` and `clearPlayback()` reject at their deadline.
+- **Control.** The participant's text streams are read through their async iterator: at most 4096 bytes within five seconds each, four at once. A `playback` or `cleared` receipt goes to the publisher and a `control` message with `mute`, `unmute` or `stop` arrives as `'message'`. Any other message, a `transcript` included, a stream past a bound and a fifth stream at once are reported as `'error'` (`livekit control refused`) and close the transport. `sendControl()` sends at most 16384 bytes a message and four at once (`livekit control bound` otherwise), and a send not done within five seconds closes the transport.
+- **Loss and closing.** The selected participant leaving the room (`participantDisconnected`) closes the transport, and the room stays connected. Errors carry fixed messages (`livekit input failed`, `livekit control refused`, `livekit cleanup incomplete`), and one that nothing listens for is dropped. `whenClosed()` resolves once the input reader's cancellation, the input loop, the text streams, the unpublication and the closing of the track and the native source have all finished, and rejects with `livekit cleanup incomplete` when any of them failed; a host's media cleanup awaits it before it releases what the call holds.
 
 ### Transcripts in the room
 
@@ -268,10 +309,10 @@ session.on('turn', (turn: TranscriptTurn) => render(turn));
 await session.close('stopped');
 ```
 
-- **Turns.** Without an endpoint detector, each final of the transcriber is a turn, with the final's `startMs` and `endMs`. With `overrides.endpointDetector`, the detector's `turn_complete` is the turn; the session gives the detector the transcriber's transcripts and its `speech_start` and `speech_end`, as the orchestrator does. When the detector supplies empty text, as `AcousticEndpointDetector` does, the turn uses the STT finals since the previous turn, joined with spaces, with the first final's `startMs` and the last final's `endMs`. Interim hypotheses are excluded; an empty detector turn with no final text writes nothing.
+- **Turns.** Without an endpoint detector, each final of the transcriber is a turn, with the final's `startMs` and `endMs`. With `overrides.endpointDetector`, the detector's `turn_complete` is the turn; the session gives the detector the transcriber's transcripts and its `speech_start` and `speech_end`, as the orchestrator does. A final the detector reports as `late_final`, one that arrived after its turn completed and that no turn takes, is written as a turn of its own with the final's `startMs` and `endMs`, so its words are not lost; one with no words writes nothing. The session resets the detector with `reset('session')` as it starts, so a detector an earlier session used waits for no late final of that session's turns. `overrides.speaker`, when given, names who spoke each turn; one that throws is written as a console warning, and the turn is written with no speaker. When the detector supplies empty text, as `AcousticEndpointDetector` does, the turn uses the STT finals since the previous turn, joined with spaces, with the first final's `startMs` and the last final's `endMs`. Interim hypotheses are excluded; an empty detector turn with no final text writes nothing.
 - **The sink numbers them.** `appendNext(input)` takes an unnumbered final (`TranscriptInput`) and returns the stored `TranscriptTurn` with its run's next `seq` and the id `<runId>:<seq>`, or `undefined` when it drops the turn. The session writes one turn at a time, in arrival order, so a second listen session on the same run continues the run's sequence where the sink left it.
 - **Backpressure.** When `sinkQueueLimit` finals (default `8`) wait for the sink, the session emits `pause` on the transport and `paused` on itself, then `resume` and `resumed` once the queue is down to half. Every ending path also releases an outstanding pause exactly once, so a caller-owned transport can be reused. No final is dropped for a slow sink. Frames a transport sends while asked to pause still reach the transcriber, and `stats().dropped` counts them.
-- **The end.** `close('stopped')`, the default, moves the session to `draining`: the transcriber is flushed and finals that arrive within `drainMs` (default `250`) are still accepted. A pending detector turn then has up to its `turnCompletionTimeoutMs`, plus one timer tick, to complete before reset: the heuristic detector exposes its configured silence timeout; the acoustic detector includes its silence threshold and polling interval. Detectors that omit the bound receive `3250` ms. If the provider has not reported speech ending, stop supplies `speech_end`. The turn and sink queue are written out before `ended`. `close('purged')` drains nothing and drops the finals waiting for the sink. The session also ends by itself with `stt_failed` (the transcriber failed for good), `transport_closed`, `transport_failed` (a transport error, included as `ended.error`) or `sink_failed` (the sink threw). It ends once, closes the transcriber, removes its transport listeners and leaves the transport open.
+- **The end.** `close('stopped')`, the default, first releases a pause the session asked for, so the audio a transport held while paused reaches the transcriber, then moves the session to `draining`: the transcriber is flushed and finals that arrive within `drainMs` (default `250`) are still accepted. A pending detector turn then has up to its `turnCompletionTimeoutMs`, plus one timer tick, to complete before reset: the heuristic detector exposes its configured silence timeout; the acoustic detector includes its silence threshold and polling interval. Detectors that omit the bound receive `3250` ms. If the provider has not reported speech ending, stop supplies `speech_end`. The turn and sink queue are written out before `ended`. `close('purged')` drains nothing and drops the finals waiting for the sink. The session also ends by itself with `stt_failed` (the transcriber failed for good), `transport_closed`, `transport_failed` (a transport error, included as `ended.error`) or `sink_failed` (the sink threw). It ends once, closes the transcriber, removes its transport listeners and leaves the transport open.
 
 | Event | Payload | When |
 |---|---|---|
@@ -295,13 +336,66 @@ Unless `overrides.reconnect` is `false`, the listen session wraps its transcribe
 
 When the provider's session errors or closes without the caller asking, a new session of the same provider opens and hears the replayed audio first, then the frames that came meanwhile, then live audio. Each session's `startMs` and `endMs` are moved onto one timeline, the audio pushed since the session began. Queue overflow leaves a gap after the replay: with one second buffered and three seconds arriving into a two-second queue, the replay remains at 0–1000 ms and the retained queue starts at 2000 ms. End bounds are exclusive, so a final ending exactly at the replay boundary keeps its original end time.
 
-`TranscriptDedupe` drops a final that repeats one already emitted over the same audio. Only finals with finite `startMs` and `endMs` and `endMs > startMs` enter its history; other finals bypass it without accumulating retained observations. `OpenAIRealtimeTranscriptionSTT` reports these bounds, while `DeepgramStreamingSTT` and `ElevenLabsStreamingSTT` do not, so with those a final transcribed again from the replay can arrive twice. Each reconnect emits `stt:reconnected` (`{ attempt, replayedMs }`) and `stt:gap` (`{ attempt, lostMs }`, the time the reconnect took).
+`TranscriptDedupe` drops a final that repeats one already emitted over the same audio. Only finals with finite `startMs` and `endMs` and `endMs > startMs` enter its history; other finals bypass it without accumulating retained observations. `OpenAIRealtimeTranscriptionSTT` and `DeepgramStreamingSTT` report these bounds, while `ElevenLabsStreamingSTT` does not, so with it a final transcribed again from the replay can arrive twice. Each reconnect emits `stt:reconnected` (`{ attempt, replayedMs }`) and `stt:gap` (`{ attempt, lostMs }`, the time the reconnect took).
 
 A `flush()` during reconnect waits for the replacement and its replay and queued audio, then flushes that session. A close during the flush, or after it before further provider activity or pushed audio, ends the stream without reconnecting. A transcript, speech event, usage report or warning after a completed flush clears that terminal-close expectation, so a later close-only network failure reconnects. Deepgram can end its stream while flushing ([CloseStream](https://developers.deepgram.com/docs/close-stream)).
 
+`startSession({ call })`, with an [`AudioIdentity`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) as `call`, opens the scoped path ([`scopedReconnect.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/scopedReconnect.ts)) instead; a [call profile](#call-profile) opens its STT session with the call's identity, so a `ReconnectingSTT` given as its `streamingSTT` takes this path. The provider's sessions must implement `pushAudioScoped()` and `reset()` ([`ScopedStreamingSTTSession`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)), or `startSession()` rejects. The session takes frames through `pushAudioScoped()` alone, and only those that carry its current scope, call, recognition turn and generation; `pushAudio()` throws. A reconnect opens the same provider, resets it to the current identity and, when at least `minReplayMs` is kept, replays the kept frames of that identity with the identity each was admitted with; it never changes provider. `reset(identity)` takes the same scope and call only, drops the kept frames and refuses frames of the earlier identity from then on. A transcript is passed on only from the provider's current session and only when it carries the current identity; its times are passed on unchanged and no dedupe runs. `queueCapacityMs` bounds the admitted audio not yet handed to the provider: a frame past it is refused (`recognition input bound`) rather than dropped, so the session has no `droppedFrames`. A reconnect whose session fails to open ends the session (`error`, then `close`) without a retry. `stt:reconnected` and `stt:gap` are emitted as above.
+
 ## Speech-to-text in the browser
 
-`@framers/agentos/io/voice-pipeline/browser` is the entry a browser bundle imports: its modules import no Node built-in and no package. `@framers/agentos/io/voice-pipeline` exports them as well.
+`@framers/agentos/io/voice-pipeline/browser` is the entry a browser bundle imports: its modules import no Node built-in and no package statically, and the one package any of them loads at run time is `@moonshine-ai/moonshine-wasm`, which `MoonshineBrowserSTT` imports on first use when no `moonshine` option is given. `@framers/agentos/io/voice-pipeline` exports them as well.
+
+[`MoonshineBrowserSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/MoonshineBrowserSTT.ts) transcribes on the user's own device. It runs [Moonshine](https://github.com/moonshine-ai/moonshine)'s streaming models (MIT) in the browser through `@moonshine-ai/moonshine-wasm`, so the audio stays on the device and no service is paid per hour. It implements `IStreamingSTT`, so its sessions fit `StreamingSTTChain` like any other provider's, and the page sends the server text in place of audio (see the `transcript` message under [WebSocket Messages](#websocket-messages)).
+
+```bash
+npm install @framers/agentos @moonshine-ai/moonshine-wasm
+```
+
+The package is an optional peer dependency (MIT, with no dependencies of its own), so an install of AgentOS alone leaves it out.
+
+```typescript
+import {
+  MoonshineBrowserSTT,
+  checkMoonshineBrowserSupport,
+  toClientTranscriptMessage,
+} from '@framers/agentos/io/voice-pipeline/browser';
+
+if (checkMoonshineBrowserSupport().supported) {
+  const stt = new MoonshineBrowserSTT({
+    // index.js of the package's dist folder, served whole (see "Serving the package")
+    moonshine: () => import(/* webpackIgnore: true */ /* @vite-ignore */ moonshineIndexUrl),
+    context: noteTitles.join('\n'), // names and terms from the user's own notes
+    onProgress: ({ fraction }) => showProgress(fraction), // undefined until the total is known
+  });
+  await stt.load(); // downloads once, before the user starts; the browser caches the files
+
+  const session = await stt.startSession({ language: 'en' });
+  session.on('transcript', (event) => {
+    showLine(event.itemId, event.text, event.isFinal); // one line keeps one itemId
+    socket.send(JSON.stringify(toClientTranscriptMessage(event))); // the server gets text, not audio
+  });
+  session.pushAudio(frame); // mono Float32 at any sample rate
+  await session.flush(); // completes the open line; the session stays open
+  session.close();
+  stt.dispose(); // releases the model and the worker
+}
+```
+
+In a page the model runs in the package's own Web Worker, so a transcription pass never blocks the page; inside a worker of the host's it runs on that worker's thread. Every transcript carries `itemId` (Moonshine's line id), `startMs` and `endMs` on the session's audio clock, and `language`. `flush()` completes the open line and keeps the session open; `close()` ends it at once, and an open line gets an empty final, which retracts its interim text. A transcription failure emits `error`, or writes a console warning when nothing listens for `'error'`, then `close`. A listener that throws on one of these last events (an open line's empty final, `error`, `close`) is written as a console warning; the listeners after it still run, and the session still closes. A model that cannot load rejects `startSession()`, so a `StreamingSTTChain` moves to its next provider, such as a smaller size. Two sizes share the provider id `moonshine-browser`, and the chain names them by their place among the providers that share it (`moonshine-browser#1`, `moonshine-browser#2`) in its circuit breaker, its dedupe and its events, so a breaker that trips one size leaves the other open; a [`ProviderPolicy`](#provider-policy) permits each provider id once, so a chain under one holds one size. To use the server's transcription instead, the page sends audio. Over a WebSocket the page sends each message as a text frame; in a LiveKit room it sends it as a text stream on `LiveKitStreamTransport`'s topic (`'agentos.voice'` unless the server names another).
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `model` | `'auto'` | `'moonshine-medium'`, `'moonshine-small'`, `'moonshine-tiny'`, or `'auto'` for the size the device runs. |
+| `language` | `'en'` | The model's language; a session that asks for another is refused. |
+| `modelBaseUrl`, `modelFileNames`, `modelBytes` | the package's CDN | The host's own copy of the files, at `<modelBaseUrl>/<size>-streaming-<language>/<file>` (the seven names in `MOONSHINE_STREAMING_MODEL_FILES`), and each size's total bytes, so progress has a fraction. |
+| `keyterms`, `context`, `contextMaxTerms` | none, none, `200` | Terms to bias the transcription towards (no term may contain a comma), and a passage whose unusual words become such terms. |
+| `onProgress` | none | `{ model, loaded, total, fraction, file }` as the model downloads; a cached file counts at once. |
+| `thread` | `'auto'` | `'worker'` (the package's Web Worker), `'calling'` (the calling thread), or `'auto'` (the worker in a page). |
+| `wasmBaseUrl` | the package's folder | The URL of the folder where the package's worker finds `moonshine.wasm`, with or without a trailing slash. |
+| `singleThreadBuild` | `false` | The page serves a single-thread build of the package, so `healthCheck()` asks for no cross-origin isolation. |
+| `moonshine` | imported by name on first use (Node, or a page with an import map) | The package, or a function that imports it from where the page serves its `dist` folder. |
+| `device` | read from the browser | The signals `'auto'` picks the size by. |
 
 ### Input level
 
@@ -339,7 +433,7 @@ const { heard, ratio, itemIds } = phraseHeard(notice, ledger.finalsAfter(undefin
 - `heard` is `true` when `ratio` is at or above `threshold` (`0.8` unless set);
 - `itemIds` names the lines that held a matched word, in order, each once.
 
-Words are lower-case runs of letters and digits (`lexicalTokens`, the library's word rule), so case, punctuation and spacing are ignored and an apostrophe splits a word: "doesn't" is the two words "doesn" and "t", which "does not" does not match. Nothing is stemmed. A phrase with no words throws an `Error`. A phrase of more than `maxPhraseWords` words (`400` unless set) throws a `RangeError`, which keeps the comparison within `maxPhraseWords` words of the phrase and `maxWords` words of the lines however long either is. A `threshold` outside `0` to `1`, a `maxWords` that is not a whole number, `0` or more, and a `maxPhraseWords` that is not a whole number, `1` or more, throw a `RangeError` too. The function is pure, so a server and a page that read the same lines reach the same answer.
+Words are the library's word rule (`lexicalTokens`): the text read in NFC and in lower case, each word a letter or a digit followed by letters, digits and combining marks. Case, punctuation and spacing are ignored, an accent counts the same whether it was written as one character or as a letter and a combining mark, and an apostrophe splits a word: "doesn't" is the two words "doesn" and "t", which "does not" does not match. Nothing is stemmed. A phrase with no words throws an `Error`. A phrase of more than `maxPhraseWords` words (`400` unless set) throws a `RangeError`, which keeps the comparison within `maxPhraseWords` words of the phrase and `maxWords` words of the lines however long either is. A `threshold` outside `0` to `1`, a `maxWords` that is not a whole number, `0` or more, and a `maxPhraseWords` that is not a whole number, `1` or more, throw a `RangeError` too. The function is pure, so a server and a page that read the same lines reach the same answer.
 
 ### Capture on the page
 
@@ -358,7 +452,7 @@ capture.setStream(otherStream); // another microphone, or a mix the page made, o
 capture.stop(); // every node disconnected and every listener removed; no block is handed on after it
 ```
 
-The blocks keep the context's sample rate, which a frame built from them carries in `sampleRate`. `DeepgramStreamingSTT` and `ElevenLabsStreamingSTT` read their audio as 16 kHz whatever a frame's `sampleRate` says, so blocks bound for them are resampled to 16 kHz first.
+The blocks keep the context's sample rate, which a frame built from them carries in `sampleRate`. `ElevenLabsStreamingSTT` reads its audio as 16 kHz whatever a frame's `sampleRate` says, so blocks bound for it are resampled to 16 kHz first; `DeepgramStreamingSTT` and `OpenAIRealtimeTranscriptionSTT` convert each frame from its own `sampleRate`.
 
 A second `start()` leaves a running capture as it is, and a `stop()` while the module loads leaves nothing built. `stop()` removes the listeners as well, so a capture started again hands its blocks to the listeners added after it. `stop()` also posts the worklet's processor a stop message: its `process()` then answers `false`, so the browser can end the node, which no longer has an input. A `start()` that fails, on a module that did not load or a stream with no audio track, leaves nothing connected, and the next `start()` tries again. A `setStream()` keeps the samples the worklet holds toward its next block, which open the first block after the change, so no sample the worklet took in before the change is dropped. Given a stream with no audio track, `setStream()` throws, and the capture keeps hearing the stream it had.
 
@@ -374,17 +468,200 @@ await copyFile(new URL('./capture-worklet.js', entry), 'public/audio/capture-wor
 
 `AudioProcessor` (in `@framers/agentos/io/hearing`) is the older capture: it reads the audio through a `ScriptProcessorNode` on the page's main thread, a node deprecated in favour of `AudioWorkletNode` ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/ScriptProcessorNode)), and feeds its frames to `EnvironmentalCalibrator` and `AdaptiveVAD`.
 
+### The browser entry
+
+The entry's modules import no Node built-in and no package statically: a test walks its built module graph (static imports and re-exports, and dynamic imports of a literal path) and fails on any import that is not one of the library's own. `MoonshineBrowserSTT` imports its optional peer through a variable specifier when the host passes no `moonshine` option, which resolves in Node and on a page with an import map; a bundled page passes `moonshine`. The entry also exports every type of the streaming contracts (the voice pipeline's [`types.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)), `StreamingSTTChain` with its parts (`CircuitBreaker`, `VoiceMetricsReporter`, `VoicePipelineError`, `AggregateVoiceError`, `defaultCapabilities`, `supportsLanguage`), `VoiceEventEmitter` (an event emitter with Node's semantics; the contracts extend its interface, `EventEmitterLike`, which Node's `EventEmitter` satisfies), `MoonshineBrowserSTT` with its helpers, and `toClientTranscriptMessage()`, `isClientTranscriptMessage()` and `transcriptEventFromClient()`. `@framers/agentos/io/voice-pipeline` exports all of it too, beside the providers, transports and orchestrator that run on a server. The test holds the run-time graph, not the typings: `types.ts` names Node's global `Buffer` type (`EncodedAudioChunk.audio`, `BatchTTSResult.audio` and `IBatchSTT.transcribe()`), so a project that checks the library's typings with `skipLibCheck` off needs `@types/node`.
+
+### Serving the package
+
+`@moonshine-ai/moonshine-wasm` starts its Web Worker (`stt-worker.js`) and loads its WebAssembly (`moonshine.mjs`, `moonshine.wasm`) from files beside its own module, so the page serves the package's `dist` folder whole: copy `node_modules/@moonshine-ai/moonshine-wasm/dist` into the page's static files at build time, or take the published folder from a CDN as the package's own demos do, and import that folder's `index.js` by its URL (`moonshineIndexUrl` above, for example `'/moonshine/index.js'`), with the comments that tell webpack and Vite to leave the import as it is. A bundle that takes the package in does not build its worker: the worker's URL is held in a variable, and neither webpack nor Vite follows a `Worker` built that way ([webpack](https://webpack.js.org/guides/web-workers/), [Vite](https://vite.dev/guide/features.html#web-workers)).
+
+### What the page needs
+
+```text
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+The package's default build runs WebAssembly SIMD with threads. Threads need `SharedArrayBuffer`, which a browser gives only to a [cross-origin isolated](https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated) page, so the page is served with both headers ([the package's README](https://github.com/moonshine-ai/moonshine/blob/main/language-bindings/wasm/README.md#cross-origin-isolation-required-for-the-default-build)). Under `require-corp`, a cross-origin resource the page loads without CORS (an image, or a script without `crossorigin`) loads only when its server sends a `Cross-Origin-Resource-Policy` header that allows it, and one requested with CORS needs its server's CORS permission ([MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cross-Origin-Embedder-Policy)). The package fetches the model files with CORS, and its CDN allows any origin; a host's own copy on another origin allows the page's. Safari does not support `credentialless`, so `require-corp` is the value for every engine. The default build runs in Chrome 91, Firefox 114 and Safari 16.4 and later.
+
+A page that cannot be cross-origin isolated serves a single-thread build of the package, which needs SIMD alone: build it from the package's source with `scripts/build-wasm.sh single-thread`, as [its README](https://github.com/moonshine-ai/moonshine/blob/main/language-bindings/wasm/README.md#building-from-source) shows, and pass `singleThreadBuild: true`.
+
+An Android WebView is such a page: it has WebAssembly SIMD, but no `SharedArrayBuffer`, which threads need, and no `Cross-Origin-Opener-Policy`, so it cannot be cross-origin isolated ([MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#browser_compatibility), [MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cross-Origin-Opener-Policy#browser_compatibility)). Firefox 89 to 113 has SIMD but no module workers ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/Worker/Worker#browser_compatibility)), and the package's worker and the default build's threads are module workers, so in those versions only the single-thread build on the calling thread (`singleThreadBuild: true` and `thread: 'calling'`) starts none. A page whose Content Security Policy has a `script-src` or `default-src` directive adds `'wasm-unsafe-eval'` to it, or the page compiles no WebAssembly, and a worker follows the policy its own script is served with, so a policy served with the package's `stt-worker.js` needs it as well ([MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy)).
+
+`checkMoonshineBrowserSupport()` reports, with no download, whether the provider can run where it is called, before a host chooses it:
+
+```typescript
+const support = checkMoonshineBrowserSupport(); // { singleThreadBuild: true } for that build
+// support.supported: WebAssembly SIMD, and cross-origin isolation or a single-thread build
+// support.missing: [] or 'webassembly-simd' and 'cross-origin-isolation'
+// support.thread: 'worker' in a page, 'calling' in a worker
+// support.model: the size 'auto' picks here
+```
+
+The check reads WebAssembly SIMD and cross-origin isolation, not module workers or the page's Content Security Policy, so in Firefox 89 to 113, or under a policy without `'wasm-unsafe-eval'`, it can report support where the provider cannot start. It reads the global scope, or the one passed as `scope`; with TypeScript 5.9's DOM lib, whose `WebAssembly.validate` takes a `BufferSource`, which the plain `Uint8Array` in `MoonshineBrowserScope` is not ([TypeScript 5.9](https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-9.html)), a host that passes the page's `globalThis` casts it: `checkMoonshineBrowserSupport({ scope: globalThis as unknown as MoonshineBrowserScope })`.
+
+### The model
+
+| Size | Download (package 0.1.5) | Picked by `'auto'` for |
+|------|--------------------------|------------------------|
+| `moonshine-medium` | 305 MB | a laptop or desktop |
+| `moonshine-small` | 165 MB | a phone, or a laptop or desktop that reports under 4 GB of memory or fewer than 4 logical cores |
+| `moonshine-tiny` | 51 MB | a phone that reports under 4 GB of memory |
+
+`'auto'` reads `navigator.userAgentData.mobile` where the browser has it (Chromium) and the user agent elsewhere, `navigator.deviceMemory` (Chromium) and `navigator.hardwareConcurrency` (which Safari reports as 4 or 8). A figure the browser does not report constrains nothing, so Safari gets Medium on a Mac and Small on an iPhone. `readMoonshineDeviceSignals()` and `chooseMoonshineModel()` are exported for a host that picks the size itself.
+
+The files come from the package's CDN (`https://download.moonshine.ai`) or from the host's own copy, and the browser keeps them with the Cache API, so a later visit downloads nothing. Safari deletes a site's script-written storage, the Cache API's included, after seven days of use without an interaction with the site ([WebKit](https://webkit.org/blog/10218/full-third-party-cookie-blocking-and-more/)), so on Safari the model can download again.
+
 
 ## Failures
 
 | Failure | What happens |
 |---------|----------|
-| The transport closes | The pipeline goes `closed` and closes the STT and TTS sessions. The client reconnects into a new session. |
-| An STT or TTS provider fails to start | Through `StreamingSTTChain` or `StreamingTTSChain`, the next provider in priority order starts instead; a circuit breaker skips providers that failed recently. A single provider fails the `startSession()` call. |
-| An STT or TTS session fails during the call | Through a chain with mid-call failover on (`enableMidUtteranceFailover` and `enableMidSynthesisFailover`, both on by default in `createVoiceProvidersFromEnv()`), the next provider takes over: the STT chain replays up to `ringBufferCapacityMs` (default `3000`) of buffered audio, and the TTS chain replays the text it was given. Otherwise the session is the provider's own, and a provider has no reconnect, except `OpenAIRealtimeTranscriptionSTT`: it reconnects, the first retry after 100 ms and each later one after 2 s, up to 3 in a row, and sends the audio held meanwhile first; past the retries its session fails like any other. `ReconnectingSTT` reconnects any one STT provider, with replay ([A transcriber that reconnects](#a-transcriber-that-reconnects)). |
+| The transport closes | The pipeline goes `closed` and closes the STT and TTS sessions. The client reconnects into a new session; a call profile can instead be detached and reattached to a new transport ([Call profile](#call-profile)). |
+| An STT or TTS provider fails to start | Through `StreamingSTTChain` or `StreamingTTSChain` under the legacy policy, the default, the next provider in priority order starts instead; a circuit breaker skips providers that failed recently. Under a `ProviderPolicy` ([Provider policy](#provider-policy)) the chain tries only the providers the policy permits, in its order, and authorizes each opening first: with `fallback: 'none'` no second provider opens, and a refused authorization fails `startSession()` with no provider opened. A single provider fails the `startSession()` call, and the orchestrator closes, its transport included. |
+| An STT or TTS session fails during the call | Through a chain with mid-call failover on (`enableMidUtteranceFailover` and `enableMidSynthesisFailover`, both on by default in `createVoiceProvidersFromEnv()`), the next provider takes over: the STT chain replays up to `ringBufferCapacityMs` (default `3000`) of buffered audio, then the frames pushed during the switch (at most `maxPendingFrames`, default `100`; the older ones are dropped and reported as `stt:gap`), and the TTS chain replays the text admitted since the last `flush_complete` (at most `maxReplayCharacters`, default `65536`). A backup that fails while it takes the replay (an `error` or a `close`, or a frame or write it refuses) is recorded as failed and closed, and the next provider takes the same audio or text; a TTS backup without `setAudioSink()` and `writeTokens()` is closed and passed over when the facade's audio goes to a sink. The TTS facade's `flush()` resolves once the provider in use has completed its flush: a provider that closes before then is a failure, the backup that takes the text is flushed in its place without waiting for the closed provider's own flush to settle, and when no provider can take over `flush()` rejects. A frame without its scope, call and turn ids (non-empty strings) and its generation (three finite numeric fences) in an STT session opened with `config.call` ends the facade before any provider receives it. Under a `ProviderPolicy` the switch needs `fallback: 'allowlisted'` and an authorized opening, and a TTS request that has already produced audio is not replayed: the session fails instead. Otherwise the session is the provider's own, and a provider has no reconnect, except `OpenAIRealtimeTranscriptionSTT`: it reconnects, the first retry after 100 ms and each later one after 2 s, up to 3 in a row, and sends the audio held meanwhile first; past the retries its session fails like any other. `ReconnectingSTT` reconnects any one STT provider, with replay ([A transcriber that reconnects](#a-transcriber-that-reconnects)). A session's `'error'` that reaches the orchestrator ends its session (see State Machine). |
 | No turn completes | The watchdog gives the endpoint detector a synthetic `speech_end` after `maxTurnDurationMs`. |
 
 Wunderland's `chat --voice` server and `TelephonyStreamTransport` (Twilio, Telnyx and Plivo media streams) build on the same orchestrator; see [Telephony Providers](./TELEPHONY_PROVIDERS.md).
+
+## Provider policy
+
+`StreamingSTTChain` and `StreamingTTSChain` take a `policy` option ([`ProviderPolicy.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/ProviderPolicy.ts)). Without one, or with `legacyProviderPolicy`, which `createVoiceProvidersFromEnv()` and `createSttChainFromEnv()` pass, a chain tries every provider in priority order and asks no one. A `ProviderPolicy` names what a call may open:
+
+```typescript
+import { StreamingSTTChain } from '@framers/agentos/io/voice-pipeline';
+import { assertCallProviderPolicy } from '@framers/agentos/io/voice-pipeline/ProviderPolicy';
+
+const policy = assertCallProviderPolicy({
+  mode: 'hosted',
+  fallback: 'allowlisted',
+  identity: { scopeId: 'scope-a', callId: 'call-a', turnId: 'turn-1', generation: { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 } },
+  purposes: ['stt'],
+  providers: [
+    { providerId: 'local-stt', locality: 'local', purposes: ['stt'], priceVersion: 'local-v1' },
+    { providerId: 'remote-stt', locality: 'remote', purposes: ['stt'], priceVersion: 'remote-v3' },
+  ],
+  authorize: async (opening) => { await reservations.check(opening); },
+  onFallback: (event) => metrics.record(event.reason, event.to),
+});
+const stt = new StreamingSTTChain([localStt, remoteStt], { policy, enableMidUtteranceFailover: true });
+```
+
+- **Selection.** The chain keeps the providers the policy permits for its purpose (`'stt'` or `'tts'`), in the policy's order, and needs exactly one configured provider for each id it keeps; the constructor throws otherwise, and for a policy that does not permit the purpose. `local` mode keeps only providers whose `locality` is `local`, whatever keys the process holds, and `fallback: 'none'` keeps only the first.
+- **Authorization.** Every opening awaits `authorize` with a content-free `ProviderOpening`: the scope, call, turn and generation, the purpose, `from`, `to`, the `reason` (`primary`, `unavailable`, `initialization_failed` or `mid_session_failure`) and the `priceVersion` of `to`. That covers the first choice, a provider tried after an earlier one failed to open or was skipped by the circuit breaker, and a backup after the open session failed. A rejection opens nothing and fails the opening with `provider authorization refused`. After an authorized move to another provider, and before it opens, `onFallback` receives the same data.
+- **Identity.** An opening is authorized for the session's `config.call` identity, or the policy's own without one. Another scope or call, another worker generation, or an earlier inference generation or transport epoch than the policy's is refused.
+- **During a session.** With mid-call failover on, a switch obeys the same permissions. Under `fallback: 'none'` a failed session ends: the facade emits `error` to its listener, then `close`, and no other provider opens. A TTS request that has produced audio is never sent to a backup: the facade fails with `partial synthesis cannot be replayed` rather than repeat speech the listener may have heard.
+- **Redaction.** Under a policy, `onProviderFailed` and the `provider_failed` metric carry `provider opening failed` in place of the provider's message, and the STT facade's `warning` carries no provider text.
+- **The call boundary.** `assertCallProviderPolicy()` refuses `legacyProviderPolicy`, so a call built through it never runs on the environment's keys. Reopening the same provider is `ReconnectingSTT`'s ([A transcriber that reconnects](#a-transcriber-that-reconnects)) and widens no policy.
+
+## Hosted transcription cost selection
+
+`selectLowestCostSttEntry()` ([`LowestCostStt.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/LowestCostStt.ts)) orders explicitly offered hosted entries before a chain is built. Supply applicable streaming price rows in whole micro-dollars per minute and the vendors the host can actually open. A configured price does not make a vendor available. Unknown prices for available entries are refused. Ties keep the offered order, and the result holds one best fallback entry from each other available vendor.
+
+```typescript
+import {
+  selectLowestCostSttEntry,
+  type SttPriceRow,
+} from '@framers/agentos/io/voice-pipeline';
+
+// Synthetic values illustrate the contract; use verified provider rows in a host.
+const prices: SttPriceRow[] = [
+  { entry: 'deepgram:nova-3', microPerMinute: 5_000 },
+  { entry: 'openai:gpt-4o-mini-transcribe', microPerMinute: 3_000 },
+];
+const nowMs = Date.UTC(2026, 9, 14, 12);
+const selected = selectLowestCostSttEntry(
+  ['openai:gpt-4o-mini-transcribe', 'deepgram:nova-3'],
+  prices,
+  {
+    availableVendors: ['openai', 'deepgram'],
+    nowMs,
+    estimatedSeconds: 60,
+    creditVersion: 'funding-a',
+    credit: {
+      vendor: 'deepgram',
+      version: 'funding-a',
+      checkedAtMs: nowMs - 1_000,
+      remainingMicro: 20_000,
+      reservedMicro: 5_000,
+      failedDays: 0,
+    },
+  },
+);
+// selected.serving is deepgram:nova-3; its fallback is openai:gpt-4o-mini-transcribe.
+// Acquire the matching credit hold in the same transaction before opening audio.
+```
+
+Credit is effective only when its version matches the complete current funding record, its successful check is less than 24 hours old, fewer than three distinct check days have failed, and the entire estimated liability fits after outstanding holds. Missing or invalid credit uses list-price order. Updating the configured vendor, amount or read instant must change the record version. A changed record cannot reuse an old cache.
+
+`language` decides which entries can serve, and `sttLanguageOptions(entry, language)` returns the language option to open the chosen entry with. An explicit tag such as `es` or `en-US` is kept for every vendor. Without one, a Deepgram entry gets `en-US`, the provider's own default, and another vendor's entry gets none. `null` asks for automatic language: the Deepgram rows price one named language, so a Deepgram entry is left out (`sttLanguageOptions()` returns `null` for it), and an OpenAI entry is opened without a language field, for automatic recognition. A value that is not a language tag throws a `RangeError`.
+
+The helper makes no reservation and reads no secret or environment variable. Read its snapshot and acquire the selected hold under one transaction before using the result. A concurrent admission must see the preceding hold. Keep locally settled usage deducted until it is reconciled with the supplier's report. Continue recording each provider's measured usage at its list price; mark only actual allocated supplier funding as prepaid.
+
+Pass the resulting entry order through the host's explicit `ProviderPolicy` ([Provider policy](#provider-policy)) and normal opening authorization. This helper does not authorize fallback, override a private-device choice, or widen an explicit single-vendor choice. An empty availability result is `undefined`, which the host must handle before constructing a chain. Deepgram's pre-recorded rows (`deepgramPreRecordedPricing()`) are a separate lookup and never price a live chain.
+
+## Connection authorization and measured usage
+
+```typescript
+import {
+  DeepgramStreamingSTT,
+  OpenAIRealtimeTranscriptionSTT,
+  StreamingSTTChain,
+  SttConnectionAuthorizationError,
+} from '@framers/agentos/io/voice-pipeline';
+
+const chain = new StreamingSTTChain(
+  [
+    new DeepgramStreamingSTT({ apiKey: process.env.DEEPGRAM_API_KEY!, mipOptOut: true, inputSampleRate: 48_000 }),
+    new OpenAIRealtimeTranscriptionSTT({ apiKey: process.env.OPENAI_API_KEY! }),
+  ],
+  { enableMidUtteranceFailover: true },
+);
+const session = await chain.startSession({
+  language: 'en',
+  connectionHooks: {
+    // Reserve for this exact socket; check signal.aborted before committing.
+    authorize: async (opening, signal) => { await holds.reserve(opening.entry, opening.connectionId, signal); },
+    // Synchronous: false refuses the frame and ends the provider.
+    beforeAudio: (opening, nextAudioSeconds) => holds.covers(opening.connectionId, nextAudioSeconds),
+    // Cumulative reports and one final report per attempted socket; queue them, never throw.
+    usage: (event) => settlements.enqueue(event.connectionId, event.audioSeconds, event.final),
+  },
+});
+session.on('error', (error) => {
+  if (error instanceof SttConnectionAuthorizationError) endForFunding();
+});
+```
+
+Deepgram and OpenAI streaming transcription establish a UUID `connectionId` before opening each socket. `StreamingSTTConfig.connectionHooks.authorize(opening, signal)` can acquire the host's funding reservation for that exact `entry` and `connectionId`. It resolves before the WebSocket upgrade and before any audio. Every OpenAI reconnect and rollover asks again. Provider permission remains with `ProviderPolicy`; funding approval does not widen it. A rejected or timed-out authorization is a `SttConnectionAuthorizationError`, which the chain does not retry as a vendor outage.
+
+The default authorization timeout is 10 seconds. Hosts must check the abort signal inside their reservation transaction before commit and release any acquisition that completes after cancellation. Socket cancellation and timeout prevent a late approval from opening a connection. A final zero report closes an unsuccessful opening. A host reconciles a hold by its identity if its worker disappears before reporting; a missing report never proves zero usage.
+
+An optional synchronous `connectionHooks.beforeAudio(opening, nextAudioSeconds)` checks prospective cumulative wire seconds immediately before every audio send, including backlog, replay and both overlap sockets. It must not throw. Returning false sends none of that frame and ends the provider with `SttConnectionAuthorizationError`, preserving final measured use and preventing cross-vendor retry. The hook is optional for existing consumers; a host claiming a bounded reservation supplies it.
+
+An optional `connectionHooks.audioCeiling(opening)` gives a socket's funded ceiling in wire seconds. `DeepgramStreamingSTT` then returns one session over successive sockets of the same vendor: it drains and closes a socket at its ceiling and opens the next through the same authorization, opt-out and conversion, with transcript times continuing on one clock. A refused successor ends the session with `SttConnectionAuthorizationError`; no frame goes past a funded ceiling and no other vendor is tried.
+
+`connectionHooks.usage(event)` receives immutable cumulative `audioSeconds` and one final report per attempted socket, including unsuccessful openings. It must synchronously queue processing and never throw. Adopted sessions also emit the same `usage` event. Use one of these delivery paths for settlement, with durable idempotence keyed by `connectionId`; do not add their identical totals together. `connectionIndex` remains the provider session's local adopted index and is not a unique identity. An unadopted OpenAI opening reports index zero through the hook only. Built-in usage includes `entry`, `model` and `connectionId`; older custom adapters may still emit the original `StreamingSTTUsageEvent` shape and cannot be assumed suitable for this accounting path.
+
+Deepgram accepts `inputSampleRate` as an optional frame-rate assertion and converts to 16 kHz mono PCM16. Without that assertion it reads each frame's rate. The shared converter preserves phase between short frames and refuses a rate that is not a positive whole number and a sample that is not finite. Both live audio and a chain's replay traverse the provider conversion. OpenAI retains its 24 kHz output and existing overlap accounting. Measured seconds count samples handed successfully to each socket, including replay and rollover overlap; they are not a provider invoice or proof the remote endpoint processed every sample. Supplier reconciliation is a separate usage-API operation.
+
+Deepgram opens with the language `sttLanguageOptions()` gives its entry ([Hosted transcription cost selection](#hosted-transcription-cost-selection)): an explicit tag, or `en-US` without one. A value that is not a language tag, such as `multi`, is refused before any socket opens, since only the single-language rows are priced. Its transcripts carry `itemId`, `startMs` and `endMs` on the socket's audio clock: every interim and the final of one segment share an `itemId`, and the next segment gets a new one. Through a failover facade, a backup's times move onto the facade's input timeline, so a final the backup transcribes again from the replay is dropped as a repeat.
+
+Deepgram's `usageIntervalMs` defaults to zero for one final report; a positive value adds cumulative reports while the connection is open. Its final report is emitted once across explicit close, remote close and failed upgrade cleanup. Configure `mipOptOut: true` to send `mip_opt_out=true`; a per-session false value cannot undo that setting. These changes preserve the general-purpose library's existing opt-out and failover defaults. Hosts that require those policies set them explicitly.
+
+## Call profile
+
+`overrides.callProfile` ([`CallPipelineProfile`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts)) runs the session as one scoped call. `startSession()` then returns the call's own session and reads neither `endpointDetector` nor `bargeinHandler`. It throws when the config sets `diarization: true`, when the agent session has no `abort()`, when `minSpeechMs`, `maxTextCharacters` or `maxSynthesisRequests` is not a positive safe integer, and when the transport lacks `waitForPlayback()` and `clearPlayback()` ([`IPlaybackTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)). `LiveKitStreamTransport` has both and speaks only with its `publisher` option ([Speaking in the room](#speaking-in-the-room)); without it, the first reply's send rejects and fails the call. An STT session without `pushAudioScoped()` and `reset()` ([`ScopedStreamingSTTSession`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)) closes the call, and `startSession()` rejects.
+
+- **Input.** Each transport frame must be normalized 16 kHz mono PCM; a frame that is not ends the call. One sequenced queue, bounded by `maxInputFrames` and `maxInputSamples`, hands each frame to the STT session, the profile's audio endpoint detector and its VAD session, in that order, stamped with the call's scope, call, recognition turn and fences. An overflow, an out-of-order frame, or a gap the transport (`gap`) or the STT session (`stt:gap`) reports is emitted as `gap` and handled as an interruption, so recognition from before the gap never completes a turn.
+- **Turns.** A `turn_complete` from the endpoint detector is taken only while the call is `listening`, and only when it carries the call's current scope, call, recognition turn and generation. Taking it advances the inference generation, waits for `onGeneration` and resets the input sessions before the agent is asked. Transcripts, VAD events and synthesis of an earlier generation are dropped.
+- **Replies.** Each reply opens a TTS session of its own, given the call's identity and a request id as `config.call`; the session must implement `setAudioSink()` and `writeTokens()`. The producer waits for its sink with each chunk, and the chunk waits in a one-slot playback queue (`playback` bounds its bytes and duration, at most two seconds) until the transport acknowledges that it played. The call stays `speaking` until then: `agent_done`, with the acknowledged duration, goes out only once `flush()` has resolved after `flush_complete` and a final `completed` `usage` report, and the last chunk has played. The sink refuses a chunk of another scope or call; a refusal that reaches `writeTokens()` or `flush()` ends the call, and so do a usage report of another request, a chunk emitted as `audio` instead of through the sink, more than `maxTextCharacters` of reply text and more than `maxSynthesisRequests` replies.
+- **Interruption.** The VAD session's `vad` events add up the duration of successive speech frames, measured from their samples; a frame of silence clears the sum. When it reaches `minSpeechMs` while the call is `processing` or `speaking`, the call advances the generation, calls `onInterrupted` with the interrupted identity and `agentSession.abort()`, cancels and closes the TTS session, clears playback, waits for `fenceInference` on the old generation and for the reply to unwind, resets the input sessions and returns to `listening`. A shorter sound does not interrupt. A client `mute` interrupts as well, and input is dropped until `unmute`.
+- **Detach and reattach.** `detach(reason, transportEpoch)` for the call's current epoch drops input, interrupts as above and emits `detached`; the call stays open and emits no `close`. `reattach(generation)` takes only the same worker and inference generations with a strictly newer transport epoch: it fences that generation with `onGeneration`, resets the input sessions and emits `reattached`. Anything else throws.
+- **Failures.** An `'error'` from the STT, TTS or VAD session, the endpoint detector or the transport, an STT session that closes by itself, a TTS session that closes before its flush completes, a transport send that rejects, a refused chunk or usage report, a VAD event that is not the one for the frame just admitted, more than 32 transcripts waiting, and a client message other than `control` with `mute`, `unmute` or `stop` each call `onFailure` with a content-free code and emit `failure`. The call then closes itself, unless `managerOwned` is set; the host then closes it, and a transport `close` or a client `stop` is left to the host as well.
+- **Closing.** `stopSession()` moves the call to `closed` and emits `close` at once, then aborts the agent and synthesis, clears playback, closes the STT session, waits for `fenceInference`, for the work in flight and for the VAD session and the endpoint detector to be disposed, advances the generation and closes the transport. Its promise rejects when that cleanup fails; the call stays closed. A host that orders the steps itself runs `cancelSynthesis()`, `drainRecognition(signal)` and `clearCallPlayback()` first: after `cancelSynthesis()` the call accepts only final transcripts of the closing generation, and only while `drainRecognition()` runs.
+- **Events.** The orchestrator re-emits the call's `turn_complete` (a `ScopedTurnCompleteEvent`), `close`, `transcript`, `gap`, `generation`, `interrupted`, `usage` (each synthesis report, a `StreamingTTSUsageEvent`), `failure`, `detached` and `reattached`. `waitForUserTurn()` resolves with the next turn and rejects on close; `pushToTTS()` speaks its text as a reply of its own while the call is `listening`.
 
 ---
 
@@ -618,7 +895,7 @@ session.close();
 | `usageIntervalMs` | `0` | `'usage'` reports for open connections at this interval; `0` reports each connection once, when it closes. |
 | `rollover` | below | `false` keeps a single connection. |
 
-Events: `transcript` (with `itemId`, `startMs` and `endMs` on the session's audio clock, and `language`); `speech_start` and `speech_end`; `usage` ([`StreamingSTTUsageEvent`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts): `providerId`, `model`, `connectionIndex`, `audioSeconds`, `final`); `warning` (a `VoicePipelineError`, for a server error the session survives, an item whose transcription failed, or a `rollover.approve` that threw); and `error` followed by `close` when the session cannot go on: a reconnect refused as unauthorised, or failures beyond the retries. A failed item that had shown interim text gets a final with empty text, so a display keyed by `itemId` drops it.
+Events: `transcript` (with `itemId`, `startMs` and `endMs` on the session's audio clock, and `language`); `speech_start` and `speech_end`; `usage` ([`SttMeasuredUsageEvent`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts): `providerId`, `model`, `entry`, `connectionId`, `connectionIndex`, `audioSeconds`, `final`; see [Connection authorization and measured usage](#connection-authorization-and-measured-usage)); `warning` (a `VoicePipelineError`, for a server error the session survives, an item whose transcription failed, or a `rollover.approve` that threw); and `error` followed by `close` when the session cannot go on: a reconnect refused as unauthorised, or failures beyond the retries. A failed item that had shown interim text gets a final with empty text, so a display keyed by `itemId` drops it.
 
 **Ending a session.** Call `flush()` before `close()`: it commits the turn in progress and waits for its final, while `close()` ends every connection at once and discards audio not yet committed. With `turnDetection: null`, `flush()` commits the buffer. Under server turn detection it commits only while the server reports speech in progress, so an utterance that began within the voice detector's reporting latency before the call (the time the server takes to send `input_audio_buffer.speech_started`) is not committed, and the `close()` that follows discards it.
 
@@ -633,7 +910,7 @@ const { stt } = createSttChainFromEnv({ openaiRealtime: { usageIntervalMs: 15_00
 const session = await stt.startSession({ language: 'en' });
 ```
 
-In both constructors OpenAI Realtime transcription joins the STT chain when `OPENAI_API_KEY` is set, after Deepgram and ElevenLabs. With mid-utterance failover on, the default in `createVoiceProvidersFromEnv()`, a session is the chain's failover facade: it forwards transcripts, speech events, `usage` and `warning` from its provider sessions, and its `flush()` drains the provider session in use, so a configuration in which the caller commits each turn (`turnDetection: null`) commits through the facade too. A close that session makes after flush and before the next frame is pushed ends the facade: it emits `close` once, releases the active session and starts no backup. Later `pushAudio()` and `flush()` calls are ignored, as after the caller's `close()`; open a new session to resume transcription. `currentProviderId` retains the last selected provider's id.
+In both constructors OpenAI Realtime transcription joins the STT chain when `OPENAI_API_KEY` is set, after Deepgram and ElevenLabs. With mid-utterance failover on, the default in `createVoiceProvidersFromEnv()`, a session is the chain's failover facade: it forwards transcripts, speech events and `warning` from the provider session in use and `usage` from each provider session it attached, a failed one too, and its `flush()` drains the provider session in use, so a configuration in which the caller commits each turn (`turnDetection: null`) commits through the facade too. The transcripts a provider session emits as the facade closes it, such as the empty finals with which `MoonshineBrowserSTT` retracts an open line's interim text, still reach the facade's listeners: on a switch, before the backup's, and when the facade ends, before its `close`. A close that session makes after flush and before the next frame is pushed ends the facade: it emits `close` once, releases the active session and starts no backup. Later `pushAudio()` and `flush()` calls are ignored, as after the caller's `close()`; open a new session to resume transcription. `currentProviderId` retains the last selected provider's id.
 
 ### ElevenLabs TTS Options
 
@@ -660,6 +937,16 @@ const orchestrator = new VoicePipelineOrchestrator({
 | `speed` | `number` | not sent | `generation_config.speed` |
 
 They go in the first message of the ElevenLabs WebSocket stream. `ttsExpressiveness`, when set, takes precedence over these keys. Settings computed from a character's state apply from the next pipeline session, since the TTS session opens once per pipeline session.
+
+---
+
+## Scoped call profile
+
+The call profile owns an `IVadSession` and an `IAudioEndpointDetector` supplied by typed scoped factories. Its single sequenced 16 kHz mono stream reaches STT and both detectors. A gap resets detector windows; completion, interruption, detach and disposal reset or dispose owned sessions. Speech duration comes from the VAD frames. `VoiceSessionFactory` sets the initial interruption threshold, `minSpeechMs`, to 120 ms, so one short noise frame does not cancel output. [Call profile](#call-profile) lists the profile's options, failures and events.
+
+The profile invalidates the inference generation before cancellation. It supervises STT, TTS, transport and async agent failures, and stale results cannot close a new turn or speak after reattachment. Its awaited producer and playback queue hold at most the configured byte and duration bounds, including in-flight output. `flush_complete` means synthesis finished. `agent_done` waits for acknowledged playback of that generation. A send rejection fails that call and enters ordered cleanup.
+
+The existing listen-only session remains separate: it requires no TTS or reasoning adapter. Direct event-only providers remain available to legacy injected callers. A pack whose event names match core is not thereby a scoped, cancellable, budgeted, pull-output adapter. Hosted admission requires the typed manifest and its conformance evidence.
 
 ---
 

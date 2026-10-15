@@ -46,7 +46,7 @@
 
 #### Safety & Security
 
-- [**Guardrails System**](./safety/GUARDRAILS_USAGE.md) — Two-phase guardrail dispatch, built-in packs (PII, ML classifiers, topicality, code safety, grounding), and folder-level filesystem permissions
+- [**Guardrails System**](./safety/GUARDRAILS_USAGE.md) — Two-phase guardrail dispatch, the six built-in packs (PII redaction, ML classifiers, topicality, code safety, grounding guard, content policy rewriter), and the folder-level file permissions that Wunderland adds on top of AgentOS
 - [**Safety Primitives**](./safety/SAFETY_PRIMITIVES.md) — Circuit breakers, cost guards, stuck detection, and tool execution guards
 
 #### Memory & Storage
@@ -99,7 +99,7 @@
 
 ### API Reference
 
-- [**TypeDoc API**](./api/index.html) — Auto-generated API documentation
+- [**TypeDoc API**](https://docs.agentos.sh/api) — Auto-generated API documentation
 
 ---
 
@@ -119,7 +119,7 @@
 1. **New to AgentOS?** Start with the [README](../README.md) for installation and basic usage
 2. **Understanding the system?** Read the [Architecture Overview](./architecture/ARCHITECTURE.md)
 3. **Building features?** Check the relevant feature guide (Planning, HITL, Guardrails, etc.)
-4. **API details?** Browse the [TypeDoc API Reference](./api/index.html)
+4. **API details?** Browse the [TypeDoc API Reference](https://docs.agentos.sh/api)
 5. **Troubleshooting?** See [Platform Support](./architecture/PLATFORM_SUPPORT.md)
 
 ---

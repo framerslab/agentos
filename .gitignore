@@ -25,6 +25,9 @@ docs/api/
 # Test coverage reports
 coverage/
 
+# Files CI downloads for tests (the Moonshine test model and clip)
+.cache/
+
 # Local SQLite test artifacts (e.g. tmp-parity.sqlite from RAG vector-store
 # parity tests). These are scratch databases produced during local test
 # runs and should never be committed.

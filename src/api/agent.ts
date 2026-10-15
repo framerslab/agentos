@@ -68,6 +68,8 @@ import type { SessionTranscriptMessage } from './sessionTranscript.js';
 import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
 // gmi.ts imports this module back (through gmiPersona.ts); each side calls the other only inside functions.
 import { gmi } from './gmi.js';
+import type { VoiceSessionFactory, StartVoiceSession, ManagedVoiceSession } from '../io/voice-platform/VoiceSessionFactory.js';
+import type { VoiceAgent } from '../io/voice-platform/contracts/index.js';
 
 /**
  * Provider hook interface consumed by `agent()` for memory integration.
@@ -117,9 +119,11 @@ export interface AgentMemoryProvider {
  * Configuration options for the {@link agent} factory function.
  *
  * Extends `BaseAgentConfig` with backward-compatible convenience fields.
- * All `BaseAgentConfig` fields (rag, discovery, permissions, emergent, voice,
- * etc.) are accepted and stored in config but are not actively wired in the
- * lightweight agent — they will be consumed by `agency()` and the full runtime.
+ * All `BaseAgentConfig` fields are accepted. Without `runtime: 'gmi'`, the
+ * lightweight agent does not apply the ones the `agent` column of the
+ * capability contract defers (rag, discovery, guardrails, security,
+ * permissions, emergent, voice, etc.), and one warning at construction names
+ * those that are set. No surface applies `security` or `permissions`.
  */
 export interface AgentOptions extends BaseAgentConfig {
   /**
@@ -330,6 +334,8 @@ export interface AgentOptions extends BaseAgentConfig {
    * bound to a learner. The legacy runtime ignores it.
    */
   learning?: boolean | LearningConfig;
+  /** Explicit runtime binding. No provider is discovered from the process environment for this path. */
+  voice?: BaseAgentConfig['voice'] & { session?: { factory: VoiceSessionFactory; agent: VoiceAgent } };
 }
 
 /**
@@ -569,6 +575,8 @@ export interface Agent {
   getAvatarBindings(): import('./types').AvatarBindingInputs & Record<string, unknown>;
   /** Inject game-specific binding overrides (healthBand, combatMode, etc.). */
   setAvatarBindingOverrides(overrides: Record<string, unknown>): void;
+  /** Prepares the configured scoped voice call; present only with voice.session. */
+  voiceSession?(request: Omit<StartVoiceSession, 'agent'>): Promise<ManagedVoiceSession>;
 }
 
 function mergeUsageLedgerOptions(
@@ -781,10 +789,10 @@ async function generateWithValidation(
  * surface, with every session served by a Generalized Mind Instance built from
  * these options, and the construction checks and diagnostics of that path.
  *
- * @param opts - Agent configuration including model, instructions, and optional tools.
- *   All `BaseAgentConfig` fields are accepted; advanced fields (rag, discovery,
- *   permissions, emergent, voice, guardrails, etc.) are stored but not actively
- *   wired in the lightweight layer — they are consumed by `agency()` and the full runtime.
+ * @param opts - Agent configuration. Deferred fields are reported at construction.
+ *   Voice is applied only through an explicit `voice.session` binding and the
+ *   returned `voiceSession()` method. Ordinary generate/stream/session calls
+ *   remain text calls. The full runtime does not apply the voice flag.
  * @returns An {@link Agent} instance with `generate`, `stream`, `session`, and `close` methods.
  * @throws {Error} With `runtime: 'gmi'`, at construction, naming an option the GMI path
  *   cannot honour (see {@link gmi}).
@@ -800,6 +808,10 @@ async function generateWithValidation(
  * @category Core
  */
 export function agent(opts: AgentOptions): Agent {
+  if (opts.voice?.session) {
+    const keys = Object.keys(opts.voice);
+    if (opts.runtime === 'gmi' || opts.voice.enabled !== true || keys.some((key) => !['enabled', 'session'].includes(key)) || Object.keys(opts.voice.session).some((key) => !['factory', 'agent'].includes(key))) throw new Error('configured voice fields refused');
+  }
   // Before anything of the legacy path runs: its diagnostics and warnings describe that path.
   if (opts.runtime === 'gmi') return gmi(opts);
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
@@ -814,7 +826,7 @@ export function agent(opts: AgentOptions): Agent {
   // costs a session records from outside AgentOS.
   const agentBudget = asSpendBudget(opts.budget);
   let avatarBindingOverrides: Record<string, unknown> = {};
-  warnOnDeferredLightweightAgentCapabilities(opts);
+  warnOnDeferredLightweightAgentCapabilities(opts.voice?.session ? { ...opts, voice: undefined } : opts);
 
   /*
    * The cognitive mechanisms run inside a CognitiveMemoryManager, which this
@@ -1364,10 +1376,17 @@ export function agent(opts: AgentOptions): Agent {
     },
   };
 
+  if (opts.voice?.session) {
+    const voice = opts.voice.session;
+    const factory = voice.factory;
+    const revision = structuredClone(voice.agent);
+    agentInstance.voiceSession = (request) => factory.startSession({ ...request, agent: revision });
+  }
+
   // Stash the original config as a non-enumerable property so that
   // exportAgentConfig() can retrieve it without polluting the public API.
   Object.defineProperty(agentInstance, '__config', {
-    value: opts,
+    value: opts.voice?.session ? { ...opts, voice: { enabled: true } } : opts,
     enumerable: false,
     configurable: true,
   });

@@ -36,6 +36,7 @@
  */
 
 import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
+import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
 export interface CacheUsageSample {
   /** Resolved model id the request ran on. */

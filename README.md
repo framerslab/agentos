@@ -37,21 +37,6 @@ AgentOS is an open-source TypeScript framework for AI agents that **remember, ad
 
 ---
 
-<div align="center">
-
-<picture>
-  <source srcset="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-forge-demo.webp" type="image/webp" />
-  <img src="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-forge-demo.gif"
-       alt="Three AgentOS agents with distinct HEXACO personalities collaborate on a code review, forge a new tool at runtime once they hit a gap their static toolkit can't cover, the LLM judge approves the spec, and all three invoke it on the next turn."
-       width="900" />
-</picture>
-
-<sub>Runtime tool forging + multi-agent collaboration. Reproduce with <code>node <a href="https://github.com/framerslab/agentos/blob/master/examples/emergent-hierarchical-spawning.mjs">examples/emergent-hierarchical-spawning.mjs</a></code>.</sub>
-
-</div>
-
----
-
 ## Install
 
 ```bash
@@ -185,7 +170,7 @@ await session.send('Explain recursion with an analogy.');
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
 | **Multi-Agent Teams** | 6 coordination strategies * manager delegation and specialist spawning * panel quorum on the parallel strategy * HITL approval gates |
 | **Orchestration** | `workflow()` DAGs * `AgentGraph` router, personality and discovery edges * `mission()` graphs from plan templates * checkpointing |
-| **Guardrails** | 5 security tiers * 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
+| **Guardrails** | 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
 | **Emergent Capabilities** | Runtime tool forging * 4 self-improvement tools * tiered promotion * skill export |
 | **Voice & Telephony** | ElevenLabs, Deepgram, Whisper * Twilio, Telnyx, Plivo |
 | **Channels** | 37 platform adapters (Telegram, Discord, Slack, WhatsApp, webchat, ...) |
@@ -244,7 +229,7 @@ Three layers, highest priority first: inline `apiKey` on the call, a module-leve
 
 - **`agent()`**: lightweight stateful agent. Prompts, sessions, personality, hooks, tools, memory through `memoryProvider` hooks. With `runtime: 'gmi'` (or `gmi()`), every session is a GMI built from the same options, with cognitive memory, sentiment tracking and metaprompts per its `cognition` profile.
 - **`agency()`**: multi-agent teams built from `agent()` members, with HITL approval gates, run limits, structured output, provenance and, on the hierarchical strategy, specialists spawned at runtime. Its `guardrails` and `rag` options are reported or logged and not applied, and `voice.enabled` serves the agency as JSON text over a local WebSocket. It wires no channels; channel adapters run on the full runtime or with `ChannelRouter`.
-- **`generateText()` / `streamText()` / `generateObject()` / `generateImage()` / `generateVideo()` / `generateMusic()` / `performOCR()` / `embedText()`**: low-level multi-modal helpers with native tool calling.
+- **`generateText()` / `streamText()` / `generateObject()` / `generateImage()` / `generateVideo()` / `generateMusic()` / `performOCR()` / `embedText()`**: low-level multi-modal helpers. `generateText()` and `streamText()` take `tools`; the other helpers take none.
 - **`workflow()` / `AgentGraph` / `mission()`**: three orchestration authoring APIs over one graph runtime.
 
 Provider fallback is on by default for `generateText()`, `streamText()`, `agent()` and `agency()`: when a call fails with a retryable error, it is retried on the other providers whose keys are in the environment. Pass `fallbackProviders: []` to turn it off, or a list to set the chain yourself. The GMIs of the full runtime (`processRequest()`) call their provider without a fallback chain. The GMIs of `agent({ runtime: 'gmi' })` call it through a completion gateway built from the agent's `fallbackProviders`, which moves to the next provider when a call fails with a retryable error before its first output, and not after it.
@@ -259,7 +244,7 @@ Provider fallback is on by default for `generateText()`, `streamText()`, `agent(
 - **[Architecture](https://docs.agentos.sh/architecture/system-architecture)**: system design, layer breakdown
 - **[Cognitive Memory](https://docs.agentos.sh/features/cognitive-memory)**: 8 mechanisms with 30+ APA citations
 - **[RAG Configuration](https://docs.agentos.sh/features/rag-memory)**: vector stores, embeddings, sources
-- **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: 5 tiers, 6 packs
+- **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, fail-open and fail-closed guards
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
 - **[Blog](https://docs.agentos.sh/blog)**: engineering posts, benchmark publications, transparency audits
 - **[Discord](https://wilds.ai/discord)** * **[GitHub Issues](https://github.com/framerslab/agentos/issues)** * **[Wilds.ai](https://wilds.ai)** (AI game worlds powered by AgentOS)

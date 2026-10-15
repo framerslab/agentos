@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import { describe, it, expect, vi } from 'vitest';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { SecretBox } from '../signing.js';
@@ -15,9 +16,14 @@ describe('meetingStoresDdl', () => {
   it('keeps identifiers within 63 bytes and includes nullable timer columns in record order', () => {
     const ddl = meetingStoresDdl('a'.repeat(38));
     const names = [...ddl.matchAll(/CREATE (?:UNIQUE )?(?:TABLE|INDEX) IF NOT EXISTS (\w+)/g)].map((match) => match[1]);
-    expect(names).toHaveLength(13);
+    expect(names).toHaveLength(14);
     for (const name of names) expect(Buffer.byteLength(name)).toBeLessThanOrEqual(63);
     expect(ddl).toContain('  participant_count INTEGER,\n  leave_commanded_at BIGINT,\n  capture_suspended_at BIGINT,\n  alone_since BIGINT,');
+    expect(ddl).toContain('last_report_at BIGINT');
+    expect(ddl).toContain('last_usage_source_at BIGINT');
+    expect(ddl).toContain('completion_hook_at BIGINT');
+    expect(ddl).toContain('completion_hook_claimed_at BIGINT');
+    expect(ddl).toContain("  purged BOOLEAN NOT NULL DEFAULT FALSE,\n  kind TEXT NOT NULL DEFAULT 'event',\n  expires_at BIGINT\n);");
     expect(() => meetingStoresDdl('a'.repeat(39))).toThrow();
   });
   it.each(['transactions', 'persistence', 'concurrent'] as const)('refuses every store when the adapter lacks %s', (missing) => {
@@ -38,6 +44,8 @@ describe('meetingStoresDdl', () => {
     const runs = new SqlRunStore({ db, box });
     expect(JSON.stringify(runs)).toBe('"[SqlRunStore redacted]"');
     expect(JSON.stringify({ runs })).toBe('{"runs":"[SqlRunStore redacted]"}');
+    expect(inspect(runs)).toBe('[SqlRunStore redacted]');
+    expect(inspect({ runs }, { depth: 5 })).toBe('{ runs: [SqlRunStore redacted] }');
     expect(serialiseBox).not.toHaveBeenCalled();
     expect(serialiseDb).not.toHaveBeenCalled();
   });

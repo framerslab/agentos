@@ -82,6 +82,94 @@ jobs:
           console.log('loadIsolated from dist:', read.format, read.content);
           "
 
+      - name: Built library exports preserve personal-source delivery policy
+        run: |
+          node --input-type=module <<'JS'
+          import { createSourceDerivation, canDeliverSourceDerivation } from './dist/cognition/library/index.js';
+          const dependency = {
+            tenantId: 'tenant-a', ownerId: 'owner-a', connectionId: 'connection-a',
+            generation: 1, sourceId: 'source-a', messageIds: ['message-a'],
+            version: 'version-a', expiresAt: 1000,
+          };
+          const answer = createSourceDerivation([dependency]);
+          const current = [{ ...dependency, connected: true, paused: false, searchAskEnabled: true, liveEnabled: false }];
+          const context = { tenantId: 'tenant-a', ownerId: 'owner-a', surface: 'ask', liveOptIn: false };
+          if (!canDeliverSourceDerivation(answer, context, current, 999)) throw new Error('private_delivery_refused');
+          if (canDeliverSourceDerivation(answer, { ...context, surface: 'share' }, current, 999)) throw new Error('shared_delivery_allowed');
+          if (canDeliverSourceDerivation(answer, context, current, 1000)) throw new Error('expired_delivery_allowed');
+          JS
+
+      - name: Built Postgres vectors accept the SQL adapter
+        run: |
+          node --input-type=module <<'JS'
+          import { createPostgresAdapter } from '@framers/sql-storage-adapter';
+          import { PostgresVectorStore } from './dist/cognition/rag/vector_stores/PostgresVectorStore.js';
+          const db = createPostgresAdapter({ connectionString: process.env.AGENTOS_TEST_POSTGRES_URL });
+          await db.open();
+          try {
+            const store = new PostgresVectorStore({ id: 'contract', type: 'postgres', adapter: db, manageSchema: false });
+            await store.initialize();
+            if (!await store.healthCheck()) throw new Error('adapter_health_failed');
+            await db.transaction((tx) => store.withStorageTransaction(tx, async (view) => {
+              if (!await view.healthCheck()) throw new Error('transaction_health_failed');
+            }));
+            await store.close();
+            if ((await db.get('SELECT 1 AS n'))?.n !== 1) throw new Error('adapter_closed');
+          } finally {
+            await db.close();
+          }
+          JS
+
+      - name: Built source derivation store enforces inactive owners
+        run: |
+          node --input-type=module <<'JS'
+          import { randomUUID } from 'node:crypto';
+          import { createPostgresAdapter } from '@framers/sql-storage-adapter';
+          import { sourceDerivationSchema, SqlSourceDerivationStore } from './dist/cognition/library/index.js';
+          const prefix = `bc_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+          const db = createPostgresAdapter({ connectionString: process.env.AGENTOS_TEST_POSTGRES_URL });
+          await db.open();
+          try {
+            for (const statement of sourceDerivationSchema(prefix)) await db.exec(statement);
+            const store = new SqlSourceDerivationStore(db, {
+              tablePrefix: prefix,
+              bindings: {
+                readCurrent: async () => [], purgeResults: async () => {}, purgeSources: async () => {},
+              },
+            });
+            const scope = { tenantId: 'tenant-a', ownerId: 'owner-a' };
+            if (await store.capture(scope) !== null) throw new Error('inactive_owner_admitted');
+            if (await store.activateOwner(scope, async () => false)) throw new Error('authorization_bypassed');
+            await store.activateOwner(scope, async () => true);
+            const ticket = await store.capture(scope);
+            if (!ticket) throw new Error('active_owner_missing');
+            await store.invalidate(scope, { kind: 'owner' }, async () => {}, { disableOwner: true });
+            const result = await store.apply(ticket, async () => { throw new Error('stale_callback_entered'); });
+            if (result.kind !== 'stale') throw new Error('stale_ticket_accepted');
+          } finally {
+            for (const suffix of ['edges', 'results', 'tombstones', 'journal', 'owners']) {
+              await db.exec(`DROP TABLE IF EXISTS "${prefix}_${suffix}" CASCADE`);
+            }
+            await db.close();
+          }
+          JS
+
+      - name: Built content-safe logging export
+        run: |
+          node --input-type=module <<'JS'
+          import { enableContentSafeTelemetry, createLogger, PinoLogger } from '@framers/agentos/logging';
+          const events = [];
+          const before = new PinoLogger().child({ opaque: 'fixture-private-binding' });
+          enableContentSafeTelemetry((event) => events.push(event));
+          before.error('fixture-private-content', { err: new Error('fixture-private-error') });
+          createLogger('fixture-private-component').warn('fixture-private-content');
+          if (events.length !== 2) throw new Error('missing_safe_events');
+          if (JSON.stringify(events).includes('fixture-private')) throw new Error('unsafe_event');
+          if (events.some((event) => Object.keys(event).sort().join(',') !== 'kind,n,state')) {
+            throw new Error('unexpected_safe_event_keys');
+          }
+          JS
+
       - name: Lint
         run: pnpm run lint
 
@@ -103,6 +191,59 @@ jobs:
 
       - name: Type check
         run: pnpm run typecheck
+
+      # The Moonshine browser provider's integration test runs the real
+      # @moonshine-ai/moonshine-wasm in Node on its tiny streaming model and a
+      # recorded clip, fetched once and kept in the cache. The fetch checks each
+      # file against the sha256 pinned here, and the cache key ends in a digest
+      # of the pins, so a copy cached under other pins is never restored. A file
+      # that differs fails the job with its actual sha256; to move to another
+      # model or clip, change its URL and its line together.
+      - name: Pin the Moonshine test model's checksums
+        id: moonshine-sums
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/moonshine-test-model.sha256" <<'SUMS'
+          22ecc949e146c49667fda28d102d4e30749a107dc88a396292aa8f277ef1347c  tiny-streaming-en/adapter.ort
+          143a36667b8d05fd9d04e8c337b7ee121f37ef299aea6b3d82bdb3d3401950b4  tiny-streaming-en/cross_kv.ort
+          8852553f312adb6c9aa4d17418015049b30f412209ee569d336548c0044627de  tiny-streaming-en/decoder_kv.ort
+          a8414e1a5dedf9f2093d7680601dd8a9b0433e7020260eafe0e370ead91134ca  tiny-streaming-en/encoder.ort
+          271a563251f11e6311949530f8025ed4d345c5d69d4ac1efa74093779927d636  tiny-streaming-en/frontend.ort
+          74fe5ddebd63b17caf59e8a3b18c17547ff7bce1642050edbb1c3962674f8950  tiny-streaming-en/streaming_config.json
+          6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d  tiny-streaming-en/tokenizer.bin
+          14a5a09479cab470db7de4fd16c0e18a8a88c03cc6d92a09a658e857ee1f73a5  two_cities_16k.wav
+          SUMS
+          echo "digest=$(sha256sum "$RUNNER_TEMP/moonshine-test-model.sha256" | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the Moonshine test model
+        uses: actions/cache@v5
+        with:
+          path: .cache/moonshine
+          key: moonshine-test-tiny-streaming-en-quantized_26_07_30-cd95be77-${{ steps.moonshine-sums.outputs.digest }}
+
+      - name: Fetch the Moonshine test model
+        run: |
+          set -euo pipefail
+          dir=.cache/moonshine
+          sums="$RUNNER_TEMP/moonshine-test-model.sha256"
+          mkdir -p "$dir/tiny-streaming-en"
+          for f in adapter.ort cross_kv.ort decoder_kv.ort encoder.ort frontend.ort streaming_config.json tokenizer.bin; do
+            [ -s "$dir/tiny-streaming-en/$f" ] || curl -fsSL --retry 3 -o "$dir/tiny-streaming-en/$f" \
+              "https://download.moonshine.ai/model/tiny-streaming-en/quantized_26_07_30/$f"
+          done
+          [ -s "$dir/two_cities_16k.wav" ] || curl -fsSL --retry 3 -o "$dir/two_cities_16k.wav" \
+            "https://raw.githubusercontent.com/moonshine-ai/moonshine/cd95be7728c5141b581a3fb8837742687c06c6d1/test-assets/two_cities_16k.wav"
+          # A file that differs from its pin is deleted, so the next run fetches it again, and the job fails.
+          if ! (cd "$dir" && sha256sum --check --strict "$sums"); then
+            while read -r sum file; do
+              if ! echo "$sum  $dir/$file" | sha256sum --check --status; then
+                echo "::error::$dir/$file has sha256 $(sha256sum "$dir/$file" | cut -d' ' -f1), not the pinned $sum; deleted, so the next run fetches it again"
+                rm -f -- "$dir/$file"
+              fi
+            done < "$sums"
+            exit 1
+          fi
+          echo "AGENTOS_TEST_MOONSHINE_DIR=$PWD/$dir" >> "$GITHUB_ENV"
 
       - name: Test with coverage
         run: pnpm run test -- --coverage

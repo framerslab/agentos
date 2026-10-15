@@ -88,6 +88,7 @@ export * from './extensions';
 export * from './io/channels';
 // Voice Calls (telephony providers)
 export * from './io/channels/telephony';
+// Meeting bots (the meeting-participant channel)
 export * from './io/channels/meetings/index.js';
 // Unified speech runtime (STT/TTS/VAD/wake-word)
 export * from './io/speech';
@@ -152,6 +153,9 @@ export {
 } from './cognition/rag/unified/policy.js';
 // Cognitive Memory System
 export * from './cognition/memory';
+// Two barrels above export an `isPublicAddress`: the memory barrel `guardedFetch`'s rule, and the meetings barrel the
+// checked egress module's stricter rule, which the outbox delivery holds. The root exports `guardedFetch`'s.
+export { isPublicAddress } from './cognition/memory';
 // Memory Wiki — markdown-first long-term memory for soul-file agents
 export {
   WikiMemoryStore,

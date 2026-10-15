@@ -3,9 +3,10 @@
  *
  * Dispatches guardrail evaluations for input and output processing.
  *
- * This module provides two main functions:
+ * This module provides three main functions:
  * - {@link evaluateInputGuardrails} - Evaluate user input before orchestration
  * - {@link wrapOutputGuardrails} - Wrap output stream with guardrail filtering
+ * - {@link createToolCallGate} - Judge a tool call before the runtime runs it
  *
  * @example
  * ```typescript
@@ -35,6 +36,7 @@ import {
   AgentOSResponse,
   AgentOSResponseChunkType,
   type AgentOSErrorChunk,
+  type AgentOSToolCallRequestChunk,
 } from '../../api/types/AgentOSResponse';
 import {
   GuardrailAction,
@@ -131,6 +133,13 @@ export interface GuardrailOutputVerdict {
   finalText: string | null;
   /** The reply's text as the guards judged it, before any rewrite; null for a verdict on a streamed delta, which judged no whole reply. */
   originalText: string | null;
+  /**
+   * The ids of the actionable tool calls (`executionMode: 'external'`) a block withheld from the caller: the calls of
+   * the tool-call chunk it ended the stream in place of, or, in hold mode, of the tool-call chunk after the text it
+   * blocked. AgentOS drops the pause the runtime saved for them when the turn stopped for them. Unset when a verdict
+   * withheld no actionable call.
+   */
+  toolCallIds?: string[];
 }
 
 /**
@@ -284,6 +293,35 @@ export async function* wrapOutputGuardrails(
   // Delegate to the two-phase parallel dispatcher.
   // normalizeServices handles single / array / undefined normalization.
   yield* ParallelGuardrailDispatcher.wrapOutput(normalizeServices(service), context, stream, options);
+}
+
+/**
+ * Judges one TOOL_CALL_REQUEST chunk with the guardrails that set `config.evaluateToolCalls`, as the output stream
+ * judges the tool-call chunks it carries: resolves to the blocking evaluation (a SANITIZE is applied as a BLOCK), or to
+ * null when the guardrails let the chunk pass.
+ */
+export type GuardrailToolCallGate = (chunk: AgentOSToolCallRequestChunk) => Promise<GuardrailEvaluationResult | null>;
+
+/**
+ * Create the tool-call gate over the guardrails that evaluate tool calls. AgentOS asks it about each call the runtime
+ * runs itself (`executionMode: 'internal'`) before the call runs, so a block refuses the call and the tool never runs.
+ *
+ * @param service - Single guardrail or array of guardrails
+ * @param context - Conversation context for policy decisions
+ * @returns The gate, or undefined when no guardrail sets `config.evaluateToolCalls`
+ */
+export function createToolCallGate(
+  service: IGuardrailService | IGuardrailService[] | undefined,
+  context: GuardrailContext,
+): GuardrailToolCallGate | undefined {
+  const services = normalizeServices(service);
+  if (!services.some((svc) => hasEvaluateOutput(svc) && svc.config?.evaluateToolCalls === true)) {
+    return undefined;
+  }
+  return async (chunk) => {
+    const verdict = await ParallelGuardrailDispatcher.evaluateToolCall(services, context, chunk);
+    return verdict.outcome === 'block' ? verdict.evaluation : null;
+  };
 }
 
 /**

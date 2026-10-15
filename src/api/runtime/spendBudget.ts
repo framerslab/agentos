@@ -11,6 +11,7 @@ import { CostCapExceededError, CostGuard } from '../../safety/runtime/CostGuard.
 import type { CostCapType } from '../../safety/runtime/CostGuard.js';
 import { openAIModelPricing } from '../../core/llm/providers/implementations/openaiPricing.js';
 import { clampMaxOutputTokens } from '../../core/llm/providers/model-output-limits.js';
+import { contentSafeConsole as console } from '../../core/logging/contentSafeConsole.js';
 
 /** What a budget was about to refuse, for an `onLimitReached` callback. */
 export interface SpendLimitInfo {

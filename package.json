@@ -1,6 +1,6 @@
 {
   "name": "@framers/agentos",
-  "version": "0.13.84",
+  "version": "0.13.145",
   "description": "AgentOS: open-source TypeScript framework for autonomous AI agents. Unified graph orchestration, cognitive memory, runtime tool forging, multi-tier guardrails, voice pipeline, and 11 LLM providers.",
   "homepage": "https://agentos.sh",
   "repository": {
@@ -119,6 +119,11 @@
       "import": "./dist/core/llm/auth/index.js",
       "default": "./dist/core/llm/auth/index.js",
       "types": "./dist/core/llm/auth/index.d.ts"
+    },
+    "./logging": {
+      "types": "./dist/core/logging/index.d.ts",
+      "import": "./dist/core/logging/index.js",
+      "default": "./dist/core/logging/index.js"
     },
     "./orchestration": {
       "import": "./dist/orchestration/index.js",
@@ -415,6 +420,11 @@
       "default": "./dist/safety/auth/index.js",
       "types": "./dist/safety/auth/index.d.ts"
     },
+    "./safety/egress": {
+      "types": "./dist/safety/egress/index.d.ts",
+      "import": "./dist/safety/egress/index.js",
+      "default": "./dist/safety/egress/index.js"
+    },
     "./sandbox/subprocess": {
       "import": "./dist/safety/sandbox/subprocess/index.js",
       "default": "./dist/safety/sandbox/subprocess/index.js",
@@ -621,7 +631,7 @@
     "prepare": "test -d dist || npm run build",
     "build": "npm run clean && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json && node scripts/fix-esm-imports.mjs",
     "build:knowledge": "node scripts/build-knowledge-corpus.mjs",
-    "verify:exports": "node --test scripts/package-exports.test.mjs",
+    "verify:exports": "node --test scripts/package-exports.test.mjs scripts/meeting-package.test.mjs",
     "prepublishOnly": "npm run build:knowledge && npm run build && npm run verify:exports",
     "typecheck": "tsc --noEmit",
     "lint": "node scripts/strip-nbsp.mjs && eslint \"src/**/*.ts\"",
@@ -766,6 +776,7 @@
   "peerDependencies": {
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
     "@livekit/rtc-node": "^1.1.0",
+    "@moonshine-ai/moonshine-wasm": "^0.1.5",
     "graphology": ">=0.25.0",
     "graphology-communities-louvain": ">=2.0.0",
     "graphology-types": ">=0.24.0",
@@ -782,6 +793,9 @@
       "optional": true
     },
     "@livekit/rtc-node": {
+      "optional": true
+    },
+    "@moonshine-ai/moonshine-wasm": {
       "optional": true
     },
     "graphology": {

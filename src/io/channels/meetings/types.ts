@@ -7,6 +7,9 @@
  * ({@link IMeetingBotProvider}) owns one way of joining.
  */
 
+import { z } from 'zod';
+import { quoteCompoundLiability } from '../../../safety/runtime/CreditRates.js';
+
 /** The platforms a provider may declare. */
 export type MeetingPlatform = 'google_meet' | 'microsoft_teams' | 'zoom';
 
@@ -145,12 +148,84 @@ export interface MeetingDispatchRecord {
   providerRunRef?: string;
 }
 
+const wholeFunding = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const positiveFunding = wholeFunding.refine((value) => value > 0);
+const fundingId = z.string().min(1).max(512);
+const fundingRate = z.object({ unit: z.enum(['second', 'millisecond', 'token', 'character', 'sample', 'request']), micro: wholeFunding, per: positiveFunding }).strict();
+const fundingRates = z.object({ version: fundingId, currency: z.literal('USD'), reasoningInOutput: z.boolean(),
+  components: z.record(z.string().min(1).max(128), z.object({ customer: fundingRate, supplier: fundingRate }).strict()),
+  attemptMinimum: z.object({ customerMicro: wholeFunding, supplierMicro: wholeFunding }).strict().optional() }).strict();
+const fundingBase = { accountRef: fundingId, policyVersion: fundingId, reservationRef: fundingId, maxSeconds: positiveFunding, expiresAt: positiveFunding };
+/** Closed, additive funding snapshot; authority and prices are server-selected before the first run insert. */
+export const MeetingFundingSnapshotSchema = z.discriminatedUnion('fundingMode', [
+  z.object({ ...fundingBase, fundingMode: z.literal('bot_blocks'), blockSeconds: positiveFunding, maxLiability: z.object({ blocks: positiveFunding }).strict() }).strict(),
+  z.object({ ...fundingBase, fundingMode: z.literal('developer_credit'), rates: fundingRates, mediaComponent: fundingId,
+    maxLiability: z.object({ customerMicro: wholeFunding, supplierMicro: wholeFunding }).strict() }).strict(),
+]);
+/** Stable account, tariff, cap and branch for the lifetime of a run. */
+export type MeetingFundingSnapshot = z.infer<typeof MeetingFundingSnapshotSchema>;
+/** Terminal billing decision persisted before a possibly interrupted fence or settlement. */
+export interface MeetingFundingSettlement {
+  /** The seconds the run is billed: zero for an unbilled end, otherwise the measured connection rounded up to the second. */
+  billedSeconds: number;
+  /** Whether the run ends unbilled. */
+  unbilled: boolean;
+  /** The measured connection, in milliseconds, when the decision was taken from it. */
+  connectedMs?: number;
+}
+/** Points where host authority and the original allocation must still be valid. */
+export type MeetingFundingPhase = 'reserve' | 'revalidate' | 'dispatch' | 'heartbeat' | 'recovery';
+
+/**
+ * Canonical text for comparison: object keys sorted at every depth and arrays kept in order, so two equal values compare
+ * equal whatever order their keys were written in. `undefined` is written as a marker, not dropped.
+ */
+function fundingJson(value: unknown): string {
+  if (value === undefined) return "undefined"; if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(fundingJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${fundingJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+}
+/** Canonical validated snapshot text for immutable comparison and reservation identity. */
+export function meetingFundingIdentity(snapshot: MeetingFundingSnapshot): string {
+  return fundingJson(MeetingFundingSnapshotSchema.parse(snapshot));
+}
+/** Validates a new row and refuses any change to already persisted funding identity or terminal intent. */
+export function assertMeetingFundingChange(previous: MeetingRunRecord | undefined, next: MeetingRunRecord): void {
+  const snapshot = next.funding === undefined ? undefined : MeetingFundingSnapshotSchema.parse(next.funding);
+  if (previous && (previous.funding !== undefined || snapshot !== undefined) && (previous.runId !== next.runId || previous.ownerRef !== next.ownerRef || (previous.funding === undefined) !== (snapshot === undefined) || (previous.funding && snapshot && meetingFundingIdentity(previous.funding) !== meetingFundingIdentity(snapshot)))) throw new Error('immutable funding');
+  if (previous?.fundingReservationId !== undefined && previous.fundingReservationId !== next.fundingReservationId) throw new Error('immutable funding reservation');
+  if (previous?.funding && previous.reportedSeconds !== undefined && next.reportedSeconds !== undefined && next.reportedSeconds < previous.reportedSeconds) throw new Error('meeting funding usage refused');
+  if (previous?.fundingSettlement !== undefined && fundingJson(previous.fundingSettlement) !== fundingJson(next.fundingSettlement)) throw new Error('immutable funding settlement');
+  if (previous?.fundingCleanup && (!next.fundingCleanup || previous.fundingCleanup.unbilled !== next.fundingCleanup.unbilled || (previous.fundingCleanup.complete && !next.fundingCleanup.complete))) throw new Error('immutable funding cleanup');
+  if (!snapshot) {
+    if (next.fundingReservationId !== undefined || next.fundingSettlement !== undefined) throw new Error('funding snapshot missing');
+    return;
+  }
+  if (snapshot.accountRef !== next.ownerRef || snapshot.reservationRef !== `meeting-funding:${next.runId}` || snapshot.expiresAt <= next.requestedAt || !Number.isSafeInteger(snapshot.maxSeconds * 1000) || snapshot.maxSeconds * 1000 < next.limits.totalMs) throw new Error('invalid funding identity or bound');
+  if (snapshot.fundingMode === 'developer_credit') {
+    if (snapshot.policyVersion !== snapshot.rates.version) throw new Error('funding tariff version mismatch');
+    const quote = quoteCompoundLiability({ rates: snapshot.rates, mediaComponent: snapshot.mediaComponent, durationSeconds: snapshot.maxSeconds, attempts: { maxAttempts: 0, perAttempt: {} } });
+    if (quote.customerMicro !== snapshot.maxLiability.customerMicro || quote.supplierMicro !== snapshot.maxLiability.supplierMicro) throw new Error('funding liability mismatch');
+  } else if (snapshot.maxLiability.blocks < Math.ceil(snapshot.maxSeconds / snapshot.blockSeconds)) throw new Error('funding block bound too small');
+  if (next.fundingReservationId !== undefined) fundingId.parse(next.fundingReservationId);
+  if (next.fundingSettlement !== undefined) {
+    const settlement = z.object({ billedSeconds: wholeFunding, unbilled: z.boolean(), connectedMs: wholeFunding.optional() }).strict().parse(next.fundingSettlement);
+    if ((settlement.unbilled && settlement.billedSeconds !== 0) || (settlement.connectedMs !== undefined && !settlement.unbilled && settlement.billedSeconds !== Math.ceil(settlement.connectedMs / 1000))) throw new Error('invalid funding settlement');
+  }
+}
+
 /** A run's row. The run store seals `meetingUrl` at rest with the product's key and opens it on read. */
 export interface MeetingRunRecord {
   runId: string;
   /** The product's reference for who owns the run (an account, an API key's workspace). Opaque to the library. */
   ownerRef: string;
   providerName: string;
+  /**
+   * The provider's opaque reference for the connection the run was sent through (a credential's generation, for
+   * example). The content-free row keeps it, so the runs sent through one connection can still be found, and their kept
+   * content purged, after the connection's credentials are gone. It names no person and carries nothing of the meeting.
+   */
+  providerConnectionRef?: string;
   platform: MeetingPlatform;
   state: MeetingRunState;
   keep: 'none' | 'account';
@@ -165,7 +240,9 @@ export interface MeetingRunRecord {
   requestedAt: number;
   joinAt: number;
   dispatchedAt?: number;
+  /** When the bot reached the meeting: its waiting room, then the call itself once it is admitted. The waiting-room limit counts from the first, the notice's confirmation from the second. */
   joinedAt?: number;
+  /** When the bot confirmed its notice in the meeting's chat, as the worker reported it, on the worker's clock: the stop monitor's heartbeats are ordered against it on that clock. */
   noticePostedAt?: number;
   captureStartedAt?: number;
   leftAt?: number;
@@ -177,18 +254,36 @@ export interface MeetingRunRecord {
   dispatch?: MeetingDispatchRecord;
   /** The last time the run's page was seen (a run sent from a page). */
   pageSeenAt?: number;
-  /** The last time a usage report arrived. */
+  /**
+   * When the last usage report was taken: on the manager's own clock when the host sets the manager's `usageSilenceMs`,
+   * which measures a run's silence from it, and otherwise the report's own time.
+   */
   lastUsageAt?: number;
-  /** The seconds the worker reported at `left` or `done`; what a purge bills from. */
+  /**
+   * The worker's own time on the last usage report taken, when the host sets the manager's `usageSilenceMs`: a usage
+   * report the worker made no later than it (a report sent again, or one that arrives late) moves neither `lastUsageAt`
+   * nor `reportedSeconds`.
+   */
+  lastUsageSourceAt?: number;
+  /**
+   * The largest running total of seconds the worker reported: at `left`, `done` or a crash, and on each usage report when
+   * the host sets the manager's `usageSilenceMs`. What a settlement bills from.
+   */
   reportedSeconds?: number;
   /** Set at `left`: the settlement, the cleanup and the room's deletion are still owed; cleared when `done` is written. */
   cleanupPending?: boolean;
   /** When a kept run's content was purged after `done` (a session's deletion). */
   purgedAt?: number;
-  /** The last time the stop monitor reported. */
+  /**
+   * The last heartbeat the stop monitor made at or after the notice, at its time bounded to one heartbeat interval past
+   * the manager's clock, by which the limits measure the monitor's freshness. The notice's confirmation clears it, so a
+   * heartbeat from before the notice is never taken for one after it.
+   */
   monitorSeenAt?: number;
   /** How many participants besides the bot the provider last reported. */
   participantCount?: number;
+  /** When the manager last accepted a report about the run, on the manager's own clock. */
+  lastReportAt?: number;
   /**
    * When the bot was last told to leave: a bot that has not left the manager's `killAfterMs` later is killed. This and
    * the two fields after it are the manager's timers, kept on the row so that any manager sharing the stores, or one
@@ -199,14 +294,39 @@ export interface MeetingRunRecord {
   captureSuspendedAt?: number;
   /** Since when the provider has reported no participant besides the bot; cleared when one is reported. */
   aloneSince?: number;
+  /**
+   * Set while the run's creation through `MeetingManager.sendBotPrepared` is unfinished: its reservation, the host's
+   * preparation or its job may still be owed. No job of such a run is dispatched. Cleared, with `creationContext`, once
+   * the run's job is scheduled, and by the run's terminal write.
+   */
+  creationPending?: boolean;
+  /** Opaque host preparation data, sealed at rest and removed before dispatch. */
+  creationContext?: string;
+  /** When the host's `beforeComplete` step ran for the run, whether it resolved or threw: a cleanup tried again does not run it twice. */
+  completionHookAt?: number;
+  /** When a cleanup claimed the `beforeComplete` step: one cleanup runs it, and a claim older than the manager's lease is taken over. */
+  completionHookClaimedAt?: number;
+  /** Immutable server-selected funding. Absence preserves legacy entitlement callers. */
+  funding?: MeetingFundingSnapshot;
+  /** Write-once actual block reservation or compound hold id. */
+  fundingReservationId?: string;
+  /** Write-once terminal decision; retained after content purge for idempotent recovery. */
+  fundingSettlement?: MeetingFundingSettlement;
+  /** Durable cleanup policy and completion; completion prevents repeated external close effects. */
+  fundingCleanup?: { unbilled: boolean; complete: boolean };
 }
 
-/** The terminal, content-free form of a run: ids, platform, times, reason, seconds, the notice version and the consent record. */
+/**
+ * The terminal, content-free form of a run: ids, the provider's connection reference, platform, times, reason, seconds,
+ * the notice version and the consent record. It keeps the usage evidence too (the last usage report's receipt and source
+ * times, the reported total and the last report's time), so a run ended at its last usage can be checked after it is over.
+ */
 export function contentFreeRun(run: MeetingRunRecord): MeetingRunRecord {
   return {
     runId: run.runId,
     ownerRef: run.ownerRef,
     providerName: run.providerName,
+    providerConnectionRef: run.providerConnectionRef,
     platform: run.platform,
     state: run.state,
     keep: run.keep,
@@ -227,7 +347,15 @@ export function contentFreeRun(run: MeetingRunRecord): MeetingRunRecord {
     reason: run.reason,
     billedSeconds: run.billedSeconds,
     reservationId: run.reservationId,
+    funding: run.funding === undefined ? undefined : structuredClone(run.funding),
+    fundingReservationId: run.fundingReservationId,
+    fundingSettlement: run.fundingSettlement === undefined ? undefined : structuredClone(run.fundingSettlement),
+    fundingCleanup: run.fundingCleanup === undefined ? undefined : structuredClone(run.fundingCleanup),
     consentRecordId: run.consentRecordId,
+    lastUsageAt: run.lastUsageAt,
+    lastUsageSourceAt: run.lastUsageSourceAt,
+    reportedSeconds: run.reportedSeconds,
+    lastReportAt: run.lastReportAt,
   };
 }
 
@@ -293,6 +421,30 @@ export type ProviderEventType =
   | 'usage'
   | 'error';
 
+/**
+ * What a provider's supplier (the platform that carries the run's media and bills for it) measured for a run, apart
+ * from the seconds the manager bills the owner: how long the supplier's stream was open, and how much of it the run
+ * captured. Both are running totals; a host records them through the entitlement hook's `recordSupplierUsage`.
+ */
+export interface SupplierUsage {
+  /** Seconds the supplier's media stream was open for the run, so far. */
+  streamSeconds: number;
+  /** Seconds of that stream during which capture was open, so far. */
+  captureSeconds: number;
+  /** Set on the last totals the provider reports for the run. */
+  final?: boolean;
+}
+
+/** Supplier totals the entitlement hook refused, as the manager's `supplierUsageInbox` keeps them until the hook records them. */
+export interface PendingSupplierUsage {
+  /** The run the totals were measured for. */
+  runId: string;
+  /** The run's reservation, which the hook records them against. */
+  reservationId: string;
+  /** The totals. */
+  usage: SupplierUsage;
+}
+
 /** One report from a provider, in the channel's terms, as the provider's parser returns it. */
 export interface NormalizedMeetingEvent {
   /** Stable: the provider supplies it or derives it from its own ids, never at random. */
@@ -313,8 +465,10 @@ export interface NormalizedMeetingEvent {
     participantRef?: string;
     /** How many participants besides the bot, on `in_call` and when one joins or leaves. */
     participantCount?: number;
-    /** An error's description, on `error`. */
+    /** An error's description, on `error`; on `left`, the provider's word for why the run ended, which `bot:left` carries beside the reason. */
     message?: string;
+    /** What the provider's supplier measured so far, on any report: recorded whatever the run's state, a terminal one included. */
+    supplierUsage?: SupplierUsage;
   };
 }
 

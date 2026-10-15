@@ -306,17 +306,18 @@ Each refusal reaches the caller before any model call. The turn settles in the o
 | `db` | required | The store. It must offer transactions, persistence and concurrent access unless `requireShared: false` |
 | `allowanceFor(accountId, period)` | required | The account's allowance in units for the period, read at every reservation |
 | `periodOf(now, accountId)` | required unless `windowMs` is set | The period a moment falls in for the account, such as its calendar month in its own time zone. Not read with a window |
-| `windowMs` | none | A rolling window in milliseconds, in place of periods: the allowance holds the units reserved or consumed in the `windowMs` before each reservation |
+| `windowMs` | none | A rolling window in milliseconds, in place of periods: the allowance holds the units consumed in the `windowMs` before each reservation and every unit still reserved, whatever its age |
 | `leaseMs` | `45000` | How long a reservation lives without a heartbeat; the turn heartbeats on each tool iteration |
 | `maxAttemptsPerOperation` | `3` | Reservations one operation may take, its retries after a release included |
 | `retry` | 3 tries, 50 to 400 ms, 2 s deadline | Retries of transient store errors before `SpendMeterUnavailableError` |
 | `resolveUnknown(reservation)` | none | Asked by `reconcile()` what became of an expired reservation: `consumed`, `released` or `unknown` |
+| `resolveExpired(reservation)` | none | Asked by `reconcile()` for each expired reservation in place of `resolveUnknown` and `unknownAfterLease`: `consumed`, `released`, or `deferred` until `retryAt` with its evidence, which keeps the reservation reserved and counted. See [Deferred expiry](#deferred-expiry) |
 | `unknownAfterLease` | `'release'` | How an expired reservation settles when the answer is `unknown` |
 | `ensureSchema` | `true` | Create the two tables when missing, and on tables that exist the indexes they lack; a product that runs its own migrations copies `SPEND_METER_DDL`, or `spendMeterDdl(prefix)` for its `tablePrefix`, and passes `false` |
 | `tablePrefix` | `'agentos_spend'` | The start of the two tables' names, `<prefix>_meter` and `<prefix>_reservations`; their indexes are named `idx_<prefix>_reservations_*`, and `idx_spend_reservations_*` under the default. A lower-case letter and at most 37 more lower-case letters, digits or underscores, and not `spend`: the constructor throws on any other value, before any statement is built. At 38 characters the longest names, `idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled`, take the 63 bytes Postgres keeps of an identifier |
 | `onWarning(warning)` | none | Told of each statement that failed while `ensureSchema` brought tables that exist up to the meter's indexes, with the `statement` and the `error`: an index the store refused, or the catalogue read before them. The meter uses the tables as they are |
 
-With `windowMs` the meter counts from the reservations themselves, inside each reservation's own transaction and after it has taken the account row's lock, so two reservations cannot both take the last unit of a window. Every row then carries the period `window`, which is the period `allowanceFor` is asked for. A unit counts from its reservation until more than `windowMs` have passed. A released reservation never counts, and one whose lease ran out still counts until `reconcile()` releases it. `snapshot()` answers the units consumed and reserved inside the window and what remains. A meter given neither `periodOf` nor `windowMs` throws when it is constructed.
+With `windowMs` the meter counts from the reservations themselves, inside each reservation's own transaction and after it has taken the account row's lock, so two reservations cannot both take the last unit of a window. Every row then carries the period `window`, which is the period `allowanceFor` is asked for. A consumed unit counts within its accounting window: from its reservation until more than `windowMs` have passed. A still-reserved hold counts until explicit settlement, even across window boundaries; expiration alone does not release it. A released reservation never counts, and one whose lease ran out still counts until `reconcile()` releases it. `snapshot()` answers the units consumed and reserved inside the window and what remains. A meter given neither `periodOf` nor `windowMs` throws when it is constructed.
 
 The window's count reads the index `idx_spend_reservations_account`, and `purge()` finds the reservations settled before its `before` through `idx_spend_reservations_settled`, on `settled_at` and `state` (`idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled` under another prefix). The DDL creates both with the tables. On tables that exist, `ensureSchema` reads the store's catalogue before the meter's first statement (`pg_indexes` on Postgres, `sqlite_master` on SQLite) and runs the `CREATE INDEX IF NOT EXISTS` statement of each of the meter's indexes the tables lack, so a store whose tables an earlier release made gains them. A meter whose tables hold all three runs no index statement, so on Postgres its start takes no SHARE lock on the reservations table, the lock a `CREATE INDEX` takes before it checks `IF NOT EXISTS`. The indexes change no answer of the meter, so tables that refuse one, as Postgres does for a role that does not own them, are used as they are, and the statement and its error go to `onWarning`. Postgres holds back writes to a table while it builds an index on it, so a product with a large reservations table creates the two indexes first in its own migration, with `CREATE INDEX CONCURRENTLY IF NOT EXISTS` and the names and columns `spendMeterDdl(prefix)` gives them, and runs the meter with `ensureSchema: false`.
 
@@ -377,6 +378,26 @@ const { used, remaining } = await meter.snapshot(userId);
 await meter.setAllowance(userId, 600);
 ```
 
+### Deferred expiry
+
+A call whose work may outlive its lease (a worker still running, an inference not yet stopped) must not be released or consumed by a sweeper that cannot prove it stopped. Reserve it with `requireFence: true` and give the meter `resolveExpired`:
+
+```typescript
+const meter = new SqlSpendMeter({
+  db, periodOf, allowanceFor,
+  resolveExpired: async (reservation) => {
+    const fence = await controlPlane.fenceOf(reservation.operationId); // the host's own evidence
+    if (!fence.transportClosed || !fence.inferenceTerminated) return { outcome: 'deferred', retryAt: Date.now() + 15_000, evidence: fence };
+    return { outcome: fence.served ? 'consumed' : 'released' };
+  },
+});
+await meter.reserve({ accountId, operationId: callId, requireFence: true });
+```
+
+A deferred reservation stays reserved and counted, with its evidence and its next check kept on its row; a resolver that throws defers it for one lease. A meter without `resolveExpired` (a legacy sweeper over the same tables) leaves a `requireFence` reservation reserved and counts it pending; an explicit `settle()` still ends it. A rolling window counts a reservation still reserved whatever its age. `releaseExpiredSpend(store, at, { resolve })` does the same for a day's bound, with `SpendDayStore.deferReservation` keeping the next check.
+
+A `reconcile()` pass writes each decision to the reservation as it read it, in one conditional statement: the same attempt, still reserved, still past its lease and, for a settlement on a meter without `resolveExpired`, still unfenced. A reservation that an opted-in pass defers, or that a heartbeat renews, while a legacy pass asks `resolveUnknown` about it stays reserved. While `resolveExpired` is asked, a heartbeat's renewed lease stands, and so does another pass's deferral to a next check after the pass's `now`, with its evidence; an operation released and retried meanwhile keeps the retry reserved under its own lease, with none of the earlier attempt's fence, evidence or next check. A meter without `resolveExpired` reads the ordinary expired reservations into its page first and the fenced holds only into the room they leave, each in expiry order on the `(state, expires_at)` index, so the fenced holds it leaves never keep one from settling, whatever the `limit`, and no pass sorts every due row to find its page.
+
 ### Retention
 
 A settled reservation's row stays, so that a retry of its operation is recognised, and a window meter keeps one row per account. `purge({ before, limit })` deletes the reservations settled before `before` and, for a window meter, the account rows that hold nothing reserved and were last written before `before`. One call deletes at most `limit` of each (default 1,000) and answers how many of each it deleted, so a sweep calls it again while a count comes back full.
@@ -390,6 +411,48 @@ const { reservations, periods } = await hourly.purge({ before: Date.now() - 3_60
 ```
 
 A reservation still reserved is never deleted, and neither is a period meter's period row, which holds the period's count: a month's `snapshot()` reads the same after its settled reservations are purged. For a window meter, a `before` at least one window back keeps every unit the window counts. Once an operation's row is purged the meter no longer knows the operation: a retry of it reserves and counts again, and a refund of it finds nothing, so `before` lies past the time either can come. `purge()` deletes across every account in its meter's two tables, so meters under one prefix share their retention, and a meter under a prefix of its own keeps its own.
+
+## Compound credit
+
+A host that sells metered calls reserves each call's most before any work starts, and settles it once from measured quantities. `@framers/agentos/safety/runtime` carries the arithmetic and the ledger; the host supplies rates, caps and its allocation policy.
+
+```typescript
+import {
+  InMemoryCompoundCreditStore,
+  grantCreditLot,
+  reserveCompoundCredit,
+  settleCompoundCredit,
+  ModelAttemptBudget,
+} from '@framers/agentos/safety/runtime';
+
+const store = new InMemoryCompoundCreditStore(); // SqlCompoundCreditStore on Postgres in a deployment
+await grantCreditLot(store, { scopeId: 'scope-a', kind: 'paid', fundingRef: 'payment-1', principalMicro: 10_000_000, at: Date.now() });
+const held = await reserveCompoundCredit(store, {
+  scopeId: 'scope-a', operationId: 'call-1', kind: 'call', requestHash: 'h', rates: { primary: rates },
+  mediaComponent: 'media_second', durationSeconds: 600,
+  attempts: { maxAttempts: 64, perAttempt: { input_token: 8_192, output_token: 512 } },
+  supplierDailyCapMicro: 10_000_000, at: Date.now(), expiresAt: Date.now() + 3_660_000,
+});
+if (held.status === 'reserved') {
+  const budget = new ModelAttemptBudget({ store, holdId: held.hold.holdId });
+  const attempt = await budget.authorize({ purpose: 'initial' }); // before every provider request
+  await budget.record(attempt.attemptId, { input_token: 900, output_token: 120 }, true);
+  await settleCompoundCredit(store, {
+    holdId: held.hold.holdId, connectedMs: 61_500, at: Date.now(),
+    fence: { mediaClosed: true, inferenceTerminated: true, evidence: 'room closed; worker exited', observedAt: Date.now() },
+  });
+}
+```
+
+- A rate is rational (`micro` micro-dollars for every `per` units), and a component's charge is one ceiling of the exact product, on BigInt. `quoteCompoundLiability` prices the full duration and every permitted attempt at the dearest authorized snapshot; reasoning tokens are counted once when the snapshot says output includes them.
+- A hold is allocated to lots in the policy's order (`promotionsFirstPolicy`: earliest-expiring promotions, then paid lots); settlement consumes those shares in that order. A policy orders only the eligible lots (`isLotEligible`: active, unexpired, with a free balance), and the balance counts only those, whatever the policy. An expired promotion keeps the share an admitted hold took, and whatever that share does not consume retires.
+- The supplier side of a hold is checked against the platform's daily cap together with every hold still open, whatever day it was made on. Reservations take that check one at a time on one platform-wide lock (the supplier day of the epoch, `1970-01-01`), so two on either side of midnight cannot both pass the cap.
+- Settlement needs evidence that the media closed and the inference stopped; without it the hold is deferred, still held. `reconcileCompoundCredit` defers when its resolver cannot tell or fails.
+- Every provider attempt (initial, tool continuation, retry, fallback) is authorized with `authorizeModelAttempt` before it is sent; an attempt that never reports usage keeps its supplier most open.
+- Refunds take only a paid lot's free principal, reserved before the payment rail is asked (`refundCreditLot`, then `completeLotRefund`). A refund id answers `existing` only for its own scope, lot and amount; another request under it, one racing it from another scope included, is refused as `conflict` and reserves nothing. A dispute freezes the lot and the account's admission; a lost reversal past the free balance is a receivable outside spendable credit.
+- `marginReport` reconciles a scope's period: paid-funded revenue, promotional usage, reversals, refunds, supplier cost including failed work, compute by measured runtime, and other costs quantified or excluded; a missing cost makes it `unreconciled`, with no contribution stated. Every hold settled in the period needs a measured runtime, an explicit zero included, or compute stays unreconciled. The period's settlements are the ones its settlement entries name, however many holds the scope settled before.
+
+With credit funding, the scoped voice factory uses `ModelAttemptBudget` below provider request and retry loops; a call with local funding counts its attempts with `CountingAttemptBudget`, which holds no money. Call minutes remain quantity-only in `CallMinuteMeter`; rational-rate arithmetic and final component rounding belong to the ledger. Stop evidence, final supplier quantities and the hold's rate snapshots and lot allocations determine settlement. Do not release a deferred hold because its process stopped reporting. `marginReport` aggregates the ledger's recorded revenue and supplier cost with the measured runtime the host supplies; it neither invents a tariff nor makes unknown supplier cost zero.
 
 ## ToolExecutionGuard
 

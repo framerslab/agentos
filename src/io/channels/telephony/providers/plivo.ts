@@ -9,9 +9,15 @@
  * |----------------|--------|----------------------------------------------|-------------|
  * | Initiate call  | POST   | `/v1/Account/{authId}/Call/`                 | JSON        |
  * | Hangup call    | DELETE | `/v1/Account/{authId}/Call/{callUuid}/`       | (none)      |
+ * | Cancel request | DELETE | `/v1/Account/{authId}/Request/{requestUuid}/` | (none)      |
  * | Play TTS       | POST   | `/v1/Account/{authId}/Call/{callUuid}/Speak/` | JSON       |
  *
  * All requests use HTTP Basic authentication: `Authorization: Basic base64(authId:authToken)`.
+ *
+ * In carrier mode a call is created under its `request_uuid` (a pending
+ * `request:`-prefixed identity) until a verified callback names its
+ * `CallUUID`; a pending request is cancelled through the Request resource
+ * and refuses speech.
  *
  * ### Hangup uses DELETE (not POST)
  *
@@ -39,8 +45,8 @@
  *
  * ## DTMF via `<GetDigits>` XML pattern
  *
- * Plivo delivers DTMF input through the `<GetDigits>` XML element callback,
- * not through the media stream WebSocket. When a call executes:
+ * Webhook DTMF is handled here; media-stream DTMF is handled by the
+ * corresponding carrier parser. When a call executes:
  *
  * ```xml
  * <GetDigits action="https://example.com/dtmf" method="POST" timeout="10">
@@ -83,6 +89,8 @@ import type {
   NormalizedCallEvent,
 } from '../types.js';
 
+import { stableCarrierEvents, callbackOccurrence } from '../CarrierEventIdentity.js';
+
 // ============================================================================
 // Config
 // ============================================================================
@@ -100,6 +108,8 @@ export interface PlivoVoiceProviderConfig {
    * Defaults to the global `fetch`.
    */
   fetchImpl?: typeof fetch;
+  /** Explicitly enables stable identities and documented carrier behavior; omitted keeps legacy parsing. */
+  protocol?: 'legacy' | 'carrier';
 }
 
 // ============================================================================
@@ -401,8 +411,8 @@ function readPlivoRequest(ctx: WebhookContext): PlivoRequestContent {
   };
 }
 
-/** The fields that decide which call event a callback produces. */
-const PLIVO_EVENT_FIELDS = ['CallUUID', 'call_uuid', 'CallStatus', 'call_status', 'Digits'];
+/** The fields that decide which call event a callback produces, its request and, in carrier mode, its occurrence. */
+const PLIVO_EVENT_FIELDS = ['CallUUID', 'call_uuid', 'CallStatus', 'call_status', 'Digits', 'RequestUUID', 'request_uuid', 'Timestamp', 'SequenceNumber', 'Event'];
 
 /**
  * The fields events are read from. For a JSON body only {@link PLIVO_EVENT_FIELDS}
@@ -738,6 +748,9 @@ export class PlivoVoiceProvider implements IVoiceCallProvider {
   /** Provider identifier, always `'plivo'`. */
   readonly name = 'plivo' as const;
 
+  /** Declares whether callback ids satisfy the durable manager contract. */
+  get webhookIdentity(): 'legacy' | 'stable-v1' { return this.config.protocol === 'carrier' ? 'stable-v1' : 'legacy'; }
+
   /** Immutable configuration snapshot. */
   private readonly config: PlivoVoiceProviderConfig;
 
@@ -832,6 +845,11 @@ export class PlivoVoiceProvider implements IVoiceCallProvider {
    * - snake_case (`call_uuid`, `call_status`) in some API responses.
    * Both are checked for maximum compatibility.
    *
+   * In carrier mode each event carries a stable id from
+   * {@link stableCarrierEvents} and the callback's `RequestUUID`; a DTMF
+   * event's occurrence is the signed `SequenceNumber` or `Timestamp`, else
+   * the callback URL's `event_key`, and a DTMF event with none throws.
+   *
    * @param ctx - Raw webhook request context.
    * @returns Parsed result containing zero or more normalized events.
    */
@@ -890,89 +908,38 @@ export class PlivoVoiceProvider implements IVoiceCallProvider {
       events.push({ ...base(), kind: 'call-dtmf', digit: digits });
     }
 
-    return { events };
+    if (this.config.protocol !== 'carrier') return { events };
+    if (!callUuid) return { events: [] };
+    const requestId = field('RequestUUID') ?? field('request_uuid');
+    const occurrence = field('SequenceNumber') ?? field('Timestamp') ?? callbackOccurrence(ctx.url);
+    return { events: stableCarrierEvents(events, { provider: this.name, account: this.config.authId, occurrence, requestId }) };
   }
 
   // ── Call Control ──────────────────────────────────────────────────────────
 
-  /**
-   * Initiate an outbound call via the Plivo Call API.
-   *
-   * POSTs a JSON body to `/v1/Account/{authId}/Call/` with the caller, callee,
-   * and answer URL. Returns the `request_uuid` as the provider call ID.
-   *
-   * @param input - Call initiation parameters (from/to numbers, webhook URL).
-   * @returns Result containing the Plivo `request_uuid` on success.
-   * @throws Never throws; returns `{ success: false, error: '...' }` on failure.
-   */
+  /** Initiates a call, retaining a separate request id until a verified callback binds the call leg. */
   async initiateCall(input: InitiateCallInput): Promise<InitiateCallResult> {
-    const url = `${this.baseUrl}/Account/${this.config.authId}/Call/`;
-
-    const response = await this.fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: this.authHeader,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: input.fromNumber,
-        to: input.toNumber,
-        answer_url: input.webhookUrl,
-        answer_method: 'POST',
-      }),
-    });
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => String(response.status));
-      return { providerCallId: '', success: false, error: `Plivo error ${response.status}: ${text}` };
-    }
-
-    const data = (await response.json()) as { request_uuid: string };
-    return { providerCallId: data.request_uuid, success: true };
+    const carrier = this.config.protocol === 'carrier';
+    const response = await this.fetch(`${this.baseUrl}/Account/${this.config.authId}/Call/`, { method: 'POST', headers: { Authorization: this.authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: input.fromNumber, to: input.toNumber, answer_url: input.webhookUrl, answer_method: 'POST',
+        ...(carrier && input.statusCallbackUrl ? { ring_url: input.statusCallbackUrl, ring_method: 'POST', hangup_url: input.statusCallbackUrl, hangup_method: 'POST' } : {}) }) });
+    if (!response.ok) return { providerCallId: '', success: false, error: `Plivo error ${response.status}: ${await response.text().catch(() => '')}` };
+    const data = await response.json() as { request_uuid?: unknown };
+    if (typeof data.request_uuid !== 'string' || !data.request_uuid) return { providerCallId: '', success: false, error: 'Plivo response missing request identity' };
+    return carrier ? { providerCallId: `request:${data.request_uuid}`, providerRequestId: data.request_uuid, success: true } : { providerCallId: data.request_uuid, success: true };
   }
-
-  /**
-   * Hang up an active call using the Plivo Call DELETE endpoint.
-   *
-   * Plivo uses HTTP `DELETE` to terminate a call (unlike Twilio's POST with
-   * `Status=completed` or Telnyx's POST to `/actions/hangup`). This is a
-   * RESTful convention where deleting the call resource ends the call.
-   *
-   * @param input - Contains the Plivo `call_uuid` to hang up.
-   */
+  /** Cancels pending requests through Request; real call ids use the existing Call endpoint. */
   async hangupCall(input: HangupCallInput): Promise<void> {
-    const url = `${this.baseUrl}/Account/${this.config.authId}/Call/${input.providerCallId}/`;
-
-    await this.fetch(url, {
-      method: 'DELETE',
-      headers: {
-        Authorization: this.authHeader,
-      },
-    });
+    const pending = this.config.protocol === 'carrier' && input.providerCallId.startsWith('request:');
+    const id = pending ? input.providerCallId.slice('request:'.length) : input.providerCallId;
+    if (!id) throw new Error('Plivo identity missing');
+    const response = await this.fetch(`${this.baseUrl}/Account/${this.config.authId}/${pending ? 'Request' : 'Call'}/${encodeURIComponent(id)}/`, { method: 'DELETE', headers: { Authorization: this.authHeader } });
+    if (this.config.protocol === 'carrier' && !response.ok) throw new Error(`Plivo hangup failed: ${response.status}`);
   }
-
-  /**
-   * Speak text into a live call using the Plivo Speak API.
-   *
-   * POSTs a JSON body to `/v1/Account/{authId}/Call/{callUuid}/Speak/`
-   * with the text, voice (default `'WOMAN'`), and language (default `'en-US'`).
-   *
-   * @param input - TTS parameters (text, optional voice, call ID).
-   */
+  /** Refuses pending request ids; speaks only to a bound carrier call. */
   async playTts(input: PlayTtsInput): Promise<void> {
-    const url = `${this.baseUrl}/Account/${this.config.authId}/Call/${input.providerCallId}/Speak/`;
-
-    await this.fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: this.authHeader,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        text: input.text,
-        voice: input.voice ?? 'WOMAN',
-        language: 'en-US',
-      }),
-    });
+    if (this.config.protocol === 'carrier' && input.providerCallId.startsWith('request:')) throw new Error('Plivo call identity pending');
+    const response = await this.fetch(`${this.baseUrl}/Account/${this.config.authId}/Call/${encodeURIComponent(input.providerCallId)}/Speak/`, { method: 'POST', headers: { Authorization: this.authHeader, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: input.text, voice: input.voice ?? 'WOMAN', language: 'en-US' }) });
+    if (this.config.protocol === 'carrier' && !response.ok) throw new Error(`Plivo speech failed: ${response.status}`);
   }
 }

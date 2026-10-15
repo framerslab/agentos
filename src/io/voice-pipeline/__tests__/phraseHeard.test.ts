@@ -137,18 +137,22 @@ describe('phraseHeard', () => {
     phraseHeard('one', [{ itemId: 'a', text: long }], { maxWords: 0 });
     expect(read.texts).toEqual(['one']);
 
-    // A capital I with a dot ends a word in lower case, so a run of them is read word by word and no further than the cap.
+    // A capital I with a dot is an i and a combining dot in lower case, and the dot stays in its word, so the cap
+    // ends where the word rule ends a word.
     read.texts.length = 0;
-    const dotted = '\u0130'.repeat(1_000);
-    expect(phraseHeard('i i i', [{ itemId: 'a', text: dotted }], { maxWords: 2 }).ratio).toBe(2 / 3);
-    expect(read.texts).toEqual(['i i i', '\u0130\u0130']);
+    expect(phraseHeard('\u0130stanbul is big', [{ itemId: 'a', text: '\u0130STANBUL is big today' }], { maxWords: 2 }).ratio).toBe(2 / 3);
+    expect(read.texts).toEqual(['\u0130stanbul is big', '\u0130STANBUL is']);
+  });
+
+  it('hears a word whose accent was written as a combining mark', () => {
+    expect(phraseHeard('caf\u00e9 au lait', [{ itemId: 'a', text: 'Cafe\u0301 au lait, please.' }]).ratio).toBe(1);
   });
 
   it('reads the words the word rule gives, whatever the cap', () => {
-    // Apostrophes, digits, a capital I with a dot (two words in lower case), a combining accent and two scripts.
+    // Apostrophes, digits, a capital I with a dot (one word, its dot kept), a combining accent and two scripts.
     const text = "It's 9 o'clock in \u0130stanbul, cafe\u0301 d\u00e9j\u00e0 vu: \u6771\u4eac 2026!";
     const all = lexicalTokens(text);
-    expect(all).toEqual(['it', 's', '9', 'o', 'clock', 'in', 'i', 'stanbul', 'cafe', 'd\u00e9j\u00e0', 'vu', '\u6771\u4eac', '2026']);
+    expect(all).toEqual(['it', 's', '9', 'o', 'clock', 'in', 'i\u0307stanbul', 'caf\u00e9', 'd\u00e9j\u00e0', 'vu', '\u6771\u4eac', '2026']);
     for (let cap = 1; cap < all.length; cap += 1) {
       // The phrase holds one word more than the cap: all but that word are found when the first `cap` words are read.
       const phrase = all.slice(0, cap + 1).join(' ');

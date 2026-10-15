@@ -11,6 +11,7 @@ import {
   STT_CHAIN_VENDORS,
 } from '../env-constructor.js';
 import { openAITranscriptionPricing } from '../../../core/llm/providers/implementations/openaiPricing.js';
+import { DEEPGRAM_STREAMING_PRICING, deepgramStreamingPricing } from '../providers/deepgramPricing.js';
 
 describe('createVoiceProvidersFromEnv', () => {
   it('builds chains with only ELEVENLABS_API_KEY', () => {
@@ -132,11 +133,11 @@ describe('cartesia + hume env wiring', () => {
     expect(tts.providers.map((p) => p.providerId)).not.toContain('cartesia-sonic-stream');
   });
 
-  it('adds hume streaming when HUME_API_KEY is present', () => {
+  it('leaves hume out when HUME_API_KEY is present without the hume preference', () => {
     const { tts } = createVoiceProvidersFromEnv({
       env: { DEEPGRAM_API_KEY: 'd', HUME_API_KEY: 'h' },
     });
-    expect(tts.providers.map((p) => p.providerId)).toContain('hume-octave-stream');
+    expect(tts.providers.map((p) => p.providerId)).not.toContain('hume-octave-stream');
   });
 
   it('key absence = absent from chain (no throw)', () => {
@@ -280,12 +281,25 @@ describe('createSttChain from entries', () => {
     expect(sttEntryPricePerMinute('openai:gpt-4o-mini-transcribe')).toBe(0.003);
     expect(sttEntryPricePerMinute('openai:no-such-model')).toBeUndefined();
     expect(sttEntryPricePerMinute('openai:constructor')).toBeUndefined();
-    expect(sttEntryPricePerMinute('deepgram:nova-3')).toBeUndefined();
   });
 
   it('refuses to price an entry parseSttEntry refuses, a device entry among them', () => {
     expect(() => sttEntryPricePerMinute('device:moonshine-auto')).toThrow(RangeError);
     expect(() => sttEntryPricePerMinute('openai')).toThrow(RangeError);
+  });
+
+  it('prices a deepgram entry from its streaming row, and no other model of it', () => {
+    expect(sttEntryPricePerMinute('deepgram:nova-3')).toBe(0.0077);
+    expect(sttEntryPricePerMinute('deepgram:nova-2')).toBeUndefined();
+    expect(sttEntryPricePerMinute('elevenlabs:scribe_v1')).toBeUndefined();
+    expect(deepgramStreamingPricing('constructor')).toBeUndefined();
+    expect(deepgramStreamingPricing(undefined)).toBeUndefined();
+    // Every spend bound in the process reads this one table: Reflect.set answers false for a frozen object, where an
+    // assignment would throw in strict code, and the price stays as listed.
+    expect(Reflect.set(DEEPGRAM_STREAMING_PRICING, 'nova-3', 0)).toBe(false);
+    expect(Reflect.set(DEEPGRAM_STREAMING_PRICING, 'nova-2', 0.001)).toBe(false);
+    expect(sttEntryPricePerMinute('deepgram:nova-3')).toBe(0.0077);
+    expect(sttEntryPricePerMinute('deepgram:nova-2')).toBeUndefined();
   });
 });
 
@@ -388,7 +402,8 @@ describe('createSttChain sessions', () => {
     try {
       expect(asked).toEqual(['gpt-4o-transcribe', 'gpt-4o-mini-transcribe']);
       expect(confirmed).toEqual(['gpt-4o-mini-transcribe']);
-      expect(failed).toEqual(['openai-realtime-transcription']);
+      // The entries share the vendor's provider id, so the chain names each by its place among them.
+      expect(failed).toEqual(['openai-realtime-transcription#1']);
       expect(attempts).toEqual([2]);
       // Failover is off, so the session is the provider's own, which ends a turn with flush().
       expect(typeof session.flush).toBe('function');

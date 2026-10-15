@@ -94,29 +94,65 @@ declare module 'irc-framework' {
   }
 }
 
+// The type checker resolves 'ws' to this declaration ahead of the installed
+// @types/ws, so each part of the ws API the library calls is declared here.
 declare module 'ws' {
   import { EventEmitter } from 'events';
-  import { Server as HTTPServer } from 'http';
+  import { IncomingMessage, Server as HTTPServer } from 'http';
+  import { AddressInfo } from 'net';
+  import { Duplex } from 'stream';
 
   class WebSocket extends EventEmitter {
+    /** A client that offers `protocols` as its subprotocols in the handshake. */
+    constructor(address: string | URL, protocols?: string | string[], options?: any);
     constructor(address: string | URL, options?: any);
     send(data: any, cb?: (err?: Error) => void): void;
     close(code?: number, reason?: string): void;
     /** Forcibly closes the connection, or aborts the handshake while it is still connecting. */
     terminate(): void;
     readyState: number;
+    /** Bytes queued by `send()` and not yet written to the socket. */
+    readonly bufferedAmount: number;
+    /** The open ready state, on the instance as well as the class. */
+    readonly OPEN: number;
     static OPEN: number;
     static CLOSED: number;
     static CONNECTING: number;
     static CLOSING: number;
   }
 
+  /** The connection type, named for the namespace's own `WebSocket` export. */
+  type WebSocketConnection = WebSocket;
+
   namespace WebSocket {
+    /** The payload of a received message. */
+    type RawData = Buffer | ArrayBuffer | Buffer[];
+    /** A connection, as the named `WebSocket` export. */
+    type WebSocket = WebSocketConnection;
+
     class Server extends EventEmitter {
-      constructor(options?: { server?: HTTPServer; port?: number; path?: string; [key: string]: any });
+      constructor(options?: {
+        server?: HTTPServer;
+        port?: number;
+        path?: string;
+        noServer?: boolean;
+        maxPayload?: number;
+        perMessageDeflate?: boolean;
+        /** Picks the subprotocol to answer with; `false` answers with none and does not refuse the handshake. */
+        handleProtocols?: (protocols: Set<string>, request: IncomingMessage) => string | false;
+        [key: string]: any;
+      });
       close(cb?: (err?: Error) => void): void;
+      /** The address of the server it created, as `net.Server.address()` gives it; null before it listens. */
+      address(): AddressInfo | string | null;
       clients: Set<WebSocket>;
+      /** Completes an upgrade the caller accepted, for a server created with `noServer`. */
+      handleUpgrade(request: IncomingMessage, socket: Duplex, upgradeHead: Buffer, callback: (client: WebSocket, request: IncomingMessage) => void): void;
     }
+
+    /** The named export of {@link Server}. */
+    const WebSocketServer: typeof Server;
+    type WebSocketServer = Server;
   }
 
   export = WebSocket;

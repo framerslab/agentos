@@ -4,6 +4,7 @@ import type {
   MeetingPlatform,
   MeetingRunRecord,
   NormalizedMeetingEvent,
+  SupplierUsage,
 } from './types.js';
 
 /** What reached the product's events route: the provider authenticates and parses it. */
@@ -79,6 +80,8 @@ export interface ProviderUsage {
   alive: boolean;
   /** The seconds the worker has counted for the run. */
   seconds: number;
+  /** What the provider's supplier measured for the run so far, for a provider that measures it; reconciliation records it. */
+  supplierUsage?: SupplierUsage;
 }
 
 /**
