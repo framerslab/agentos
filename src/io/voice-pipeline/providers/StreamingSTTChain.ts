@@ -38,6 +38,7 @@ import type { VoiceMetricsReporter, VoiceMetricEvent } from '../VoiceMetricsRepo
 import { AudioRingBuffer } from '../AudioRingBuffer.js';
 import { TranscriptDedupe } from '../TranscriptDedupe.js';
 import { authorizeProviderOpening, freezeProviderPolicy, legacyProviderPolicy, selectPolicyProviders, type ProviderSelectionPolicy } from '../ProviderPolicy.js';
+import { SttConnectionAuthorizationError } from '../SttConnectionAuthorizationError.js';
 
 /** Selected provider notification retained for existing hosts. */
 export interface ProviderSelectedEvent {
@@ -219,6 +220,8 @@ export class StreamingSTTChain implements IStreamingSTT {
    * @throws {Error} The policy's refusal, which opens no provider and tries no other; `No STT providers available
    *   (all tripped or filtered)` when the breaker skips every provider; an `AggregateVoiceError` when every provider
    *   tried failed to open.
+   * @throws {SttConnectionAuthorizationError} When the `config.connectionHooks` of a provider that honors them refuse
+   *   its socket: a funding refusal is no outage, so no other provider is tried and none is recorded as failed.
    */
   async startSession(config?: StreamingSTTConfig): Promise<StreamingSTTSession> {
     const candidates = this.list.filter((p) => !this.opts.breaker || this.opts.breaker.isAvailable(this.nameOf(p)));
@@ -236,6 +239,7 @@ export class StreamingSTTChain implements IStreamingSTT {
         this.opts.breaker?.recordSuccess(this.nameOf(provider));
         return this.wrap(session, provider, candidates.slice(i + 1), config);
       } catch (error) {
+        if (error instanceof SttConnectionAuthorizationError) throw error;
         const failure = VoicePipelineError.classifyError(error, { kind: 'stt', provider: provider.providerId });
         errors.push(failure);
         const event: ProviderFailedEvent = { kind: 'stt', providerId: this.nameOf(provider), errorClass: failure.errorClass, message: this.policy.mode === 'legacy' ? failure.message : 'provider opening failed' };
@@ -264,6 +268,14 @@ export class StreamingSTTChain implements IStreamingSTT {
    * `config.call`, every frame goes to the provider session's `pushAudioScoped()`, a frame without its identity ends
    * the facade before the ring keeps it, and the facade has `pushAudioScoped()` and `reset()` when the first session
    * has them. The facade is a `VoiceEventEmitter`, so the chain imports nothing from `node:events`.
+   *
+   * A backup's transcript times count from the first frame it received; the facade moves them, word times included,
+   * onto its own input timeline (the audio pushed since it opened, or since its last `reset()`), so a final the
+   * backup transcribes again from the replay meets the one the failed provider gave for the same audio. A backup that
+   * cannot open because the `config.connectionHooks` refused its socket ends the facade with that
+   * `SttConnectionAuthorizationError`, and so does an `'error'` that is one from the session in use (a refused
+   * reconnect of its own, or a frame past its funded limit), during a switch as well: no further provider is tried
+   * for a funding refusal.
    */
   private wrap(initial: StreamingSTTSession, first: STTProvider, candidates: STTProvider[], config?: StreamingSTTConfig): StreamingSTTSession {
     if (!this.opts.enableMidUtteranceFailover) return initial;
@@ -280,6 +292,12 @@ export class StreamingSTTChain implements IStreamingSTT {
     let switching: Promise<void> | undefined;
     const pending: AudioFrame[] = [];
     let lostMs = 0;
+    // Milliseconds of audio pushed into the facade: its input timeline, which a reset starts again.
+    let inputMs = 0;
+    // Where each frame the ring or the switch's hold keeps begins on the input timeline.
+    const positions = new WeakMap<AudioFrame, number>();
+    // Where each provider session's own audio clock begins on the input timeline: its first frame's position.
+    const origins = new WeakMap<StreamingSTTSession, number>([[initial, 0]]);
     // An error or close of the backup a switch has attached, reported before the switch ended; the switch passes over it.
     let lost: Error | undefined;
     // Whether a frame carries the identity a scoped session takes it with: its scope, call and turn ids as non-empty
@@ -339,10 +357,18 @@ export class StreamingSTTChain implements IStreamingSTT {
     const attach = (session: StreamingSTTSession, id: string): void => {
       session.on('transcript', (event: TranscriptEvent) => {
         if (session !== retiring && (closed || session !== current)) return;
+        // The session's times move onto the facade's input timeline; the first session's clock is that timeline.
+        const origin = origins.get(session) ?? 0;
+        const normalized: TranscriptEvent = origin === 0 ? event : {
+          ...event,
+          ...(event.startMs === undefined ? {} : { startMs: origin + event.startMs }),
+          ...(event.endMs === undefined ? {} : { endMs: origin + event.endMs }),
+          ...(event.words === undefined ? {} : { words: event.words.map((word) => ({ ...word, start: origin + word.start, end: origin + word.end })) }),
+        };
         // An empty final retracts interim text its own provider showed and repeats no one's words, so it is never
         // a duplicate.
-        if (event.isFinal && event.text.trim() !== '' && event.startMs !== undefined && event.endMs !== undefined && dedupe.evaluate({ provider: id, text: event.text, audioStartMs: event.startMs, audioEndMs: event.endMs, isFinal: true }).isDuplicate) return;
-        facade.emit('transcript', event);
+        if (normalized.isFinal && normalized.text.trim() !== '' && normalized.startMs !== undefined && normalized.endMs !== undefined && dedupe.evaluate({ provider: id, text: normalized.text, audioStartMs: normalized.startMs, audioEndMs: normalized.endMs, isFinal: true }).isDuplicate) return;
+        facade.emit('transcript', normalized);
       });
       for (const name of ['vad', 'speech_start', 'speech_end'] as const) session.on(name, (...args: unknown[]) => {
         if (!closed && session === current) facade.emit(name, ...args);
@@ -359,6 +385,12 @@ export class StreamingSTTChain implements IStreamingSTT {
       // During a switch the active session is the backup taking the replay: its failure is left for the switch.
       session.on('error', (error: Error) => {
         if (closed || session !== current) return;
+        // A funding refusal, such as a provider's own reconnect or a replay frame past the funded limit, is no
+        // outage: it ends the facade, during a switch as well, and no other provider is opened for it.
+        if (error instanceof SttConnectionAuthorizationError) {
+          fatal(error);
+          return;
+        }
         if (switching) lost ??= error;
         else begin(error);
       });
@@ -393,6 +425,8 @@ export class StreamingSTTChain implements IStreamingSTT {
         try {
           next = await backup.startSession(config);
         } catch (error) {
+          // A funding refusal is no outage: the switch ends, and the facade with it, without another provider.
+          if (error instanceof SttConnectionAuthorizationError) throw error;
           const failed = VoicePipelineError.classifyError(error, { kind: 'stt', provider: backup.providerId });
           this.opts.breaker?.recordFailure(this.nameOf(backup), failed.errorClass);
           continue;
@@ -404,12 +438,18 @@ export class StreamingSTTChain implements IStreamingSTT {
         // Read for each backup: frames pushed during the switch that a failed backup took are in the ring by then.
         const replay = ring.snapshot();
         const replayMs = ring.durationMs();
+        const replayIncluded = replayMs >= (this.opts.minReplayMs ?? 400);
+        // The backup's clock starts at the first frame it receives: the replay's first, or else the first frame held
+        // during the switch, or else the next frame pushed.
+        const firstFrame = replayIncluded ? replay[0] : pending[0];
+        const nextOriginMs = (firstFrame === undefined ? undefined : positions.get(firstFrame)) ?? inputMs;
         current = next;
         provider = backup;
         remaining = remaining.filter((p) => p !== backup);
+        origins.set(next, nextOriginMs);
         attach(next, this.nameOf(backup));
         try {
-          if (replayMs >= (this.opts.minReplayMs ?? 400)) for (const frame of replay) {
+          if (replayIncluded) for (const frame of replay) {
             if (closed || lost) break;
             await deliver(next, frame);
           }
@@ -479,9 +519,13 @@ export class StreamingSTTChain implements IStreamingSTT {
           fatal(new Error('scoped STT input required'));
           return;
         }
+        const at = inputMs;
+        inputMs += ms;
         if (switching) {
           // Held for the backup, newest kept; what overflows is counted as lost audio and reported as a gap.
-          pending.push({ ...frame, samples: frame.samples.slice() });
+          const held = { ...frame, samples: frame.samples.slice() };
+          positions.set(held, at);
+          pending.push(held);
           while (pending.length > (this.opts.maxPendingFrames ?? 100)) {
             const dropped = pending.shift()!;
             lostMs += dropped.samples.length / dropped.sampleRate * 1000;
@@ -489,6 +533,7 @@ export class StreamingSTTChain implements IStreamingSTT {
           return;
         }
         if (!current) return;
+        positions.set(frame, at);
         ring.push(frame);
         try {
           await deliver(current, frame);
@@ -519,6 +564,9 @@ export class StreamingSTTChain implements IStreamingSTT {
           await switching;
           ring.clear();
           dedupe.reset();
+          // The provider session's reset starts its audio clock again, and the facade's input timeline with it.
+          inputMs = 0;
+          if (current) origins.set(current, 0);
           pending.length = 0;
           config = { ...config, call: identity };
           if (closed) return;

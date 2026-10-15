@@ -137,9 +137,9 @@ Each passage has `index` (from 0), `text`, `firstSeq`, `lastSeq`, `itemIds`, `st
 
 ## Words and snippets
 
-`lexicalTokens(text)` answers a text's words: lower-case runs of letters and digits, in order, in any script, nothing stemmed. `lexicalTokens("Q3's budget: 1,200 units")` is `['q3', 's', 'budget', '1', '200', 'units']`. `PostgresVectorStore` builds its lexical query from the same runs.
+`lexicalTokens(text)` answers a text's words: the text read in NFC and in lower case, each word a letter or a digit followed by letters, digits and combining marks, in order, in any script, nothing stemmed. `lexicalTokens("Q3's budget: 1,200 units")` is `['q3', 's', 'budget', '1', '200', 'units']`. A mark stays inside its word, so an accent written as a combining mark or a Devanagari vowel sign does not split one, and a text reads the same words composed or decomposed: `lexicalTokens('Re\u0301sume\u0301')` is `['résumé']`, as `lexicalTokens('Résumé')` is. A mark with no letter or digit before it starts no word. `PostgresVectorStore` builds its lexical query from runs of letters and digits in lower case; on a text in NFC that holds no combining mark once in lower case, as precomposed Latin, Greek and Cyrillic, Chinese and Japanese are written, it reads the same words. A capital I with a dot (U+0130) is the exception: lower case turns it into an i and a combining dot, which the word rule keeps in its word and the store's runs split at.
 
-`snippetAround(text, words, { before, after })` finds the first word of `text` that begins with one of `words` and answers `{ at, text }`. `at` is where that word starts in the text as given, or -1 when no word matches. `text` is the snippet in whole words, with white space collapsed: it runs from just after the last white space (a space, a tab or a line break, such as the one between two turns of a passage) at or before `before` characters (80 unless given) ahead of the word, or from the text's start, to the first white space at or after `after` characters (120 unless given) past the word's start, or to the text's end. A text with no white space, as Chinese and Japanese are written, comes back whole. With no match, the snippet is the text's start.
+`snippetAround(text, words, { before, after })` finds the first word of `text`, by the same rule, that begins with one of `words`, each word and query word compared in NFC and in lower case, and answers `{ at, text }`. `at` is where that word starts in the text as given, or -1 when no word matches. `text` is the snippet in whole words, with white space collapsed: it runs from just after the last white space (a space, a tab or a line break, such as the one between two turns of a passage) at or before `before` characters (80 unless given) ahead of the word, or from the text's start, to the first white space at or after `after` characters (120 unless given) past the word's start, or to the text's end. A text with no white space, as Chinese and Japanese are written, comes back whole. With no match, the snippet is the text's start.
 
 ## Results from private sources
 
@@ -280,8 +280,64 @@ restored.search('hiring', 5); // the same passage
 - `match: 'any'` (the default) ranks every document that holds at least one of the query's words; `match: 'all'` keeps only the documents that hold every one of them.
 - `prefix: true` lets a stored word match when it begins with a query word, so `chapter` finds `chapters`. When several stored words begin with one query word, a document scores by the best of them for that word. With `prefix` left out, a word matches only itself.
 
-`toJSON()` answers the index as plain JSON, version 1: `k1`, `b`, each document's id, its length in tokens and its metadata, and each term's postings. `LexicalIndex.fromJSON(json, { tokenize })` restores it. A saved index holds terms, not texts, so give it the tokenizer it was made with. A saved index of another version throws, and so does one that `toJSON()` could not have written, with an error that names what is wrong: a part out of shape, an id, a term or a position given twice, or a count under 1. Metadata is saved as given, so keep it to values JSON can hold.
+`toJSON()` answers the index as plain JSON, version 1: `k1`, `b`, each document's id, its length in tokens and its metadata, and each term's postings. `LexicalIndex.fromJSON(json, { tokenize })` restores it. A saved index holds terms, not texts, so give it the tokenizer it was made with. `lexicalTokens` reads a text in NFC and keeps a combining mark inside its word from 0.13.143 on, where it used to read the text as given and end a word at a mark. An index that an earlier version saved with it can hold other words than the rule reads now in a text that holds a combining mark once in lower case (an accent written as a letter and a mark, a Devanagari vowel sign, a capital I with a dot) or that NFC changes, such as the pieces between the marks, and a search for the words the rule reads now does not find that text by them. Build such an index again from its texts. A saved index of another version throws, and so does one that `toJSON()` could not have written, with an error that names what is wrong: a part out of shape, an id, a term or a position given twice, or a count under 1. Metadata is saved as given, so keep it to values JSON can hold.
 
 `BM25Index`, in `@framers/agentos/cognition/rag`, is a `LexicalIndex` with AgentOS's tokenizer: `tokenize` when its options give one, else its `pipeline`, else the built-in tokenizer, which reads its stop words on first use. It is saved with `toJSON()` and restored with `BM25Index.fromJSON(json, config)`, which takes `k1` and `b` from the saved index and the tokenizer from `config`. Its module reaches `node:module`, which loads `natural`, so a page imports `LexicalIndex` instead.
 
-`@framers/agentos/cognition/library/browser` is the entry a page imports. It exports `LexicalIndex`, `lexicalTokens`, `snippetAround` and `chunkTurns`, with the types `LexicalIndexConfig`, `LexicalIndexJSON`, `LexicalSearchOptions`, `BM25Result`, `BM25Stats`, `Snippet`, `ChunkTurnsOptions`, `LibraryTurn` and `TurnChunk`, and everything `@framers/agentos/core/storage/browser` exports: the page's key-value store over IndexedDB or memory, the outbox and `reconcileList` ([A Page's Own Records](../memory/CLIENT_SIDE_STORAGE.md#a-pages-own-records)). Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph, and none of it uses the DOM but for IndexedDB, which it reaches only when a page opens a store or calls `idb()`. `LibraryIndex` is not in it: it stays in `@framers/agentos/cognition/library`.
+`@framers/agentos/cognition/library/browser` is the entry a page imports. It exports `LexicalIndex`, `FuzzyIndex`, `withinOneEdit`, `lexicalTokens`, `snippetAround` and `chunkTurns`, with the types `LexicalIndexConfig`, `LexicalIndexJSON`, `LexicalSearchOptions`, `BM25Result`, `BM25Stats`, `FuzzyIndexConfig`, `FuzzyIndexJSON`, `FuzzySearchOptions`, `FuzzyDocument`, `FuzzyHit`, `FuzzyToken`, `FuzzyTokenizer`, `Marked`, `Snippet`, `ChunkTurnsOptions`, `LibraryTurn` and `TurnChunk`, and everything `@framers/agentos/core/storage/browser` exports: the page's key-value store over IndexedDB or memory, the outbox and `reconcileList` ([A Page's Own Records](../memory/CLIENT_SIDE_STORAGE.md#a-pages-own-records)). Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph, and none of it uses the DOM but for IndexedDB, which it reaches only when a page opens a store or calls `idb()`. `LibraryIndex` is not in it: it stays in `@framers/agentos/cognition/library`.
+
+## Fuzzy search on a device
+
+```typescript
+import { FuzzyIndex } from '@framers/agentos/cognition/library/browser';
+
+const index = new FuzzyIndex({ fields: { title: 100, keywords: 10, body: 1 } });
+index.addDocuments([
+  {
+    id: 'n1',
+    fields: {
+      title: 'Enclosure samples',
+      keywords: ['enclosure', 'factory'],
+      body: 'The samples leave the factory on Friday; the moulds are confirmed on Wednesday.',
+    },
+  },
+  {
+    id: 'n2',
+    fields: {
+      title: 'Project Atlas status',
+      keywords: ['atlas', 'launch'],
+      body: 'Beta ships 3 Oct. Two open blockers: the billing webhook and load testing.',
+    },
+  },
+]);
+
+const [hit] = index.search('factory firday');
+// hit.id === 'n1' and hit.score === 10.5: "factory" is a keyword (1 times 10), and "firday" is the body's "Friday"
+// with two letters swapped (0.5 times 1).
+// hit.fields.keywords: [{ text: 'enclosure', marks: [] }, { text: 'factory', marks: [{ start: 0, end: 7 }] }]
+// hit.passages: [{ text: 'The samples leave the factory on Friday; the moulds are confirmed on Wednesday.',
+//                  marks: [{ start: 22, end: 29 }, { start: 33, end: 39 }] }]
+
+const saved = JSON.stringify(index.toJSON());
+const restored = FuzzyIndex.fromJSON(JSON.parse(saved));
+```
+
+`FuzzyIndex` is a search box's index over a page's own records, such as a person's notes: it finds a word typed with a typo or only begun, ranks a match by the field it is in, and answers each hit with its matched words marked and the sentences that hold them. A document is `{ id, fields }`, each field a text or a list of short texts such as keywords, and the index is made with each field's weight, a finite number above 0. A query is read in NFC and cut into words by the library's word rule with an apostrophe inside a word kept, so "Professor's" is one word. Each word, in lower case with the accents of the Combining Diacritical Marks block (U+0300 to U+036F) dropped, so that `resume` finds `résumé`, matches a word of a document that is:
+
+| The stored word | Counts |
+|---|---|
+| The same word | 1 |
+| A word the query word begins: `fact` finds `factory` | 0.75 |
+| One edit away, where both words have `editMinLength` letters or more (4 unless given): a letter added, dropped or changed, or two letters side by side swapped, a [Damerau-Levenshtein distance](https://en.wikipedia.org/wiki/Damerau%E2%80%93Levenshtein_distance) of 1. `firday` finds `Friday`; `teh` finds nothing, since `the` has three letters | 0.5 |
+
+A document's score is, for each query word, its best match's count times the weight of the field it is in, summed over the query's words: `score = sum over query words q of max over fields f and their words t of weight(f) * count(q, t)`, each query word counted once. With the weights above, a match in the title outranks one in the keywords, which outranks one in the body, and within a field the same word outranks a word it begins, which outranks a word an edit away. `search(query, { topK, match })` answers at most `topK` hits (10 unless given, `Infinity` for every hit), highest score first, a tie in the order the documents were added. `match: 'all'` (the default) keeps the documents in which every query word matches somewhere; `match: 'any'` keeps those in which at least one does. A query with no word in it finds nothing.
+
+A hit is `{ id, score, fields, passages }`. `fields` holds each field of the document with its matched words marked: a `Marked`, `{ text, marks }`, for a text and a list of them for a list. A mark is a whole word, `{ start, end }` in UTF-16 units of the text as the index holds it, in NFC; a text's marks are in order and never overlap. `passages` holds up to `passages` (3 unless given) sentences or lines of the passage fields that hold a match: those that hold the most query words, then the earliest, shown in the order of the text, each clipped to about `passageWidth` characters (160 unless given) around its first match, at white space, with `…` where text was left out. A document matched only in another field shows the opening of its text, unmarked. The passage fields are those `passageFields` names, in its order, or else the fields of the lowest weight. A sentence ends at a run of full stops, question marks or exclamation marks (or of the Devanagari danda, the Arabic question mark or the Urdu full stop) before white space, or at an ideographic full stop or a full-width exclamation or question mark, and every line break ends one.
+
+`withinOneEdit(a, b)` is the one-edit test alone: true when two words are at most one edit apart, letter by letter over code points, compared as given.
+
+Adding a document under an id the index holds replaces it, and it then counts as added last; a document that is refused leaves the index as it was. A field the index was not made with is neither searched nor kept. `removeDocument(id)` answers whether the id was there. `tokenize` takes the place of the word rule: it answers each word of a text with its `start` and `end`, and the index hands it every text and query in NFC.
+
+A search reads the words near each query word's, not every word the index holds. It keeps the index's words in two orders, by how they begin and by how they end, which the first search after a document is added brings up to date. The query word itself and the words it begins stand together in the first order. A word one edit from the query word keeps one of its halves whole, letter by letter: an edit in the second half leaves the first half as the word's start, and an edit in the first half leaves the second half as its end, but for the two letters on either side of the middle swapped, which makes one more word to look up. So a query word of `editMinLength` letters or more reads the words that begin with its first half or end with its second, and the word with its middle letters swapped; a shorter one reads only the words it begins, and one of a single letter, with an `editMinLength` of 1, reads every word. The search then reads the fields of the hits it answers again to mark them.
+
+`toJSON()` answers the index as plain JSON, version 1: its settings and each document's id and fields, in the order they were added. `FuzzyIndex.fromJSON(json, { tokenize })` restores it and reads the texts again with the tokenizer given, the word rule unless one is. A saved index of another version throws, and so does one that `toJSON()` could not have written, with an error that names what is wrong.

@@ -1,11 +1,12 @@
 /**
  * @fileoverview Whether a given sentence was said in a transcript's first lines: the share of the sentence's words
- * found in order (the longest common subsequence of words), and the lines that held them. Words are lower-case runs
- * of letters and digits; nothing is stemmed, since a transcriber writes the words it heard. Pure and DOM-free.
+ * found in order (the longest common subsequence of words), and the lines that held them. Words are the library's word
+ * rule: a text read in NFC and in lower case, each word a letter or a digit followed by letters, digits and combining
+ * marks; nothing is stemmed, since a transcriber writes the words it heard. Pure and DOM-free.
  * @module agentos/voice-pipeline/phraseHeard
  */
 
-import { lexicalTokens } from '../../cognition/library/tokens.js';
+import { lexicalTokens, WORD_PATTERN } from '../../cognition/library/tokens.js';
 
 /** A transcript line: its id and its text. */
 export interface HeardLine {
@@ -46,11 +47,11 @@ export interface PhraseHeardOptions {
 }
 
 /**
- * A word of the library's word rule, as the text holds it before its lower case: a run of letters and digits, which a
- * capital I with a dot (U+0130) ends, since lower case turns that letter into an i and a combining dot and the dot is
- * neither a letter nor a digit.
+ * A word of the library's word rule, as the text holds it before NFC and lower case. Neither moves where such a word
+ * ends: NFC joins a letter and its marks into one letter, and lower case turns a capital I with a dot (U+0130) into an
+ * i and a combining dot, which stays in the word.
  */
-const WORD = /(?:(?!\u0130)[\p{L}\p{N}])+\u0130?|\u0130/gu;
+const WORD = new RegExp(WORD_PATTERN, 'gu');
 
 /**
  * The first `count` words of `text` by the library's word rule, with the text read no further than the last of them:
@@ -67,8 +68,8 @@ function firstWords(text: string, count: number): string[] {
       break;
     }
   }
-  // WORD ends a word where lower case does, so the part read holds `count` words and a run of capital I's with a dot
-  // is not split whole to keep its first few. The cut stays, should lower case part a run anywhere else.
+  // WORD ends a word where the word rule does once the text is in NFC and lower case, so the part read holds `count`
+  // words. The cut stays, should either part a word anywhere else.
   return lexicalTokens(text.slice(0, end)).slice(0, count);
 }
 

@@ -274,4 +274,21 @@ export {
   type SttChainVendor,
   type SttEntry,
 } from './env-constructor.js';
-export { DEEPGRAM_STREAMING_PRICING, deepgramStreamingPricing } from './providers/deepgramPricing.js';
+export {
+  DEEPGRAM_PRE_RECORDED_PRICING,
+  DEEPGRAM_STREAMING_PRICING,
+  deepgramPreRecordedPricing,
+  deepgramStreamingPricing,
+} from './providers/deepgramPricing.js';
+
+// Price ordering over the hosted transcription entries a host offers, before a chain is built.
+export { selectLowestCostSttEntry, sttLanguageOptions } from './LowestCostStt.js';
+export type {
+  SttPriceRow,
+  SttCreditSnapshot,
+  LowestCostSttOptions,
+  LowestCostSttSelection,
+} from './LowestCostStt.js';
+
+// A host's refusal of a hosted transcription socket (`StreamingSTTConfig.connectionHooks`); never retried as an outage.
+export { SttConnectionAuthorizationError } from './SttConnectionAuthorizationError.js';

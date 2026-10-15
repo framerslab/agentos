@@ -1,3 +1,36 @@
+## [0.13.145](https://github.com/framerslab/agentos/compare/v0.13.144...v0.13.145) (2026-10-15)
+
+### perf
+
+* **rag:** look a fuzzy query word up among the words near it, not every word the index holds (#506) ([66c7292](https://github.com/framerslab/agentos/commit/66c7292fc9d87bb6ecb847a0dd6086773964111f))
+
+## [0.13.144](https://github.com/framerslab/agentos/compare/v0.13.143...v0.13.144) (2026-10-15)
+
+### fix
+
+* **auth:** read a token answer whose body is JSON but not an object as a refusal (#503) ([88886c6](https://github.com/framerslab/agentos/commit/88886c6723720eab1b40c9e9ffded34665004a8a))
+
+## [0.13.143](https://github.com/framerslab/agentos/compare/v0.13.142...v0.13.143) (2026-10-15)
+
+### feat
+
+* **rag:** add FuzzyIndex, ranked search with prefix and one-edit matching, field weights, marks and passages (#498) ([35e88de](https://github.com/framerslab/agentos/commit/35e88de44d5424fab635a9578e40a7e906842740))
+
+### test
+
+* **sources:** compile the installed foundation contract under Node's own resolution (#500) ([ea2db78](https://github.com/framerslab/agentos/commit/ea2db7826cf81fa8c829fa5107e8942eb58eb580))
+
+## [0.13.142](https://github.com/framerslab/agentos/compare/v0.13.141...v0.13.142) (2026-10-15)
+
+### test
+
+* **sources:** check the published ranges in the installed foundation contract (#499) ([dfa73e7](https://github.com/framerslab/agentos/commit/dfa73e7877d8b0fdcdf68208e579970ba861fa30))
+* **sources:** exercise installed foundation contracts (#494) ([b73ee36](https://github.com/framerslab/agentos/commit/b73ee367096a12c8c6a1dfb40169e8c436007f87))
+
+### feat
+
+* **voice:** hosted transcription prices, lowest-cost selection and measured connections (#491) ([14aa645](https://github.com/framerslab/agentos/commit/14aa645634d151da9682366b6b297dbff905a833))
+
 ## [0.13.141](https://github.com/framerslab/agentos/compare/v0.13.140...v0.13.141) (2026-10-15)
 
 ### fix
