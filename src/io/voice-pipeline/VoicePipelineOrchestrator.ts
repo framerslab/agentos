@@ -11,7 +11,7 @@
  * IDLE -----> startSession() ---------> LISTENING
  * LISTENING -> turn_complete ----------> PROCESSING
  * PROCESSING -> LLM tokens start -----> SPEAKING
- * SPEAKING --> TTS flush_complete -----> LISTENING
+ * SPEAKING --> TTS flush_complete -----> LISTENING (once played out, on a transport that reports it)
  * SPEAKING --> barge-in (cancel) ------> INTERRUPTING -> LISTENING
  * ANY ------> transport disconnect ----> CLOSED
  * ANY ------> a part of it fails ------> CLOSED
@@ -77,6 +77,12 @@
  *   interruption, and the reply resumes: a `resume` control, then the audio
  *   the pause held. The endpoint detector hears the speech once the floor is
  *   decided, so the speech that cuts a reply is the user's turn.
+ * - Without a call profile, a reply ends when its TTS session reports
+ *   `flush_complete`, or, on a transport that reports its playout
+ *   (`IStreamTransport.waitForPlayout()`, as a speaking
+ *   `LiveKitStreamTransport` does), once the audio it was sent has played
+ *   out (`_finishReply`). Until then the pipeline stays `speaking`, so speech
+ *   over the rest of the reply interrupts it, and `agent_done` waits.
  */
 
 import { EventEmitter } from 'node:events';
@@ -206,7 +212,10 @@ interface Interruption {
   paused: boolean;
   /** The reply's audio that arrived during the pause, in order. */
   audio: EncodedAudioChunk[];
-  /** Whether the reply's synthesis completed during the pause: the reply ends once the held audio is sent. */
+  /**
+   * Whether the reply ended during the pause: its synthesis completed, or, on a transport that reports its playout, the
+   * audio it was sent stopped playing. It then ends after the resume, once the audio the pause held has played.
+   */
   synthesized: boolean;
   /**
    * What the endpoint detector would have been told of the speech since its first start, in order. It is told once
@@ -641,7 +650,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   /**
    * Resumes a paused reply after a false interruption. The endpoint detector is told the speech as the agent holds the
    * floor, so a backchannel stays out of the conversation; the transport is sent `barge_in` with `resume`, then the
-   * audio the pause held, in order; and a reply whose synthesis completed during the pause ends.
+   * audio the pause held, in order; and a reply that ended during the pause ends once that audio has played
+   * (`_finishReply`).
    *
    * @param open - The interruption.
    * @param parts - The session's parts.
@@ -653,7 +663,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (this.current !== 'speaking') return;
     this._watchSend(() => parts.transport.sendControl({ type: 'barge_in', action: { type: 'resume' } }));
     for (const chunk of open.audio) this._sendReplyAudio(parts.transport, chunk);
-    if (open.synthesized) this._replyDone(parts);
+    if (open.synthesized) this._finishReply(parts);
   }
 
   /**
@@ -705,8 +715,57 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   }
 
   /**
-   * Ends the reply once its audio is sent: the pipeline returns to `listening`, the transport is sent `agent_done`, the
-   * endpoint detector is reset and told the user holds the floor, and the watchdog starts.
+   * Ends the reply once its audio has played. A transport that reports its playout (`waitForPlayout()`, as a speaking
+   * `LiveKitStreamTransport` does) keeps the reply `speaking` until the audio it was sent has played out, so speech
+   * over the rest of the reply interrupts it as over any part of it; a wait that rejects ends the reply as one that
+   * resolves, and one that settles after the reply was cut or replaced changes nothing. Without it, the reply ends at
+   * once (`_settleReply`).
+   *
+   * @param parts - The session's parts.
+   */
+  private _finishReply(parts: ReplyParts): void {
+    const reply = this._currentReply;
+    let playout: Promise<void> | undefined;
+    try {
+      playout = parts.transport.waitForPlayout?.();
+    } catch (err) {
+      playout = Promise.reject(err);
+    }
+    if (!playout) {
+      this._settleReply(parts);
+      return;
+    }
+    const settle = (): void => {
+      if (this._currentReply === reply && this.current === 'speaking') this.supervise(() => this._settleReply(parts));
+    };
+    // As in _watchSend(), Promise.resolve() also takes a promise of another realm or library.
+    Promise.resolve(playout).then(settle, settle);
+  }
+
+  /**
+   * Ends a reply whose audio has played. One that a pause holds ends after the resume, once the audio the pause held has
+   * played (`_resumeReply`), and not at all when it is cut; speech over it that never paused it ends with it, told as
+   * said while the agent held the floor; then the reply is done (`_replyDone`).
+   *
+   * @param parts - The session's parts.
+   */
+  private _settleReply(parts: ReplyParts): void {
+    const open = this.interruption;
+    if (open?.paused) {
+      open.synthesized = true;
+      return;
+    }
+    if (open) {
+      this._endInterruption(open);
+      // Telling the detector can fail and end the session.
+      if (this.current !== 'speaking') return;
+    }
+    this._replyDone(parts);
+  }
+
+  /**
+   * Ends the reply once its audio has played (`_finishReply`): the pipeline returns to `listening`, the transport is
+   * sent `agent_done`, the endpoint detector is reset and told the user holds the floor, and the watchdog starts.
    *
    * @param parts - The session's parts.
    */
@@ -918,18 +977,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       if (this.current !== 'speaking') return;
       const open = this.interruption;
       if (open?.paused) {
-        // The reply ends once the audio the pause holds is sent (`_resumeReply`), and not at all when it is cut.
+        // The reply ends once the audio the pause holds is sent and has played (`_resumeReply`), and not at all when
+        // it is cut.
         open.synthesized = true;
         return;
       }
-      if (open) {
-        // Speech over the reply that never paused it ends with it, told as said while the agent held the floor.
-        this._endInterruption(open);
-        // Cast needed because TypeScript keeps `this.current` narrowed by the check above; telling the detector can
-        // fail and end the session.
-        if ((this.current as PipelineState) !== 'speaking') return;
-      }
-      this._replyDone(parts);
+      // The reply ends once the transport has played its audio out; speech over the rest of it interrupts it.
+      this._finishReply(parts);
     });
     stt.on('speech_start', () => this.supervise(() => speech.start()));
     stt.on('speech_end', () => this.supervise(() => speech.end()));

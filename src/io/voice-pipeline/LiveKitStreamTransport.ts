@@ -34,8 +34,9 @@
  * - Native playout, the default and the only mode for a SIP participant:
  *   every participant subscribed to the track hears it, chunks queue on the
  *   track in order, `waitForPlayback()` resolves once the track has played
- *   the chunk out, `clearPlayback()` needs no answer, and a `barge_in`
- *   message that cancels clears the track as it is sent.
+ *   the chunk out, `waitForPlayout()` once it has played out every chunk
+ *   sent, `clearPlayback()` needs no answer, and a `barge_in` message that
+ *   cancels clears the track as it is sent.
  * - Participant playout, when `publisher.playout` is `'participant'` or the
  *   participant's `agentos.playout` attribute is: one chunk at a time,
  *   announced to the participant, and `waitForPlayback()` resolves only after
@@ -234,6 +235,11 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     if (!this.publisher) return Promise.reject(new Error('LiveKitStreamTransport does not publish audio'));
     return this.publisher.waitForPlayback(generation, sequence, signal);
   }
+  /**
+   * Resolves once the track has played out what the transport was handed: every chunk sent so far, and any sent while
+   * it waits; what a clear discarded counts as played out. A listen-only transport resolves at once.
+   */
+  async waitForPlayout(): Promise<void> { await this.publisher?.waitForPlayout(); }
   /** Discards only this physical path's queued output; a closed path must finish native cleanup. */
   async clearPlayback(generation: VoiceGeneration): Promise<void> {
     if (this._state === 'closed') { await this.closing; return; }

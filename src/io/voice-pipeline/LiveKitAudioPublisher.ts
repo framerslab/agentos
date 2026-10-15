@@ -361,6 +361,22 @@ export class LiveKitAudioPublisher {
     } finally { if (timer) clearTimeout(timer); if (this.pending === pending) this.pending = undefined; }
   }
   /**
+   * Resolves once what the publisher was handed has left the track: every chunk admitted so far, and any admitted while
+   * it waits, has been captured or discarded, and the track's native queue has played out
+   * (`AudioSource.waitForPlayout()`). A queue that a clear or a close emptied counts as played out, and in participant
+   * playout the participant's receipt is not waited for. It rejects only when the native wait does.
+   */
+  async waitForPlayout(): Promise<void> {
+    for (;;) {
+      const queued = this.queued; const sending = this.sending;
+      await queued; await sending?.catch(() => {});
+      // A chunk admitted meanwhile is waited for too.
+      if (queued !== this.queued || sending !== this.sending) continue;
+      await this.source?.waitForPlayout();
+      if (queued === this.queued && sending === this.sending) return;
+    }
+  }
+  /**
    * Only the authenticated intended participant's parsed control stream calls this method. A receipt counts in
    * participant playout alone; in native playout it is ignored.
    */

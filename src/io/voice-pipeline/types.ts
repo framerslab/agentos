@@ -273,6 +273,17 @@ export interface IStreamTransport extends EventEmitterLike {
   sendControl(message: ServerTextMessage): Promise<void>;
 
   /**
+   * Resolves once the audio handed to `sendAudio()` has played out, on a transport that plays it on its own timing
+   * after taking it, as a speaking `LiveKitStreamTransport` does: every chunk sent so far, and any sent while it waits.
+   * Audio a clear discarded counts as played out. `VoicePipelineOrchestrator` without a call profile keeps a reply
+   * `speaking` until it settles, so speech over the rest of the reply interrupts it; a rejection ends the reply as a
+   * resolution does. Without it, a reply ends when its synthesis completes.
+   *
+   * @returns Resolves once the audio sent so far has played out.
+   */
+  waitForPlayout?(): Promise<void>;
+
+  /**
    * Close the transport, optionally supplying a WebSocket-style close code and
    * human-readable reason string for diagnostics.
    *
