@@ -239,6 +239,31 @@ describe('native playout', () => {
     await settle(); f.publisher.pause(); await playback;
     await f.publisher.close();
   });
+  it('does not count a chunk as played when a pause cleared it before its playback wait began', async () => {
+    const f = native(); await f.publisher.sendAudio(unscoped());
+    // The pause comes after the send resolved and before the wait begins; a resume does not bring the audio back.
+    f.publisher.pause(); f.publisher.resume();
+    await expect(f.publisher.waitForPlayback(generation, 1, new AbortController().signal)).rejects.toThrow('publisher cancelled');
+    // A chunk the track takes after the resume counts once it has played out.
+    await f.publisher.sendAudio(unscoped()); const next = f.publisher.waitForPlayback(generation, 2, new AbortController().signal);
+    f.source().playOut(); expect(await next).toMatchObject({ sequence: 2, playedSamples: 320, sampleRate: 16000 });
+    await f.publisher.close();
+  });
+  it('clears a frame whose capture was under way as a pause came, even when a resume came before it landed', async () => {
+    const f = native(); await f.publisher.ready();
+    let free!: () => void; f.source().gate = new Promise<void>((resolve) => { free = resolve; });
+    const sent = f.publisher.sendAudio(unscoped());
+    // A false interruption: the pause and the resume both come while the frame's capture waits for room in the queue.
+    await settle(); f.publisher.pause(); f.publisher.resume(); expect(f.source().clears).toBe(1);
+    f.source().gate = undefined; free(); await sent;
+    // The frame landed after the pause's clear and is cleared as it lands, so nothing from before the pause plays after it.
+    expect(f.source().clears).toBe(2);
+    let drained = false; void f.source().waitForPlayout().then(() => { drained = true; }); await settle(); expect(drained).toBe(true);
+    // The track takes the next chunk as usual.
+    await f.publisher.sendAudio(unscoped()); const next = f.publisher.waitForPlayback(generation, 2, new AbortController().signal);
+    f.source().playOut(); expect(await next).toMatchObject({ sequence: 2, playedSamples: 320, sampleRate: 16000 });
+    await f.publisher.close();
+  });
   /** A publisher left to its default playout and without a call identity, published by `room`'s local participant. */
   const unidentified = (room: FakeRoom, receiptTimeoutMs = 1000) => new LiveKitAudioPublisher({ sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs, rtc: fakePublishingRtc() }, room.localParticipant, async () => {});
   it('captures nothing until a participant has subscribed to the track', async () => {
