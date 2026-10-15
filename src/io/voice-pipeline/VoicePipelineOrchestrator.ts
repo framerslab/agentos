@@ -51,6 +51,9 @@
  *   and drops what arrives from the other, reporting the first drop as
  *   `'error'` (`_takesSpeechFrom`). A call profile ends the call on a
  *   transcript message, as on any client message but its controls.
+ * - A transport that plays one audio format alone (`IStreamTransport.playbackFormat`, `'pcm'` for
+ *   `LiveKitStreamTransport` with a publisher) gets it: the TTS session is asked for that format, and a chunk in
+ *   another one is reported once, naming the TTS provider, and not sent.
  * - A watchdog timer prevents a session without a call profile from staying in
  *   LISTENING forever if the user walks away (default 30 s). The watchdog
  *   resets after each completed turn.
@@ -309,7 +312,7 @@ export interface VoicePipelineOverrides {
  * | `'state_changed'`      | `{ from: PipelineState, to: PipelineState }`  |
  * | `'turn_complete'`      | {@link TurnCompleteEvent}; a {@link ScopedTurnCompleteEvent} under a call profile |
  * | `'close'`              | *(none)*: the session moved to `closed`       |
- * | `'error'`              | `Error`: a `turn_complete` or `close` listener threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); speech came from a second source and was dropped (the session's first drop only); or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
+ * | `'error'`              | `Error`: a `turn_complete` or `close` listener threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); speech came from a second source and was dropped (the session's first drop only); a TTS chunk came in another format than the transport's `playbackFormat` and was dropped (the session's first only, naming the provider); or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
  * | `'cleanup_incomplete'` | *(none)*: the stop that followed such a failure could not close every part |
  * | `'transcript'`, `'gap'`, `'generation'`, `'interrupted'`, `'usage'`, `'failure'`, `'detached'`, `'reattached'` | re-emitted from a call profile's session |
  *
@@ -793,7 +796,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     try {
       this.stt = await overrides.streamingSTT.startSession({ language: this.config.language, providerOptions: this.config.sttOptions });
       this.watch(this.stt);
-      this.tts = await overrides.streamingTTS.startSession({ voice: this.config.voice, format: this.config.format, providerOptions: this.config.ttsOptions, expressiveness: this.config.ttsExpressiveness });
+      this.tts = await overrides.streamingTTS.startSession({ voice: this.config.voice, format: transport.playbackFormat ?? this.config.format, providerOptions: this.config.ttsOptions, expressiveness: this.config.ttsExpressiveness });
       this.watch(this.tts);
       if ((this.current as PipelineState) === 'closed') {
         this.stt.close();
@@ -894,9 +897,20 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         if (this.current === 'speaking') await tts.flush();
       });
     });
+    const playbackFormat = transport.playbackFormat;
+    const ttsProvider = overrides.streamingTTS.providerId;
+    let formatRefusalReported = false;
     tts.on('audio', (chunk: EncodedAudioChunk) => {
       if (this.current !== 'speaking') return;
-      // A pause holds the reply's audio until the reply resumes or is cut.
+      // A transport that plays one format alone would refuse the chunk; the session says once which provider sent what.
+      if (playbackFormat && chunk.format !== playbackFormat) {
+        if (!formatRefusalReported) {
+          formatRefusalReported = true;
+          this._reportError(new Error(`the TTS provider '${ttsProvider}' sent ${chunk.format} audio, and the transport plays ${playbackFormat} only`), 'a TTS chunk the transport cannot play');
+        }
+        return;
+      }
+      // A pause holds the reply's audio until the reply resumes or is cut; a chunk the transport cannot play is never held.
       if (this.interruption?.paused) this.interruption.audio.push(chunk);
       else this._sendReplyAudio(transport, chunk);
     });
@@ -1176,7 +1190,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * raises an unhandled rejection as an uncaught exception by default.
    *
    * A refused control message is reported each time. Of a reply's audio chunks only the first refused is reported: a
-   * transport that does not publish audio, as `LiveKitStreamTransport` does not, refuses every chunk of every reply.
+   * transport that does not publish audio, as `LiveKitStreamTransport` without a publisher does not, refuses every chunk
+   * of every reply.
    *
    * @param send - Calls `sendControl()` or `sendAudio()`; it is called at once.
    * @param reply - For an audio chunk, the reply it belongs to (`_currentReply` when it was sent).
@@ -1603,7 +1618,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
       throw new Error('synthesis request bound');
     }
     const requestId = randomUUID();
-    const tts = await this.ttsProvider.startSession({ voice: this.config.voice, format: this.config.format, providerOptions: this.config.ttsOptions, expressiveness: this.config.ttsExpressiveness, call: { ...identity, requestId } });
+    const tts = await this.ttsProvider.startSession({ voice: this.config.voice, format: this.transport.playbackFormat ?? this.config.format, providerOptions: this.config.ttsOptions, expressiveness: this.config.ttsExpressiveness, call: { ...identity, requestId } });
     tts.on('error', () => {
       if (this.live(generation)) this.fail('provider_failure');
     });

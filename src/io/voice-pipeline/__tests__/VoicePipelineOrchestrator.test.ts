@@ -1475,6 +1475,28 @@ describe('VoicePipelineOrchestrator', () => {
     expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'It is booked for two at seven.', durationMs: 400 });
   });
 
+  it('reports and drops a chunk the transport cannot play while a pause holds the reply, and resumes with the chunks it can play', async () => {
+    Object.defineProperty(transport, 'playbackFormat', { value: 'opus', configurable: true });
+    const handler = new SoftFadeBargeinHandler();
+    const { sent } = await speakingWith(handler);
+    const errors: Error[] = [];
+    orchestrator.on('error', (error: Error) => errors.push(error));
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(100); // the handler pauses at its 100 ms
+    ttsSession.emit('audio', replyChunk('two'));
+    ttsSession.emit('audio', { ...replyChunk('wrong'), format: 'mp3' });
+    ttsSession.emit('audio', replyChunk('three'));
+    // The pause holds what the transport can play; the chunk it cannot play is reported once and never held.
+    expect(sent).toEqual(['audio one', 'barge_in pause']);
+    expect(errors.map((error) => error.message)).toEqual(["the TTS provider 'mock-tts' sent mp3 audio, and the transport plays opus only"]);
+
+    sttSession.emit('transcript', sttFinal('uh huh'));
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two', 'audio three']);
+  });
+
   it('resumes the reply held on a pause when no final comes within 1,500 ms of the end of speech', async () => {
     const { sent, states, turns } = await speakingWith(new SoftFadeBargeinHandler());
 
