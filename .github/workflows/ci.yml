@@ -170,6 +170,17 @@ jobs:
           }
           JS
 
+      # The examples the text processing and search pages link to. They need no key and no
+      # network, so each one runs against the build exactly as the pages tell a reader to run it.
+      - name: The text processing and search examples run from the built package
+        run: |
+          set -euo pipefail
+          for example in text-processing-pipeline text-search-bm25 text-hybrid-search text-statistics; do
+            echo "::group::examples/$example.mjs"
+            node "examples/$example.mjs"
+            echo "::endgroup::"
+          done
+
       - name: Lint
         run: pnpm run lint
 
