@@ -448,3 +448,159 @@ describe('measured hosted connections', () => {
     expect(finals[1]?.entry).toBe(fallback === 'deepgram' ? dgEntry : oaEntry);
   });
 });
+
+describe('accounting refusal after opening', () => {
+  it('keeps denied Deepgram continuation terminal before a facade close can trigger fallback', async () => {
+    const seen = hooks(); const first = dg(); const second = oa();
+    Object.defineProperty(first, 'priority', { value: 1 }); Object.defineProperty(second, 'priority', { value: 2 });
+    const errors: Error[] = [];
+    const session = await new StreamingSTTChain([first, second], { enableMidUtteranceFailover: true })
+      .startSession({ connectionHooks: { ...seen.callbacks, audioCeiling: () => 1,
+        authorize: async (opening) => {
+          seen.openings.push(opening);
+          if (seen.openings.length > 1) throw new Error('no remaining funding');
+        }, beforeAudio: (_opening, seconds) => seconds <= 1 } });
+    sessions.push(session); session.on('error', (error: Error) => errors.push(error));
+    await session.pushAudio(frame());
+    const next = session.pushAudio(frame());
+    await vi.advanceTimersByTimeAsync(200); await turns(); await next;
+    expect(errors[0]).toBeInstanceOf(SttConnectionAuthorizationError);
+    expect(seen.openings.map((opening) => opening.entry)).toEqual([dgEntry, dgEntry]);
+    expect(sockets.instances).toHaveLength(1);
+    expect(seen.usage.filter((event) => event.final).map((event) => event.audioSeconds)).toEqual([1, 0]);
+  });
+
+  it('refuses audio beyond an overlap socket ceiling before either socket sends it', async () => {
+    const seen = hooks();
+    const provider = new OpenAIRealtimeTranscriptionSTT({
+      apiKey: 'fixture', usageIntervalMs: 100,
+      rollover: { afterMs: 1000, deadlineMs: 2000, overlapMs: 100, hardStopMs: 3000 },
+    });
+    const session = await provider.startSession({ connectionHooks: {
+      ...seen.callbacks, beforeAudio: (_opening, seconds) => seconds <= 1,
+    } });
+    sessions.push(session);
+    const errors: Error[] = [];
+    session.on('error', (error: Error) => { errors.push(error); });
+    await session.pushAudio(frame());
+    await vi.advanceTimersByTimeAsync(2000); await turns();
+    expect(sockets.instances).toHaveLength(2);
+    await session.pushAudio(frame(2400));
+    expect(sockets.instances.map(pcmSamples)).toEqual([24000, 0]);
+    expect(errors[0]).toBeInstanceOf(SttConnectionAuthorizationError);
+    expect(seen.usage.filter((event) => event.final).map((event) => event.audioSeconds)).toEqual([1, 0]);
+  });
+
+  it('refuses an over-limit fallback replay while switching and closes the facade', async () => {
+    const seen = hooks(); const first = dg(); const second = oa();
+    Object.defineProperty(first, 'priority', { value: 1 }); Object.defineProperty(second, 'priority', { value: 2 });
+    const chain = new StreamingSTTChain([first, second], { enableMidUtteranceFailover: true, minReplayMs: 1 });
+    const session = await chain.startSession({ connectionHooks: {
+      ...seen.callbacks, beforeAudio: (opening, seconds) => opening.entry === dgEntry || seconds <= 0.25,
+    } });
+    sessions.push(session);
+    const errors: Error[] = []; let closes = 0;
+    session.on('error', (error: Error) => { errors.push(error); });
+    session.on('close', () => { closes += 1; });
+    await session.pushAudio(frame(12000));
+    sockets.instances[0]!.emit('error', new Error('HTTP 503'));
+    await turns();
+    expect(sockets.instances).toHaveLength(2);
+    expect(sockets.instances.map(pcmSamples)).toEqual([8000, 0]);
+    expect(errors[0]).toBeInstanceOf(SttConnectionAuthorizationError);
+    expect(closes).toBe(1);
+    expect(seen.usage.filter((event) => event.final).map((event) => event.audioSeconds)).toEqual([0.5, 0]);
+  });
+
+  it.each(['deepgram', 'openai'] as const)('bounds %s wire audio before sending past a funded limit', async (vendor) => {
+    const seen = hooks(); const provider = vendor === 'deepgram' ? dg() : oa();
+    const session = await provider.startSession({ connectionHooks: {
+      ...seen.callbacks, beforeAudio: (_opening, seconds) => seconds <= 1,
+    } });
+    sessions.push(session);
+    const errors: Error[] = [];
+    session.on('error', (error: Error) => { errors.push(error); });
+    await session.pushAudio(frame());
+    await session.pushAudio(frame(24));
+    expect(pcmSamples(sockets.instances[0]!)).toBe(vendor === 'deepgram' ? 16000 : 24000);
+    expect(errors[0]).toBeInstanceOf(SttConnectionAuthorizationError);
+    expect(seen.usage.filter((event) => event.final).map((event) => event.audioSeconds)).toEqual([1]);
+    expect(sockets.instances).toHaveLength(1);
+  });
+
+  it('does not turn a refused OpenAI reconnect into cross-vendor failover', async () => {
+    const seen = hooks();
+    const first = oa();
+    const second = dg();
+    Object.defineProperty(first, 'priority', { value: 1 });
+    Object.defineProperty(second, 'priority', { value: 2 });
+    const chain = new StreamingSTTChain([first, second], { enableMidUtteranceFailover: true });
+    const session = await chain.startSession({ connectionHooks: {
+      ...seen.callbacks,
+      authorize: async (opening) => {
+        seen.openings.push(opening);
+        if (seen.openings.length === 2) throw new Error('reservation refused');
+      },
+    } });
+    sessions.push(session);
+    const errors: Error[] = [];
+    let closes = 0;
+    session.on('error', (error: Error) => { errors.push(error); });
+    session.on('close', () => { closes += 1; });
+    session.pushAudio(frame());
+    sockets.instances[0]!.drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await turns();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(SttConnectionAuthorizationError);
+    expect(closes).toBe(1);
+    expect(seen.openings.map((opening) => opening.entry)).toEqual([oaEntry, oaEntry]);
+    expect(sockets.instances).toHaveLength(1);
+    expect(seen.usage.filter((event) => event.final).map((event) => event.audioSeconds)).toEqual([1, 0]);
+  });
+
+  it('closes a pending reconnect and never opens it after a late approval', async () => {
+    const seen = hooks();
+    const gate = deferred();
+    let signal: AbortSignal | undefined;
+    const session = await oa().startSession({ connectionHooks: {
+      ...seen.callbacks,
+      authorize: async (opening, abort) => {
+        seen.openings.push(opening);
+        if (seen.openings.length === 2) {
+          signal = abort;
+          await gate.promise;
+        }
+        abort.throwIfAborted();
+      },
+    } });
+    sessions.push(session);
+    sockets.instances[0]!.drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await turns();
+    expect(seen.openings).toHaveLength(2);
+    session.close();
+    expect(signal?.aborted).toBe(true);
+    gate.resolve();
+    await turns();
+    expect(sockets.instances).toHaveLength(1);
+    expect(seen.usage.filter((event) => event.final)).toHaveLength(2);
+    expect(new Set(seen.usage.filter((event) => event.final).map((event) => event.connectionId)).size).toBe(2);
+  });
+
+  it('keeps a single-vendor chain single when its provider fails', async () => {
+    const seen = hooks();
+    const chain = new StreamingSTTChain([dg()], { enableMidUtteranceFailover: false });
+    const session = await chain.startSession({ connectionHooks: seen.callbacks });
+    sessions.push(session);
+    const errors: Error[] = [];
+    session.on('error', (error: Error) => { errors.push(error); });
+    session.pushAudio(frame());
+    sockets.instances[0]!.emit('error', new Error('HTTP 503'));
+    await turns();
+    expect(errors).toHaveLength(1);
+    expect(seen.openings.map((opening) => opening.entry)).toEqual([dgEntry]);
+    session.close();
+    expect(seen.usage.filter((event) => event.final).map((event) => event.audioSeconds)).toEqual([1]);
+  });
+});
