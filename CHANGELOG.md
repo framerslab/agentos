@@ -1,3 +1,15 @@
+## [0.13.145](https://github.com/framerslab/agentos/compare/v0.13.144...v0.13.145) (2026-10-15)
+
+### perf
+
+* **rag:** look a fuzzy query word up among the words near it, not every word the index holds (#506) ([66c7292](https://github.com/framerslab/agentos/commit/66c7292fc9d87bb6ecb847a0dd6086773964111f))
+
+## [0.13.144](https://github.com/framerslab/agentos/compare/v0.13.143...v0.13.144) (2026-10-15)
+
+### fix
+
+* **auth:** read a token answer whose body is JSON but not an object as a refusal (#503) ([88886c6](https://github.com/framerslab/agentos/commit/88886c6723720eab1b40c9e9ffded34665004a8a))
+
 ## [0.13.143](https://github.com/framerslab/agentos/compare/v0.13.142...v0.13.143) (2026-10-15)
 
 ### feat
