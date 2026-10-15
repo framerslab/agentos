@@ -2,8 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync, realpathSync, writeFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, isAbsolute } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const require = createRequire(import.meta.url);
+// Entries resolve as this ESM consumer imports them: account-sources exports "." only under "import",
+// a condition require.resolve never matches.
+const entryOf = (specifier: string): string => fileURLToPath(import.meta.resolve(specifier));
 const base = realpathSync(process.cwd());
 const specs = [
   ['@framers/agentos', '@framers/agentos/cognition/rag', process.env.CORE_VERSION],
@@ -25,7 +28,7 @@ const roots = new Map<string, string>();
 const records: Array<{ name: string; version: string; resolved: string; integrity: string; gitHead: string | null }> = [];
 for (const [name, specifier, version] of specs) {
   assert.match(version ?? '', /^\d+\.\d+\.\d+$/);
-  const root = rootOf(require.resolve(specifier), name); roots.set(name, root);
+  const root = rootOf(entryOf(specifier), name); roots.set(name, root);
   const location = relative(base, root);
   assert.equal(isAbsolute(location), false); assert.equal(location.startsWith('..'), false);
   assert.equal(location.replaceAll('\\', '/'), `node_modules/${name}`);
@@ -46,10 +49,10 @@ for (const [name, specifier, version] of specs) {
   records.push({ name, version: version!, resolved: installed.resolved!, integrity: installed.integrity!,
     gitHead: metadata.gitHead ?? null });
 }
-const extensionRequire = createRequire(require.resolve('@framers/agentos-ext-account-sources'));
+const extensionRequire = createRequire(entryOf('@framers/agentos-ext-account-sources'));
 assert.equal(rootOf(extensionRequire.resolve('@framers/agentos/cognition/library'), '@framers/agentos'), roots.get('@framers/agentos'));
 assert.equal(rootOf(extensionRequire.resolve('@framers/sql-storage-adapter'), '@framers/sql-storage-adapter'), roots.get('@framers/sql-storage-adapter'));
-const coreRequire = createRequire(require.resolve('@framers/agentos/cognition/rag'));
+const coreRequire = createRequire(entryOf('@framers/agentos/cognition/rag'));
 assert.equal(rootOf(coreRequire.resolve('@framers/sql-storage-adapter'), '@framers/sql-storage-adapter'), roots.get('@framers/sql-storage-adapter'));
 writeFileSync('registry-evidence.json', JSON.stringify({
   repository: process.env.GITHUB_REPOSITORY, workflowSha: process.env.GITHUB_SHA,
