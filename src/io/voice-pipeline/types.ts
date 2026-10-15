@@ -247,6 +247,13 @@ export interface IStreamTransport extends EventEmitterLike {
   readonly state: 'connecting' | 'open' | 'closing' | 'closed';
 
   /**
+   * The one audio format the transport plays, when it plays only one: `LiveKitStreamTransport` with a publisher
+   * plays `'pcm'`. `VoicePipelineOrchestrator` asks its TTS for this format, and reports a chunk in another one instead
+   * of sending it. Absent when the remote client decodes what it receives.
+   */
+  readonly playbackFormat?: 'pcm' | 'mp3' | 'opus';
+
+  /**
    * Send a synthesised audio chunk to the remote client for playback.
    * Resolves once the chunk has been handed to the underlying I/O layer.
    *

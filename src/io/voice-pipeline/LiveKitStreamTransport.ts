@@ -162,6 +162,8 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  */
 export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTransport {
   readonly id = randomUUID();
+  /** `'pcm'` with a publisher, which plays raw or WAV PCM16 alone; `undefined` for a listen-only transport. */
+  readonly playbackFormat?: 'pcm';
   private _state: 'connecting' | 'open' | 'closing' | 'closed' = 'open';
   private readonly topic: string;
   private readonly source: LiveKitRoomAudioSource;
@@ -196,7 +198,10 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     // option leaves the topic free; until it is read, the source holds nothing.
     this.source = new LiveKitRoomAudioSource({ room: options.room, participantIdentity: options.participantIdentity,
       sampleRate: options.sampleRate, frameSizeMs: options.frameSizeMs, rtc: options.rtc, strictMono: !!options.publisher });
-    if (options.publisher) this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message), { rtc: options.rtc, participant: () => this.linkedParticipant() });
+    if (options.publisher) {
+      this.playbackFormat = 'pcm';
+      this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message), { rtc: options.rtc, participant: () => this.linkedParticipant() });
+    }
     this.on('pause', () => { if (this._state === 'open') this.paused = true; });
     this.on('resume', () => {
       if (this._state !== 'open') return; this.paused = false;
