@@ -1,3 +1,14 @@
+## [0.13.142](https://github.com/framerslab/agentos/compare/v0.13.141...v0.13.142) (2026-10-15)
+
+### test
+
+* **sources:** check the published ranges in the installed foundation contract (#499) ([dfa73e7](https://github.com/framerslab/agentos/commit/dfa73e7877d8b0fdcdf68208e579970ba861fa30))
+* **sources:** exercise installed foundation contracts (#494) ([b73ee36](https://github.com/framerslab/agentos/commit/b73ee367096a12c8c6a1dfb40169e8c436007f87))
+
+### feat
+
+* **voice:** hosted transcription prices, lowest-cost selection and measured connections (#491) ([14aa645](https://github.com/framerslab/agentos/commit/14aa645634d151da9682366b6b297dbff905a833))
+
 ## [0.13.141](https://github.com/framerslab/agentos/compare/v0.13.140...v0.13.141) (2026-10-15)
 
 ### fix

@@ -54,6 +54,9 @@ jobs:
           done
           consumer_dir=$(mktemp -d "$RUNNER_TEMP/source-foundation.XXXXXX")
           cp contracts/source-foundation/*.ts "$consumer_dir/"
+          # No overrides: an overridden edge is checked against the override, not the range its package published.
+          # Without them a peer range that misses a selected version stops the install or fails npm ls, and a
+          # dependency range that misses one installs a second copy, which provenance.ts rejects.
           cat > "$consumer_dir/package.json" <<JSON
           {
             "name": "source-foundation-consumer", "private": true, "type": "module",
@@ -62,12 +65,7 @@ jobs:
               "@framers/agentos-ext-account-sources": "$as_version",
               "@framers/sql-storage-adapter": "$adapter_version"
             },
-            "devDependencies": { "typescript": "5.4.5", "@types/node": "22.20.1" },
-            "overrides": {
-              "@framers/agentos": "$core_version",
-              "@framers/agentos-ext-account-sources": "$as_version",
-              "@framers/sql-storage-adapter": "$adapter_version"
-            }
+            "devDependencies": { "typescript": "5.4.5", "@types/node": "22.20.1" }
           }
           JSON
           {
