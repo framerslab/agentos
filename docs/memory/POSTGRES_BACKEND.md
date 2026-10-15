@@ -77,8 +77,9 @@ await store.initialize();
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `connectionString` | `string` | required unless `pool` is given | Standard Postgres connection URI |
+| `connectionString` | `string` | required unless `pool` or `adapter` is given | Standard Postgres connection URI |
 | `pool` | `PgPoolLike` (a `pg.Pool`) | none | A pool you own: the store opens none, and `close()` leaves it open |
+| `adapter` | `StorageAdapter` (an open PostgreSQL adapter of `@framers/sql-storage-adapter`) | none | An adapter you own, given without `pool` and `connectionString`: the store opens no pool, `close()` leaves it open, and `withStorageTransaction()` runs the store's statements in one of its transactions ([An adapter you own, and its transactions](#an-adapter-you-own-and-its-transactions)) |
 | `poolSize` | `number` | `10` | Max concurrent connections in the pool the store opens |
 | `defaultDimension` | `number` | `1536` | Embedding vector dimensions for new collections |
 | `similarityMetric` | `string` | `'cosine'` | Distance function: `cosine`, `euclidean`, or `dotproduct` |
@@ -147,7 +148,31 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 10 }
 const store = new PostgresVectorStore({ id: 'docs', type: 'postgres', pool, manageSchema: false });
 ```
 
-With `pool`, the store opens no pool of its own and `close()` leaves yours open; `connectionString` is then not needed. With neither, `initialize()` throws.
+With `pool`, the store opens no pool of its own and `close()` leaves yours open; `connectionString` is then not needed. With none of `pool`, `adapter` and `connectionString`, `initialize()` throws.
+
+### An adapter you own, and its transactions
+
+The store also runs on an open PostgreSQL adapter of [`@framers/sql-storage-adapter`](https://github.com/framerslab/sql-storage-adapter), and joins a transaction that adapter opened, so that vector writes commit or roll back with the transaction's other writes:
+
+```typescript
+import { createPostgresAdapter } from '@framers/sql-storage-adapter';
+
+const db = createPostgresAdapter({ connectionString: process.env.DATABASE_URL });
+await db.open();
+const store = new PostgresVectorStore({ id: 'docs', type: 'postgres', adapter: db, manageSchema: false });
+
+await db.transaction((tx) => store.withStorageTransaction(tx, async (vectors) => {
+  await tx.run('UPDATE sources SET version = ? WHERE id = ?', [version, sourceId]);
+  await vectors.delete('chunks', undefined, { filter: { sourceId } });
+  await vectors.upsert('chunks', passages);
+}));
+```
+
+With `adapter`, the store opens no pool and `close()` leaves the adapter open. Give it without `pool` and `connectionString`: with either as well, `initialize()` throws `vector_connection_ambiguous` before it reaches a database. The adapter must be a PostgreSQL adapter with transactions (`kind` `'postgres'` and the `transactions` capability); any other throws `vector_adapter_requires_postgres_transactions`.
+
+`withStorageTransaction(tx, work)` takes the adapter that `StorageAdapter.transaction` passed to its callback and gives `work` a view of the store whose statements all run on that transaction's connection. Pass `tx`, not `db`: on the adapter itself the view's writes would run on pooled connections and commit at once, outside the transaction, so `withStorageTransaction(db, work)` throws `vector_transaction_required`, on the store and on a view of it. The view opens no pool, commits nothing and runs no DDL: like a store with `manageSchema: false`, it takes the metric from `similarityMetric`. Its `upsert()` writes in the caller's transaction instead of opening one, and a search with `iterativeScan`, `efSearch` or `maxScanTuples` sets them with `SET LOCAL` and sets the earlier values back after the search, so the rest of the transaction keeps its own. The transaction commits when its callback returns and rolls back when the callback throws. When `work` settles the view stops working: `close()` and `shutdown()` do nothing, `healthCheck()` answers `false`, `checkHealth()` answers `{ isHealthy: false }`, `fetchByIds()` with no ids answers an empty list, and every other call throws `vector_transaction_closed`.
+
+Make the calls on the view one at a time, awaiting each inside `work`: they share the transaction's one connection, and two searches with settings at once interleave their `SET LOCAL` and restore statements there, so that one search can run under the transaction's own values and the transaction can go on under the store's. Keep neither the view nor `tx` after `work`, and let a failure reach the transaction's callback; a transaction that catches a failed write and commits anyway is outside this contract. Compute embeddings before the transaction opens, so that it holds its connection for the reads and writes alone. On a store made with `pool` or `connectionString`, `withStorageTransaction()` throws `vector_adapter_required`.
 
 ### Tables made by your migrations
 
@@ -201,7 +226,7 @@ await store.updateMetadata('chunks', { sourceId: 'doc_7' }, { aclGroups: ['org:o
 
 `delete()` deletes by `ids` when they are given; otherwise by `options.filter`, where a filter that yields no condition deletes nothing; otherwise every row when `deleteAll` is set. `updateMetadata()` merges the patch into the metadata of every document the filter matches: a key given as `null` is removed, the others replace the stored values, and the rest stays. It throws when the filter holds no condition, so that no call changes every document.
 
-A filter compiles each comparison of a key's value to an expression on `metadata_json->>'key'` or `metadata_json->'key'`, which the GIN index on `metadata_json` does not serve ([PostgreSQL: jsonb indexing](https://www.postgresql.org/docs/current/datatype-json.html#JSON-INDEXING)), so without an index of your own on that expression `delete()` and `updateMetadata()` by such a filter read every row of the collection, and a large collection changed this way is better split into narrower ones.
+A filter compiles each comparison of a key's value to an expression on `metadata_json->>'key'` or `metadata_json->'key'`, which the GIN index on `metadata_json` does not serve ([PostgreSQL: jsonb indexing](https://www.postgresql.org/docs/current/datatype-json.html#JSON-INDEXING)), so without an index of your own on that expression `delete()` and `updateMetadata()` by such a filter read every row of the collection, and a large collection changed this way is better split into narrower ones. `$exists` compiles to `jsonb_exists(metadata_json, 'key')`, the function behind jsonb's `?` operator, since the SQL storage adapter rewrites every `?` in a statement to a placeholder; the index does not serve the function either.
 
 ### Lexical search, and the words of a hybrid search
 
@@ -230,7 +255,7 @@ const store = new PostgresVectorStore({
 });
 ```
 
-With any of the three set, `query()` and `hybridSearch()` run in a transaction on one connection with `SET LOCAL`, so the settings never reach the pool's other users. `relaxed_order` may return rows slightly out of distance order: `query()` sorts its rows again by similarity, and `hybridSearch()` returns its rows in fused-score order. `lexicalSearch()` reads no HNSW index and runs with no setting.
+With any of the three set, `query()` and `hybridSearch()` run in a transaction on one connection with `SET LOCAL`, so the settings never reach the pool's other users. On a view of `withStorageTransaction()` that transaction is the caller's, and the search sets each setting's earlier value back when it ends. `relaxed_order` may return rows slightly out of distance order: `query()` sorts its rows again by similarity, and `hybridSearch()` returns its rows in fused-score order. `lexicalSearch()` reads no HNSW index and runs with no setting.
 
 ## Cloud providers
 

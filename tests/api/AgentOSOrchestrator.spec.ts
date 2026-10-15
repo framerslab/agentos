@@ -305,6 +305,59 @@ describe('AgentOSOrchestrator (API layer)', () => {
       expect(capturedGMIInput?.metadata?.taskHint).toBe('user_multimodal_query');
     });
 
+    it('sends vision inputs as image parts, and stores the turn as text with no image data', async () => {
+      // The first bytes of a JPEG, as base64.
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]).toString('base64');
+      const input: AgentOSInput = {
+        userId: 'test-user',
+        sessionId: 'test-session-3',
+        selectedPersonaId: 'persona-1',
+        textInput: 'What does this receipt say?',
+        visionInputs: [
+          { type: 'base64', data: jpeg },
+          { type: 'image_url', data: 'https://images.example.org/receipt.png' },
+        ],
+      };
+
+      await orchestrator.orchestrateTurn(input);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Message parts, which prompt construction sends whole: the model sees the images.
+      expect(capturedGMIInput?.content).toEqual([
+        { type: 'text', text: 'What does this receipt say?' },
+        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpeg}` } },
+        { type: 'image_url', image_url: { url: 'https://images.example.org/receipt.png' } },
+      ]);
+      const stored = vi
+        .mocked(mockConversationContext.addMessage)
+        .mock.calls.map(([message]) => message)
+        .find((message) => (message as { metadata?: { source?: string } }).metadata?.source === 'agentos_input_multimodal');
+      expect(stored).toMatchObject({ content: 'What does this receipt say?\n[image]\n[image]' });
+      expect(JSON.stringify(stored)).not.toContain(jpeg);
+    });
+
+    it('runs a turn whose audio comes as data, with a note in its place and none of its data', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const clip = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEA';
+      const input: AgentOSInput = {
+        userId: 'test-user',
+        sessionId: 'test-session-4',
+        selectedPersonaId: 'persona-1',
+        textInput: 'Summarize my memo.',
+        audioInput: { type: 'base64', data: clip, mimeType: 'audio/wav' },
+      };
+
+      await orchestrator.orchestrateTurn(input);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(capturedGMIInput?.content).toEqual([
+        { type: 'text', text: 'Summarize my memo.' },
+        { type: 'text', text: '[An audio clip (audio/wav) came with this message. It was not transcribed, so what it says is not available.]' },
+      ]);
+      expect(JSON.stringify(capturedGMIInput)).not.toContain(clip);
+      warn.mockRestore();
+    });
+
     it('includes gmiId in metadata', async () => {
       const input: AgentOSInput = {
         userId: 'test-user',
@@ -413,6 +466,86 @@ describe('AgentOSOrchestrator (API layer)', () => {
       );
       expect(tenantUpdateChunk?.updates?.tenantRouting?.mode).toBe('single_tenant');
       expect(tenantUpdateChunk?.updates?.tenantRouting?.defaultOrganizationId).toBe('org-default');
+    });
+
+    it("hands the GMI manager the turn's resolved organization before it acquires the GMI", async () => {
+      const initializeWith = async (tenantRouting?: Record<string, unknown>) => {
+        await orchestrator.shutdown();
+        await orchestrator.initialize(
+          { maxToolCallIterations: 5, defaultAgentTurnTimeoutMs: 120000, ...(tenantRouting ? { tenantRouting } : {}) } as any,
+          {
+            gmiManager: mockGMIManager,
+            toolOrchestrator: mockToolOrchestrator,
+            conversationManager: mockConversationManager,
+            streamingManager: mockStreamingManager,
+            modelProviderManager: {
+              getProvider: vi.fn(),
+              getProviderForModel: vi.fn(),
+              getModelInfo: vi.fn(),
+              listProviders: vi.fn().mockReturnValue([]),
+              listModels: vi.fn().mockReturnValue([]),
+            } as any,
+          }
+        );
+      };
+      /** The ninth argument of the turn's getOrCreateGMIForSession call: the organization the pipeline resolved. */
+      const organizationPassed = async (input: Partial<AgentOSInput>): Promise<unknown> => {
+        (mockGMIManager.getOrCreateGMIForSession as any).mockClear();
+        await orchestrator.orchestrateTurn({
+          userId: 'test-user',
+          sessionId: 'test-session',
+          textInput: 'Hello',
+          selectedPersonaId: 'persona-1',
+          ...input,
+        } as AgentOSInput);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return (mockGMIManager.getOrCreateGMIForSession as any).mock.calls[0]?.[8];
+      };
+
+      await initializeWith({ mode: 'single_tenant', defaultOrganizationId: 'org-default', strictOrganizationIsolation: true });
+      expect(await organizationPassed({})).toBe('org-default');
+      await initializeWith();
+      expect(await organizationPassed({ organizationId: 'acme' })).toBe('acme');
+      expect(await organizationPassed({})).toBe('');
+    });
+
+    it('fails a turn whose organization the single-tenant runtime refuses after it acquires the GMI and announces the turn, as before', async () => {
+      await orchestrator.shutdown();
+      await orchestrator.initialize(
+        {
+          maxToolCallIterations: 5,
+          defaultAgentTurnTimeoutMs: 120000,
+          tenantRouting: { mode: 'single_tenant', defaultOrganizationId: 'org-default', strictOrganizationIsolation: true },
+        },
+        {
+          gmiManager: mockGMIManager,
+          toolOrchestrator: mockToolOrchestrator,
+          conversationManager: mockConversationManager,
+          streamingManager: mockStreamingManager,
+          modelProviderManager: {
+            getProvider: vi.fn(),
+            getProviderForModel: vi.fn(),
+            getModelInfo: vi.fn(),
+            listProviders: vi.fn().mockReturnValue([]),
+            listModels: vi.fn().mockReturnValue([]),
+          } as any,
+        }
+      );
+      await orchestrator.orchestrateTurn({
+        userId: 'test-user',
+        sessionId: 'test-session',
+        textInput: 'Hello',
+        selectedPersonaId: 'persona-1',
+        organizationId: 'other-org',
+      } as AgentOSInput);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(mockGMIManager.getOrCreateGMIForSession).toHaveBeenCalledTimes(1);
+      const types = (mockStreamingManager.pushChunk as any).mock.calls.map((call: any[]) => call[1]?.type);
+      const progress = types.indexOf(AgentOSResponseChunkType.SYSTEM_PROGRESS);
+      expect(progress).toBeGreaterThanOrEqual(0);
+      expect(types.indexOf(AgentOSResponseChunkType.ERROR)).toBeGreaterThan(progress);
+      expect(capturedGMIInput).toBeNull();
     });
 
     it('uses aggressive long-term-memory recall defaults when retriever is present', async () => {
@@ -540,6 +673,76 @@ describe('AgentOSOrchestrator (API layer)', () => {
         responseText: 'Hello',
         feedbackPayload,
       });
+    });
+
+    it('records the feedback of a multimodal turn under its text, with no image data, when the retriever reports no query', async () => {
+      const feedbackPayload = {
+        traces: [{ id: 'mt_feedback_2', content: 'Receipts go to the expenses folder.' }],
+      };
+      const mockLongTermMemoryRetriever = {
+        // diagnostics, and its queryText, are optional for a custom retriever.
+        retrieveLongTermMemory: vi.fn().mockResolvedValue({
+          contextText: '## User Memory\n- Receipts go to the expenses folder.',
+          diagnostics: { hits: 1 },
+          feedbackPayload,
+        }),
+        recordRetrievalFeedback: vi.fn().mockResolvedValue(undefined),
+      };
+
+      mockConversationContext.getAllMessages = vi.fn().mockReturnValue([
+        { id: 'u-1', role: 'user', content: 'first', timestamp: 1 },
+        { id: 'u-2', role: 'user', content: 'second', timestamp: 2 },
+      ]);
+
+      await orchestrator.shutdown();
+      await orchestrator.initialize(
+        {
+          maxToolCallIterations: 5,
+          defaultAgentTurnTimeoutMs: 120000,
+        },
+        {
+          gmiManager: mockGMIManager,
+          toolOrchestrator: mockToolOrchestrator,
+          conversationManager: mockConversationManager,
+          streamingManager: mockStreamingManager,
+          modelProviderManager: {
+            getProvider: vi.fn(),
+            getProviderForModel: vi.fn(),
+            getModelInfo: vi.fn(),
+            listProviders: vi.fn().mockReturnValue([]),
+            listModels: vi.fn().mockReturnValue([]),
+          } as any,
+          longTermMemoryRetriever: mockLongTermMemoryRetriever as any,
+        }
+      );
+
+      // The first bytes of a JPEG, as base64.
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]).toString('base64');
+      const input: AgentOSInput = {
+        userId: 'test-user',
+        sessionId: 'test-session',
+        textInput: 'What does this receipt say?',
+        visionInputs: [{ type: 'base64', data: jpeg }],
+        selectedPersonaId: 'persona-1',
+        memoryControl: {
+          longTermMemory: {
+            scopes: { user: true },
+          },
+        },
+      };
+
+      await orchestrator.orchestrateTurn(input);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      expect(mockLongTermMemoryRetriever.retrieveLongTermMemory.mock.calls[0]?.[0]?.queryText).toBe(
+        'What does this receipt say?\n[image]',
+      );
+      expect(mockLongTermMemoryRetriever.recordRetrievalFeedback).toHaveBeenCalledWith({
+        queryText: 'What does this receipt say?\n[image]',
+        responseText: 'Hello',
+        feedbackPayload,
+      });
+      expect(JSON.stringify(mockLongTermMemoryRetriever.recordRetrievalFeedback.mock.calls)).not.toContain(jpeg);
     });
 
     it('emits taskOutcome metadata for final turn evaluation', async () => {

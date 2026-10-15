@@ -128,7 +128,9 @@ embeddings[0].length; // 1536 for text-embedding-3-small
 usage;                // { promptTokens, totalTokens, costUSD? }
 ```
 
-`input` takes one string or an array, and `embeddings` holds one vector per string either way. The options are `provider`, `model`, `input`, `dimensions`, `apiKey`, `baseUrl`, `usageLedger` and `abortSignal`. When `abortSignal` aborts, the request in flight is cancelled, no later request starts (Gemini sends 100 inputs a request), and the call rejects with the signal's reason; a call whose signal has already aborted sends nothing.
+`input` takes one string or an array, and `embeddings` holds one vector per string either way. The options are `provider`, `model`, `input`, `dimensions`, `maxInputsPerRequest`, `apiKey`, `baseUrl`, `usageLedger` and `abortSignal`. When `abortSignal` aborts, the request in flight is cancelled, no later request starts (Gemini sends 100 inputs a request), and the call rejects with the signal's reason; a call whose signal has already aborted sends nothing.
+
+OpenAI-compatible calls send inputs in order in requests of at most 2,048 inputs and 300,000 UTF-8 bytes. Set `maxInputsPerRequest` to an integer from 1 to 2,048 for a smaller batch size. The byte bound conservatively limits total tokens; each input must still fit the model's per-input token limit. An input above the byte bound is rejected. Returned usage sums all requests, and usage from completed requests is recorded even if a later request fails or the call aborts. Native Gemini and Ollama ignore `maxInputsPerRequest`.
 
 | Provider | Default model | Endpoint |
 |---|---|---|

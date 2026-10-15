@@ -4,23 +4,26 @@
  * Adapts an AgentOS {@link AgentSession} to the {@link IVoicePipelineAgentSession}
  * interface required by {@link VoicePipelineOrchestrator}.
  *
- * The adapter wraps `AgentSession.stream(text)` and yields the resulting
- * `textStream` (an `AsyncIterable<string>` of token deltas) as the return
- * value of `sendText()`.
+ * Each request streams through `AgentSession.stream(text, { abortSignal })`
+ * and yields the result's `textStream` deltas as the return value of
+ * `sendText()`.
  *
  * ## Abort Handling
  *
- * The `abort()` method is implemented by setting an internal flag that causes
- * the `sendText()` iterator to stop yielding tokens. Since `StreamTextResult`
- * does not expose a native cancellation mechanism, the underlying provider
- * stream continues but its output is discarded.
+ * `abort()` aborts the request's signal, so the session cancels the model
+ * request itself instead of only discarding its output, and tokens that arrive
+ * after the abort are not yielded. A request `sendText()` returned before an
+ * `abort()` and not yet pulled is cancelled too: it never reaches the session
+ * and yields nothing. `whenIdle()` resolves once the request's iterator has
+ * unwound; that alone does not prove a remote supplier stopped work. One
+ * request is active at a time.
  */
 
 import type { AgentSession } from '../../../api/agent.js';
 import type { IVoicePipelineAgentSession, VoiceTurnMetadata } from '../types.js';
 
 /**
- * Wraps an AgentOS `AgentSession` as an `IVoicePipelineAgentSession`.
+ * Adapts AgentSession streaming with a request AbortSignal; aborted output never enters a new turn.
  *
  * @example
  * ```typescript
@@ -36,42 +39,64 @@ import type { IVoicePipelineAgentSession, VoiceTurnMetadata } from '../types.js'
  * ```
  */
 export class AgentSessionVoiceAdapter implements IVoicePipelineAgentSession {
-  /** Internal abort flag. Set by `abort()`, checked by the token iterator. */
-  private aborted = false;
+  private controller?: AbortController;
+  private idle: Promise<void> = Promise.resolve();
+  /** `abort()` calls so far; a request made before the latest one never starts. */
+  private aborts = 0;
 
+  /**
+   * @param session - The agent session each request streams through.
+   */
   constructor(private readonly session: AgentSession) {}
 
   /**
-   * Send user text to the agent and yield response tokens as an async iterable.
-   *
-   * The `metadata` parameter carries voice-specific context (speech duration,
-   * endpoint reason, confidence, etc.) that could be injected into the agent's
-   * context for more informed responses. Currently the metadata is not forwarded
-   * to the agent (the AgentSession API doesn't support metadata injection),
-   * but it is available for future enhancement.
+   * One active request. The underlying model and tool machinery receive the same abort signal. The request belongs
+   * to the moment of this call: an `abort()` before its first pull cancels it, so it never reaches the session and
+   * yields nothing.
    *
    * @param text - Transcribed user speech to send to the agent.
-   * @param _metadata - Voice turn metadata (reserved for future use).
-   * @returns An async iterable of response token strings.
+   * @param _metadata - Voice turn metadata; the session takes none, so it is not forwarded.
+   * @returns The response's text deltas.
+   * @throws {Error} When iterated while another request of this adapter is active.
    */
-  async *sendText(text: string, _metadata: VoiceTurnMetadata): AsyncIterable<string> {
-    this.aborted = false;
+  sendText(text: string, _metadata: VoiceTurnMetadata): AsyncIterable<string> {
+    // Read at the call, not at the first pull: a generator's body does not run until it is iterated.
+    return this.request(text, this.aborts);
+  }
 
-    const result = this.session.stream(text);
-
-    for await (const token of result.textStream) {
-      if (this.aborted) break;
-      yield token;
+  /** Streams one request, made when `abort()` had been called `issued` times; it starts nothing after a later abort. */
+  private async *request(text: string, issued: number): AsyncIterable<string> {
+    if (issued !== this.aborts) return;
+    if (this.controller) throw new Error('voice request already active');
+    const controller = new AbortController();
+    this.controller = controller;
+    let finish!: () => void;
+    this.idle = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    try {
+      const result = this.session.stream(text, { abortSignal: controller.signal });
+      for await (const token of result.textStream) {
+        if (controller.signal.aborted) break;
+        yield token;
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      controller.abort();
+      if (this.controller === controller) this.controller = undefined;
+      finish();
     }
   }
 
-  /**
-   * Abort the current generation.
-   * Sets an internal flag causing the active `sendText()` iterator to stop
-   * yielding tokens. The underlying LLM stream is not explicitly cancelled
-   * but its output is discarded.
-   */
+  /** Cancels actual generation, not just iteration of the returned text, and every request not yet pulled. */
   abort(): void {
-    this.aborted = true;
+    this.aborts++;
+    this.controller?.abort();
+  }
+
+  /** Completes when the iterator unwinds; native providers additionally owe their own abort acknowledgement. */
+  whenIdle(): Promise<void> {
+    return this.idle;
   }
 }

@@ -26,6 +26,7 @@ import { generateText } from '../../api/generateText.js';
 import { PROVIDER_DEFAULTS, autoDetectProvider } from '../../api/runtime/provider-defaults.js';
 import { VALID_TRAITS, type AdaptPersonalityTool, type HEXACOTrait } from './AdaptPersonalityTool.js';
 import { resolveSelfImprovementSessionKey } from './sessionScope.js';
+import { refusedSelfChange, selfChangeRefusal } from '../learning/toolContext.js';
 
 // ============================================================================
 // TYPES
@@ -338,7 +339,11 @@ export class SelfEvaluateTool implements ITool<SelfEvaluateInput> {
       const parsed = this.parseEvaluation(result.text);
       scores = parsed.scores;
 
-      const autoAdjustResults = this.deps.config.autoAdjust
+      // On a turn the learning layer refuses, the evaluation answers and stays in the session's record, but stores no
+      // memory trace and applies no adjustment: both are the agent changing itself.
+      const refusal = selfChangeRefusal(context.sessionData);
+
+      const autoAdjustResults = this.deps.config.autoAdjust && !refusal
         ? await this.applySuggestedAdjustments(parsed.adjustments, context)
         : undefined;
 
@@ -352,7 +357,7 @@ export class SelfEvaluateTool implements ITool<SelfEvaluateInput> {
 
       // Store as memory trace if callback is provided. The trace carries the
       // user's query, so the context goes along to keep it in this session.
-      if (this.deps.storeMemory) {
+      if (this.deps.storeMemory && !refusal) {
         try {
           await this.deps.storeMemory(
             {
@@ -380,6 +385,7 @@ export class SelfEvaluateTool implements ITool<SelfEvaluateInput> {
           remainingEvaluations:
             this.deps.config.maxEvaluationsPerSession - sessionState.evalCount,
           ...(autoAdjustResults ?? {}),
+          ...(refusal ? { selfChangeRefused: refusal } : {}),
         },
       };
     } catch (err: any) {
@@ -405,6 +411,10 @@ export class SelfEvaluateTool implements ITool<SelfEvaluateInput> {
     args: SelfEvaluateInput,
     context: ToolExecutionContext,
   ): Promise<ToolExecutionResult> {
+    // Adjusting a setting or a trait is a self-change: refused before anything is read or changed.
+    const refusal = selfChangeRefusal(context.sessionData);
+    if (refusal) return refusedSelfChange(this.name, refusal);
+
     const { param, value, reasoning } = args;
     const sessionState = this.getSessionState(context);
 

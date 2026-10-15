@@ -54,6 +54,10 @@ export type {
   CapabilitySearchResult,
   CapabilityIndexSources,
   CapabilityManifestFile,
+  CapabilityManifestField,
+  CapabilityManifestProblem,
+  CapabilityManifestScanResult,
+  RefusedCapabilityManifest,
   DiscoveryQueryOptions,
   ICapabilityDiscoveryEngine,
 } from './types.js';
@@ -68,7 +72,11 @@ export { CapabilityGraph } from './CapabilityGraph.js';
 export { Neo4jCapabilityGraph } from './Neo4jCapabilityGraph.js';
 export { CapabilityContextAssembler } from './CapabilityContextAssembler.js';
 export { CapabilityEmbeddingStrategy } from './CapabilityEmbeddingStrategy.js';
-export { CapabilityManifestScanner } from './CapabilityManifestScanner.js';
+export {
+  CapabilityManifestRefusedError,
+  CapabilityManifestScanner,
+  resolveSkillContentPath,
+} from './CapabilityManifestScanner.js';
 
 // Meta-tool
 export { createDiscoverCapabilitiesTool } from './DiscoverCapabilitiesTool.js';

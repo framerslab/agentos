@@ -21,6 +21,7 @@ import type {
 } from '../memory/core/types.js';
 import { GMIMood, GMIInteractionType } from './IGMI';
 import type { UserContext, GMITurnInput } from './IGMI';
+import { turnContentText } from './turnContent';
 
 /**
  * Identity of the turn a memory retrieval runs for. The bridge combines it
@@ -345,15 +346,8 @@ export class CognitiveMemoryBridge {
    * @returns The stringified content, or null if empty/invalid.
    */
   private stringifyTurnContent(content: GMITurnInput['content']): string | null {
-    if (typeof content === 'string') {
-      const trimmed = content.trim();
-      return trimmed ? trimmed : null;
-    }
-    try {
-      const serialized = JSON.stringify(content);
-      return serialized && serialized !== 'null' ? serialized : null;
-    } catch {
-      return null;
-    }
+    // As text, with no image data: memory keeps what was said, not base64.
+    const text = turnContentText(content).trim();
+    return text && text !== 'null' ? text : null;
   }
 }

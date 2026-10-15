@@ -1217,9 +1217,14 @@ describe('Agency Full Integration', () => {
 
       await team.generate('query with documents');
 
+      // The message says the documents go unused and names the runtime's
+      // retrieval config, not AgentOSOrchestrator, which does not set up the
+      // RAG subsystem (RagMemoryInitializer does, for AgentOS).
       expect(infoSpy).toHaveBeenCalledWith(
-        expect.stringContaining('AgentOSOrchestrator'),
+        expect.stringContaining('rag.documents is set, but agency() loads, indexes and retrieves no documents'),
       );
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('AgentOSConfig.ragConfig'));
+      expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('AgentOSOrchestrator'));
 
       infoSpy.mockRestore();
     });

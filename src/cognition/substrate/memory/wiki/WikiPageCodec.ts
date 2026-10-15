@@ -21,11 +21,13 @@ export function extractWikiLinks(body: string): string[] {
 /**
  * Parse a page file's content into a WikiPage. `id` is the caller-known relative id.
  * The front matter is read as data: a block marked as JavaScript is dropped, never evaluated.
+ * Blank lines between the front matter and the body are dropped, and the body's first line
+ * keeps its indentation.
  */
 export function parsePage(id: string, raw: string): WikiPage {
   const { data, content } = readFrontMatter(raw);
   const type: WikiPageType = isWikiPageType(data.type) ? data.type : inferTypeFromId(id);
-  const body = content.replace(/^\s+/, '');
+  const body = content.replace(/^(?:[ \t]*\r?\n)+/, '');
   return {
     id,
     type,

@@ -61,6 +61,9 @@ import {
   type ITaskOutcomeTelemetryStore,
 } from './runtime/AgentOSOrchestrator';
 import { GMIManager, GMIManagerConfig } from '../cognition/substrate/GMIManager';
+import { createLearningLayer } from '../cognition/learning/LearningLayer.js';
+import { resolveLearningConfig } from '../cognition/learning/config.js';
+import type { HostLoopName, ILearningLayer, LearningConfig, LoopState } from '../cognition/learning/types.js';
 import {
   AIModelProviderManager,
   AIModelProviderManagerConfig,
@@ -139,6 +142,7 @@ import { GuardrailAction } from '../safety/guardrails/IGuardrailService';
 import {
   evaluateInputGuardrails,
   createGuardrailBlockedStream,
+  createToolCallGate,
   wrapOutputGuardrails,
 } from '../safety/guardrails/guardrailDispatcher';
 import type { IPersonaLoader } from '../cognition/substrate/personas/IPersonaLoader';
@@ -770,6 +774,17 @@ export interface AgentOSConfig {
    * Default: disabled (opt-in).
    */
   observability?: AgentOSObservabilityConfig;
+
+  /**
+   * The learning layer (docs/GMI.md, "Learning"). Unset or `false`: off, and the runtime's GMIs run as they did
+   * before the layer existed. `true` or a {@link LearningConfig}: every GMI sends its persona's personality section
+   * as a system prompt of its own on every turn, and each session is bound to a learner: its persona with the user
+   * and the resolved organization of its first turn. `namespace` is refused here, because the runtime takes the
+   * organization from each turn. A host that built a layer itself passes it in `gmiManagerConfig.learningLayer`
+   * instead. {@link AgentOS.getLearningLayer} returns the layer.
+   * @default false
+   */
+  learning?: boolean | LearningConfig;
 }
 
 export interface AgentOSActiveConversationSnapshot {
@@ -861,6 +876,10 @@ export class AgentOS implements IAgentOS {
   private guardrailService?: IGuardrailService;
   private workflowFacade?: WorkflowFacade;
   private discoveryInitializer?: CapabilityDiscoveryInitializer;
+  /** The learning layer the runtime's GMIs use: built from `learning`, or passed in `gmiManagerConfig`. */
+  private learningLayer?: ILearningLayer;
+  /** True when this runtime built the layer, and so closes it at shutdown. */
+  private ownsLearningLayer = false;
 
   private ragMemoryInitializer!: RagMemoryInitializer;
 
@@ -947,6 +966,7 @@ export class AgentOS implements IAgentOS {
     }
 
     this.validateConfiguration(config);
+    this.assertLearningConfig(config);
     const resolvedConfig = RagMemoryInitializer.resolveConfig(config);
     const normalizedConfigTools = adaptToolsToMap(resolvedConfig.tools);
     const normalizedExternalTools = normalizeExternalToolRegistry(resolvedConfig.externalTools);
@@ -1229,10 +1249,17 @@ export class AgentOS implements IAgentOS {
       await this.streamingManager.initialize(this.config.streamingManagerConfig);
       console.log('AgentOS: StreamingManager initialized.');
 
+      // The learning layer, only when the host turned learning on (or passed a layer of its own).
+      this.learningLayer = this.resolveLearningLayer();
+
       // Initialize GMI Manager
       const personaSource = resolvePersonaLoader(this.config);
       this.gmiManager = new GMIManager(
-        { ...this.config.gmiManagerConfig, personaLoaderConfig: personaSource.personaLoaderConfig },
+        {
+          ...this.config.gmiManagerConfig,
+          personaLoaderConfig: personaSource.personaLoaderConfig,
+          ...(this.learningLayer ? { learningLayer: this.learningLayer } : {}),
+        },
         this.subscriptionService,
         this.authService,
         this.conversationManager, // Removed Prisma parameter
@@ -1472,6 +1499,33 @@ export class AgentOS implements IAgentOS {
   }
 
   /**
+   * The output guards' verdict on a stream. A block that withheld actionable tool calls drops the pause the
+   * orchestrator saved for them, so neither `getPendingExternalToolRequest()` nor the stream offers them again; then
+   * a replaced or rewritten reply is written to the stored conversation. A store that refuses the save of the dropped
+   * pause is logged: the stream is closed all the same, and the stored conversation keeps the pause until the
+   * conversation is saved again. Nothing here throws into the stream.
+   */
+  private async onOutputVerdict(conversationKey: string, verdict: GuardrailOutputVerdict): Promise<void> {
+    const withheld = verdict.toolCallIds ?? [];
+    if (verdict.action === GuardrailAction.BLOCK && withheld.length > 0) {
+      try {
+        await this.agentOSOrchestrator.discardBlockedToolCalls(verdict.streamId, withheld, {
+          reason: 'An output guardrail blocked the reply that requested this tool call, so the call was not run.',
+          ...(verdict.reasonCode ? { reasonCode: verdict.reasonCode } : {}),
+          ...(verdict.guardrailId ? { guardrailId: verdict.guardrailId } : {}),
+        });
+      } catch (error) {
+        this.logger.warn('The refusal of a blocked tool call could not be saved: the stored conversation keeps its pause until it is saved again', {
+          streamId: verdict.streamId,
+          toolCallIds: withheld,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    await this.recordGuardedReply(conversationKey, verdict);
+  }
+
+  /**
    * With conversational persistence on, the orchestrator stores the model's reply before the output guards run. When
    * a guard replaced or rewrote it, the stored message is made to hold what the person saw, so the history never
    * carries a reply the guards refused. A reply blocked with no replacement is emptied, with the reason recorded.
@@ -1682,6 +1736,97 @@ export class AgentOS implements IAgentOS {
   public getGMIManager(): GMIManager {
     this.ensureInitialized();
     return this.gmiManager;
+  }
+
+  /**
+   * The runtime's learning layer, or `undefined` when learning is off: no `learning` option and no layer passed
+   * in `gmiManagerConfig.learningLayer`. A host reads the loop manifest from it; a measurement asserts on it
+   * that a runtime it compares has learning off.
+   */
+  public getLearningLayer(): ILearningLayer | undefined {
+    this.ensureInitialized();
+    return this.learningLayer;
+  }
+
+  /**
+   * Checks the `learning` option before any service starts: a `LearningConfig` must be valid, `learning.namespace`
+   * is refused (the runtime takes each turn's resolved organization), and `learning` and
+   * `gmiManagerConfig.learningLayer` are not both set (the manager takes one layer).
+   *
+   * @throws {AgentOSServiceError} With `CONFIGURATION_ERROR`, naming the option.
+   */
+  private assertLearningConfig(config: AgentOSConfig): void {
+    const option = config.learning;
+    if (option === undefined || option === false) return;
+    const refuse = (message: string): never => {
+      throw new AgentOSServiceError(message, GMIErrorCode.CONFIGURATION_ERROR, undefined, 'AgentOS.initialize');
+    };
+    if (config.gmiManagerConfig?.learningLayer) {
+      refuse('Both learning and gmiManagerConfig.learningLayer are set; set one.');
+    }
+    if (option !== true && (option as LearningConfig | null)?.namespace !== undefined) {
+      refuse("learning.namespace is read by gmi() only; the runtime takes each turn's resolved organizationId.");
+    }
+    try {
+      resolveLearningConfig(option === true ? {} : option, 'custom');
+    } catch (error) {
+      throw AgentOSServiceError.wrap(error, GMIErrorCode.CONFIGURATION_ERROR, 'The learning option is not valid', 'AgentOS.initialize');
+    }
+  }
+
+  /**
+   * The layer the GMI manager is built with: one built from `learning` (profile `custom`: the runtime has no
+   * cognition profile, so rendering is on and the self-change kinds are off unless the config asks for them), or
+   * the one the host passed in `gmiManagerConfig.learningLayer`, or none.
+   */
+  private resolveLearningLayer(): ILearningLayer | undefined {
+    const option = this.config.learning;
+    this.ownsLearningLayer = false;
+    if (option === undefined || option === false) return this.config.gmiManagerConfig.learningLayer;
+    const layer = createLearningLayer({
+      ...(option === true ? {} : option),
+      profile: 'custom',
+      surface: 'runtime',
+      hostLoops: this.describeHostLoops(),
+    });
+    this.ownsLearningLayer = true;
+    return layer;
+  }
+
+  /** What this runtime's configuration says about the loops it runs, for the learning layer's manifest. */
+  private describeHostLoops(): Partial<Record<HostLoopName, LoopState>> {
+    const perFactory: LoopState = { live: 'varies', detail: "decided by the host's cognitiveMemoryFactory" };
+    const perPersona: LoopState = { live: 'varies', detail: 'set per persona' };
+    const off = (detail: string): LoopState => ({ live: false, detail });
+    const memory = Boolean(this.config.gmiManagerConfig.cognitiveMemoryFactory);
+    const emergent = this.config.emergent === true;
+    return {
+      memory: memory ? { live: true } : off('no gmiManagerConfig.cognitiveMemoryFactory'),
+      memory_mechanisms: memory ? perFactory : off('no cognitive memory'),
+      memory_observer_reflector: memory ? perFactory : off('no cognitive memory'),
+      memory_store: memory ? perFactory : off('no cognitive memory'),
+      sentiment: perPersona,
+      metaprompts: perPersona,
+      emergent_tools: emergent ? { live: true } : off('emergent is off'),
+      self_improvement_tools:
+        emergent && this.config.emergentConfig?.selfImprovement?.enabled === true
+          ? { live: true }
+          : off('emergentConfig.selfImprovement is off'),
+      forged_code_executor:
+        emergent && this.config.emergentConfig?.allowSandboxTools === true ? { live: true } : off('sandbox forging is off'),
+      // The tool orchestrator's approval gate runs only with toolOrchestratorConfig.hitl.enabled.
+      hitl:
+        this.config.toolOrchestratorConfig?.hitl?.enabled === true
+          ? this.config.hitlManager
+            ? { live: true }
+            : { live: true, detail: 'no hitlManager: side-effect tools are refused unless hitl.autoApproveWhenNoManager is set' }
+          : off('toolOrchestratorConfig.hitl.enabled is off'),
+      tool_policy:
+        this.config.orchestratorConfig.adaptiveExecution?.enabled === false
+          ? off('orchestratorConfig.adaptiveExecution is off')
+          : { live: true },
+      rag: this.ragMemoryInitializer?.retrievalAugmentor ? { live: true } : off('no retrieval augmentor'),
+    };
   }
 
   public getExtensionManager(): ExtensionManager {
@@ -1928,10 +2073,16 @@ export class AgentOS implements IAgentOS {
 
       // The orchestrator creates/manages the actual stream and starts pushing chunks to StreamingManager.
       // We get the streamId it uses so our bridge can listen to it.
-      streamIdToListen = await this.agentOSOrchestrator.orchestrateTurn({
+      // the output guards that evaluate tool calls also judge each call the runtime runs itself, before it runs; a
+      // host with none hands the orchestrator the turn alone, as before
+      const turnInput = {
         ...orchestratorInput,
         languageNegotiation,
-      } as any);
+      } as any;
+      const toolCallGate = createToolCallGate(guardrailServices, guardrailContext);
+      streamIdToListen = toolCallGate
+        ? await this.agentOSOrchestrator.orchestrateTurn(turnInput, { toolCallGate })
+        : await this.agentOSOrchestrator.orchestrateTurn(turnInput);
       await this.streamingManager.registerClient(streamIdToListen, bridge);
       this.logger.debug?.('Bridge registered', { bridgeId: bridge.id, streamId: streamIdToListen });
 
@@ -1944,7 +2095,7 @@ export class AgentOS implements IAgentOS {
           personaId: effectivePersonaId,
           inputEvaluations: guardrailInputOutcome.evaluations ?? [],
           holdUntilFinal: this.holdsOutputUntilFinal(),
-          onVerdict: (verdict) => this.recordGuardedReply(orchestratorInput.conversationId || orchestratorInput.sessionId, verdict),
+          onVerdict: (verdict) => this.onOutputVerdict(orchestratorInput.conversationId || orchestratorInput.sessionId, verdict),
         }
       );
       if (orchestratorInput.workflowRequest) {
@@ -2160,18 +2311,25 @@ export class AgentOS implements IAgentOS {
         yield this.requiredGuardrailMissingChunk(continuationReport, streamId, identity?.personaId ?? 'unknown_persona');
         return;
       }
+      const continuationServices = this.getActiveGuardrailServices();
 
       // This call is `async Promise<void>`; it triggers the orchestrator to process the tool result(s)
-      // and push new chunks to the StreamingManager for the given streamId.
-      await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults);
+      // and push new chunks to the StreamingManager for the given streamId. The output guards that evaluate tool
+      // calls judge each call the continuation runs itself, before it runs.
+      const continuationGate = createToolCallGate(continuationServices, continuationContext);
+      if (continuationGate) {
+        await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults, { toolCallGate: continuationGate });
+      } else {
+        await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults);
+      }
 
       // Yield new chunks received by our bridge client on the same stream, through the same output guards a turn has
       const continuationKey = identity?.conversationId || identity?.sessionId || streamId;
-      const guardedContinuation = wrapOutputGuardrails(this.getActiveGuardrailServices(), continuationContext, bridge.consume(), {
+      const guardedContinuation = wrapOutputGuardrails(continuationServices, continuationContext, bridge.consume(), {
         streamId,
         personaId: identity?.personaId,
         holdUntilFinal: this.holdsOutputUntilFinal(),
-        onVerdict: (verdict) => this.recordGuardedReply(continuationKey, verdict),
+        onVerdict: (verdict) => this.onOutputVerdict(continuationKey, verdict),
       });
       for await (const chunk of guardedContinuation) {
         yield chunk;
@@ -2396,24 +2554,27 @@ export class AgentOS implements IAgentOS {
         yield this.requiredGuardrailMissingChunk(resumeReport, pendingRequest.streamId, pendingRequest.personaId);
         return;
       }
-      streamIdToListen = await this.agentOSOrchestrator.orchestrateResumedToolResults(
-        pendingRequest,
-        toolResults,
-        options
-      );
-      await this.streamingManager.registerClient(streamIdToListen, bridge);
-
       const resumeContext: GuardrailContext = {
         userId: pendingRequest.userId,
         sessionId: pendingRequest.sessionId,
         personaId: pendingRequest.personaId,
         conversationId: pendingRequest.conversationId,
       };
-      const guardedResume = wrapOutputGuardrails(this.getActiveGuardrailServices(), resumeContext, bridge.consume(), {
+      const resumeServices = this.getActiveGuardrailServices();
+      // the output guards that evaluate tool calls judge each call the resumed turn runs itself, before it runs
+      const resumeGate = createToolCallGate(resumeServices, resumeContext);
+      streamIdToListen = resumeGate
+        ? await this.agentOSOrchestrator.orchestrateResumedToolResults(pendingRequest, toolResults, options, {
+            toolCallGate: resumeGate,
+          })
+        : await this.agentOSOrchestrator.orchestrateResumedToolResults(pendingRequest, toolResults, options);
+      await this.streamingManager.registerClient(streamIdToListen, bridge);
+
+      const guardedResume = wrapOutputGuardrails(resumeServices, resumeContext, bridge.consume(), {
         streamId: streamIdToListen,
         personaId: pendingRequest.personaId,
         holdUntilFinal: this.holdsOutputUntilFinal(),
-        onVerdict: (verdict) => this.recordGuardedReply(pendingRequest.conversationId, verdict),
+        onVerdict: (verdict) => this.onOutputVerdict(pendingRequest.conversationId, verdict),
       });
       for await (const chunk of guardedResume) {
         yield chunk;
@@ -2497,8 +2658,8 @@ export class AgentOS implements IAgentOS {
     // E.g., await this.authService.validateUserExists(userId);
 
     console.log(
-      `AgentOS.receiveFeedback: UserID '${userId}', SessionID '${sessionId}', PersonaID '${personaId}'. Payload:`,
-      JSON.stringify(feedbackPayload).substring(0, 200) + '...'
+      `AgentOS.receiveFeedback: UserID '${userId}', SessionID '${sessionId}', PersonaID '${personaId}'. Feedback metadata:`,
+      { fields: Object.keys(feedbackPayload), textLength: feedbackPayload.text?.length ?? 0 }
     );
 
     try {
@@ -2550,6 +2711,12 @@ export class AgentOS implements IAgentOS {
         await this.gmiManager.shutdown();
         console.log('AgentOS: GMIManager shut down.');
       }
+      // After the GMIs: each ended its learner session as it shut down. A layer the host passed stays the host's.
+      if (this.learningLayer && this.ownsLearningLayer) {
+        await this.learningLayer.close();
+      }
+      this.learningLayer = undefined;
+      this.ownsLearningLayer = false;
       if (this.streamingManager?.shutdown) {
         await this.streamingManager.shutdown();
         console.log('AgentOS: StreamingManager shut down.');

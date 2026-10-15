@@ -148,6 +148,22 @@ describe('MemoryAddTool', () => {
     expect(row!.scope).toBe('persona');
   });
 
+  it('refuses a type or scope outside its schema and stores nothing, even for a caller that skips the schema', async () => {
+    const brain = await openBrain();
+    const tool = new MemoryAddTool(brain);
+
+    const scoped = await tool.execute({ content: 'Stored two folders up.', scope: '../../elsewhere' }, testContext);
+    expect(scoped.success).toBe(false);
+    expect(scoped.error).toContain('scope must be one of');
+
+    const typed = await tool.execute({ content: 'Stored under a made-up type.', type: 'semantic/../..' }, testContext);
+    expect(typed.success).toBe(false);
+    expect(typed.error).toContain('type must be one of');
+
+    const stored = await brain.get<{ n: number }>('SELECT COUNT(*) AS n FROM memory_traces');
+    expect(stored?.n).toBe(0);
+  });
+
   it('generates unique IDs for rapid sequential inserts', async () => {
     const brain = await openBrain();
     const tool = new MemoryAddTool(brain);

@@ -34,12 +34,53 @@ export interface SpendUsage {
   totalCostUSD?: number;
 }
 
+/** What a host knows of whether an expired reservation's work stopped. */
+export interface SpendFenceEvidence {
+  /** The call's media (its room or socket) is closed. */
+  transportClosed: boolean;
+  /** Its inference ended: a native abort acknowledged, or its process exited. */
+  inferenceTerminated: boolean;
+  /** When the evidence was observed, epoch milliseconds. */
+  observedAt: number;
+  /** A word on what showed it; no content. */
+  note?: string;
+}
+
+/**
+ * What a host decides for an expired reservation whose work may still run: consumed, released, or deferred until
+ * `retryAt` with its evidence. A deferred reservation stays reserved and counted.
+ */
+export type SpendExpiryDecision =
+  | { outcome: 'consumed' }
+  | { outcome: 'released' }
+  | { outcome: 'deferred'; retryAt: number; evidence?: SpendFenceEvidence };
+
+/** An expired reservation, as a resolver is asked about it. */
+export interface SpendExpiredReservation {
+  operationId: string;
+  accountId: string;
+  period: string;
+  units: number;
+  /** Made with `requireFence`, or deferred before. */
+  requireFence: boolean;
+  /** How many times it was deferred already. */
+  deferredCount: number;
+  /** The evidence its last deferral recorded. */
+  evidence?: SpendFenceEvidence;
+}
+
 export interface SpendReserveRequest {
   accountId: string;
   /** The product's durable id for the request; a retry with the same id replays the reservation. */
   operationId: string;
   /** Units to reserve. Default 1. */
   units?: number;
+  /**
+   * A reservation only an opted-in reconcile may settle once its lease runs out: a meter without `resolveExpired`
+   * leaves it reserved and counted, so a legacy sweeper over the same tables cannot consume or release it. An explicit
+   * `settle()` still settles it. Default false.
+   */
+  requireFence?: boolean;
   /** The clock, in epoch milliseconds; for tests. */
   now?: number;
 }
@@ -91,8 +132,10 @@ export interface SpendMeterSnapshot {
 export interface SpendReconcileResult {
   consumed: number;
   released: number;
-  /** Expired reservations still reserved after the pass (a concurrent settle, or the page limit). */
+  /** Expired reservations still reserved after the pass: deferred, fenced, a concurrent settle, or the page limit. */
   pending: number;
+  /** Deferred by `resolveExpired` in the pass; present only on a meter with `resolveExpired`. */
+  deferred?: number;
 }
 
 /**

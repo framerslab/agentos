@@ -9,6 +9,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { resolveModelOption, resolveProvider, createProviderManager } from './model.js';
+import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities } from './runtime/hostPolicy.js';
@@ -59,6 +60,7 @@ import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstru
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { createLogger } from '../core/logging/loggerFactory.js';
+import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 
 const fallbackLogger = createLogger('fallback');
 
@@ -195,6 +197,8 @@ export function normalizeStreamFinishReason(
  * results once the stream has drained.
  */
 export interface StreamTextResult {
+  /** Citation verdicts after text completes, when enabled on a default-runtime session. */
+  grounding?: Promise<import('../cognition/rag/citation/types.js').VerifiedResponse | undefined>;
   /** Async iterable that yields only raw text-delta strings (filters out non-text parts). */
   textStream: AsyncIterable<string>;
   /** Async iterable that yields all {@link StreamPart} events in order. */
@@ -435,6 +439,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     // leg meters itself, so this is what the outer stream meters then.
     let attemptUsage: TokenUsage | undefined;
     let recordedProviderId: string | undefined;
+    /** The id this attempt's health is recorded under: see providerHealthKey. */
+    let healthProviderId: string | undefined;
     let recordedModelId: string | undefined;
     // Raw provider finish reason of the most recent step's final chunk.
     // The LAST step's reason is the one that describes the assembled
@@ -458,6 +464,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // A stream whose signal has already aborted ends before anything is set up or sent.
       opts.abortSignal?.throwIfAborted();
       let { providerId, modelId } = resolveModelOption(opts, 'text');
+      // The provider the call's own key and base URL are for. A router that
+      // moves the call to another provider sends it there on that provider's
+      // own credentials, as a fallback leg runs.
+      const credentialProviderId = providerId;
 
       // --- Model routing (optional) ---
       if (opts.router) {
@@ -511,12 +521,19 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         }
       }
 
-      const resolved = resolveProvider(providerId, modelId, {
-        apiKey: opts.apiKey,
-        baseUrl: opts.baseUrl,
-      });
+      const ownCredentials =
+        providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
+      const resolved = resolveProvider(
+        providerId,
+        modelId,
+        providerId === credentialProviderId ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl } : undefined,
+      );
       recordedProviderId = resolved.providerId;
       recordedModelId = resolved.modelId;
+      // A key or base URL of the call's own, when it differs from the
+      // provider's, has a health record of its own.
+      const healthId = providerHealthKey(resolved, ownCredentials ? () => resolveProvider(providerId, modelId) : undefined);
+      healthProviderId = healthId;
       // Resolve the eagerly-exposed routing Promises so callers
       // logging telemetry don't have to wait for the stream to drain.
       resolveProviderId!(resolved.providerId);
@@ -526,8 +543,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // {@link LLMProviderHealthRegistry} for the policy. Mirrors the
       // generateText path so a 402 on the OpenRouter REST endpoint
       // short-circuits streaming consumers in the same process too.
-      if (globalLLMProviderHealth.isOpen(resolved.providerId)) {
-        const stats = globalLLMProviderHealth.getStats(resolved.providerId);
+      if (globalLLMProviderHealth.isOpen(healthId)) {
+        const stats = globalLLMProviderHealth.getStats(healthId);
         const err: Error & { httpStatus?: number } = new Error(
           `[503] Provider '${resolved.providerId}' circuit open; cooldown ${stats?.cooldownRemainingMs ?? 0}ms`,
         );
@@ -649,6 +666,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               : {}),
             ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
             ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+            ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
           },
           usage,
           budget ? { budget, providerId: resolved.providerId, what: 'stream_text.plan' } : undefined,
@@ -1017,8 +1035,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // caller's own stop and never walks.
               if (!aborted && firstPartAt === undefined && !shimRanTool) throw error;
               // After output the stream ends here, and the failure is recorded.
-              if (!aborted && !stoppedBy && recordedProviderId) {
-                globalLLMProviderHealth.recordFailure(recordedProviderId, error);
+              if (!aborted && !stoppedBy && healthProviderId) {
+                globalLLMProviderHealth.recordFailure(healthProviderId, error);
               }
               // Settled before the error part is handed over: a consumer that
               // stops reading at it still finds the stream failed.
@@ -1349,8 +1367,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // Primary streaming attempt succeeded: reset the failure streak
       // so a future transient error starts fresh. See
       // {@link LLMProviderHealthRegistry}.
-      if (recordedProviderId) {
-        globalLLMProviderHealth.recordSuccess(recordedProviderId);
+      if (healthProviderId) {
+        globalLLMProviderHealth.recordSuccess(healthProviderId);
       }
     } catch (err: any) {
       // The caller's signal ended the stream, whatever error the provider made
@@ -1381,8 +1399,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // *consequence* of the registry, not a new failure to record, and so
       // is a call the caller stopped (its spend budget's refusal, a hook's
       // stop, an abort), which says nothing about the provider.
-      if (recordedProviderId && error.name !== 'LLMProviderCircuitOpenError' && !stoppedBy && !isCallerStop(err)) {
-        globalLLMProviderHealth.recordFailure(recordedProviderId, error);
+      if (healthProviderId && error.name !== 'LLMProviderCircuitOpenError' && !stoppedBy && !isCallerStop(err)) {
+        globalLLMProviderHealth.recordFailure(healthProviderId, error);
       }
 
       // ── Fallback chain for streaming ──────────────────────────────

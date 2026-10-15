@@ -51,6 +51,7 @@ import { reply, script } from '../../../api/__tests__/helpers/stubProviders';
 import { createConversationMessage, MessageRole } from '../../../core/conversation/ConversationMessage';
 import type { IModelRouter, ModelRouteParams } from '../../../core/llm/routing/IModelRouter';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry';
+import { providerHealthKey } from '../../../api/runtime/providerHealthKey.js';
 import { GMIErrorCode } from '../../../core/utils/errors';
 import { GMIInteractionType, GMIOutputChunkType, type GMIOutputChunk } from '../IGMI';
 import { createScriptedGmi, runTurn, textTurn } from './helpers/scriptedGmi';
@@ -163,13 +164,43 @@ describe('GMI turn through the real completion gateway', () => {
     expect(skipped).toBeDefined();
   });
 
+  it("after the first model refuses, the turn passes over the policy chain's Claude legs to the next leg", async () => {
+    const k = key(); const claudeKey = key(); const nextKey = key();
+    const primary = script('openai', k, { replies: [Object.assign(new Error('The model declined.'), { code: 'content_filter' })] });
+    const claude = script('anthropic', claudeKey, { replies: [reply.text('From Claude.')] });
+    const next = script('openai', nextKey, { replies: [reply.text('From the next leg.')] });
+    vi.stubEnv('ANTHROPIC_API_KEY', claudeKey);
+    vi.stubEnv('OPENAI_API_KEY', nextKey);
+    const gateway = createCompletionGateway({
+      apiKey: k,
+      fallbackProviders: [
+        { provider: 'anthropic', model: 'claude-x', origin: 'policy-default' },
+        { provider: 'openai', model: 'stub-model-b', origin: 'policy-default' },
+      ],
+    });
+    const { gmi } = await createScriptedGmi({ gateway, persona: { defaultModelId: 'stub-model' } });
+    const { chunks } = await runTurn(gmi, textTurn('t1', 'Hi.'));
+    expect(of(chunks, GMIOutputChunkType.ERROR)).toEqual([]);
+    expect(of(chunks, GMIOutputChunkType.STEP_FINISHED)[0].content).toMatchObject({ text: 'From the next leg.', providerId: 'openai', hop: 2 });
+    expect([primary.seen.length, claude.seen.length, next.seen.length]).toEqual([1, 0, 1]);
+    const passedOver = gmi.getReasoningTrace().entries.find((entry) => entry.message.includes("'anthropic/claude-x' passed over: claude_after_refusal"));
+    expect(passedOver).toBeDefined();
+  });
+
   it('a primary whose circuit is open is skipped before any prompt is built or sent to it', async () => {
     const k = key(); const fb = key();
     const primary = script('anthropic', k, { replies: [reply.text('Should not run.')] });
     script('openai', fb, { replies: [reply.text('From the fallback.')] });
     vi.stubEnv('OPENAI_API_KEY', fb);
-    // A rejected key opens the provider's circuit at once.
-    globalLLMProviderHealth.recordFailure('anthropic', Object.assign(new Error('invalid x-api-key'), { httpStatus: 401 }));
+    // A rejected key opens its circuit at once: the circuit of this key, which
+    // the gateway's own key has apart from the provider's.
+    globalLLMProviderHealth.recordFailure(
+      // No ANTHROPIC_API_KEY here: the gateway's key is the route's own.
+      providerHealthKey({ providerId: 'anthropic', apiKey: k }, () => {
+        throw new Error('no shared key');
+      }),
+      Object.assign(new Error('invalid x-api-key'), { httpStatus: 401 }),
+    );
     const { gmi, promptEngine } = await createScriptedGmi({
       gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [{ provider: 'openai', model: 'stub-model' }] }),
       persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-x' },

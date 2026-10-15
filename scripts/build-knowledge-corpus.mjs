@@ -287,7 +287,7 @@ function getFaqEntries(skillCount = 0) {
       id: 'faq:image',
       heading: 'How do I generate or edit images?',
       content:
-        "Use generateImage() for creation and editImage() for modification. Import from '@framers/agentos'. Supports DALL-E, Stable Diffusion, and other providers. The image-gen and image-editing skills provide guided workflows.",
+        "Use generateImage() for creation and editImage() for modification. Import from '@framers/agentos'. Supports OpenAI's GPT Image models, Stable Diffusion, and other providers. The image-gen and image-editing skills provide guided workflows.",
       category: 'faq',
     },
     {
@@ -510,14 +510,14 @@ function getApiReferenceEntries() {
       id: 'api:generateImage',
       heading: 'generateImage() API',
       content:
-        "import { generateImage } from '@framers/agentos'. generateImage({ model: 'openai:dall-e-3', prompt: 'A sunset over mountains', size?: '1024x1024', n?: 1 }) -> Promise<{ images: Array<{ url, base64? }> }>. AI image generation supporting DALL-E, Stable Diffusion, and more.",
+        "import { generateImage } from '@framers/agentos'. generateImage({ model: 'openai:gpt-image-2.5-flare', prompt: 'A sunset over mountains', size?: '1024x1024', n?: 1 }) -> Promise<{ images: Array<{ url?, base64? }> }>. AI image generation supporting OpenAI's GPT Image models, Stable Diffusion, and more.",
       category: 'api',
     },
     {
       id: 'api:editImage',
       heading: 'editImage() API',
       content:
-        "import { editImage } from '@framers/agentos'. editImage({ model: 'openai:dall-e-2', image: Buffer, prompt: 'Add a rainbow', mask?: Buffer }) -> Promise<{ images: Array<{ url }> }>. Modify existing images using AI inpainting and editing.",
+        "import { editImage } from '@framers/agentos'. editImage({ model: 'openai:gpt-image-2.5-sunburst', image: Buffer, prompt: 'Add a rainbow', mask?: Buffer }) -> Promise<{ images: Array<{ url?, base64? }> }>. Modify existing images using AI inpainting and editing.",
       category: 'api',
     },
     {

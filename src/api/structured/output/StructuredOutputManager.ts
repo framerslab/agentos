@@ -1113,7 +1113,7 @@ export class StructuredOutputManager implements IStructuredOutputManager {
       return JSON.parse(cleaned);
     } catch {
       this.logger?.warn?.('Failed to parse JSON after recovery attempts', {
-        original: jsonString.substring(0, 200),
+        textLength: jsonString.length,
       });
       return null;
     }

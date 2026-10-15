@@ -69,6 +69,7 @@ import type { StepGate } from './StepGate.js';
 import { SandboxedToolForge } from './SandboxedToolForge.js';
 import { EmergentJudge } from './EmergentJudge.js';
 import { EmergentToolRegistry } from './EmergentToolRegistry.js';
+import { InvalidToolNameError, forgedToolNameProblem } from './ToolName.js';
 
 // ============================================================================
 // SELF-IMPROVEMENT TOOL DEPENDENCIES
@@ -544,6 +545,8 @@ export class EmergentCapabilityEngine {
    * the tool ID on success, or an error / rejection verdict on failure.
    *
    * Pipeline:
+   * 0. Hold the tool's name to the forge's name rule (`forgedToolNameProblem`): a
+   *    refused name fails the forge before anything runs.
    * 1. Generate unique tool ID.
    * 2. Build or validate implementation (compose vs. sandbox).
    * 3. Execute all declared test cases and collect results.
@@ -564,6 +567,14 @@ export class EmergentCapabilityEngine {
     // Guard: engine must be enabled.
     if (!this.config.enabled) {
       return { success: false, error: 'Emergent capabilities are disabled.' };
+    }
+
+    // Step 0: the name names the tool's folder when the tool is exported as a
+    // skill, so a name the forge's rule refuses fails the forge here, for a
+    // host's direct call as for forge_tool.
+    const nameProblem = forgedToolNameProblem(request.name);
+    if (nameProblem) {
+      return { success: false, error: new InvalidToolNameError(nameProblem, request.name).message };
     }
 
     // Step 1: Generate a unique tool ID.

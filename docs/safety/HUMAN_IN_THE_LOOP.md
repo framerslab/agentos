@@ -21,9 +21,7 @@ keywords:
 
 Pause an agent run at specific lifecycle events, route the pending action to a human (or an LLM judge, or both), and resume with an approve / reject / modify decision. AgentOS exposes HITL on three integration surfaces, each with its own contract. `agency({ hitl })` passes an `ApprovalRequest` to `hitl.handler` and acts on the `ApprovalDecision` it returns (`approved`, `reason`, `modifications`). A graph's human node resolves from its own `autoAccept`, `autoReject` or `judge` options, or suspends the run with an interrupt. The runtime `HumanInteractionManager` takes a `PendingAction` in `requestApproval()` and answers with its own `ApprovalDecision` type (`actionId`, `approved`, `rejectionReason`, `decidedBy`, `decidedAt`).
 
-![Three-lane HITL architecture: Agency HitlConfig with 5 triggers and 6 handlers, the graph human node with autoAccept/autoReject/judge modes, and the runtime HumanInteractionManager with severity-aware PendingAction + escalation surface, above a band for the agency's ApprovalRequest → handler → ApprovalDecision → post-approval check contract.](/img/diagrams/human-in-the-loop.svg)
-
-The diagram's bottom band, drawn under all three lanes, is the agency lane's contract alone.
+![Three HITL surfaces, each with its own decision contract. Agency lane: agency({ hitl }) with five opt-in approval triggers (beforeTool for listed tool names or '*', beforeAgent for listed agent names, beforeEmergent for spawn_specialist, beforeReturn for the final answer, and beforeStrategyOverride, which pauses nothing) and six handler factories; its contract is an ApprovalRequest, the handler's ApprovalDecision (approved, reason, modifications), with timeoutMs and onTimeout applied on beforeTool and beforeReturn, and a post-approval check (code-safety, pii-redaction) that can veto a yes. Graph lane: a human node resolves by autoAccept, autoReject or a judge, in that order, and otherwise suspends (a workflow() step takes no mode, so it always suspends); a yes no human gave is checked through deps.guardrailEngine when one is wired, and with no decision the runtime saves a checkpoint and emits an interrupt, and the host writes the answer into a fork of it and resumes. Runtime lane: HumanInteractionManager takes a severity-aware PendingAction through four interaction modes; requestApproval() notifies approval_required, submitApprovalDecision() answers with the manager's own ApprovalDecision type, and ToolOrchestrator and the step gate ask it before tools with side effects when hitl.enabled is set.](/img/diagrams/human-in-the-loop.svg)
 
 ## What HITL is in AgentOS
 
@@ -31,7 +29,7 @@ Three places HITL plugs in:
 
 | Layer | Primitive | Source | Use when |
 |---|---|---|---|
-| **Agency** | [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) on `agency({ hitl: {...} })`; `agent()` accepts the field and does not read it | [`src/api/types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) | The host runs a multi-agent agency and wants declarative gates at specific lifecycle events (a tool name, the final return, a strategy override). |
+| **Agency** | [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) on `agency({ hitl: {...} })`; `agent()` accepts the field and does not read it | [`src/api/types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) | The host runs a multi-agent agency and wants declarative gates at specific lifecycle events (a tool name, an agent name, a specialist spawn, the final return). |
 | **Workflow / graph** | `humanNode({ prompt, autoAccept?, autoReject?, judge? })` in an `AgentGraph`; `workflow()`'s `step({ human: { prompt } })` | [`src/orchestration/builders/nodes.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/nodes.ts) + [`src/orchestration/runtime/NodeExecutor.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/NodeExecutor.ts) | The host owns an explicit graph and wants a node that suspends the run until the host resumes it. |
 | **Runtime** | [`HumanInteractionManager`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/HumanInteractionManager.ts) implementing [`IHumanInteractionManager`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/IHumanInteractionManager.ts) | [`src/orchestration/hitl/`](https://github.com/framerslab/agentos/tree/master/src/orchestration/hitl) | A subsystem (planner, custom orchestrator, evaluator) needs severity-aware approval with clarification, edit, and escalation flows in addition to approve/reject. |
 
@@ -39,7 +37,7 @@ The agency-level surface is what most apps need. Reach for a human node when you
 
 ## Five approval triggers
 
-`HitlConfig.approvals` is the declarative trigger surface. Every field is optional — present a field, get a pause at that lifecycle event:
+`HitlConfig.approvals` is the declarative trigger surface. Every field is optional. A tool or agent named in `beforeTool` or `beforeAgent`, or `beforeEmergent` or `beforeReturn` set to `true`, pauses the run at that lifecycle event; `beforeStrategyOverride` pauses nothing (see the table below):
 
 ```typescript
 import { agency, hitl } from '@framers/agentos';
@@ -167,7 +165,7 @@ interface ApprovalDecision {
 }
 ```
 
-When `approved: true` and `modifications` are set, the orchestrator applies them before proceeding. This is the path for "approve but with these changes": `output` on a `beforeReturn` approval replaces the final text (the LLM judge rewrites the final answer, the webhook returns a sanitized version), and `instructions` on a `beforeAgent` approval are added to the input of the agent it lets run, under the sequential, parallel and hierarchical strategies. Tool arguments are the exception. A `beforeTool` approval approves or refuses the arguments the call will run with; it never applies `modifications.toolArgs`, and it refuses an approval that carries them (anything but `undefined` or `null`), so the call is skipped rather than run with the arguments the approver meant to replace. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
+When `approved: true` and `modifications` are set, the orchestrator applies them before proceeding. This is the path for "approve but with these changes": `output` on a `beforeReturn` approval replaces the final text (a `hitl.webhook()` endpoint can return a sanitized version; `hitl.llmJudge()` returns no modifications), after the replacement has gone through the agency's output guardrails and the post-approval check, and `instructions` on a `beforeAgent` approval are added to the input of the agent it lets run, under every strategy (sequential, parallel, hierarchical, graph, review-loop and debate), and the post-approval check reads that input with them. Tool arguments are the exception. A `beforeTool` approval approves or refuses the arguments the call will run with; it never applies `modifications.toolArgs`, and it refuses an approval that carries them (anything but `undefined` or `null`), so the call is skipped rather than run with the arguments the approver meant to replace. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
 
 ## Timeout policy
 
@@ -182,14 +180,16 @@ hitl: {
 
 | Field | Default | Meaning |
 |---|---|---|
-| `timeoutMs` | `30_000` | Maximum wall-clock milliseconds the handler may take. |
-| `onTimeout: 'reject'` | (default) | Treat timeout as denied — action blocked. |
-| `onTimeout: 'approve'` | — | Treat timeout as approved — action proceeds. Use sparingly. |
-| `onTimeout: 'error'` | — | Throw and halt the run. Use for hard SLAs where neither approve nor reject is acceptable on timeout. |
+| `timeoutMs` | `30_000` | Milliseconds a `beforeTool` or `beforeReturn` handler may take before `onTimeout` decides. |
+| `onTimeout: 'reject'` | (default) | The request is denied: a `beforeTool` call is skipped and the run goes on, and a `beforeReturn` request makes `generate()` reject with an `AgencyConfigError` whose message starts `Final output rejected by HITL`. |
+| `onTimeout: 'approve'` | — | The request is approved as if the handler had approved it: the post-approval check runs, and the action proceeds unless the check vetoes it. Use sparingly. |
+| `onTimeout: 'error'` | — | The request fails with `AgencyConfigError('HITL approval timed out')`: on `beforeTool`, the tool and every later one are skipped and the call rejects with that error once the strategy settles; on `beforeReturn`, `generate()` rejects with it. Use for hard SLAs where neither approve nor reject is acceptable on timeout. |
+
+The timer covers `beforeTool` and `beforeReturn` requests, which `agency()` asks through `resolveApprovalDecision()` in [`src/api/runtime/approval-gate.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/approval-gate.ts). A `beforeAgent` or `beforeEmergent` request calls the handler directly, in `checkBeforeAgentInput()` and `checkBeforeEmergentSpawn()` ([`src/api/runtime/strategies/shared.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/strategies/shared.ts)), with no timer: the run waits for the handler's answer however long it takes, and `onTimeout` never applies.
 
 ## Guardrail-override post-approval safety net
 
-After a `beforeTool` or `beforeReturn` approval, `agency()` runs built-in pattern checks named by `postApprovalGuardrails` over the tool's name and arguments (or the final text) and vetoes the approval when one matches. These are fixed checks inside `agency()`, not the guardrail extension packs: `code-safety` looks for destructive commands and statements (`rm -rf /`, `mkfs.`, `dd ... of=/dev`, `DROP TABLE`, `TRUNCATE TABLE`, `chmod -R 777 /`, `shutdown` and others), `pii-redaction` for unredacted SSNs and card numbers, and any other id passes. A veto fires `guardrailHitlOverride` and skips the tool, or, for the final output, rejects `generate()` with an `AgencyConfigError`. This catches the case where a human (or LLM judge) approves something destructive.
+After a `beforeTool`, `beforeAgent` or `beforeReturn` approval, `agency()` runs built-in pattern checks named by `postApprovalGuardrails` over the tool's name and arguments, the agent's name and the input the strategy passes it, or the final text, and vetoes the approval when one matches. That input is the one the strategy built for the agent, and the approver is shown it in `details.input`: under the graph, review-loop and debate strategies it carries what other agents wrote (the dependencies' outputs, the draft and the reviewer's feedback, the debate transcript), so an earlier agent's output the check blocks vetoes the approval and never reaches the agent. Under those three strategies the check also reads the task and each of those outputs on its own, since the strategy writes more text after them, so a statement the check matches only at the end of a text (`rm -rf .`, a `DELETE FROM <table>` with nothing after it) is caught at the end of the task or of an earlier agent's output as it is at the end of the input. Every strategy adds the approval's `modifications.instructions` to the agent's input, and the check reads the input as the strategy passes it and the text the agent is sent, the instructions included, so instructions the check blocks veto the approval. On a `beforeReturn` approval it reads the strategy's text and, when the approval's `modifications.output` replaces it, the replacement, after the agency's output guardrails have read it, so a replacement the check blocks vetoes the approval as a blocked final text does. These are fixed checks inside `agency()`, not the guardrail extension packs: `code-safety` looks for destructive commands and statements (`rm -rf /`, `mkfs.`, `dd ... of=/dev`, `DROP TABLE`, `TRUNCATE TABLE`, `chmod -R 777 /`, `shutdown` and others), `pii-redaction` for unredacted SSNs and card numbers, and any other id passes. A veto fires `guardrailHitlOverride` (its `toolName` is the tool's name, `agent:<name>` for an agent, or `return` for the final output) and skips the tool, turns the agent's approval into a rejection, so the agent does not run, or, for the final output, rejects `generate()` with an `AgencyConfigError`. A `beforeEmergent` approval gets no check. This catches the case where a human (or LLM judge) approves something destructive.
 
 ```typescript
 hitl: {
@@ -421,7 +421,7 @@ For agencies that already use the higher-level `agency({ hitl: { approvals: { be
 
 ## Pitfalls
 
-**`hitl.cli()` hangs in non-interactive environments.** It reads from `process.stdin`. In CI, serverless, or any environment without a TTY, the handler never resolves and the `onTimeout` policy fires after `timeoutMs`. Use `hitl.autoApprove()` in CI and `hitl.cli()` only locally.
+**`hitl.cli()` hangs in non-interactive environments.** It reads from `process.stdin`. In CI, serverless, or any environment without a TTY, the handler never resolves: on a `beforeTool` or `beforeReturn` request the `onTimeout` policy fires after `timeoutMs`, and a `beforeAgent` or `beforeEmergent` request, which has no timer, never gets an answer. Use `hitl.autoApprove()` in CI and `hitl.cli()` only locally.
 
 **`hitl.slack(...)` approves after notifying.** It does not wait for a reaction. Use it for audit, or wrap it in a webhook for blocking approval.
 
@@ -435,15 +435,15 @@ For agencies that already use the higher-level `agency({ hitl: { approvals: { be
 
 **Does `beforeReturn` block streaming?** Yes — when `beforeReturn: true`, the agency's `stream.finalTextStream` does not emit until the handler resolves. `stream.textStream` (raw live chunks) continues unaffected.
 
-**Can a handler modify the action without rejecting it?** For the final answer and for an agent run, yes. Return `{ approved: true, modifications: { output: '...' } }` from a `beforeReturn` approval to replace the final text, or `{ approved: true, modifications: { instructions: '...' } }` from a `beforeAgent` approval to add instructions to that agent's input. For a tool call, no: a `beforeTool` approval does not apply `modifications.toolArgs`, and it refuses an approval that carries them, so a handler that redacts or redirects an argument gets a skipped call, never the original one. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
+**Can a handler modify the action without rejecting it?** For the final answer and for an agent run, yes. Return `{ approved: true, modifications: { output: '...' } }` from a `beforeReturn` approval to replace the final text (the replacement goes through the agency's output guardrails and the post-approval check, and one the check blocks rejects the call), or `{ approved: true, modifications: { instructions: '...' } }` from a `beforeAgent` approval to add instructions to that agent's input. For a tool call, no: a `beforeTool` approval does not apply `modifications.toolArgs`, and it refuses an approval that carries them, so a handler that redacts or redirects an argument gets a skipped call, never the original one. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
 
 **Do agency callbacks (`approvalRequested`, `approvalDecided`) fire for graph human nodes?** No — those callbacks are on [`AgencyCallbacks`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) and only fire for [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts)-driven pauses. A human node that suspends yields an `interrupt` event on the compiled graph's `stream()`.
 
-**Can the LLM judge see the full agent call history?** No. The request carries it in `ApprovalRequest.context.agentCalls`, but `hitl.llmJudge()` sends the judge only the request's type, agent, action, description and details. A handler of your own can read `context` and pass it on.
+**Can the LLM judge see the full agent call history?** No. A `beforeReturn` request carries the run's agent calls in `ApprovalRequest.context.agentCalls`; a `beforeAgent` or `beforeEmergent` request carries the strategy's own list of agent calls, not a copy, which grows as later calls finish, including calls of the same graph tier that finish while the request waits (under the `parallel` strategy it is an empty list of its own), and a `beforeTool` request carries none. `hitl.llmJudge()` sends the judge only the request's type, agent, action, description and details; a handler of your own can read `context` and pass it on.
 
 ## See also
 
-- [Guardrails Usage](./GUARDRAILS_USAGE.md) — the post-approval guardrail safety net.
+- [Guardrails Usage](./GUARDRAILS_USAGE.md) — the guardrail packs a runtime loads; the post-approval check above runs its own built-in patterns instead.
 - [Agency API](../orchestration/AGENCY_API.md) — full `agency()` reference, including the [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) field.
 - [`workflow()` DSL](../orchestration/WORKFLOW_DSL.md) and [AgentGraph](../architecture/AGENT_GRAPH.md) — graphs with human nodes.
 - [Emergent Capabilities](../architecture/EMERGENT_CAPABILITIES.md) — how `beforeEmergent` gates `spawn_specialist`.

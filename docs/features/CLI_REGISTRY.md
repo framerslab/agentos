@@ -172,22 +172,22 @@ Two production bridges extend it:
 | [`ClaudeCodeCLIBridge`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/ClaudeCodeCLIBridge.ts) | `claude` | Anthropic Claude via Max subscription (no API key needed) |
 | [`GeminiCLIBridge`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiCLIBridge.ts) | `gemini` | Google Gemini via Google account login (no API key needed) |
 
-Both bridges use `checkBinaryInstalled()` (which internally runs `which` + `--version`) before attempting LLM calls, and fall back gracefully when the binary is missing.
+The `claude-code-cli` and `gemini-cli` providers call their bridge's `checkBinaryInstalled()` (`which`, then `--version`) when they initialize, and `initialize()` throws `BINARY_NOT_FOUND` when the binary is missing ([CLI Error Codes](./CLI_ERROR_CODES.md)).
 
 ### Creating a custom bridge
 
 ```typescript
-import { CLISubprocessBridge } from '@framers/agentos/sandbox/subprocess';
-import { CLISubprocessError, CLI_ERROR } from '@framers/agentos/sandbox/subprocess';
+import { CLISubprocessBridge, CLISubprocessError, CLI_ERROR } from '@framers/agentos/sandbox/subprocess';
+import type { BridgeOptions, OutputFormat, StreamEvent } from '@framers/agentos/sandbox/subprocess';
 
 class MyToolBridge extends CLISubprocessBridge {
   protected readonly binaryName = 'mytool';
 
-  protected buildArgs(options, format) {
+  protected buildArgs(options: BridgeOptions, format: OutputFormat): string[] {
     return ['--prompt', options.prompt, '--format', format];
   }
 
-  protected classifyError(error) {
+  protected classifyError(error: any): CLISubprocessError {
     if (error.code === 'ENOENT') {
       return new CLISubprocessError(
         'mytool not found',
@@ -206,7 +206,8 @@ class MyToolBridge extends CLISubprocessBridge {
     );
   }
 
-  protected parseStreamEvent(raw) {
+  // The declared return type keeps each `type` a literal, as StreamEvent requires.
+  protected parseStreamEvent(raw: any): StreamEvent | null {
     if (raw.text) return { type: 'text_delta', text: raw.text };
     if (raw.done) return { type: 'result', result: raw.output };
     return null;
@@ -246,7 +247,7 @@ CLI_ERROR.PERMISSION_DENIED  // EACCES
 CLI_ERROR.CONTEXT_TOO_LONG   // Input too long for the CLI
 ```
 
-Each error carries a `guidance` string with human-readable fix instructions and a `recoverable` flag indicating whether retry/fallback is appropriate.
+Each error carries a `guidance` string with fix instructions and a `recoverable` flag, both set by the code that builds the error. [CLI Error Codes](./CLI_ERROR_CODES.md) lists which of these codes the Claude Code and Gemini CLI bridges raise and when, and what AgentOS does with the error.
 
 ## Exports
 
@@ -260,6 +261,7 @@ export type {
   BridgeOptions,
   BridgeResult,
   StreamEvent,
+  StreamParseContext,
   OutputFormat,
   InstallCheckResult,
   CLIDescriptor,
@@ -277,7 +279,9 @@ The registry reports a binary as not installed when `which <binary>` fails durin
 - **Binary not installed.** Follow the `installGuidance` field from the descriptor. Run the install command, then re-scan.
 - **PATH does not include the binary's directory.** GUI-launched processes (IDEs, Electron apps) may inherit a different PATH than your terminal. Verify with `echo $PATH` and add the directory to your shell profile (`~/.bashrc`, `~/.zshrc`, `~/.profile`).
 - **Binary has an unexpected name.** Some CLIs differ across platforms — `python` vs `python3`, `docker-compose` (v1) vs `docker compose` (v2 plugin). The registry tracks specific binary names; check the `binaryName` field.
-**Fix:** Install the binary, ensure its directory is on PATH, or register a custom descriptor with the correct `binaryName`.
+- **Windows with no `which` program on PATH.** `scan()`, `check()` and the CLI bridges' [`checkBinaryInstalled()`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts) run `which` on every platform, Windows included. Where no `which` program is on PATH, the lookup fails, so every binary reads as not installed and the `claude-code-cli` and `gemini-cli` providers throw `BINARY_NOT_FOUND` when they initialize. Provider auto-detection looks for the `claude` and `gemini` binaries with `where` on Windows ([`provider-defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/provider-defaults.ts)), so it can pick one of those providers that then fails to initialize.
+
+**Fix:** Install the binary, ensure its directory is on PATH, or register a custom descriptor with the correct `binaryName`. On Windows, put a `which` program on PATH as well.
 
 ### Version shows "unknown"
 
@@ -309,14 +313,14 @@ Runtime registrations via `registry.register()` or `registry.registerAll()` are 
 
 ### scan() is slow
 
-The `scan()` method runs `which` + `--version` for every registered descriptor. With 54+ CLIs, this involves 100+ subprocess spawns.
+The `scan()` method runs `which` for every registered descriptor, and the version flag for each binary `which` finds. With the 54 bundled descriptors, that is 54 `which` processes and one more process for each installed binary.
 
 **Common causes:**
 - **Network-attached PATH entries.** If PATH includes NFS or CIFS mounts, each `which` call may incur network latency. Remove network paths from PATH or move them to the end.
 - **Slow binary startup.** Some CLIs (e.g., Java, `gcloud`) have slow startup times for `--version`. The registry runs all checks in parallel, but a single slow binary can delay the overall result.
-- **Antivirus scanning.** On Windows, real-time antivirus may scan each spawned subprocess, adding per-binary overhead.
+- **Antivirus scanning.** Antivirus that scans each new process adds that scan to every `which` and version-flag process the scan starts.
 
-**Fix:** The registry already runs checks in parallel. To reduce scan time further, use `check(binaryName)` for specific binaries instead of `scan()` for all, or use `byCategory(category)` to scan only the categories you need.
+**Fix:** The registry already runs checks in parallel. To reduce scan time further, use `check(binaryName)` for the registered binaries you need instead of `scan()` (for a binary with no descriptor, `check()` reports `installed: false` without looking). `byCategory(category)` saves no time: it runs the full `scan()` and filters its results.
 
 ## Complete CLI Reference
 

@@ -35,6 +35,10 @@ import type { PersonaEvolutionRule } from '../../orchestration/workflows/Workflo
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import { feedbackTraceMessage, normalizeUserFeedback } from './userFeedback';
 import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
+import { normalizeHexacoTraits } from './personas/hexaco';
+import { traitOverlayPatch } from './personas/personalityPrompt';
+import { deferLearnerSession } from '../learning/LearnerSession.js';
+import type { ILearnerSession, ILearningLayer, LearnerContext } from '../learning/types.js';
 
 /**
  * Custom error class for GMIManager-specific operational errors.
@@ -69,6 +73,22 @@ export interface GMIManagerConfig {
    * the 5 seconds a GMI gives its metaprompt work to finish.
    */
   shutdownTimeoutMs?: number;
+  /**
+   * The runtime's learning layer, when the host turned learning on (`AgentOSConfig.learning`). With it, each GMI
+   * the manager builds gets a learner session and the registry persona's traits, and sends the personality
+   * section on every turn. Without it the manager builds GMIs as it did before the layer existed.
+   */
+  learningLayer?: ILearningLayer;
+}
+
+/** What the manager knows, when it builds a GMI, for the learning layer. */
+interface LearningSource {
+  /** The registry persona, before any role overlay. */
+  registryPersona: IPersonaDefinition;
+  /** True for a GMI built for a workflow role (`agencyOptions`): its turns have no learner. */
+  workflowSeat: boolean;
+  /** The resolved organization of the turn the GMI is built for (`''` for none), when the caller passed it. */
+  organizationId?: string;
 }
 
 export interface GMICognitiveMemoryFactoryInput {
@@ -102,8 +122,8 @@ export interface GMIAgencyContextOptions {
  * Manages the lifecycle of Generalized Mind Instances (GMIs).
  */
 export class GMIManager {
-  private config!: Required<Omit<GMIManagerConfig, 'defaultGMIBaseConfigDefaults' | 'personaValidationStrict' | 'cognitiveMemoryFactory'>> &
-    Pick<GMIManagerConfig, 'defaultGMIBaseConfigDefaults' | 'personaValidationStrict' | 'cognitiveMemoryFactory'>;
+  private config!: Required<Omit<GMIManagerConfig, 'defaultGMIBaseConfigDefaults' | 'personaValidationStrict' | 'cognitiveMemoryFactory' | 'learningLayer'>> &
+    Pick<GMIManagerConfig, 'defaultGMIBaseConfigDefaults' | 'personaValidationStrict' | 'cognitiveMemoryFactory' | 'learningLayer'>;
   private personaLoader: IPersonaLoader;
   private allPersonaDefinitions: Map<string, IPersonaDefinition>;
   private allPersonaRecords: Map<string, LoadedPersonaRecord>;
@@ -155,6 +175,7 @@ export class GMIManager {
       personaValidationStrict: config.personaValidationStrict,
       cognitiveMemoryFactory: config.cognitiveMemoryFactory,
       shutdownTimeoutMs: shutdownTimeoutOrDefault(config.shutdownTimeoutMs),
+      learningLayer: config.learningLayer,
     };
 
     this.subscriptionService = subscriptionService;
@@ -477,9 +498,63 @@ export class GMIManager {
     return secretIds.size ? Array.from(secretIds) : undefined;
   }
 
+  /**
+   * What a GMI of a runtime with a learning layer is built with: the registry persona's traits and the role
+   * overlay's patch, apart, and the session's learner session. A workflow seat's session has no learner. Any other
+   * session is bound to the user the GMI is created for: under the turn's resolved organization when the caller
+   * passed it, else under the organization of the GMI's first prepared turn (a GMI built again for a tool-result
+   * resume, whose organization is read from the conversation after the GMI is acquired). A layer that fails to open
+   * the session here never fails the GMI: the GMI gets a session that asks again at each turn, and until one opens
+   * each turn has no learner and the GMI renders the persona's traits itself, so its tools refuse rather than act
+   * as on a host with no layer. Without a layer the result is empty, and the GMI is built as before
+   * the layer existed.
+   *
+   * @param effectivePersona - The persona the GMI is initialized with: the registry persona, overlay applied.
+   * @param runtimeContext - The GMI's id, its session and the user it is created for.
+   * @param source - The registry persona, whether the GMI is a workflow seat, and the turn's organization.
+   */
+  private async assembleLearning(
+    effectivePersona: IPersonaDefinition,
+    runtimeContext: { gmiInstanceId: string; sessionId: string; userId: string },
+    source: LearningSource | undefined,
+  ): Promise<Pick<GMIBaseConfig, 'learning' | 'personaTraits'>> {
+    const layer = this.config.learningLayer;
+    if (!layer || !source) return {};
+    const authored = normalizeHexacoTraits(source.registryPersona.personalityTraits);
+    const overlay = traitOverlayPatch(authored, effectivePersona.personalityTraits);
+    const personaTraits = { authored, ...(overlay ? { overlay } : {}) };
+    const context: LearnerContext = {
+      sessionId: runtimeContext.sessionId,
+      personaId: source.registryPersona.id,
+      authoredTraits: authored,
+      ...(overlay ? { overlayTraits: overlay } : {}),
+    };
+    const open = (namespace: string): Promise<ILearnerSession> =>
+      layer.forLearner({ namespace, agentKey: source.registryPersona.id, userId: runtimeContext.userId }, context);
+    // Without the turn's organization the session opens at the GMI's first prepared turn, under that turn's.
+    if (!source.workflowSeat && source.organizationId === undefined) {
+      return { learning: deferLearnerSession({ traits: authored, open }), personaTraits };
+    }
+    const organizationId = (source.organizationId ?? '').trim();
+    const openNow = (): Promise<ILearnerSession> =>
+      source.workflowSeat ? layer.forLearner(null, { ...context, noLearnerReason: 'workflow_seat' }) : open(organizationId);
+    try {
+      return { learning: await openNow(), personaTraits };
+    } catch (error: any) {
+      console.warn(
+        `GMIManager (ID: ${this.managerId}): The learning layer gave GMI ${runtimeContext.gmiInstanceId} no learner session; each turn asks again, and until one opens the turn has no learner and the GMI renders the persona's traits itself.`,
+        error?.message ?? error,
+      );
+      // Fail closed: the deferred session rejects while the layer cannot open one, so each such turn runs degraded
+      // and tells its tools it has no learner.
+      return { learning: deferLearnerSession({ traits: authored, open: openNow }), personaTraits };
+    }
+  }
+
   private async assembleGMIBaseConfig(
     persona: IPersonaDefinition,
     runtimeContext: { gmiInstanceId: string; sessionId: string; userId: string },
+    learningSource?: LearningSource,
   ): Promise<GMIBaseConfig> {
     const workingMemory = new InMemoryWorkingMemory();
     let cognitiveMemory: ICognitiveMemoryManager | undefined;
@@ -518,9 +593,17 @@ export class GMIManager {
       customSettings: persona.customFields,
       // A GMI waits as long for the turns its shutdown stops as the manager waits for the GMI.
       shutdownTimeoutMs: this.config.shutdownTimeoutMs,
+      ...(await this.assembleLearning(persona, runtimeContext, learningSource)),
     };
   }
 
+  /**
+   * The GMI of a session: the one the session has, or a new one built for it.
+   *
+   * @param turnOrganizationId - The resolved organization of the turn the GMI is acquired for (`''` for none).
+   *   With a learning layer a new GMI's learner session is bound under it; a caller that cannot resolve it before
+   *   the GMI is acquired leaves it out, and the learner session is bound at the GMI's first prepared turn.
+   */
   public async getOrCreateGMIForSession(
     userId: string,
     sessionId: string,
@@ -529,7 +612,8 @@ export class GMIManager {
     preferredModelId?: string,
     preferredProviderId?: string,
     userApiKeys?: Record<string, string>,
-    agencyOptions?: GMIAgencyContextOptions
+    agencyOptions?: GMIAgencyContextOptions,
+    turnOrganizationId?: string,
   ): Promise<{ gmi: IGMI; conversationContext: ConversationContext }> {
     this.ensureInitialized();
     // shutdown() waits for this call to settle; a GMI the call builds once
@@ -549,6 +633,7 @@ export class GMIManager {
         preferredProviderId,
         userApiKeys,
         agencyOptions,
+        turnOrganizationId,
       );
     } finally {
       this.creationsInFlight.delete(inFlight);
@@ -570,7 +655,8 @@ export class GMIManager {
     preferredModelId?: string,
     preferredProviderId?: string,
     userApiKeys?: Record<string, string>,
-    agencyOptions?: GMIAgencyContextOptions
+    agencyOptions?: GMIAgencyContextOptions,
+    turnOrganizationId?: string,
   ): Promise<{ gmi: IGMI; conversationContext: ConversationContext }> {
     const personaDefinition = this.getPersonaDefinition(requestedPersonaId);
     if (!personaDefinition) {
@@ -632,16 +718,21 @@ export class GMIManager {
       const newGmiInstanceId = `gmi-instance-${uuidv4()}`;
       console.log(`GMIManager (ID: ${this.managerId}): Creating new GMI instance ${newGmiInstanceId} for session ${sessionId} with persona ${requestedPersonaId}.`);
 
-      const completeGMIBaseConfig = await this.assembleGMIBaseConfig(effectivePersona, {
-        gmiInstanceId: newGmiInstanceId,
-        sessionId,
-        userId,
-      });
+      const completeGMIBaseConfig = await this.assembleGMIBaseConfig(
+        effectivePersona,
+        { gmiInstanceId: newGmiInstanceId, sessionId, userId },
+        // The registry persona, before any role overlay: the learning layer reads its traits as the authored ones.
+        { registryPersona: personaDefinition, workflowSeat: agencyOptions !== undefined, organizationId: turnOrganizationId },
+      );
       const newGMI = new GMI(newGmiInstanceId);
 
       try {
         await newGMI.initialize(effectivePersona, completeGMIBaseConfig);
       } catch (error: any) {
+        // The GMI never runs, so the learner session made for it ends here; a failure to end it is not the error.
+        await Promise.resolve()
+          .then(() => completeGMIBaseConfig.learning?.endSession())
+          .catch(() => undefined);
         throw createGMIErrorFromError(error, GMIErrorCode.GMI_INITIALIZATION_ERROR, { newGmiInstanceId },`Failed to initialize new GMI instance ${newGmiInstanceId}.`);
       }
       if (!this.isInitialized) {
@@ -748,7 +839,18 @@ export class GMIManager {
     };
     const bound = this.config.shutdownTimeoutMs;
     try {
-      const shutdown = Promise.resolve(gmi.shutdown());
+      // A GMI with a learner session ends it once it has shut down, inside the same bound.
+      const learnerSession = typeof gmi.getLearnerSession === 'function' ? gmi.getLearnerSession() : undefined;
+      const gmiShutdown = Promise.resolve(gmi.shutdown());
+      const shutdown = learnerSession
+        ? gmiShutdown.finally(() =>
+            Promise.resolve()
+              .then(() => learnerSession.endSession())
+              .catch((error: any) => {
+                console.warn(`GMIManager (ID: ${this.managerId}): Ending the learner session of GMI ${gmiInstanceId} failed: ${error?.message ?? error}`);
+              }),
+          )
+        : gmiShutdown;
       if (await settlesWithin(shutdown, bound)) return;
       console.warn(
         `GMIManager (ID: ${this.managerId}): GMI ${gmiInstanceId}${sessionId ? ` (session ${sessionId})` : ''} did not finish shutting down within ${bound} ms; going on without it.`,
@@ -873,7 +975,10 @@ export class GMIManager {
    */
   public async processUserFeedback(userId: string, sessionId: string, personaId: string, feedbackData: any): Promise<void> {
     this.ensureInitialized();
-    console.log(`GMIManager (ID: ${this.managerId}): Received feedback for User: ${userId}, Session: ${sessionId}, Persona: ${personaId}`, feedbackData);
+    console.log(`GMIManager (ID: ${this.managerId}): Received feedback for User: ${userId}, Session: ${sessionId}, Persona: ${personaId}`, {
+      fields: feedbackData && typeof feedbackData === 'object' ? Object.keys(feedbackData) : [],
+      textLength: typeof feedbackData?.text === 'string' ? feedbackData.text.length : 0,
+    });
 
     const gmiInstanceId = this.gmiSessionMap.get(sessionId);
     const gmi = gmiInstanceId ? this.activeGMIs.get(gmiInstanceId) : undefined;

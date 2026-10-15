@@ -9,7 +9,10 @@ export function isWikiPageType(v: unknown): v is WikiPageType {
 
 /** A single wiki page: parsed frontmatter + markdown body. */
 export interface WikiPage {
-  /** Stable id = path relative to memory/ without extension, e.g. 'entities/johnny'. */
+  /**
+   * Stable id = path relative to memory/ without extension, with `/` between folders, e.g. 'entities/johnny'.
+   * The store refuses an id without this form (see `isWikiPageId`) before it reads or writes a file.
+   */
   id: string;
   type: WikiPageType;
   /** One-line catalog summary. */

@@ -62,6 +62,33 @@ describe('VoicePipelineError', () => {
     );
     expect(unknown.errorClass).toBe('unknown');
   });
+
+  /**
+   * A provider can fail with any value, and String() throws for some: an object without a prototype, and a revoked
+   * proxy, which refuses even an instanceof check and the read of its code. classifyError names such a value by its
+   * type and keeps it as the cause.
+   */
+  it.each<[string, () => unknown]>([
+    ['an object without a prototype', () => Object.create(null)],
+    [
+      'a revoked proxy',
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      },
+    ],
+  ])('classifyError names %s, which String() cannot print, without throwing', (_name, unprintable) => {
+    const failure = unprintable();
+    const classify = (): VoicePipelineError =>
+      VoicePipelineError.classifyError(failure, { kind: 'stt', provider: 'deepgram' });
+
+    expect(classify).not.toThrow();
+    const classified = classify();
+    expect(classified.message).toBe('an unprintable object');
+    expect(classified.errorClass).toBe('unknown');
+    expect(classified.cause).toBe(failure);
+  });
 });
 
 describe('AggregateVoiceError', () => {

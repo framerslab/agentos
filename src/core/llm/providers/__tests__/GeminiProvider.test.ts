@@ -391,24 +391,114 @@ describe('GeminiProvider', () => {
       expect(requestBody.contents[0].parts).toEqual([{ inlineData: { mimeType: 'image/svg+xml', data: 'PHN2Zz4=' } }]);
     });
 
-    it('refuses an https image URL, which neither Gemini nor this provider fetches', async () => {
-      await expect(
-        provider.generateCompletion('gemini-2.5-flash', [
-          { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/cat.jpg' } }] },
-        ], {}),
-      ).rejects.toThrow('does not fetch image URLs');
+    it('sends an https image URL as fileData, for Gemini to fetch, and fetches nothing itself', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
+
+      await provider.generateCompletion('gemini-2.5-flash', [
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: 'https://example.com/photos/cat.JPG?size=large' } },
+            { type: 'image_url', image_url: { url: 'https://example.com/render' } },
+          ],
+        },
+      ], {});
+
+      // The one request made is the generateContent call.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0][0])).toMatch(/:generateContent$/);
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.contents[0].parts).toEqual([
+        { fileData: { fileUri: 'https://example.com/photos/cat.JPG?size=large', mimeType: 'image/jpeg' } },
+        // No image extension: the type is left for Gemini to read.
+        { fileData: { fileUri: 'https://example.com/render' } },
+      ]);
+    });
+
+    it('refuses an http image URL, which Gemini fetches over HTTPS only, as a bad request', async () => {
+      const refused = provider.generateCompletion('gemini-2.5-flash', [
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: 'http://example.com/cat.jpg' } }] },
+      ], {});
+      await expect(refused).rejects.toMatchObject({ code: 'IMAGE_URL_NOT_SUPPORTED', httpStatus: 400 });
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    it("refuses inline images past Gemini's 20 MB per request", async () => {
-      // 28 MiB of base64 decodes to 21 MiB.
-      const big = `data:image/png;base64,${'A'.repeat(28 * 1024 * 1024)}`;
-      await expect(
-        provider.generateCompletion('gemini-2.5-flash', [
-          { role: 'user', content: [{ type: 'image_url', image_url: { url: big } }] },
-        ], {}),
-      ).rejects.toThrow('20 MB of inline data');
+    it('reads a data URL as WHATWG Fetch does: spaces or a tab around ;base64, percent-encoding in the base64', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
+      const png = 'iVBORw0KGgo=';
+
+      await provider.generateCompletion('gemini-2.5-flash', [
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: `data:image/png; base64 ,${png}` } },
+            { type: 'image_url', image_url: { url: `data:image/png;\tbase64,${png}` } },
+            { type: 'image_url', image_url: { url: 'data:IMAGE/PNG;base64,iVBORw0KGgo%3D' } },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBO Rw0K\nGgo=' } },
+            // The fragment is not part of the data.
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${png}#frame-2` } },
+          ],
+        },
+      ], {});
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.contents[0].parts).toEqual(
+        Array.from({ length: 5 }, () => ({ inlineData: { mimeType: 'image/png', data: png } })),
+      );
+    });
+
+    it.each([
+      ['no comma', 'data:image/png;base64'],
+      ['no media type', 'data:;base64,iVBORw0KGgo='],
+      ['base64 that is not valid', 'data:image/png;base64,iVBORw0K*Ggo='],
+      ['one character past a multiple of four', 'data:image/png;base64,iVBORw0KG'],
+      ['no image data', 'data:image/png;base64,'],
+      ['a scheme that is neither', 'ftp://example.com/cat.png'],
+    ])('refuses a data URL with %s as a bad request, before any request', async (_case, url) => {
+      const refused = provider.generateCompletion('gemini-2.5-flash', [
+        { role: 'user', content: [{ type: 'image_url', image_url: { url } }] },
+      ], {});
+      await expect(refused).rejects.toMatchObject({ code: 'INVALID_IMAGE_URL', httpStatus: 400 });
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('reads a long data URL with no comma in linear time', async () => {
+      // The pattern this replaced took about n^2/2 steps on these, minutes at a
+      // megabyte, blocking the event loop; 100,000 characters took seconds.
+      for (const url of [`data:${'A'.repeat(100_000)}`, `data:image/png;${'A'.repeat(100_000)}`]) {
+        const started = performance.now();
+        await expect(
+          provider.generateCompletion('gemini-2.5-flash', [
+            { role: 'user', content: [{ type: 'image_url', image_url: { url } }] },
+          ], {}),
+        ).rejects.toMatchObject({ code: 'INVALID_IMAGE_URL' });
+        expect(performance.now() - started).toBeLessThan(1000);
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("takes inline images past the old 20 MB, and refuses them past Gemini's 100 MB of base64 per request", async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
+      // 30 MiB of base64 (22.5 MiB of image), which the 20 MB rule refused.
+      const large = `data:image/png;base64,${'A'.repeat(30 * 1024 * 1024)}`;
+      await provider.generateCompletion('gemini-2.5-flash', [
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: large } }] },
+      ], {});
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Two of 60 MiB come to 120 MiB of base64 in one request.
+      const half = `data:image/png;base64,${'A'.repeat(60 * 1024 * 1024)}`;
+      const refused = provider.generateCompletion('gemini-2.5-flash', [
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: half } },
+            { type: 'image_url', image_url: { url: half } },
+          ],
+        },
+      ], {});
+      await expect(refused).rejects.toMatchObject({ code: 'IMAGE_TOO_LARGE', httpStatus: 400 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it('maps generation config fields correctly', async () => {

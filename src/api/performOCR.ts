@@ -23,12 +23,12 @@
  * const result = await performOCR({ image: '/tmp/receipt.png' });
  * console.log(result.text);
  *
- * // From a URL with cloud-only strategy
+ * // From a URL with cloud-only strategy, on a key of your own
  * const result2 = await performOCR({
  *   image: 'https://example.com/scan.jpg',
  *   strategy: 'cloud-only',
  *   provider: 'openai',
- *   apiKey: process.env.OPENAI_API_KEY,
+ *   apiKey: process.env.TENANT_OPENAI_KEY,
  * });
  * ```
  *
@@ -36,8 +36,9 @@
  */
 
 import { readFile } from 'node:fs/promises';
+import { imageToBuffer } from '../io/media/images/imageToBuffer.js';
 import { createVisionPipeline } from '../io/vision/index.js';
-import type { VisionResult, VisionTier } from '../io/vision/types.js';
+import type { FailedTier, VisionResult, VisionTier } from '../io/vision/types.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -94,10 +95,18 @@ export interface PerformOCROptions {
   model?: string;
 
   /**
-   * API key for the cloud provider. When omitted the key is read from the
-   * standard environment variable for the provider.
+   * API key for the cloud provider. It goes to `provider`, or to the provider
+   * a `model` prefix names (`openai:gpt-4o`), and is refused with neither, so
+   * it never reaches a provider picked from the environment. When omitted
+   * the key is read from the standard environment variable for the provider.
    */
   apiKey?: string;
+
+  /**
+   * Base URL for the cloud provider, such as a proxy. It needs a named
+   * provider, as `apiKey` does.
+   */
+  baseUrl?: string;
 }
 
 /**
@@ -135,6 +144,13 @@ export interface OCRResult {
     bbox?: { x: number; y: number; width: number; height: number };
     confidence: number;
   }>;
+
+  /**
+   * Tiers that were due to run and failed, each with its error, such as a
+   * cloud tier whose request failed while a local tier read the text.
+   * Absent when none did.
+   */
+  failedTiers?: FailedTier[];
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +191,12 @@ async function resolveImageToBuffer(image: string | Buffer): Promise<Buffer> {
     return image;
   }
 
-  // Base64 string (with or without data: prefix).
+  // A data URL, base64 or percent-encoded (RFC 2397).
+  if (image.startsWith('data:')) {
+    return imageToBuffer(image);
+  }
+
+  // Raw base64 string.
   if (looksLikeBase64(image)) {
     const raw = stripDataPrefix(image);
     return Buffer.from(raw, 'base64');
@@ -268,22 +289,26 @@ function resolveWinningTier(result: VisionResult): { tier: VisionTier; provider:
  * ```
  */
 export async function performOCR(opts: PerformOCROptions): Promise<OCRResult> {
-  // 1. Resolve the input into a raw image buffer.
-  const imageBuffer = await resolveImageToBuffer(opts.image);
-
-  // 2. Create a vision pipeline with the caller's preferences.
+  // 1. Create a vision pipeline with the caller's preferences. It refuses a
+  //    key or base URL with no named provider before any image is read.
   const pipeline = await createVisionPipeline({
     strategy: opts.strategy ?? 'progressive',
     confidenceThreshold: opts.confidenceThreshold,
     cloudProvider: opts.provider,
     cloudModel: opts.model,
+    cloudApiKey: opts.apiKey,
+    cloudBaseUrl: opts.baseUrl,
     // Disable embedding tier — OCR callers don't need CLIP vectors.
     embedding: false,
   });
 
   try {
-    // 3. Run the pipeline.
-    const visionResult = await pipeline.process(imageBuffer);
+    // 2. Resolve the input into a raw image buffer.
+    const imageBuffer = await resolveImageToBuffer(opts.image);
+
+    // 3. Run the pipeline. The cloud tier transcribes: OCR wants the text as
+    //    written, not a description of the picture.
+    const visionResult = await pipeline.process(imageBuffer, { cloudTask: 'transcribe' });
 
     // 4. Determine which tier won.
     const winning = resolveWinningTier(visionResult);
@@ -304,6 +329,7 @@ export async function performOCR(opts: PerformOCROptions): Promise<OCRResult> {
       category: visionResult.category,
       provider: winning.provider,
       regions,
+      ...(visionResult.failedTiers?.length ? { failedTiers: visionResult.failedTiers } : {}),
     };
   } finally {
     // 6. Always clean up pipeline resources.

@@ -865,6 +865,7 @@ Without `capabilities`, a forge request names the APIs it needs in `implementati
 - Writes, deletes and state-changing requests are granted only under a ceiling, only on an executor that declares `isolates: true`, within roots and bounds the host writes out, and never while a forge's tests run (see [Effects](#effects-writes-deletes-and-state-changing-requests))
 - Raw sandbox source is redacted at rest by default
 - If no LLM is configured, all forge requests are rejected (fail-closed)
+- Under `AGENTOS_LEARNING_FREEZE=1`, `forge_tool` and the four self-improvement tools refuse every action that changes the agent (`frozen`), with a learning layer or without one
 
 ## Self-Improvement Tools
 
@@ -891,6 +892,10 @@ Configuration:
 }
 ```
 
+### Refusals where a learning layer exists
+
+On a host whose `learning` option is on ([Learning](../GMI.md#learning)), each tool call carries the turn's learner and mode in `sessionData.learning`, and `forge_tool`, `create_workflow` (`create`), `manage_skills` (`enable`, `disable`), `self_evaluate` (`adjust`) and `adapt_personality` refuse before they act: `frozen` in mode `frozen`, `off` in mode `off`, `no_learner` on a turn with no learner. A refusal is a failed tool result with `details: { status: 'rejected', reason }`, and nothing changes. `self_evaluate`'s `evaluate` on such a turn answers, stores no trace, applies no adjustment and sets `selfChangeRefused`. With a layer, `adapt_personality` also refuses `honesty` and `emotionality` (`operator_only`), a delta above 0.02 (`step_bound`) and a fourth accepted call in a session (`call_limit`). `AGENTOS_LEARNING_FREEZE=1` makes all five refuse with `frozen`, with a layer or without one.
+
 See [Self-Extension](../SELF_EXTENSION.md) for how each tool is gated.
 
 ## Skill Export
@@ -901,6 +906,8 @@ The `SkillExporter` converts runtime-forged tools into `SKILL.md` + `CAPABILITY.
 import { exportToolAsSkillPack } from '@framers/agentos/emergent';
 await exportToolAsSkillPack(forgedTool, './skills/slugify');
 ```
+
+The tool's name names its folder, `<outputDir>/<name>/`. The forge holds a name to two rules: the rule for any file or folder name built from data ([`pathNameProblem`](https://github.com/framerslab/agentos/blob/master/src/core/utils/pathName.ts): not empty; no slash, backslash or colon, none of `"`, `*`, `<`, `>`, `?` and `|`, and no control character; not starting with a dot; not starting or ending with a space, or ending with a dot; at most 200 bytes in UTF-8), and an identifier: an ASCII letter, then ASCII letters, digits, underscores and hyphens. `forge_tool` refuses a name that breaks either rule before the engine runs, with a failed result whose `details` are `{ code: 'INVALID_TOOL_NAME', problem }` (the error of a missing or empty name reads `name is required and must be a string`, its `problem` `type` or `empty`), and `engine.forge`, called directly, refuses it with the same message ([`ToolName.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/ToolName.ts)). `writeSkillFile` and `exportToolAsSkillPack` hold the name to the first rule again, so a tool the forge did not check, such as one loaded from a stored row or one a host builds itself, is checked too, and they write only when the tool's folder resolves inside `outputDir`. Otherwise they reject with an `InvalidToolNameError` (`code` and `problem` as above) and write nothing. `outputDir` is made when missing and used as it is, even when it is a link. Below it, the tool's folder is made and its files are written never through a link, and only into regular files ([`linkFreeWrite.ts`](https://github.com/framerslab/agentos/blob/master/src/core/utils/linkFreeWrite.ts)): a symbolic link at the folder or at a file, a second name (a hard link) for a file, or anything but a regular file at a file's place rejects with a `SkillExportRefusedError` (`code: 'SKILL_EXPORT_REFUSED'`, `problem: 'link'` or `'special'`), and nothing is written.
 
 ## Related
 

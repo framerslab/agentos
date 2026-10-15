@@ -6,12 +6,12 @@ import type { VisionResult } from '../../../io/vision/types.js';
 // Mock the createVisionPipeline factory so we never instantiate real ML models
 // ---------------------------------------------------------------------------
 
-const mockProcess = vi.fn<(image: Buffer) => Promise<VisionResult>>();
+const mockProcess = vi.fn<(image: Buffer, options?: { cloudTask?: string }) => Promise<VisionResult>>();
 const mockDispose = vi.fn<() => Promise<void>>();
 
 vi.mock('../../../io/vision/index.js', () => ({
   createVisionPipeline: vi.fn().mockResolvedValue({
-    process: (image: Buffer) => mockProcess(image),
+    process: (image: Buffer, options?: { cloudTask?: string }) => mockProcess(image, options),
     dispose: () => mockDispose(),
   }),
 }));
@@ -100,7 +100,51 @@ describe('performOCR', () => {
     const result = await performOCR({ image: Buffer.from('disk-image') });
 
     expect(result.text).toBe('Hello World');
-    expect(mockProcess).toHaveBeenCalledWith(Buffer.from('disk-image'));
+    expect(mockProcess).toHaveBeenCalledWith(Buffer.from('disk-image'), { cloudTask: 'transcribe' });
+  });
+
+  it('asks the cloud tier for the text as written, not a description', async () => {
+    mockProcess.mockResolvedValueOnce(fakeVisionResult());
+
+    await performOCR({ image: Buffer.from('img'), strategy: 'cloud-only', provider: 'openai' });
+
+    expect(mockProcess.mock.calls[0][1]).toEqual({ cloudTask: 'transcribe' });
+  });
+
+  it('passes apiKey and baseUrl to the pipeline as its cloud key and base URL', async () => {
+    mockProcess.mockResolvedValueOnce(fakeVisionResult());
+
+    await performOCR({
+      image: Buffer.from('img'),
+      strategy: 'cloud-only',
+      provider: 'openai',
+      apiKey: 'sk-ocr-tenant',
+      baseUrl: 'https://gateway.example/v1',
+    });
+
+    expect(createVisionPipeline).toHaveBeenCalledWith(
+      expect.objectContaining({ cloudProvider: 'openai', cloudApiKey: 'sk-ocr-tenant', cloudBaseUrl: 'https://gateway.example/v1' }),
+    );
+  });
+
+  it('returns the tiers that were due to run and failed', async () => {
+    mockProcess.mockResolvedValueOnce(fakeVisionResult({ failedTiers: [{ tier: 'cloud-vision', error: 'HTTP 429' }] }));
+
+    const result = await performOCR({ image: Buffer.from('img') });
+
+    expect(result.failedTiers).toEqual([{ tier: 'cloud-vision', error: 'HTTP 429' }]);
+    mockProcess.mockResolvedValueOnce(fakeVisionResult());
+    expect(await performOCR({ image: Buffer.from('img') })).not.toHaveProperty('failedTiers');
+  });
+
+  it('reads no image when the pipeline refuses its options', async () => {
+    vi.mocked(createVisionPipeline).mockRejectedValueOnce(new Error('createVisionPipeline: cloudApiKey and cloudBaseUrl need cloudProvider'));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    await expect(performOCR({ image: 'https://example.com/scan.png', apiKey: 'sk-loose' })).rejects.toThrow('need cloudProvider');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockProcess).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
   });
 
   it('handles base64 input by decoding to buffer', async () => {

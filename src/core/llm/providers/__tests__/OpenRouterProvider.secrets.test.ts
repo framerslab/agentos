@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 /**
  * @file OpenRouterProvider.secrets.test.ts
  * @description Every OpenRouter request carries the API key in its
@@ -65,6 +66,59 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it.each(['completion', 'embedding'] as const)('stores only request metadata for a failed %s', async (kind) => {
+    const sentinel = 'sentinel-words-7731-é';
+    let requestBody = '';
+    useAdapter(async (config) => {
+      if (config.url === '/models') return { status: 200, statusText: 'OK', headers: {}, config, data: { data: [] } };
+      requestBody = String(config.data);
+      throw new AxiosError('Request rejected', AxiosError.ERR_BAD_REQUEST, config, {}, {
+        status: 400, statusText: 'Bad Request', headers: {}, config, data: { error: { message: 'Request rejected' } },
+      });
+    });
+    const provider = new OpenRouterProvider();
+    await provider.initialize({ apiKey: 'test-key' });
+    const { errorLog, warnLog } = quietConsole();
+    const modelId = kind === 'completion' ? 'openai/gpt-4o' : 'openai/text-embedding-3-small';
+    const failure = await (kind === 'completion'
+      ? provider.generateCompletion(modelId, [{ role: 'user', content: sentinel }], {})
+      : provider.generateEmbeddings(modelId, [sentinel]))
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(requestBody).toContain(sentinel);
+    expect((failure as { details: unknown }).details).toMatchObject({
+      modelId,
+      requestBodyBytes: Buffer.byteLength(requestBody),
+      requestBodySha256: createHash('sha256').update(requestBody).digest('hex'),
+    });
+    expect((failure as { details: unknown }).details).not.toHaveProperty('requestBodyPreview');
+    console.error('Request failed', failure);
+    expect(renderings(failure)).not.toContain(sentinel);
+    expect(renderings(errorLog.mock.calls)).not.toContain(sentinel);
+    expect(renderings(warnLog.mock.calls)).not.toContain(sentinel);
+  });
+
+  it.each([
+    { raw: 'sentinel-words-7731-é', diagnostic: 'Invalid stream JSON.', label: 'Failed to parse stream chunk JSON, skipping chunk:' },
+    { raw: JSON.stringify('sentinel-words-7731-é'), diagnostic: 'Expected a JSON object.', label: 'Stream chunk is not a JSON object, skipping chunk:' },
+    { raw: JSON.stringify({ content: 'sentinel-words-7731-é' }), diagnostic: 'Invalid stream event shape.', label: 'Failed to map stream chunk, skipping chunk:' },
+  ])('logs only stream metadata for $diagnostic', async ({ raw, diagnostic, label }) => {
+    useAdapter(async (config) => ({
+      status: 200, statusText: 'OK', headers: {}, config,
+      data: config.url === '/models' ? { data: [] } : Readable.from([Buffer.from(`data: ${raw}\n\ndata: [DONE]\n\n`)]),
+    }));
+    const provider = new OpenRouterProvider();
+    await provider.initialize({ apiKey: 'test-key' });
+    const { warnLog } = quietConsole();
+    const events = [];
+    for await (const event of provider.generateCompletionStream('openai/gpt-4o', messages, {})) events.push(event);
+    expect(events).toEqual([]);
+    expect(warnLog).toHaveBeenCalledExactlyOnceWith(`OpenRouterProvider: ${label}`, {
+      eventBytes: Buffer.byteLength(raw), error: diagnostic,
+    });
+    expect(renderings(warnLog.mock.calls)).not.toContain('sentinel-words-7731');
   });
 
   it('when initialize() gets a 401, as with a revoked key', async () => {

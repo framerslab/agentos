@@ -70,6 +70,10 @@ const OPENAI_REASONING_EFFORT: Record<EffortLevel, string> = {
   xhigh: 'xhigh',
   max: 'xhigh',
 };
+// OpenAI documents `reasoning_effort: 'none'` in Chat Completions:
+// https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+// Read 2026-10-12. Keep it out of this mapping until a fresh HTTP 200 chat
+// probe establishes support for each allowed id, as the probe rule below requires.
 export function mapEffortToOpenAiReasoningEffort(effort: unknown): string | undefined {
   return isEffortLevel(effort) ? OPENAI_REASONING_EFFORT[effort] : undefined;
 }

@@ -67,7 +67,7 @@ await session.send('Help me build a morning routine.');
 
 The traits reach five surfaces, detailed below, and each runs on its own paths:
 
-- **System prompt directives** (1): `agent()`, with or without `runtime: 'gmi'`, writes them into the system prompt it builds from its options (`systemBlocks` replaces that prompt). The full runtime sends each persona's own system prompt and writes no directives from its traits.
+- **System prompt directives** (1): `agent()`, with or without `runtime: 'gmi'`, writes them into the system prompt it builds from its options (`systemBlocks` replaces that prompt). The full runtime sends each persona's own system prompt and writes the directives from its traits only with its `learning` option on. With `learning` on, `agent({ runtime: 'gmi' })` and the full runtime send them as a system prompt of their own on every turn, after the persona's base prompt and after any `systemBlocks` ([Learning](../GMI.md#learning)).
 - **Encoding strength, working-memory capacity and memory prompt formatting** (2 to 4): a `CognitiveMemoryManager` built with the traits applies them: the one `agent({ runtime: 'gmi' })` builds when memory is on, as in the quickstart ([GMIs from agent()](../GMI.md#gmis-from-agent)), one the full runtime gets from `gmiManagerConfig.cognitiveMemoryFactory`, or one you build ([Memory subsystem](#memory-subsystem)).
 - **Observer and reflector bias** (5): a `CognitiveMemoryManager` runs the observer only when its config gives it a model invoker (`observer.llmInvoker`), and the reflector likewise (`reflector.llmInvoker`). The manager `agent({ runtime: 'gmi' })` builds has neither.
 
@@ -81,7 +81,7 @@ The propagation diagram at the top of this page shows the five surfaces. Each is
 
 ### 1. System prompt directives
 
-`buildPersonalityDescription(traits)` in [`agent.ts`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) emits a `## Personality & Communication Style` section in the agent's system prompt. Each trait above 0.65 or below 0.35 produces one instruction; values from 0.35 to 0.65 produce none.
+`renderPersonalitySection(traits)` in [`personalityPrompt.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/personalityPrompt.ts) emits a `## Personality & Communication Style` section: `agent()` puts it in the system prompt it builds, and a GMI whose host turned `learning` on sends it as a system prompt of its own. Each trait above 0.65 or below 0.35 produces one instruction; values from 0.35 to 0.65 produce none.
 
 | Trait > 0.65 | Trait < 0.35 |
 |---|---|
@@ -92,7 +92,7 @@ The propagation diagram at the top of this page shows the five surfaces. Each is
 | **Conscientiousness:** "Be thorough and systematic. Structure responses clearly. Follow through on details. Prefer precision over speed." | **Conscientiousness:** "Be flexible and adaptive. Prioritize the big picture over details. Respond quickly. Tolerate ambiguity and improvise." |
 | **Openness:** "Explore creative angles and unconventional ideas. Draw unexpected connections. Question established approaches." | **Openness:** "Stick to proven approaches and established knowledge. Be practical and concrete. Favor reliability over novelty." |
 
-Source: [`src/api/agent.ts:552`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts#L552).
+Source: [`src/cognition/substrate/personas/personalityPrompt.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/personalityPrompt.ts).
 
 ### 2. Memory encoding strength
 
@@ -231,8 +231,11 @@ interface AdaptPersonalityInput {
 - The total change per trait per session is capped at `selfImprovement.personality.maxDeltaPerSession` (default 0.15); a larger delta is clamped to what remains.
 - The new value is clamped to [0, 1] and applied with `GMI.setPersonalityTrait()`.
 - A [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts) records the change only when the runtime has a storage adapter and `personality.persistWithDecay` is on (the default); stored mutations are not reloaded into later GMIs.
+- On a host with a learning layer (its `learning` option on), the tool refuses before it changes anything: on a turn in mode `frozen` (`frozen`) or `off` (`off`), on a turn with no learner (`no_learner`), for `honesty` and `emotionality` (`operator_only`), for a `delta` above 0.02 either way (`step_bound`), and after three accepted calls in one session (`call_limit`).
+- `AGENTOS_LEARNING_FREEZE=1` refuses every call (`frozen`), with a learning layer or without one.
+- A trait it changes reaches no prompt: the full runtime sends the personality section only with `learning` on, and the section renders the persona's authored traits ([Learning](../GMI.md#learning)).
 
-`agent()` registers no such tool; its traits stay as given.
+`agent()` registers no such tool, with or without `runtime: 'gmi'`: `gmi()` gives its tool orchestrator the agent's own tools and nothing else. Its traits stay as given.
 
 Source: [`src/cognition/emergent/AdaptPersonalityTool.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts).
 
@@ -365,6 +368,8 @@ Full citations are in the [Cognitive Memory page](./COGNITIVE_MEMORY.md#referenc
 | Observer bias | [`src/cognition/memory/pipeline/observation/MemoryObserver.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryObserver.ts) |
 | Reflector bias | [`src/cognition/memory/pipeline/observation/MemoryReflector.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryReflector.ts) |
 | `adapt_personality` tool | [`src/cognition/emergent/AdaptPersonalityTool.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) |
+| Personality section | [`src/cognition/substrate/personas/personalityPrompt.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/personalityPrompt.ts) |
+| Learning layer and the self-change refusals | [`src/cognition/learning/`](https://github.com/framerslab/agentos/tree/master/src/cognition/learning) |
 | Mutation persistence | [`src/cognition/emergent/PersonalityMutationStore.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts) |
 | Persona drift mechanism | [`src/cognition/memory/mechanisms/PersonaDriftMechanism.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts) |
 

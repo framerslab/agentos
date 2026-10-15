@@ -52,9 +52,14 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { readFileSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import * as path from 'node:path';
 import { readFrontMatter, writeFrontMatter } from '../../../core/utils/frontMatter.js';
+import {
+  readFileOutsideLinks,
+  readFileOutsideLinksSync,
+  type OpenRefusal,
+} from '../../../core/utils/linkFreeWrite.js';
 import { ensureMemoryDir } from '../memory/wiki/migrateMemoryMd.js';
 import type { IPersonaDefinition } from './IPersonaDefinition.js';
 import { normalizeHexacoTraits } from './hexaco.js';
@@ -154,12 +159,15 @@ export interface SoulLoaderOptions {
   /**
    * Either a workspace directory (containing SOUL.md and friends) OR a
    * direct path to a SOUL.md file. If a directory, all 6 standard files
-   * are scanned.
+   * are scanned. The files are read below the folder that holds the
+   * workspace directory, so the workspace directory may not be a symbolic
+   * link; the folder that holds it may.
    */
   source: string;
   /**
-   * If true, throw when SOUL.md is missing. Default true — a soul without
-   * SOUL.md is not a soul.
+   * If true, throw when SOUL.md is missing or is not read (a symbolic link,
+   * or not a regular file). Default true: a soul without SOUL.md is not a
+   * soul.
    */
   requireSoul?: boolean;
 }
@@ -169,6 +177,14 @@ export interface SoulLoaderOptions {
  * companion files (STYLE.md, IDENTITY.md, AGENTS.md, MEMORY.md). Returns
  * a `LoadedSoul` with both the parsed `IPersonaDefinition` and the raw
  * markdown bodies for the runtime to inject as system messages.
+ *
+ * Each file, `memory/index.md` among them, is read never through a symbolic
+ * link at the workspace directory or below it, never waiting, and only when
+ * it is a regular file (`readFileOutsideLinks`). A file refused that way, or
+ * one that cannot be read, is skipped with a warning; a skipped SOUL.md
+ * throws, as a missing one does, unless `requireSoul` is false. The
+ * workspace's `memory/` folder is made by `ensureMemoryDir`, which writes
+ * nothing through a link either.
  *
  * @example
  * ```ts
@@ -204,15 +220,11 @@ export async function loadSoul(options: SoulLoaderOptions): Promise<LoadedSoul> 
     soulPath = resolvedSource;
   }
 
+  // The soul's files are read below the folder that holds the workspace.
+  const folder = soulFolder(workspaceDir);
+
   // Read SOUL.md (required unless explicitly opted out)
-  let soulRaw: string | null = null;
-  try {
-    soulRaw = await fs.readFile(soulPath, 'utf-8');
-  } catch {
-    if (requireSoul) {
-      throw new Error(`SOUL.md not found at ${soulPath}`);
-    }
-  }
+  const soulRaw = soulText(soulPath, await readSoulFile(folder, path.basename(soulPath)), requireSoul);
 
   // Parse frontmatter + body. The frontmatter is read as data, never evaluated.
   const parsed = soulRaw ? readFrontMatter(soulRaw) : { data: {}, content: '' };
@@ -220,14 +232,14 @@ export async function loadSoul(options: SoulLoaderOptions): Promise<LoadedSoul> 
   const soulContent = parsed.content.trim();
 
   // Read optional companion files
-  const styleContent = await readOptional(path.join(workspaceDir, 'STYLE.md'));
-  const identityContent = await readOptional(path.join(workspaceDir, 'IDENTITY.md'));
-  const agentsContent = await readOptional(path.join(workspaceDir, 'AGENTS.md'));
-  const memoryContent = await readOptional(path.join(workspaceDir, 'MEMORY.md'));
+  const styleContent = trimmedText(await readSoulFile(folder, 'STYLE.md'));
+  const identityContent = trimmedText(await readSoulFile(folder, 'IDENTITY.md'));
+  const agentsContent = trimmedText(await readSoulFile(folder, 'AGENTS.md'));
+  const memoryContent = trimmedText(await readSoulFile(folder, 'MEMORY.md'));
 
   // Resolve the markdown wiki memory dir (idempotent migration of legacy MEMORY.md).
   const memoryDir = ensureMemoryDir(workspaceDir);
-  const wikiIndex = readOptionalSync(path.join(memoryDir, 'index.md'));
+  const wikiIndex = trimmedText(await readSoulFile(folder, path.join('memory', 'index.md')));
 
   // Build IPersonaDefinition from frontmatter + soul body
   const personaDefinition = frontmatterToPersona(frontmatter, soulContent, styleContent);
@@ -274,27 +286,22 @@ export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
     soulPath = resolvedSource;
   }
 
-  let soulRaw: string | null = null;
-  try {
-    soulRaw = readFileSync(soulPath, 'utf-8');
-  } catch {
-    if (requireSoul) {
-      throw new Error(`SOUL.md not found at ${soulPath}`);
-    }
-  }
+  const folder = soulFolder(workspaceDir);
+
+  const soulRaw = soulText(soulPath, readSoulFileSync(folder, path.basename(soulPath)), requireSoul);
 
   const parsed = soulRaw ? readFrontMatter(soulRaw) : { data: {}, content: '' };
   const frontmatter = parsed.data as SoulFrontmatter;
   const soulContent = parsed.content.trim();
 
-  const styleContent = readOptionalSync(path.join(workspaceDir, 'STYLE.md'));
-  const identityContent = readOptionalSync(path.join(workspaceDir, 'IDENTITY.md'));
-  const agentsContent = readOptionalSync(path.join(workspaceDir, 'AGENTS.md'));
-  const memoryContent = readOptionalSync(path.join(workspaceDir, 'MEMORY.md'));
+  const styleContent = trimmedText(readSoulFileSync(folder, 'STYLE.md'));
+  const identityContent = trimmedText(readSoulFileSync(folder, 'IDENTITY.md'));
+  const agentsContent = trimmedText(readSoulFileSync(folder, 'AGENTS.md'));
+  const memoryContent = trimmedText(readSoulFileSync(folder, 'MEMORY.md'));
 
   // Resolve the markdown wiki memory dir (idempotent migration of legacy MEMORY.md).
   const memoryDir = ensureMemoryDir(workspaceDir);
-  const wikiIndex = readOptionalSync(path.join(memoryDir, 'index.md'));
+  const wikiIndex = trimmedText(readSoulFileSync(folder, path.join('memory', 'index.md')));
 
   const personaDefinition = frontmatterToPersona(frontmatter, soulContent, styleContent);
 
@@ -395,7 +402,11 @@ export function frontmatterToPersona(
  * HEXACO traits are written under the documented frontmatter keys
  * (`honestyHumility`, ...) whichever spelling the persona uses, so the output
  * parses back to the same `personalityTraits`. Unset optional fields are
- * left out of the frontmatter.
+ * left out of the frontmatter. A persona with no field to write is rendered
+ * as its prompt alone, or behind an empty frontmatter block when the prompt
+ * opens like one (three dashes that a fourth does not follow) or with a byte
+ * order mark, so that the loader takes none of the prompt's lines for
+ * frontmatter.
  */
 export function renderSoulMarkdown(persona: IPersonaDefinition): string {
   const traits = normalizeHexacoTraits(persona.personalityTraits);
@@ -493,27 +504,95 @@ function stringifyBaseSystemPrompt(
 }
 
 /**
- * Helper: read a file if it exists, otherwise return undefined.
+ * A soul's folder, resolved, and the folder that holds it, which its files are
+ * read below so that the soul's folder itself is looked at too.
  */
-async function readOptional(filepath: string): Promise<string | undefined> {
+interface SoulFolder {
+  /** The folder that holds the soul's folder. It may be a link. */
+  root: string;
+  /** The soul's folder. */
+  dir: string;
+}
+
+/** A soul file's text; null when no file is there; or why it was skipped. */
+type SoulFileRead = { text: string } | { skipped: string } | null;
+
+/** What is wrong with a soul file's place, as a warning words it. */
+const PLACE_REFUSED: Record<OpenRefusal, string> = {
+  link: 'it is reached through a symbolic link',
+  special: 'it is not a regular file',
+};
+
+/** Where the files of the soul whose folder is `workspaceDir` are read. */
+function soulFolder(workspaceDir: string): SoulFolder {
+  const dir = path.resolve(workspaceDir);
+  return { root: path.dirname(dir), dir };
+}
+
+/**
+ * Read the soul file `name` names below the soul's folder, never through a
+ * symbolic link at that folder or below it, never waiting, and only when it is
+ * a regular file (`readFileOutsideLinks`). A file refused that way, or one that
+ * cannot be read, is skipped with a warning.
+ */
+async function readSoulFile(folder: SoulFolder, name: string): Promise<SoulFileRead> {
+  const file = path.join(folder.dir, name);
   try {
-    const content = await fs.readFile(filepath, 'utf-8');
-    return content.trim();
-  } catch {
-    return undefined;
+    return settleSoulFile(file, await readFileOutsideLinks(folder.root, path.relative(folder.root, file)));
+  } catch (err) {
+    return skipSoulFile(file, `it could not be read (${errorText(err)})`);
   }
 }
 
 /**
- * Sync companion to `readOptional`. Used by `loadSoulSync` when blocking I/O
- * is acceptable (boot-time agent factory wiring).
+ * Sync companion to `readSoulFile`. Used by `loadSoulSync` when blocking I/O
+ * is acceptable (boot-time agent factory wiring); a named pipe is refused at
+ * once, so it never holds the thread up.
  */
-function readOptionalSync(filepath: string): string | undefined {
+function readSoulFileSync(folder: SoulFolder, name: string): SoulFileRead {
+  const file = path.join(folder.dir, name);
   try {
-    return readFileSync(filepath, 'utf-8').trim();
-  } catch {
-    return undefined;
+    return settleSoulFile(file, readFileOutsideLinksSync(folder.root, path.relative(folder.root, file)));
+  } catch (err) {
+    return skipSoulFile(file, `it could not be read (${errorText(err)})`);
   }
+}
+
+/** A read's outcome as a `SoulFileRead`, with a warning for a refusal. */
+function settleSoulFile(file: string, read: { text: string } | OpenRefusal | null): SoulFileRead {
+  if (typeof read !== 'string') return read;
+  return skipSoulFile(file, PLACE_REFUSED[read]);
+}
+
+/** Write the one warning for a skipped soul file and say why it was skipped. */
+function skipSoulFile(file: string, reason: string): { skipped: string } {
+  console.warn(`[SoulLoader] Skipped ${file}: ${reason}`);
+  return { skipped: reason };
+}
+
+/**
+ * SOUL.md's text, or null when it gave none and `requireSoul` is false.
+ *
+ * @throws Error when SOUL.md is missing or was skipped and `requireSoul` is true.
+ */
+function soulText(soulPath: string, read: SoulFileRead, requireSoul: boolean): string | null {
+  if (read === null) {
+    if (requireSoul) throw new Error(`SOUL.md not found at ${soulPath}`);
+    return null;
+  }
+  if ('text' in read) return read.text;
+  if (requireSoul) throw new Error(`SOUL.md at ${soulPath} was not read: ${read.skipped}`);
+  return null;
+}
+
+/** An optional file's text, trimmed, or undefined when it gave none. */
+function trimmedText(read: SoulFileRead): string | undefined {
+  return read !== null && 'text' in read ? read.text.trim() : undefined;
+}
+
+/** An error's message, or the value as text when it is not an Error. */
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

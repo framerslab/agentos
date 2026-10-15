@@ -5,8 +5,9 @@
  * returns the same handle.
  *
  * Construction checks what needs no environment: options the GMI path cannot
- * honour, the cognition profile, and the `memory.embedding` settings that name
- * their provider. The persona (with the provider and model it resolves), the
+ * honour, the cognition profile, the `learning` option, and the `memory.embedding`
+ * settings that name their provider. With `learning` on it also builds the
+ * agent's learning layer. The persona (with the provider and model it resolves), the
  * prompt engine, utility AI and tool orchestrator the sessions share, and the
  * cognitive memory are built on first use, so an agent made before its keys are
  * set resolves them on its first call; a build that fails is not kept, and the
@@ -36,8 +37,9 @@ import { runCitationVerification } from './runtime/citationVerification.js';
 import { createCompletionGateway, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 import { adaptTools } from './runtime/toolAdapter.js';
-import { resolveCognition } from './runtime/gmiCognition.js';
+import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions } from './runtime/gmiPersona.js';
+import { modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import { assertEmbeddingConfig, createAgentCognitiveMemory, type AgentCognitiveMemory } from './runtime/agentCognitiveMemory.js';
 import { sendGmiTurn, streamGmiTurn, TurnLock, type GmiForTurn, type GmiSessionDeps, type GmiTurnContext, type GmiTurnOptions } from './runtime/gmiSession.js';
 import { transcriptToConversation } from './runtime/gmiTranscript.js';
@@ -47,6 +49,10 @@ import { accumulateUsage, createEmptyUsageAggregate, mergeAggregates } from './r
 import type { AgentOSUsageAggregate, AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { exportAgentConfig, exportAgentConfigJSON } from './agentExportCore.js';
 import { getDeferredCapabilities, isMeaningfullyConfigured } from './runtime/lightweightAgentDiagnostics.js';
+import { createLearningLayer } from '../cognition/learning/LearningLayer.js';
+import { deferLearnerSession } from '../cognition/learning/LearnerSession.js';
+import type { HostLoopName, ILearnerSession, ILearningLayer, LearnerContext, LoopState } from '../cognition/learning/types.js';
+import { normalizeHexacoTraits } from '../cognition/substrate/personas/hexaco.js';
 
 /** The options of {@link gmi}: the options of `agent()`. */
 export type GmiOptions = AgentOptions;
@@ -208,6 +214,11 @@ function hookTools(base: IToolOrchestrator, hook: AgentOptions['onBeforeToolExec
  */
 function gatewayFor(opts: AgentOptions): CompletionGateway {
   const base = createCompletionGateway({
+    // The agent's key and base URL are for its provider: a call that names
+    // another provider (generate()'s and stream()'s `provider` and `model`)
+    // runs on that provider's own credentials.
+    providerId: opts.provider,
+    modelId: opts.model,
     apiKey: opts.apiKey,
     baseUrl: opts.baseUrl,
     fallbackProviders: opts.fallbackProviders,
@@ -221,7 +232,7 @@ function gatewayFor(opts: AgentOptions): CompletionGateway {
   return {
     stream: base.stream,
     schemaInstruction: base.schemaInstruction,
-    resolve: (route, after) =>
+    resolve: (route, after, failure) =>
       base.resolve(
         {
           ...route,
@@ -235,6 +246,7 @@ function gatewayFor(opts: AgentOptions): CompletionGateway {
           },
         },
         after,
+        failure,
       ),
   };
 }
@@ -272,6 +284,26 @@ interface SessionEntry {
   userId: string;
 }
 
+/** What a gmi() agent's options say about the loops its GMIs run, for the learning layer's manifest. */
+function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName, LoopState>> {
+  const off = (detail: string): LoopState => ({ live: false, detail });
+  const memory = cognition.memory !== false;
+  return {
+    memory: memory ? { live: true } : off('memory is off'),
+    memory_mechanisms: cognition.mechanisms ? { live: true } : off(memory ? 'the mechanisms are off' : 'memory is off'),
+    memory_observer_reflector: off('gmi() builds memory without an observer or a reflector'),
+    memory_store: off(memory ? 'memory lives in process memory' : 'memory is off'),
+    sentiment: cognition.sentiment ? { live: true } : off('sentiment tracking is off'),
+    metaprompts: cognition.metaprompts !== false ? { live: true } : off('no metaprompt preset'),
+    emergent_tools: off('gmi() builds no emergent engine'),
+    self_improvement_tools: off('gmi() registers no self-improvement tool'),
+    forged_code_executor: off('gmi() builds no emergent engine'),
+    hitl: off('gmi() applies no hitl setting'),
+    tool_policy: off("the tool-policy switch runs in the full runtime's turn pipeline"),
+    rag: off('gmi() applies no rag setting'),
+  };
+}
+
 /**
  * An agent whose sessions are GMIs (docs/GMI.md, "GMIs from agent()").
  *
@@ -279,7 +311,8 @@ interface SessionEntry {
  *   a config that sets only `enabled: false` is unset.
  * @returns The `Agent` surface: `generate`, `stream`, `session`, `usage`, `close`, `export`.
  * @throws {Error} At construction, naming the option: an option the GMI path
- *   cannot honour, an unknown cognition profile or metaprompt preset, or a
+ *   cannot honour, an unknown cognition profile or metaprompt preset, a
+ *   `learning` value of the wrong type or an unknown `learning.mode`, or a
  *   `memory.embedding` that names a provider without embeddings, a model that
  *   does not resolve, or a dimension that is not a positive integer or not known.
  *   No environment is read here: the provider and model resolve on the first
@@ -297,7 +330,20 @@ export function gmi(opts: GmiOptions): GmiHandle {
     console.warn(`[AgentOS] gmi() accepted config it does not enforce yet: ${deferred.join(', ')}.`);
   }
   const cognition = resolveCognition(opts);
-  const lightCognition = resolveCognition({ cognition: 'light' });
+  // generate() and stream() run the light profile, under the agent's own learning option.
+  const lightCognition = resolveCognition({ cognition: 'light', learning: opts.learning });
+  // One learning layer for the agent, only when its `learning` option is on. With it off nothing below builds or
+  // passes anything of the layer, and the agent runs as it did before the layer existed.
+  const layer: ILearningLayer | undefined = cognition.learning
+    ? createLearningLayer({
+        ...(typeof opts.learning === 'object' ? opts.learning : {}),
+        profile: cognition.profile,
+        surface: 'gmi',
+        hostLoops: hostLoopsOf(cognition),
+      })
+    : undefined;
+  /** The traits the agent was given, as the layer and a GMI's own render read them. */
+  const authoredTraits = normalizeHexacoTraits(opts.personality);
   if (cognition.memory) assertEmbeddingConfig(cognition.memory);
   if (cognition.memory && opts.memoryProvider?.getContext) {
     console.warn('[agentos] gmi(): cognitive memory supplies the memory context; memoryProvider.getContext is skipped (observe still runs).');
@@ -355,7 +401,41 @@ export function gmi(opts: GmiOptions): GmiHandle {
   // have finished, and the sessions opened after that share a new one.
   let memory = memoryForSessions();
 
-  async function buildGmi(id: string, persona: IPersonaDefinition, mem: AgentCognitiveMemory | undefined, steps: number, gate?: ApprovalGateFn): Promise<BuiltGmi> {
+  /**
+   * A learner session for one session or one call of the agent; `undefined` when learning is off. A session
+   * opened with a user id names a learner (the layer still answers with none for a placeholder id, or for an
+   * agent with neither a name nor `learning.agentKey`); a session opened without one, `generate()` and
+   * `stream()` have none. A layer that fails to open the session never fails the call: the GMI gets a session
+   * that asks again at each turn, and until one opens each turn has no learner and the GMI renders the
+   * persona's traits itself.
+   */
+  async function learnerSessionFor(sessionId: string, personaId: string, userId: string | undefined): Promise<ILearnerSession | undefined> {
+    const active = layer;
+    if (!active) return undefined;
+    const context: LearnerContext = { sessionId, personaId, authoredTraits };
+    // A named agent's persona id is stable; an agent without a name is named by `learning.agentKey` alone.
+    const learnerKey = userId === undefined ? null : { namespace: '', agentKey: opts.name?.trim() ? personaId : '', userId };
+    const open = (): Promise<ILearnerSession> => active.forLearner(learnerKey, context);
+    try {
+      return await open();
+    } catch (error) {
+      console.warn("[agentos] gmi(): the learning layer gave the session no learner session; each turn asks again, and until one opens the turn has no learner and its GMI renders the persona's traits itself.", error);
+      // Fail closed: the deferred session rejects while the layer cannot open one, so each such turn runs degraded
+      // and tells its tools it has no learner.
+      return deferLearnerSession({ traits: authoredTraits, open });
+    }
+  }
+
+  /** Ends a learner session; a failure is warned about and never reaches the caller. */
+  async function endLearnerSession(learner: ILearnerSession | undefined): Promise<void> {
+    try {
+      await learner?.endSession();
+    } catch (error) {
+      console.warn('[agentos] gmi(): ending the learner session failed:', error);
+    }
+  }
+
+  async function buildGmi(id: string, persona: IPersonaDefinition, mem: AgentCognitiveMemory | undefined, steps: number, gate?: ApprovalGateFn, learner?: ILearnerSession): Promise<BuiltGmi> {
     const s = await shared.get();
     const step = { index: 0 };
     let turn: GmiTurnContext = { prompt: undefined, memoryContext: undefined };
@@ -371,6 +451,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // another's memories. `GMI.shutdown()` shuts down the memory it was given;
       // on the view that does nothing, and `agent.close()` closes the manager.
       ...(mem ? { cognitiveMemory: mem.manager.forSession() } : {}),
+      // With learning on: the learner session, which prepares the personality section each turn, and the agent's
+      // traits, which the GMI renders itself when that session does not answer.
+      ...(layer ? { ...(learner ? { learning: learner } : {}), personaTraits: { authored: authoredTraits } } : {}),
       // The usage a provider reports for a call after the call was stopped goes
       // to the turn that made the call, which meters and counts it.
       completionGateway: {
@@ -446,9 +529,19 @@ export function gmi(opts: GmiOptions): GmiHandle {
     };
   }
 
-  /** A GMI for one turn only, shut down once the turn ends. */
-  function forOneTurn(built: BuiltGmi): GmiForTurn {
-    return { ...built, release: () => built.gmi.shutdown() };
+  /** A GMI for one turn only, shut down once the turn ends; a learner session made for that turn ends with it. */
+  function forOneTurn(built: BuiltGmi, learner?: ILearnerSession): GmiForTurn {
+    if (!learner) return { ...built, release: () => built.gmi.shutdown() };
+    return {
+      ...built,
+      release: async () => {
+        try {
+          await built.gmi.shutdown();
+        } finally {
+          await endLearnerSession(learner);
+        }
+      },
+    };
   }
 
   const sessions = new Map<string, SessionEntry>();
@@ -489,10 +582,22 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // generate() and stream() keep no history and run the light profile whatever the agent's (spec D10).
       gmiFor: async () => {
         const s = await shared.get();
+        // A call whose model's `provider:` prefix names another provider does not inherit the agent's.
+        const callProvider =
+          extra?.provider ??
+          (extra?.model && opts.provider && modelNamesAnotherProvider(opts.provider, extra.model) ? undefined : opts.provider);
         const persona = extra && (extra.model || extra.provider)
-          ? personaFromAgentOptions({ ...opts, model: extra.model ?? opts.model, provider: extra.provider ?? opts.provider }, lightCognition, tools)
+          ? personaFromAgentOptions({ ...opts, model: extra.model ?? opts.model, provider: callProvider }, lightCognition, tools)
           : s.lightPersona;
-        return forOneTurn(await buildGmi(`gmi-${persona.id}-${callId}`, persona, undefined, extra?.maxSteps ?? maxSteps, extra?.__approvalGate));
+        // A call has no user of its own, so no learner; with learning on its GMI sends the personality section.
+        const learner = await learnerSessionFor(callId, persona.id, undefined);
+        try {
+          return forOneTurn(await buildGmi(`gmi-${persona.id}-${callId}`, persona, undefined, extra?.maxSteps ?? maxSteps, extra?.__approvalGate, learner), learner);
+        } catch (error) {
+          // A GMI that was never built is never released, so the call's learner session ends here.
+          await endLearnerSession(learner);
+          throw error;
+        }
       },
     };
   }
@@ -541,9 +646,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // The memory the agent's sessions shared when this one opened.
       const sessionMemory = memory;
 
+      // The session's learner session, when learning is on: one for this agent.session() entry, built with its
+      // first turn and ended by close(). A session that keeps no history builds a GMI per turn, and each gets it.
+      const learner = retryingOnce<ILearnerSession | undefined>(async () => {
+        const { persona } = await shared.get();
+        return learnerSessionFor(sessionId, persona.id, sessionOptions?.userId);
+      });
       const buildSessionGmi = async (gmiId: string): Promise<BuiltGmi> => {
         const { persona } = await shared.get();
-        return buildGmi(gmiId, persona, await sessionMemory.get(), maxSteps);
+        return buildGmi(gmiId, persona, await sessionMemory.get(), maxSteps, undefined, await learner.get());
       };
       // The session's own GMI, when it keeps history; a GMI per turn otherwise.
       const own = retryingOnce(() => buildSessionGmi(`gmi-${memoryScopeId}`));
@@ -661,7 +772,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
             const release = await lock.acquire();
             try {
               const built = await own.peek()?.catch(() => undefined);
-              await built?.gmi.shutdown();
+              try {
+                await built?.gmi.shutdown();
+              } finally {
+                await endLearnerSession(await learner.peek()?.catch(() => undefined));
+              }
             } finally {
               release();
             }
@@ -708,6 +823,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
     setAvatarBindingOverrides() {
       // avatar is not available on the GMI path
     },
+    // With learning on: the layer as the agent's host reads it. agent.close() ends every session's learner session
+    // through session.close() and leaves the layer open, because the agent serves sessions opened after close().
+    ...(layer ? { learning: { manifest: () => layer.manifest() } } : {}),
   };
   Object.defineProperty(handle, '__config', { value: opts, enumerable: false, configurable: true });
   return handle;

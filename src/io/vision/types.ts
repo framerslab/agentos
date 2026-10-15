@@ -21,6 +21,8 @@
  * @see {@link VisionStrategy} for how tiers are combined.
  */
 
+import type { FallbackProviderEntry } from '../../api/generateText.js';
+
 // ---------------------------------------------------------------------------
 // Strategy
 // ---------------------------------------------------------------------------
@@ -78,6 +80,13 @@ export type ContentCategory =
  */
 export type VisionTier = 'ocr' | 'handwriting' | 'document-ai' | 'embedding' | 'cloud-vision';
 
+/**
+ * What the cloud tier asks its model for. `'describe'` (the default) asks for
+ * a description of the image together with the text it shows; `'transcribe'`
+ * asks for the text alone, exactly as written, for a call that wants text.
+ */
+export type VisionCloudTask = 'describe' | 'transcribe';
+
 // ---------------------------------------------------------------------------
 // Result types
 // ---------------------------------------------------------------------------
@@ -93,8 +102,15 @@ export interface TierResult {
   /** Which tier produced this result. */
   tier: VisionTier;
 
-  /** Provider name within the tier (e.g. 'paddle', 'tesseract', 'openai'). */
+  /**
+   * Provider name within the tier (e.g. 'paddle', 'tesseract', 'openai').
+   * For the cloud tier, the provider that answered: `cloudProvider`, or a
+   * `cloudFallbackProviders` entry after it failed.
+   */
   provider: string;
+
+  /** For the cloud tier, the model that answered, as `generateText` reports it. */
+  model?: string;
 
   /** Extracted or generated text content. */
   text: string;
@@ -238,7 +254,11 @@ export interface LayoutBlock {
  * ```
  */
 export interface VisionResult {
-  /** Best extracted text (from OCR, handwriting, or vision description). */
+  /**
+   * Best extracted text: from OCR, handwriting or layout, or from the cloud
+   * tier, which gives a description of the image with its text, or with
+   * `cloudTask: 'transcribe'` the text alone.
+   */
   text: string;
 
   /** Overall confidence score 0–1, taken from the winning tier. */
@@ -375,15 +395,28 @@ export interface VisionPipelineConfig {
   /**
    * API key for the cloud vision provider. When unset, the provider's key is
    * read from its environment variable (`OPENAI_API_KEY` and so on), as
-   * {@link generateText} does.
+   * {@link generateText} does. `createVisionPipeline` refuses a key, and a
+   * base URL, that comes with no `cloudProvider` and no `cloudModel` naming a
+   * provider (`openai:gpt-4o`): it would go to whichever provider the
+   * environment names.
    */
   cloudApiKey?: string;
 
   /**
    * Base URL for the cloud vision provider, such as a proxy or a local
    * OpenAI-compatible server. When unset, the provider's default is used.
+   * Needs a named provider, as `cloudApiKey` does.
    */
   cloudBaseUrl?: string;
+
+  /**
+   * The providers the cloud tier may try, in order, after `cloudProvider`
+   * fails: `generateText`'s `fallbackProviders`. Default `[]`, so the image
+   * goes to `cloudProvider` alone and never to another vendor whose key is in
+   * the environment. A listed provider uses its own key from the environment,
+   * never `cloudApiKey` or `cloudBaseUrl`.
+   */
+  cloudFallbackProviders?: FallbackProviderEntry[];
 
   /**
    * Minimum confidence to accept an OCR result without escalating to cloud.
