@@ -413,3 +413,24 @@ export const EXTENSION_KIND_STREAMING_TTS = 'streaming-tts-provider';
 export const EXTENSION_KIND_DIARIZATION = 'diarization-provider';
 export const EXTENSION_KIND_ENDPOINT_DETECTOR = 'endpoint-detector';
 export const EXTENSION_KIND_BARGEIN_HANDLER = 'bargein-handler';
+
+/** Extension kind for meeting-participant providers: a bot that joins a call as a listener. */
+export const EXTENSION_KIND_MEETING_PROVIDER = 'meeting-provider';
+/** The descriptor of a meeting provider: its payload is the `IMeetingBotProvider` a host registers on its `MeetingManager`. */
+export type MeetingProviderDescriptor = ExtensionDescriptor<import('../io/channels/meetings/IMeetingBotProvider.js').IMeetingBotProvider> & {
+  kind: typeof EXTENSION_KIND_MEETING_PROVIDER;
+};
+/** Scoped VAD factories own an awaited per-call IVadSession. */
+export const EXTENSION_KIND_VAD_SESSION = 'vad-session-provider';
+/** Audio endpoint factories receive the sequenced PCM fan-out. */
+export const EXTENSION_KIND_AUDIO_ENDPOINT = 'audio-endpoint-provider';
+/** Typed streaming speech descriptor; legacy payloads remain valid on their existing registries. */
+export type ScopedStreamingSttDescriptor = ExtensionDescriptor<import('../io/speech/VoiceAdapter.js').ScopedVoiceAdapter<'streaming-stt'>> & { kind: typeof EXTENSION_KIND_STREAMING_STT };
+/** Typed awaited-output synthesis factory. */
+export type ScopedStreamingTtsDescriptor = ExtensionDescriptor<import('../io/speech/VoiceAdapter.js').ScopedVoiceAdapter<'streaming-tts'>> & { kind: typeof EXTENSION_KIND_STREAMING_TTS };
+/** Typed owned VAD factory. */
+export type VadSessionDescriptor = ExtensionDescriptor<import('../io/speech/VoiceAdapter.js').ScopedVoiceAdapter<'vad-session'>> & { kind: typeof EXTENSION_KIND_VAD_SESSION };
+/** Typed owned audio-endpoint factory. */
+export type AudioEndpointDescriptor = ExtensionDescriptor<import('../io/speech/VoiceAdapter.js').ScopedVoiceAdapter<'audio-endpoint'>> & { kind: typeof EXTENSION_KIND_AUDIO_ENDPOINT };
+/** Batch adapters remain batch and use their original registry kinds. */
+export type ScopedBatchSpeechDescriptor = ExtensionDescriptor<import('../io/speech/VoiceAdapter.js').ScopedVoiceAdapter<'batch-stt' | 'batch-tts'>>;

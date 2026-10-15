@@ -36,6 +36,8 @@ import {
   EXTENSION_KIND_WAKE_WORD_PROVIDER,
 } from './types';
 import { getSecretDefinition } from '../core/config/extensionSecrets';
+import { EXTENSION_KIND_STREAMING_STT, EXTENSION_KIND_STREAMING_TTS, EXTENSION_KIND_VAD_SESSION, EXTENSION_KIND_AUDIO_ENDPOINT } from './types.js';
+import { isScopedVoiceAdapter, type ScopedVoiceAdapter } from '../io/speech/VoiceAdapter.js';
 
 const DEFAULT_EXTENSIONS_KIND_TOOL = 'tool';
 const DEFAULT_EXTENSIONS_KIND_GUARDRAIL = 'guardrail';
@@ -304,6 +306,20 @@ export class ExtensionManager {
     return registry;
   }
 
+  /** Lists active scoped factories only, without invoking them or reading a process credential. */
+  public getVoiceAdapters(): ScopedVoiceAdapter[] {
+    const result: ScopedVoiceAdapter[] = [];
+    const kinds = [EXTENSION_KIND_STREAMING_STT, EXTENSION_KIND_STREAMING_TTS, EXTENSION_KIND_VAD_SESSION, EXTENSION_KIND_AUDIO_ENDPOINT, EXTENSION_KIND_STT_PROVIDER, EXTENSION_KIND_TTS_PROVIDER];
+    const expected = ['streaming-stt', 'streaming-tts', 'vad-session', 'audio-endpoint', 'batch-stt', 'batch-tts'];
+    for (let i = 0; i < kinds.length; i++) for (const descriptor of this.getRegistry<unknown>(kinds[i]!).listActive()) {
+      const payload = descriptor.payload;
+      if (!payload || typeof payload !== 'object' || !('voiceAdapterVersion' in payload)) continue;
+      if (!isScopedVoiceAdapter(payload) || payload.kind !== expected[i] || descriptor.id !== payload.manifest.providerId || descriptor.requiredSecrets?.some((s) => !s.optional)) throw new Error('scoped voice descriptor refused');
+      result.push(payload);
+    }
+    return result;
+  }
+
   /**
    * Deactivates all loaded descriptors and extension packs.
    *
@@ -350,6 +366,10 @@ export class ExtensionManager {
     this.getRegistry(DEFAULT_EXTENSIONS_KIND_TTS);
     this.getRegistry(DEFAULT_EXTENSIONS_KIND_VAD);
     this.getRegistry(DEFAULT_EXTENSIONS_KIND_WAKE_WORD);
+    this.getRegistry(EXTENSION_KIND_STREAMING_STT);
+    this.getRegistry(EXTENSION_KIND_STREAMING_TTS);
+    this.getRegistry(EXTENSION_KIND_VAD_SESSION);
+    this.getRegistry(EXTENSION_KIND_AUDIO_ENDPOINT);
     // Messaging Channels — external human-facing platforms (v1.3.0)
     this.getRegistry(EXTENSION_KIND_MESSAGING_CHANNEL);
     // Provenance & Audit (v1.2.0)

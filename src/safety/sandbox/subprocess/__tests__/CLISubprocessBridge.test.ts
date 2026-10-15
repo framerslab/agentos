@@ -11,7 +11,7 @@ vi.mock('execa', () => ({
 
 import { CLISubprocessBridge } from '../CLISubprocessBridge';
 import { CLISubprocessError } from '../errors';
-import type { BridgeOptions, StreamEvent, OutputFormat } from '../types';
+import type { BridgeOptions, BridgeResult, StreamEvent, OutputFormat } from '../types';
 
 /**
  * Concrete test subclass that implements the abstract methods.
@@ -43,6 +43,43 @@ class TestBridge extends CLISubprocessBridge {
     if (raw.type === 'done') return { type: 'result', result: raw.result };
     return null;
   }
+}
+
+/**
+ * A bridge for a CLI whose JSON result has a shape of its own, which
+ * overrides parseJsonResult() as its JSDoc invites and reads stdout with a
+ * plain JSON.parse: stdout that is not JSON makes it throw.
+ */
+class StrictJsonBridge extends TestBridge {
+  protected parseJsonResult(stdout: string, durationMs: number): BridgeResult {
+    const parsed = JSON.parse(stdout);
+    return { result: parsed.output, isError: parsed.status === 'error', durationMs };
+  }
+}
+
+/**
+ * The error execa 10.0.1 rejects with when a run exits non-zero
+ * (getErrorProperties in lib/return/result.js; the message starts with the
+ * prefix of getErrorPrefix in lib/return/message.js, then the command, stderr
+ * and stdout).
+ */
+function exitFailure(exitCode: number, stdout: string, stderr: string): Error {
+  const shortMessage = `Command failed with exit code ${exitCode}: test-cli -p --format json`;
+  return Object.assign(new Error([shortMessage, stderr, stdout].join('\n\n')), {
+    shortMessage,
+    command: 'test-cli -p --format json',
+    escapedCommand: 'test-cli -p --format json',
+    failed: true,
+    timedOut: false,
+    isCanceled: false,
+    isGracefullyCanceled: false,
+    isTerminated: false,
+    isMaxBuffer: false,
+    isForcefullyTerminated: false,
+    exitCode,
+    stdout,
+    stderr,
+  });
 }
 
 describe('CLISubprocessBridge', () => {
@@ -146,6 +183,19 @@ describe('CLISubprocessBridge', () => {
         expect(err.code).toBe('TIMEOUT');
         expect(err.recoverable).toBe(true);
       }
+    });
+
+    it('classifies a failed run with classifyError() when a parseJsonResult() override throws on its stdout', async () => {
+      // The CLI wrote its failure as text, not as its JSON result, and exited 1.
+      execaMock.mockRejectedValueOnce(exitFailure(1, 'Error: could not reach the server', 'connect ECONNREFUSED 127.0.0.1:443'));
+
+      const error = await new StrictJsonBridge().execute({ prompt: 'test' }).then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+
+      expect(error).toBeInstanceOf(CLISubprocessError);
+      expect(error).toMatchObject({ code: 'CRASHED', message: 'Crashed: connect ECONNREFUSED 127.0.0.1:443' });
     });
 
     it('respects custom timeout option', async () => {

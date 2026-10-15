@@ -37,6 +37,20 @@ const createMockLLMProvider = (response: { content?: string; toolCalls?: any[] }
 };
 
 describe('StructuredOutputManager', () => {
+  it('logs only the length when model JSON cannot be recovered', async () => {
+    const sentinel = 'sentinel-words-7731';
+    const warn = vi.fn();
+    const manager = new StructuredOutputManager({
+      llmProviderManager: createMockLLMProvider({ content: sentinel }),
+      logger: { warn } as any,
+    });
+    await expect(manager.generate({
+      prompt: 'Return an object', schema: { type: 'object' }, strategy: 'json_mode', maxRetries: 0,
+    })).rejects.toThrow('Failed to generate valid structured output');
+    expect(warn).toHaveBeenCalledWith('Failed to parse JSON after recovery attempts', { textLength: sentinel.length });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(sentinel);
+  });
+
   describe('JSON Schema Validation', () => {
     let manager: StructuredOutputManager;
 

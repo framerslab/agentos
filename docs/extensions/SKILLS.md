@@ -49,6 +49,10 @@ console.log(snapshot.prompt);
 
 Source: [`SkillRegistry`](https://github.com/framerslab/agentos/blob/master/src/cognition/skills/SkillRegistry.ts), [`SkillLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/skills/SkillLoader.ts).
 
+Each skill is a folder of its own in a skills directory, and its `SKILL.md` is a regular file. The loader reads `SKILL.md` never through a symbolic link at the skill's folder or below it, and never waits on a named pipe: a skill folder that is a link, and a `SKILL.md` that is a link or not a regular file, are skipped with a warning. The skills directory itself may be a link.
+
+With `buildSnapshot({ strict: true })`, the binaries a skill requires (`requires.bins`, `requires.anyBins`) are looked for in the folders on `PATH`. Each is named by one file name: a name such as `../bin/tool` or `.tool`, which holds a slash or starts with a dot, counts as missing, with a warning, and no folder is looked at for it.
+
 ## Curated registry (optional)
 
 - [`@framers/agentos-skills-registry`](https://github.com/framerslab/agentos-skills-registry) — catalog SDK with typed query helpers and snapshot factories

@@ -7,9 +7,12 @@
  * an {@link AIModelProviderManager} ready for use by {@link generateText} and
  * {@link streamText}.
  */
+import { createHash } from 'node:crypto';
+
 import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderManager.js';
 import { PROVIDER_DEFAULTS, autoDetectProvider } from './runtime/provider-defaults.js';
 import { getDefaultProvider } from './runtime/global-default.js';
+import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 
 /**
  * The result of splitting a `provider:model` string at the first colon.
@@ -61,6 +64,7 @@ const ENV_URL_MAP: Record<string, string> = {
   requesty: 'REQUESTY_BASE_URL',
   stability: 'STABILITY_BASE_URL',
   replicate: 'REPLICATE_BASE_URL',
+  fal: 'FAL_BASE_URL',
   ollama: 'OLLAMA_BASE_URL',
   'stable-diffusion-local': 'STABLE_DIFFUSION_LOCAL_BASE_URL',
 };
@@ -148,6 +152,38 @@ export function parseModelString(model: string): ParsedModel {
 }
 
 /**
+ * Refuses a call whose own `apiKey` or `baseUrl` would reach a provider the
+ * call did not name for it:
+ *
+ * - a `provider:` model prefix that names another provider than `provider`,
+ *   since the prefix wins (`provider: 'openai', model: 'replicate:...'`
+ *   would send the OpenAI key to Replicate);
+ * - for an image task, a provider left to auto-detection, which picks the
+ *   first image vendor with a key in the environment.
+ *
+ * A call with neither field, and a provider the global default names, pass.
+ *
+ * @throws {Error} Naming the provider the credentials would have gone to.
+ */
+function refuseMisdirectedCredentials(opts: ModelOption, task: TaskType): void {
+  const inline = opts as { apiKey?: unknown; baseUrl?: unknown };
+  if (typeof inline.apiKey !== 'string' && typeof inline.baseUrl !== 'string') return;
+  const prefixed = opts.provider === 'ollama' ? undefined : knownProviderPrefixOf(opts.model);
+  if (opts.provider && prefixed && prefixed !== opts.provider) {
+    throw new Error(
+      `Model '${opts.model}' names provider '${prefixed}', not '${opts.provider}': the apiKey or baseUrl ` +
+        `given for one would go to the other. Name one provider.`,
+    );
+  }
+  if (task === 'image' && !routedProviderOf(opts)) {
+    throw new Error(
+      "An apiKey or baseUrl for an image call needs provider (or a model such as 'openai:gpt-image-2.5-flare'): " +
+        'without one, the provider is detected from the environment and the key would go to it.',
+    );
+  }
+}
+
+/**
  * Resolves a complete provider configuration for LLM text providers.
  *
  * Reads API keys and base URLs from well-known environment variables
@@ -198,7 +234,9 @@ export function resolveProvider(
 
   // Anthropic fallback: when ANTHROPIC_API_KEY is missing, fall back to OpenRouter
   // if available. This is a convenience — OpenRouter proxies Anthropic models.
-  if (providerId === 'anthropic' && !apiKey) {
+  // Not when the call or the global default gave a base URL: that is where
+  // the caller sends Anthropic requests, and OpenRouter would drop it.
+  if (providerId === 'anthropic' && !apiKey && !baseUrl) {
     const orKey = process.env['OPENROUTER_API_KEY'];
     if (orKey) {
       // Anthropic's native API takes dated model IDs (e.g. "claude-haiku-4-5-20251001").
@@ -344,32 +382,8 @@ export interface ModelOption {
  *   or the provider has no default model for the requested task.
  */
 export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): ParsedModel {
-  // Apply global default for `provider` / `model` when neither is inlined.
-  // Inline opts always win; the default kicks in only when the caller
-  // supplied nothing. Env-var auto-detect happens later as a final
-  // fallback if the default also doesn't pin a provider. The default's
-  // model applies only to a task it can serve (see globalModelForTask);
-  // otherwise the provider's default model for the task is used.
-  if (!opts.provider && !opts.model) {
-    const def = getDefaultProvider();
-    if (def?.provider) {
-      // A custom endpoint (the default's baseUrl, an inline baseUrl on
-      // callers such as embedText, or the provider's base-URL env var) may
-      // serve any model under any name, so the default's model stays.
-      const inlineBaseUrl = (opts as { baseUrl?: unknown }).baseUrl;
-      const envBaseUrlVar = def.provider ? ENV_URL_MAP[def.provider] : undefined;
-      const customEndpoint = Boolean(
-        def.baseUrl ||
-          (typeof inlineBaseUrl === 'string' && inlineBaseUrl) ||
-          (envBaseUrlVar && process.env[envBaseUrlVar]),
-      );
-      opts = {
-        ...opts,
-        provider: def.provider,
-        model: customEndpoint ? def.model : globalModelForTask(def, task),
-      };
-    }
-  }
+  opts = withGlobalDefault(opts, task);
+  refuseMisdirectedCredentials(opts, task);
 
   // 1. Explicit model string (backwards compat and direct override)
   if (opts.model) {
@@ -459,8 +473,50 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
 const CHAT_MODEL_FAMILY =
   /^(?:[\w.-]+:)?(?:[\w.-]+\/)?(?:gpt-|chatgpt|o\d|claude|gemini|gemma|llama|mistral|mixtral|codestral|ministral|magistral|grok|deepseek|qwen|command|phi-|sonar|kimi|glm)/i;
 
-/** Names that mark a non-chat model inside a chat family (gpt-image-1, gemini-embedding-2). */
+/** Names that mark a non-chat model inside a chat family (gpt-image-2.5-flare, gemini-embedding-2). */
 const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|audio|realtime|moderation/i;
+
+/**
+ * `opts` with the global default's `provider` and `model` filled in when the
+ * call inlines neither. Inline options always win; the default applies only
+ * when the caller supplied nothing, and env-var auto-detection stays the last
+ * fallback if the default pins no provider. The default's model applies only
+ * to a task it can serve (see {@link globalModelForTask}); otherwise the
+ * provider's default model for the task is used.
+ */
+function withGlobalDefault(opts: ModelOption, task: TaskType): ModelOption {
+  if (opts.provider || opts.model) return opts;
+  const def = getDefaultProvider();
+  if (!def?.provider) return opts;
+  // A custom endpoint (the default's baseUrl, an inline baseUrl on callers
+  // such as embedText, or the provider's base-URL env var) may serve any
+  // model under any name, so the default's model stays.
+  const inlineBaseUrl = (opts as { baseUrl?: unknown }).baseUrl;
+  const envBaseUrlVar = def.provider ? ENV_URL_MAP[def.provider] : undefined;
+  const customEndpoint = Boolean(
+    def.baseUrl ||
+      (typeof inlineBaseUrl === 'string' && inlineBaseUrl) ||
+      (envBaseUrlVar && process.env[envBaseUrlVar]),
+  );
+  return {
+    ...opts,
+    provider: def.provider,
+    model: customEndpoint ? def.model : globalModelForTask(def, task),
+  };
+}
+
+/**
+ * Whether {@link resolveModelOption} takes the model for `task` from a name:
+ * the call's `model`, or the global default's. False when the model is the
+ * provider's default for the task.
+ *
+ * The image operations use it: a call that names no model runs on the
+ * provider's own default for the operation, not on the text-to-image default
+ * `resolveModelOption` returns for the provider.
+ */
+export function modelIsNamed(opts: ModelOption, task: TaskType = 'text'): boolean {
+  return Boolean(withGlobalDefault(opts, task).model);
+}
 
 /**
  * The global default's model when it can serve `task` on the provider's own
@@ -492,14 +548,29 @@ function globalModelForTask(
 
 /**
  * Process-scoped cache of initialised {@link AIModelProviderManager}
- * instances, keyed by `providerId + apiKey + baseUrl`. Every LLM call
- * inside agentos goes through `createProviderManager`, and without
- * memoisation each call allocates a fresh manager (four init log lines
- * per call) and repeats provider listing. Cache key includes the key
- * + base URL so a config swap picks up a new manager, but identical
- * configs reuse the same one for the life of the process.
+ * instances, keyed by the provider id and a digest of the key and base URL.
+ * Every LLM call inside agentos goes through `createProviderManager`, and
+ * without memoisation each call allocates a fresh manager (four init log
+ * lines per call) and repeats provider listing. The key and base URL are in
+ * the cache key so a config swap picks up a new manager, and identical
+ * configs reuse the same one; at most
+ * {@link MAX_CACHED_PROVIDER_MANAGERS} are kept, the least recently used
+ * dropped first.
  */
 const managerCache = new Map<string, Promise<AIModelProviderManager>>();
+
+/**
+ * The most managers {@link createProviderManager} keeps. A service that
+ * passes each user's own key would otherwise keep one initialized manager
+ * per key for the life of the process; past this many, the one used least
+ * recently is dropped (a call that still holds it finishes with it).
+ */
+export const MAX_CACHED_PROVIDER_MANAGERS = 64;
+
+/** The number of managers cached now, for tests. @internal */
+export function cachedProviderManagerCount(): number {
+  return managerCache.size;
+}
 
 /**
  * Thrown by {@link createProviderManager} when the requested provider did not
@@ -545,8 +616,10 @@ function httpStatusOf(error: unknown): number | undefined {
   return undefined;
 }
 
+/** The cache key: the provider, and a digest of its key and base URL, so the map holds no key. */
 function buildCacheKey(resolved: ResolvedProvider): string {
-  return `${resolved.providerId}::${resolved.apiKey ?? ''}::${resolved.baseUrl ?? ''}`;
+  const digest = createHash('sha256').update(`${resolved.apiKey ?? ''}\n${resolved.baseUrl ?? ''}`).digest('hex');
+  return `${resolved.providerId}::${digest}`;
 }
 
 /**
@@ -574,7 +647,12 @@ export async function createProviderManager(
 ): Promise<AIModelProviderManager> {
   const key = buildCacheKey(resolved);
   const cached = managerCache.get(key);
-  if (cached) return cached;
+  if (cached) {
+    // Most recently used last: the map's order is the eviction order.
+    managerCache.delete(key);
+    managerCache.set(key, cached);
+    return cached;
+  }
 
   const pending = (async () => {
     const manager = new AIModelProviderManager();
@@ -612,7 +690,14 @@ export async function createProviderManager(
 
   // Drop from cache if init rejected so the next call retries cleanly
   // instead of surfacing the stale rejection forever.
-  pending.catch(() => managerCache.delete(key));
+  pending.catch(() => {
+    if (managerCache.get(key) === pending) managerCache.delete(key);
+  });
   managerCache.set(key, pending);
+  while (managerCache.size > MAX_CACHED_PROVIDER_MANAGERS) {
+    const oldest = managerCache.keys().next().value;
+    if (oldest === undefined) break;
+    managerCache.delete(oldest);
+  }
   return pending;
 }

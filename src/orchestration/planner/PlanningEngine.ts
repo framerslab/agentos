@@ -250,7 +250,7 @@ export class PlanningEngine implements IPlanningEngine {
     const opts = { ...this.defaultOptions, ...options };
     const startTime = Date.now();
 
-    this.logger?.info?.('Generating execution plan', { goal, strategy: opts.strategy });
+    this.logger?.info?.('Generating execution plan', { goalLength: goal.length, strategy: opts.strategy });
 
     try {
       // Build the planning prompt
@@ -281,7 +281,7 @@ export class PlanningEngine implements IPlanningEngine {
       return plan;
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      this.logger?.error?.('Failed to generate plan', { goal, error: errorMessage });
+      this.logger?.error?.('Failed to generate plan', { goalLength: goal.length, error: 'Planning operation failed.' });
       throw new Error(`Planning failed: ${errorMessage}`);
     }
   }
@@ -294,7 +294,7 @@ export class PlanningEngine implements IPlanningEngine {
    * @returns Task decomposition result
    */
   public async decomposeTask(task: string, depth = 3): Promise<TaskDecomposition> {
-    this.logger?.debug?.('Decomposing task', { task, depth });
+    this.logger?.debug?.('Decomposing task', { taskLength: task.length, depth });
 
     const prompt = PLANNING_PROMPTS.decomposeTask.replace('{task}', task);
     const response = await this.callLLM(prompt, { jsonMode: true });
@@ -625,7 +625,7 @@ export class PlanningEngine implements IPlanningEngine {
     let goalConfidence = 0;
     let currentPlan: ExecutionPlan | null = null;
 
-    this.logger?.info?.('Starting autonomous loop', { goal, maxIterations: opts.maxIterations });
+    this.logger?.info?.('Starting autonomous loop', { goalLength: goal.length, maxIterations: opts.maxIterations });
 
     try {
       // Generate initial plan
@@ -722,7 +722,7 @@ export class PlanningEngine implements IPlanningEngine {
       return summary;
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      this.logger?.error?.('Autonomous loop failed', { goal, error: errorMessage });
+      this.logger?.error?.('Autonomous loop failed', { goalLength: goal.length, error: 'Planning operation failed.' });
       return {
         goalAchieved: false,
         finalConfidence: 0,

@@ -54,7 +54,8 @@ describe('Logger Factory', () => {
 
       const logger = createLogger('custom-component');
       expect(customFactory).toHaveBeenCalledWith('custom-component', undefined);
-      expect(logger).toBe(customLogger);
+      logger.warn('custom message');
+      expect(customLogger.warn).toHaveBeenCalledExactlyOnceWith('custom message');
     });
 
     it('should pass bindings to custom factory', () => {

@@ -8,14 +8,18 @@
  * When no `title` key is present in the front-matter the loader falls back
  * to extracting the first ATX heading (`# …`) from the document body.
  *
+ * Front matter is read as data. A block marked as JavaScript (`---js` or
+ * `---javascript`), which gray-matter's own engine would evaluate, is taken
+ * off the content like any front matter and gives no metadata.
+ *
  * @module memory/ingestion/MarkdownLoader
  */
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import matter from 'gray-matter';
 import type { IDocumentLoader } from './IDocumentLoader.js';
 import type { LoadOptions, LoadedDocument, DocumentMetadata } from '../facade/types.js';
+import { readFrontMatter } from '../../../../core/utils/frontMatter.js';
 import { validatePath } from './pathUtils.js';
 
 // ---------------------------------------------------------------------------
@@ -91,7 +95,9 @@ function toIsoString(value: unknown): string | undefined {
  * YAML front-matter delimited by `---` is parsed via `gray-matter`.  All
  * key-value pairs are merged into {@link DocumentMetadata} as-is, with a
  * handful of well-known keys (`title`, `author`, `createdAt`, `modifiedAt`,
- * `language`) mapped to the corresponding typed metadata fields.
+ * `language`) mapped to the corresponding typed metadata fields.  A block
+ * marked as JavaScript (`---js`) is never evaluated: it is dropped and gives
+ * no metadata.
  *
  * ### Title extraction fallback
  * When the front-matter does **not** contain a `title` field the loader
@@ -147,7 +153,8 @@ export class MarkdownLoader implements IDocumentLoader {
     }
 
     // ---- Parse front-matter ----
-    const parsed = matter(raw);
+    // Read as data: a block marked as JavaScript is dropped, never evaluated.
+    const parsed = readFrontMatter(raw);
 
     // `parsed.content` is the body with front-matter stripped.
     const body = parsed.content;

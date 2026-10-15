@@ -1,24 +1,42 @@
 /**
  * @fileoverview Tests for {@link guardedFetch}. A loopback server stands in
- * for the web. Every case names it by a made-up host whose addresses a
- * stand-in resolver answers, and allows only that server's address and port,
- * so no case reaches past this machine.
+ * for the web. Reads name it by a made-up host whose addresses a stand-in
+ * resolver answers, and allow only that server's address and port. Literal
+ * refusal cases block connection attempts, so no case reaches past this machine.
  *
  * @module memory/ingestion/__tests__/guardedFetch.test
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createServer as createTcpServer, type AddressInfo } from 'node:net';
-import { gzipSync } from 'node:zlib';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import * as diagnosticsChannel from 'node:diagnostics_channel';
+import { createServer as createTcpServer, Socket, type AddressInfo } from 'node:net';
+import { createGunzip, gzipSync } from 'node:zlib';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { guardedFetch, GuardedFetchError, isPublicAddress, type GuardedFetchOptions } from '../guardedFetch.js';
+
+// Keep real decompression while allowing a case to hold one decoder's completion.
+vi.mock('node:zlib', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:zlib')>();
+  return { ...original, createGunzip: vi.fn(original.createGunzip) };
+});
 
 /** The page the stand-in serves: about 2 KB of HTML. */
 const PAGE = `<html><head><title>Review</title></head><body>${'<p>The quarterly review moved to Thursday.</p>\n'.repeat(44)}</body></html>`;
 
 /** The cap a read is held to. */
 const CAP = 2_097_152;
+
+/**
+ * `data` gzipped with a file name of `nameBytes` bytes in the header: as long
+ * as that on the wire, and no longer once decoded.
+ */
+function gzipWithFileName(data: string, nameBytes: number): Buffer {
+  const plain = gzipSync(data);
+  const header = Buffer.from(plain.subarray(0, 10));
+  header[3] |= 0x08;
+  return Buffer.concat([header, Buffer.alloc(nameBytes, 0x61), Buffer.from([0]), plain.subarray(10)]);
+}
 
 /** What `/big` sends before it stops sending. */
 const BIG_BYTES = 3 * 1024 * 1024;
@@ -55,12 +73,28 @@ function answer(request: IncomingMessage, response: ServerResponse): void {
   } else if (path === '/to-private') {
     response.writeHead(302, { location: `http://metadata.test:${port}/latest` });
     response.end();
+  } else if (path === '/untyped') {
+    // No Content-Type at all, as some file servers answer.
+    response.writeHead(200);
+    response.end(Buffer.from([1, 2, 3, 4]));
   } else if (path === '/image') {
     response.writeHead(200, { 'content-type': 'image/png' });
     response.end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   } else if (path === '/gzip') {
     response.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip' });
     response.end(gzipSync(PAGE));
+  } else if (path === '/declared-held') {
+    // A length past the cap in the head, and a body that never comes: only a
+    // read that refuses the declared length answers before the deadline.
+    response.writeHead(200, { 'content-type': 'text/plain', 'content-length': String(64 * 1024) });
+    response.flushHeaders();
+  } else if (path === '/gzip-padded') {
+    // A short page that is five kilobytes on the wire, sent in two writes
+    // with no content-length to give the size away.
+    const body = gzipWithFileName('<p>short</p>', 5000);
+    response.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip' });
+    response.write(body.subarray(0, 2500));
+    response.end(body.subarray(2500));
   } else if (path === '/upgrade') {
     // A protocol switch, written by hand: Node's own response cannot send a 101.
     request.socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
@@ -164,6 +198,47 @@ describe('guardedFetch', () => {
     expect(connections).toBe(before);
   });
 
+  it.each(['127.0.0.1', '169.254.169.254', '[::ffff:127.0.0.1]', '0x7f000001'])(
+    'refuses the literal %s before any connection or resolver call',
+    async (host) => {
+      const before = connections;
+      let lookups = 0;
+      /** Counts resolver calls that a literal address must bypass. */
+      const resolve = async () => {
+        lookups += 1;
+        return [{ address: '127.0.0.1', family: 4 }];
+      };
+      // Block even an attempted connection if the address check regresses.
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        const address = `http://${host}:${port}/page`;
+        if (host === '0x7f000001') expect(new URL(address).hostname).toBe('127.0.0.1');
+        expect(await reasonOf(guardedFetch(address, reach({ resolve, allowAddresses: [] })))).toBe('address');
+        expect(lookups).toBe(0);
+        expect(connect).not.toHaveBeenCalled();
+        expect(connections).toBe(before);
+      } finally {
+        connect.mockRestore();
+      }
+    },
+  );
+
+  it('keeps resolver error details out of a network refusal', async () => {
+    const before = connections;
+    /** Supplies a resolver failure containing details that must stay private. */
+    const resolve = async (): Promise<never> => {
+      throw new Error('lookup failed at 10.0.0.53 for private-service.test');
+    };
+    await expect(guardedFetch(at('/page'), reach({ resolve }))).rejects.toMatchObject({
+      name: 'GuardedFetchError',
+      reason: 'network',
+      message: 'The network read failed.',
+    });
+    expect(connections).toBe(before);
+  });
+
   it('connects to the address it checked, resolving once a hop', async () => {
     const answers = [[{ address: '127.0.0.1', family: 4 }], [{ address: '10.0.0.1', family: 4 }]];
     let calls = 0;
@@ -195,6 +270,48 @@ describe('guardedFetch', () => {
     expect(await reasonOf(guardedFetch(at('/to-private'), reach({ resolve })))).toBe('address');
   });
 
+  /** The addresses each new client socket tries to connect to, in order, while `run` runs. */
+  async function attemptsDuring<T>(run: () => Promise<T>): Promise<{ result: T; attempts: string[] }> {
+    const attempts: string[] = [];
+    const onSocket = (message: unknown) => {
+      (message as { socket: Socket }).socket.on('connectionAttempt', (address: string) => attempts.push(address));
+    };
+    diagnosticsChannel.subscribe('net.client.socket', onSocket);
+    try {
+      return { result: await run(), attempts };
+    } finally {
+      diagnosticsChannel.unsubscribe('net.client.socket', onSocket);
+    }
+  }
+
+  it('tries the checked addresses in order, and reads at the next when the first cannot be reached', async () => {
+    // The stand-in listens on 127.0.0.1 alone, so a connection to 127.0.0.2
+    // on its port is refused, as an address unreachable from this network
+    // (often a host's IPv6 one) would be.
+    const both = ['127.0.0.2', '127.0.0.1'];
+    const answers = (order: string[]) => async () => order.map((address) => ({ address, family: 4 }));
+
+    const fallback = await attemptsDuring(() => guardedFetch(at('/page'), reach({ resolve: answers(both), allowAddresses: both })));
+    expect(fallback.result.body.toString('utf8')).toBe(PAGE);
+    expect(fallback.attempts).toEqual(['127.0.0.2', '127.0.0.1']);
+
+    // The first address that answers is the one read: nothing after it is tried.
+    const first = await attemptsDuring(() =>
+      guardedFetch(at('/page'), reach({ resolve: answers(['127.0.0.1', '127.0.0.2']), allowAddresses: both })),
+    );
+    expect(first.result.status).toBe(200);
+    expect(first.attempts).toEqual(['127.0.0.1']);
+  });
+
+  it('reads an answer with no Content-Type as application/octet-stream, for a caller that accepts that', async () => {
+    const untyped = await guardedFetch(at('/untyped'), reach({ accept: ['audio/mpeg', 'application/octet-stream'] }));
+    expect(untyped.contentType).toBe('application/octet-stream');
+    expect(untyped.body).toEqual(Buffer.from([1, 2, 3, 4]));
+
+    // The default types hold no application/octet-stream, so it is refused as before.
+    expect(await reasonOf(guardedFetch(at('/untyped'), reach()))).toBe('type');
+  });
+
   it('refuses past the size cap, the deadline or the accepted types, and counts decoded bytes', async () => {
     expect(await reasonOf(guardedFetch(at('/big'), reach({ maxBytes: CAP, deadlineMs: 10_000 })))).toBe('size');
     expect(await reasonOf(guardedFetch(at('/slow'), reach({ deadlineMs: 500 })))).toBe('deadline');
@@ -208,6 +325,124 @@ describe('guardedFetch', () => {
     const underThePage = Buffer.byteLength(PAGE) - 1;
     expect(gzipSync(PAGE).length).toBeLessThan(underThePage);
     expect(await reasonOf(guardedFetch(at('/gzip'), reach({ maxBytes: underThePage })))).toBe('size');
+  });
+
+  it('refuses a declared length past the cap before the body is read', async () => {
+    expect(await reasonOf(guardedFetch(at('/declared-held'), reach({ maxBytes: 1000, deadlineMs: 3_000 })))).toBe('size');
+  });
+
+  it('counts the bytes on the wire too: a body that decodes to little is refused once it arrives past the cap', async () => {
+    expect(await reasonOf(guardedFetch(at('/gzip-padded'), reach({ maxBytes: 3000 })))).toBe('size');
+    const read = await guardedFetch(at('/gzip-padded'), reach({ maxBytes: 6000 }));
+    expect(read.body.toString('utf8')).toBe('<p>short</p>');
+  });
+
+  describe('an IPv6 address under a NAT64 prefix of this network', () => {
+    /** A DNS64 network with the prefix 2600:1f14:abcd::/96: its resolver writes IPv4 addresses into IPv6 ones. */
+    const dns64 = (address: string) => async (host: string) =>
+      host === 'ipv4only.arpa'
+        ? [
+            { address: '192.0.0.170', family: 4 },
+            { address: '2600:1f14:abcd::c000:aa', family: 6 },
+          ]
+        : [{ address, family: 6 }];
+
+    it('is refused when it carries a private IPv4 address, though it looks public', async () => {
+      const before = connections;
+      // 10.0.0.1 under the prefix: public by its own range, private by what it carries.
+      expect(isPublicAddress('2600:1f14:abcd::a00:1')).toBe(true);
+      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: dns64('2600:1f14:abcd::a00:1') })))).toBe('address');
+      expect(connections).toBe(before);
+    });
+
+    it('passes the address check when it carries a public IPv4 address', async () => {
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        // 8.8.8.8 under the prefix: the check passes, and the connection is the next step.
+        expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: dns64('2600:1f14:abcd::808:808') })))).toBe('network');
+        expect(connect).toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
+    });
+
+    it.each(['EAI_AGAIN', 'ENOTFOUND'])('is refused when the lookup of the prefixes fails with %s', async (code) => {
+      // The lookup asks for every family, so a network without DNS64 still
+      // answers ipv4only.arpa with its IPv4 addresses: a name that does not
+      // resolve at all was filtered, and says nothing of NAT64.
+      const before = connections;
+      const resolve = async (host: string) => {
+        if (host === 'ipv4only.arpa') throw Object.assign(new Error('the lookup failed'), { code });
+        return [{ address: '2606:4700:4700::1111', family: 6 }];
+      };
+      await expect(guardedFetch(at('/page'), reach({ resolve }))).rejects.toMatchObject({
+        reason: 'network',
+        message: expect.stringContaining("NAT64 prefixes could not be read"),
+      });
+      expect(connections).toBe(before);
+    });
+
+    it('reads a network without DNS64 from its IPv4 answer, and clears a public IPv6 address', async () => {
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        const resolve = async (host: string) =>
+          host === 'ipv4only.arpa' ? [{ address: '192.0.0.170', family: 4 }] : [{ address: '2606:4700:4700::1111', family: 6 }];
+        // The address check passes; the connection, blocked here, is the next step.
+        expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve })))).toBe('network');
+        expect(connect).toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
+    });
+  });
+
+  it.each(['deadline', 'caller'] as const)('ends held decoding on %s abort after the connection closes', async (source) => {
+    const decoder = createGunzip();
+    vi.mocked(createGunzip).mockReturnValueOnce(decoder);
+    // The compressed bytes use the real decoder; only its final flush is held.
+    const flush = vi.spyOn(decoder, '_flush');
+    const held = new Promise<void>((resolve) => flush.mockImplementation(() => resolve()));
+    const closed = new Promise<IncomingMessage>((resolve) => {
+      decoder.once('pipe', (response: IncomingMessage) => {
+        response.socket.once('close', () => resolve(response));
+      });
+    });
+    const deadline = new AbortController();
+    const caller = new AbortController();
+    // Trigger the deadline only after the wire has closed, without a timing race.
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValueOnce(deadline.signal);
+    const pending = guardedFetch(at('/gzip'), reach({ signal: caller.signal })).then(
+      () => 'read',
+      (error: unknown) => error,
+    );
+    try {
+      const [response] = await Promise.all([closed, held]);
+      expect(response.complete).toBe(true);
+      expect(response.readableEnded).toBe(true);
+      expect(decoder.destroyed).toBe(false);
+      const reason = new Error('the caller moved on');
+      if (source === 'deadline') deadline.abort();
+      else caller.abort(reason);
+      expect(response.destroyed).toBe(true);
+      expect(decoder.destroyed).toBe(true);
+      const outcome = await pending;
+      if (source === 'deadline') {
+        expect(outcome).toBeInstanceOf(GuardedFetchError);
+        expect(outcome).toMatchObject({ reason: 'deadline' });
+      } else {
+        expect(outcome).toBe(reason);
+      }
+    } finally {
+      decoder.destroy();
+      await pending;
+      flush.mockRestore();
+      timeout.mockRestore();
+      vi.mocked(createGunzip).mockReset();
+    }
   });
 
   it('reads http and https on the allowed ports alone, https to the checked address by its name', async () => {

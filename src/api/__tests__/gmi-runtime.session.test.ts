@@ -539,6 +539,27 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(onFallback).toHaveBeenCalledWith(expect.any(Error), 'openai');
   });
 
+  it("with onFallback set, a refusal still passes over the policy chain's Claude legs, and onFallback hears the refusal", async () => {
+    const k = key(); const claudeKey = key(); const nextKey = key();
+    const primary = script('openai', k, { replies: [Object.assign(new Error('The model declined.'), { code: 'content_filter' })] });
+    const claude = script('anthropic', claudeKey, { replies: [reply.text('From Claude.')] });
+    const next = script('openai', nextKey, { replies: [reply.text('From the next leg.')] });
+    vi.stubEnv('ANTHROPIC_API_KEY', claudeKey);
+    vi.stubEnv('OPENAI_API_KEY', nextKey);
+    const onFallback = vi.fn((_error: Error, _provider: string) => undefined);
+    const r = await agent({
+      ...base(k),
+      fallbackProviders: [
+        { provider: 'anthropic', model: 'claude-x', origin: 'policy-default' },
+        { provider: 'openai', model: 'stub-model-b', origin: 'policy-default' },
+      ],
+      onFallback,
+    }).session('s').send('hi');
+    expect(r).toMatchObject({ text: 'From the next leg.', provider: 'openai' });
+    expect([primary.seen.length, claude.seen.length, next.seen.length]).toEqual([1, 0, 1]);
+    expect(onFallback).toHaveBeenCalledWith(expect.objectContaining({ message: 'The model declined.' }), 'openai');
+  });
+
   it('close() leaves the tools the caller passed running', async () => {
     const k = key(); script('openai', k, { replies: [reply.text('ok')] });
     const shutdown = vi.fn(async () => undefined);

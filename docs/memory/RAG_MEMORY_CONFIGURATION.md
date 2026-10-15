@@ -470,7 +470,7 @@ console.log(result.augmentedContext);
 |---|---|---|
 | `in_memory` | [`InMemoryVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/InMemoryVectorStore.ts) | Lost on exit |
 | `sql` | [`SqlVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/SqlVectorStore.ts) | Through `@framers/sql-storage-adapter` (`storage` or `adapter`); embeddings as base64 Float32 text; `hybridSearch()` fuses dense and lexical rankings (RRF by default); with `hnswlib-node` installed, an HNSW index per collection once an upsert leaves it with `hnswThreshold` documents (default 1000) |
-| `hnswlib` | [`HnswlibVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/HnswlibVectorStore.ts) | Deprecated in the manager (it logs a warning and points to `sql`); needs `hnswlib-node` |
+| `hnswlib` | [`HnswlibVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/HnswlibVectorStore.ts) | Deprecated in the manager (it logs a warning and points to `sql`); needs `hnswlib-node`. With `persistDirectory` it keeps `hnswlib.manifest.json` there and two files per collection, named after the collection; a manifest entry whose `fileBase` is not that name is skipped with a warning, so the manifest cannot point the store's reads, writes or deletes outside the folder |
 | `qdrant` | [`QdrantVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/QdrantVectorStore.ts) | Qdrant over HTTP; BM25 sparse vectors and `hybridSearch()` unless `enableBm25: false` |
 | `pinecone` | [`PineconeVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PineconeVectorStore.ts) | See [Pinecone Backend](./PINECONE_BACKEND.md) |
 | `neo4j` | `Neo4jVectorStore` | The manager loads it with `require()`, which the ES-module build of `@framers/agentos` does not define, so this type fails to load through the manager; construct the store directly |
@@ -587,7 +587,7 @@ Notes:
 
 ## Reranking and the Reranker Chain {#reranker-chain}
 
-If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augmentor builds a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) and registers the built-in providers its `providers` list names: `cohere` (needs `apiKey`) and `local` (an offline cross-encoder through Transformers.js: `@huggingface/transformers`, or `@xenova/transformers`). Reranking is opt-in per request with `RagRetrievalOptions.rerankerConfig.enabled: true`.
+If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augmentor builds a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) and registers the built-in providers its `providers` list names: `cohere` (needs `apiKey`) and `local` (an offline cross-encoder through Transformers.js: `@huggingface/transformers`, or `@xenova/transformers`). Reranking is opt-in per request: with `RagRetrievalOptions.rerankerConfig.enabled: true`, or, on a request without `rerankerConfig`, with a `policy` whose `reranker` is `'always'`.
 
 `RerankerService.rerankChain(query, chunks, stages)` runs several providers one after another, each stage keeping its `topK`. The caller passes the stages; no config file or research depth sets a chain.
 

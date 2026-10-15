@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { findSpeechProviderCatalogEntry, SPEECH_PROVIDER_CATALOG } from '../providerCatalog.js';
+import {
+  findSpeechProviderCatalogEntry,
+  isSpeechProviderConfigured,
+  SPEECH_PROVIDER_CATALOG,
+} from '../providerCatalog.js';
 
 /**
  * Tests for the static speech provider catalog — verifies that key provider
@@ -85,5 +89,45 @@ describe('providerCatalog', () => {
     // API, so a default pointing at it would fail every default synthesis.
     const speechEndpointModels = ['tts-1', 'tts-1-hd', 'gpt-4o-mini-tts', 'gpt-4o-mini-tts-2025-12-15'];
     expect(speechEndpointModels).toContain(findSpeechProviderCatalogEntry('openai-tts')!.defaultModel);
+  });
+
+  it('should list OpenAI Realtime transcription as a streaming STT provider keyed by OPENAI_API_KEY', () => {
+    const entry = findSpeechProviderCatalogEntry('openai-realtime-transcription');
+    expect(entry).toBeDefined();
+    expect(entry!.kind).toBe('stt');
+    expect(entry!.streaming).toBe(true);
+    expect(entry!.envVars).toEqual(['OPENAI_API_KEY']);
+    expect(entry!.defaultModel).toBe('gpt-4o-mini-transcribe');
+  });
+
+  it('should mark whisper-local as unavailable (nothing implements it)', () => {
+    expect(findSpeechProviderCatalogEntry('whisper-local')!.available).toBe(false);
+  });
+
+  it('should report an unavailable entry as not configured, local or keyed', () => {
+    const unavailable = SPEECH_PROVIDER_CATALOG.filter((entry) => entry.available === false);
+    expect(unavailable.map((entry) => entry.id)).toEqual(
+      expect.arrayContaining(['whisper-local', 'nvidia-nemo', 'coqui', 'bark', 'styletts2'])
+    );
+    for (const entry of unavailable) expect(isSpeechProviderConfigured(entry, {})).toBe(false);
+  });
+
+  it('should report an available local entry as configured with no key, and a keyed one only with its keys', () => {
+    expect(isSpeechProviderConfigured(findSpeechProviderCatalogEntry('agentos-adaptive-vad')!, {})).toBe(true);
+    expect(isSpeechProviderConfigured(findSpeechProviderCatalogEntry('deepgram')!, {})).toBe(false);
+    expect(isSpeechProviderConfigured(findSpeechProviderCatalogEntry('deepgram')!, { DEEPGRAM_API_KEY: 'dg' })).toBe(
+      true
+    );
+  });
+
+  it('should list moonshine-browser as a local streaming STT provider that runs in the browser', () => {
+    const entry = findSpeechProviderCatalogEntry('moonshine-browser');
+    expect(entry).toBeDefined();
+    expect(entry!.kind).toBe('stt');
+    expect(entry!.local).toBe(true);
+    expect(entry!.streaming).toBe(true);
+    expect(entry!.envVars).toEqual([]);
+    expect(entry!.features).toEqual(['local', 'offline', 'streaming', 'browser']);
+    expect(isSpeechProviderConfigured(entry!, {})).toBe(true);
   });
 });

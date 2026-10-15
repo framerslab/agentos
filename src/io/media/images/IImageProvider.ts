@@ -53,6 +53,10 @@ export interface StabilityImageProviderOptions {
   aspectRatio?: string;
   outputFormat?: ImageOutputFormat;
   extraFields?: Record<string, string | number | boolean>;
+  /** Style transfer: how closely the output's style follows the source's, 0 to 1 (Stability's default 0.9). */
+  compositionFidelity?: number;
+  /** Style transfer: how much the source may change, 0.1 to 1 (Stability's default 0.9). */
+  changeStrength?: number;
 }
 
 export interface ReplicateImageProviderOptions {
@@ -223,7 +227,7 @@ export type ImageEditMode = 'img2img' | 'inpaint' | 'outpaint';
  * {@link editImage} helper after normalising user input.
  */
 export interface ImageEditRequest {
-  /** Model identifier to use for the edit. */
+  /** Model identifier to use for the edit. An empty string asks for the provider's own default for edits. */
   modelId: string;
   /** Source image as a raw `Buffer`. */
   image: Buffer;
@@ -261,7 +265,7 @@ export interface ImageEditRequest {
  * {@link upscaleImage} helper.
  */
 export interface ImageUpscaleRequest {
-  /** Model identifier to use for upscaling. */
+  /** Model identifier to use for upscaling. An empty string asks for the provider's own upscale default. */
   modelId: string;
   /** Source image as a raw `Buffer`. */
   image: Buffer;
@@ -286,7 +290,7 @@ export interface ImageUpscaleRequest {
  * {@link variateImage} helper.
  */
 export interface ImageVariateRequest {
-  /** Model identifier to use for variation generation. */
+  /** Model identifier to use for variation generation. An empty string asks for the provider's own default. */
   modelId: string;
   /** Source image as a raw `Buffer`. */
   image: Buffer;
@@ -299,6 +303,38 @@ export interface ImageVariateRequest {
   variance?: number;
   /** Desired output size (e.g. `"1024x1024"`). */
   size?: string;
+  /** Arbitrary provider-specific options. */
+  providerOptions?: ImageProviderOptionBag | Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Style transfer
+// ---------------------------------------------------------------------------
+
+/**
+ * Provider-level request for a style transfer: the source image restyled
+ * after the style reference, both sent to the provider.
+ *
+ * Passed to {@link IImageProvider.transferStyle} by the high-level
+ * {@link transferStyle} helper.
+ */
+export interface ImageStyleTransferRequest {
+  /** Model identifier. An empty string asks for the provider's own default for style transfer. */
+  modelId: string;
+  /** The image to restyle: its subject and composition are kept. */
+  image: Buffer;
+  /** The image whose style is applied. */
+  styleImage: Buffer;
+  /** Text guiding the result. */
+  prompt: string;
+  /** How much of the reference's style to apply, from 0 to 1. */
+  strength?: number;
+  /** Content to avoid, where the provider takes it. */
+  negativePrompt?: string;
+  /** Output dimensions (e.g. `"1024x1024"`), where the provider takes them. */
+  size?: string;
+  /** Seed for reproducible output, where the provider takes one. */
+  seed?: number;
   /** Arbitrary provider-specific options. */
   providerOptions?: ImageProviderOptionBag | Record<string, unknown>;
 }
@@ -336,6 +372,24 @@ export interface IImageProvider {
    * Providers that do not support variations should leave this `undefined`.
    */
   variateImage?(request: ImageVariateRequest): Promise<ImageGenerationResult>;
+
+  /**
+   * Restyle `image` after `styleImage`, sending the provider both. A provider
+   * with no call that takes both images leaves this `undefined`.
+   */
+  transferStyle?(request: ImageStyleTransferRequest): Promise<ImageGenerationResult>;
+
+  /**
+   * The model a style transfer runs on for `modelId` (an empty string for
+   * the provider's default), decided by an initialised provider from its own
+   * configuration, without a request. Throws for a model its style transfer
+   * cannot run. A provider whose base URL is not its own may take a model
+   * outside its list, by its own rule: OpenAI and Fal any name, Replicate
+   * any `owner/name` (never a pinned version), Stability none, since its
+   * endpoint takes no model. A provider defines this exactly when it
+   * defines {@link transferStyle}.
+   */
+  styleTransferModel?(modelId: string): string;
 }
 
 const BUILT_IN_IMAGE_PROVIDER_IDS = new Set(['minimax', 'openai', 'openrouter', 'stability', 'replicate', 'stable-diffusion-local']);

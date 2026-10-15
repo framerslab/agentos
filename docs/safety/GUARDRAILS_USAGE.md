@@ -97,30 +97,48 @@ Stop generation when the response exceeds a token budget:
 ```typescript
 class CostCeilingGuardrail implements IGuardrailService {
   // Enable streaming evaluation
-  config = {
-    evaluateStreamingChunks: true,
-    maxStreamingEvaluations: 100  // Rate limit
-  };
+  config = { evaluateStreamingChunks: true };
 
-  private tokenCount = 0;
   private readonly maxTokens = 1000;
+  // Characters per response stream, and when each stream was last seen
+  private readonly streams = new Map<string, { chars: number; seenAt: number }>();
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
+    // The stream's final chunk ends its count
+    if (chunk.isFinal) {
+      this.streams.delete(chunk.streamId);
+      return null;
+    }
+
     // Only evaluate text chunks
     if (chunk.type !== AgentOSResponseChunkType.TEXT_DELTA || !chunk.textDelta) {
       return null;
     }
 
-    // Estimate tokens (rough: 1 token ≈ 4 chars)
-    this.tokenCount += Math.ceil(chunk.textDelta.length / 4);
+    const now = Date.now();
+    let stream = this.streams.get(chunk.streamId);
+    if (!stream) {
+      // A stream that ended without a final chunk left its entry: drop the ones idle for ten minutes
+      for (const [id, idle] of this.streams) {
+        if (now - idle.seenAt > 600_000) this.streams.delete(id);
+      }
+      stream = { chars: 0, seenAt: now };
+      this.streams.set(chunk.streamId, stream);
+    }
+    stream.chars += chunk.textDelta.length;
+    stream.seenAt = now;
 
-    if (this.tokenCount > this.maxTokens) {
+    // Estimate tokens (rough: 1 token ≈ 4 chars)
+    const tokensUsed = Math.ceil(stream.chars / 4);
+
+    if (tokensUsed > this.maxTokens) {
+      this.streams.delete(chunk.streamId);
       // "Change mind" - stop generating mid-stream
       return {
         action: GuardrailAction.BLOCK,
         reason: 'Response exceeded token budget. Please refine your request.',
         reasonCode: 'COST_CEILING_EXCEEDED',
-        metadata: { tokensUsed: this.tokenCount, limit: this.maxTokens },
+        metadata: { tokensUsed, limit: this.maxTokens },
       };
     }
 
@@ -128,6 +146,8 @@ class CostCeilingGuardrail implements IGuardrailService {
   }
 }
 ```
+
+The guardrail counts characters per `streamId`, so each response is measured on its own, and the stream's final chunk, which every output guardrail is called for, ends the count. A stream can end without a final chunk (another guardrail blocked it, or it failed), so an entry left idle for ten minutes is dropped when the next stream starts. It sets no `maxStreamingEvaluations`: once a stream reaches that limit, the dispatcher stops calling the guardrail on the stream's text deltas (it still calls it on the final chunk), and the count would stop short of the budget.
 
 ### Example 2: Real-Time PII Redaction
 
@@ -208,14 +228,31 @@ class ContentPolicyGuardrail implements IGuardrailService {
     // ... more patterns
   ];
 
-  private accumulatedText = '';
+  // The text each response stream has produced so far, kept as Example 1 keeps its counts
+  private readonly streams = new Map<string, { text: string; seenAt: number }>();
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
+    if (chunk.isFinal) {
+      this.streams.delete(chunk.streamId);
+      return null;
+    }
+
     if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA && chunk.textDelta) {
-      this.accumulatedText += chunk.textDelta;
+      const now = Date.now();
+      let stream = this.streams.get(chunk.streamId);
+      if (!stream) {
+        for (const [id, idle] of this.streams) {
+          if (now - idle.seenAt > 600_000) this.streams.delete(id);
+        }
+        stream = { text: '', seenAt: now };
+        this.streams.set(chunk.streamId, stream);
+      }
+      stream.text += chunk.textDelta;
+      stream.seenAt = now;
 
       for (const pattern of this.prohibitedPatterns) {
-        if (pattern.test(this.accumulatedText)) {
+        if (pattern.test(stream.text)) {
+          this.streams.delete(chunk.streamId);
           return {
             action: GuardrailAction.BLOCK,
             reason: 'Response contains content that violates our usage policy.',
@@ -324,6 +361,7 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `evaluateStreamingChunks` | `boolean` | `false` | Evaluate TEXT_DELTA chunks (real-time) vs only FINAL_RESPONSE |
+| `evaluateToolCalls` | `boolean` | `false` | Evaluate tool calls: a block refuses a call the runtime runs itself before it runs, and keeps an actionable call from the host and ends the stream; a sanitize is applied as a block. See [Tool Calls](#tool-calls) |
 | `maxStreamingEvaluations` | `number` | `undefined` | Rate limit streaming evaluations per guarded stream (the turn's stream and each continuation stream count on their own) |
 | `canSanitize` | `boolean` | `false` | Run this guardrail in Phase 1 so SANITIZE results chain deterministically |
 | `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required |
@@ -388,9 +426,56 @@ const neverDo = await PhraseListGuardrail.create({
 
 `PhraseListGuardrail.create` refuses an empty list, a list that does not load, and judge entries without a judge; `reload()` swaps the list in whole and keeps the last good one when the new one fails. The judge fails closed: a throw, an answer without `block` and `confidence`, or a confidence under `judgeThreshold` (default 0.7) blocks. `createLlmPhraseJudge` takes `fallbackProviders: []` by default, so the judge reaches only the provider it was given.
 
+`phraseMatches(entries, text)` runs the same match with no guard and no judge: the text goes through the same normalisation, the entries compile with the same word boundaries, and the entries that occur come back in list order. A `judge` entry comes back like any other; what a match means is the caller's to decide. It throws on an entry whose phrase normalises to nothing, as `PhraseListGuardrail.create` does.
+
+```typescript
+import { phraseMatches, type PhraseEntry } from '@framers/agentos';
+
+const entries: PhraseEntry[] = [
+  { phrase: 'coming soon', match: 'word', onMatch: 'block', ruleId: 'timing' },
+  { phrase: 'next', match: 'word', onMatch: 'judge', ruleId: 'timing' },
+  { phrase: 'in\\s+beta', match: 'regex', onMatch: 'block', ruleId: 'stage' },
+];
+
+phraseMatches(entries, 'Exports are COMING SOON.').map((e) => e.phrase); // ['coming soon']
+phraseMatches(entries, 'The nextcloud connector'); // []: a word entry keeps its word boundaries
+phraseMatches(entries, 'Now in beta').map((e) => e.ruleId); // ['stage']
+```
+
 ### Hard limits in the persona
 
 `IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter, when the file is loaded as a persona) renders as the last block of the system prompt of every GMI turn for that persona, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
+
+A GMI built by `agent({ runtime: 'gmi' })` or `gmi()` has no such block. Its persona comes from [`personaFromAgentOptions()`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiPersona.ts), which sets no `hardLimits`, and the front matter of a `soul` file is not applied on that path ([GMIs from agent()](../GMI.md#gmis-from-agent)).
+
+## Tool Calls
+
+An output guardrail can judge the tool calls a turn requests. With `config.evaluateToolCalls: true`, `evaluateOutput` receives each `TOOL_CALL_REQUEST` chunk of a guarded stream, the turn's and each continuation's, as the stream carries it: `chunk.toolCalls` lists each call's `id`, `name` and parsed `arguments`.
+
+```typescript
+class ShellCommandGuard implements IGuardrailService {
+  readonly id = 'shell-commands';
+  readonly config: GuardrailConfig = { evaluateToolCalls: true };
+
+  async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
+    if (chunk.type !== AgentOSResponseChunkType.TOOL_CALL_REQUEST) return null;
+    for (const call of chunk.toolCalls) {
+      if (call.name === 'shell_execute' && /rm\s+-rf\s+\//.test(String(call.arguments.command))) {
+        return { action: GuardrailAction.BLOCK, reason: 'A destructive shell command', reasonCode: 'SHELL_DESTRUCTIVE' };
+      }
+    }
+    return null;
+  }
+}
+```
+
+- **Block.** The stream ends with the guard's verdict in place of the chunk: the error chunk, or the final response holding `replacementText`. The stream never hands the host an actionable call (`executionMode: 'external'`), so the host does not execute it. In hold mode the text held before the call is dropped with it, and a block on that text withholds the call too. AgentOS drops the pause the runtime saved for the call when the turn stopped for it, before the verdict reaches the host. `getPendingExternalToolRequest()` no longer returns the call, the conversation answers it with a refused tool result (code `AUTH_PERMISSION_DENIED`) so the history stays well formed, and the stream is closed, so `handleToolResult()` cannot continue it. The stream is closed even when the conversation store refuses that save, and AgentOS logs a warning. The conversation in memory drops the pause all the same, and the conversation's next save (on its next turn, before it is evicted from memory, or at shutdown) stores it without the pause: a restart finds the pause stored only when no such save succeeded before the process stopped. A host that wraps a stream with `wrapOutputGuardrails()` itself reads the withheld calls in the verdict's `toolCallIds` (`onVerdict`).
+- **Sanitize.** A guard cannot rewrite a tool call. A `SANITIZE` is applied as a `BLOCK` that keeps the guard's reason and reason code.
+- **Flag and allow.** The chunk goes on with the evaluation in `metadata.guardrail.output`.
+- **Calls the runtime runs itself.** AgentOS asks the guard about each call with `executionMode: 'internal'` before the call runs, as a `TOOL_CALL_REQUEST` chunk holding that one call, on `processRequest()`, `handleToolResult()` and `resumeExternalToolRequest()` alike. A block (or a sanitize) refuses the call: the tool does not run, and the model reads a refused tool result (code `AUTH_PERMISSION_DENIED`, with the guard's reason), as it reads a permission refusal. On the stream `processRequest()` returns, the guard also judges the stream's chunk for the call, so it is asked about such a call twice; a block there ends the host's stream with the verdict while the turn finishes inside the runtime. A continuation's stream carries no chunk for the calls the GMI runs itself. A refused call never becomes an actionable request and no pending request is saved for it; the `FINAL_RESPONSE` lists it in `finalToolCalls` beside the calls that ran. To have a person approve a tool before it runs, gate the tool: with a `hitlManager` and `toolOrchestratorConfig.hitl.enabled`, the tool orchestrator asks for an approval before a tool with `hasSideEffects: true` runs ([Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)).
+- **Several guards.** The guards that evaluate tool calls run in parallel on each tool-call chunk; the first block in registration order is the verdict.
+
+**Why it is opt-in.** A guard written for text may read any chunk it is given as text: one that takes every non-final chunk for a `TEXT_DELTA` reads `textDelta` as `undefined`, and a fail-closed guard that throws on it would block every tool call. A guard that sets `evaluateToolCalls` is written to read tool calls, and a guard without it never receives one. A guard that has a tool-call branch already, as the code-safety pack's guard does, runs it once its config sets the flag.
 
 ## Using Multiple Guardrails
 
@@ -507,7 +592,7 @@ Extension packs that need expensive resources (NER models, ONNX classifiers, emb
 
 ## Folder-Level Permissions
 
-AgentOS has no folder-permission layer: its guardrails see the user's input and the response chunks, not tool arguments. [Wunderland](https://github.com/jddunn/wunderland), the agent CLI built on AgentOS, adds one. Its [`SafeGuardrails`](https://github.com/jddunn/wunderland/blob/master/src/security/SafeGuardrails.ts) class checks a tool call's file paths, and the paths it reads out of `rm`, `cp`, `mv`, `cat`, `touch`, `mkdir`, `rmdir`, `chmod` and `chown` commands, against glob rules with separate read and write flags before the tool runs. It writes each violation to `~/.wunderland/security/violations.log` and can notify webhooks or an email address of high and critical ones. An agent's `security.folderPermissions` in its `agent.config.json` sets the rules; see Wunderland's [guardrails documentation](https://github.com/jddunn/wunderland/blob/master/docs/features/GUARDRAILS.md).
+AgentOS has no folder-permission layer. Its guardrails see the user's input and the response chunks, and a guard that sets `evaluateToolCalls` sees each tool call's arguments, but AgentOS ships no path rules. [Wunderland](https://github.com/jddunn/wunderland), the agent CLI built on AgentOS, adds one. Its [`SafeGuardrails`](https://github.com/jddunn/wunderland/blob/master/src/security/SafeGuardrails.ts) class checks a tool call's file paths, and the paths it reads out of `rm`, `cp`, `mv`, `cat`, `touch`, `mkdir`, `rmdir`, `chmod` and `chown` commands, against glob rules with separate read and write flags before the tool runs. It writes each violation to `~/.wunderland/security/violations.log` and can notify webhooks or an email address of high and critical ones. An agent's `security.folderPermissions` in its `agent.config.json` sets the rules; see Wunderland's [guardrails documentation](https://github.com/jddunn/wunderland/blob/master/docs/features/GUARDRAILS.md).
 
 ## Related Documentation
 

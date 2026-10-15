@@ -88,6 +88,19 @@ describe.skipIf(!inCI && !existsSync(entry))('the browser entry of the voice pip
         'io/voice-pipeline/browser.js',
         'io/voice-pipeline/transcriptLedger.js',
         'io/voice-pipeline/inputLevel.js',
+        'io/voice-pipeline/phraseHeard.js',
+        'io/voice-pipeline/sttEntries.js',
+        'cognition/library/tokens.js',
+        'io/voice-pipeline/VoiceEventEmitter.js',
+        'io/voice-pipeline/providers/StreamingSTTChain.js',
+        'io/voice-pipeline/AudioRingBuffer.js',
+        'io/voice-pipeline/TranscriptDedupe.js',
+        'io/voice-pipeline/VoicePipelineError.js',
+        'io/voice-pipeline/CircuitBreaker.js',
+        'io/voice-pipeline/VoiceMetricsReporter.js',
+        'io/voice-pipeline/HealthyProvider.js',
+        'io/voice-pipeline/providers/MoonshineBrowserSTT.js',
+        'io/voice-pipeline/clientTranscript.js',
       ])
     );
   });
@@ -114,5 +127,23 @@ describe.skipIf(!inCI && !existsSync(captureEntry))('the capture entry of hearin
       ])
     );
     expect(graph.get(captureWorklet), `${fromDist(captureWorklet)} imports`).toEqual([]);
+  });
+});
+
+/** Contracts permit Zod alone; all library edges stay inside the contracts directory. */
+const contractsEntry = path.join(distRoot, 'io', 'voice-platform', 'contracts', 'index.js');
+
+describe.skipIf(!inCI && !existsSync(contractsEntry))('the browser entry of voice contracts', () => {
+  it('imports only contract modules and Zod, never a server, provider or native entry', () => {
+    expect(existsSync(contractsEntry), `${fromDist(contractsEntry)} is not built`).toBe(true);
+    const graph = walk(contractsEntry);
+    const outside = [...graph].flatMap(([file, imports]) => imports
+      .filter((specifier) => !specifier.startsWith('./') && !specifier.startsWith('../') && specifier !== 'zod')
+      .map((specifier) => `${fromDist(file)} imports ${specifier}`));
+    expect(outside).toEqual([]);
+    for (const file of graph.keys()) expect(fromDist(file)).toMatch(/^io\/voice-platform\/contracts\//);
+    expect([...graph.keys()].map(fromDist)).toEqual(expect.arrayContaining([
+      'io/voice-platform/contracts/index.js', 'io/voice-platform/contracts/schemas.js', 'io/voice-platform/contracts/openapi.js',
+    ]));
   });
 });

@@ -56,6 +56,7 @@ The toggles are process-wide: `AgentOS.initialize()` (and so `AgentOS.create()`)
 
 Precedence:
 
+- Content-safe telemetry, once a host enables it with `enableContentSafeTelemetry` from `@framers/agentos/logging` ([LOGGING.md](https://github.com/framerslab/agentos/blob/master/docs/observability/LOGGING.md)), keeps every signal off for the rest of the process, whatever the config or environment says, and the global usage observer is not called.
 - `observability.enabled: false` turns every signal off, whatever the environment says.
 - Otherwise a specific config field wins, then `observability.enabled` (for tracing, metrics and log trace ids), then the specific environment variable, then `AGENTOS_OBSERVABILITY_ENABLED`.
 - `includeTraceInResponses` and `exportToOtel` follow only their own config field and environment variable; neither master switch turns them on.

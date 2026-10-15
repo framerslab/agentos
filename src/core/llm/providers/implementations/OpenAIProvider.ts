@@ -42,6 +42,7 @@ import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForMo
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { redactUrlSecrets } from '../url-secrets.js';
 import { OPENAI_MODEL_PRICING, openAIModelPricing } from './openaiPricing.js';
+import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
 // import fetch, { RequestInit, Response as FetchResponse, AbortController } from 'node-fetch'; // Example for Node
@@ -1249,8 +1250,11 @@ export class OpenAIProvider implements IProvider {
       try {
         const apiChunk = JSON.parse(data) as OpenAIAPITypes.ChatCompletionStreamResponse;
         mapped = this.mapApiToStreamChunkResponse(apiChunk, accumulatedToolCalls);
-      } catch (error: unknown) {
-        console.warn('OpenAIProvider: Failed to parse stream chunk JSON:', data, error);
+      } catch {
+        console.warn('OpenAIProvider: Failed to parse stream chunk JSON:', {
+          eventBytes: new TextEncoder().encode(data).byteLength,
+          error: 'Invalid stream JSON.',
+        });
         continue;
       }
       yield mapped;
@@ -1360,8 +1364,11 @@ export class OpenAIProvider implements IProvider {
       let event: OpenAIAPITypes.ResponsesStreamEvent;
       try {
         event = JSON.parse(data) as OpenAIAPITypes.ResponsesStreamEvent;
-      } catch (error: unknown) {
-        console.warn('OpenAIProvider: Failed to parse /responses stream event JSON:', data, error);
+      } catch {
+        console.warn('OpenAIProvider: Failed to parse /responses stream event JSON:', {
+          eventBytes: new TextEncoder().encode(data).byteLength,
+          error: 'Invalid stream JSON.',
+        });
         continue;
       }
 
@@ -1653,11 +1660,17 @@ export class OpenAIProvider implements IProvider {
   /** @inheritdoc */
   public async checkHealth(): Promise<{ isHealthy: boolean; details?: unknown }> {
     try {
-      // A lightweight call, e.g., fetching a small model's info or /models with limit=1
-      await this.makeApiRequest<OpenAIAPITypes.ModelAPIObject>(
-          `/models/${this.defaultModelId || 'gpt-3.5-turbo'}`, // Use a known cheap/fast model
+      // The key a request would send: the OAuth flow's token, or the next key
+      // of the pool. The configured string can be a comma-separated key list,
+      // which the API rejects as a bearer token.
+      const apiKey = await this.getApiKey();
+      // One light call: the default model's record, or the model list when
+      // no default is set. No model id is assumed, since OpenAI retires them
+      // (gpt-3.5-turbo on 2026-10-23).
+      await this.makeApiRequest<unknown>(
+          this.defaultModelId ? `/models/${encodeURIComponent(this.defaultModelId)}` : '/models',
           'GET',
-          this.config.apiKey
+          apiKey
       );
       return { isHealthy: true };
     } catch (error: unknown) {
@@ -2735,7 +2748,10 @@ export class OpenAIProvider implements IProvider {
         // Sometimes the final [DONE] is not prefixed by "data: ".
         if (!sawData) {
           if (trailing === '[DONE]') yield '[DONE]';
-          else console.warn('OpenAIProvider: Trailing stream data not processed:', buffer);
+          else console.warn('OpenAIProvider: Trailing stream data not processed:', {
+            eventBytes: new TextEncoder().encode(buffer).byteLength,
+            error: 'Unrecognized stream framing.',
+          });
         }
       }
 

@@ -130,10 +130,12 @@ describe('ModelRouter integration', () => {
     await generateText({ prompt: 'hello', router });
 
     expect(router.selectModel).toHaveBeenCalledOnce();
+    // The routed provider is resolved on its own credentials: the call's
+    // key and base URL belong to the provider the call resolved first.
     expect(mockResolveProvider).toHaveBeenCalledWith(
       'anthropic',
       'claude-sonnet-4-6',
-      expect.any(Object),
+      undefined,
     );
   });
 

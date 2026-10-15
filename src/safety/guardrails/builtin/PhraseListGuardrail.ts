@@ -139,6 +139,23 @@ export class StaticPhraseListSource implements PhraseListSource {
   }
 }
 
+/**
+ * The entries of a list that occur in a text, under the built-in normalisation and the same word boundaries the guard
+ * compiles, with no judge: a deterministic check for a caller that only needs to know whether a reviewed phrase occurs.
+ * An entry whose `onMatch` is `judge` is reported like any other; deciding what a match means is the caller's.
+ *
+ * @param entries - The reviewed entries.
+ * @param text - The text to read.
+ * @returns The entries that match, in list order.
+ * @throws Error when an entry's phrase normalises to nothing, as the guard does.
+ */
+export function phraseMatches(entries: readonly PhraseEntry[], text: string): PhraseEntry[] {
+  const normalized = normalizePhraseText(text);
+  return compile(entries, normalizePhraseText)
+    .filter((compiled) => compiled.test(normalized))
+    .map((compiled) => compiled.entry);
+}
+
 export class PhraseListGuardrail implements IGuardrailService {
   readonly id: string;
   readonly config: GuardrailConfig;

@@ -73,6 +73,28 @@ describe('VectorStoreManager', () => {
     }
   });
 
+  it('logs the index and missing fields of invalid provider entries without credentials', async () => {
+    const sentinel = 'sentinel-words-7731';
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const invalidManager = new VectorStoreManager();
+    try {
+      await invalidManager.initialize({ providers: [
+        { type: 'pinecone', apiKey: sentinel },
+        { id: 'store-2', connectionString: sentinel },
+        { apiKey: sentinel, connectionString: sentinel },
+      ] } as unknown as VectorStoreManagerConfig, []);
+      expect(error.mock.calls.map((call) => call[1])).toEqual([
+        { index: 0, missingFields: ['id'] },
+        { index: 1, missingFields: ['type'] },
+        { index: 2, missingFields: ['id', 'type'] },
+      ]);
+      expect(JSON.stringify(error.mock.calls)).not.toContain(sentinel);
+    } finally {
+      await invalidManager.shutdownAllProviders();
+      error.mockRestore();
+    }
+  });
+
   describe('initialization', () => {
     it('initializes successfully with valid config', async () => {
       const newManager = new VectorStoreManager();

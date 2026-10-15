@@ -7,8 +7,10 @@
  * that was checked, on a connection of its own, so a second lookup cannot
  * point it elsewhere; at most `maxRedirects` redirects, each checked the same
  * way; `http:` and `https:` on their default ports; the body read as a stream
- * under a cap, counted after decoding; one deadline over the whole read; the
- * content types the caller accepts.
+ * under a cap, counted as it arrives and again after decoding; one deadline
+ * over the whole read; the content types the caller accepts. An IPv6 address
+ * is also checked for an IPv4 one it carries under a NAT64 prefix of this
+ * network (RFC 7050), not only under the well-known one.
  *
  * @module memory/ingestion/guardedFetch
  */
@@ -20,7 +22,7 @@ import { isIP, type LookupFunction } from 'node:net';
 import { pipeline, type Readable } from 'node:stream';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 
-import { isPublicNetworkAddress } from '../../../../io/media/images/networkAddress.js';
+import { isPublicNetworkAddress, nat64PrefixesFrom, type Nat64Prefix } from '../../../../io/media/images/networkAddress.js';
 
 /**
  * Why a fetch was refused or stopped:
@@ -31,9 +33,10 @@ import { isPublicNetworkAddress } from '../../../../io/media/images/networkAddre
  * - `'redirects'`: more redirects than `maxRedirects`.
  * - `'status'`: an answer other than 2xx, a redirect without an address, or a protocol upgrade.
  * - `'type'`: a media type the caller does not accept, or a body in a coding the request did not ask for.
- * - `'size'`: a body past `maxBytes`, counted after decoding.
+ * - `'size'`: a body past `maxBytes`, as it arrives or after decoding.
  * - `'deadline'`: the read took longer than `deadlineMs`.
- * - `'network'`: the host has no address, or the lookup, the connection or the read failed.
+ * - `'network'`: the host has no address, the lookup, the connection or the read failed, or the
+ *   network's NAT64 prefixes could not be read for a host with an IPv6 address.
  */
 export type GuardedFetchReason =
   | 'address'
@@ -65,13 +68,17 @@ export class GuardedFetchError extends Error {
 
 /** What the caller allows a {@link guardedFetch}. */
 export interface GuardedFetchOptions {
-  /** The most bytes the body may hold, counted after a gzip, deflate or br coding is decoded. */
+  /** The most bytes the body may hold, counted as they arrive and again after a gzip, deflate or br coding is decoded. */
   maxBytes: number;
   /** How long the whole read may take in milliseconds: the lookups, every redirect and the body. */
   deadlineMs: number;
   /** The most redirects followed, each checked as the first address is. @default 3 */
   maxRedirects?: number;
-  /** Media types read, without parameters, in lower case. @default ['text/html', 'application/xhtml+xml', 'application/pdf', 'text/plain'] */
+  /**
+   * Media types read, without parameters, in lower case. An answer with no
+   * `Content-Type` counts as `application/octet-stream`.
+   * @default ['text/html', 'application/xhtml+xml', 'application/pdf', 'text/plain']
+   */
   accept?: readonly string[];
   /** Ports read. @default [80, 443] */
   allowPorts?: readonly number[];
@@ -91,7 +98,7 @@ export interface GuardedResponse {
   url: string;
   /** The HTTP status, a 2xx. */
   status: number;
-  /** The media type without parameters, in lower case. */
+  /** The media type without parameters, in lower case; `application/octet-stream` for an answer that names none. */
   contentType: string;
   /** The body, decoded. */
   body: Buffer;
@@ -117,6 +124,16 @@ const MAX_DEADLINE_MS = 2_147_483_647;
 
 /** The redirect statuses followed. */
 const REDIRECTS: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * How long a connection to one of a host's addresses may take before the
+ * next is tried. Node ends an attempt at this timeout and moves on (it does
+ * not race them), so at its default of 250 ms a first address that connects
+ * more slowly, over a long or lossy link, would be given up for a next one
+ * that may refuse. Two seconds is RFC 8305's upper bound for this delay
+ * (section 5); an address that cannot be reached costs at most that.
+ */
+const CONNECT_ATTEMPT_MS = 2_000;
 
 /**
  * True when `address`, an IPv4 or IPv6 address as text, is a public unicast
@@ -187,17 +204,22 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+/** The NAT64 prefixes of the network, or `undefined` when they could not be read (see {@link nat64PrefixesOf}). */
+type Nat64Lookup = () => Promise<Nat64Prefix[] | undefined>;
+
 /**
- * The address the connection goes to: every address of the host public or
- * allowed, the first one taken. A lookup cannot be cancelled, so the wait for
- * it ends at the deadline while the lookup itself runs on.
+ * The addresses the connection may go to: every address of the host, each
+ * public or allowed, in the order the resolver gave them. A lookup cannot be
+ * cancelled, so the wait for it ends at the deadline while the lookup itself
+ * runs on.
  */
-async function checkedAddress(
+async function checkedAddresses(
   url: URL,
   resolve: NonNullable<GuardedFetchOptions['resolve']>,
   allowed: ReadonlySet<string>,
   signal: AbortSignal,
-): Promise<CheckedAddress> {
+  nat64: Nat64Lookup,
+): Promise<CheckedAddress[]> {
   const host = hostOf(url);
   const literal = isIP(host);
   const answers = literal !== 0 ? [{ address: host, family: literal }] : await untilAborted(resolve(host), signal);
@@ -207,13 +229,56 @@ async function checkedAddress(
       throw new GuardedFetchError('address', `${host} resolves to an address that is not public`);
     }
   }
-  const first = answers[0];
-  return { address: first.address, family: isIP(first.address) === 6 ? 6 : 4 };
+  // A public-looking IPv6 address can carry a private IPv4 one under a NAT64
+  // prefix of this network, which a DNS64 resolver writes into the answer
+  // for a name with IPv4 addresses only. The prefixes are asked for only
+  // when such an address comes up.
+  const overIPv6 = answers.filter((answer) => !allowed.has(answer.address) && isIP(answer.address) === 6);
+  if (overIPv6.length > 0) {
+    const nat64Prefixes = await nat64();
+    if (nat64Prefixes === undefined) {
+      throw new GuardedFetchError('network', `the network's NAT64 prefixes could not be read, so the IPv6 address of ${host} cannot be cleared`);
+    }
+    if (overIPv6.some((answer) => !isPublicNetworkAddress(answer.address, { nat64Prefixes }))) {
+      throw new GuardedFetchError('address', `${host} resolves to an address that is not public`);
+    }
+  }
+  return answers.map((answer) => ({ address: answer.address, family: isIP(answer.address) === 6 ? 6 : 4 }));
 }
 
 /**
- * Sends one GET for `url` to `target` on a connection of its own, and
- * resolves with the response once its head arrives. The promise settles
+ * The NAT64 prefixes of the network, as `resolve` reveals them (RFC 7050):
+ * the IPv6 addresses it gives for `ipv4only.arpa`, a name with IPv4
+ * addresses only, were made by a DNS64 resolver from those prefixes, and a
+ * network without DNS64 gives its IPv4 addresses alone. `undefined` when
+ * the lookup fails, `ENOTFOUND` included: `resolve` asks for every family,
+ * so even a network without DNS64 answers with the name's IPv4 addresses,
+ * and a name that does not resolve at all was filtered or the resolver
+ * failed. The prefixes are then not known, and no IPv6 address can be
+ * cleared. (The image fetch, `untrustedImageFetch.ts`, asks for IPv6
+ * addresses alone, where `ENOTFOUND` does mean no DNS64.)
+ */
+async function nat64PrefixesOf(
+  resolve: NonNullable<GuardedFetchOptions['resolve']>,
+  signal: AbortSignal,
+): Promise<Nat64Prefix[] | undefined> {
+  let answers: Array<{ address: string; family: number }>;
+  try {
+    answers = await untilAborted(resolve('ipv4only.arpa'), signal);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return undefined;
+  }
+  return nat64PrefixesFrom(answers.map((answer) => answer.address).filter((address) => isIP(address) === 6));
+}
+
+/**
+ * Sends one GET for `url` on a connection of its own to one of `targets`,
+ * the addresses that were checked, and resolves with the response once its
+ * head arrives. Node tries them in turn, alternating the families, when the
+ * first does not connect (`autoSelectFamily`), so a host whose first address
+ * cannot be reached from this network, often an IPv6 one, is read at the
+ * next; it never connects to an address that was not checked. The promise settles
  * however the request ends: a response, an error, the signal, a protocol
  * upgrade, or a close with none of these. Node closes a connection answered
  * with `101 Switching Protocols` without an error when nothing listens for the
@@ -222,18 +287,21 @@ async function checkedAddress(
  */
 function requestOnce(
   url: URL,
-  target: CheckedAddress,
+  targets: CheckedAddress[],
   headers: http.OutgoingHttpHeaders,
   signal: AbortSignal,
 ): Promise<http.IncomingMessage> {
   const host = hostOf(url);
-  // The connection goes to the address that was checked, whatever another
+  // The connection goes to an address that was checked, whatever another
   // lookup of the name would answer now.
   const lookup: LookupFunction = (_hostname, lookupOptions, callback) => {
-    if (lookupOptions.all) callback(null, [{ address: target.address, family: target.family }]);
-    else callback(null, target.address, target.family);
+    if (lookupOptions.all) callback(null, targets.map(({ address, family }) => ({ address, family })));
+    else callback(null, targets[0].address, targets[0].family);
   };
-  const options: https.RequestOptions = {
+  // autoSelectFamily and its attempt timeout are socket options that
+  // http(s).request hands on to the connection; @types/node does not list
+  // them among the request's options.
+  const options: https.RequestOptions & { autoSelectFamily?: boolean; autoSelectFamilyAttemptTimeout?: number } = {
     // A connection of its own: a pooled one may have been opened to another
     // address for the same host and port, by a lookup this check never saw.
     agent: false,
@@ -243,6 +311,9 @@ function requestOnce(
     method: 'GET',
     headers,
     lookup,
+    // Set here, not left to the process-wide defaults, which a host can change.
+    autoSelectFamily: true,
+    autoSelectFamilyAttemptTimeout: CONNECT_ATTEMPT_MS,
     signal,
     // The certificate is checked against the host's name, never the address.
     servername: isIP(host) === 0 ? host : undefined,
@@ -275,11 +346,18 @@ function requestOnce(
 
 /**
  * Reads the body of `response`, decoded, and refuses it once it passes
- * `maxBytes` counted after decoding, so a small compressed body that inflates
- * past the cap stops there. A decoder is joined to the response by
- * `pipeline`, so an error or an abort that ends the response ends the read.
+ * `maxBytes`, counted as it arrives and again after decoding: a small
+ * compressed body that inflates past the cap stops there, and so does a
+ * large one that decodes to little, which would otherwise be read until the
+ * deadline. A decoder is joined to the response by `pipeline`, so an error
+ * ends both. The signal destroys both streams even when the connection has
+ * already closed and only decoding remains.
  */
-async function readBody(response: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
+async function readBody(response: http.IncomingMessage, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
+  if (Number(response.headers['content-length']) > maxBytes) {
+    response.destroy();
+    throw new GuardedFetchError('size', `the body passes ${maxBytes} bytes`, response.statusCode);
+  }
   const coding = String(response.headers['content-encoding'] ?? '').trim().toLowerCase();
   let body: Readable = response;
   if (coding !== '' && coding !== 'identity') {
@@ -295,21 +373,40 @@ async function readBody(response: http.IncomingMessage, maxBytes: number): Promi
       response.destroy();
       throw new GuardedFetchError('type', `a body in the ${coding} coding is not read`, response.statusCode);
     }
+    let encoded = 0;
+    response.on('data', (chunk: Buffer) => {
+      encoded += chunk.length;
+      if (encoded > maxBytes) decoder.destroy(new GuardedFetchError('size', `the body passes ${maxBytes} bytes`, response.statusCode));
+    });
     pipeline(response, decoder, () => {});
     body = decoder;
   }
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of body) {
-    const bytes = chunk as Buffer;
-    total += bytes.length;
-    if (total > maxBytes) {
-      response.destroy();
-      throw new GuardedFetchError('size', `the body passes ${maxBytes} bytes`, response.statusCode);
+  /** Ends the response and any decoder, including decoding after the wire closes. */
+  const onAbort = () => {
+    response.destroy();
+    body.destroy();
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    if (signal.aborted) {
+      onAbort();
+      signal.throwIfAborted();
     }
-    chunks.push(bytes);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of body) {
+      const bytes = chunk as Buffer;
+      total += bytes.length;
+      if (total > maxBytes) {
+        response.destroy();
+        throw new GuardedFetchError('size', `the body passes ${maxBytes} bytes`, response.statusCode);
+      }
+      chunks.push(bytes);
+    }
+    return Buffer.concat(chunks, total);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
   }
-  return Buffer.concat(chunks, total);
 }
 
 /**
@@ -321,18 +418,19 @@ function failureOf(error: unknown, callerSignal: AbortSignal | undefined, deadli
   if (callerSignal?.aborted) return callerSignal.reason;
   if (deadline.aborted) return new GuardedFetchError('deadline', 'the read took too long');
   if (error instanceof GuardedFetchError) return error;
-  return new GuardedFetchError('network', error instanceof Error ? error.message : String(error));
+  return new GuardedFetchError('network', 'The network read failed.');
 }
 
 /**
  * Reads `address`, an http or https address a person gave a server, under
  * `options`. Each hop resolves the host and refuses it when any of its
  * addresses is not public ({@link isPublicAddress}) and not in
- * `allowAddresses`, then connects to the first checked address on a
- * connection of its own; a redirect is followed only to an address that
+ * `allowAddresses`, then connects to a checked address on a connection of
+ * its own, trying the next one when the first cannot be reached; a redirect is followed only to an address that
  * passes the same checks, at most `maxRedirects` times. The answer must be a
  * 2xx of a type in `accept`, and its body, decoded from gzip, deflate or br,
- * is refused once it passes `maxBytes`. The whole read stops at `deadlineMs`.
+ * is refused once it passes `maxBytes` on the wire or decoded. The whole read
+ * stops at `deadlineMs`.
  *
  * @example
  * ```ts
@@ -368,10 +466,14 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
   let url = checkedUrl(address, ports);
   const deadline = AbortSignal.timeout(Math.ceil(deadlineMs));
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+  // Asked once a fetch, the first time an IPv6 address comes up, whatever
+  // number of redirects follows.
+  let nat64Asked: ReturnType<Nat64Lookup> | undefined;
+  const nat64: Nat64Lookup = () => (nat64Asked ??= nat64PrefixesOf(resolve, signal));
   try {
     for (let hop = 0; ; hop += 1) {
-      const target = await checkedAddress(url, resolve, allowed, signal);
-      const response = await requestOnce(url, target, headers, signal);
+      const targets = await checkedAddresses(url, resolve, allowed, signal, nat64);
+      const response = await requestOnce(url, targets, headers, signal);
       const status = response.statusCode ?? 0;
       if (REDIRECTS.has(status)) {
         const location = response.headers.location;
@@ -386,12 +488,18 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
         response.destroy();
         throw new GuardedFetchError('status', `the server answered ${status}`, status);
       }
-      const contentType = String(response.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+      // An answer that names no type is application/octet-stream, as RFC 9110
+      // (8.3) lets a recipient take it: a caller that accepts bytes of no
+      // type in particular reads it, and any other list refuses it as before.
+      const declared = String(response.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+      const contentType = declared || 'application/octet-stream';
       if (!accept.includes(contentType)) {
         response.destroy();
-        throw new GuardedFetchError('type', `${contentType || 'no type'} is not read`, status);
+        throw new GuardedFetchError('type', `${declared || 'an answer with no type'} is not read`, status);
       }
-      return { url: url.toString(), status, contentType, body: await readBody(response, maxBytes) };
+      const body = await readBody(response, maxBytes, signal);
+      signal.throwIfAborted();
+      return { url: url.toString(), status, contentType, body };
     }
   } catch (error) {
     throw failureOf(error, options.signal, deadline);

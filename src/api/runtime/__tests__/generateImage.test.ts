@@ -23,7 +23,7 @@ describe('generateImage', () => {
     );
 
     const result = await generateImage({
-      model: 'openai:gpt-image-1.5',
+      model: 'openai:gpt-image-2.5-flare',
       prompt: 'A cat in a suit',
       apiKey: 'test-key',
       outputFormat: 'png',
@@ -48,7 +48,8 @@ describe('generateImage', () => {
       base64: 'ZmFrZQ==',
       revisedPrompt: 'revised cat prompt',
     });
-    expect(body.style).toBe('natural');
+    // `style` was DALL·E 3's: a GPT Image model is not sent it.
+    expect(body).not.toHaveProperty('style');
     expect(body.moderation).toBe('low');
     expect(body.quality).toBe('high');
   });

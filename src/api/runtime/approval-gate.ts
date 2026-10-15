@@ -14,6 +14,7 @@
  */
 import type { AgencyOptions, ApprovalDecision, ApprovalRequest } from '../types.js';
 import { AgencyConfigError } from '../types.js';
+import { contentSafeConsole as console } from '../../core/logging/contentSafeConsole.js';
 
 /**
  * The only value that approves a tool call. A registered symbol, so a gate

@@ -20,6 +20,16 @@
  * to revise. This graceful fallback ensures the loop always makes progress
  * even when the reviewer doesn't follow the format precisely.
  *
+ * ## HITL integration
+ *
+ * The producer and the reviewer are each gated by {@link checkBeforeAgentInput}
+ * over the input they receive: the producer's carries its previous draft and
+ * the reviewer's feedback, the reviewer's carries the draft. The post-approval
+ * check also reads the task, the draft and the feedback each on its own. Each
+ * agent is sent the input the check read. A refused producer ends the loop
+ * with the draft it already has; a refused reviewer leaves the current draft
+ * as the result.
+ *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileDebate} -- an alternative iterative strategy for adversarial discourse.
  */
@@ -33,7 +43,7 @@ import type {
 import { AgencyConfigError } from '../types.js';
 import {
   resolveAgent,
-  checkBeforeAgent,
+  checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
 } from './shared.js';
@@ -145,14 +155,6 @@ export function compileReviewLoop(
       let feedback = '';
 
       for (let round = 0; round < maxRounds; round++) {
-        // ---- HITL: check beforeAgent gate for the producer ----
-        const prodDecision = await checkBeforeAgent(producerName, prompt, agentCalls, agencyConfig);
-        if (prodDecision && !prodDecision.approved) {
-          // Producer rejected -- terminate the loop early.
-          // The current draft (empty or from a prior round) becomes the final output.
-          break;
-        }
-
         // ---- Producer creates or revises ----
         // On the first round, the producer sees the original task.
         // On subsequent rounds, it sees the task + its prior draft + reviewer feedback.
@@ -161,8 +163,24 @@ export function compileReviewLoop(
             ? prompt
             : `${prompt}\n\nYour previous draft:\n${draft}\n\nReviewer feedback:\n${feedback}\n\nRevise your work.`;
 
+        // ---- HITL: check beforeAgent gate for the producer ----
+        // The gate reads the producer's input, the reviewer's feedback
+        // included, and the task, the draft and the feedback each on its
+        // own, since the input puts more text after each of them. The
+        // producer is sent the input the check read.
+        const prodGate = await checkBeforeAgentInput(producerName, prodPrompt, agentCalls, agencyConfig, [
+          prompt,
+          draft,
+          feedback,
+        ]);
+        if (prodGate.decision && !prodGate.decision.approved) {
+          // Producer rejected -- terminate the loop early.
+          // The current draft (empty or from a prior round) becomes the final output.
+          break;
+        }
+
         const prodStart = Date.now();
-        const prodResult = (await producer.generate(prodPrompt, opts)) as Record<string, unknown>;
+        const prodResult = (await producer.generate(prodGate.input, opts)) as Record<string, unknown>;
         const prodDuration = Date.now() - prodStart;
 
         const prodText = (prodResult.text as string) ?? '';
@@ -185,21 +203,27 @@ export function compileReviewLoop(
         totalUsage.totalTokens += prodUsage.totalTokens ?? 0;
         accumulateExtraUsage(totalUsage, prodUsage);
 
-        // ---- HITL: check beforeAgent gate for the reviewer ----
-        const revDecision = await checkBeforeAgent(reviewerName, prompt, agentCalls, agencyConfig);
-        if (revDecision && !revDecision.approved) {
-          // Reviewer rejected -- accept the current draft and break.
-          break;
-        }
-
         // ---- Reviewer evaluates ----
         const revPrompt =
           `Review this work for the task: "${prompt}"\n\n` +
           `Draft:\n${draft}\n\n` +
           `Respond with JSON: { "approved": true/false, "feedback": "..." }`;
 
+        // ---- HITL: check beforeAgent gate for the reviewer ----
+        // The gate reads the reviewer's input, the draft included, and the
+        // task and the draft each on its own. The reviewer is sent the input
+        // the check read.
+        const revGate = await checkBeforeAgentInput(reviewerName, revPrompt, agentCalls, agencyConfig, [
+          prompt,
+          draft,
+        ]);
+        if (revGate.decision && !revGate.decision.approved) {
+          // Reviewer rejected -- accept the current draft and break.
+          break;
+        }
+
         const revStart = Date.now();
-        const revResult = (await reviewer.generate(revPrompt, opts)) as Record<string, unknown>;
+        const revResult = (await reviewer.generate(revGate.input, opts)) as Record<string, unknown>;
         const revDuration = Date.now() - revStart;
 
         const revText = (revResult.text as string) ?? '';

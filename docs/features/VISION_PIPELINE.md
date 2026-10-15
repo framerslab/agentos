@@ -34,6 +34,9 @@ const vector = await vision.embed(image);          // CLIP tier, returns number[
 
 // Cloud tier only: a description of the image plus the text it shows.
 const described = await vision.process(image, { tiers: ['cloud-vision'] });
+
+// Cloud tier only, asked for the text alone, exactly as written.
+const transcribed = await vision.process(image, { tiers: ['cloud-vision'], cloudTask: 'transcribe' });
 ```
 
 `image` is a `Buffer`, a file path, an `http(s)` URL or a data URL. Preprocessing applies to a `Buffer` only. A file path works for the local tiers only: the cloud tier sends a string to the provider as the image URL, and a provider cannot read a path on your machine. Pass a local file as a `Buffer` when the cloud tier can run. The local tiers fetch an `http(s)` URL string themselves, and nothing checks where it points: for a URL from a model or a user, read it with `imageToBuffer(url, { untrusted: true })` (see [Image Editing](./IMAGE_EDITING.md)) and pass the `Buffer`.
@@ -47,7 +50,7 @@ const described = await vision.process(image, { tiers: ['cloud-vision'] });
 | `ocr` | PaddleOCR (`ppu-paddle-ocr`) or Tesseract.js (`tesseract.js`, English), per the `ocr` option | the package | PaddleOCR: the mean of the region confidences. Tesseract.js: the page confidence divided by 100 |
 | `handwriting` | TrOCR, `Xenova/trocr-base-handwritten` (Microsoft's checkpoint converted to ONNX), Transformers.js `image-to-text` task | `@huggingface/transformers` and `handwriting: true` | 0.75 when it returns text, else 0 |
 | `document-ai` | Florence-2, `onnx-community/Florence-2-base-ft`, loaded as a model and a processor and run with the `<OCR_WITH_REGION>` task | `@huggingface/transformers` and `documentAI: true` | 0.8 when it returns text, else 0 |
-| `cloud-vision` | `generateText()` with the image and a fixed prompt: describe the image, extract all visible text, name the kind of content | `cloudProvider` | 0.95, fixed |
+| `cloud-vision` | `generateText()` with the image and one of two fixed prompts: by default, describe the image, extract all visible text and name the kind of content; with `cloudTask: 'transcribe'`, give the text alone, exactly as written, in reading order | `cloudProvider` | 0.95, fixed; 0 for an answer with no text |
 | `embedding` | CLIP, `Xenova/clip-vit-base-patch32`, Transformers.js `image-feature-extraction` task: 512 numbers in the space of CLIP's text embeddings | `@huggingface/transformers` and `embedding: true` | none; fills `result.embedding` |
 
 `result.text` and `result.confidence` come from the tier with the highest confidence, so a cloud result (0.95) wins over every local tier that ran. `result.regions` holds that tier's text regions. The Florence-2 tier reads the image line by line: `result.layout` holds one page the size of the image, with a `text` block for each line and the line's bounding box in the image's pixels, and the tier's text is the lines in reading order. It does not label headings, tables or figures.
@@ -100,6 +103,16 @@ const result = await vision.process(image, { forceCategory: 'handwritten' });
 
 `forceCategory` sets the reported category and routes the handwriting and document tiers. In `progressive` the OCR tier still runs first, and an OCR result at or above the threshold still ends the run. To run TrOCR alone, pass `{ tiers: ['handwriting'] }`.
 
+The cloud tier describes the image unless `cloudTask: 'transcribe'` is passed, and its answer has confidence 0.95, so it becomes `result.text` over every local tier that ran. An answer with no text in it, which the transcription prompt asks for when the image shows none, has confidence 0, so a local tier's text stands. A call that wants text passes `'transcribe'`. TrOCR is a single-line model ([its card](https://huggingface.co/microsoft/trocr-base-handwritten)): its processor resizes the whole image to 384 by 384 pixels and generation stops at 20 tokens, so a page of handwriting is read with the cloud tier listed too:
+
+```typescript
+const page = await vision.process(scan, {
+  tiers: ['handwriting', 'cloud-vision'],
+  forceCategory: 'handwritten',
+  cloudTask: 'transcribe',
+});
+```
+
 ---
 
 ## createVisionPipeline() Options
@@ -125,16 +138,28 @@ interface VisionPipelineConfig {
    * OPENAI_API_KEY is set, else 'anthropic' (ANTHROPIC_API_KEY), else 'gemini'
    * (GEMINI_API_KEY, or GOOGLE_API_KEY, which detection passes as the key),
    * else 'openrouter' (OPENROUTER_API_KEY); unset and undetected, there is no
-   * cloud tier. Gemini does not fetch image URLs, so give it a Buffer or a
-   * data URL.
+   * cloud tier. Gemini fetches an https image URL itself, up to 15 MB a
+   * file, and takes a Buffer or a data URL inline, up to 100 MB of base64
+   * per request.
    */
   cloudProvider?: string;
   /** Cloud model. Default: the provider's default text model. */
   cloudModel?: string;
-  /** Key for the cloud provider. Default: its environment variable (OPENAI_API_KEY and so on). */
+  /**
+   * Key for the cloud provider. Default: its environment variable
+   * (OPENAI_API_KEY and so on). Refused, with cloudBaseUrl, when neither
+   * cloudProvider nor a cloudModel prefix ('openai:gpt-4o') names the
+   * provider, and when the two name different providers.
+   */
   cloudApiKey?: string;
   /** Base URL for the cloud provider, such as a proxy. */
   cloudBaseUrl?: string;
+  /**
+   * Providers the cloud tier may try, in order, after cloudProvider fails
+   * (generateText's fallbackProviders). Default: none, so the image goes to
+   * cloudProvider alone, whatever other keys the environment holds.
+   */
+  cloudFallbackProviders?: Array<{ provider: string; model?: string }>;
 
   /** Confidence below which 'progressive' runs the next tier. Default: 0.7. */
   confidenceThreshold?: number;
@@ -155,7 +180,7 @@ interface VisionPipelineConfig {
 
 ```typescript
 interface VisionResult {
-  text: string;                 // text of the winning tier
+  text: string;                 // text of the winning tier (the cloud tier's: a description with the text, or with cloudTask 'transcribe' the text alone)
   confidence: number;           // confidence of the winning tier, 0-1
   category: ContentCategory;    // 'printed-text' | 'handwritten' | 'document-layout' | 'photograph' | 'diagram' | 'screenshot' | 'mixed'
   tiers: VisionTier[];          // tiers that ran: 'ocr' | 'handwriting' | 'document-ai' | 'embedding' | 'cloud-vision'
@@ -169,7 +194,8 @@ interface VisionResult {
 
 interface TierResult {
   tier: VisionTier;
-  provider: string;             // 'paddle', 'tesseract', 'trocr', 'florence-2', or the cloud provider id
+  provider: string;             // 'paddle', 'tesseract', 'trocr', 'florence-2', or the cloud provider that answered
+  model?: string;               // the cloud tier's model, as generateText reports it
   text: string;
   confidence: number;
   durationMs: number;
@@ -213,7 +239,7 @@ await indexer.indexImage({ image: readFileSync('./receipt.jpg'), metadata: { sou
 const hits = await indexer.search('receipt total');
 ```
 
-Pass the pipeline through this factory (or as `visionProvider: new PipelineVisionProvider(pipeline)`), not as `new MultimodalIndexer({ visionPipeline })`: that constructor path fails in the published ES module build. The indexer sends a `Buffer` to the pipeline as a data URL labelled `image/png`, so the pipeline skips preprocessing, and a provider that checks the label against the bytes (Anthropic does) rejects a JPEG.
+Pass the pipeline through this factory (or as `visionProvider: new PipelineVisionProvider(pipeline)`), not as `new MultimodalIndexer({ visionPipeline })`: that constructor path fails in the published ES module build. The indexer sends a `Buffer` to the pipeline as a data URL labelled with the type its first bytes show (PNG, JPEG, WebP or GIF; anything else as PNG), so the pipeline skips preprocessing.
 
 `agent()` accepts a `rag` field (including `rag.multimodal.images`) and does not read it.
 
@@ -231,6 +257,8 @@ npm install sharp            # only for preprocessing
 `@huggingface/transformers` is an optional dependency of `@framers/agentos` and installs with it unless optional dependencies are skipped. Transformers.js downloads model weights from the Hugging Face Hub the first time a tier loads them.
 
 The cloud tier reads the provider's key from its environment variable: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (with `cloudProvider: 'gemini'`) or `OPENROUTER_API_KEY`, unless `cloudApiKey` is set.
+
+The image goes to `cloudProvider`, and after it fails only to the providers `cloudFallbackProviders` lists, in order: no other vendor whose key is in the environment receives it. The tier fails (or, beside a local result, is listed in `failedTiers`) when `cloudProvider` and every listed provider fail. A listed provider uses its own key from the environment, and the tier's result names the provider and model that answered. Under the default `cloudTask: 'describe'`, an empty answer is a failed tier: every image has a description. Under `'transcribe'`, an empty answer means the image shows no text, and it has confidence 0.
 
 ---
 

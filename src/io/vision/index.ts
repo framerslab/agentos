@@ -50,6 +50,7 @@ export type {
   VisionResult,
   VisionStrategy,
   VisionTier,
+  VisionCloudTask,
   ContentCategory,
   TierResult,
   FailedTier,
@@ -194,9 +195,48 @@ export async function createVisionPipeline(
   const documentAI = config?.documentAI ?? (hasTransformers ? true : false);
   const embedding = config?.embedding ?? (hasTransformers ? true : false);
 
-  // Resolve cloud provider: caller override > env var auto-detect
-  const detected = config?.cloudProvider ? undefined : detectCloudProvider();
-  const cloudProvider = config?.cloudProvider ?? detected?.provider;
+  // Resolve cloud provider: the one the caller names (cloudProvider, or the
+  // provider a cloudModel prefix names, which generateText follows) > env
+  // var auto-detect. A key or a base URL the caller gives goes only to a
+  // provider the caller named: with none named, detection would pick one
+  // from the environment and send it there.
+  const keyed = config?.cloudApiKey !== undefined || config?.cloudBaseUrl !== undefined;
+  let named = config?.cloudProvider;
+  let cloudModel = config?.cloudModel;
+  if (config?.cloudModel) {
+    const { knownProviderPrefixOf, routedProviderOf } = await import('../../api/model.js');
+    named = routedProviderOf({ provider: config.cloudProvider, model: config.cloudModel });
+    if (keyed && config.cloudProvider && named !== config.cloudProvider) {
+      throw new Error(
+        `createVisionPipeline: cloudModel '${config.cloudModel}' names provider '${named}', not cloudProvider ` +
+          `'${config.cloudProvider}'; the cloudApiKey or cloudBaseUrl given for one would go to the other.`,
+      );
+    }
+    // A `provider:` prefix that names the provider is sent without it, as
+    // generateText splits it: under provider 'ollama' a colon is never split,
+    // so 'ollama:llava' would ask Ollama for a model of that name. A tag of a
+    // model the caller sent to 'ollama' itself ('llava:7b') stays whole.
+    const prefix = config.cloudProvider === 'ollama' ? undefined : knownProviderPrefixOf(config.cloudModel);
+    if (prefix && prefix === named) cloudModel = config.cloudModel.slice(prefix.length + 1);
+  }
+  if (keyed && !named) {
+    throw new Error(
+      'createVisionPipeline: cloudApiKey and cloudBaseUrl need cloudProvider (or a cloudModel such as ' +
+        "'openai:gpt-4o'): without one, the key would go to whichever provider the environment names.",
+    );
+  }
+  const detected = named ? undefined : detectCloudProvider();
+  const cloudProvider = named ?? detected?.provider;
+  // The gemini provider reads GEMINI_API_KEY alone, so a GOOGLE_API_KEY is
+  // passed as the tier's key, as detection passes it, also when the caller
+  // named gemini. Not over a key the caller or the global default gives.
+  let googleKey: string | undefined;
+  if (cloudProvider === 'gemini' && !detected && config?.cloudApiKey === undefined && !process.env.GEMINI_API_KEY) {
+    const { getDefaultProvider } = await import('../../api/runtime/global-default.js');
+    const def = getDefaultProvider();
+    const defaultKey = def?.apiKey && (!def.provider || def.provider === 'gemini');
+    if (!defaultKey) googleKey = process.env.GOOGLE_API_KEY || undefined;
+  }
 
   // Build the final resolved config
   const resolvedConfig: import('./types.js').VisionPipelineConfig = {
@@ -206,9 +246,10 @@ export async function createVisionPipeline(
     documentAI,
     embedding,
     cloudProvider,
-    cloudModel: config?.cloudModel,
-    cloudApiKey: config?.cloudApiKey ?? detected?.apiKey,
+    cloudModel,
+    cloudApiKey: config?.cloudApiKey ?? detected?.apiKey ?? googleKey,
     cloudBaseUrl: config?.cloudBaseUrl,
+    cloudFallbackProviders: config?.cloudFallbackProviders,
     confidenceThreshold: config?.confidenceThreshold,
     preprocessing: config?.preprocessing,
   };

@@ -19,6 +19,7 @@ vi.mock('ws', () => {
     readyState = 1;
     send = vi.fn();
     close = vi.fn();
+    terminate = vi.fn(() => { this.readyState = 3; });
     url: string;
 
     constructor(url?: string) {

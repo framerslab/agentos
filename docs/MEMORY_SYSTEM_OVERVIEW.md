@@ -34,9 +34,9 @@ The next sections explain each piece, why it earned its place, and which adjacen
 
 The whole stack is up to three small classifier calls plus a hybrid retriever, on top of a SQL-backed brain that a consolidation pass maintains: `CognitiveMemoryManager` runs its `ConsolidationPipeline`, which opens with a decay sweep, on an hourly timer (`consolidation.intervalMs`, off with `consolidation.enabled: false`), and the `Memory` facade runs its `ConsolidationLoop` when `consolidate()` is called. The calls depend on the host's path: the QueryClassifier gate's call when the host runs the gate (a T0 query ends there when the host skips recall on it), then the MemoryRouter's and the ReadRouter's. Every concept that sounds like a separate thing in this doc plugs into one of those four parts.
 
-![AgentOS memory pipeline: user query enters QueryClassifier (T0 short-circuits, T1+ proceeds), MemoryRouter picks retrieval architecture, canonical-hybrid retrieval runs BM25 + dense embeddings, fuses via RRF, then Cohere rerank-v3.5 cross-encoder, then a six-signal cognitive composite scorer (optional HyDE). Reranked traces feed ReaderRouter (gpt-4o vs gpt-5-mini) then ReadRouter (5 intents to 5 strategies) for the grounded answer. A consolidation box lists prune, merge, strengthen, derive, compact and reindex on the same brain, plus 8 cognitive mechanisms.](/img/diagrams/memory-system-overview.svg)
+![AgentOS memory pipeline: the QueryClassifier gate, when the host runs it, labels a retrieval tier, and the host can skip recall on T0; the MemoryRouter's classifier call picks one of six query categories, its routing table (the preset's, unless the host passes its own table or a per-category mapping) names a backend, and a budget policy, when the host sets one, can change that pick; the host's dispatcher runs the executor the host registered for the backend, and for canonical-hybrid the drawing shows HybridRetriever, which fuses a dense MemoryStore search scored on six signals with a BM25 search by RRF, blends in an optional reranker's score and passes the top traces on; selectReader() looks up the reader model from the category with no LLM call; the ReadRouter picks the read strategy for the grounded answer. Below, a consolidation box per facade: ConsolidationLoop for the Memory facade, run by consolidate() or the memory_reflect tool, with no derive step, since the facade passes it no LLM invoker, and ConsolidationPipeline for CognitiveMemoryManager, hourly by default; the eight cognitive mechanisms run only when CognitiveMemoryManager is given a cognitiveMechanisms config.](/img/diagrams/memory-system-overview.svg)
 
-The diagram draws one consolidation loop. In the code each facade has its own: `ConsolidationLoop` (prune, merge, strengthen, derive, compact, re-index) serves the `Memory` facade, and `ConsolidationPipeline` serves `CognitiveMemoryManager`. The eight mechanisms run only when `CognitiveMemoryManager` is given a `cognitiveMechanisms` config ([Memory Consolidation](#memory-consolidation-the-background-loop), [The Eight Cognitive Mechanisms](#the-eight-cognitive-mechanisms)).
+Each facade has its own consolidation, drawn as its own box in the diagram above and in [the end-to-end flow](#the-end-to-end-flow) below: `ConsolidationLoop` serves the `Memory` facade when `consolidate()` or the `memory_reflect` tool runs it (prune, merge, strengthen, compact, re-index; its derive step needs an LLM invoker, which the facade does not pass), and `ConsolidationPipeline` serves `CognitiveMemoryManager` on its timer, hourly by default. The eight mechanisms run only when `CognitiveMemoryManager` is given a `cognitiveMechanisms` config ([Memory Consolidation](#memory-consolidation-the-background-loop), [The Eight Cognitive Mechanisms](#the-eight-cognitive-mechanisms)).
 
 Where a verbatim archive is wired, it is write-ahead: the temporal-gist mechanism (with an archive in its config) and `MemoryLifecycleManager` wait for the archive write before changing a trace, and abort if it fails. `CognitiveMemoryManager` passes its archive to neither the temporal-gist mechanism nor its consolidation pipeline, so its gisting keeps no archived copy (see [Memory Consolidation](#memory-consolidation-the-background-loop)).
 
@@ -185,9 +185,11 @@ flowchart TB
         I1["new content"]:::input
         I2["IngestRouter<br/><i>kind classifier</i>"]:::process
         I3["Memory store + archive + graph"]:::data
-        I4["Consolidation Loop<br/><i>6 steps + 8 cognitive mechanisms</i>"]:::process
+        I4["ConsolidationLoop<br/><i>Memory facade: prune, merge, strengthen,<br/>compact, re-index; derive needs an LLM invoker,<br/>which the facade does not pass</i>"]:::process
+        I5["ConsolidationPipeline<br/><i>CognitiveMemoryManager: decay sweep; replay and<br/>conflicts with a graph; schemas with a graph and an<br/>LLM invoker; spaced repetition; temporal gist, source<br/>decay and emotion regulation with cognitiveMechanisms</i>"]:::process
         I1 --> I2 --> I3
-        I3 -. background .-> I4
+        I3 -. consolidate or memory_reflect .-> I4
+        I3 -. hourly timer by default .-> I5
     end
 
     subgraph recall["RECALL"]
@@ -196,7 +198,7 @@ flowchart TB
         R2["QueryClassifier<br/><i>T0 / T1 / T2 / T3</i>"]:::process
         R3["context-only<br/><i>skips memory</i>"]:::output
         R4["MemoryRouter<br/><i>category → backend</i>"]:::process
-        R5["canonical-hybrid retrieval<br/><i>BM25 + dense + Cohere rerank</i>"]:::process
+        R5["canonical-hybrid retrieval<br/><i>the executor the host registers;<br/>HybridRetriever: dense + BM25, RRF merge, optional rerank</i>"]:::process
         R6["scored evidence chunks"]:::data
         R1 --> R2
         R2 -- T0 --> R3
@@ -277,7 +279,7 @@ The classifier is one call to `classifierModel` (by default the cheap model of t
 
 | Backend ID | What it does |
 |---|---|
-| `canonical-hybrid` | BM25 + dense embedding + RRF merge + Cohere rerank-v3.5 over the cognitive-memory composite score |
+| `canonical-hybrid` | BM25 + dense embedding + RRF merge, then an optional reranker (Cohere rerank-v3.5 in the benchmark runs) blended with the cognitive-memory composite score |
 | `observational-memory-v10` | gpt-5-mini per-question classifier routes to canonical for single-session/temporal questions and to v5 Observational Memory ingest for knowledge-update/multi-session |
 | `observational-memory-v11` | v10 plus a conditional verbatim citation rule appended to the OM reader prompt for `knowledge-update` and `single-session-user` categories |
 

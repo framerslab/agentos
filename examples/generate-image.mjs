@@ -2,7 +2,7 @@
 
 import { generateImage } from '../dist/index.js';
 
-const model = process.env.AGENTOS_IMAGE_MODEL || 'openai:gpt-image-1.5';
+const model = process.env.AGENTOS_IMAGE_MODEL || 'openai:gpt-image-2.5-flare';
 
 async function main() {
   console.log(`Using image model: ${model}`);

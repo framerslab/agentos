@@ -318,6 +318,8 @@ export type {
   IngestOptions,
   IngestResult,
   ExportOptions,
+  ExportResult,
+  RefusedExportTrace,
   ImportOptions,
   ImportResult,
   ConsolidationResult as MemoryConsolidationResult,

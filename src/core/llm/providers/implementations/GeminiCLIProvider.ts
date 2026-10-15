@@ -204,6 +204,121 @@ function parseToolCallsFromText(text: string): Array<{ id: string; name: string;
 }
 
 /* ------------------------------------------------------------------ */
+/*  Tool-call markup in a streamed reply                               */
+/* ------------------------------------------------------------------ */
+
+/** The closing tag of a tool-call block. */
+const TOOL_CALL_CLOSE = '</tool_call>';
+
+/** `\s+` in the opening tag TOOL_CALL_REGEX reads. */
+const SPACE = Symbol('space');
+/** `[^"]+` in the opening tag TOOL_CALL_REGEX reads: an attribute's value. */
+const VALUE = Symbol('value');
+
+/** The opening tag TOOL_CALL_REGEX reads, `<tool_call\s+id="([^"]+)"\s+name="([^"]+)">`, part by part. */
+const OPENING_TAG: ReadonlyArray<string | typeof SPACE | typeof VALUE> = [
+  '<tool_call', SPACE, 'id="', VALUE, '"', SPACE, 'name="', VALUE, '">',
+];
+
+/**
+ * Reads the opening tag of a tool-call block at the start of `text` as
+ * TOOL_CALL_REGEX does: its length when `text` starts with one, `'more'` when
+ * `text` ends before that can be told, and `'none'` when `text` does not start
+ * with one. Each `\s+` and `[^"]+` of the tag is followed by a character it
+ * cannot take, so reading each as far as it goes reads the tag as the regex
+ * does.
+ */
+function openingTagLength(text: string): number | 'more' | 'none' {
+  let at = 0;
+  for (const part of OPENING_TAG) {
+    if (typeof part === 'string') {
+      const seen = text.slice(at, at + part.length);
+      if (!part.startsWith(seen)) return 'none';
+      if (seen.length < part.length) return 'more';
+      at += part.length;
+      continue;
+    }
+    const start = at;
+    while (at < text.length && (part === SPACE ? /\s/.test(text[at]) : text[at] !== '"')) at++;
+    if (at === text.length) return 'more';
+    if (at === start) return 'none';
+  }
+  return at;
+}
+
+/**
+ * Reads a tool-call block at the start of `text` as TOOL_CALL_REGEX does: its
+ * length once the first closing tag after its opening tag has arrived,
+ * `'more'` while it may still be one, and `'none'` when `text` does not start
+ * with one. The closing tag is searched for from `closeFrom` at the earliest,
+ * past text already searched.
+ */
+function toolCallBlockLength(text: string, closeFrom: number): number | 'more' | 'none' {
+  const opening = openingTagLength(text);
+  if (typeof opening !== 'number') return opening;
+  const close = text.indexOf(TOOL_CALL_CLOSE, Math.max(opening, closeFrom));
+  return close < 0 ? 'more' : close + TOOL_CALL_CLOSE.length;
+}
+
+/**
+ * The text of a reply streamed with tools, less the blocks that
+ * parseToolCallsFromText reads as tool calls from the whole reply. It reads
+ * the text as TOOL_CALL_REGEX does, from left to right, and holds back the
+ * text from a '<' that may open a block until the first closing tag after the
+ * block's opening tag shows whether it is one. A block whose body is not JSON
+ * is no tool call to the reply's parse either, and goes out as text.
+ */
+class ToolCallMarkupFilter {
+  /** Text not yet known to lie outside a tool-call block: empty, or from a '<' on. */
+  private held = '';
+
+  /** Takes the next piece of the reply, and returns the text now known to lie outside a tool-call block. */
+  push(piece: string): string {
+    /* The held text has been searched for a closing tag: one that ends in
+     * this piece starts at most the tag's length less one before it. */
+    let closeFrom = Math.max(0, this.held.length - (TOOL_CALL_CLOSE.length - 1));
+    let rest = this.held + piece;
+    let out = '';
+    for (;;) {
+      const at = rest.indexOf('<');
+      if (at < 0) {
+        out += rest;
+        rest = '';
+        break;
+      }
+      if (at > 0) {
+        out += rest.slice(0, at);
+        rest = rest.slice(at);
+        closeFrom = 0;
+      }
+      const length = toolCallBlockLength(rest, closeFrom);
+      if (length === 'more') break;
+      closeFrom = 0;
+      if (length === 'none') {
+        out += '<';
+        rest = rest.slice(1);
+        continue;
+      }
+      const block = rest.slice(0, length);
+      if (parseToolCallsFromText(block) === null) out += block;
+      rest = rest.slice(length);
+    }
+    this.held = rest;
+    return out;
+  }
+
+  /**
+   * Once the reply has ended: the text still held, which no closing tag
+   * followed, so no tool-call block.
+   */
+  flush(): string {
+    const rest = this.held;
+    this.held = '';
+    return rest;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Provider                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -290,12 +405,7 @@ export class GeminiCLIProvider implements IProvider {
     const result = await this.bridge.executeWithSystemPrompt(bridgeOpts);
 
     if (result.isError) {
-      throw new GeminiCLIProviderError(
-        `Gemini CLI returned an error: ${result.result}`,
-        'CRASHED',
-        'Try running "gemini -p test" manually to diagnose.',
-        true,
-      );
+      throw this.errorResultError(result.result);
     }
 
     /* Try parsing tool calls from XML markers */
@@ -316,6 +426,24 @@ export class GeminiCLIProvider implements IProvider {
     return this.buildTextResponse(result.result, result, undefined, undefined, modelId);
   }
 
+  /**
+   * Stream a completion by spawning `gemini -p --output-format stream-json`.
+   *
+   * The final chunk is yielded once the bridge's stream has ended, which is
+   * after the CLI has exited: a non-zero exit after the result line ends the
+   * stream with the bridge's classified error, and a result with
+   * `status: 'error'` ends it with an error chunk.
+   *
+   * With tools, the reply's text streams without the tool-call blocks the
+   * provider reads as tool calls, which reach the consumer as the final
+   * chunk's tool calls alone (a block whose body is not JSON is no tool call,
+   * and streams as text): the text from a '<' that may open a block is held
+   * back until the block's closing tag shows whether it is one. Text still
+   * held when the run ends with its reply is no block, and is yielded as one
+   * text delta just before the final chunk; a run that fails ends with its
+   * error chunk alone. A caller who aborts while the consumer holds that
+   * delta gets the abort chunk in place of the reply's final chunk.
+   */
   async *generateCompletionStream(
     modelId: string,
     messages: ChatMessage[],
@@ -338,29 +466,35 @@ export class GeminiCLIProvider implements IProvider {
     };
 
     let accumulatedText = '';
+    /* With tools, the tool-call blocks in the reply's text are left out of
+     * the text the stream yields, which `streamedText` holds. */
+    const markup = hasTools ? new ToolCallMarkupFilter() : undefined;
+    let streamedText = '';
     const responseId = `gc-${Date.now()}`;
     let finalUsage: ModelUsage | undefined;
-    let emittedFinal = false;
+    /* The chunk that ends the stream. It is held while the bridge's stream is
+     * read to its end, where the bridge awaits the CLI's exit, so a failed
+     * exit after the result line still reaches the catch below. */
+    let finalChunk: ModelCompletionResponse | undefined;
+    /* Set when the CLI reports a failure in its own output (an error event or
+     * an error result), which says more than the exit code that follows. */
+    let cliReportedError = false;
 
     try {
       for await (const event of this.bridge.streamWithSystemPrompt(bridgeOpts)) {
+        /* Once the ending is known the rest of the stream is only drained. */
+        if (finalChunk) continue;
         switch (event.type) {
-          case 'text_delta':
+          case 'text_delta': {
             accumulatedText += event.text;
-            yield {
-              id: responseId,
-              object: 'chat.completion.chunk',
-              created: Date.now(),
-              modelId,
-              choices: [{
-                index: 0,
-                message: { role: 'assistant', content: accumulatedText },
-                finishReason: null,
-              }],
-              responseTextDelta: event.text,
-              isFinal: false,
-            };
+            const text = markup ? markup.push(event.text) : event.text;
+            /* Text held back as part of a possible tool-call block goes out
+             * once it is known not to be one. */
+            if (markup && text === '') break;
+            streamedText += text;
+            yield this.buildTextDeltaChunk(text, streamedText, modelId, responseId);
             break;
+          }
 
           case 'result': {
             const usage = event.usage;
@@ -368,62 +502,92 @@ export class GeminiCLIProvider implements IProvider {
               ? { promptTokens: usage.input_tokens, completionTokens: usage.output_tokens, totalTokens: usage.input_tokens + usage.output_tokens, costUSD: 0 }
               : { totalTokens: 0, costUSD: 0 };
 
-            const finalText = event.result || accumulatedText;
-
-            /* Try parsing tool calls from final text */
-            if (hasTools) {
-              const toolCalls = parseToolCallsFromText(finalText);
-              if (toolCalls) {
-                emittedFinal = true;
-                yield this.buildToolCallResponse(
-                  toolCalls,
-                  { sessionId: event.sessionId, usage: event.usage },
-                  responseId,
-                  finalUsage,
-                  modelId,
-                );
-                return;
-              }
+            /* A failed run the CLI reports in its result: the error
+             * generateCompletion() throws for it */
+            if (event.isError) {
+              /* The bridge carries the failure's message in `error`. */
+              const error = this.errorResultError(event.error ?? event.result);
+              cliReportedError = true;
+              finalChunk = this.buildStreamErrorResponse(error.message, modelId, responseId, finalUsage, error.code, error);
+              break;
             }
 
-            emittedFinal = true;
-            yield this.buildTextResponse(
-              finalText,
+            /* The tool calls are read from the whole reply. */
+            finalChunk = this.buildReplyResponse(
+              event.result || accumulatedText,
+              Boolean(hasTools),
               { sessionId: event.sessionId, usage: event.usage },
               responseId,
               finalUsage,
               modelId,
             );
-            return;
+            break;
           }
 
           case 'error':
-            emittedFinal = true;
-            yield this.buildStreamErrorResponse(
+            cliReportedError = true;
+            finalChunk = this.buildStreamErrorResponse(
               `Gemini CLI stream error: ${event.error}`,
               modelId,
               responseId,
               finalUsage,
             );
-            return;
+            break;
         }
       }
     } catch (error: any) {
-      emittedFinal = true;
-      yield this.buildStreamErrorResponse(
-        error?.message ?? 'Gemini CLI stream failed.',
-        modelId,
-        responseId,
-        finalUsage,
-        error?.code,
-        error,
-      );
-      return;
+      /* A failed run (a non-zero exit, a timeout, an abort) ends the stream
+       * with the bridge's classified error, unless the CLI already reported
+       * the failure itself. */
+      if (!cliReportedError) {
+        finalChunk = this.buildStreamErrorResponse(
+          error?.message ?? 'Gemini CLI stream failed.',
+          modelId,
+          responseId,
+          finalUsage,
+          error?.code,
+          error,
+          /* The caller's abort ends the stream with type 'abort', as the
+           * abortSignal contract in IProvider asks of a streaming provider. */
+          error?.code === 'REQUEST_ABORTED' ? 'abort' : undefined,
+        );
+      }
     }
 
-    if (!emittedFinal) {
-      yield this.buildTextResponse(accumulatedText, {}, responseId, finalUsage, modelId);
+    /* A stream that ended with no result line ends as one whose result
+     * carried no text, its tool calls read from the whole reply as well, so
+     * a block the deltas left out still arrives as a tool call. */
+    if (!finalChunk) {
+      finalChunk = this.buildReplyResponse(accumulatedText, Boolean(hasTools), {}, responseId, finalUsage, modelId);
     }
+
+    /* Once the run has ended with its reply, the text still held back is no
+     * tool-call block, as no closing tag followed it, and it goes out just
+     * before the final chunk. A run that failed ends with its error chunk
+     * alone. */
+    const heldText = finalChunk.error ? '' : (markup?.flush() ?? '');
+    if (heldText) {
+      streamedText += heldText;
+      yield this.buildTextDeltaChunk(heldText, streamedText, modelId, responseId);
+      /* The bridge's stream has ended, so it no longer sees the caller's
+       * signal. An abort while the consumer held the delta still comes before
+       * the final chunk, and ends the stream as the bridge ends a run the
+       * caller aborted before the stream's end. */
+      if (options.abortSignal?.aborted) {
+        const error = GeminiCLIProviderError.requestAborted();
+        finalChunk = this.buildStreamErrorResponse(
+          error.message,
+          modelId,
+          responseId,
+          finalUsage,
+          error.code,
+          error,
+          'abort',
+        );
+      }
+    }
+
+    yield finalChunk;
   }
 
   /* ---- Embeddings (not supported) -------------------------------- */
@@ -585,6 +749,49 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
 
   /* ---- Private: response builders ------------------------------- */
 
+  /**
+   * Build a streaming chunk for a piece of the reply's text: `delta` is the
+   * new text, and `message.content` the text the stream has yielded so far.
+   */
+  private buildTextDeltaChunk(
+    delta: string,
+    textSoFar: string,
+    modelId: string,
+    responseId: string,
+  ): ModelCompletionResponse {
+    return {
+      id: responseId,
+      object: 'chat.completion.chunk',
+      created: Date.now(),
+      modelId,
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: textSoFar },
+        finishReason: null,
+      }],
+      responseTextDelta: delta,
+      isFinal: false,
+    };
+  }
+
+  /**
+   * The final chunk of a reply: with tools, its tool calls when its text
+   * holds tool-call blocks, and otherwise its text.
+   */
+  private buildReplyResponse(
+    text: string,
+    hasTools: boolean,
+    result: { sessionId?: string; usage?: { input_tokens: number; output_tokens: number } },
+    responseId: string,
+    usage: ModelUsage | undefined,
+    modelId: string,
+  ): ModelCompletionResponse {
+    const toolCalls = hasTools ? parseToolCallsFromText(text) : null;
+    return toolCalls
+      ? this.buildToolCallResponse(toolCalls, result, responseId, usage, modelId)
+      : this.buildTextResponse(text, result, responseId, usage, modelId);
+  }
+
   private buildTextResponse(
     text: string,
     result: { sessionId?: string; usage?: { input_tokens: number; output_tokens: number } },
@@ -642,6 +849,19 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
     };
   }
 
+  /**
+   * The error a result flagged as an error stands for: generateCompletion()
+   * throws it, and a stream ends with it.
+   */
+  private errorResultError(message: string): GeminiCLIProviderError {
+    return new GeminiCLIProviderError(
+      `Gemini CLI returned an error: ${message}`,
+      'CRASHED',
+      'Try running "gemini -p test" manually to diagnose.',
+      true,
+    );
+  }
+
   private buildStreamErrorResponse(
     message: string,
     modelId: string,
@@ -649,6 +869,7 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
     usage?: ModelUsage,
     code?: string | number,
     details?: unknown,
+    type?: string,
   ): ModelCompletionResponse {
     return {
       id: responseId,
@@ -659,6 +880,7 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
       usage,
       error: {
         message,
+        ...(type === undefined ? {} : { type }),
         ...(code === undefined ? {} : { code }),
         ...(details === undefined ? {} : { details }),
       },

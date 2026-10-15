@@ -1,6 +1,6 @@
 {
   "name": "@framers/agentos",
-  "version": "0.13.34",
+  "version": "0.13.150",
   "description": "AgentOS: open-source TypeScript framework for autonomous AI agents. Unified graph orchestration, cognitive memory, runtime tool forging, multi-tier guardrails, voice pipeline, and 11 LLM providers.",
   "homepage": "https://agentos.sh",
   "repository": {
@@ -119,6 +119,11 @@
       "import": "./dist/core/llm/auth/index.js",
       "default": "./dist/core/llm/auth/index.js",
       "types": "./dist/core/llm/auth/index.d.ts"
+    },
+    "./logging": {
+      "types": "./dist/core/logging/index.d.ts",
+      "import": "./dist/core/logging/index.js",
+      "default": "./dist/core/logging/index.js"
     },
     "./orchestration": {
       "import": "./dist/orchestration/index.js",
@@ -280,6 +285,11 @@
       "default": "./dist/io/channels/telephony/index.js",
       "types": "./dist/io/channels/telephony/index.d.ts"
     },
+    "./io/channels/meetings": {
+      "import": "./dist/io/channels/meetings/index.js",
+      "default": "./dist/io/channels/meetings/index.js",
+      "types": "./dist/io/channels/meetings/index.d.ts"
+    },
     "./io/speech": {
       "import": "./dist/io/speech/index.js",
       "default": "./dist/io/speech/index.js",
@@ -294,6 +304,11 @@
       "import": "./dist/io/hearing/AudioWorkletCapture.js",
       "default": "./dist/io/hearing/AudioWorkletCapture.js",
       "types": "./dist/io/hearing/AudioWorkletCapture.d.ts"
+    },
+    "./io/hearing/pieces": {
+      "import": "./dist/io/hearing/pieces/index.js",
+      "default": "./dist/io/hearing/pieces/index.js",
+      "types": "./dist/io/hearing/pieces/index.d.ts"
     },
     "./io/hearing/livekit": {
       "import": "./dist/io/hearing/livekit.js",
@@ -405,6 +420,11 @@
       "default": "./dist/safety/auth/index.js",
       "types": "./dist/safety/auth/index.d.ts"
     },
+    "./safety/egress": {
+      "types": "./dist/safety/egress/index.d.ts",
+      "import": "./dist/safety/egress/index.js",
+      "default": "./dist/safety/egress/index.js"
+    },
     "./sandbox/subprocess": {
       "import": "./dist/safety/sandbox/subprocess/index.js",
       "default": "./dist/safety/sandbox/subprocess/index.js",
@@ -419,6 +439,11 @@
       "import": "./dist/core/vector-store/IVectorStore.js",
       "default": "./dist/core/vector-store/IVectorStore.js",
       "types": "./dist/core/vector-store/IVectorStore.d.ts"
+    },
+    "./core/storage/browser": {
+      "import": "./dist/core/storage/browser/index.js",
+      "default": "./dist/core/storage/browser/index.js",
+      "types": "./dist/core/storage/browser/index.d.ts"
     },
     "./memory": {
       "import": "./dist/cognition/memory/index.js",
@@ -606,11 +631,12 @@
     "prepare": "test -d dist || npm run build",
     "build": "npm run clean && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json && node scripts/fix-esm-imports.mjs",
     "build:knowledge": "node scripts/build-knowledge-corpus.mjs",
-    "verify:exports": "node --test scripts/package-exports.test.mjs",
+    "verify:exports": "node --test scripts/package-exports.test.mjs scripts/meeting-package.test.mjs",
     "prepublishOnly": "npm run build:knowledge && npm run build && npm run verify:exports",
     "typecheck": "tsc --noEmit",
     "lint": "node scripts/strip-nbsp.mjs && eslint \"src/**/*.ts\"",
     "test": "vitest run",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
     "dev:test": "vitest",
     "docs:clean": "rimraf docs/api ../../docs-generated/library ../../docs-generated/api",
     "docs:library": "npm run docs:clean && pnpm --dir ../../ exec typedoc --options packages/agentos/typedoc.json && pnpm --dir ../../ exec typedoc --options packages/agentos/typedoc.modules.json && node scripts/generate-doc-search-index.mjs && pnpm --dir ../../ exec node apps/agentos.sh/scripts/copy-docs.js",
@@ -685,7 +711,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@framers/agentos-extensions-registry": "^0.18.2",
+    "@framers/agentos-extensions-registry": "^0.18.10",
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
     "@opentelemetry/context-async-hooks": "^2.0.1",
     "@opentelemetry/sdk-metrics": "^2.0.1",
@@ -701,12 +727,16 @@
     "@types/node": "^22.20.1",
     "@types/ws": "^8.18.1",
     "@types/pg": "^8.20.0",
+    "@vitest/browser-playwright": "5.0.3",
     "better-sqlite3": "^13.0.3",
     "conventional-changelog-conventionalcommits": "^9.3.1",
     "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-import": "^2.29.1",
+    "fake-indexeddb": "6.2.5",
+    "mediabunny": "1.61.3",
     "officeparser": "8.1.1",
+    "playwright": "1.63.0",
     "prettier": "^3.3.2",
     "quickjs-emscripten-core": "0.32.0",
     "rimraf": "^6.1.3",
@@ -722,7 +752,7 @@
     "vitest": "^5.0.3"
   },
   "dependencies": {
-    "@framers/sql-storage-adapter": "^0.6.8",
+    "@framers/sql-storage-adapter": "^0.6.9",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/api-logs": "^0.201.1",
     "ajv": "^8.17.1",
@@ -746,10 +776,13 @@
   },
   "peerDependencies": {
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "@livekit/rtc-node": "^1.1.0",
+    "@moonshine-ai/moonshine-wasm": "^0.1.5",
     "graphology": ">=0.25.0",
     "graphology-communities-louvain": ">=2.0.0",
     "graphology-types": ">=0.24.0",
     "hnswlib-node": ">=3.0.0",
+    "mediabunny": "^1.61.3",
     "neo4j-driver": ">=5.0.0",
     "officeparser": "^8.1.1",
     "ppu-paddle-ocr": ">=3.0.0",
@@ -759,6 +792,12 @@
   },
   "peerDependenciesMeta": {
     "@jitl/quickjs-wasmfile-release-sync": {
+      "optional": true
+    },
+    "@livekit/rtc-node": {
+      "optional": true
+    },
+    "@moonshine-ai/moonshine-wasm": {
       "optional": true
     },
     "graphology": {
@@ -771,6 +810,9 @@
       "optional": true
     },
     "hnswlib-node": {
+      "optional": true
+    },
+    "mediabunny": {
       "optional": true
     },
     "neo4j-driver": {

@@ -19,7 +19,13 @@ import * as os from 'os';
 import * as path from 'path';
 import { CLISubprocessBridge } from '../../../../safety/sandbox/subprocess/CLISubprocessBridge';
 import { GeminiCLIProviderError } from '../errors/GeminiCLIProviderError';
-import type { BridgeOptions, BridgeResult, StreamEvent, OutputFormat } from '../../../../safety/sandbox/subprocess/types';
+import type {
+  BridgeOptions,
+  BridgeResult,
+  StreamEvent,
+  StreamParseContext,
+  OutputFormat,
+} from '../../../../safety/sandbox/subprocess/types';
 
 /* Re-export shared types for provider imports */
 export type { BridgeOptions, BridgeResult, StreamEvent } from '../../../../safety/sandbox/subprocess/types';
@@ -31,7 +37,7 @@ export type { InstallCheckResult } from '../../../../safety/sandbox/subprocess/t
  * Extends {@link CLISubprocessBridge} to implement:
  * - Flag assembly: `-p`, `--output-format`, `-m`
  * - System prompt via temp file + `GEMINI_SYSTEM_MD` env var
- * - Error classification: auth, rate-limit, timeout, quota errors
+ * - Error classification: caller abort, timeout, auth, rate-limit and quota errors
  * - Stream event parsing: Gemini's stream-json format
  */
 export class GeminiCLIBridge extends CLISubprocessBridge {
@@ -125,8 +131,29 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
 
   /* ---- Stream event parsing ------------------------------------- */
 
-  protected parseStreamEvent(raw: any): StreamEvent | null {
+  protected parseStreamEvent(raw: any, context?: StreamParseContext): StreamEvent | null {
     if (!raw || typeof raw !== 'object') return null;
+
+    /* The init event that opens the stream, { type: 'init', session_id,
+     * model } (InitEvent in packages/core/src/output/types.ts in
+     * google-gemini/gemini-cli), is the only line with the session's id: the
+     * result event has no such field (ResultEvent). The id is kept for the
+     * result. */
+    if (raw.type === 'init') {
+      if (context && typeof raw.session_id === 'string') context.sessionId = raw.session_id;
+      return null;
+    }
+
+    /* Reply text as the Gemini CLI writes it: a message event for each piece,
+     * { type: 'message', role: 'assistant', content, delta: true }
+     * (packages/cli/src/nonInteractiveCli.ts in google-gemini/gemini-cli).
+     * The CLI also echoes the prompt as a message with role 'user', which is
+     * not reply text. */
+    if (raw.type === 'message') {
+      return raw.role === 'assistant' && typeof raw.content === 'string'
+        ? { type: 'text_delta', text: raw.content }
+        : null;
+    }
 
     /* Text delta */
     if (raw.type === 'content_block_delta' && raw.delta?.type === 'text_delta') {
@@ -143,21 +170,39 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
       return { type: 'text_delta', text: raw.text };
     }
 
-    /* Final result */
+    /* Final result. The CLI's result carries no text of its own (the reply
+     * came as message events) and its token counts in `stats`. The CLI
+     * reports a failure as a result with status 'error' and an `error` object
+     * ({ type, message }), then exits non-zero; an `is_error` flag is read as
+     * well. `result` stays the result text, '' when there is none, as the
+     * bridge read it before 0.13.41; the failure's message goes in `error`.
+     * The session id is the result line's own when it carries one, and
+     * otherwise the one the init event wrote. */
     if (raw.type === 'result') {
+      const isError = raw.is_error === true || raw.status === 'error';
+      const tokens = raw.usage ?? raw.stats;
       return {
         type: 'result',
         result: raw.result ?? raw.response ?? '',
-        sessionId: raw.session_id,
-        usage: raw.usage
-          ? { input_tokens: raw.usage.input_tokens ?? 0, output_tokens: raw.usage.output_tokens ?? 0 }
+        sessionId: raw.session_id ?? context?.sessionId,
+        usage: tokens
+          ? { input_tokens: tokens.input_tokens ?? 0, output_tokens: tokens.output_tokens ?? 0 }
           : undefined,
+        ...(isError
+          ? {
+              isError: true,
+              error: raw.error?.message || raw.result || raw.response || raw.error?.type || 'Unknown error',
+            }
+          : {}),
       };
     }
 
-    /* Error event */
+    /* Error event. The CLI gives each a severity; after a warning (a loop it
+     * stopped, a blocked agent step) the run goes on to its result, so a
+     * warning passes on as a system event and does not end the stream. */
     if (raw.type === 'error') {
-      return { type: 'error', error: raw.error?.message ?? raw.message ?? 'Unknown error' };
+      const message = raw.error?.message ?? raw.message ?? 'Unknown error';
+      return raw.severity === 'warning' ? { type: 'system', message } : { type: 'error', error: message };
     }
 
     /* System events */
@@ -172,7 +217,16 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
 
   protected classifyError(error: any): GeminiCLIProviderError {
     const stderr: string = error.stderr ?? '';
+    /* The CLI's wording varies in case ("Authentication failed"), so stderr is matched lowercased. */
+    const text = String(stderr).toLowerCase();
     const exitCode = error.exitCode;
+
+    /* Cancelled by the caller. execa sets isCanceled when the abortSignal it
+     * was given as cancelSignal fires; the signal that then ends the process
+     * sets isTerminated too, so this is checked before the timeout. */
+    if (error.isCanceled) {
+      return GeminiCLIProviderError.requestAborted({ exitCode, stderr });
+    }
 
     /* Timeout */
     if (error.timedOut || error.isTerminated) {
@@ -186,7 +240,7 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
     }
 
     /* Auth errors */
-    if (stderr.includes('not logged in') || stderr.includes('authentication') || stderr.includes('unauthorized') || stderr.includes('sign in')) {
+    if (text.includes('not logged in') || text.includes('authentication') || text.includes('unauthorized') || text.includes('sign in')) {
       return new GeminiCLIProviderError(
         'Gemini CLI is installed but not logged in.',
         'NOT_AUTHENTICATED',
@@ -197,7 +251,7 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
     }
 
     /* Rate limit / quota */
-    if (stderr.includes('rate limit') || stderr.includes('quota') || stderr.includes('too many requests') || stderr.includes('429') || stderr.includes('RESOURCE_EXHAUSTED')) {
+    if (text.includes('rate limit') || text.includes('quota') || text.includes('too many requests') || text.includes('429') || text.includes('resource_exhausted')) {
       return new GeminiCLIProviderError(
         'Gemini CLI rate limit or quota reached.',
         'RATE_LIMITED',
@@ -208,7 +262,7 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
     }
 
     /* Context too long */
-    if (stderr.includes('context') && (stderr.includes('too long') || stderr.includes('token limit') || stderr.includes('exceeds'))) {
+    if (text.includes('context') && (text.includes('too long') || text.includes('token limit') || text.includes('exceeds'))) {
       return new GeminiCLIProviderError(
         'Conversation exceeds model context window.',
         'CONTEXT_TOO_LONG',

@@ -13,6 +13,7 @@
  * @module @framers/agentos/channels/ChannelRouter
  */
 
+import { createHash } from 'node:crypto';
 import type { IChannelAdapter } from './IChannelAdapter.js';
 import { evaluateGroupPolicy } from './group-policy.js';
 import type {
@@ -420,8 +421,10 @@ export class ChannelRouter {
           await Promise.resolve(handler(message, binding, session));
         } catch (err) {
           console.error(
-            `[ChannelRouter] Handler error for ${message.platform}:${message.conversationId}:`,
-            err,
+            `[ChannelRouter] Handler error for ${message.platform}:${createHash('sha256').update(message.conversationId).digest('hex').slice(0, 8)}:`,
+            err instanceof Error
+              ? { name: err.name, message: err.message }
+              : { name: 'Error', message: 'Inbound message handler failed.' },
           );
         }
       });

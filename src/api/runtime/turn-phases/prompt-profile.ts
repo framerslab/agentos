@@ -10,6 +10,7 @@ import {
   type PromptProfileConversationState,
 } from '../../structured/prompting/PromptProfileRouter.js';
 import { GMIInteractionType, type GMITurnInput } from '../../../cognition/substrate/IGMI';
+import { turnContentText } from '../../../cognition/substrate/turnContent';
 
 export interface PromptProfilePhaseInput {
   conversationContext: ConversationContext | undefined;
@@ -43,7 +44,7 @@ export function executePromptProfilePhase(
       input.gmiInput.type === GMIInteractionType.TEXT && typeof input.gmiInput.content === 'string'
         ? input.gmiInput.content
         : input.gmiInput.type === GMIInteractionType.MULTIMODAL_CONTENT
-          ? JSON.stringify(input.gmiInput.content)
+          ? turnContentText(input.gmiInput.content)
           : '';
 
     const selection = selectPromptProfile(

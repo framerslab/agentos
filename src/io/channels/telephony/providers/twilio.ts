@@ -66,6 +66,9 @@ import type {
   NormalizedCallEvent,
 } from '../types.js';
 
+import { stableCarrierEvents, callbackOccurrence } from '../CarrierEventIdentity.js';
+import { escapeXml } from '../telephony-audio.js';
+
 // ============================================================================
 // Config
 // ============================================================================
@@ -83,6 +86,10 @@ export interface TwilioVoiceProviderConfig {
    * Defaults to the global `fetch`.
    */
   fetchImpl?: typeof fetch;
+  /** Explicitly enables stable identities and documented carrier behavior; omitted keeps legacy parsing. */
+  protocol?: 'legacy' | 'carrier';
+  /** Escaping is the default. legacy-raw exists only for trusted compatibility callers. */
+  speechXml?: 'escaped' | 'legacy-raw';
 }
 
 // ============================================================================
@@ -103,8 +110,8 @@ function signaturesMatch(expected: string, received: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** The form fields that decide which call event a webhook produces. */
-const TWILIO_EVENT_FIELDS = ['CallSid', 'CallStatus', 'Digits'];
+/** The form fields that decide which call event a webhook produces and, in carrier mode, its occurrence. */
+const TWILIO_EVENT_FIELDS = ['CallSid', 'CallStatus', 'Digits', 'SequenceNumber', 'Timestamp'];
 
 /**
  * A form field's value when it has exactly one. The signed string sorts a
@@ -185,6 +192,9 @@ export class TwilioVoiceProvider implements IVoiceCallProvider {
   /** Provider identifier, always `'twilio'`. */
   readonly name = 'twilio' as const;
 
+  /** Declares whether callback ids satisfy the durable manager contract. */
+  get webhookIdentity(): 'legacy' | 'stable-v1' { return this.config.protocol === 'carrier' ? 'stable-v1' : 'legacy'; }
+
   /** Immutable configuration snapshot. */
   private readonly config: TwilioVoiceProviderConfig;
 
@@ -225,7 +235,8 @@ export class TwilioVoiceProvider implements IVoiceCallProvider {
    * 4. Build the signed string: start with the full URL, then append each
    *    key + value (no delimiters between pairs). A repeated key contributes
    *    each distinct value, sorted, so a webhook whose `CallSid`,
-   *    `CallStatus` or `Digits` repeats with different values is refused.
+   *    `CallStatus`, `Digits`, `SequenceNumber` or `Timestamp` repeats with
+   *    different values is refused.
    * 5. Compute `HMAC-SHA1` of the signed string using the auth token as the key.
    * 6. Base64-encode the digest and compare it to the header value.
    * 7. Repeat with the URL with and without its port, as twilio-node does
@@ -282,10 +293,17 @@ export class TwilioVoiceProvider implements IVoiceCallProvider {
    * `CallStatus`, and optionally `Digits` (for DTMF input from `<Gather>`).
    * Each webhook may produce one or two events (status + optional DTMF).
    *
+   * In carrier mode a request other than POST yields no events (Twilio signs
+   * a GET by its URL alone, so a body there carries nothing Twilio signed),
+   * and each event carries a stable id from {@link stableCarrierEvents}: a
+   * DTMF event's occurrence is the signed `SequenceNumber` or `Timestamp`,
+   * else the callback URL's `event_key`, and a DTMF event with none throws.
+   *
    * @param ctx - Raw webhook request context.
    * @returns Parsed result containing zero or more normalized events.
    */
   parseWebhookEvent(ctx: WebhookContext): WebhookParseResult {
+    if (this.config.protocol === 'carrier' && ctx.method.toUpperCase() !== 'POST') return { events: [] };
     const params = new URLSearchParams(ctx.body.toString());
     const callSid = singleTwilioField(params, 'CallSid') ?? '';
     const callStatus = singleTwilioField(params, 'CallStatus') ?? '';
@@ -342,7 +360,10 @@ export class TwilioVoiceProvider implements IVoiceCallProvider {
       });
     }
 
-    return { events };
+    if (this.config.protocol !== 'carrier') return { events };
+    if (!callSid) return { events: [] };
+    const occurrence = singleTwilioField(params, 'SequenceNumber') ?? singleTwilioField(params, 'Timestamp') ?? callbackOccurrence(ctx.url);
+    return { events: stableCarrierEvents(events, { provider: this.name, account: this.config.accountSid, occurrence }) };
   }
 
   // ── Call Control ──────────────────────────────────────────────────────────
@@ -414,31 +435,13 @@ export class TwilioVoiceProvider implements IVoiceCallProvider {
     });
   }
 
-  /**
-   * Inject TTS into a live call using a TwiML `<Say>` verb.
-   *
-   * Sends a `Twiml` form parameter containing a minimal `<Response><Say>`
-   * document. Twilio will parse the TwiML, synthesise the speech, and play
-   * it to the caller in real-time.
-   *
-   * The optional `voice` attribute maps to Twilio's built-in voice names
-   * (e.g., `alice`, `Polly.Joanna`).
-   *
-   * @param input - TTS parameters (text, voice, call ID).
-   */
+  /** Speaks text using escaped TwiML; raw interpolation is an explicit compatibility option. */
   async playTts(input: PlayTtsInput): Promise<void> {
-    const url = `${this.baseUrl}/Accounts/${this.config.accountSid}/Calls/${input.providerCallId}.json`;
-
-    const voiceAttr = input.voice ? ` voice="${input.voice}"` : '';
-    const twiml = `<Response><Say${voiceAttr}>${input.text}</Say></Response>`;
-
-    await this.fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: this.authHeader,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: `Twiml=${encodeURIComponent(twiml)}`,
-    });
+    const url = `${this.baseUrl}/Accounts/${this.config.accountSid}/Calls/${encodeURIComponent(input.providerCallId)}.json`;
+    const encode = this.config.speechXml === 'legacy-raw' ? (value: string): string => value : escapeXml;
+    const voice = input.voice ? ` voice="${encode(input.voice)}"` : '';
+    const twiml = `<Response><Say${voice}>${encode(input.text)}</Say></Response>`;
+    const response = await this.fetch(url, { method: 'POST', headers: { Authorization: this.authHeader, 'Content-Type': 'application/x-www-form-urlencoded' }, body: `Twiml=${encodeURIComponent(twiml)}` });
+    if (!response.ok) throw new Error(`Twilio speech failed: ${response.status}`);
   }
 }

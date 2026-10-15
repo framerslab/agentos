@@ -19,6 +19,7 @@ const SECTION_ORDER = [
   'Cognitive Pipeline',
   'Memory',
   'RAG & Retrieval',
+  'Text Processing & Search',
   'Personas',
   'Orchestration',
   'Tools & Capabilities',
@@ -129,6 +130,7 @@ const publicationManifest = [
   siteDoc('benchmarks/index.md', 'benchmarks/index.md', 'Memory Benchmarks', 'Benchmarks', 1, {
     categoryIndex: true,
   }),
+  agentosDoc('evaluation/GMI_VS_AGENT.md', 'benchmarks/gmi-vs-agent.md', 'GMI versus agent() Study', 'Benchmarks', 2),
 
   agentosDoc('ARCHITECTURE.md', 'architecture/system-architecture.md', 'System Architecture', 'Concepts', 1),
   agentosDoc('GMI.md', 'architecture/gmi.md', 'Generalized Mind Instances (GMIs)', 'Concepts', 0.5),
@@ -143,6 +145,10 @@ const publicationManifest = [
   agentosDoc('LOGGING.md', 'architecture/logging.md', 'Logging (Pino + OpenTelemetry)', 'Architecture', 10),
   agentosDoc('TOOL_CALLING_AND_LOADING.md', 'architecture/tool-calling-and-loading.md', 'Tool Calling & Lazy Loading', 'Tools & Capabilities', 11),
   agentosDoc('LLM_PROVIDERS.md', 'architecture/llm-providers.md', 'LLM Providers', 'Architecture', 12),
+  agentosDoc('KEY_ROTATION.md', 'architecture/key-rotation.md', 'API Key Rotation', 'Architecture', 12.5),
+  // The page documents the claude-code-cli and gemini-cli provider bridges, so it sits with the
+  // provider pages. Its dest keeps the URL it was first published at, so links to it hold.
+  agentosDoc('features/CLI_ERROR_CODES.md', 'extensions/built-in/cli-error-codes.md', 'CLI Error Codes', 'Architecture', 12.7),
   agentosDoc('STREAMING_SEMANTICS.md', 'architecture/streaming-semantics.md', 'Streaming Semantics', 'Architecture', 13),
   agentosDoc('OAUTH_AUTH.md', 'architecture/oauth-auth.md', 'OAuth Auth', 'Architecture', 14),
 
@@ -208,6 +214,16 @@ const publicationManifest = [
   agentosDoc('INCREMENTAL_VECTOR_INGESTION.md', 'features/incremental-vector-ingestion.md', 'Incremental Vector Ingestion', 'RAG & Retrieval', 7),
   agentosDoc('features/LIBRARY_INDEX.md', 'features/library-index.md', 'Library Index', 'RAG & Retrieval', 7.5),
 
+  // Text processing, statistics and search
+  agentosDoc('text/TEXT_OVERVIEW.md', 'text/index.md', 'Text Processing & Search', 'Text Processing & Search', 1, {
+    categoryIndex: true,
+  }),
+  agentosDoc('text/TEXT_PROCESSING.md', 'text/text-processing.md', 'Text Processing Pipeline', 'Text Processing & Search', 2),
+  agentosDoc('text/TEXT_STATISTICS.md', 'text/text-statistics.md', 'Text Statistics and Classification', 'Text Processing & Search', 3),
+  agentosDoc('text/LEXICAL_AND_HYBRID_SEARCH.md', 'text/lexical-and-hybrid-search.md', 'Lexical and Hybrid Search', 'Text Processing & Search', 4),
+  agentosDoc('text/CHUNKING_AND_SNIPPETS.md', 'text/chunking-and-snippets.md', 'Chunking and Snippets', 'Text Processing & Search', 5),
+  agentosDoc('text/RERANKING.md', 'text/reranking.md', 'Reranking', 'Text Processing & Search', 6),
+
   agentosDoc('GUARDRAILS_USAGE.md', 'features/guardrails.md', 'Guardrails', 'Guardrails & Safety', 1),
   staticDoc('features/guardrails-architecture.md', 'features/guardrails-architecture.md', 'Guardrails Architecture', 'Guardrails & Safety', 1.5),
   agentosDoc('HUMAN_IN_THE_LOOP.md', 'features/human-in-the-loop.md', 'Human-in-the-Loop (HITL)', 'Guardrails & Safety', 1.8),
@@ -215,8 +231,10 @@ const publicationManifest = [
   agentosDoc('CREATING_GUARDRAILS.md', 'features/creating-guardrails.md', 'Creating Custom Guardrails', 'Guardrails & Safety', 2),
   agentosDoc('SAFETY_PRIMITIVES.md', 'features/safety-primitives.md', 'Safety Primitives', 'Guardrails & Safety', 3),
 
+  agentosDoc('features/VOICE_PLATFORM.md', 'features/voice-platform.md', 'Voice Platform Runtime', 'Voice & Speech', 0.5),
   agentosDoc('VOICE_PIPELINE.md', 'features/voice-pipeline.md', 'Voice Pipeline', 'Voice & Speech', 1),
   agentosDoc('SPEECH_PROVIDERS.md', 'features/speech-providers.md', 'Speech Providers', 'Voice & Speech', 2),
+  agentosDoc('MEETING_BOTS.md', 'features/meeting-bots.md', 'Meeting Bots', 'Voice & Speech', 4),
   agentosDoc('TELEPHONY_PROVIDERS.md', 'features/telephony-providers.md', 'Telephony Providers', 'Voice & Speech', 3),
 
   agentosDoc('IMAGE_GENERATION.md', 'features/image-generation.md', 'Image Generation', 'Media Generation', 1),
@@ -345,8 +363,7 @@ const publicationManifest = [
   builtInExtension('tools/send-file-to-channel', 'extensions/built-in/send-file-to-channel.md', 'Send File to Channel', 16.3),
   builtInExtension('research/trulia-search', 'extensions/built-in/trulia-search.md', 'Trulia Search', 16.4),
   builtInExtension('tools/zip-files', 'extensions/built-in/zip-files.md', 'Zip Files', 16.5),
-  builtInExtension('security/pii-redaction', 'extensions/built-in/pii-redaction.md', 'PII Redaction', 17, {
-    allowMissingSource: true,
+  staticDoc('extensions/built-in/pii-redaction.md', 'extensions/built-in/pii-redaction.md', 'PII Redaction', 'Extensions', 17, {
     group: 'Guardrail Extensions',
   }),
   staticDoc('extensions/built-in/ml-classifiers.md', 'extensions/built-in/ml-classifiers.md', 'ML Content Classifiers', 'Extensions', 17.1, {
@@ -441,13 +458,25 @@ function publicRouteFromDest(dest) {
   return `/${docIdFromDest(dest).replace(/\/index$/, '')}`;
 }
 
+/**
+ * Maps each source file name to the route of the first entry that publishes a
+ * file of that name. The docs site matches a link's file name case-insensitively
+ * and reads '-' as '_' (`normalizeDocKey` in agentos-live-docs
+ * `scripts/pull-docs-links.mjs`), and there a later name with the same key
+ * replaces an earlier one. So the first entry keeps the key: links written to
+ * `PII_REDACTION.md` reach the guide at /features/pii-redaction, not the
+ * extension page published from `pii-redaction.md`.
+ */
 function buildFilenameRewriteMap() {
   const rewrites = {};
+  const takenKeys = new Set();
 
   for (const manifestEntry of publicationManifest) {
     if (!manifestEntry.sourcePath?.endsWith('.md')) continue;
     const fileName = basename(manifestEntry.sourcePath);
-    if (rewrites[fileName]) continue;
+    const key = fileName.toLowerCase().replace(/-/g, '_');
+    if (takenKeys.has(key)) continue;
+    takenKeys.add(key);
     rewrites[fileName] = publicRouteFromDest(manifestEntry.dest);
   }
 

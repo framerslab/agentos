@@ -114,6 +114,7 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(chunk.audio.readUInt32LE(24)).toBe(24_000);
     expect(chunk.audio.readUInt32LE(40)).toBe(4); // data-chunk size = raw pcm bytes
     expect(chunk.format).toBe('pcm');
+    expect(chunk.container).toBe('wav');
     expect(chunk.text).toBe('hi');
   });
 
@@ -130,6 +131,7 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(chunk.audio.byteLength).toBe(4);
     expect(chunk.audio.subarray(0, 4).toString('ascii')).not.toBe('RIFF');
     expect(chunk.format).toBe('pcm');
+    expect(chunk.container).toBe('raw');
   });
 
   it('REJECTS startSession (never hangs) when the server refuses the upgrade, carrying the HTTP body', async () => {
