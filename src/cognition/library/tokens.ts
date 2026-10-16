@@ -2,8 +2,9 @@
  * @file tokens.ts
  * @description The word rule of the library's lexical legs: a text read in NFC and in lower case, and its words, in
  * order, in any script, each a letter or a digit followed by letters, digits and combining marks. It also holds the
- * rules tags match words by: a word's stem, and whether a word's script is written without spaces; the one-edit rule
- * is FuzzyIndex's. A mark stays inside its word, so an accent written as a combining mark or a Devanagari vowel sign
+ * rules tags match words by: a word's stem, whether a word's script is written without spaces, and the words of a text
+ * as the tag rules read them, each with its place and what separates it from the word before (`tagSegments`); the
+ * one-edit rule is FuzzyIndex's. A mark stays inside its word, so an accent written as a combining mark or a Devanagari vowel sign
  * does not split one, and a text reads the same words whether it came composed or decomposed. The rule stems nothing:
  * a prefix match stands in for stemming in every language.
  *
@@ -14,6 +15,8 @@
  *
  * @module agentos/cognition/library/tokens
  */
+
+import { graphemeClusters } from './graphemes.js';
 
 /**
  * The word rule as a pattern: a letter or a digit, then any letters, digits and combining marks. A mark with no letter
@@ -141,4 +144,112 @@ const UNSPACED =
  */
 export function isUnspacedScript(word: string): boolean {
   return UNSPACED.test(word);
+}
+
+/** A word of a text as the tag rules read it. */
+export interface TagSegment {
+  /** The word as written in the text's NFC form, its combining marks kept with their letters. */
+  text: string;
+  /** Where it starts in the NFC form, in UTF-16 units. */
+  start: number;
+  /** One past where it ends. */
+  end: number;
+  /** True for a word of a script written without spaces (`isUnspacedScript`). */
+  unspaced: boolean;
+  /** A word of a spaced script; a word the word segmenter gave; or, with no segmenter, one grapheme cluster. */
+  unit: 'spaced' | 'word' | 'grapheme';
+  /** What lies between it and the word before: nothing, white space alone, or anything else (the text's start included). */
+  gap: 'none' | 'space' | 'other';
+}
+
+/** Cuts a run of a script written without spaces into words, every character kept, in order. */
+export type WordSegmenter = (run: string) => string[];
+
+/** The runtime's word segmenter, made once on the first ask, or null where the runtime has no `Intl.Segmenter`. */
+let runtimeWordSegmenter: WordSegmenter | null | undefined;
+
+/** `Intl.Segmenter`'s word boundaries where the runtime has it, else null. The segmenter is made once and shared. */
+export function defaultWordSegmenter(): WordSegmenter | null {
+  if (runtimeWordSegmenter !== undefined) return runtimeWordSegmenter;
+  const Segmenter = (Intl as unknown as { Segmenter?: new (locale?: string, options?: { granularity: 'word' }) => { segment(text: string): Iterable<{ segment: string }> } }).Segmenter;
+  let found: WordSegmenter | null = null;
+  if (typeof Segmenter === 'function') {
+    const segmenter = new Segmenter(undefined, { granularity: 'word' });
+    found = (run: string): string[] => Array.from(segmenter.segment(run), (part) => part.segment);
+  }
+  runtimeWordSegmenter = found;
+  return found;
+}
+
+/** A run of letters or decimal digits, each followed by its combining marks. */
+const WORD_RUN = /(?:[\p{L}\p{Nd}]\p{M}*)+/gu;
+
+/** A letter or a decimal digit. */
+const LETTER_OR_DIGIT = /[\p{L}\p{Nd}]/u;
+
+/** A combining mark. */
+const MARK = /^\p{M}$/u;
+
+/** A decimal digit, which belongs to the script around it. */
+const DIGIT = /^\p{Nd}$/u;
+
+/**
+ * A run cut where it changes between a spaced and an unspaced script; a mark stays with the character it follows, and a
+ * digit with the part around it (a digit is neither script: `3月` and `明日3時` are one unspaced part each, `q3` and
+ * `2026budget` one spaced part each, and digits alone a spaced part), so an unspaced tag that holds a digit matches as a
+ * substring, punctuation alone cutting a run.
+ */
+function scriptParts(run: string): Array<{ text: string; offset: number; unspaced: boolean }> {
+  const parts: Array<{ text: string; offset: number; unspaced: boolean | null }> = [];
+  let offset = 0;
+  for (const char of run) {
+    const kind: boolean | null = MARK.test(char) || DIGIT.test(char) ? null : UNSPACED.test(char);
+    const last = parts[parts.length - 1];
+    if (last === undefined) {
+      parts.push({ text: char, offset, unspaced: kind });
+    } else if (kind === null || last.unspaced === null || last.unspaced === kind) {
+      last.text += char;
+      last.unspaced ??= kind;
+    } else {
+      parts.push({ text: char, offset, unspaced: kind });
+    }
+    offset += char.length;
+  }
+  return parts.map((part) => ({ text: part.text, offset: part.offset, unspaced: part.unspaced ?? false }));
+}
+
+/**
+ * The words of a text for the tag rules, in order: in the text's NFC form, each run of letters or decimal digits with
+ * the combining marks after each (`(?:[\p{L}\p{Nd}]\p{M}*)+`), so `किताब` and `كِتَاب` are one word each and a mark with
+ * no letter before it starts none; a run cut where it changes between a spaced and an unspaced script; an unspaced part
+ * cut by the word segmenter (`Intl.Segmenter` by default, none with `null`) or, with none, into grapheme clusters. A
+ * piece that holds no letter or digit is left out. Each word says what separates it from the one before.
+ */
+export function tagSegments(text: string, options: { wordSegmenter?: WordSegmenter | null } = {}): TagSegment[] {
+  const normalized = text.normalize('NFC');
+  const segmenter = options.wordSegmenter === undefined ? defaultWordSegmenter() : options.wordSegmenter;
+  const segments: TagSegment[] = [];
+  let previousEnd: number | null = null;
+  const push = (piece: string, start: number, unspaced: boolean, unit: TagSegment['unit']): void => {
+    const between = previousEnd === null ? null : normalized.slice(previousEnd, start);
+    const gap: TagSegment['gap'] = between === null ? 'other' : between === '' ? 'none' : /^\s+$/u.test(between) ? 'space' : 'other';
+    segments.push({ text: piece, start, end: start + piece.length, unspaced, unit, gap });
+    previousEnd = start + piece.length;
+  };
+  for (const match of normalized.matchAll(WORD_RUN)) {
+    const at = match.index ?? 0;
+    for (const part of scriptParts(match[0])) {
+      const start = at + part.offset;
+      if (!part.unspaced) {
+        push(part.text, start, false, 'spaced');
+        continue;
+      }
+      let offset = start;
+      for (const piece of segmenter === null ? graphemeClusters(part.text) : segmenter(part.text)) {
+        if (LETTER_OR_DIGIT.test(piece)) push(piece, offset, true, segmenter === null ? 'grapheme' : 'word');
+        offset += piece.length;
+      }
+    }
+  }
+  return segments;
 }
