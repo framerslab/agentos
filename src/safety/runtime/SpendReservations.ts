@@ -8,6 +8,9 @@
  * on its own tables, which locks the day for the caller's transaction, so two admissions never read the same total.
  * On a store that holds fenced reservations, an admission made with `requireFence` outlives its time until a sweep
  * given a resolver decides it, and the resolver may defer it, still open and counted, until its work has stopped.
+ * On a store that holds operation reservations, an operation keeps one row with a recorded figure and runs fenced by
+ * their number: each run takes the row's lease as it begins, only the lease's holder puts its settled figure in place
+ * of its bound, and the row settles once, at its recorded figure, when its time is up and no run holds a live lease.
  * Money is whole micro-dollars (millionths of a US dollar).
  */
 import { CostCapExceededError } from './CostGuard.js';
@@ -29,7 +32,9 @@ export interface OpenReservation {
  * The rows a day's bound needs, kept by the caller; every method runs inside the caller's transaction. A store that
  * holds fenced reservations says so with `fencedReservations` and implements `addFencedReservation` and
  * `deferReservation`, persisting the fence, the next check and the evidence in the caller's transaction. A store
- * without that capability cannot admit a fenced reservation or run a sweep with a resolver.
+ * without that capability cannot admit a fenced reservation or run a sweep with a resolver. A store that holds
+ * operation reservations says so with `operationReservations` and implements `addOperationReservation`,
+ * `openOperationReservation`, `beginRun`, `endRun` and `renewRun`; a store without them cannot admit an operation.
  */
 export interface SpendDayStore {
   /**
@@ -46,7 +51,9 @@ export interface SpendDayStore {
   settleReservation(id: string, settledMicro: number, at: Date): Promise<boolean>;
   /**
    * The open reservations whose time is up at `at`. A store with `fencedReservations` leaves a deferred one out until
-   * its next check has come, and lists each one's `requireFence` and last evidence.
+   * its next check has come, and lists each one's `requireFence` and last evidence. A store with
+   * `operationReservations` lists an operation's row only once it is past its expiry with no live lease, its `micro`
+   * the recorded figure, which `releaseExpiredSpend` settles it at.
    */
   expiredReservations(at: Date): Promise<OpenReservation[]>;
   /** True on a store that holds fenced reservations, with `addFencedReservation` and `deferReservation`. */
@@ -55,6 +62,35 @@ export interface SpendDayStore {
   addFencedReservation?(reservation: { day: string; kind: string; micro: number; created: Date; expires: Date }): Promise<string>;
   /** Atomically persists a permanent fence, next check and evidence; false for a closed or unknown row. */
   deferReservation?(id: string, retryAt: Date, evidence: SpendFenceEvidence | undefined): Promise<boolean>;
+  /** True on a store that holds operation reservations, with the five methods below. */
+  readonly operationReservations?: true;
+  /**
+   * Records an operation's row in the locked day with run 1's own row, its recorded figure run 1's bound and run 1
+   * holding the lease, adds `micro` to the day's open total, and answers its id; null, changing nothing, when the
+   * operation has a row already.
+   */
+  addOperationReservation?(row: { day: string; kind: string; micro: number; created: Date; expires: Date; operation: string; runMicro: number; leaseUntil: Date }): Promise<string | null>;
+  /** The operation's row, or null. */
+  openOperationReservation?(operation: string): Promise<OperationReservation | null>;
+  /**
+   * In one locked step: `gone` when the row is settled or past its expiry at `at`; `in_flight` while a lease is live;
+   * `gone` when it has had `maxRuns` runs or `runMicro` would take its recorded figure past its amount; else the run's
+   * bound added to the recorded figure, the run counted, its own row written and the lease given to it.
+   */
+  beginRun?(id: string, run: { runMicro: number; leaseUntil: Date; maxRuns: number; at: Date }): Promise<RunBegin>;
+  /**
+   * In one transaction, all or nothing: the run's own row takes `settledMicro` held to its bound, unless it ended
+   * already, when nothing changes; then, only when `run` holds the lease of an open row, its bound in the recorded
+   * figure is replaced by that figure, the lease cleared, and the row settled at its recorded figure when `at` is past
+   * its expiry or `close` is set.
+   */
+  endRun?(id: string, end: { run: number; settledMicro: number; at: Date; close: boolean }): Promise<RunEnd>;
+  /**
+   * In one locked step: true, the lease moved to `leaseUntil`, only when `run` holds a lease still live at `at` on an
+   * open row; false, changing nothing, otherwise. A run renews its lease before it settles what it holds outside the
+   * row (a unit on another meter), so no other run can begin and take that unit over while it settles it.
+   */
+  renewRun?(id: string, renew: { run: number; leaseUntil: Date; at: Date }): Promise<boolean>;
 }
 
 /** What an admission asks for: its kind, its largest cost, when it starts and until when, and the cap it must fit under. */
@@ -78,6 +114,55 @@ export interface SpendAdmission {
   /** A reservation only a sweep with a resolver may settle once its time is up; see {@link releaseExpiredSpend}. */
   requireFence?: boolean;
 }
+
+/** One operation reservation as a store reads it. */
+export interface OperationReservation {
+  /** The id the store gave it. */
+  id: string;
+  /** The caller's operation, unique among the store's reservations. */
+  operation: string;
+  /** The amount reserved for every run the operation may have, in micro-dollars. */
+  micro: number;
+  /** What the row settles at: each ended run's settled figure and each other run's whole bound. */
+  recordedMicro: number;
+  /** The runs begun. */
+  runs: number;
+  /** When the lease of the run holding it ends, or null when no run holds it. */
+  leaseUntil: Date | null;
+  /** The number of the run holding the lease, or null. Run numbers only grow, so it is a fencing token. */
+  leaseRun: number | null;
+  /** When the row's window closes. */
+  expires: Date;
+  /** When it settled, or null while open. */
+  settledAt: Date | null;
+}
+
+/** What a run's beginning answers. */
+export type RunBegin = { status: 'begun'; run: number } | { status: 'in_flight'; leaseUntil: Date } | { status: 'gone' };
+
+/** What a run's end answers: whether the run held the lease, and whether the row settled in that step. */
+export interface RunEnd {
+  /** True when the run held the lease as it ended. */
+  holder: boolean;
+  /** True when the row settled in the same step. */
+  settled: boolean;
+}
+
+/**
+ * An admission bound to an operation: the whole amount for every run, run 1's bound, and run 1's lease. The runs'
+ * lease fences the row, so an operation admission never takes `requireFence`.
+ */
+export interface OperationAdmission extends SpendAdmission {
+  /** The caller's name for the operation, unique among the store's reservations. */
+  operation: string;
+  /** Run 1's bound in whole micro-dollars, at most `micro`. */
+  runMicro: number;
+  /** When run 1's lease ends. */
+  leaseUntil: Date;
+}
+
+/** What an operation admission answers: reserved with run 1's lease, or `in_flight` when the operation has a row already. */
+export type OperationReserved = { status: 'reserved'; id: string; run: 1 } | { status: 'in_flight' };
 
 /** A whole number, zero or more, small enough to count exactly: a token count or an amount in micro-dollars. */
 function isWholeCount(n: unknown): n is number {
@@ -131,6 +216,11 @@ function supportsFencedReservations(store: SpendDayStore): boolean {
   return store.fencedReservations === true && typeof store.addFencedReservation === 'function' && typeof store.deferReservation === 'function';
 }
 
+/** Whether a store holds operation reservations: it says so, and has the five methods they need. */
+function supportsOperationReservations(store: SpendDayStore): store is SpendDayStore & Required<Pick<SpendDayStore, 'addOperationReservation' | 'openOperationReservation' | 'beginRun' | 'endRun' | 'renewRun'>> {
+  return store.operationReservations === true && typeof store.addOperationReservation === 'function' && typeof store.beginRun === 'function' && typeof store.endRun === 'function' && typeof store.openOperationReservation === 'function' && typeof store.renewRun === 'function';
+}
+
 /**
  * Reserves an admission's largest cost in the day it starts and answers the reservation's id, or throws
  * CostCapExceededError (`daily`) reserving nothing. A cost that is not whole micro-dollars, zero or more, is a
@@ -181,7 +271,8 @@ export function releaseSpend(store: SpendDayStore, id: string, settledMicro: num
  * With `resolve`, each is decided by the host: consumed (its whole amount), released (nothing), or deferred until
  * `retryAt`, still open and counted; a resolver that throws defers for 15 seconds, never settling on a failure.
  * A sweep with `resolve` throws on a store that does not hold fenced reservations, and a reservation another process
- * settled in the meantime is not counted.
+ * settled in the meantime is not counted. An operation's row is listed only once its time is up and no run holds a
+ * live lease, its amount the recorded figure, so a sweep without a resolver settles it there.
  */
 export async function releaseExpiredSpend(
   store: SpendDayStore,
@@ -214,16 +305,91 @@ export async function releaseExpiredSpend(
 }
 
 /**
+ * Admits an operation under the day's cap as {@link reserveSpend} admits a reservation, records run 1 and gives it
+ * the lease. A store without operation reservations is refused with an Error before the day is read, and so is an
+ * admission with `requireFence`, with a RangeError: the runs' lease fences an operation's row.
+ * @throws {CostCapExceededError} Past the cap, with nothing reserved.
+ */
+export async function reserveOperationSpend(store: SpendDayStore, admission: OperationAdmission): Promise<OperationReserved> {
+  if (!supportsOperationReservations(store)) throw new Error('operation reservations unsupported');
+  if (!isWholeCount(admission.micro) || !isWholeCount(admission.runMicro) || admission.runMicro > admission.micro) {
+    throw new RangeError('An operation reserves whole micro-dollars, its run at most its amount');
+  }
+  if (!isValidDate(admission.at) || !isValidDate(admission.expires) || !isValidDate(admission.leaseUntil)) {
+    throw new RangeError('An operation starts, expires and leases at valid dates');
+  }
+  if (admission.operation === '') throw new RangeError('An operation has a name');
+  if (admission.requireFence) throw new RangeError('An operation is fenced by its runs, not by requireFence');
+  const day = utcDay(admission.at);
+  const committed = await store.lockDay(day);
+  if (!isWholeCount(committed) || !isWholeCount(admission.capMicro) || !(committed + admission.micro <= admission.capMicro)) {
+    throw new CostCapExceededError(admission.kind, 'daily', committed / 1_000_000, admission.capMicro / 1_000_000);
+  }
+  const id = await store.addOperationReservation({
+    day,
+    kind: admission.kind,
+    micro: admission.micro,
+    created: admission.at,
+    expires: admission.expires,
+    operation: admission.operation,
+    runMicro: admission.runMicro,
+    leaseUntil: admission.leaseUntil,
+  });
+  return id === null ? { status: 'in_flight' } : { status: 'reserved', id, run: 1 };
+}
+
+/** Begins a further run of an operation's row; see {@link SpendDayStore.beginRun}. */
+export async function beginOperationRun(store: SpendDayStore, id: string, run: { runMicro: number; leaseUntil: Date; maxRuns: number; at: Date }): Promise<RunBegin> {
+  if (!supportsOperationReservations(store)) throw new Error('operation reservations unsupported');
+  if (!isWholeCount(run.runMicro) || !Number.isInteger(run.maxRuns) || run.maxRuns < 1 || !isValidDate(run.at) || !isValidDate(run.leaseUntil)) {
+    throw new RangeError('A run has a whole bound, a run count of 1 or more and valid dates');
+  }
+  return store.beginRun(id, run);
+}
+
+/**
+ * Ends a run; see {@link SpendDayStore.endRun}. A figure that is not a finite number, zero or more, was never known,
+ * so the run settles at its whole bound, as {@link releaseSpend} settles an unknown cost. An end that names no run
+ * from 1 or no valid date is a RangeError, since a time that is not a date would settle the row at once.
+ */
+export async function endOperationRun(store: SpendDayStore, id: string, end: { run: number; settledMicro: number; at: Date; close: boolean }): Promise<RunEnd> {
+  if (!supportsOperationReservations(store)) throw new Error('operation reservations unsupported');
+  if (!Number.isInteger(end.run) || end.run < 1 || !isValidDate(end.at)) {
+    throw new RangeError('An end names a run from 1 and a valid date');
+  }
+  const known = Number.isFinite(end.settledMicro) && end.settledMicro >= 0;
+  const settledMicro = known ? Math.min(Math.floor(end.settledMicro), Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
+  return store.endRun(id, { ...end, settledMicro });
+}
+
+/** Renews a run's lease while it holds it; see {@link SpendDayStore.renewRun}. False for a run that no longer holds it. */
+export async function renewOperationRun(store: SpendDayStore, id: string, renew: { run: number; leaseUntil: Date; at: Date }): Promise<boolean> {
+  if (!supportsOperationReservations(store)) throw new Error('operation reservations unsupported');
+  if (!Number.isInteger(renew.run) || renew.run < 1 || !isValidDate(renew.leaseUntil) || !isValidDate(renew.at)) {
+    throw new RangeError('A renewal names a run from 1 and valid dates');
+  }
+  return store.renewRun(id, renew);
+}
+
+/** A run's own row in {@link InMemorySpendDayStore}: its bound, and its settled figure once it ended. */
+type InMemoryRunRow = { boundMicro: number; settledMicro: number | null; started: Date; ended: Date | null };
+
+/**
  * A store held in memory, for tests and for one process that admits one reservation at a time. It takes no lock, so
  * two admissions awaited at once can both read the same total; a service that admits concurrently implements
- * {@link SpendDayStore} on tables whose day row its transaction locks.
+ * {@link SpendDayStore} on tables whose day row its transaction locks. It holds fenced and operation reservations, and
+ * each of its operation methods reads and writes its rows in one step on the event loop, before it awaits anything.
  */
 export class InMemorySpendDayStore implements SpendDayStore {
   /** It holds fenced reservations. */
   readonly fencedReservations = true as const;
+  /** It holds operation reservations. */
+  readonly operationReservations = true as const;
   private readonly days = new Map<string, { reserved: number; settled: number }>();
-  private readonly reservations = new Map<string, { day: string; micro: number; expires: Date; settledAt: Date | null; requireFence: boolean; nextCheck: Date | null; evidence?: SpendFenceEvidence }>();
+  private readonly reservations = new Map<string, { day: string; micro: number; expires: Date; settledAt: Date | null; requireFence: boolean; nextCheck: Date | null; evidence?: SpendFenceEvidence; operation?: string; recorded?: number; runs?: number; leaseUntil?: Date | null; leaseRun?: number | null }>();
   private made = 0;
+  private readonly operations = new Map<string, string>();
+  private readonly runRows = new Map<string, Map<number, InMemoryRunRow>>();
 
   /** Makes the day when missing and answers its committed total (it takes no lock: see the class). */
   lockDay(day: string): Promise<number> {
@@ -239,12 +405,17 @@ export class InMemorySpendDayStore implements SpendDayStore {
 
   /** Records a reservation and adds it to its day's open total. */
   addReservation(reservation: { day: string; kind: string; micro: number; created: Date; expires: Date; requireFence?: boolean }): Promise<string> {
+    return Promise.resolve(this.insertReservation(reservation));
+  }
+
+  /** Records a reservation and adds it to its day's open total in one synchronous step, answering its id. */
+  private insertReservation(reservation: { day: string; micro: number; expires: Date; requireFence?: boolean }): string {
     const id = `reservation-${++this.made}`;
     this.reservations.set(id, { day: reservation.day, micro: reservation.micro, expires: reservation.expires, settledAt: null, requireFence: reservation.requireFence === true, nextCheck: null });
     const row = this.days.get(reservation.day) ?? { reserved: 0, settled: 0 };
     row.reserved += reservation.micro;
     this.days.set(reservation.day, row);
-    return Promise.resolve(id);
+    return id;
   }
 
   /** Settles an open reservation once, held to its amount. */
@@ -259,12 +430,19 @@ export class InMemorySpendDayStore implements SpendDayStore {
     return Promise.resolve(true);
   }
 
-  /** The open reservations whose time is up and whose next check, when deferred, has come. */
+  /**
+   * The open reservations whose time is up and whose next check, when deferred, has come; an operation's row only once
+   * no run holds a live lease, listed at its recorded figure.
+   */
   expiredReservations(at: Date): Promise<OpenReservation[]> {
     const due = [...this.reservations.entries()].filter(
-      ([, r]) => r.settledAt === null && r.expires.getTime() <= at.getTime() && (r.nextCheck === null || r.nextCheck.getTime() <= at.getTime()),
+      ([, r]) =>
+        r.settledAt === null &&
+        r.expires.getTime() <= at.getTime() &&
+        (r.nextCheck === null || r.nextCheck.getTime() <= at.getTime()) &&
+        !(r.leaseUntil != null && r.leaseUntil.getTime() > at.getTime()),
     );
-    return Promise.resolve(due.map(([id, r]) => ({ id, micro: r.micro, ...(r.requireFence ? { requireFence: true } : {}), ...(r.evidence ? { evidence: structuredClone(r.evidence) } : {}) })));
+    return Promise.resolve(due.map(([id, r]) => ({ id, micro: r.recorded ?? r.micro, ...(r.requireFence ? { requireFence: true } : {}), ...(r.evidence ? { evidence: structuredClone(r.evidence) } : {}) })));
   }
 
   /** Defers an open reservation's next check. */
@@ -275,5 +453,70 @@ export class InMemorySpendDayStore implements SpendDayStore {
     reservation.requireFence = true;
     if (evidence) reservation.evidence = structuredClone(evidence);
     return Promise.resolve(true);
+  }
+
+  /**
+   * Records an operation's row and run 1, or answers null when the operation has one. The check and the record are one
+   * synchronous step, so of two admissions of one operation made at once, one records the row.
+   */
+  addOperationReservation(row: { day: string; kind: string; micro: number; created: Date; expires: Date; operation: string; runMicro: number; leaseUntil: Date }): Promise<string | null> {
+    if (this.operations.has(row.operation)) return Promise.resolve(null);
+    const id = this.insertReservation(row);
+    const made = this.reservations.get(id)!;
+    Object.assign(made, { operation: row.operation, recorded: row.runMicro, runs: 1, leaseUntil: row.leaseUntil, leaseRun: 1 });
+    this.operations.set(row.operation, id);
+    this.runRows.set(id, new Map<number, InMemoryRunRow>([[1, { boundMicro: row.runMicro, settledMicro: null, started: row.created, ended: null }]]));
+    return Promise.resolve(id);
+  }
+
+  /** The operation's row, copied. */
+  openOperationReservation(operation: string): Promise<OperationReservation | null> {
+    const id = this.operations.get(operation);
+    const r = id === undefined ? undefined : this.reservations.get(id);
+    if (id === undefined || r === undefined) return Promise.resolve(null);
+    return Promise.resolve({ id, operation, micro: r.micro, recordedMicro: r.recorded!, runs: r.runs!, leaseUntil: r.leaseUntil ?? null, leaseRun: r.leaseRun ?? null, expires: r.expires, settledAt: r.settledAt });
+  }
+
+  /** A run's beginning; the store takes no lock and runs one call at a time on the event loop (see the class). */
+  async beginRun(id: string, run: { runMicro: number; leaseUntil: Date; maxRuns: number; at: Date }): Promise<RunBegin> {
+    const r = this.reservations.get(id);
+    if (r === undefined || r.operation === undefined || r.settledAt !== null || r.expires.getTime() <= run.at.getTime()) return { status: 'gone' };
+    if (r.leaseUntil != null && r.leaseUntil.getTime() > run.at.getTime()) return { status: 'in_flight', leaseUntil: r.leaseUntil };
+    if (r.runs! >= run.maxRuns || r.recorded! + run.runMicro > r.micro) return { status: 'gone' };
+    r.recorded = r.recorded! + run.runMicro;
+    r.runs = r.runs! + 1;
+    r.leaseUntil = run.leaseUntil;
+    r.leaseRun = r.runs;
+    this.runRows.get(id)!.set(r.runs, { boundMicro: run.runMicro, settledMicro: null, started: run.at, ended: null });
+    return { status: 'begun', run: r.runs };
+  }
+
+  /** A run's end, in one step. */
+  async endRun(id: string, end: { run: number; settledMicro: number; at: Date; close: boolean }): Promise<RunEnd> {
+    const r = this.reservations.get(id);
+    const own = this.runRows.get(id)?.get(end.run);
+    if (r === undefined || own === undefined || own.settledMicro !== null) return { holder: false, settled: false };
+    own.settledMicro = Math.min(Math.max(0, end.settledMicro), own.boundMicro);
+    own.ended = end.at;
+    if (r.leaseRun !== end.run || r.settledAt !== null) return { holder: false, settled: false };
+    r.recorded = r.recorded! - own.boundMicro + own.settledMicro;
+    r.leaseUntil = null;
+    r.leaseRun = null;
+    if (!end.close && r.expires.getTime() > end.at.getTime()) return { holder: true, settled: false };
+    await this.settleReservation(id, r.recorded, end.at);
+    return { holder: true, settled: true };
+  }
+
+  /** A lease's renewal by the run that holds it, in one step. */
+  renewRun(id: string, renew: { run: number; leaseUntil: Date; at: Date }): Promise<boolean> {
+    const r = this.reservations.get(id);
+    if (r === undefined || r.settledAt !== null || r.leaseRun !== renew.run || r.leaseUntil == null || r.leaseUntil.getTime() <= renew.at.getTime()) return Promise.resolve(false);
+    r.leaseUntil = renew.leaseUntil;
+    return Promise.resolve(true);
+  }
+
+  /** A run's own row, for tests. */
+  runOf(id: string, run: number): { boundMicro: number; settledMicro: number | null } | undefined {
+    return this.runRows.get(id)?.get(run);
   }
 }

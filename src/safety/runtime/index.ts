@@ -49,16 +49,29 @@ export type { SqlSpendMeterOptions, SpendUnknownResolution } from './SqlSpendMet
 
 export {
   InMemorySpendDayStore,
+  beginOperationRun,
+  endOperationRun,
   minutesMicro,
   releaseExpiredSpend,
   releaseSpend,
+  renewOperationRun,
+  reserveOperationSpend,
   reserveSpend,
   settledTokensMicro,
   toMicro,
   tokensMicro,
   utcDay,
 } from './SpendReservations.js';
-export type { OpenReservation, SpendAdmission, SpendDayStore } from './SpendReservations.js';
+export type {
+  OpenReservation,
+  OperationAdmission,
+  OperationReservation,
+  OperationReserved,
+  RunBegin,
+  RunEnd,
+  SpendAdmission,
+  SpendDayStore,
+} from './SpendReservations.js';
 // The prices a spend admission reads, beside its rules, so `@framers/agentos/safety/runtime` carries both without loading a provider.
 export {
   OPENAI_MODEL_PRICING,

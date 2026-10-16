@@ -129,4 +129,24 @@ describe('operation reservations', () => {
     expect(await renewOperationRun(store, id, { run: 1, leaseUntil: at(120), at: at(62) })).toBe(false);
     expect(await store.openOperationReservation('ask:q1')).toMatchObject({ leaseRun: 2, leaseUntil: at(106) });
   });
+
+  it('admits one of two admissions of an operation made at once, reserving its amount once', async () => {
+    const store = new InMemorySpendDayStore();
+    const both = await Promise.all([reserveOperationSpend(store, admission()), reserveOperationSpend(store, admission())]);
+    expect(both.map((b) => b.status).sort()).toEqual(['in_flight', 'reserved']);
+    expect(await store.lockDay('2026-10-20')).toBe(6_000);
+  });
+
+  it('refuses a fenced operation, and a run, an end or a renewal without a valid run number or date, changing nothing', async () => {
+    const store = new InMemorySpendDayStore();
+    await expect(reserveOperationSpend(store, { ...admission(), requireFence: true })).rejects.toBeInstanceOf(RangeError);
+    expect(await store.lockDay('2026-10-20')).toBe(0);
+    const { id } = (await reserveOperationSpend(store, admission())) as { id: string };
+    const noDate = new Date(Number.NaN);
+    await expect(beginOperationRun(store, id, { runMicro: BOUND, leaseUntil: noDate, maxRuns: 2, at: at(46) })).rejects.toBeInstanceOf(RangeError);
+    await expect(endOperationRun(store, id, { run: 0, settledMicro: 1, at: at(20), close: false })).rejects.toBeInstanceOf(RangeError);
+    await expect(endOperationRun(store, id, { run: 1, settledMicro: 1, at: noDate, close: false })).rejects.toBeInstanceOf(RangeError);
+    await expect(renewOperationRun(store, id, { run: 1.5, leaseUntil: at(60), at: at(40) })).rejects.toBeInstanceOf(RangeError);
+    expect(await store.openOperationReservation('ask:q1')).toMatchObject({ runs: 1, recordedMicro: BOUND, leaseRun: 1, leaseUntil: at(45), settledAt: null });
+  });
 });
