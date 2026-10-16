@@ -113,18 +113,21 @@ export function stemWord(word: string): string {
 }
 
 /**
- * A character of a script written without spaces between words, each script read by its Unicode script property so
- * that no block of it is left out: Thai (its digits among them, since a number in Thai digits sits inside a Thai run),
- * the kana (the half-width forms among them), the CJK ideographs (the compatibility and the supplementary blocks among
+ * A character of a script written without spaces between words, each script read by its Unicode script extensions
+ * (`Script_Extensions`) so that no block of it is left out and a character two of these scripts share counts too:
+ * Thai (its digits among them, since a number in Thai digits sits inside a Thai run), the kana (the half-width forms
+ * among them, and the prolonged sound mark U+30FC of `ラーメン`, which is Script=Common and Hiragana and Katakana by
+ * extension, so that it never cuts a run), the CJK ideographs (the compatibility and the supplementary blocks among
  * them) and Hangul (the syllables and the jamo).
  */
-const UNSPACED = /[\p{Script=Thai}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}\p{Script=Hangul}]/u;
+const UNSPACED = /[\p{Script_Extensions=Thai}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Han}\p{Script_Extensions=Hangul}]/u;
 
 /**
  * Whether a word holds a character of a script written without spaces between words (Thai, Japanese kana, the
  * ideographs Chinese and Japanese share, Korean, whose long runs are common in data), where whole words cannot be
- * compared and one edit says nothing. A half-width kana letter, a compatibility or a supplementary ideograph and a
- * Thai digit all count, since each script is read by its Unicode script property.
+ * compared and one edit says nothing. A half-width kana letter, a compatibility or a supplementary ideograph, a Thai
+ * digit and the prolonged sound mark of `ラーメン` all count, since each script is read by its Unicode script
+ * extensions.
  */
 export function isUnspacedScript(word: string): boolean {
   return UNSPACED.test(word);

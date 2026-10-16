@@ -29,6 +29,11 @@ describe('isUnspacedScript', () => {
     // ideograph (U+20BB7); a number in Thai digits, which sits inside a Thai run; a conjoining jamo (U+1112)
     for (const word of ['ｶｲｷﾞ', '﨑', '𠮷', '๒๕๖๙', 'ᄒ']) expect(isUnspacedScript(word)).toBe(true);
   });
+
+  it('counts a character two of its scripts share, as the prolonged sound mark of ラーメン', () => {
+    // U+30FC and its half-width form U+FF70 are Script=Common, and Hiragana and Katakana by script extension
+    for (const word of ['ラーメン', 'ー', 'ｰ', 'ﾗｰﾒﾝ']) expect(isUnspacedScript(word)).toBe(true);
+  });
 });
 
 describe('tagSegments', () => {
@@ -58,6 +63,12 @@ describe('tagSegments', () => {
     expect(tagSegments('3月の会議', { wordSegmenter: null }).map((s) => [s.text, s.unspaced])).toEqual([['3', true], ['月', true], ['の', true], ['会', true], ['議', true]]);
     expect(tagSegments('明日3時に', { wordSegmenter: null }).map((s) => s.unspaced)).toEqual([true, true, true, true, true]);
     expect(tagSegments('q3 2026budget', { wordSegmenter: null }).map((s) => [s.text, s.unspaced])).toEqual([['q3', false], ['2026budget', false]]);
+  });
+
+  it('keeps a run whole across a character two of its scripts share', () => {
+    expect(tagSegments('ラーメン屋', { wordSegmenter: null }).map((s) => [s.text, s.unspaced])).toEqual([['ラ', true], ['ー', true], ['メ', true], ['ン', true], ['屋', true]]);
+    const words = (run: string): string[] => (run === 'ラーメン屋' ? ['ラーメン', '屋'] : [run]);
+    expect(tagSegments('ラーメン屋', { wordSegmenter: words }).map((s) => [s.text, s.unit])).toEqual([['ラーメン', 'word'], ['屋', 'word']]);
   });
 
   it('cuts an unspaced part with the word segmenter it is given, its places in the normalized text', () => {
