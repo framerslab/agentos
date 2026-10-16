@@ -11,7 +11,7 @@ AgentOS is an open-source TypeScript runtime for AI agents, licensed under Apach
 
 ## Development setup
 
-You need Node.js 22.12 or later in the 22 line (vitest's floor) and pnpm 10; CI runs the newest Node.js 22.
+You need Node.js 22.13 or later in the 22 line (the floor of officeparser, which the office loader's tests read documents with; vitest's own is 22.12) and pnpm 10; CI runs the newest Node.js 22.
 
 ```bash
 git clone https://github.com/framerslab/agentos.git
@@ -21,7 +21,7 @@ pnpm run build
 pnpm run test
 ```
 
-CI runs on Node 22 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `pnpm run build`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test -- --coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. A second job, "Batch-1 gated tests", runs a fixed set of test files. Maintainers merge a pull request only when both jobs are green.
+CI runs on Node 22 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `pnpm run build`, `pnpm run verify:exports`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test -- --coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. A second job, "Batch-1 gated tests", runs a fixed set of test files. Maintainers merge a pull request only when both jobs are green.
 
 To run one test file: `pnpm vitest run <path>`.
 

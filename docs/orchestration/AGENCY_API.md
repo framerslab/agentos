@@ -847,10 +847,18 @@ the full runtime: see [Memory Model](../MEMORY_MODEL.md), [Cognitive Memory](../
 
 When `voice.enabled` is `true` the agency exposes a `listen()` method that
 starts a WebSocket server on `127.0.0.1` and returns its port, URL and a
-`close()` function. Each message a client sends must be JSON with a `text`
-field; the agency runs `generate()` on it and replies with `{ "text": "..." }`.
-`agency()` reads no other `voice` field and handles no audio: put
-speech-to-text and text-to-speech in front of the socket (the
+`close()` function. Each message a client sends must be one JSON object whose
+only field is a non-empty `text` string of at most 16384 characters; the agency
+runs `generate()` on it and replies with `{ "text": "..." }`. A connection
+carries one request at a time, and a frame over 65536 bytes closes it. Errors
+come back as `{ "error": { "code": "...", "message": "..." } }` with the codes
+`invalid_message`, `request_in_progress`, `generation_failed` (the
+generation's own error is not sent) and `output_unavailable` (a reply that is
+not text or exceeds 32768 bytes). `agency()` reads no other `voice` field and
+handles no audio: a binary frame receives `audio_not_supported` and close code
+1003, and frames that arrive while a connection is closing are ignored. For
+spoken calls use `VoiceSessionFactory`, or put speech-to-text and
+text-to-speech in front of the socket (the
 [Voice Pipeline](/features/voice-pipeline) and its providers live in
 `src/io/voice-pipeline/`).
 
@@ -868,7 +876,7 @@ console.log(`WebSocket ready at ${server.url}`);
 await server.close();
 ```
 
-Requires the `ws` package (`npm install ws`).
+The `ws` package the listener uses is a dependency of `@framers/agentos`.
 
 ### Channel adapters
 

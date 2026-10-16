@@ -24,6 +24,7 @@ import { RequestyProviderError } from '../errors/RequestyProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
+import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
 /**
  * Configuration specific to the RequestyProvider.

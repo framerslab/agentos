@@ -86,12 +86,12 @@ Preferred providers receive priorities 50, 51, 52, … (lower number = higher pr
 | `deepgram` | Deepgram | `DEEPGRAM_API_KEY` | No | Yes | cloud, streaming |
 | `deepgram-streaming` | Deepgram Streaming | `DEEPGRAM_API_KEY` | No | Yes | streaming, interim-results, diarization, punctuation, endpointing |
 | `assemblyai` | AssemblyAI | `ASSEMBLYAI_API_KEY` | No | Yes | cloud, streaming, diarization |
-| `google-cloud-stt` | Google Cloud STT | `GOOGLE_STT_CREDENTIALS` | No | Yes | cloud, streaming |
+| `google-cloud-stt` | Google Cloud STT | `GOOGLE_STT_CREDENTIALS` | No | No | batch transcription through the installed provider |
 | `azure-speech-stt` | Azure Speech STT | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | No | No | cloud, streaming |
-| `whisper-chunked` | Whisper Chunked Streaming | `OPENAI_API_KEY` | No | Yes | streaming, interim-results |
+| `whisper-chunked` | Whisper Chunked Streaming | `OPENAI_API_KEY` | No | Chunked | a stream-shaped adapter over bounded file requests, not an intrinsically streaming acoustic model |
 | `openai-realtime-transcription` | OpenAI Realtime Transcription | `OPENAI_API_KEY` | No | Yes | streaming, interim-results, endpointing, item-ids, long-sessions |
 | `whisper-local` | Whisper.cpp | — | Yes | No | local, offline _(unavailable: no implementation)_ |
-| `vosk` | Vosk | — | Yes | Yes | local, offline, streaming |
+| `vosk` | Vosk | none | Yes | No | local, offline, batch provider |
 | `moonshine-browser` | Moonshine (in the browser) | — | Yes | Yes | local, offline, streaming, browser |
 | `nvidia-nemo` | NVIDIA NeMo | — | Yes | No | local, offline _(unavailable — not yet integrated)_ |
 
@@ -105,6 +105,8 @@ Preferred providers receive priorities 50, 51, 52, … (lower number = higher pr
 | `openai-streaming-tts` | OpenAI Streaming TTS | `OPENAI_API_KEY` | No | Yes | streaming, sentence-chunking |
 | `elevenlabs` | ElevenLabs | `ELEVENLABS_API_KEY` | No | Yes | cloud, tts, voice-cloning |
 | `elevenlabs-streaming-tts` | ElevenLabs Streaming TTS | `ELEVENLABS_API_KEY` | No | Yes | streaming, websocket, continuation-hints |
+| `deepgram-aura` | Deepgram Aura | `DEEPGRAM_API_KEY` | No | Yes | catalog entry; runtime construction requires a configured provider |
+| `minimax-tts` | MiniMax TTS | `MINIMAX_API_KEY` | No | Yes | catalog entry; runtime construction requires a configured provider |
 | `google-cloud-tts` | Google Cloud TTS | `GOOGLE_TTS_CREDENTIALS` | No | No | cloud, tts |
 | `amazon-polly` | Amazon Polly | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | No | Yes | cloud, tts |
 | `azure-speech-tts` | Azure Speech TTS | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | No | Yes | cloud, tts |
@@ -133,6 +135,18 @@ Preferred providers receive priorities 50, 51, 52, … (lower number = higher pr
 | `twilio` | Twilio | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | `voice-twilio` |
 | `telnyx` | Telnyx | `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID` | `voice-telnyx` |
 | `plivo` | Plivo | `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN` | `voice-plivo` |
+
+---
+
+## Scoped provider resolution
+
+Batch capability is not a streaming session. The tables describe catalog entries and installed interfaces, not every capability a vendor sells. A catalog id does not instantiate a provider; `whisper-local` has no built-in runtime instance. The Vosk and Google Cloud STT packs expose batch recognition. Their batch results cannot satisfy `startSession` merely by setting a streaming flag.
+
+`resolveVoicePlan` is the scoped call entry on the same `SpeechProviderResolver`. It reads typed factories, validates model/voice revisions, language, sample rate, codec and closed options, then freezes the call selection. `resolveScopedBatch` retains batch operation as an explicit separate choice. `ExtensionManager.getVoiceAdapters()` discovers scoped factories without opening them or resolving a process credential.
+
+The configured call policy names its mode and fallback allowlist. Hosted construction rejects legacy environment discovery and never treats the presence of an environment key as permission to contact another vendor. Every actual request and retry passes through `VoiceAdapterRuntime` and its attempt authorizer. Legacy `SpeechRuntime` and the environment constructors remain single-tenant conveniences with their existing behavior.
+
+Provider retirement data lives in `src/io/speech/retirements.ts`, and its dated tests in `src/io/speech/__tests__/retirements.test.ts`. Consult that versioned register and its source notices before selecting a model. A replacement model name does not prove protocol compatibility with an existing adapter. The hosted factory does not silently substitute a retiring provider.
 
 ---
 
@@ -171,11 +185,11 @@ sttEntryPricePerMinute('deepgram:nova-3'); // 0.0077 US dollars a minute
 sttEntryPricePerMinute('elevenlabs:scribe_v2'); // undefined: no price row
 ```
 
-**The entry.** An entry is `<vendor>:<model>`: a vendor of `STT_CHAIN_VENDORS` (`openai`, `deepgram`, `elevenlabs`), a colon, and the model's name, 1 to 128 letters, digits, `.`, `_` and `-`. `parseSttEntry(entry)` returns `{ vendor, model }` and throws a `RangeError` for any other shape, a vendor outside the list included. `parseSttEntry(entry, registeredVendors)` reads the vendors a host registered instead, and no other, a built-in one included: a vendor there is a lower-case letter followed by up to 63 lower-case letters, digits or `-`, such as `local-stt`, and the result is a `RegisteredSttEntry`. Neither form puts the entry in its error message. Its module imports nothing, so the browser entry, `@framers/agentos/io/voice-pipeline/browser`, exports it as well, and a page can hold a list of entries to the rule the server builds them by.
+**The entry.** An entry has the form `vendor:model`: a vendor of `STT_CHAIN_VENDORS` (`openai`, `deepgram`, `elevenlabs`), a colon, and the model's name, 1 to 128 letters, digits, `.`, `_` and `-`. The original `STT_CHAIN_VENDORS` remain the built-in convenience choices. `parseSttEntry(entry)` returns `{ vendor, model }` and throws a `RangeError` for any other shape, a vendor outside the list included. Registered entry support is explicit; a settings string alone does not install a model or grant credentials. `parseSttEntry(entry, registeredVendors)` reads the vendors a host registered instead, and no other, a built-in one included: a vendor there is a lower-case letter followed by up to 63 lower-case letters, digits or `-`, such as `local-stt`, and the result is a `RegisteredSttEntry`. Neither form puts the entry in its error message. Its module imports nothing, so the browser entry, `@framers/agentos/io/voice-pipeline/browser`, exports it as well, and a page can hold a list of entries to the rule the server builds them by. The scoped factory uses typed registrations and its frozen policy, not ambient environment discovery.
 
 **The order is the priority.** The entries take the priorities 10, 20, 30 and so on, in the order given: a session starts on the first provider whose session opens, and the next entry is its fallback. `createSttChain` throws a `RangeError` for an empty list, an entry named twice, an entry `parseSttEntry` refuses, or an entry whose vendor has no options. Mid-utterance failover is off unless the third argument, the chain's `StreamingSTTChainOptions`, turns it on, so a session is the provider's own, with its `flush()` and its events; with failover on, a session is the chain's facade, which forwards transcripts, speech events, `'usage'` and `'warning'`, and whose `flush()` drains the provider session in use.
 
-**The vendors and their options.** Each vendor's options are its provider's configuration without `model` and `priority`, its API key among them: the entry names the model, and its place in the list sets the priority. Every entry of one vendor shares that vendor's options and its provider id (every `openai` entry is `openai-realtime-transcription`), so `currentProviderId`, the chain's provider events and a `CircuitBreaker` in the chain options cannot tell two entries of one vendor apart: a breaker counts their failures together, and once it trips, later sessions skip every entry of that vendor. [VOICE_PIPELINE.md](./VOICE_PIPELINE.md#openai-realtime-transcription) describes the OpenAI provider and its options.
+**The vendors and their options.** Each vendor's options are its provider's configuration without `model` and `priority`, its API key among them: the entry names the model, and its place in the list sets the priority. Every entry of one vendor shares that vendor's options and its provider id (every `openai` entry is `openai-realtime-transcription`), so `currentProviderId` cannot tell two entries of one vendor apart. The chain's provider events and a `CircuitBreaker` in the chain options name each entry by that id and its place among the vendor's entries (`openai-realtime-transcription#2`): a breaker counts each entry's failures, and skips only the entries it has tripped. [VOICE_PIPELINE.md](./VOICE_PIPELINE.md#openai-realtime-transcription) describes the OpenAI provider and its options.
 
 **Ending a stream.** If the provider closes after a facade `flush()` and before the next audio frame, the facade emits `close` once, releases its active session and starts no backup. Further `pushAudio()` and `flush()` calls are ignored, as after the caller's `close()`; a new stream needs a new session. `currentProviderId` retains the last selected provider's id. In a [listen session](./VOICE_PIPELINE.md#listening-without-speaking), stopping flushes STT, waits for late finals and then allows a pending endpoint-detector turn to complete within its configured silence bound before resetting. Purging skips both drains. A transport error ends listening with `transport_failed` and the error in `ended.error`; cleanup releases any outstanding transport pause and removes the session's transport listeners.
 
@@ -208,13 +222,16 @@ Each entry's vendor must be a key of the registry. Its factory receives the mode
 
 A dated snapshot without a row of its own (the model's name followed by `-YYYY-MM-DD`) takes its base model's price.
 
-Deepgram's rows are `DEEPGRAM_STREAMING_PRICING` in [`deepgramPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/deepgramPricing.ts): the pay-as-you-go price a minute of streamed audio that [Deepgram's pricing page](https://deepgram.com/pricing) lists, as read on 12 October 2026. The page shows a lower current price for a limited time beside the regular price; the row holds the regular price, so a spending bound read from it still holds when the offer ends. It is the price of a session with no add-on: Deepgram bills its add-ons a minute on top of it, at the rates its pricing page lists beside the model, and `DeepgramStreamingSTT` turns two of them on from `providerOptions` (`diarize` sends `diarize=true`; `keywords` sends `keyterm` on Nova-3 and `keywords` on older models), so a bound read from the row covers a session only while it turns on no add-on, and a consumer that turns one on prices that add-on as well:
+Deepgram's rows are `DEEPGRAM_STREAMING_PRICING` and `DEEPGRAM_PRE_RECORDED_PRICING` in [`deepgramPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/deepgramPricing.ts): the pay-as-you-go price a minute of audio that [Deepgram's pricing page](https://deepgram.com/pricing) lists, as read on 15 October 2026, in one table for streamed audio and one for pre-recorded audio, which Deepgram prices separately. The page shows a lower current price for streamed audio for a limited time beside the regular price; the streaming row holds the regular price, so a spending bound read from it still holds when the offer ends. A row is the price of a request with no add-on: Deepgram bills its add-ons a minute on top of it, at the rates its pricing page lists beside the model, and `DeepgramStreamingSTT` turns two of them on from `providerOptions` (`diarize` sends `diarize=true`; `keywords` sends `keyterm` on Nova-3 and `keywords` on older models), so a bound read from a row covers a request only while it turns on no add-on, and a consumer that turns one on prices that add-on as well:
 
-| Model | US dollars a minute |
-|---|---|
-| `nova-3` | 0.0077 |
+| Model | Audio | US dollars a minute |
+|---|---|---|
+| `nova-3` | Streamed | 0.0077 |
+| `nova-3` | Pre-recorded | 0.0043 |
 
-The row is the price of Nova-3 Monolingual. Deepgram's pricing page lists Nova-3 Multilingual higher, and a `nova-3` session started with `language: 'multi'` transcribes several languages ([multilingual code switching](https://developers.deepgram.com/docs/multilingual-code-switching)): a host that runs a Deepgram entry that way prices it from Deepgram's page, not from the row. Any other Deepgram model, `nova-2` among them, has no row. `deepgramStreamingPricing(model)` reads only the table's own rows, so a model named after a property every object inherits, such as `constructor`, has none, and the table is frozen. `DEEPGRAM_STREAMING_PRICING` and `deepgramStreamingPricing` are exported from `@framers/agentos/io/voice-pipeline`, from `@framers/agentos/safety/runtime` and from `@framers/agentos`.
+The rows are the prices of Nova-3 Monolingual. Deepgram's pricing page lists Nova-3 Multilingual higher, and a `nova-3` session started with `language: 'multi'` transcribes several languages ([multilingual code switching](https://developers.deepgram.com/docs/multilingual-code-switching)): a host that runs a Deepgram entry that way prices it from Deepgram's page, not from a row. Any other Deepgram model, `nova-2` among them, has no row. `sttEntryPricePerMinute('deepgram:nova-3')` reads the streaming row. The pre-recorded row prices a batch request, such as one [`DeepgramPreRecordedBatchSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/DeepgramPreRecordedBatchSTT.ts) sends, and never a streamed session. `deepgramStreamingPricing(model)` and `deepgramPreRecordedPricing(model)` read only their own table's rows, so a model named after a property every object inherits, such as `constructor`, has none, and both tables are frozen. `DEEPGRAM_STREAMING_PRICING`, `DEEPGRAM_PRE_RECORDED_PRICING`, `deepgramStreamingPricing` and `deepgramPreRecordedPricing` are exported from `@framers/agentos/io/voice-pipeline`, from `@framers/agentos/safety/runtime` and from `@framers/agentos`.
+
+Neither table establishes the price of a request sent with `mip_opt_out=true`, which `DeepgramStreamingSTT` and `DeepgramPreRecordedBatchSTT` send when their `mipOptOut` option is set, and a streaming session also sends when its `providerOptions.mip_opt_out` is `true`. Deepgram's API reference asks callers to check the pricing impact of opting out of its [Model Improvement Program](https://developers.deepgram.com/docs/the-deepgram-model-improvement-partnership-program) before sending it, and neither the programme's page nor the pricing page, as read on 15 October 2026, states the price of an opted-out request. A host that opts out verifies its account's tariff for those requests before it bounds their spend with a row.
 
 ---
 

@@ -138,7 +138,9 @@ export class FencedOutbox implements IOutbox {
   async enqueue(delivery: Parameters<IOutbox['enqueue']>[0], now: number): Promise<void> {
     await this.locked(delivery.runId, async () => {
       const fenced = await this.isFenced(delivery.runId);
-      await this.inner.enqueue(fenced ? { ...delivery, payload: '', type: 'bot:purged' } : delivery, now);
+      const mail = delivery.kind === 'mail';
+      await this.inner.enqueue(fenced ? (mail ? { ...delivery, payload: '' } : { ...delivery, payload: '', type: 'bot:purged' }) : delivery, now);
+      if (fenced && mail) await this.inner.markDead?.(delivery.id);
       if (fenced) await this.inner.purgeContent(delivery.runId);
     });
   }
@@ -239,6 +241,26 @@ export class FencedOutbox implements IOutbox {
   /** Makes the delivery pending again in the wrapped outbox; one a purge emptied goes out content-free. */
   replay(id: string, now: number): Promise<void> {
     return this.inner.replay(id, now);
+  }
+
+  /** Ends a pending delivery at once in the wrapped outbox; false when the wrapped outbox has no such method. */
+  async markDead(id: string): Promise<boolean> {
+    return this.inner.markDead ? this.inner.markDead(id) : false;
+  }
+
+  /** Holds a pending delivery in the wrapped outbox until `notBefore`; false when the wrapped outbox has no such method. */
+  async holdUntil(id: string, notBefore: number): Promise<boolean> {
+    return this.inner.holdUntil ? this.inner.holdUntil(id, notBefore) : false;
+  }
+
+  /** Ends the run's pending deliveries to a destination in the wrapped outbox, under the run's guard; false when the wrapped outbox has no such method. */
+  async cancel(runId: string, destinationRef: string): Promise<boolean> {
+    return this.locked(runId, async () => (this.inner.cancel ? this.inner.cancel(runId, destinationRef) : false));
+  }
+
+  /** Ends the expired mail deliveries in the wrapped outbox; none when the wrapped outbox has no such method. */
+  async endExpired(now: number): Promise<number> {
+    return this.inner.endExpired ? this.inner.endExpired(now) : 0;
   }
 
   /** Every delivery of the run in the wrapped outbox. */

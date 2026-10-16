@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PlaybackAcknowledgements } from '../PlaybackAcknowledgements.js';
+import { PlaybackAcknowledgements, type PlaybackClear } from '../PlaybackAcknowledgements.js';
 const generation = { workerGeneration: 1, inferenceGeneration: 2, transportEpoch: 3 };
 const receipt = { generation, sequence: 1, playedSamples: 320, sampleRate: 16000 };
 describe('bounded receiver receipts', () => {
@@ -26,5 +26,17 @@ describe('bounded receiver receipts', () => {
     expect(a.receive({ type: 'cleared', generation: message.generation, clearId: message.clearId })).toBe(true);
     await cleared; await waiting;
     await a.clear(generation, async () => { throw new Error('duplicate clear'); }); a.close();
+  });
+  it('settles a repeated clear only once the handshake it shares has released', async () => {
+    const a = new PlaybackAcknowledgements(1000); a.begin(receipt);
+    let sent: unknown;
+    const first = a.clear(generation, async (message) => { sent = message; });
+    const repeated = a.clear(generation, async () => { throw new Error('a second discard was sent'); });
+    const clear = sent as PlaybackClear;
+    expect(a.receive({ type: 'cleared', generation: clear.generation, clearId: clear.clearId })).toBe(true);
+    await repeated;
+    // The handshake is over for every caller: the next generation's chunk is admitted at once.
+    expect(() => a.begin({ ...receipt, generation: { ...generation, inferenceGeneration: 3 } })).not.toThrow();
+    await first; a.close();
   });
 });

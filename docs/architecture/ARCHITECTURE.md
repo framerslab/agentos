@@ -318,7 +318,7 @@ Every descriptor carries an `id`, a `kind` and a `payload`, plus optional `prior
 | `provenance` | [`EXTENSION_KIND_PROVENANCE`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | provenance pack payload | Content anchoring provider |
 | `meeting-provider` | [`EXTENSION_KIND_MEETING_PROVIDER`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | `IMeetingBotProvider` | Meeting participant registered by the host on `MeetingManager` |
 
-The other kinds are `response-processor`, `workflow-executor`, `persona`, `planning-strategy`, `hitl-handler`, `communication-channel`, `memory-provider`, `stt-provider`, `tts-provider`, `vad-provider`, `wake-word-provider`, `messaging-channel`, `http-handler`, `streaming-stt-provider`, `streaming-tts-provider` and `diarization-provider`.
+The other kinds are `response-processor`, `workflow-executor`, `persona`, `planning-strategy`, `hitl-handler`, `communication-channel`, `memory-provider`, `stt-provider`, `tts-provider`, `vad-provider`, `wake-word-provider`, `messaging-channel`, `http-handler`, `streaming-stt-provider`, `streaming-tts-provider`, `diarization-provider`, `endpoint-detector`, `bargein-handler`, `vad-session-provider` and `audio-endpoint-provider`.
 
 ### Guardrail Dispatch Model
 
@@ -725,7 +725,7 @@ Seven [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cor
 
 ### Chunking Strategies
 
-[`SemanticChunker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/chunking/SemanticChunker.ts) in `cognition/rag/chunking/` splits text at headings, then paragraphs, then sentences, keeps fenced code blocks whole, and falls back to fixed-size splits for text with no boundaries.
+[`SemanticChunker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/chunking/SemanticChunker.ts) in `cognition/rag/chunking/` splits text at headings, then paragraphs, then sentences, keeps a fenced code block whole unless it is longer than `maxSize` (2,000 characters unless set), and falls back to fixed-size splits for text with no boundaries ([Chunking and Snippets](../text/CHUNKING_AND_SNIPPETS.md#semanticchunker)).
 
 ### Reranking
 
@@ -1000,7 +1000,7 @@ The real-time voice conversation pipeline lives in `io/voice-pipeline/` and is o
 IDLE -------> startSession() ---------> LISTENING
 LISTENING --> turn_complete ----------> PROCESSING
 PROCESSING -> LLM tokens start -------> SPEAKING
-SPEAKING ---> TTS flush_complete -----> LISTENING
+SPEAKING ---> TTS flush_complete -----> LISTENING (once played out, on a transport that reports it)
 SPEAKING ---> barge-in (cancel) ------> INTERRUPTING -> LISTENING
 ANY --------> transport disconnect ---> CLOSED
 ANY --------> stopSession() ----------> CLOSED
@@ -1132,7 +1132,7 @@ When `observability.metrics.enabled` is true, AgentOS exports ([`otel.ts`](https
 
 ### Logging
 
-[`PinoLogger`](https://github.com/framerslab/agentos/blob/master/src/core/logging/PinoLogger.ts) injects `trace_id` and `span_id` fields when `observability.logging.includeTraceIds` is true. Optional `exportToOtel` emits `LogRecord` objects via `@opentelemetry/api-logs`.
+[`PinoLogger`](https://github.com/framerslab/agentos/blob/master/src/core/logging/PinoLogger.ts) injects `trace_id` and `span_id` fields when `observability.logging.includeTraceIds` is true. Optional `exportToOtel` emits `LogRecord` objects via `@opentelemetry/api-logs`. With content-safe telemetry on (`enableContentSafeTelemetry` from `@framers/agentos/logging`), it writes no record: the host's sink receives one fixed event per record instead, and spans, metrics and log export stay off.
 
 ### Evaluation Framework
 

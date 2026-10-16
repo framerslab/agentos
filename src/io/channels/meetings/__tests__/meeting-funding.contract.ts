@@ -154,5 +154,28 @@ export function meetingFundingContract(name: string, open: () => Promise<Funding
         expect(holds).toHaveLength(1); expect(holds[0]).toMatchObject({ chargedMicro: 0, supplierSettledMicro: 0 });
       } finally { await h.close(); }
     });
+
+    it('hands the host close the run with the allocation it found and linked after a lost link', async () => {
+      const h = await open();
+      try {
+        await grantCreditLot(h.credit, { scopeId: 'account', kind: 'paid', fundingRef: 'payment', principalMicro: 100_000, at: 1_000_000 });
+        await h.runs.insert(fundedRun('relinked'));
+        let fail = true; const update = h.runs.update.bind(h.runs);
+        const failing: IRunStore = { insert: (r) => h.runs.insert(r), get: (id) => h.runs.get(id), replace: (r) => h.runs.replace(r), list: (f) => h.runs.list(f), findByIdempotencyKey: (o, k) => h.runs.findByIdempotencyKey(o, k),
+          update: async (id, patch, state) => { if (patch.fundingReservationId && fail) { fail = false; throw new Error('response lost'); } return update(id, patch, state); } };
+        // the reservation id on each run the host's close is handed
+        const closed: Array<string | undefined> = [];
+        const options = { runs: failing, credit: h.credit, now: () => 1_000_100, supplierDailyCapMicro: () => 1_000_000,
+          blocks: () => new TestMeetingBlocks(), check: async () => ({ ok: true as const, maxSeconds: 600 }),
+          close: async (run: MeetingRunRecord) => { closed.push(run.fundingReservationId); return { connectedMs: 0, fence: { mediaClosed: true, inferenceTerminated: true, evidence: 'no-dispatch-fenced', observedAt: 1_000_100 } }; } };
+        await expect(new CompositeMeetingEntitlement(options).reserveOnce({ runId: 'relinked', ownerRef: 'account', platform: 'google_meet', maxSeconds: 600 })).rejects.toThrow('response lost');
+        // the creation ends before any reservation is asked again: the release finds the committed hold by the run and links it first
+        await new CompositeMeetingEntitlement({ ...options, runs: h.peerRuns, credit: h.peerCredit }).release('meeting-funding:relinked');
+        const holds = await h.credit.withTransaction((tx) => tx.listHolds({ scopeId: 'account' }));
+        expect(holds).toHaveLength(1);
+        expect((await h.peerRuns.get('relinked'))?.fundingReservationId).toBe(holds[0]!.holdId);
+        expect(closed).toEqual([holds[0]!.holdId]);
+      } finally { await h.close(); }
+    });
   });
 }

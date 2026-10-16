@@ -63,7 +63,7 @@ const provider = new TwilioVoiceProvider({
 
 1. Create a Telnyx account and generate an **API key** (Mission Control Portal → Auth → API Keys).
 2. Buy a phone number and assign it to a TeXML or Call Control application; its id is the `connectionId`.
-3. Copy the account's Ed25519 **public key** for webhook verification.
+3. Copy the account's Ed25519 **public key** for webhook verification. Without it the provider refuses every webhook.
 
 ```typescript
 import { TelnyxVoiceProvider } from '@framers/agentos';
@@ -71,7 +71,7 @@ import { TelnyxVoiceProvider } from '@framers/agentos';
 const provider = new TelnyxVoiceProvider({
   apiKey: process.env.TELNYX_API_KEY!,
   connectionId: process.env.TELNYX_CONNECTION_ID!,
-  publicKey: process.env.TELNYX_PUBLIC_KEY!, // without publicKey, verifyWebhook() accepts every webhook
+  publicKey: process.env.TELNYX_PUBLIC_KEY!, // without publicKey, verifyWebhook() refuses every webhook
 });
 ```
 
@@ -134,7 +134,7 @@ A call record carries one of two modes:
 | `conversation` | Full duplex: caller audio to STT, the agent's reply to TTS, over a media stream |
 | `notify` | Speak a message and hang up |
 
-The providers do not act on the mode. Each one sends its API the destination, the caller number and the webhook URL (Twilio also the status callback URL); the mode, the message, the TTS voice and the media stream URL are not sent. In the carrier profile, Plivo also receives the status callback URL as its ring and hangup URLs, and Telnyx receives the media stream URL. When a Twilio or Plivo call connects, the provider requests the webhook URL, and the host's route answers with the XML for the mode, built with the helpers in [`twiml.ts`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/twiml.ts):
+The legacy profile leaves stream setup to the host. The providers do not act on the mode. Each one sends its API the destination, the caller number and the webhook URL (Twilio also the status callback URL); the mode, the message, the TTS voice and, in the legacy profile, the media stream URL are not sent. Carrier mode sends Telnyx's configured media URL with explicit bidirectional RTP PCMU settings and sends Plivo ring/hangup status callbacks: Plivo receives the status callback URL as its ring and hangup URLs. Mode still does not create the host's answer route or a synthesis loop. Use the [Carrier protocol profile](#carrier-protocol-profile) section for live-carrier setup. When a Twilio or Plivo call connects, the provider requests the webhook URL, and the host's route answers with the XML for the mode, built with the helpers in [`twiml.ts`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/twiml.ts):
 
 ```typescript
 import { twilioConversationTwiml, twilioNotifyTwiml } from '@framers/agentos';
@@ -173,7 +173,7 @@ All three providers sign their webhook payloads:
 | Telnyx | Ed25519 over the timestamp and the raw body; a timestamp more than 300 seconds old is rejected | `telnyx-signature-ed25519`, `telnyx-timestamp` |
 | Plivo | HMAC-SHA256 (V3) over the URL, its query, the sorted form params and the nonce | `x-plivo-signature-v3` or `x-plivo-signature-ma-v3`, `x-plivo-signature-v3-nonce` |
 
-`CallManager.processWebhook()` calls the provider's `verifyWebhook()` before it parses any event, and drops a webhook that fails. A legacy Telnyx provider constructed without `publicKey` skips the check and accepts every webhook, so anyone who can reach the webhook URL can post call events to `CallManager`; pass the key outside local development. With `protocol: 'carrier'`, a Telnyx provider without `publicKey` refuses every webhook. `webhookToleranceSec` (300 by default, 0 turns it off) sets the timestamp window.
+`CallManager.processWebhook()` verifies before parsing: it calls the provider's `verifyWebhook()` before it parses any event, and drops a webhook that fails. A Telnyx provider without `publicKey` refuses every webhook, in the legacy and carrier profiles alike. For local development without a key, construct it with `allowUnverifiedWebhooks: true`: it then accepts every webhook unverified, so anyone who can reach the webhook URL can post call events to `CallManager`, and it logs one warning, to the `logger` it is given or else through `createLogger` from `@framers/agentos/logging`; when that write fails, the warning goes to the console instead. Whether it accepts webhooks unverified is decided when it is constructed: setting the flag, or removing `publicKey`, on its config object afterwards does not open the webhook. With `publicKey` set, the key is checked whatever the flag says. `webhookToleranceSec` (300 by default, 0 turns it off) sets the timestamp window. Use `processWebhookDurable` and a persisted admitted call for restart-safe processing ([Callback identity and persistence](#callback-identity-and-persistence)). Authentication, call admission and callback retention remain host responsibilities.
 
 ### Provider console settings
 
@@ -218,7 +218,7 @@ manager.on((event) => {
 });
 ```
 
-A DTMF event does not change the call's state. On a media stream, [`TelephonyStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/TelephonyStreamTransport.ts) also emits `dtmf` for each key press its parser reports, with `durationMs` when the message carries a duration. The Twilio parser reports key presses in both profiles; the Telnyx and Plivo parsers report them only when constructed with `{ protocol: 'carrier' }`. The Telnyx and Plivo webhooks carry no duration.
+A DTMF event does not change call state. All three carrier-profile parsers emit stream DTMF. Legacy parsers retain their earlier behavior: the Twilio parser reports key presses in both profiles, and the Telnyx and Plivo parsers report them only when constructed with `{ protocol: 'carrier' }`. On a media stream, [`TelephonyStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/TelephonyStreamTransport.ts) also emits `dtmf` for each key press its parser reports, with `durationMs` when the message carries a duration. Choose either the authenticated stream or verified webhook path for each IVR action so a physical key press is not handled twice across delivery channels. A duration absent from the carrier message remains absent, and the Telnyx and Plivo webhooks carry no duration.
 
 ```typescript
 transport.on('dtmf', ({ digit, durationMs }) => {

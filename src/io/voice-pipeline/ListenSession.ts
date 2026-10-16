@@ -9,6 +9,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { ReconnectingSTT, type ReconnectingSTTOptions, type SttGapEvent, type SttReconnectedEvent } from './ReconnectingSTT.js';
+import { describeReason, isError } from './describeReason.js';
 import type { AudioFrame, IEndpointDetector, IStreamingSTT, IStreamTransport, ITranscriptInputSink, StreamingSTTConfig, StreamingSTTSession, TranscriptEvent, TranscriptInput, TranscriptTurn, TurnCompleteEvent, VadEvent } from './types.js';
 
 export type { ITranscriptSink, ITranscriptInputSink, TranscriptInput, TranscriptTurn } from './types.js';
@@ -33,6 +34,8 @@ export interface ListenSessionOverrides {
    * and their first start and last end times (including with {@link AcousticEndpointDetector}).
    * A `late_final` it emits, a final that arrived after its turn completed and that no turn takes,
    * is written as a turn of its own, as a final is without a detector; one with no words writes nothing.
+   * The session resets it with `'session'` as it starts, so a detector an earlier session used waits for no
+   * late final of that session's last turn.
    */
   endpointDetector?: IEndpointDetector;
   /** Passed to the transcriber's `startSession()`. */
@@ -43,7 +46,8 @@ export interface ListenSessionOverrides {
   sinkQueueLimit?: number;
   /**
    * Names who spoke a turn, from the transcriber's final. A detector turn carries its text and no words,
-   * unless empty detector text uses the accumulated STT finals and their words.
+   * unless empty detector text uses the accumulated STT finals and their words. One that throws names no one:
+   * the throw is written as a console warning, and the turn is written with no speaker.
    */
   speaker?: (event: TranscriptEvent) => string | undefined;
   /** How long a stop waits for the flushed final to arrive, before draining a pending detector turn. Default 250. */
@@ -119,6 +123,9 @@ export interface ListenSession extends EventEmitter {
  * ```
  */
 export async function startListenSession(transport: IStreamTransport, sink: ITranscriptInputSink, overrides: ListenSessionOverrides): Promise<ListenSession> {
+  // This session's transcriber sends no final of an earlier session's turns, so a detector an earlier session used
+  // waits for none.
+  overrides.endpointDetector?.reset('session');
   const stt = overrides.reconnect === false ? overrides.streamingSTT : new ReconnectingSTT(overrides.streamingSTT, typeof overrides.reconnect === 'object' ? overrides.reconnect : {});
   const sttSession: StreamingSTTSession = await stt.startSession(overrides.sttConfig);
   const detector = overrides.endpointDetector;
@@ -204,9 +211,20 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
     return endPromise;
   };
 
+  // `speaker` is the host's code, run inside the transcriber's or the detector's event: a throw would lose the turn
+  // and go into that event's emitter, so it is written as a console warning and the turn is written with no speaker.
+  const speakerOf = (event: TranscriptEvent): string | undefined => {
+    try {
+      return overrides.speaker?.(event);
+    } catch (thrown) {
+      console.warn('[listen-session] the speaker option threw; the turn is written with no speaker:', describeReason(thrown));
+      return undefined;
+    }
+  };
+
   const write = (text: string, event: TranscriptEvent): void => {
     if (!accepting() || sinkFailed) return;
-    const turn: TranscriptInput = { runId: overrides.runId, at: Date.now(), text, startMs: event.startMs, endMs: event.endMs, speaker: overrides.speaker?.(event) };
+    const turn: TranscriptInput = { runId: overrides.runId, at: Date.now(), text, startMs: event.startMs, endMs: event.endMs, speaker: speakerOf(event) };
     pending.push(turn);
     if (pending.length >= queueLimit && !paused) {
       paused = true;
@@ -225,7 +243,8 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
       } catch (err) {
         sinkFailed = true;
         pending.length = 0;
-        void end('sink_failed', err instanceof Error ? err : new Error(String(err)), true);
+        // describeReason() gives text for any value: String() throws for some a sink can reject with.
+        void end('sink_failed', isError(err) ? err : new Error(describeReason(err)), true);
         return;
       }
       if (paused && pending.length < Math.ceil(queueLimit / 2)) {

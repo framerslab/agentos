@@ -1270,10 +1270,14 @@ export interface Agent {
   /** Releases all in-memory state held by this agent. */
   close(): Promise<void>;
   /**
-   * Starts an HTTP server exposing the agent over a REST / SSE interface.
-   * Present on agency instances only.
+   * Starts a loopback WebSocket listener on 127.0.0.1 that exchanges JSON text:
+   * `{ "text": "..." }` in, `{ "text": "..." }` out, one request at a time per
+   * connection. It performs no speech recognition or synthesis; a binary frame
+   * receives an `audio_not_supported` error and close code 1003. Present on
+   * agency instances created with `voice: { enabled: true }`. Spoken calls use
+   * `VoiceSessionFactory`.
    *
-   * @param opts - Server options including optional port.
+   * @param opts - Listener options; port 0, the default, picks a free port.
    * @returns Resolves to the bound port, URL, and a `close()` teardown function.
    */
   listen?(opts?: {

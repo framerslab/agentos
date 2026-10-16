@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { DestinationRefusedError, httpsSend, isPublicAddress, OutboxDispatcher, type DeliveryRequest } from '../delivery.js';
+import { DestinationRefusedError, httpsSend, isPublicAddress, OutboxDispatcher, type DeliveryRequest, type MailOutcome } from '../delivery.js';
 import { FakeClock, InMemoryOutbox } from '../stores/memory.js';
+import type { IOutbox } from '../stores/types.js';
 import { verifyEnvelope } from '../signing.js';
 import { harness } from './manager-harness.js';
 
@@ -221,5 +222,104 @@ describe('OutboxDispatcher', () => {
     // a content delivery the purge emptied sends its ids alone
     expect(bodies.get(chat.eventId)).toEqual({ id: chat.eventId, type: 'bot:purged', runId });
     expect(JSON.stringify([...bodies.values()])).not.toContain('we start at nine');
+  });
+});
+
+describe('mail deliveries', () => {
+  const mail = (id: string, ref: string, expiresAt = 10_000_000) => ({ id, runId: 'r1', destinationRef: ref, eventId: 'r1:notes', type: 'bot:done' as const, payload: 'sealed', kind: 'mail' as const, expiresAt });
+
+  it('hands a mail delivery to the mail option and records each outcome', async () => {
+    const outbox = new InMemoryOutbox();
+    const clock = new FakeClock(1_000);
+    const warned: string[] = [];
+    const answers: Record<string, MailOutcome> = { 'mail:1': { outcome: 'sent' }, 'mail:2': { outcome: 'dead' }, 'mail:3': { outcome: 'hold', notBefore: 50_000 }, 'mail:4': { outcome: 'retry' }, 'mail:5': { outcome: 'unknown' } };
+    const dispatcher = new OutboxDispatcher({ outbox, clock, resolve: async () => undefined, send: async () => ({ status: 500 }), mail: async (d) => answers[d.destinationRef]!, logger: { warn: (m) => warned.push(m) } });
+    for (const ref of ['mail:1', 'mail:2', 'mail:3', 'mail:4', 'mail:5']) await outbox.enqueue(mail(ref, ref), 1_000);
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 1, failed: 3 });
+    const byRef = Object.fromEntries((await outbox.listByRun('r1')).map((d) => [d.destinationRef, d]));
+    expect(byRef['mail:1']).toMatchObject({ state: 'delivered', payload: '' });
+    expect(byRef['mail:2']).toMatchObject({ state: 'dead', payload: '' });
+    expect(byRef['mail:3']).toMatchObject({ state: 'pending', nextAt: 50_000, attempts: 0, payload: 'sealed' });
+    expect(byRef['mail:4']).toMatchObject({ state: 'pending', attempts: 1, payload: 'sealed' });
+    // an outcome the destination never answered ends the delivery, never tried again, and the warning says so by the id alone
+    expect(byRef['mail:5']).toMatchObject({ state: 'dead', payload: '' });
+    expect(warned).toEqual(['[OutboxDispatcher] mail:5: outcome unknown']);
+    expect((await outbox.due(9_999_999)).map((d) => d.id).sort()).toEqual(['mail:3', 'mail:4']);
+  });
+
+  it('an unknown outcome is never retried: held until its expiry where the outbox cannot end it, and a mail send needs an outbox with markDead', async () => {
+    const inner = new InMemoryOutbox();
+    const warned: string[] = [];
+    // an outbox whose markDead answers false (a wrapper over a store without it) and whose holdUntil records
+    const cannotEnd: IOutbox = {
+      enqueue: (d, now) => inner.enqueue(d, now), due: (now, limit) => inner.due(now, limit), markDelivered: (id) => inner.markDelivered(id),
+      markFailed: (id, now) => inner.markFailed(id, now), replay: (id, now) => inner.replay(id, now), purgeContent: (id) => inner.purgeContent(id),
+      listByRun: (id) => inner.listByRun(id), markDead: async () => false, holdUntil: (id, at) => inner.holdUntil(id, at),
+      endExpired: (now) => inner.endExpired(now), // the sweep is the store's own, as a wrapper passes it through
+    };
+    const clock = new FakeClock(1_000);
+    const dispatcher = new OutboxDispatcher({ outbox: cannotEnd, clock, resolve: async () => undefined, mail: async () => ({ outcome: 'unknown' }), logger: { warn: (m) => warned.push(m) } });
+    await inner.enqueue(mail('m1', 'mail:1', 50_000), 1_000);
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 0, failed: 0 });
+    expect((await inner.listByRun('r1'))[0]).toMatchObject({ state: 'pending', nextAt: 50_000, attempts: 0 });
+    expect(warned.some((m) => m.includes('held until its expiry'))).toBe(true);
+    clock.advance(49_000);
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 0, failed: 0 }); // at its expiry the sweep ends it: no second send
+    expect((await inner.listByRun('r1'))[0]).toMatchObject({ state: 'dead', payload: '' });
+    const { markDead: _dead, ...withoutMarkDead } = cannotEnd;
+    expect(() => new OutboxDispatcher({ outbox: withoutMarkDead, clock, resolve: async () => undefined, mail: async () => ({ outcome: 'sent' }) })).toThrow(/markDead/);
+    expect(() => new OutboxDispatcher({ outbox: withoutMarkDead, clock, resolve: async () => undefined })).not.toThrow();
+  });
+
+  it('a mail past its expiry is ended by the pass before anything is sent, its body emptied, and never handed to the mail option', async () => {
+    const outbox = new InMemoryOutbox();
+    const clock = new FakeClock(1_000);
+    const sent: string[] = [];
+    const dispatcher = new OutboxDispatcher({ outbox, clock, resolve: async () => undefined, mail: async (d) => { sent.push(d.destinationRef); return { outcome: 'sent' }; } });
+    await outbox.enqueue(mail('m1', 'mail:1', 5_000), 1_000);
+    await outbox.holdUntil('m1', 4_000); // a cap held it; by the next pass it has expired, and `due` would never return it again
+    await outbox.enqueue(mail('m2', 'mail:2', 100_000), 1_000);
+    clock.advance(5_000);
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 1, failed: 0 });
+    expect(sent).toEqual(['mail:2']);
+    expect((await outbox.listByRun('r1')).find((d) => d.id === 'm1')).toMatchObject({ state: 'dead', payload: '', attempts: 0 });
+  });
+
+  it('a mail delivery with no mail option, or one whose option throws, is marked failed for the backoff, and the warning names the id alone', async () => {
+    const outbox = new InMemoryOutbox();
+    const warned: string[] = [];
+    const clock = new FakeClock(1_000);
+    const none = new OutboxDispatcher({ outbox, clock, resolve: async () => undefined, logger: { warn: (m) => warned.push(m) } });
+    await outbox.enqueue(mail('m1', 'mail:1'), 1_000);
+    await none.deliverDue();
+    expect((await outbox.listByRun('r1'))[0]?.attempts).toBe(1);
+    clock.advance(1_000);
+    const throwing = new OutboxDispatcher({ outbox, clock, resolve: async () => undefined, mail: async () => { throw new Error('the address is secret'); }, logger: { warn: (m) => warned.push(m) } });
+    await outbox.replay('m1', 2_000);
+    await outbox.enqueue(mail('m2', 'mail:2'), 2_000);
+    await throwing.deliverDue();
+    expect((await outbox.listByRun('r1')).find((d) => d.id === 'm2')?.attempts).toBe(1);
+    expect(warned.length).toBeGreaterThanOrEqual(2);
+    expect(warned.every((m) => !m.includes('secret'))).toBe(true);
+  });
+
+  it('a mail that expired since the pass began is ended without a send, and the outcome is recorded inside the claim', async () => {
+    const outbox = new InMemoryOutbox();
+    const clock = new FakeClock(1_000);
+    const sent: string[] = [];
+    const dispatcher = new OutboxDispatcher({
+      outbox, clock, resolve: async () => undefined,
+      mail: async (d) => {
+        sent.push(d.destinationRef);
+        clock.advance(10_000); // the first send takes long enough for the second mail to expire
+        return { outcome: 'sent' };
+      },
+    });
+    await outbox.enqueue(mail('m1', 'mail:1', 100_000), 1_000);
+    await outbox.enqueue(mail('m2', 'mail:2', 5_000), 1_000);
+    expect(await dispatcher.deliverDue()).toEqual({ delivered: 1, failed: 1 });
+    expect(sent).toEqual(['mail:1']);
+    const byRef = Object.fromEntries((await outbox.listByRun('r1')).map((d) => [d.destinationRef, d.state]));
+    expect(byRef).toEqual({ 'mail:1': 'delivered', 'mail:2': 'dead' });
   });
 });

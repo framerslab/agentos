@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { harness } from './manager-harness.js';
+import { COMPLETION_HOOK_LEASE_MS } from '../MeetingManager.js';
 import { FencedError } from '../stores/types.js';
 import { MockMeetingBotProvider, mockEventContext } from '../providers/mock.js';
 
@@ -857,5 +858,149 @@ describe('an event on its way when the fence goes up', () => {
     expect(transcript).toBeDefined();
     expect(transcript?.data).toBeUndefined();
     expect((await h.stores.events.read(runId, 0)).find((e) => e.type === 'bot:transcript')).toMatchObject({ purged: true });
+  });
+});
+
+describe('the completion hook', () => {
+  /** A run in the call with its notice up and two turns stored. */
+  async function heard(h: ReturnType<typeof harness>, keep: 'none' | 'account') {
+    const r = await h.manager.sendBot({ ...h.request, keep, idempotencyKey: `hook-${keep}` });
+    const runId = r.ok ? r.run.runId : '';
+    await h.manager.tick();
+    await h.report(runId, 'joining');
+    await h.report(runId, 'in_call', { participantCount: 2 });
+    await h.report(runId, 'notice_posted');
+    await h.report(runId, 'monitor_heartbeat', {}, h.clock.now() + 1);
+    await h.stores.transcript.append({ runId, seq: 1, turnId: `${runId}:1`, at: 1, text: 'first' });
+    await h.stores.transcript.append({ runId, seq: 2, turnId: `${runId}:2`, at: 2, text: 'second' });
+    return runId;
+  }
+
+  it('runs before the scrub with every turn of a run not kept, and the run still ends done with nothing kept', async () => {
+    const seen: Array<{ runId: string; state: string; texts: string[] }> = [];
+    const h = harness({
+      beforeComplete: async (run, turns) => {
+        seen.push({ runId: run.runId, state: run.state, texts: turns.map((t) => t.text) });
+      },
+    });
+    const runId = await heard(h, 'none');
+    await h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    await h.manager.tick();
+    expect(seen).toEqual([{ runId, state: 'left', texts: ['first', 'second'] }]);
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
+  });
+
+  it('a hook that throws is logged by its name alone and the run still ends done', async () => {
+    const warned: string[] = [];
+    const h = harness({
+      beforeComplete: async () => {
+        throw new Error('the address is secret');
+      },
+      logger: { info: () => undefined, warn: (m) => warned.push(m), error: () => undefined },
+    });
+    const runId = await heard(h, 'account');
+    await h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(warned.some((m) => m.includes('beforeComplete') && m.includes(runId))).toBe(true);
+    expect(warned.every((m) => !m.includes('secret'))).toBe(true);
+  });
+
+  it('does not run for a run the stop phrase purged, nor for a run that failed before it was dispatched', async () => {
+    const calls: string[] = [];
+    const h = harness({ beforeComplete: async (run) => void calls.push(run.runId) });
+    const stopped = await heard(h, 'none');
+    await h.report(stopped, 'chat_message', { text: 'ok, STOP TAKING NOTES now', sender: 'Sam' });
+    await h.report(stopped, 'left', { reason: 'stopped_by_participant', seconds: 30 });
+    await h.report(stopped, 'done', { seconds: 30 });
+    await h.manager.tick();
+    expect((await h.stores.runs.get(stopped))?.purgedAt).toBeDefined();
+    const requested = await h.manager.sendBot({ ...h.request, idempotencyKey: 'hook-failed', joinAt: h.clock.now() + 3_600_000 });
+    const requestedId = requested.ok ? requested.run.runId : '';
+    expect(await h.manager.leaveBot(requestedId)).toBe(true);
+    await h.manager.tick();
+    expect((await h.stores.runs.get(requestedId))?.state).toBe('failed');
+    expect(calls).toEqual([]);
+  });
+
+  it('runs once when the cleanup after it fails and is tried again, and the run still ends done', async () => {
+    const calls: string[] = [];
+    const h = harness({ beforeComplete: async (run) => void calls.push(run.runId) });
+    const runId = await heard(h, 'account');
+    const deleteRoom = h.rooms.deleteRoom.bind(h.rooms);
+    let failed = false;
+    h.rooms.deleteRoom = async (name: string) => {
+      if (!failed) {
+        failed = true;
+        throw new Error('the room service is down');
+      }
+      await deleteRoom(name);
+    };
+    // the left report runs the cleanup itself: the step runs, the room's delete fails, and the run waits for the next tick
+    await h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    expect((await h.stores.runs.get(runId))).toMatchObject({ state: 'left', cleanupPending: true });
+    expect((await h.stores.runs.get(runId))?.completionHookAt).toBeDefined();
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(calls).toEqual([runId]);
+  });
+
+  it('runs once when a tick overlaps the report that ended the run: the tick leaves the run to the step, and the scrub comes after it', async () => {
+    const calls: string[] = [];
+    let begun!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { begun = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const h = harness({
+      beforeComplete: async (run) => {
+        calls.push(run.runId);
+        begun();
+        await gate; // the host's model takes its time
+      },
+    });
+    const runId = await heard(h, 'none');
+    const ended = h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    await started;
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))).toMatchObject({ state: 'left', cleanupPending: true });
+    expect((await h.stores.transcript.read(runId, 0)).map((t) => t.text)).toEqual(['first', 'second']);
+    release();
+    await ended;
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
+    expect(calls).toEqual([runId]);
+  });
+
+  it('a total a done report gives while the step runs is the one settled and kept', async () => {
+    let begun!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { begun = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const h = harness({ beforeComplete: async () => { begun(); await gate; } });
+    const runId = await heard(h, 'none');
+    const ended = h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    await started;
+    await h.report(runId, 'done', { seconds: 180 }); // its cleanup finds the step claimed and leaves its total on the row
+    expect((await h.stores.runs.get(runId))).toMatchObject({ state: 'left', reportedSeconds: 180 });
+    release();
+    await ended;
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reportedSeconds: 180, billedSeconds: 180 });
+    expect(h.entitlement.settled).toEqual([['res-1', 180]]);
+  });
+
+  it('a claim another cleanup left holds the step for the lease, and is taken over once it is that old', async () => {
+    const calls: string[] = [];
+    const h = harness({ beforeComplete: async (run) => void calls.push(run.runId) });
+    const runId = await heard(h, 'account');
+    // a claim written a moment ago by a process that stopped mid-step: this cleanup leaves the run to it
+    await h.stores.runs.update(runId, { completionHookClaimedAt: h.clock.now() - 1_000 });
+    await h.report(runId, 'left', { reason: 'ended', seconds: 120 });
+    expect((await h.stores.runs.get(runId))).toMatchObject({ state: 'left', cleanupPending: true });
+    expect(calls).toEqual([]);
+    h.clock.advance(COMPLETION_HOOK_LEASE_MS);
+    await h.manager.tick();
+    expect((await h.stores.runs.get(runId))?.state).toBe('done');
+    expect(calls).toEqual([runId]);
   });
 });

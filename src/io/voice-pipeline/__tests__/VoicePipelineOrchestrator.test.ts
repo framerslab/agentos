@@ -29,11 +29,43 @@
  * - A listener's rejection is reported from a promise of another realm or library as from a native one
  * - Of the audio chunks a transport refuses, the first of each reply is reported and the rest of that reply's
  *   are not, whatever order the replies' sends settle in; a refused control message is reported each time
+ * - A send refused with a value String() cannot print (an object without a prototype, a revoked proxy) is
+ *   reported, as is an 'error' listener that throws one, and nothing is left unhandled
+ * - A session takes speech from the first source it receives, the transport's audio or a client's transcripts;
+ *   what arrives from the other is dropped, and the drop is reported once
+ * - A session started on a detector an earlier session used hands its first final to the agent: no late final of
+ *   the earlier session's last turn is awaited
+ * - A detector the host hands to one session after another loses each session's listeners as it stops, and as a
+ *   start fails, with no listener-limit warning
+ * - On the HeuristicEndpointDetector, a backchannel is dropped only while the agent holds the floor: said while the
+ *   agent speaks, keyed by an item or not and whatever its trailing punctuation, or after the user's turn completed
+ *   and before the reply has a word; while the agent listens a lone one is the user's turn, after a statement as
+ *   after a question; a client's lone backchannel said while the agent speaks reaches the detector on its own, and
+ *   a detector without isBackchannel() gets every client final joined
+ * - A lone final that ends with a question mark, such as "Right?" after a statement, is the user's turn; the session
+ *   tells the detector the agent listens as it starts, so a lone "sure" as its first utterance is the user's turn
+ * - On the HeuristicEndpointDetector, a transcriber that sends each keyed final before its end of speech, as Deepgram
+ *   does and marks with beforeSpeechEnd, has every turn handed to the agent, the second one included
+ * - With the stock handlers, barge-in follows the user's speech as it grows: the handler is asked at its start and
+ *   every 100 ms while it lasts, with the speech so far, the reply's text and the audio sent. HardCut cancels once the
+ *   speech reaches minSpeechMs and lets a shorter sound go. SoftFade's pause holds the reply's audio, and the speech's
+ *   end decides: a final with words cancels the reply and becomes the user's turn, from the STT session or a client's
+ *   line, whether it comes before or after the end of speech, keyed by an item or not; a backchannel or no final
+ *   within 1,500 ms resumes the reply where it paused, and a reply whose synthesis completed during the pause ends
+ *   after the resume; a final with words that comes after the resume, while the reply plays, cuts it and becomes the
+ *   user's turn, and speech that starts after the resume pauses the reply again and resumes it on its own final.
+ *   SoftFade cancels at cancelMs before any final, and a stop during a pause leaves no timer behind.
+ *   falseInterruptionMs sets how long a pause waits for the final, from the end of speech: a final with words within
+ *   it cuts the reply though the handler answers it late, and the constructor refuses one that is not a finite number
+ *   of zero or more
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
+import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
+import { HardCutBargeinHandler } from '../HardCutBargeinHandler.js';
+import { SoftFadeBargeinHandler } from '../SoftFadeBargeinHandler.js';
 import type {
   AudioFrame,
   BargeinAction,
@@ -209,6 +241,15 @@ describe('VoicePipelineOrchestrator', () => {
     expect(orchestrator.state).toBe('idle');
   });
 
+  it('asks a transport that has readyForPlayback() to get ready as the session starts, and starts though that fails', async () => {
+    const readyForPlayback = vi.fn().mockRejectedValue(new Error('track not published'));
+    (transport as any).readyForPlayback = readyForPlayback;
+    await startSession();
+    expect(readyForPlayback).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+  });
+
   it('should transition to listening when startSession is called', async () => {
     await startSession();
     expect(orchestrator.state).toBe('listening');
@@ -297,6 +338,36 @@ describe('VoicePipelineOrchestrator', () => {
     );
   });
 
+  it('stays SPEAKING after flush_complete until a transport that reports its playout has played the reply out, and ends a reply whose wait fails', async () => {
+    let played!: () => void;
+    let failed!: (error: Error) => void;
+    (transport as any).waitForPlayout = vi
+      .fn()
+      .mockReturnValueOnce(new Promise<void>((resolve) => { played = resolve; }))
+      .mockReturnValueOnce(new Promise<void>((_resolve, reject) => { failed = reject; }));
+    await startSession();
+    endpoint.emit('turn_complete', makeTurnComplete());
+    await vi.advanceTimersByTimeAsync(0);
+
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('speaking');
+    expect(transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_done' }));
+    played();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'Hello world', durationMs: 0 });
+
+    // A wait that rejects ends the reply as one that resolves: the transport can no longer say when its audio stops.
+    endpoint.emit('turn_complete', makeTurnComplete());
+    await vi.advanceTimersByTimeAsync(0);
+    ttsSession.emit('flush_complete');
+    failed(new Error('track closed'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+    expect(transport.sendControl).toHaveBeenCalledTimes(6); // agent_thinking, agent_speaking and agent_done, twice
+  });
+
   /**
    * Validates barge-in: when speech_start is detected during SPEAKING,
    * the handler returns 'cancel', TTS is stopped, agent is aborted,
@@ -340,6 +411,8 @@ describe('VoicePipelineOrchestrator', () => {
 
   it('should reset endpoint detector after flush_complete to prepare for next turn', async () => {
     await startSession();
+    expect(endpoint.reset).toHaveBeenCalledWith('session'); // as the session started
+    vi.mocked(endpoint.reset).mockClear();
     endpoint.emit('turn_complete', makeTurnComplete());
     await vi.advanceTimersByTimeAsync(0);
 
@@ -710,6 +783,54 @@ describe('VoicePipelineOrchestrator', () => {
     }
   });
 
+  /**
+   * A transport can refuse a send with any value, and String() throws for some: an object without a prototype, and a
+   * revoked proxy, whose prototype cannot even be read. The refusal is still reported, as an Error that names the
+   * value's type, and so is an 'error' listener that throws such a value; neither becomes an unhandled rejection.
+   */
+  it.each([
+    ['an object without a prototype', (): unknown => Object.create(null)],
+    [
+      'a revoked proxy',
+      (): unknown => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      },
+    ],
+  ])('reports a send refused with %s, and an error listener that throws one, leaving nothing unhandled', async (_kind, unprintable) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      vi.mocked(transport.sendControl).mockRejectedValueOnce(unprintable());
+      await startSession();
+      const seen: Error[] = [];
+      orchestrator.on('error', () => {
+        throw unprintable();
+      });
+      orchestrator.on('error', (err: Error) => seen.push(err));
+
+      sttSession.emit('transcript', { text: 'hello', confidence: 0.9, words: [], isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBeInstanceOf(Error);
+      expect(seen[0].message).toBe('an unprintable object');
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
+        expect.stringMatching(/an unprintable object.*an 'error' listener failed: an unprintable object/),
+      ]);
+      expect(orchestrator.state).toBe('listening');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      warn.mockRestore();
+    }
+  });
+
   // --------------------------------------------------------------------------
   // Client transcripts: a client that transcribes on its own device
   // --------------------------------------------------------------------------
@@ -893,6 +1014,791 @@ describe('VoicePipelineOrchestrator', () => {
 
       expect(orchestrator.state).toBe('closed');
       expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  /**
+   * A session takes speech from one source, the first it receives: the transport's audio, which its STT session
+   * transcribes, or a client's transcript messages. With both, the endpoint detector would get two sets of speech
+   * edges and finals, and a client's final would replace the finals the STT session's transcripts hold. What arrives
+   * from the other source is dropped, and the first drop is reported.
+   */
+  it("should drop a client's transcripts in a session that received audio first, and report the drop once", async () => {
+    await startSession();
+    const errors: Error[] = [];
+    orchestrator.on('error', (err: Error) => errors.push(err));
+    const log = logDetector();
+
+    transport.emit('audio', makeFrame());
+    transport.emit('message', clientTranscript('1', 'Hello there.', true));
+    transport.emit('message', clientTranscript('2', 'Bye.', true));
+    transport.emit('audio', makeFrame());
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sttSession.pushAudio).toHaveBeenCalledTimes(2);
+    expect(log).toEqual([]); // no client line reached the detector
+    expect(errors.map((err) => err.message)).toEqual([expect.stringMatching(/^a client transcript was dropped/)]);
+    expect(orchestrator.state).toBe('listening');
+  });
+
+  it('should drop audio in a session that received a client transcript first, and report the drop once', async () => {
+    await startSession();
+    const errors: Error[] = [];
+    orchestrator.on('error', (err: Error) => errors.push(err));
+    const log = logDetector();
+
+    transport.emit('message', clientTranscript('1', 'Hello there.', true));
+    transport.emit('audio', makeFrame());
+    transport.emit('audio', makeFrame());
+    transport.emit('message', clientTranscript('2', 'Bye.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sttSession.pushAudio).not.toHaveBeenCalled();
+    expect(log).toEqual([
+      'vad speech_start',
+      'final Hello there.',
+      'vad speech_end',
+      'vad speech_start',
+      'final Hello there. Bye.',
+      'vad speech_end',
+    ]);
+    expect(errors.map((err) => err.message)).toEqual([expect.stringMatching(/^audio was dropped/)]);
+    expect(orchestrator.state).toBe('listening');
+  });
+
+  /**
+   * A host can hand one endpoint detector to one session after another. After a turn in which speech started, the
+   * heuristic detector drops the late final of that turn until speech ends again; the next session's STT session
+   * sends no final of the earlier session's turns, so its first final, which comes before its end of speech as one
+   * does under client commits, is an ordinary final of its own turn.
+   */
+  it("should hand a session's first final to its agent when an earlier session's last turn on the same detector had speech", async () => {
+    const detector = new HeuristicEndpointDetector();
+    const late = vi.fn();
+    detector.on('late_final', late);
+    const start = async (stt: ReturnType<typeof createMockSTTSession>, agent: IVoicePipelineAgentSession) => {
+      const pipeline = new VoicePipelineOrchestrator(makeConfig());
+      await pipeline.startSession(createMockTransport(), agent, {
+        streamingSTT: createMockSTT(stt),
+        streamingTTS: createMockTTS(createMockTTSSession()),
+        endpointDetector: detector,
+        bargeinHandler: createMockBargeinHandler(),
+      });
+      return pipeline;
+    };
+
+    const firstStt = createMockSTTSession();
+    const firstAgent = createMockAgentSession();
+    const first = await start(firstStt, firstAgent);
+    firstStt.emit('speech_start');
+    firstStt.emit('speech_end');
+    firstStt.emit('transcript', { text: 'Book a table for two.', confidence: 0.9, words: [], isFinal: true, itemId: 'item_A' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firstAgent.sendText).toHaveBeenCalledWith('Book a table for two.', expect.objectContaining({ endpointReason: 'punctuation' }));
+    await first.stopSession();
+
+    const secondStt = createMockSTTSession();
+    const secondAgent = createMockAgentSession();
+    const second = await start(secondStt, secondAgent);
+    secondStt.emit('transcript', { text: 'What about Friday?', confidence: 0.9, words: [], isFinal: true, itemId: 'item_B' });
+    secondStt.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(late).not.toHaveBeenCalled();
+    expect(secondAgent.sendText).toHaveBeenCalledWith('What about Friday?', expect.objectContaining({ endpointReason: 'punctuation' }));
+    await second.stopSession();
+  });
+
+  /**
+   * A host can hand one endpoint detector to one session after another. Each session removes the listeners it added
+   * to the detector when it stops, by `stopSession()` or by its transport closing, and when its start fails, so no
+   * closed session stays reachable from the detector and the detector's listeners do not pile up past Node's limit.
+   */
+  it('should remove the listeners it added to a detector the host hands to one session after another', async () => {
+    const detector = new HeuristicEndpointDetector();
+    const hostTurns = vi.fn();
+    detector.on('turn_complete', hostTurns);
+    const counts = () =>
+      Object.fromEntries(
+        ['turn_complete', 'error', 'backchannel_detected', 'late_final'].map((event) => [event, detector.listenerCount(event)]),
+      );
+    const before = counts();
+    const warnings: Error[] = [];
+    const onWarning = (warning: Error): void => {
+      warnings.push(warning);
+    };
+    process.on('warning', onWarning);
+    try {
+      for (let session = 0; session < 5; session++) {
+        const sessionTransport = createMockTransport();
+        const pipeline = new VoicePipelineOrchestrator(makeConfig());
+        await pipeline.startSession(sessionTransport, createMockAgentSession(), {
+          streamingSTT: createMockSTT(createMockSTTSession()),
+          streamingTTS: createMockTTS(createMockTTSSession()),
+          endpointDetector: detector,
+          bargeinHandler: createMockBargeinHandler(),
+        });
+        // A session stops by the host's call or by its transport closing.
+        if (session % 2 === 0) await pipeline.stopSession();
+        else sessionTransport.emit('close');
+        expect(pipeline.state).toBe('closed');
+      }
+      const failing = new VoicePipelineOrchestrator(makeConfig());
+      await expect(
+        failing.startSession(createMockTransport(), createMockAgentSession(), {
+          streamingSTT: { providerId: 'mock-stt', isStreaming: false, startSession: vi.fn().mockRejectedValue(new Error('no connection')) },
+          streamingTTS: createMockTTS(createMockTTSSession()),
+          endpointDetector: detector,
+          bargeinHandler: createMockBargeinHandler(),
+        }),
+      ).rejects.toThrow('no connection');
+      // Node hands a listener-limit warning to process 'warning' on the next tick.
+      await new Promise<void>((resolve) => process.nextTick(resolve));
+
+      expect(counts()).toEqual(before);
+      expect(detector.listeners('turn_complete')).toEqual([hostTurns]);
+      expect(warnings.map((warning) => warning.name)).not.toContain('MaxListenersExceededWarning');
+    } finally {
+      process.off('warning', onWarning);
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // Backchannels: the HeuristicEndpointDetector, told what the agent is doing
+  // --------------------------------------------------------------------------
+
+  /**
+   * Starts a session on a real HeuristicEndpointDetector, with an agent that answers every turn with `reply` and a
+   * barge-in handler that lets a reply go on while the user speaks. Gives the texts the agent is handed and the
+   * backchannels the detector reports.
+   */
+  async function startWithDetector(reply: string) {
+    const detector = new HeuristicEndpointDetector();
+    const backchannels: string[] = [];
+    detector.on('backchannel_detected', (event: { text: string }) => backchannels.push(event.text));
+    agentSession = createMockAgentSession([reply]);
+    await orchestrator.startSession(transport, agentSession, {
+      streamingSTT: createMockSTT(sttSession),
+      streamingTTS: createMockTTS(ttsSession),
+      endpointDetector: detector,
+      bargeinHandler: createMockBargeinHandler({ type: 'ignore' }),
+    });
+    const turns = (): string[] => vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text);
+    return { detector, backchannels, turns };
+  }
+
+  /**
+   * The user says `text`, as the STT session reports it: a start of speech, then the final and the end of speech, the
+   * end first for a final keyed by an item (OpenAI Realtime sends an utterance's final after its end of speech).
+   */
+  async function say(text: string, itemId?: string): Promise<void> {
+    const final = { text, confidence: 0.9, words: [], isFinal: true, ...(itemId ? { itemId } : {}) };
+    sttSession.emit('speech_start');
+    if (itemId) {
+      sttSession.emit('speech_end');
+      sttSession.emit('transcript', final);
+    } else {
+      sttSession.emit('transcript', final);
+      sttSession.emit('speech_end');
+    }
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  it('should drop an item-keyed backchannel said while the agent speaks, whatever its trailing punctuation', async () => {
+    const { detector, backchannels, turns } = await startWithDetector('It is booked.');
+    const detectorTurns = vi.fn();
+    detector.on('turn_complete', detectorTurns);
+    await say('Book a table for two.');
+    expect(orchestrator.state).toBe('speaking');
+
+    await say('Uh huh.', 'item_A');
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(backchannels).toEqual(['Uh huh.']);
+    expect(detectorTurns).toHaveBeenCalledOnce(); // the first turn: none ended on the backchannel
+    expect(turns()).toEqual(['Book a table for two.']);
+  });
+
+  it("should drop a backchannel said while the agent speaks, though the agent's last reply asked a question", async () => {
+    const { backchannels, turns } = await startWithDetector('Shall I book it?');
+    await say('Book a table for two.');
+    ttsSession.emit('flush_complete');
+    await say('Yes, for seven.');
+    expect(orchestrator.state).toBe('speaking');
+
+    await say('Sure.');
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(backchannels).toEqual(['Sure.']);
+    expect(turns()).toEqual(['Book a table for two.', 'Yes, for seven.']);
+  });
+
+  it("should drop a lone 'yeah' said after the user's turn completes and before the reply has a word, though the agent's last reply asked a question", async () => {
+    const { backchannels, turns } = await startWithDetector('Shall I book it?');
+    await say('Book a table for two.');
+    ttsSession.emit('flush_complete');
+    // The agent thinks before the first word of its next reply.
+    let speak = (): void => {};
+    const thinking = new Promise<void>((resolve) => {
+      speak = resolve;
+    });
+    vi.mocked(agentSession.sendText).mockReturnValueOnce({
+      [Symbol.asyncIterator]: async function* () {
+        await thinking;
+        yield 'It is booked.';
+      },
+    });
+    await say('Yes, for seven.');
+
+    // The floor is the agent's from the moment the user's turn completes.
+    await say('yeah');
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(backchannels).toEqual(['yeah']);
+
+    speak();
+    await vi.advanceTimersByTimeAsync(0);
+    ttsSession.emit('flush_complete');
+    expect(turns()).toEqual(['Book a table for two.', 'Yes, for seven.']);
+  });
+
+  it("should hand the agent a lone 'yeah' that answers a reply ending in a question", async () => {
+    const { backchannels, turns } = await startWithDetector('Shall I book it?');
+    await say('Book a table for two.');
+    ttsSession.emit('flush_complete');
+
+    await say('yeah');
+    // No terminal punctuation: the silence timeout ends the turn.
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(turns()).toEqual(['Book a table for two.', 'yeah']);
+    expect(backchannels).toEqual([]);
+  });
+
+  /**
+   * A backchannel is a response made while the other party holds the floor. Once the agent's reply has ended the user
+   * holds it, so a lone "okay" after a statement is the user's turn, a minimal one: what to answer is the agent's call.
+   */
+  it.each([
+    { said: 'okay', itemId: undefined },
+    { said: 'Uh huh.', itemId: 'item_A' },
+  ])('should hand the agent a lone $said said while it listens after a statement', async ({ said, itemId }) => {
+    const { backchannels, turns } = await startWithDetector('It is booked.');
+    await say('Book a table for two.');
+    ttsSession.emit('flush_complete');
+
+    await say(said, itemId);
+    // "okay" has no terminal punctuation: the silence timeout ends its turn.
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(turns()).toEqual(['Book a table for two.', said]);
+    expect(backchannels).toEqual([]);
+  });
+
+  it("should hand the agent a lone 'Right?' after a reply that asked no question: a question mark is never a backchannel", async () => {
+    const { backchannels, turns } = await startWithDetector('It is booked.');
+    await say('Book a table for two.');
+    ttsSession.emit('flush_complete');
+
+    await say('Right?');
+
+    expect(turns()).toEqual(['Book a table for two.', 'Right?']);
+    expect(backchannels).toEqual([]);
+  });
+
+  it("should read a backchannel by the agent's context from the session's first utterance", async () => {
+    const { backchannels, turns } = await startWithDetector('It is booked.');
+
+    // The session tells the detector the agent listens as it starts: a lone "sure" is the user's turn, which a
+    // detector told nothing would drop by its exact phrase.
+    await say('sure');
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(backchannels).toEqual([]);
+    expect(turns()).toEqual(['sure']);
+  });
+
+  it.each([
+    { after: 'a statement', reply: 'It is booked.' },
+    { after: 'a question', reply: 'Shall I book it?' },
+  ])(
+    "after $after, should hand the agent a client's lines 'I think we should', 'yeah' and 'go ahead' as one turn, its 'yeah' kept",
+    async ({ reply }) => {
+      const { backchannels, turns } = await startWithDetector(reply);
+      transport.emit('message', clientTranscript('1', 'Book a table for two.', true));
+      await vi.advanceTimersByTimeAsync(0);
+      ttsSession.emit('flush_complete');
+
+      // The agent listens: the user holds the floor, so a "yeah" in the user's own turn is words of that turn.
+      transport.emit('message', clientTranscript('2', 'I think we should', true));
+      transport.emit('message', clientTranscript('3', 'yeah', true));
+      transport.emit('message', clientTranscript('4', 'go ahead', true));
+      await vi.advanceTimersByTimeAsync(1_500);
+
+      expect(turns()).toEqual(['Book a table for two.', 'I think we should yeah go ahead']);
+      expect(backchannels).toEqual([]);
+    },
+  );
+
+  it("should drop a client's lone 'uh huh' line said while the agent speaks, and leave the agent's turns as they were", async () => {
+    const { backchannels, turns } = await startWithDetector('It is booked.');
+    transport.emit('message', clientTranscript('1', 'Book a table for two.', true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('speaking');
+
+    transport.emit('message', clientTranscript('2', 'uh huh', true));
+    await vi.advanceTimersByTimeAsync(1_500);
+    ttsSession.emit('flush_complete');
+
+    expect(backchannels).toEqual(['uh huh']);
+    expect(turns()).toEqual(['Book a table for two.']);
+  });
+
+  it('should join every client final for a detector without isBackchannel() or setAgentContext(), as before', async () => {
+    await startSession(); // the mock detector has neither
+    const log = logDetector();
+    endpoint.emit('turn_complete', makeTurnComplete());
+    await vi.advanceTimersByTimeAsync(0);
+    ttsSession.emit('flush_complete');
+
+    transport.emit('message', clientTranscript('2', 'I think we should', true));
+    transport.emit('message', clientTranscript('3', 'yeah', true));
+    transport.emit('message', clientTranscript('4', 'go ahead', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log).toEqual([
+      'reset',
+      'vad speech_start',
+      'final I think we should',
+      'vad speech_end',
+      'vad speech_start',
+      'final I think we should yeah',
+      'vad speech_end',
+      'vad speech_start',
+      'final I think we should yeah go ahead',
+      'vad speech_end',
+    ]);
+  });
+
+  // --------------------------------------------------------------------------
+  // Turns: a transcriber that sends each final before its end of speech
+  // --------------------------------------------------------------------------
+
+  /**
+   * The user says `text` as DeepgramStreamingSTT reports it: a start of speech, then the final, keyed by an item and
+   * marked `beforeSpeechEnd`, then the end of speech. Deepgram sends a segment's final before the end of speech of its
+   * utterance (`speech_final`), the other order from OpenAI Realtime's.
+   */
+  async function sayFinalFirst(text: string, itemId: string): Promise<void> {
+    sttSession.emit('speech_start');
+    sttSession.emit('transcript', { text, confidence: 0.9, words: [], isFinal: true, itemId, beforeSpeechEnd: true });
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  it('should hand the agent each turn of a transcriber that sends its keyed finals before their end of speech, as Deepgram does', async () => {
+    const { detector, turns } = await startWithDetector('It is booked.');
+    const late = vi.fn();
+    detector.on('late_final', late);
+
+    await sayFinalFirst('Book a table for two.', 'dg:1');
+    ttsSession.emit('flush_complete');
+    await sayFinalFirst('At seven tonight.', 'dg:2');
+
+    expect(turns()).toEqual(['Book a table for two.', 'At seven tonight.']);
+    expect(late).not.toHaveBeenCalled();
+  });
+
+  // --------------------------------------------------------------------------
+  // Barge-in: the stock handlers, asked as the user's speech grows
+  // --------------------------------------------------------------------------
+
+  /** One 100 ms chunk of the reply's audio, named by its text. */
+  function replyChunk(text: string): EncodedAudioChunk {
+    return { audio: Buffer.from([0]), format: 'opus', sampleRate: 24000, durationMs: 100, text };
+  }
+
+  /**
+   * A final transcript from the STT session, keyed by an item when `itemId` is given, and marked `beforeSpeechEnd` when
+   * `beforeSpeechEnd` is, as DeepgramStreamingSTT marks the finals it sends before their end of speech.
+   */
+  function sttFinal(text: string, itemId?: string, beforeSpeechEnd = false) {
+    return { text, confidence: 0.9, words: [], isFinal: true, ...(itemId ? { itemId } : {}), ...(beforeSpeechEnd ? { beforeSpeechEnd } : {}) };
+  }
+
+  /**
+   * Starts a session on a real HeuristicEndpointDetector and `handler`, hands the agent the user's turn "Book a table
+   * for two." and leaves it speaking its reply, "It is booked for two at seven.", whose first 100 ms chunk has been
+   * sent. The user speaks through the STT session's events, or, with `client`, through a client's transcript lines.
+   * Gives one log of the barge-in controls and the audio the transport was sent, the states the pipeline moves through
+   * from here, the user turns the orchestrator re-emitted and the backchannels the detector reported. The fake timers
+   * `beforeEach` installs fake `Date` too, the clock the orchestrator measures the user's speech with.
+   */
+  async function speakingWith(
+    handler: IBargeinHandler,
+    { config = {}, client = false }: { config?: Partial<VoicePipelineConfig>; client?: boolean } = {},
+  ) {
+    const detector = new HeuristicEndpointDetector();
+    const backchannels: string[] = [];
+    detector.on('backchannel_detected', (event: { text: string }) => backchannels.push(event.text));
+    const sent: string[] = [];
+    vi.mocked(transport.sendAudio).mockImplementation(async (chunk) => {
+      sent.push(`audio ${chunk.text}`);
+    });
+    vi.mocked(transport.sendControl).mockImplementation(async (message) => {
+      if (message.type === 'barge_in') sent.push(`barge_in ${message.action.type}`);
+    });
+    orchestrator = new VoicePipelineOrchestrator(makeConfig(config));
+    agentSession = createMockAgentSession(['It is booked for two at seven.']);
+    await orchestrator.startSession(transport, agentSession, {
+      streamingSTT: createMockSTT(sttSession),
+      streamingTTS: createMockTTS(ttsSession),
+      endpointDetector: detector,
+      bargeinHandler: handler,
+    });
+    const turns: string[] = [];
+    orchestrator.on('turn_complete', (event: TurnCompleteEvent) => turns.push(event.transcript));
+    if (client) {
+      transport.emit('message', clientTranscript('1', 'Book a table for two.', true));
+    } else {
+      sttSession.emit('speech_start');
+      sttSession.emit('transcript', sttFinal('Book a table for two.'));
+      sttSession.emit('speech_end');
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('speaking');
+    ttsSession.emit('audio', replyChunk('one'));
+    const states: string[] = [];
+    orchestrator.on('state_changed', (change: { to: string }) => states.push(change.to));
+    return { sent, states, turns, backchannels };
+  }
+
+  it('cancels the reply once the user has spoken over it for minSpeechMs, asking a stock HardCutBargeinHandler as the speech grows', async () => {
+    const handler = new HardCutBargeinHandler();
+    const asked = vi.spyOn(handler, 'handleBargein');
+    const { sent, states, turns } = await speakingWith(handler);
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(299);
+    expect(ttsSession.cancel).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(201); // 500 ms of speech
+    sttSession.emit('transcript', sttFinal('Make it three.'));
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Asked at the start and every 100 ms as the speech grew, each time with the speech so far, the reply's text and
+    // the audio sent, until the handler cancelled at its 300 ms.
+    expect(asked.mock.calls.map(([context]) => context)).toEqual(
+      [0, 100, 200, 300].map((speechDurationMs) => ({
+        speechDurationMs,
+        interruptedText: 'It is booked for two at seven.',
+        playedDurationMs: 100,
+      })),
+    );
+    expect(transport.sendControl).toHaveBeenCalledWith({ type: 'barge_in', action: { type: 'cancel', injectMarker: '[interrupted]' } });
+    expect(ttsSession.cancel).toHaveBeenCalledOnce();
+    expect(agentSession.abort).toHaveBeenCalledOnce();
+    expect(states.slice(0, 2)).toEqual(['interrupting', 'listening']);
+    expect(sent).toEqual(['audio one', 'barge_in cancel']);
+    // What the user said after the cancel is the user's turn.
+    expect(turns).toEqual(['Book a table for two.', 'Make it three.']);
+  });
+
+  it('lets the reply go on when the user speaks over it for less than minSpeechMs', async () => {
+    const { sent, states } = await speakingWith(new HardCutBargeinHandler());
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(100);
+    ttsSession.emit('audio', replyChunk('two'));
+    await vi.advanceTimersByTimeAsync(50);
+    sttSession.emit('speech_end'); // 150 ms of speech
+    await vi.advanceTimersByTimeAsync(0);
+    ttsSession.emit('audio', replyChunk('three'));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(sent).toEqual(['audio one', 'audio two', 'audio three']);
+    expect(ttsSession.cancel).not.toHaveBeenCalled();
+    expect(states).toEqual([]);
+  });
+
+  it('holds the reply on a pause, and resumes it where it paused when the speech was a backchannel', async () => {
+    const handler = new SoftFadeBargeinHandler();
+    const asked = vi.spyOn(handler, 'handleBargein');
+    const { sent, states, turns, backchannels } = await speakingWith(handler);
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(100); // the handler pauses at its 100 ms
+    ttsSession.emit('audio', replyChunk('two'));
+    await vi.advanceTimersByTimeAsync(300);
+    ttsSession.emit('audio', replyChunk('three'));
+    // The pause holds the audio that arrives: none of it is sent.
+    expect(sent).toEqual(['audio one', 'barge_in pause']);
+
+    sttSession.emit('transcript', sttFinal('uh huh'));
+    sttSession.emit('speech_end'); // 400 ms of speech
+    await vi.advanceTimersByTimeAsync(0);
+    ttsSession.emit('audio', replyChunk('four'));
+
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two', 'audio three', 'audio four']);
+    expect(transport.sendControl).toHaveBeenCalledWith({ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } });
+    expect(transport.sendControl).toHaveBeenCalledWith({ type: 'barge_in', action: { type: 'resume' } });
+    // The audio held during the pause was not played when the speech ended.
+    expect(asked.mock.lastCall?.[0]).toEqual({ speechDurationMs: 400, interruptedText: 'It is booked for two at seven.', playedDurationMs: 100 });
+    expect(states).toEqual([]); // speaking throughout
+    expect(backchannels).toEqual(['uh huh']);
+    expect(turns).toEqual(['Book a table for two.']);
+    ttsSession.emit('flush_complete');
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'It is booked for two at seven.', durationMs: 400 });
+  });
+
+  it('reports and drops a chunk the transport cannot play while a pause holds the reply, and resumes with the chunks it can play', async () => {
+    Object.defineProperty(transport, 'playbackFormat', { value: 'opus', configurable: true });
+    const handler = new SoftFadeBargeinHandler();
+    const { sent } = await speakingWith(handler);
+    const errors: Error[] = [];
+    orchestrator.on('error', (error: Error) => errors.push(error));
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(100); // the handler pauses at its 100 ms
+    ttsSession.emit('audio', replyChunk('two'));
+    ttsSession.emit('audio', { ...replyChunk('wrong'), format: 'mp3' });
+    ttsSession.emit('audio', replyChunk('three'));
+    // The pause holds what the transport can play; the chunk it cannot play is reported once and never held.
+    expect(sent).toEqual(['audio one', 'barge_in pause']);
+    expect(errors.map((error) => error.message)).toEqual(["the TTS provider 'mock-tts' sent mp3 audio, and the transport plays opus only"]);
+
+    sttSession.emit('transcript', sttFinal('uh huh'));
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two', 'audio three']);
+  });
+
+  it('resumes the reply held on a pause when no final comes within 1,500 ms of the end of speech', async () => {
+    const { sent, states, turns } = await speakingWith(new SoftFadeBargeinHandler());
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(400);
+    ttsSession.emit('audio', replyChunk('two'));
+    sttSession.emit('speech_end'); // a sound with no words: no final comes
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(sent).toEqual(['audio one', 'barge_in pause']);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two']);
+    expect(states).toEqual([]);
+    expect(turns).toEqual(['Book a table for two.']);
+  });
+
+  it('resumes the reply held on a pause after the falseInterruptionMs it is given when no final comes', async () => {
+    const { sent } = await speakingWith(new SoftFadeBargeinHandler(), { config: { falseInterruptionMs: 500 } });
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(400);
+    ttsSession.emit('audio', replyChunk('two'));
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(499);
+    expect(sent).toEqual(['audio one', 'barge_in pause']);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two']);
+  });
+
+  /** SoftFadeBargeinHandler's answers, each 10 ms after the ask, as a handler that awaits something answers. */
+  function lateSoftFade(): IBargeinHandler {
+    const softFade = new SoftFadeBargeinHandler();
+    return {
+      mode: 'soft-fade',
+      handleBargein: (context) =>
+        new Promise<BargeinAction>((resolve) => setTimeout(() => resolve(softFade.handleBargein(context)), 10)),
+    };
+  }
+
+  it('counts the wait for the final from the end of speech, however long the handler takes to answer', async () => {
+    const { sent } = await speakingWith(lateSoftFade());
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(400);
+    sttSession.emit('speech_end'); // answered 20 ms later
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(sent).toEqual(['audio one', 'barge_in pause']);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume']);
+  });
+
+  it('cuts the reply held on a pause when a final with words comes within falseInterruptionMs, though the handler answers late', async () => {
+    const { sent, turns } = await speakingWith(lateSoftFade());
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(400);
+    sttSession.emit('speech_end'); // the wait for its final ends 1,500 ms from now
+    await vi.advanceTimersByTimeAsync(1_495);
+    // The final's ask is still in flight when the wait ends.
+    sttSession.emit('transcript', sttFinal('Make it three.'));
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in cancel']);
+    expect(turns).toEqual(['Book a table for two.', 'Make it three.']);
+  });
+
+  it.each([
+    { order: 'without an item', itemId: undefined },
+    { order: 'keyed by an item', itemId: 'item_B' },
+  ])(
+    "cuts a reply that resumed when no final came within falseInterruptionMs, once the speech's final with words comes $order, and hands the words to the agent",
+    async ({ itemId }) => {
+      const { sent, states, turns } = await speakingWith(new SoftFadeBargeinHandler());
+
+      sttSession.emit('speech_start');
+      await vi.advanceTimersByTimeAsync(400);
+      ttsSession.emit('audio', replyChunk('two')); // held by the pause
+      sttSession.emit('speech_end');
+      await vi.advanceTimersByTimeAsync(1_600); // no final within 1,500 ms: the reply resumes
+      expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two']);
+
+      // The final comes late, while the resumed reply plays.
+      ttsSession.emit('audio', replyChunk('three'));
+      sttSession.emit('transcript', sttFinal('No, Tuesday.', itemId));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two', 'audio three', 'barge_in cancel']);
+      expect(ttsSession.cancel).toHaveBeenCalledOnce();
+      expect(agentSession.abort).toHaveBeenCalledOnce();
+      expect(states.slice(0, 2)).toEqual(['interrupting', 'listening']);
+      expect(turns).toEqual(['Book a table for two.', 'No, Tuesday.']);
+      expect(agentSession.sendText).toHaveBeenLastCalledWith('No, Tuesday.', expect.objectContaining({ endpointReason: 'punctuation' }));
+    },
+  );
+
+  it("pauses a resumed reply again when the user speaks again, and resumes it on that speech's own final", async () => {
+    const { sent, states } = await speakingWith(new SoftFadeBargeinHandler());
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(400);
+    sttSession.emit('speech_end'); // a sound with no words: no final comes
+    await vi.advanceTimersByTimeAsync(1_600); // the reply resumes, and listens on for that final
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume']);
+
+    sttSession.emit('speech_start'); // the user speaks again
+    await vi.advanceTimersByTimeAsync(100);
+    ttsSession.emit('audio', replyChunk('two')); // held by the new pause
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'barge_in pause']);
+
+    sttSession.emit('transcript', sttFinal('uh huh'));
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+    // The backchannel is this speech's final: the reply resumes at once, without waiting for the first sound's.
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'barge_in pause', 'barge_in resume', 'audio two']);
+    expect(states).toEqual([]);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])('refuses a falseInterruptionMs of %s', (falseInterruptionMs) => {
+    expect(() => new VoicePipelineOrchestrator(makeConfig({ falseInterruptionMs }))).toThrow(RangeError);
+  });
+
+  it.each([
+    { order: 'before its end of speech', text: 'wait, change that to three', itemId: undefined, finalFirst: true },
+    { order: 'before its end of speech, punctuated', text: 'Wait, change that to three.', itemId: undefined, finalFirst: true },
+    { order: 'before its end of speech, keyed by an item', text: 'wait, change that to three', itemId: 'item_B', finalFirst: true },
+    { order: 'after its end of speech, keyed by an item', text: 'wait, change that to three', itemId: 'item_B', finalFirst: false },
+  ])(
+    "cancels the reply held on a pause when the speech had words, its final $order, and hands them to the agent as the user's turn",
+    async ({ text, itemId, finalFirst }) => {
+      const { sent, states, turns } = await speakingWith(new SoftFadeBargeinHandler());
+
+      sttSession.emit('speech_start');
+      await vi.advanceTimersByTimeAsync(900);
+      ttsSession.emit('audio', replyChunk('two')); // held by the pause
+      if (finalFirst) {
+        // Deepgram sends a keyed final before the end of speech of its utterance, and marks it so.
+        sttSession.emit('transcript', sttFinal(text, itemId, itemId !== undefined));
+        sttSession.emit('speech_end');
+      } else {
+        // OpenAI Realtime sends an utterance's final after its end of speech.
+        sttSession.emit('speech_end');
+        sttSession.emit('transcript', sttFinal(text, itemId));
+      }
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in cancel']);
+      expect(ttsSession.cancel).toHaveBeenCalledOnce();
+      expect(agentSession.abort).toHaveBeenCalledOnce();
+      expect(states.slice(0, 2)).toEqual(['interrupting', 'listening']);
+      // Without terminal punctuation, the detector's silence timeout ends the user's turn.
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(turns).toEqual(['Book a table for two.', text]);
+      expect(agentSession.sendText).toHaveBeenLastCalledWith(text, expect.objectContaining({ endpointReason: text.endsWith('.') ? 'punctuation' : 'silence_timeout' }));
+      // The audio held by the pause was never sent.
+      expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in cancel']);
+    },
+  );
+
+  it('cancels the reply held on a pause once the speech reaches cancelMs, before its final', async () => {
+    const { sent, states, turns } = await speakingWith(new SoftFadeBargeinHandler());
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(sent).toEqual(['audio one', 'barge_in pause']);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in cancel']);
+    expect(transport.sendControl).toHaveBeenCalledWith({ type: 'barge_in', action: { type: 'cancel', injectMarker: '[interrupted]' } });
+    expect(states).toEqual(['interrupting', 'listening']);
+
+    await vi.advanceTimersByTimeAsync(500);
+    sttSession.emit('transcript', sttFinal('No, I said a table for three.'));
+    sttSession.emit('speech_end'); // 2,500 ms of speech
+    await vi.advanceTimersByTimeAsync(0);
+    expect(turns).toEqual(['Book a table for two.', 'No, I said a table for three.']);
+  });
+
+  it('ends a reply whose synthesis completed during a pause after the resume has sent its held audio', async () => {
+    const { sent, states } = await speakingWith(new SoftFadeBargeinHandler());
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(200);
+    ttsSession.emit('audio', replyChunk('two'));
+    ttsSession.emit('flush_complete'); // the last of the reply's audio is held by the pause
+    expect(orchestrator.state).toBe('speaking');
+
+    sttSession.emit('transcript', sttFinal('Mm hmm.'));
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two']);
+    expect(states).toEqual(['listening']);
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'It is booked for two at seven.', durationMs: 200 });
+  });
+
+  it("measures a client's line said over the reply, and hands its words to the agent when they cancel the reply", async () => {
+    const { sent, turns } = await speakingWith(new SoftFadeBargeinHandler(), { client: true });
+
+    transport.emit('message', clientTranscript('9', 'wait', false));
+    await vi.advanceTimersByTimeAsync(600);
+    ttsSession.emit('audio', replyChunk('two')); // held by the pause
+    transport.emit('message', clientTranscript('9', 'Wait, change that to three.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in cancel']);
+    expect(turns).toEqual(['Book a table for two.', 'Wait, change that to three.']);
+  });
+
+  it.each(['stopSession()', 'a transport close'] as const)(
+    'leaves no timer of a pause behind on %s, and sends nothing after it',
+    async (stop) => {
+      const { sent } = await speakingWith(new SoftFadeBargeinHandler());
+      sttSession.emit('speech_start');
+      await vi.advanceTimersByTimeAsync(400);
+      ttsSession.emit('audio', replyChunk('two'));
+      sttSession.emit('speech_end'); // the pause waits for the speech's final
+      await vi.advanceTimersByTimeAsync(0);
+
+      if (stop === 'stopSession()') await orchestrator.stopSession('done');
+      else transport.emit('close');
+
+      expect(orchestrator.state).toBe('closed');
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(sent).toEqual(['audio one', 'barge_in pause']);
     },
   );
 });

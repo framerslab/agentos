@@ -23,13 +23,16 @@ export interface CompositeMeetingEntitlementOptions {
   supplierDailyCapMicro(): number;
   /** Resolves the original block policy, not the current subscription's preferred source. */
   blocks(snapshot: Extract<MeetingFundingSnapshot, { fundingMode: 'bot_blocks' }>): MeetingBlockEntitlement;
-  /** Checks active account/scope, caller permission, original tariff eligibility and supplier capacity. */
+  /**
+   * Checks active account/scope, caller permission, original tariff eligibility and supplier capacity. Handed a copy
+   * of the run as the store holds it when asked: an allocation link this class has just recovered is on it.
+   */
   check(run: MeetingRunRecord, phase: MeetingFundingPhase): Promise<DispatchAllowance>;
   /**
    * Idempotently prevents dispatch/re-dispatch, closes media and inference, and supplies final metered
    * media duration. A never-dispatched run still needs a positive dispatch fence under the owner lock.
    * A kill request, terminal state, elapsed lease or missing worker is not positive evidence.
-   * Return false fence flags while termination or final usage remains unknown.
+   * Return false fence flags while termination or final usage remains unknown. Handed a copy of the run as `check` is.
    */
   close(run: MeetingRunRecord): Promise<{ connectedMs: number; fence: CallFence }>;
 }
@@ -84,7 +87,11 @@ export class CompositeMeetingEntitlement implements IEntitlementHook {
       backend = hold?.holdId;
     }
     if (run.fundingReservationId !== undefined && backend !== run.fundingReservationId) throw new Error('funding allocation missing or changed');
-    if (backend !== undefined && run.fundingReservationId === undefined) await this.link(run.runId, backend);
+    if (backend !== undefined && run.fundingReservationId === undefined) {
+      await this.link(run.runId, backend);
+      // a caller may hand this run to the host's check or close next: it carries the link the store now holds
+      run.fundingReservationId = backend;
+    }
     return backend;
   }
   /** The legacy method is supported only for an already persisted, snapshotted run. */

@@ -1,4 +1,5 @@
 import type { Span } from '@opentelemetry/api';
+import { isContentSafeTelemetryEnabled } from '../core/logging/contentSafeTelemetry.js';
 
 export interface ApiUsageLike {
   promptTokens?: number;
@@ -14,8 +15,15 @@ export interface ApiUsageLike {
   inclusiveInputTokens?: number;
 }
 
+/**
+ * Sets the `llm.usage.*` attributes (prompt, completion and total tokens, and cost) on a high-level API span. Does
+ * nothing without a span or usage, or while content-safe telemetry is on.
+ *
+ * @param span - The span, or null.
+ * @param usage - The call's usage.
+ */
 export function attachUsageAttributes(span: Span | null, usage?: ApiUsageLike | null): void {
-  if (!span || !usage) return;
+  if (isContentSafeTelemetryEnabled() || !span || !usage) return;
 
   if (typeof usage.promptTokens === 'number') {
     span.setAttribute('llm.usage.prompt_tokens', usage.promptTokens);
@@ -106,9 +114,11 @@ export interface GenAiSpanInfo {
  * `gen_ai.usage.input_tokens` reads the normalized inclusive input total
  * (cached tokens included per the semconv contract) — never a provider-raw
  * prompt count.
+ *
+ * Does nothing while content-safe telemetry is on.
  */
 export function attachGenAiAttributes(span: Span | null, info: GenAiSpanInfo): void {
-  if (!span) return;
+  if (isContentSafeTelemetryEnabled() || !span) return;
   span.setAttribute('gen_ai.provider.name', info.providerName);
   span.setAttribute('gen_ai.operation.name', info.operationName);
   span.setAttribute('gen_ai.request.model', info.requestModel);

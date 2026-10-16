@@ -23,6 +23,7 @@ import {
 } from '../IProvider';
 import { sha256Hex } from '../../../utils/sha256';
 import { OpenAIProvider } from './OpenAIProvider';
+import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
 /** Mistral accepts only tool call ids made of nine letters and digits. */
 const MISTRAL_TOOL_CALL_ID = /^[A-Za-z0-9]{9}$/;

@@ -74,7 +74,10 @@ export class CallTransportBinding extends EventEmitter implements IPlaybackTrans
       await this.options.authorize(tx, s, binding);
     });
   }
-  /** Authenticates, fences an old connection and binds one replacement without changing worker or call identity. */
+  /**
+   * Authenticates, fences an old connection and binds one replacement without changing worker or call identity. A
+   * generation the pipeline records for the new epoch while the attachment completes stays the binding's fence.
+   */
   async reattach(input: CallAttachment): Promise<void> {
     if (this.busy || this.detaching) throw new Error('binding busy');
     if (this.terminal || input.participantId !== this.options.participantId || input.transportEpoch <= this.current.transportEpoch || input.physical.state !== 'open') throw new Error('attachment refused');
@@ -114,7 +117,9 @@ export class CallTransportBinding extends EventEmitter implements IPlaybackTrans
       if (lost || this.terminal || physical.state !== 'open') throw new Error('attachment refused');
       await this.options.manager.connected(this.options.scopeId, this.options.callId, this.options.workerGeneration, epoch);
       if (lost || this.terminal || physical.state !== 'open') throw new Error('attachment refused');
-      this.current = generation; this.attached = true; this.emit('open');
+      // A turn or interruption the pipeline recorded for this epoch meanwhile is newer than the snapshot it started from.
+      if (this.current.transportEpoch !== epoch || this.current.inferenceGeneration < generation.inferenceGeneration) this.current = generation;
+      this.attached = true; this.emit('open');
     } catch (error) {
       if (consumed) await this.end('transport_failure');
       throw error;

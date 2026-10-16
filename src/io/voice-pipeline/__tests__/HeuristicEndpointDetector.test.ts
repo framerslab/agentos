@@ -11,6 +11,9 @@
  * - Correct transcript text and confidence are carried in the turn_complete event
  * - Backchannel phrases are detected, suppressed from accumulation, and emitted separately
  * - Backchannel matching is case-insensitive and whitespace-tolerant
+ * - Once an agent context is set, a backchannel said while the agent holds the floor is recognized whatever its
+ *   trailing punctuation (. , ! and the ellipsis), and a final that ends with a question mark, after any spaces or
+ *   other punctuation, is never one
  * - Silence timeout fallback fires turn_complete with reason 'silence_timeout'
  * - No turn_complete fires without accumulated text
  * - No turn_complete fires for interim (non-final) transcripts
@@ -20,6 +23,15 @@
  * - An item final that comes before its end of speech, and one left over from a completed turn, reported as late_final,
  *   also when it arrives while the transcriber reports the next utterance; a standalone VAD's start of speech ends
  *   that window
+ * - A final its provider marks beforeSpeechEnd, as Deepgram sends each final before its end of speech: never a late
+ *   final, after a completed turn or after a reset while its speech was spoken, and paired with its own end of
+ *   speech, not with an earlier one that a sound with no words left waiting
+ * - Each late_final listener gets the final when one before it throws; the throw is written as a console warning
+ * - By the agent's context (setAgentContext()): a backchannel is dropped only while the agent holds the floor, and
+ *   while the agent listens a lone one is the user's turn whatever its last reply asked, keyed by an item or not;
+ *   isBackchannel() answers by the same rule; a turn's end keeps the context
+ * - Until a context is set, and again after a reset for a new session, a backchannel is its exact phrase, trimmed
+ *   and lowercased, dropped whatever the agent is doing, keyed by an item or not, as before the context existed
  *
  * The silence_timeout cases use a 100 ms detector instance and a short
  * setTimeout await -- fast enough for CI while remaining deterministic. The
@@ -28,7 +40,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
-import type { TranscriptEvent, VadEvent } from '../types.js';
+import type { TranscriptEvent, TurnCompleteEvent, VadEvent } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,6 +69,15 @@ function itemFinal(text: string, itemId: string, startMs?: number): TranscriptEv
 /** Build a speech event the transcriber reported, as the orchestrator forwards it. */
 function transcriberSpeech(type: 'speech_start' | 'speech_end'): VadEvent {
   return { type, timestamp: Date.now(), source: 'stt' };
+}
+
+/**
+ * Build a final keyed by item that its provider sends before the end of speech of the utterance it transcribes, and
+ * marks so, as DeepgramStreamingSTT marks every result.
+ */
+function finalBeforeSpeechEnd(text: string, itemId: string): TranscriptEvent {
+  const final = { ...itemFinal(text, itemId), beforeSpeechEnd: true };
+  return final;
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +248,49 @@ describe('HeuristicEndpointDetector', () => {
     detector.pushTranscript(transcript('  Uh Huh  '));
     expect(handler).toHaveBeenCalledOnce();
   });
+
+  /**
+   * Providers punctuate a backchannel differently: once a caller sets the agent's context, as the orchestrator does
+   * at a session's start, the phrase is read trimmed, lowercased and without trailing punctuation (. , ! and the
+   * ellipsis), so each of these, said while the agent holds the floor, is one, as "yeah" is.
+   */
+  it.each(['Sure.', 'Yeah!', 'Uh huh,', 'Right...', 'Mm hmm\u2026', 'Yep !'])(
+    'should detect %j as a backchannel phrase, whatever its trailing punctuation, once the agent context is set',
+    (text) => {
+      const backchannel = vi.fn();
+      const turn = vi.fn();
+      detector.on('backchannel_detected', backchannel);
+      detector.on('turn_complete', turn);
+      detector.setAgentContext({ speaking: true, askedQuestion: false });
+
+      detector.pushTranscript(transcript(text));
+      detector.pushVadEvent(speechEnd());
+
+      expect(backchannel).toHaveBeenCalledWith({ text });
+      expect(turn).not.toHaveBeenCalled();
+    },
+  );
+
+  /**
+   * A question mark is never stripped: a final that ends with one, after any spaces or other trailing punctuation,
+   * asks something, so it is the user's turn and not an acknowledgement, even said while the agent holds the floor.
+   */
+  it.each(['Okay?', 'Right?!', 'Yeah ?'])(
+    'should not take %j, which ends with a question mark, for a backchannel phrase',
+    (text) => {
+      const backchannel = vi.fn();
+      const turn = vi.fn();
+      detector.on('backchannel_detected', backchannel);
+      detector.on('turn_complete', turn);
+      detector.setAgentContext({ speaking: true, askedQuestion: false });
+
+      detector.pushTranscript(transcript(text));
+      detector.pushVadEvent(speechEnd());
+
+      expect(backchannel).not.toHaveBeenCalled();
+      expect(turn).toHaveBeenCalledWith(expect.objectContaining({ transcript: text, reason: 'punctuation' }));
+    },
+  );
 
   // -------------------------------------------------------------------------
   // Silence timeout fallback
@@ -677,5 +741,213 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
 
     expect(handler).toHaveBeenCalledOnce();
     expect(handler.mock.calls[0][0].transcript).toBe('Stop, I meant Friday.');
+  });
+
+  it('hands a late final to every late_final listener when one throws, and throws nothing into the code that pushed it', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const kept = vi.fn();
+      detector.on('late_final', () => {
+        throw new Error('a listener failed');
+      });
+      detector.on('late_final', kept);
+
+      detector.pushVadEvent(transcriberSpeech('speech_start'));
+      detector.pushVadEvent(transcriberSpeech('speech_end'));
+      detector.pushTranscript(itemFinal('Book a table for two.', 'item_A', 0)); // ends the turn, and the reset with it
+
+      const slow = itemFinal('At seven tonight.', 'item_B', 1_300);
+      expect(() => detector.pushTranscript(slow)).not.toThrow();
+      expect(kept).toHaveBeenCalledOnce();
+      expect(kept.mock.calls[0][0]).toBe(slow);
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([expect.stringContaining('a listener failed')]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the final of each turn that its provider sends before the end of speech, as Deepgram does, so no turn after the first is taken for a late final', () => {
+    const handler = vi.fn();
+    const late = vi.fn();
+    detector.on('turn_complete', handler);
+    detector.on('late_final', late);
+
+    for (const [text, itemId] of [
+      ['Book a table for two.', 'dg:1'],
+      ['At seven tonight.', 'dg:2'],
+      ['Thank you.', 'dg:3'],
+    ]) {
+      detector.pushVadEvent(transcriberSpeech('speech_start'));
+      detector.pushTranscript(finalBeforeSpeechEnd(text, itemId));
+      detector.pushVadEvent(transcriberSpeech('speech_end'));
+      detector.reset(); // as the orchestrator does once the reply has played
+    }
+
+    expect(handler.mock.calls.map(([event]) => [event.transcript, event.reason])).toEqual([
+      ['Book a table for two.', 'punctuation'],
+      ['At seven tonight.', 'punctuation'],
+      ['Thank you.', 'punctuation'],
+    ]);
+    expect(late).not.toHaveBeenCalled();
+  });
+
+  it("keeps a final its provider sends before its end of speech when a reset came while that speech was spoken, as a barge-in's cut makes one", () => {
+    const handler = vi.fn();
+    const late = vi.fn();
+    detector.on('turn_complete', handler);
+    detector.on('late_final', late);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.reset(); // as the orchestrator does when a barge-in cuts the reply
+    detector.pushTranscript(finalBeforeSpeechEnd('No, make it eight.', 'dg:2'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+
+    expect(late).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toMatchObject({ transcript: 'No, make it eight.', reason: 'punctuation' });
+  });
+
+  it('pairs a final its provider sends before its end of speech with that end of speech, not with an earlier one a sound with no words left waiting', () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    // A sound the provider found no words in: its end of speech gets no final.
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    vi.advanceTimersByTime(600);
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(finalBeforeSpeechEnd('Book a table for two.', 'dg:1'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+
+    // The sound's end of speech holds the turn until the silence timeout counted from it, and no longer.
+    vi.advanceTimersByTime(399);
+    expect(handler).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toMatchObject({ transcript: 'Book a table for two.', reason: 'punctuation' });
+  });
+});
+
+describe("HeuristicEndpointDetector: backchannels by the agent's context", () => {
+  let detector: HeuristicEndpointDetector;
+  let turns: string[];
+  let backchannels: string[];
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    detector = new HeuristicEndpointDetector({ silenceTimeoutMs: 1_000 });
+    turns = [];
+    backchannels = [];
+    detector.on('turn_complete', (event: TurnCompleteEvent) => turns.push(event.transcript));
+    detector.on('backchannel_detected', (event: { text: string }) => backchannels.push(event.text));
+  });
+
+  afterEach(() => {
+    detector.reset();
+    vi.useRealTimers();
+  });
+
+  it('keeps a lone backchannel that answers a question, keyed by an item or not, as a turn that completes at its end of speech', () => {
+    detector.setAgentContext({ speaking: false, askedQuestion: true });
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(transcript('yeah'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    vi.advanceTimersByTime(1_000); // no terminal punctuation: the silence timeout ends the turn
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('Sure.', 'item_A', 0));
+
+    expect(turns).toEqual(['yeah', 'Sure.']);
+    expect(backchannels).toEqual([]);
+  });
+
+  it('drops a backchannel while the agent speaks, keyed by an item or not, whatever its last reply asked', () => {
+    detector.setAgentContext({ speaking: true, askedQuestion: true });
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(transcript('Okay!'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('uh huh', 'item_A', 0));
+    vi.advanceTimersByTime(1_000);
+
+    expect(backchannels).toEqual(['Okay!', 'uh huh']);
+    expect(turns).toEqual([]);
+  });
+
+  it("answers isBackchannel() by the same rule: the exact phrase until a context is set, then the reading while the agent holds the floor and nothing while it listens, by a context a turn's end keeps and a session's start unsets", () => {
+    // Before any report: the whole text, trimmed and lowercased, is a phrase, whatever the agent is doing.
+    expect(detector.isBackchannel(' Sure ')).toBe(true);
+    expect(detector.isBackchannel('Sure.')).toBe(false);
+    expect(detector.isBackchannel('Sure thing.')).toBe(false);
+
+    // The agent holds the floor: the phrase without its trailing punctuation, whatever the agent's last reply asked.
+    detector.setAgentContext({ speaking: true, askedQuestion: true });
+    expect(detector.isBackchannel('Sure.')).toBe(true);
+    expect(detector.isBackchannel('Mm-hmm...')).toBe(true);
+    // A question mark is never stripped, after spaces or other punctuation either.
+    expect(detector.isBackchannel('Sure?')).toBe(false);
+    expect(detector.isBackchannel('Sure? ')).toBe(false);
+    expect(detector.isBackchannel('Sure?!')).toBe(false);
+    expect(detector.isBackchannel('Mm-hmm?')).toBe(false);
+    detector.reset();
+    expect(detector.isBackchannel('Sure.')).toBe(true);
+
+    // The agent listens: the user holds the floor, so no final is a backchannel, after a statement or a question.
+    detector.setAgentContext({ speaking: false, askedQuestion: false });
+    expect(detector.isBackchannel('sure')).toBe(false);
+    expect(detector.isBackchannel('Uh huh.')).toBe(false);
+    detector.setAgentContext({ speaking: false, askedQuestion: true });
+    expect(detector.isBackchannel('sure')).toBe(false);
+    detector.reset();
+    expect(detector.isBackchannel('sure')).toBe(false);
+
+    detector.reset('session');
+    expect(detector.isBackchannel('Sure.')).toBe(false);
+    expect(detector.isBackchannel('sure')).toBe(true);
+  });
+
+  it('drops only the exact phrase until a context is set, drops "Sure." once one is, and only the exact phrase again after a reset for a new session', () => {
+    // No context set, as before the context existed: "sure" is a backchannel, and "Sure." is the user's turn.
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(transcript('sure'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(transcript('Sure.'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    expect(backchannels).toEqual(['sure']);
+    expect(turns).toEqual(['Sure.']);
+
+    // Once a context is set, "Sure." is a backchannel too.
+    detector.setAgentContext({ speaking: true, askedQuestion: false });
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(transcript('Sure.'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    vi.advanceTimersByTime(1_000);
+    expect(backchannels).toEqual(['sure', 'Sure.']);
+    expect(turns).toEqual(['Sure.']);
+
+    // A reset for a new session unsets the context: "Sure." is the user's turn again.
+    detector.reset('session');
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(transcript('Sure.'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    expect(backchannels).toEqual(['sure', 'Sure.']);
+    expect(turns).toEqual(['Sure.', 'Sure.']);
+  });
+
+  it('drops an item-keyed final by its exact phrase while no context is set, and keeps "Uh huh." as the turn, as before', () => {
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('uh huh', 'item_A', 0));
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    detector.pushTranscript(itemFinal('Uh huh.', 'item_B', 1_000));
+
+    expect(backchannels).toEqual(['uh huh']);
+    expect(turns).toEqual(['Uh huh.']);
   });
 });

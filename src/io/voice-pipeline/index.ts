@@ -21,7 +21,7 @@
  * ## Built-in Providers
  *
  * **STT (Speech-to-Text):**
- * - {@link DeepgramStreamingSTT} — WebSocket streaming via Deepgram Nova-2. Lowest latency.
+ * - {@link DeepgramStreamingSTT}: WebSocket streaming via Deepgram Nova-3. Lowest latency.
  * - {@link ElevenLabsStreamingSTT} — Chunked REST via ElevenLabs Scribe. Uses same key as TTS.
  * - {@link OpenAIRealtimeTranscriptionSTT}: WebSocket streaming via OpenAI's Realtime API in transcription mode, keyed by item id, with a connection rollover for long sessions.
  * - {@link MoonshineBrowserSTT}: Moonshine's streaming models on the user's own device, in the browser through WebAssembly; also in `@framers/agentos/io/voice-pipeline/browser`.
@@ -274,4 +274,32 @@ export {
   type SttChainVendor,
   type SttEntry,
 } from './env-constructor.js';
-export { DEEPGRAM_STREAMING_PRICING, deepgramStreamingPricing } from './providers/deepgramPricing.js';
+export {
+  DEEPGRAM_PRE_RECORDED_PRICING,
+  DEEPGRAM_STREAMING_PRICING,
+  deepgramPreRecordedPricing,
+  deepgramStreamingPricing,
+} from './providers/deepgramPricing.js';
+
+// Price ordering over the hosted transcription entries a host offers, before a chain is built.
+export { selectLowestCostSttEntry, sttLanguageOptions } from './LowestCostStt.js';
+export type {
+  SttPriceRow,
+  SttCreditSnapshot,
+  LowestCostSttOptions,
+  LowestCostSttSelection,
+} from './LowestCostStt.js';
+
+// A host's refusal of a hosted transcription socket (`StreamingSTTConfig.connectionHooks`); never retried as an outage.
+export { SttConnectionAuthorizationError } from './SttConnectionAuthorizationError.js';
+
+// A Deepgram project's request costs for supplier-credit reconciliation; reads no balance and grants no credit.
+export { readDeepgramUsage, DeepgramUsageReadError } from './providers/DeepgramUsage.js';
+export type {
+  DeepgramUsageFailureCode,
+  DeepgramUsageContract,
+  DeepgramRequestCost,
+  DeepgramUsageEvidence,
+  DeepgramUsageReadOptions,
+  DeepgramUsageFetch,
+} from './providers/DeepgramUsage.js';

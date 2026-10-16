@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderManager.js';
 import { PROVIDER_DEFAULTS, autoDetectProvider } from './runtime/provider-defaults.js';
 import { getDefaultProvider } from './runtime/global-default.js';
+import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 
 /**
  * The result of splitting a `provider:model` string at the first colon.

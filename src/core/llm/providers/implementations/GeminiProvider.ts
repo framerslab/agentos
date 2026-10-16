@@ -38,6 +38,7 @@ import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
+import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
 // ---------------------------------------------------------------------------
 // Configuration

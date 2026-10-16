@@ -19,6 +19,7 @@ const SECTION_ORDER = [
   'Cognitive Pipeline',
   'Memory',
   'RAG & Retrieval',
+  'Text Processing & Search',
   'Personas',
   'Orchestration',
   'Tools & Capabilities',
@@ -213,6 +214,16 @@ const publicationManifest = [
   agentosDoc('INCREMENTAL_VECTOR_INGESTION.md', 'features/incremental-vector-ingestion.md', 'Incremental Vector Ingestion', 'RAG & Retrieval', 7),
   agentosDoc('features/LIBRARY_INDEX.md', 'features/library-index.md', 'Library Index', 'RAG & Retrieval', 7.5),
 
+  // Text processing, statistics and search
+  agentosDoc('text/TEXT_OVERVIEW.md', 'text/index.md', 'Text Processing & Search', 'Text Processing & Search', 1, {
+    categoryIndex: true,
+  }),
+  agentosDoc('text/TEXT_PROCESSING.md', 'text/text-processing.md', 'Text Processing Pipeline', 'Text Processing & Search', 2),
+  agentosDoc('text/TEXT_STATISTICS.md', 'text/text-statistics.md', 'Text Statistics and Classification', 'Text Processing & Search', 3),
+  agentosDoc('text/LEXICAL_AND_HYBRID_SEARCH.md', 'text/lexical-and-hybrid-search.md', 'Lexical and Hybrid Search', 'Text Processing & Search', 4),
+  agentosDoc('text/CHUNKING_AND_SNIPPETS.md', 'text/chunking-and-snippets.md', 'Chunking and Snippets', 'Text Processing & Search', 5),
+  agentosDoc('text/RERANKING.md', 'text/reranking.md', 'Reranking', 'Text Processing & Search', 6),
+
   agentosDoc('GUARDRAILS_USAGE.md', 'features/guardrails.md', 'Guardrails', 'Guardrails & Safety', 1),
   staticDoc('features/guardrails-architecture.md', 'features/guardrails-architecture.md', 'Guardrails Architecture', 'Guardrails & Safety', 1.5),
   agentosDoc('HUMAN_IN_THE_LOOP.md', 'features/human-in-the-loop.md', 'Human-in-the-Loop (HITL)', 'Guardrails & Safety', 1.8),
@@ -220,6 +231,7 @@ const publicationManifest = [
   agentosDoc('CREATING_GUARDRAILS.md', 'features/creating-guardrails.md', 'Creating Custom Guardrails', 'Guardrails & Safety', 2),
   agentosDoc('SAFETY_PRIMITIVES.md', 'features/safety-primitives.md', 'Safety Primitives', 'Guardrails & Safety', 3),
 
+  agentosDoc('features/VOICE_PLATFORM.md', 'features/voice-platform.md', 'Voice Platform Runtime', 'Voice & Speech', 0.5),
   agentosDoc('VOICE_PIPELINE.md', 'features/voice-pipeline.md', 'Voice Pipeline', 'Voice & Speech', 1),
   agentosDoc('SPEECH_PROVIDERS.md', 'features/speech-providers.md', 'Speech Providers', 'Voice & Speech', 2),
   agentosDoc('MEETING_BOTS.md', 'features/meeting-bots.md', 'Meeting Bots', 'Voice & Speech', 4),

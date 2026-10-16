@@ -36,6 +36,14 @@ type Expect<T extends true> = T;
 type ModuleFits = Expect<typeof Moonshine extends MoonshineWasmModule ? true : false>;
 const conformance: ModuleFits = true;
 
+// Checked by the type check, for the docs: TypeScript 5.9's DOM lib declares
+// WebAssembly.validate(bytes: BufferSource), with BufferSource =
+// ArrayBufferView<ArrayBuffer> | ArrayBuffer, and a scope with that validate
+// does not type as a MoonshineBrowserScope, so a host casts a page's globalThis.
+type DomScope = { WebAssembly: { validate(bytes: ArrayBufferView<ArrayBuffer> | ArrayBuffer): boolean } };
+type DomScopeNeedsCast = Expect<DomScope extends MoonshineBrowserScope ? false : true>;
+const domScopeNeedsCast: DomScopeNeedsCast = true;
+
 const CHROME_WINDOWS =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 const CHROME_ANDROID =
@@ -65,6 +73,80 @@ describe('loadMoonshineWasm', () => {
       '@moonshine-ai/moonshine-wasm is required for the Moonshine browser speech-to-text provider. Install it: npm install @moonshine-ai/moonshine-wasm'
     );
     expect(failed?.cause).toBe(missing);
+  });
+
+  it('names how to install the package when a page cannot resolve its bare specifier', async () => {
+    const unresolved = new TypeError(
+      'Failed to resolve module specifier \'@moonshine-ai/moonshine-wasm\'. Relative references must start with either "/", "./", or "../".'
+    );
+    let failed: (Error & { cause?: unknown }) | undefined;
+    try {
+      await loadMoonshineWasm(async () => {
+        throw unresolved;
+      });
+    } catch (err) {
+      failed = err as Error & { cause?: unknown };
+    }
+    expect(failed?.message).toBe(
+      '@moonshine-ai/moonshine-wasm is required for the Moonshine browser speech-to-text provider. Install it: npm install @moonshine-ai/moonshine-wasm'
+    );
+    expect(failed?.cause).toBe(unresolved);
+  });
+
+  it("carries the import's own message when the import fails for another reason, keeping its error as the cause", async () => {
+    const failures = [
+      new TypeError('Failed to fetch dynamically imported module: https://cdn.example.com/moonshine/index.js'),
+      // A CDN's URL names the package too, as part of the URL.
+      new TypeError(
+        'Failed to fetch dynamically imported module: https://cdn.example.com/npm/@moonshine-ai/moonshine-wasm@0.1.5/dist/index.js'
+      ),
+      new SyntaxError("Unexpected token '<'"),
+    ];
+    for (const failure of failures) {
+      let failed: (Error & { cause?: unknown }) | undefined;
+      try {
+        await loadMoonshineWasm(async () => {
+          throw failure;
+        });
+      } catch (err) {
+        failed = err as Error & { cause?: unknown };
+      }
+      expect(failed?.message).toBe(
+        `@moonshine-ai/moonshine-wasm could not be imported for the Moonshine browser speech-to-text provider: ${failure.message}`
+      );
+      expect(failed?.cause).toBe(failure);
+    }
+  });
+
+  /**
+   * An import can fail with any value, and String() throws for some: an object without a prototype, and a revoked
+   * proxy, which refuses even the read of its code. The error names such a value by its type and keeps it as the
+   * cause.
+   */
+  it.each<[string, () => unknown]>([
+    ['an object without a prototype', () => Object.create(null)],
+    [
+      'a revoked proxy',
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      },
+    ],
+  ])('names an import failure by its type when the import fails with %s, which String() cannot print', async (_name, unprintable) => {
+    const failure = unprintable();
+    let failed: (Error & { cause?: unknown }) | undefined;
+    try {
+      await loadMoonshineWasm(async () => {
+        throw failure;
+      });
+    } catch (err) {
+      failed = err as Error & { cause?: unknown };
+    }
+    expect(failed?.message).toBe(
+      '@moonshine-ai/moonshine-wasm could not be imported for the Moonshine browser speech-to-text provider: an unprintable object'
+    );
+    expect(failed?.cause).toBe(failure);
   });
 
   it('imports the package by its name', async () => {
@@ -417,6 +499,46 @@ for (const thread of THREADS) describe(`MoonshineBrowserSTT on the ${thread} thr
     warn.mockRestore();
   });
 
+  /**
+   * A listener can throw any value, and String() throws for some: an object without a prototype, and a revoked proxy,
+   * whose prototype cannot even be read. The warning names the value's type, and the close still finishes.
+   */
+  it.each<[string, () => unknown]>([
+    ['an object without a prototype', () => Object.create(null)],
+    [
+      'a revoked proxy',
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      },
+    ],
+  ])('finishes closing when a listener throws %s, which String() cannot print, and warns of it by its type', async (_name, unprintable) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { stt, session, stream, log } = await open();
+      stream.passes.push([line('g', 'Open line', 0, 0.4)]);
+      session.pushAudio(frame(500));
+      await settle();
+      session.prependListener('transcript', () => {
+        throw unprintable();
+      });
+      session.prependListener('close', () => {
+        throw unprintable();
+      });
+      expect(() => session.close()).not.toThrow();
+      expect(log.events).toEqual(['interim g Open line', 'final g ', 'close']);
+      expect(stream.closed).toBe(true);
+      expect(heldSessions(stt)).toBe(0);
+      expect(warn.mock.calls).toEqual([
+        ["[moonshine-browser-stt] a listener of 'transcript' threw:", 'an unprintable object'],
+        ["[moonshine-browser-stt] a listener of 'close' threw:", 'an unprintable object'],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("ends on a failure though an 'error' listener throws: the error, the open line retracted, then close", async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { stt, session, stream, log } = await open();
@@ -434,6 +556,25 @@ for (const thread of THREADS) describe(`MoonshineBrowserSTT on the ${thread} thr
     expect(heldSessions(stt)).toBe(0);
     expect(warn.mock.calls).toEqual([["[moonshine-browser-stt] a listener of 'error' threw:", 'handler failed']]);
     warn.mockRestore();
+  });
+
+  it('completes a line once when a transcript listener flushes in the middle of a pass, and a flush from its final shares that flush', async () => {
+    const { session, stream, log } = await open();
+    stream.passes.push([line('g', 'Is it', 0, 0.3)]);
+    stream.passes.push([line('g', 'Is it done?', 0, 0.6)]);
+    const flushes: Array<Promise<void>> = [];
+    // A listener that completes a line once it reads as a question, and asks again on the final.
+    session.on('transcript', (event: TranscriptEvent) => {
+      if (event.isFinal || event.text.endsWith('?')) flushes.push(session.flush());
+    });
+    session.pushAudio(frame(500));
+    session.pushAudio(frame(500));
+    await settle();
+    await Promise.all(flushes);
+    session.close();
+    expect(log.events).toEqual(['interim g Is it', 'interim g Is it done?', 'final g Is it done?', 'close']);
+    expect(stream.stops).toBe(1);
+    expect(stream.starts).toBe(2);
   });
 
   it('takes the confidence from the timed words, and their offsets from the line start', async () => {
@@ -615,6 +756,39 @@ describe('MoonshineBrowserSTT: the model, its loading and the provider', () => {
     expect(log.events).toEqual(['close']);
     expect(FakeWorkerHost.created[0].closed).toBe(true);
     await expect(stt.startSession()).rejects.toThrow(/disposed/);
+  });
+
+  for (const thread of THREADS) {
+    it(`rejects the start as disposed and closes its stream when dispose lands as the stream opens, on the ${thread} thread`, async () => {
+      const stt = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), thread, model: 'moonshine-small' });
+      const starting = stt.startSession();
+      // Lands once the model has loaded, before the stream starts.
+      void stt.load().then(() => stt.dispose());
+      await expect(starting).rejects.toThrow('MoonshineBrowserSTT: disposed');
+      expect(newestStream().closed).toBe(true);
+      expect(heldSessions(stt)).toBe(0);
+    });
+  }
+
+  it("gives wasmBaseUrl one trailing slash, as the package's worker resolves its files against it", async () => {
+    for (const wasmBaseUrl of [
+      'https://cdn.example.com/moonshine/dist',
+      'https://cdn.example.com/moonshine/dist/',
+      'https://cdn.example.com/moonshine/dist//',
+    ]) {
+      const stt = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), model: 'moonshine-small', wasmBaseUrl });
+      await stt.load();
+      stt.dispose();
+    }
+    const packageFolder = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), model: 'moonshine-small' });
+    await packageFolder.load();
+    packageFolder.dispose();
+    expect(FakeWorkerHost.created.map((host) => host.wasmBaseUrl)).toEqual([
+      'https://cdn.example.com/moonshine/dist/',
+      'https://cdn.example.com/moonshine/dist/',
+      'https://cdn.example.com/moonshine/dist/',
+      undefined,
+    ]);
   });
 
   it('reports in its health check what this scope lacks, and nothing once a single-thread build is served', async () => {

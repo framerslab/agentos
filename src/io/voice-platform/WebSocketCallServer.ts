@@ -65,6 +65,12 @@ class SocketPlaybackTransport extends EventEmitter implements IPlaybackTransport
     this.base.on('error', () => { this.close(); });
   }
   get state(): 'connecting' | 'open' | 'closing' | 'closed' { return this.base.state; }
+  /**
+   * Sends the chunk's metadata message, then its PCM16 binary message. The pair always leaves whole: the receiver frames
+   * each binary message by the metadata before it and discards a pair whose generation it has cleared. A clearPlayback()
+   * that lands during the writes rejects the chunk with `audio cancelled` once the pair is out and leaves the connection
+   * open; only a write that fails closes it.
+   */
   async sendAudio(chunk: EncodedAudioChunk): Promise<void> {
     if (this.sending || !chunk.generation || !chunk.sequence) throw new Error('invalid audio admission');
     const pcm = inspectPcm16(chunk);
@@ -73,11 +79,10 @@ class SocketPlaybackTransport extends EventEmitter implements IPlaybackTransport
     this.acks.begin(receipt); this.sending = true; const epoch = this.cancelled;
     try {
       await send(this.ws, JSON.stringify({ type: 'audio', scopeId: chunk.scopeId, callId: chunk.callId, generation: receipt.generation, sequence: receipt.sequence, samples: pcm.samples, sampleRate: pcm.sampleRate, encoding: 'pcm16le', channels: 1 }));
-      if (epoch !== this.cancelled) throw new Error('audio cancelled');
       await this.base.sendAudio({ ...chunk, audio: pcm.pcm, container: 'raw' });
-      if (epoch !== this.cancelled) throw new Error('audio cancelled');
     } catch { this.acks.close(); this.close(); throw new Error('audio send failed'); }
     finally { this.sending = false; }
+    if (epoch !== this.cancelled) throw new Error('audio cancelled');
   }
   async sendControl(message: ServerTextMessage): Promise<void> {
     if (this.controlPending) throw new Error('control backpressure'); this.controlPending = true;
@@ -127,14 +132,14 @@ export class WebSocketCallServer {
   }
   private accept(ws: WebSocket, binding: CallTransportBinding, origin: string): void {
     let phase: 'first' | 'authenticating' | 'open' | 'closed' = 'first'; let lastSequence = 0;
-    let physical: SocketPlaybackTransport | undefined; let acceptedEpoch = 0; let generationPending = false;
+    let physical: SocketPlaybackTransport | undefined; let acceptedEpoch = 0;
     const deadline = setTimeout(() => ws.terminate(), 5000);
     const terminate = (): void => { ws.terminate(); };
+    // Each notice is written as its generation is recorded, so it reaches the client ahead of every message of that
+    // generation, however quickly the next one follows; send() still bounds the buffered bytes and each write's deadline.
     const generation = (value: VoiceGeneration): void => {
       if (phase !== 'open') return;
-      if (generationPending) { terminate(); return; }
-      generationPending = true;
-      void send(ws, JSON.stringify({ type: 'generation', generation: value })).catch(terminate).finally(() => { generationPending = false; });
+      void send(ws, JSON.stringify({ type: 'generation', generation: value })).catch(terminate);
     };
     binding.on('generation', generation);
     ws.on('error', terminate);
@@ -162,8 +167,9 @@ export class WebSocketCallServer {
         if (binary) {
           if (data.length < 14 || data.length > 3212 || (data.length - 12) % 2 !== 0) { terminate(); return; }
           const worker = data.readUInt32LE(0); const epoch = data.readUInt32LE(4); const sequence = data.readUInt32LE(8);
-          if (worker !== binding.generation.workerGeneration || epoch !== acceptedEpoch || sequence <= lastSequence) return;
+          // Sequences start at 1: a zero is malformed, not an old packet.
           if (sequence === 0) { terminate(); return; }
+          if (worker !== binding.generation.workerGeneration || epoch !== acceptedEpoch || sequence <= lastSequence) return;
           if (sequence !== lastSequence + 1) physical.emit('gap', { lostMs: 0, reason: 'sequence' });
           lastSequence = sequence; physical.receiveAudio(data.subarray(12), sequence); return;
         }

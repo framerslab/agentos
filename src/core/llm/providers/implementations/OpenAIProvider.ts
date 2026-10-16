@@ -42,6 +42,7 @@ import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForMo
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { redactUrlSecrets } from '../url-secrets.js';
 import { OPENAI_MODEL_PRICING, openAIModelPricing } from './openaiPricing.js';
+import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
 // import fetch, { RequestInit, Response as FetchResponse, AbortController } from 'node-fetch'; // Example for Node

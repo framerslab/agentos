@@ -22,7 +22,12 @@ import { inflateRawSync } from 'node:zlib';
 import mammoth from 'mammoth';
 import type { IDocumentLoader } from './IDocumentLoader.js';
 import type { LoadOptions, LoadedDocument, DocumentMetadata } from '../facade/types.js';
+import { DocumentTooLargeError } from './DocumentTooLargeError.js';
 import { validatePath } from './pathUtils.js';
+
+// DocumentTooLargeError has a module of its own, which imports nothing. It is
+// exported from here too: both name the one class.
+export { DocumentTooLargeError };
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -68,22 +73,8 @@ const ZIP64_MARK_16 = 0xffff;
 const ZIP64_MARK_32 = 0xffffffff;
 
 // ---------------------------------------------------------------------------
-// Errors and options
+// Options
 // ---------------------------------------------------------------------------
-
-/** Thrown when a document would take more memory to read than its loader allows. */
-export class DocumentTooLargeError extends Error {
-  /** A stable code for callers that branch on the kind of failure. */
-  readonly code = 'DOCUMENT_TOO_LARGE';
-
-  /**
-   * @param limit - The bound, in bytes, that the document passed.
-   */
-  constructor(readonly limit: number) {
-    super(`the document inflates past ${limit} bytes`);
-    this.name = 'DocumentTooLargeError';
-  }
-}
 
 /** Options of the Word loader. */
 export interface DocxLoaderOptions {

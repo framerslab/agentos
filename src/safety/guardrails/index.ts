@@ -90,6 +90,7 @@ export {
   createLlmPhraseJudge,
   createPhraseListPack,
   normalizePhraseText,
+  phraseMatches,
   type PhraseEntry,
   type PhraseJudge,
   type PhraseJudgeVerdict,

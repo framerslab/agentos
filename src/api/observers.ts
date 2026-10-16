@@ -35,6 +35,8 @@
  * @module agentos/api/observers
  */
 import type { TokenUsage } from './generateText.js';
+import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
+import { isContentSafeTelemetryEnabled } from '../core/logging/contentSafeTelemetry.js';
 
 /**
  * Payload delivered to a registered usage observer once an LLM call
@@ -146,6 +148,9 @@ let globalObserver: LlmUsageObserver | null = null;
  *
  * Passing `null` clears the observer (useful in tests).
  *
+ * While content-safe telemetry is on (`enableContentSafeTelemetry`), the observer is not called;
+ * read usage from the call's result instead.
+ *
  * @param observer - The observer callback, or null to clear.
  */
 export function setGlobalLlmObserver(observer: LlmUsageObserver | null): void {
@@ -171,11 +176,12 @@ export function getGlobalLlmObserver(): LlmUsageObserver | null {
  * are caught + logged to stderr so a misbehaving observer can never
  * crash the LLM call path.
  *
- * No-op when no observer is registered.
+ * No-op when no observer is registered, and while content-safe telemetry is on.
  *
  * @internal
  */
 export function fireLlmUsageObserver(event: LlmUsageEvent): void {
+  if (isContentSafeTelemetryEnabled()) return;
   const cb = globalObserver;
   if (!cb) return;
   try {

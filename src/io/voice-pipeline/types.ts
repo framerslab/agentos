@@ -247,6 +247,13 @@ export interface IStreamTransport extends EventEmitterLike {
   readonly state: 'connecting' | 'open' | 'closing' | 'closed';
 
   /**
+   * The one audio format the transport plays, when it plays only one: `LiveKitStreamTransport` with a publisher
+   * plays `'pcm'`. `VoicePipelineOrchestrator` asks its TTS for this format, and reports a chunk in another one instead
+   * of sending it. Absent when the remote client decodes what it receives.
+   */
+  readonly playbackFormat?: 'pcm' | 'mp3' | 'opus';
+
+  /**
    * Send a synthesised audio chunk to the remote client for playback.
    * Resolves once the chunk has been handed to the underlying I/O layer.
    *
@@ -266,6 +273,17 @@ export interface IStreamTransport extends EventEmitterLike {
   sendControl(message: ServerTextMessage): Promise<void>;
 
   /**
+   * Resolves once the audio handed to `sendAudio()` has played out, on a transport that plays it on its own timing
+   * after taking it, as a speaking `LiveKitStreamTransport` does: every chunk sent so far, and any sent while it waits.
+   * Audio a clear discarded counts as played out. `VoicePipelineOrchestrator` without a call profile keeps a reply
+   * `speaking` until it settles, so speech over the rest of the reply interrupts it; a rejection ends the reply as a
+   * resolution does. Without it, a reply ends when its synthesis completes.
+   *
+   * @returns Resolves once the audio sent so far has played out.
+   */
+  waitForPlayout?(): Promise<void>;
+
+  /**
    * Close the transport, optionally supplying a WebSocket-style close code and
    * human-readable reason string for diagnostics.
    *
@@ -278,6 +296,75 @@ export interface IStreamTransport extends EventEmitterLike {
 // ============================================================================
 // Section 3 -- Streaming STT (Speech-to-Text)
 // ============================================================================
+
+/**
+ * A hosted socket's immutable identity, established before any network
+ * opening. The built-in Deepgram and OpenAI streaming adapters give one to
+ * every socket they try, retries, reconnects and rollovers included, and pass
+ * it to {@link SttConnectionHooks.authorize} before the WebSocket upgrade.
+ */
+export interface SttConnectionOpening {
+  /** UUID unique across providers, retries, rollovers and process restarts. */
+  readonly connectionId: string;
+  /** Adapter id, such as `deepgram-streaming`. */
+  readonly providerId: string;
+  /** Exact hosted `vendor:model` entry used to reserve and price this socket. */
+  readonly entry: string;
+  /** Exact model used on the wire. */
+  readonly model: string;
+}
+
+/**
+ * Built-in hosted usage, with the identity shared by authorization and
+ * settlement: one immutable cumulative report per interval and exactly one
+ * final report for every socket a built-in adapter tried.
+ */
+export interface SttMeasuredUsageEvent extends StreamingSTTUsageEvent {
+  /** The socket's {@link SttConnectionOpening.connectionId}. */
+  readonly connectionId: string;
+  /** The socket's {@link SttConnectionOpening.entry}. */
+  readonly entry: string;
+  /** The socket's {@link SttConnectionOpening.model}. */
+  readonly model: string;
+  /** The supplier's request id for this socket, when the supplier reported one. */
+  readonly supplierRequestId?: string;
+}
+
+/**
+ * Host accounting at the socket boundary, separate from provider permission
+ * (`ProviderPolicy` still decides which providers may open). Honored by the
+ * built-in Deepgram and OpenAI streaming adapters.
+ */
+export interface SttConnectionHooks {
+  /**
+   * Reserve against `opening.entry` and `opening.connectionId` before resolving.
+   * Rejection forbids this socket and does not authorize a vendor fallback.
+   * The host must test `signal.aborted` inside its transaction before commit
+   * and roll back or release any late acquisition. No socket opens after abort.
+   */
+  authorize(opening: SttConnectionOpening, signal: AbortSignal): Promise<void>;
+  /**
+   * Finite per-socket funded audio ceiling, in wire seconds. Deepgram rolls to
+   * an independently authorized socket of the same vendor before exceeding it.
+   */
+  audioCeiling?(opening: SttConnectionOpening): number;
+  /**
+   * Synchronous check of prospective cumulative wire seconds before each send,
+   * including replay and overlap. `false` ends the provider with an
+   * authorization error; must not throw.
+   */
+  beforeAudio?(opening: SttConnectionOpening, nextAudioSeconds: number): boolean;
+  /**
+   * Receive cumulative and exactly one final report for every attempted socket,
+   * including final zero for a failed or denied opening. Unadopted OpenAI openings
+   * use `connectionIndex` zero; all billing identity uses `connectionId`.
+   * Queue durable processing synchronously and never throw. This is mirrored
+   * by the session's `'usage'` event for adopted sockets: consume one path, not both.
+   */
+  usage(event: SttMeasuredUsageEvent): void;
+  /** Maximum authorization wait before abort, in milliseconds. Default 10000. */
+  authorizationTimeoutMs?: number;
+}
 
 /**
  * Configuration passed to `IStreamingSTT.startSession()` when opening a new
@@ -329,6 +416,9 @@ export interface StreamingSTTConfig {
    * speaker adaptation models) without modifying the interface.
    */
   providerOptions?: Record<string, unknown>;
+
+  /** Optional accounting hooks honored by built-in Deepgram and OpenAI streaming adapters. */
+  connectionHooks?: SttConnectionHooks;
 
   /** Call-profile identity; scoped adapters capture this and update it only through reset. */
   call?: AudioIdentity;
@@ -453,6 +543,20 @@ export interface TranscriptEvent {
   endMs?: number;
 
   /**
+   * `true` on a result the provider sends before the end of speech of the
+   * speech it transcribes: the session's `'speech_end'` for that speech
+   * follows it. `DeepgramStreamingSTT` sets it on every result: it emits a
+   * segment's final before the `'speech_end'` that Deepgram's `speech_final`
+   * or `UtteranceEnd` raises. A provider that sends an utterance's final
+   * after that utterance's `'speech_end'`, as `OpenAIRealtimeTranscriptionSTT`
+   * does, leaves it undefined. {@link HeuristicEndpointDetector} reads it on
+   * a final that carries an `itemId`: such a final belongs to the speech it
+   * arrives in, never to a turn that has ended, and that speech's
+   * `'speech_end'` pairs with it.
+   */
+  beforeSpeechEnd?: boolean;
+
+  /**
    * Language of `text`: the code the provider detected, or the language the
    * session was configured with (for example `'en'`). Undefined when neither
    * is known.
@@ -479,6 +583,12 @@ export interface TranscriptEvent {
 export interface StreamingSTTUsageEvent {
   /** Provider that received the audio (its `IStreamingSTT.providerId`). */
   providerId: string;
+
+  /** Built-in hosted socket UUID; custom adapters may omit it. Never substitute a local index. */
+  connectionId?: string;
+
+  /** Exact hosted `vendor:model` entry; custom adapters may omit it. */
+  entry?: string;
 
   /** Model the connection transcribed with, when the provider names one. */
   model?: string;
@@ -682,6 +792,38 @@ export interface TurnCompleteEvent {
 }
 
 /**
+ * What the agent is doing, as `VoicePipelineOrchestrator` reports it to its
+ * endpoint detector through `IEndpointDetector.setAgentContext()`, so the
+ * detector can tell a backchannel, a response the user makes while the agent
+ * holds the floor, from the user's own turn.
+ *
+ * @example
+ * ```typescript
+ * // The user's turn has completed: the agent holds the floor until its reply ends or a barge-in cuts it.
+ * detector.setAgentContext?.({ speaking: true });
+ * ```
+ */
+export interface EndpointAgentContext {
+  /**
+   * The agent holds the floor: its turn has begun and its reply has not
+   * ended. `VoicePipelineOrchestrator` reports `true` from the moment a
+   * user's turn completes until the reply ends or a barge-in cuts it.
+   */
+  speaking: boolean;
+  /**
+   * Whether the agent's last reply asked a question.
+   *
+   * @deprecated Ignored. A backchannel is a response made while the other
+   * party holds the floor, so `speaking` alone decides whether a final is
+   * one, and a reply's punctuation does not say whether it expects an answer
+   * ("Tell me the time you would like." asks without `?`). The property stays
+   * so that code which sets it still compiles; `VoicePipelineOrchestrator`
+   * does not set it.
+   */
+  askedQuestion?: boolean;
+}
+
+/**
  * Detects turn boundaries in a continuous audio/transcript stream.
  * Combines VAD events with linguistic signals to decide when the user
  * has finished speaking.
@@ -694,15 +836,17 @@ export interface TurnCompleteEvent {
  * | `'speech_start'`       | *(none)*                | The user has started speaking.         |
  * | `'barge_in_detected'`  | *(none)*                | User spoke while TTS was playing.      |
  * | `'late_final'`         | {@link TranscriptEvent} | A final that arrived after its turn ended, which the turn does not take. |
+ * | `'backchannel_detected'` | `{ text: string }`    | A final the detector dropped as a backchannel (see `isBackchannel()`). |
  *
  * A detector that drops such a final from its turns emits `'late_final'`
  * with the final as it was pushed, once per final it drops
  * ({@link HeuristicEndpointDetector} does, for an item-keyed final that
- * arrives after a reset ended its turn and before the next `speech_end` or a
- * standalone VAD's next `speech_start`, while the transcriber's next
- * utterance is spoken included). `VoicePipelineOrchestrator` does not
- * listen for it, so the conversation leaves those words out;
- * `startListenSession` writes the final to its sink as a turn of its own.
+ * arrives after a reset ended its turn and before the next `speech_end`, a
+ * standalone VAD's next `speech_start` or a reset with `'session'`, while the
+ * transcriber's next utterance is spoken included).
+ * `VoicePipelineOrchestrator` does not listen for it, so the conversation
+ * leaves those words out; `startListenSession` writes the final to its sink
+ * as a turn of its own.
  *
  * @see {@link HeuristicEndpointDetector} for the rule-based implementation.
  * @see {@link AcousticEndpointDetector} for the purely acoustic implementation.
@@ -740,9 +884,56 @@ export interface IEndpointDetector extends EventEmitterLike {
 
   /**
    * Reset all internal state (timers, partial transcripts) without destroying
-   * the detector instance. Called at the start of each new turn.
+   * the detector instance. Called at the start of each new turn, and with
+   * `'session'` as a session starts on the detector
+   * (`VoicePipelineOrchestrator.startSession()` and `startListenSession()`
+   * make that call), so a detector a host hands to one session after another
+   * starts each with nothing an earlier session left.
+   *
+   * @param scope - `'turn'` (the default) ends a turn, and a final of that turn
+   *   can still arrive after it ({@link HeuristicEndpointDetector} drops such a
+   *   late final and reports it as `'late_final'`, and never takes a final
+   *   marked `beforeSpeechEnd` for one); `'session'` starts a session, whose
+   *   transcriber sends no final of an earlier session's turns, so nothing
+   *   from before it is awaited.
    */
-  reset(): void;
+  reset(scope?: 'turn' | 'session'): void;
+
+  /**
+   * Tells the detector whether the agent holds the floor.
+   * `VoicePipelineOrchestrator` calls it as its session starts, after the
+   * reset with `'session'` (`speaking: false`), as a user's turn completes
+   * and the agent takes the floor (`speaking: true`), and as the agent's
+   * reply ends or a barge-in cuts it (`speaking: false`). From the first call
+   * until a reset with `'session'`, {@link HeuristicEndpointDetector} reads a
+   * final with trailing `.`, `,`, `!` or an ellipsis ("Sure.") as its phrase,
+   * never takes one that ends with `?` ("Okay?") for a backchannel, and drops
+   * a backchannel such as "yeah" only while the agent holds the floor: while
+   * the agent listens, every final is the user's, a lone "okay" included.
+   * Until the first call, and again after a reset with `'session'`, it drops
+   * a final whose whole text, trimmed and lowercased, is a backchannel
+   * phrase, whatever the agent is doing, so a caller that never calls it,
+   * such as a listen session, keeps that rule. A detector without this method
+   * is told nothing.
+   *
+   * @param context - Whether the agent holds the floor; its deprecated `askedQuestion` is ignored.
+   */
+  setAgentContext?(context: EndpointAgentContext): void;
+
+  /**
+   * Whether the detector would drop a final with this text as a backchannel
+   * now: the same phrases, the same reading of the text and the same agent
+   * context as for its own finals. `VoicePipelineOrchestrator` asks it of
+   * each final from a client that transcribes on its own device, and hands
+   * one it answers `true` for to the detector on its own, which drops it and
+   * reports it as `'backchannel_detected'`, instead of joining it into the
+   * turn's text. A detector without this method gets every client final
+   * joined with the turn's earlier ones.
+   *
+   * @param text - A final's text.
+   * @returns `true` when the detector would drop the final as a backchannel.
+   */
+  isBackchannel?(text: string): boolean;
 }
 
 // ============================================================================
@@ -1212,7 +1403,10 @@ export interface IBatchSTT {
  */
 export interface BargeinContext {
   /**
-   * Duration of detected user speech before the barge-in was confirmed, in ms.
+   * Duration of the user's speech over the reply so far, in ms.
+   * `VoicePipelineOrchestrator` asks with 0 as the speech starts, then again
+   * every 100 ms while it lasts, on each of its transcripts and at its end,
+   * each time with the speech measured from its start.
    * Short durations (< 100 ms) often indicate accidental noise, lip smacks,
    * or breaths rather than intentional interruption.
    *
@@ -1229,7 +1423,9 @@ export interface BargeinContext {
   interruptedText: string;
 
   /**
-   * How many milliseconds of audio had been played at the point of interruption.
+   * How many milliseconds of the reply's audio had been sent to the transport
+   * when the handler is asked. `VoicePipelineOrchestrator` counts audio a
+   * pause holds once it is sent.
    * Combined with `interruptedText`, this allows the agent to estimate
    * how much of the response the user actually heard.
    */
@@ -1261,7 +1457,12 @@ export type BargeinAction =
       injectMarker?: string;
     }
   | {
-      /** Fade out TTS audio over `fadeMs` milliseconds then pause. */
+      /**
+       * Fade out TTS audio over `fadeMs` milliseconds then pause.
+       * `VoicePipelineOrchestrator` sends the transport this action and holds
+       * the reply's audio until the reply is cancelled or, after a false
+       * interruption, resumed with `'resume'`.
+       */
       type: 'pause';
       /** Duration of the fade-out in milliseconds. @defaultValue 150 */
       fadeMs?: number;
@@ -1269,7 +1470,9 @@ export type BargeinAction =
   | {
       /**
        * Resume TTS playback from where it was paused (only valid after a prior
-       * `'pause'` action).
+       * `'pause'` action). `VoicePipelineOrchestrator` sends it in the
+       * `barge_in` message after a false interruption, followed by the audio
+       * the pause held; a handler that answers it changes nothing there.
        */
       type: 'resume';
     }
@@ -1298,8 +1501,13 @@ export interface IBargeinHandler {
   readonly mode: 'hard-cut' | 'soft-fade';
 
   /**
-   * Called by the pipeline when a barge-in is confirmed. The handler evaluates
-   * the context and returns the action the pipeline should execute.
+   * Called by the pipeline as the user speaks over the agent's reply.
+   * `VoicePipelineOrchestrator`, without a call profile, asks as the speech
+   * starts and again as it grows (see `BargeinContext.speechDurationMs`),
+   * until the handler answers `'cancel'` or the speech's end decides, so a
+   * handler that decides by the speech's duration acts once it reaches its
+   * threshold. The handler evaluates the context and returns the action the
+   * pipeline should execute.
    *
    * @param context - Contextual snapshot at the moment of interruption.
    * @returns The action to perform (or a promise resolving to one).
@@ -1484,6 +1692,18 @@ export interface VoicePipelineConfig {
   maxTurnDurationMs?: number;
 
   /**
+   * How long a reply paused by barge-in waits, after the user's speech ends,
+   * for that speech's final transcript, in milliseconds. A final with words
+   * cancels the reply; an empty final, a backchannel the endpoint detector
+   * recognizes, or no final within this time is a false interruption, and
+   * the reply resumes. Read without a call profile. A finite number of zero
+   * or more: `VoicePipelineOrchestrator`'s constructor throws a `RangeError`
+   * otherwise.
+   * @defaultValue 1500
+   */
+  falseInterruptionMs?: number;
+
+  /**
    * Provider-level STT options merged into `StreamingSTTConfig.providerOptions`.
    */
   sttOptions?: Record<string, unknown>;
@@ -1581,6 +1801,9 @@ export interface VoicePipelineSession extends EventEmitterLike {
  * `toClientTranscriptMessage()` makes one from a `TranscriptEvent`;
  * `isClientTranscriptMessage()` checks one a server received, and
  * `transcriptEventFromClient()` turns it back into a `TranscriptEvent`.
+ * `VoicePipelineOrchestrator` takes a session's speech from the first source
+ * it receives: a session that received audio first drops these messages, and
+ * one that received a message first drops the audio.
  *
  * @example
  * ```typescript

@@ -12,9 +12,11 @@
  *
  * `abort()` aborts the request's signal, so the session cancels the model
  * request itself instead of only discarding its output, and tokens that arrive
- * after the abort are not yielded. `whenIdle()` resolves once the request's
- * iterator has unwound; that alone does not prove a remote supplier stopped
- * work. One request is active at a time.
+ * after the abort are not yielded. A request `sendText()` returned before an
+ * `abort()` and not yet pulled is cancelled too: it never reaches the session
+ * and yields nothing. `whenIdle()` resolves once the request's iterator has
+ * unwound; that alone does not prove a remote supplier stopped work. One
+ * request is active at a time.
  */
 
 import type { AgentSession } from '../../../api/agent.js';
@@ -39,6 +41,8 @@ import type { IVoicePipelineAgentSession, VoiceTurnMetadata } from '../types.js'
 export class AgentSessionVoiceAdapter implements IVoicePipelineAgentSession {
   private controller?: AbortController;
   private idle: Promise<void> = Promise.resolve();
+  /** `abort()` calls so far; a request made before the latest one never starts. */
+  private aborts = 0;
 
   /**
    * @param session - The agent session each request streams through.
@@ -46,14 +50,23 @@ export class AgentSessionVoiceAdapter implements IVoicePipelineAgentSession {
   constructor(private readonly session: AgentSession) {}
 
   /**
-   * One active request. The underlying model and tool machinery receive the same abort signal.
+   * One active request. The underlying model and tool machinery receive the same abort signal. The request belongs
+   * to the moment of this call: an `abort()` before its first pull cancels it, so it never reaches the session and
+   * yields nothing.
    *
    * @param text - Transcribed user speech to send to the agent.
    * @param _metadata - Voice turn metadata; the session takes none, so it is not forwarded.
    * @returns The response's text deltas.
    * @throws {Error} When iterated while another request of this adapter is active.
    */
-  async *sendText(text: string, _metadata: VoiceTurnMetadata): AsyncIterable<string> {
+  sendText(text: string, _metadata: VoiceTurnMetadata): AsyncIterable<string> {
+    // Read at the call, not at the first pull: a generator's body does not run until it is iterated.
+    return this.request(text, this.aborts);
+  }
+
+  /** Streams one request, made when `abort()` had been called `issued` times; it starts nothing after a later abort. */
+  private async *request(text: string, issued: number): AsyncIterable<string> {
+    if (issued !== this.aborts) return;
     if (this.controller) throw new Error('voice request already active');
     const controller = new AbortController();
     this.controller = controller;
@@ -76,8 +89,9 @@ export class AgentSessionVoiceAdapter implements IVoicePipelineAgentSession {
     }
   }
 
-  /** Cancels actual generation, not just iteration of the returned text. */
+  /** Cancels actual generation, not just iteration of the returned text, and every request not yet pulled. */
   abort(): void {
+    this.aborts++;
     this.controller?.abort();
   }
 

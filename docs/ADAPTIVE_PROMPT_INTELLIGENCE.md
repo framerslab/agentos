@@ -25,13 +25,13 @@ Every turn, a GMI on the full AgentOS runtime reassembles the system prompt in l
 
 The agent stays the same persona; how it sounds, what it remembers, and how confidently it speaks evolve across the messages where triggers actually fire.
 
-The dollar math, in one line: sentiment scoring is the one adaptive surface that runs on *every* user turn once it is enabled, and the runtime's utility AI decides whether it costs an LLM call, not `sentimentTracking.method`: the default `LLMUtilityAI` makes one call per scored user turn, and a second one when its reply is not valid JSON and it asks for a repair, while a `StatisticalUtilityAI` (or a `HybridUtilityAI` with a statistical part) scores with a lexicon at no cost. Contextual elements cost nothing extra. A metaprompt costs one call each time its trigger fires, and a repair call when its reply is not valid JSON: every `intervalTurns` user turns (every turn with `intervalTurns: 1`), on a sentiment event, or on a host-set flag. See [Operational notes](#operational-notes) below for a concrete per-1000-turn cost table.
+The dollar math, in one line: sentiment scoring is the one adaptive surface that runs on *every* user turn once it is enabled, and the runtime's utility AI decides whether it costs an LLM call, not `sentimentTracking.method`: the default `LLMUtilityAI` makes one call per scored user turn, and a second one when its reply is not valid JSON and it asks for a repair, while a `StatisticalUtilityAI` (or a `HybridUtilityAI` with a statistical part) makes no call and scores every turn 0, neutral, because its sentiment lexicon does not load ([Text Statistics and Classification](./text/TEXT_STATISTICS.md#sentiment)). Contextual elements cost nothing extra. A metaprompt costs one call each time its trigger fires, and a repair call when its reply is not valid JSON: every `intervalTurns` user turns (every turn with `intervalTurns: 1`), on a sentiment event, or on a host-set flag. See [Operational notes](#operational-notes) below for a concrete per-1000-turn cost table.
 
 ![Adaptive Prompt Intelligence: one GMI turn (SentimentTracker scores the user message when the persona turns sentiment tracking on, PromptEngine.constructPrompt() builds the prompt from the persona and the contextual elements whose criteria match the GMI's state, the model call streams the reply with tool rounds as needed, then MetapromptExecutor.checkAndTriggerMetaprompts() queues the metaprompts that fired as one background batch whose updates land on GMI state and working memory); the three trigger types (turn_interval fires on user turns N, 2N, 3N; event_based fires on a pending GMIEvent such as user_frustrated, which the SentimentTracker raises; manual fires on a working-memory flag named manual_trigger_ and the metaprompt id, which host code sets, a metaprompt cannot set, and the executor deletes once it queues the metaprompt), with each metaprompt's handler chosen by its id; and the state a metaprompt's JSON reply writes (GMI mood, user skill level, task complexity, working-memory imprints), of which prompt assembly reads mood, skill level and complexity and not imprints, beside the HEXACO traits, which metaprompts do not set and the adapt_personality tool or setPersonalityTrait() changes.](/img/diagrams/adaptive-intelligence.svg)
 
 This page is the source-verified map of that loop. Every class, interface, trigger name, and handler ID below corresponds to a real surface in [`packages/agentos`](https://github.com/framerslab/agentos/tree/master). If you only need one mental model: the persona definition is the static contract, and the metaprompt executor is the dynamic editor of the GMI's state turn over turn.
 
-All of it runs inside a GMI, so it applies to the sessions of the full runtime (`AgentOS.processRequest()`), to a GMI a host builds itself, and to the sessions of `agent({ runtime: 'gmi' })`. On that path the `cognition` option turns on sentiment tracking (scored by the lexicon of `StatisticalUtilityAI`, with no LLM call) and picks the sentiment presets: `cognition: 'full'` runs all five, and a `CognitionConfig` names them ([GMIs from agent()](./GMI.md#gmis-from-agent)). It carries preset names only: custom `metaPrompts`, turn-interval and manual metaprompts, the self-reflection metaprompt and contextual elements come from a persona definition, which the examples below are.
+All of it runs inside a GMI, so it applies to the sessions of the full runtime (`AgentOS.processRequest()`), to a GMI a host builds itself, and to the sessions of `agent({ runtime: 'gmi' })`. On that path the `cognition` option turns on sentiment tracking (scored by a `StatisticalUtilityAI`, with no LLM call, and neutral on every turn: see the note under the event table) and picks the sentiment presets: `cognition: 'full'` runs all five, and a `CognitionConfig` names them ([GMIs from agent()](./GMI.md#gmis-from-agent)). It carries preset names only: custom `metaPrompts`, turn-interval and manual metaprompts, the self-reflection metaprompt and contextual elements come from a persona definition, which the examples below are.
 
 ```typescript
 import { agent } from '@framers/agentos';
@@ -235,6 +235,8 @@ The SentimentTracker emits five of the [`GMIEventType`](https://github.com/frame
 | `ERROR_THRESHOLD_EXCEEDED` (`error_threshold_exceeded`) | Two or more of the last ten reasoning-trace entries are `ERROR` entries. |
 | `LOW_ENGAGEMENT` (`low_engagement`) | `consecutiveConfusion` reaches 4 and the user messages among the last five history messages average under 50 characters. |
 
+A `StatisticalUtilityAI`, the utility class of `agent({ runtime: 'gmi' })`, scores every turn 0 with polarity `neutral` and no negative tokens ([Text Statistics and Classification](./text/TEXT_STATISTICS.md#sentiment)). With it and the default thresholds, `USER_FRUSTRATED` and `USER_SATISFIED` never fire, `USER_CONFUSED` fires on its phrases alone, and every scored turn adds to `consecutiveConfusion`, so `LOW_ENGAGEMENT` fires from the fourth scored turn whenever the recent user messages average under 50 characters. `ERROR_THRESHOLD_EXCEEDED` does not read the score. The score-based events need a utility class that scores, such as the full runtime's default `LLMUtilityAI`.
+
 Sentiment analysis is **opt-in** via the persona's [`sentimentTracking: { enabled: true }`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) config. When `enabled: false` (default), no sentiment analysis runs, none of the five events fires (`ERROR_THRESHOLD_EXCEEDED` included), and `event_based` metaprompts never trigger. Turn-interval metaprompts like `gmi_self_trait_adjustment` continue to fire regardless.
 
 ### `manual` — host- or tool-driven
@@ -330,7 +332,7 @@ sentimentTracking: {
 | Field | Effect |
 |---|---|
 | `enabled` | Master switch. Default `false`. No sentiment analysis, no event emission when off. |
-| `method` | Passed to the runtime's utility AI, and neither built-in utility AI reads it. The runtime's default `LLMUtilityAI` classifies every scored turn with one LLM call (~500-1000ms, costs tokens) on `modelId`, else the persona's `defaultModelId`. A `StatisticalUtilityAI`, or a `HybridUtilityAI` with a statistical part, set as the runtime's `utilityAIService`, runs a lexical scan (~10-50ms, no LLM cost). |
+| `method` | Passed to the runtime's utility AI, and neither built-in utility AI reads it. The runtime's default `LLMUtilityAI` classifies every scored turn with one LLM call (~500-1000ms, costs tokens) on `modelId`, else the persona's `defaultModelId`; it takes its provider from its own `defaultProviderId`, not from `providerId`. A `StatisticalUtilityAI`, or a `HybridUtilityAI` with a statistical part, set as the runtime's `utilityAIService`, makes no LLM call and scores every turn 0, neutral (see the note under the [event table](#three-trigger-types)). |
 | `historyWindow` | Sliding window of recent sentiment scores kept in `workingMemory.gmi_sentiment_history`. Larger windows catch slower trends; smaller windows react faster. |
 | `frustrationThreshold` / `satisfactionThreshold` | Score thresholds below/above which a single turn counts toward the consecutive counter. |
 | `consecutiveTurnsForTrigger` | How many consecutive matching turns before the event fires. Prevents over-triggering on outlier messages. |
@@ -557,7 +559,7 @@ Most adaptive surfaces add zero extra LLM cost. Only two paths add LLM calls bey
 |---|---|---|
 | **`PromptEngine.constructPrompt()` (every turn)** | Never. Local template merging + criteria evaluation, no LLM. | $0 |
 | **`ContextualPromptElement[]` (every turn)** | Never. Same local assembly pass. | $0 |
-| **Sentiment scoring by a `StatisticalUtilityAI` or `HybridUtilityAI` (every turn when enabled)** | Never. Lexical scan in code, ~10-50ms. | $0 |
+| **Sentiment scoring by a `StatisticalUtilityAI`, or a `HybridUtilityAI` that holds one (every turn when enabled)** | Never. Computed in code, and neutral (score 0) on every turn. | $0 |
 | **Sentiment scoring by the default `LLMUtilityAI` (every turn when enabled)** | Every user turn. | One small LLM call (~200 in / ~100 out), plus one JSON-repair call when the reply does not parse. |
 | **`turn_interval` metaprompt fires** | Once every `intervalTurns` user turns. | One LLM call (~1500 in / ≤512 out at temperature 0.3), plus one JSON-repair call when the reply does not parse. |
 | **`event_based` metaprompt fires** | Only when the SentimentTracker emits the matching event (one strong turn or `consecutiveTurnsForTrigger` turns in a row for frustration, one message for confusion; see the event table above). | One LLM call per event, plus one JSON-repair call when the reply does not parse. |
@@ -579,14 +581,14 @@ Over 1000 user turns:
 | Item | Calls | Avg in/out tokens | Cost |
 |---|---|---|---|
 | Regular completions (your existing baseline) | 1000 | varies | (your baseline) |
-| Sentiment scan | 0 LLM calls | — | $0 |
+| Sentiment scoring (neutral on every turn) | 0 LLM calls | — | $0 |
 | `gmi_self_trait_adjustment` firing every 5 turns | 200 | 1500 in / 400 out | $0.045 + $0.048 = **$0.093** |
-| Event-based presets (typical: ~5% of turns trigger an event) | ~50 | 1500 in / 400 out | $0.011 + $0.012 = **$0.023** |
+| Event-based presets (with this scorer only `confusion_clarification` fires, on its phrases; say ~5% of turns) | ~50 | 1500 in / 400 out | $0.011 + $0.012 = **$0.023** |
 | **Total adaptive overhead** | **~250 extra LLM calls** | | **~$0.12 per 1000 turns** |
 
 Score sentiment with the runtime's default `LLMUtilityAI` instead and you add 1000 small classification calls (~200 in / 100 out each) at ~$0.030 + $0.060 = **$0.09** more per 1000 turns. Swap `gpt-4o-mini` for `gpt-4o` (10x the unit price) and the same overhead becomes ~$1.20 per 1000 turns.
 
-The order of magnitude: with lexicon sentiment and a 5-turn self-reflection cadence, adaptive overhead lands at roughly **5-15% of a turn's regular cost on a cheap model**, **0.5-1.5% on a frontier model**, and **0%** if you disable both surfaces.
+The order of magnitude: with statistical sentiment scoring and a 5-turn self-reflection cadence, adaptive overhead lands at roughly **5-15% of a turn's regular cost on a cheap model**, **0.5-1.5% on a frontier model**, and **0%** if you disable both surfaces.
 
 ### Cost controls
 
@@ -600,7 +602,7 @@ Three knobs change the cost curve directly:
 
 ### Latency
 
-The executor checks triggers at the end of a turn, after the regular completion has streamed, and queues the metaprompts that fire as a background batch. The turn does not wait for the batch's LLM calls, so the user-visible latency on turn N is unaffected. A batch applies its updates when its calls return: a metaprompt firing on turn N shapes the first prompt assembled after that, normally turn N+1, and a slow call can land during a later turn. Batches for one GMI run one at a time, so their updates apply in trigger order. `GMI.shutdown()` waits up to five seconds for a running batch before it closes working memory. Sentiment scoring runs before the turn's first model call and is awaited: a lexicon score adds 10-50ms, and an LLM score (the default `LLMUtilityAI`) delays the reply by one provider round trip.
+The executor checks triggers at the end of a turn, after the regular completion has streamed, and queues the metaprompts that fire as a background batch. The turn does not wait for the batch's LLM calls, so the user-visible latency on turn N is unaffected. A batch applies its updates when its calls return: a metaprompt firing on turn N shapes the first prompt assembled after that, normally turn N+1, and a slow call can land during a later turn. Batches for one GMI run one at a time, so their updates apply in trigger order. `GMI.shutdown()` waits up to five seconds for a running batch before it closes working memory. Sentiment scoring runs before the turn's first model call and is awaited: a `StatisticalUtilityAI` score makes no call, and an LLM score (the default `LLMUtilityAI`) delays the reply by one provider round trip.
 
 **Failure modes.** A failed metaprompt is logged to the reasoning trace as an `ERROR` entry and does not block the user-visible reply. When the metaprompt's reply is not valid JSON, [`IUtilityAI.parseJsonSafe()`](https://github.com/framerslab/agentos/blob/master/src/cognition/nlp/ai_utilities/IUtilityAI.ts) asks the metaprompt's model to repair it (the default `LLMUtilityAI` does; `StatisticalUtilityAI` does not repair); when repair fails, the metaprompt applies nothing. An unknown mood value is dropped silently (validated against the [`GMIMood`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) enum).
 

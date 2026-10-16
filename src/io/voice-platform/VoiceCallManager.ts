@@ -12,13 +12,19 @@ export const CALL_END_MESSAGES: Readonly<Record<CallEndReason, string>> = {
   participant_disconnected: 'The participant disconnected.', setup_timeout: 'The call could not connect in time.', provider_failure: 'A speech or reasoning provider failed.',
   transport_failure: 'The media connection failed.', sink_failure: 'Transcript delivery failed.', worker_lost: 'The call worker stopped responding.', deployment: 'The call ended for maintenance.', purged: 'Call content was deleted.',
 };
-/** Canonical JSON digest of validated JSON values; object key order cannot change an operation's identity. */
+/**
+ * Canonical JSON digest of validated JSON values; object key order cannot change an operation's identity.
+ * An object member whose value is `undefined` is omitted, as JSON omits it, so a value and its stored JSON form share one digest.
+ */
 export function canonicalVoiceHash(value: unknown): string {
   const encode = (item: unknown): string => {
     if (item === null || typeof item === 'boolean' || typeof item === 'string') return JSON.stringify(item);
     if (typeof item === 'number' && Number.isFinite(item)) return JSON.stringify(item);
     if (Array.isArray(item)) return `[${item.map(encode).join(',')}]`;
-    if (item && typeof item === 'object') return `{${Object.keys(item).sort().map((key) => `${JSON.stringify(key)}:${encode((item as Record<string, unknown>)[key])}`).join(',')}}`;
+    if (item && typeof item === 'object') {
+      const record = item as Record<string, unknown>;
+      return `{${Object.keys(record).filter((key) => record[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${encode(record[key])}`).join(',')}}`;
+    }
     throw new Error('non-JSON operation input');
   };
   return createHash('sha256').update(encode(value)).digest('hex');
@@ -64,6 +70,8 @@ async function putState(tx: VoiceTransaction, row: VoiceRow<StoredVoiceCall>, fi
 /**
  * Atomic end intent, shared with the credential stop transaction. A terminal call is immutable here.
  * Purge fences content immediately; an active cleanup repeats from its first step after that stronger request.
+ * A purge that reaches a call already ending keeps the end reason and the ended or failed outcome of the
+ * request that began the ending; the purge shows in content retention and transcript availability.
  */
 export async function requestCallEndInTransaction(tx: VoiceTransaction, callId: string, reason: CallEndReason, now: number): Promise<VoiceCall> {
   const row = await tx.get('calls', callId);
@@ -73,8 +81,8 @@ export async function requestCallEndInTransaction(tx: VoiceTransaction, callId: 
   if (s.call.state === 'ending' && (reason !== 'purged' || s.contentFenced)) return s.call;
   const wasEnding = s.call.state === 'ending';
   meter.close(s, now, reason === 'worker_lost');
-  s.call.state = 'ending'; s.call.endReason = reason; s.endingAt ??= now;
-  s.terminalFailed = failureReasons.has(reason); s.call.inferenceGeneration = voiceInteger(s.call.inferenceGeneration + 1);
+  s.call.state = 'ending'; s.endingAt ??= now; s.call.inferenceGeneration = voiceInteger(s.call.inferenceGeneration + 1);
+  if (!wasEnding) { s.call.endReason = reason; s.terminalFailed = failureReasons.has(reason); }
   if (!wasEnding || reason === 'purged') s.credentialGeneration = voiceInteger(s.credentialGeneration + 1, 1);
   if (reason === 'purged') { s.contentFenced = true; s.call.contentRetention.state = 'revoking'; s.cleanupStep = 0; }
   await putState(tx, row);
@@ -283,13 +291,17 @@ export class VoiceCallManager {
       s.lastUserSpeechAt = voiceInteger(this.options.now()); await tx.put('calls', callId, s, row.version);
     });
   }
-  /** Cumulative turn count, not an increment. Repeated completion cannot consume another turn. */
+  /**
+   * Cumulative turn count, not an increment. Repeated completion cannot consume another turn.
+   * The count that reaches `limits.maxTurns` commits the `turn_limit` end intent with it, so no later turn starts on a connected call.
+   */
   async completedTurn(scopeId: string, callId: string, workerGeneration: number, inferenceGeneration: number, transportEpoch: number, count: number): Promise<void> { await this.tick(scopeId, callId);
     voiceInteger(count);
     await this.options.store.withTransaction(scopeId, async (tx) => {
       const row = await tx.get('calls', callId); if (!row) throw new Error('call not found'); const s = row.value;
       if (s.call.state !== 'connected' || s.call.workerGeneration !== workerGeneration || s.call.inferenceGeneration !== inferenceGeneration || s.call.transportEpoch !== transportEpoch) throw new Error('stale turn');
       s.completedTurns = Math.max(s.completedTurns, count); await tx.put('calls', callId, s, row.version);
+      if (s.completedTurns >= s.limits.maxTurns) await requestCallEndInTransaction(tx, callId, 'turn_limit', this.options.now());
     });
   }
   /** Commits the stop intent; advance performs cleanup, with no successful terminal event before it finishes. */

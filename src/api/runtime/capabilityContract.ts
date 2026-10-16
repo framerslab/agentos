@@ -47,7 +47,8 @@ export const BASE_AGENT_CONFIG_CAPABILITY_CONTRACT = {
   permissions: { agent: 'accepted_but_deferred', generation: 'accepted_but_deferred', runtime: 'accepted_but_deferred', gmi: 'accepted_but_deferred' },
   hitl: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
   emergent: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
-  voice: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'runtime_only' },
+  // Only agent({ voice: { enabled: true, session } }).voiceSession constructs the configured runtime.
+  voice: { agent: 'partially_enforced', generation: 'runtime_only', runtime: 'accepted_but_deferred', gmi: 'runtime_only' },
   channels: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'runtime_only' },
   output: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
   provenance: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },

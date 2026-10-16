@@ -12,7 +12,7 @@
 
 [![npm](https://img.shields.io/npm/v/@framers/agentos?style=flat-square&logo=npm&color=cb3837)](https://www.npmjs.com/package/@framers/agentos)
 [![CI](https://img.shields.io/github/actions/workflow/status/framerslab/agentos/ci.yml?branch=master&style=flat-square&logo=github&label=CI)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/framerslab/agentos/master/.github/badges/tests.json&style=flat-square&logo=vitest&logoColor=white)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/endpoint?url=https://unpkg.com/@framers/agentos@latest/.github/badges/tests.json&style=flat-square&logo=vitest&logoColor=white)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/framerslab/agentos/graph/badge.svg)](https://codecov.io/gh/framerslab/agentos)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4+-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
@@ -244,6 +244,8 @@ Provider fallback is on by default for `generateText()`, `streamText()`, `agent(
 - **[Architecture](https://docs.agentos.sh/architecture/system-architecture)**: system design, layer breakdown
 - **[Cognitive Memory](https://docs.agentos.sh/features/cognitive-memory)**: 8 mechanisms with 30+ APA citations
 - **[RAG Configuration](https://docs.agentos.sh/features/rag-memory)**: vector stores, embeddings, sources
+- **[Document Ingestion](https://docs.agentos.sh/features/memory-document-ingestion)**: PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, HTML and Markdown read to text, with bounds on what a Word or office archive inflates to
+- **[Text Processing & Search](https://docs.agentos.sh/text)**: tokenizers and stemming, BM25, fuzzy and hybrid search, text statistics, chunking, reranking
 - **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, fail-open and fail-closed guards
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
 - **[Blog](https://docs.agentos.sh/blog)**: engineering posts, benchmark publications, transparency audits

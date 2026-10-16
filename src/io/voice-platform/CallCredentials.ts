@@ -98,8 +98,13 @@ export class CallCredentials {
     const now = voiceInteger(this.options.now());
     if (!active(s) || (s.call.startedAt === null && now >= s.call.createdAt + s.limits.setupTimeoutMs) || (s.call.startedAt !== null && now >= s.call.startedAt + s.limits.maxDurationSeconds * 1000) || (s.disconnectedAt !== null && now >= s.disconnectedAt + s.limits.reconnectGraceMs) || (s.leaseExpiresAt !== null && now >= s.leaseExpiresAt)) throw new Error('credential refused');
   }
+  /** The credential names this call's worker, agent revision, proof key, participant and initiating principal. */
+  private bound(s: StoredVoiceCall, c: VoiceCredential): void {
+    if (c.binding.workerGeneration !== s.call.workerGeneration || c.binding.agentRevision !== s.call.agentRevision || c.binding.thumbprint !== s.proofKeyThumbprint || c.binding.participantId !== s.participantId || canonicalVoiceHash(c.binding.principal) !== canonicalVoiceHash(s.call.initiatingPrincipal)) throw new Error('credential refused');
+  }
   private current(s: StoredVoiceCall, c: VoiceCredential): void {
-    if (!active(s) || c.binding.generation !== s.credentialGeneration || c.binding.workerGeneration !== s.call.workerGeneration || c.binding.agentRevision !== s.call.agentRevision || c.binding.thumbprint !== s.proofKeyThumbprint || c.binding.participantId !== s.participantId || canonicalVoiceHash(c.binding.principal) !== canonicalVoiceHash(s.call.initiatingPrincipal)) throw new Error('credential refused');
+    if (!active(s) || c.binding.generation !== s.credentialGeneration) throw new Error('credential refused');
+    this.bound(s, c);
   }
   private async proof(tx: VoiceTransaction, row: VoiceRow<VoiceCredential>, proof: BrowserProof, operation: CallProofOperation, operationKey: string, requestHash: string): Promise<void> {
     const b = row.value.binding;
@@ -170,7 +175,11 @@ export class CallCredentials {
       await tx.put('credentials', media.id, { ...media.value, consumed: true }, media.version); return media.value.binding;
     });
   }
-  /** Stops with narrow proof-bound authority after media has closed; the receipt and end intent commit together. */
+  /**
+   * Stops with narrow proof-bound authority after media has closed; the receipt and end intent commit together.
+   * A call the server is already ending, or has ended, commits no second end intent: a valid control credential
+   * gets a stored receipt with the state reached (`ending`, `ended` or `failed`), and its retry returns that receipt.
+   */
   async stop(scopeId: string, callId: string, token: string, origin: string, input: StopCall): Promise<StopReceipt> {
     const request = StopCallSchema.parse(input); if (!request.proof) throw new Error('proof refused');
     const proof = request.proof;
@@ -183,6 +192,14 @@ export class CallCredentials {
       if (old) {
         if (old.value.requestHash !== hash || call.value.credentialGeneration !== control.value.binding.generation + 1) throw new Error('stop conflict');
         return StopReceiptSchema.parse(old.value.result);
+      }
+      const state = call.value.call.state;
+      if (state === 'ending' || state === 'ended' || state === 'failed') {
+        // Ending advanced the credential generation, so only the binding to this call is checked; revocation and expiry were checked by read.
+        this.bound(call.value, control.value);
+        const receipt = StopReceiptSchema.parse({ callId, stopId: request.idempotencyKey, state });
+        await tx.put('idempotency', key, { requestHash: hash, callId, result: receipt }, 0);
+        return receipt;
       }
       this.current(call.value, control.value);
       await requestCallEndInTransaction(tx, callId, 'client_stop', this.options.now());

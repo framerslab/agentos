@@ -36,6 +36,7 @@ import type {
 import { refusedToolCallResult } from '../../cognition/substrate/toolCallGate';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { gmiToolCallGateFor } from './toolCallGate';
+import { externalToolPauseCalls } from './externalToolPause';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { normalizeUsage, snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import {
@@ -390,13 +391,15 @@ export class ExternalToolResultHandler {
           // Process the GMI output (text, ui commands, errors).
           await this.processGMIOutputCallback(agentOSStreamId, streamContext, gmiOutputAfterTool, false);
 
-          // Handle further tool calls or finalization.
-          if (gmiOutputAfterTool.toolCalls && gmiOutputAfterTool.toolCalls.length > 0) {
+          // Handle further tool calls or finalization. The continuation stops for the host by the turn's rule, so the
+          // calls a final output lists, which the GMI ran or refused itself, end the turn with the final response.
+          const pauseCalls = externalToolPauseCalls(gmiOutputAfterTool);
+          if (pauseCalls) {
             await this.persistPendingExternalToolRequest(
               agentOSStreamId,
               streamContext,
               gmiInstanceIdForChunks,
-              gmiOutputAfterTool.toolCalls,
+              pauseCalls,
               gmiOutputAfterTool.responseText || 'Agent requires further tool execution.',
             );
             await this.chunks.pushChunk(
@@ -406,7 +409,7 @@ export class ExternalToolResultHandler {
               personaId,
               false,
               {
-                toolCalls: gmiOutputAfterTool.toolCalls,
+                toolCalls: pauseCalls,
                 rationale:
                   gmiOutputAfterTool.responseText || 'Agent requires further tool execution.',
                 executionMode: 'external',

@@ -133,11 +133,11 @@ describe('cartesia + hume env wiring', () => {
     expect(tts.providers.map((p) => p.providerId)).not.toContain('cartesia-sonic-stream');
   });
 
-  it('adds hume streaming when HUME_API_KEY is present', () => {
+  it('leaves hume out when HUME_API_KEY is present without the hume preference', () => {
     const { tts } = createVoiceProvidersFromEnv({
       env: { DEEPGRAM_API_KEY: 'd', HUME_API_KEY: 'h' },
     });
-    expect(tts.providers.map((p) => p.providerId)).toContain('hume-octave-stream');
+    expect(tts.providers.map((p) => p.providerId)).not.toContain('hume-octave-stream');
   });
 
   it('key absence = absent from chain (no throw)', () => {
@@ -402,7 +402,8 @@ describe('createSttChain sessions', () => {
     try {
       expect(asked).toEqual(['gpt-4o-transcribe', 'gpt-4o-mini-transcribe']);
       expect(confirmed).toEqual(['gpt-4o-mini-transcribe']);
-      expect(failed).toEqual(['openai-realtime-transcription']);
+      // The entries share the vendor's provider id, so the chain names each by its place among them.
+      expect(failed).toEqual(['openai-realtime-transcription#1']);
       expect(attempts).toEqual([2]);
       // Failover is off, so the session is the provider's own, which ends a turn with flush().
       expect(typeof session.flush).toBe('function');

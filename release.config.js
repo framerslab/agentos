@@ -7,6 +7,10 @@
  * - feat!: or BREAKING CHANGE: → minor (0.1.x → 0.2.0) - not major while 0.x
  * - perf:, refactor: → patch
  * - docs:, chore:, test:, ci: → no release
+ *
+ * Nothing is committed to master: master's branch rules refuse direct pushes.
+ * A release is the tag v<version>, the npm package and the GitHub release;
+ * package.json's version on master is not the released version.
  */
 export default {
   branches: ['master'],
@@ -73,27 +77,18 @@ export default {
       },
     }],
 
-    // Update CHANGELOG.md
-    ['@semantic-release/changelog', {
-      changelogFile: 'CHANGELOG.md'
-    }],
-
     // Publish to npm
     ['@semantic-release/npm', {
       npmPublish: true
     }],
 
-    // Commit version bump, changelog, and refreshed test-count badge.
-    ['@semantic-release/git', {
-      assets: ['CHANGELOG.md', 'package.json', '.github/badges/tests.json'],
-      message: 'chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}'
-    }],
-
-    // Create GitHub release
+    // Create the GitHub release, with the refreshed test-count badge attached.
+    // The README's badge reads the copy shipped in the npm package, through unpkg.
     ['@semantic-release/github', {
       successComment: false,
       failComment: false,
-      releasedLabels: false
+      releasedLabels: false,
+      assets: [{ path: '.github/badges/tests.json', name: 'tests.json', label: 'Test count badge' }]
     }]
   ]
 };

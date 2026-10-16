@@ -1,7 +1,7 @@
 /**
  * @fileoverview Telephony integration tests.
  *
- * Exercises two end-to-end paths without any real network I/O:
+ * Exercises three end-to-end paths without any real network I/O:
  *
  * ## Suite 1: Media stream path
  * ```
@@ -18,6 +18,15 @@
  * Validates the full ringing -> answered -> completed lifecycle via
  * HMAC-SHA1 signed webhooks processed by the CallManager.
  *
+ * ## Suite 3: Unsigned webhook path
+ * ```
+ * TelnyxVoiceProvider without a public key + CallManager -> nothing applied
+ * ```
+ * Validates that an unsigned key press or hangup posted to the webhook URL
+ * changes no call and emits no call event, also when the host sets
+ * `allowUnverifiedWebhooks` on its config object after constructing the
+ * provider.
+ *
  * No network I/O is performed -- WebSocket and HTTP interactions are mocked.
  */
 
@@ -29,6 +38,7 @@ import { TwilioMediaStreamParser } from '../parsers/TwilioMediaStreamParser.js';
 import { TelephonyStreamTransport } from '../TelephonyStreamTransport.js';
 import { CallManager } from '../CallManager.js';
 import { TwilioVoiceProvider } from '../providers/twilio.js';
+import { TelnyxVoiceProvider } from '../providers/telnyx.js';
 import type { AudioFrame } from '../../../voice-pipeline/types.js';
 
 // ---------------------------------------------------------------------------
@@ -375,5 +385,107 @@ describe('CallManager + TwilioVoiceProvider integration', () => {
 
     await manager.initiateCall({ toNumber: '+15550003333', fromNumber: '+15559993333' });
     expect(events).toContain('call:initiated');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 3: CallManager + TelnyxVoiceProvider without a public key
+// ---------------------------------------------------------------------------
+
+describe('CallManager + TelnyxVoiceProvider without a public key', () => {
+  const WEBHOOK_URL = 'https://example.com/voice/webhook/telnyx';
+
+  /** Build an unsigned Telnyx event for the call, as anyone who can reach the webhook URL could post it. */
+  function unsignedCtx(eventType: string, payload: Record<string, unknown>) {
+    return {
+      method: 'POST' as const,
+      url: WEBHOOK_URL,
+      headers: {} as Record<string, string>,
+      body: JSON.stringify({ data: { event_type: eventType, payload: { call_control_id: 'ctrl-unsigned-001', ...payload } } }),
+    };
+  }
+
+  it('should drop an unsigned key press and an unsigned hangup instead of applying them to the call', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { call_control_id: 'ctrl-unsigned-001', call_session_id: 'sess-unsigned-001' } }),
+      text: async () => '{}',
+    });
+    const provider = new TelnyxVoiceProvider({
+      apiKey: 'KEY_test_integration',
+      connectionId: 'conn-integration',
+      fetchImpl: fetchMock as typeof fetch,
+    });
+    const manager = new CallManager({
+      provider: {
+        provider: 'telnyx',
+        config: { apiKey: 'KEY_test_integration', connectionId: 'conn-integration', fromNumber: '+15559994444' },
+      },
+      webhookBaseUrl: 'https://example.com',
+    });
+    manager.registerProvider(provider);
+
+    const events: string[] = [];
+    manager.on((e) => { events.push(e.type); });
+
+    const call = await manager.initiateCall({ toNumber: '+15550004444' });
+    expect(call.providerCallId).toBe('ctrl-unsigned-001');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      manager.processWebhook('telnyx', unsignedCtx('call.dtmf.received', { digit: '1' }));
+      manager.processWebhook('telnyx', unsignedCtx('call.hangup', { hangup_cause: 'normal_clearing' }));
+
+      expect(events).not.toContain('call:dtmf');
+      expect(events).not.toContain('call:ended');
+      expect(call.state).toBe('initiated');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Webhook verification failed'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('should keep dropping unsigned webhooks when the host sets allowUnverifiedWebhooks on its config object after constructing the provider', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { call_control_id: 'ctrl-unsigned-001', call_session_id: 'sess-unsigned-001' } }),
+      text: async () => '{}',
+    });
+    const config = {
+      apiKey: 'KEY_test_integration',
+      connectionId: 'conn-integration',
+      allowUnverifiedWebhooks: false,
+      fetchImpl: fetchMock as typeof fetch,
+    };
+    const provider = new TelnyxVoiceProvider(config);
+    config.allowUnverifiedWebhooks = true;
+    const manager = new CallManager({
+      provider: {
+        provider: 'telnyx',
+        config: { apiKey: 'KEY_test_integration', connectionId: 'conn-integration', fromNumber: '+15559994444' },
+      },
+      webhookBaseUrl: 'https://example.com',
+    });
+    manager.registerProvider(provider);
+
+    const events: string[] = [];
+    manager.on((e) => { events.push(e.type); });
+
+    const call = await manager.initiateCall({ toNumber: '+15550004444' });
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      manager.processWebhook('telnyx', unsignedCtx('call.dtmf.received', { digit: '1' }));
+      manager.processWebhook('telnyx', unsignedCtx('call.hangup', { hangup_cause: 'normal_clearing' }));
+
+      expect(events).not.toContain('call:dtmf');
+      expect(events).not.toContain('call:ended');
+      expect(call.state).toBe('initiated');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Webhook verification failed'));
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

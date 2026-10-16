@@ -3,7 +3,7 @@ import type { TranscriptInput } from '../../../voice-pipeline/types.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { assertMeetingFundingChange, CONTENT_EVENT_TYPES, type MeetingEvent, type MeetingRunRecord, type MeetingRunState, type TranscriptTurn } from '../types.js';
 import type { SecretBox } from '../signing.js';
-import { DuplicateIdempotencyKeyError, FencedError, nextAttemptAt, OUTBOX_GIVE_UP_MS, type IEventStore, type IJobStore, type IOutbox, type IRunStore, type ITranscriptStore, type MeetingJob, type OutboxDelivery, type RunFilter } from './types.js';
+import { DuplicateIdempotencyKeyError, FencedError, nextAttemptAt, OUTBOX_GIVE_UP_MS, type IEventStore, type IJobStore, type IOutbox, type IRunStore, type ITranscriptStore, type MeetingJob, type OutboxDelivery, type OutboxEnqueue, type RunFilter } from './types.js';
 import { abortClaimedSends, runClaimedSend, type ClaimedSends } from './claims.js';
 import type { DeliveryFence } from './fenced-outbox.js';
 
@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS ${t.runs} (
   last_usage_source_at BIGINT,
   creation_pending BOOLEAN NOT NULL DEFAULT FALSE,
   creation_context TEXT,
+  completion_hook_at BIGINT,
+  completion_hook_claimed_at BIGINT,
   funding_json TEXT,
   funding_reservation_id TEXT,
   funding_settlement_json TEXT,
@@ -144,7 +146,9 @@ CREATE TABLE IF NOT EXISTS ${t.outbox} (
   first_attempt_at BIGINT,
   next_at BIGINT NOT NULL,
   state TEXT NOT NULL,
-  purged BOOLEAN NOT NULL DEFAULT FALSE
+  purged BOOLEAN NOT NULL DEFAULT FALSE,
+  kind TEXT NOT NULL DEFAULT 'event',
+  expires_at BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_${p}_outbox_due ON ${t.outbox} (next_at) WHERE state = 'pending';
 CREATE INDEX IF NOT EXISTS idx_${p}_outbox_run ON ${t.outbox} (run_id);
@@ -178,12 +182,16 @@ ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS last_report_at BIGINT;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS last_usage_source_at BIGINT;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS creation_pending BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS creation_context TEXT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS completion_hook_at BIGINT;
+ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS completion_hook_claimed_at BIGINT;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_json TEXT;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_reservation_id TEXT;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_settlement_json TEXT;
 ALTER TABLE ${t.runs} ADD COLUMN IF NOT EXISTS funding_cleanup_json TEXT;
 ALTER TABLE ${t.locks} ADD COLUMN IF NOT EXISTS turn_seq INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE ${t.locks} ADD COLUMN IF NOT EXISTS outbox_fenced_at BIGINT;
+ALTER TABLE ${t.outbox} ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'event';
+ALTER TABLE ${t.outbox} ADD COLUMN IF NOT EXISTS expires_at BIGINT;
 CREATE INDEX IF NOT EXISTS idx_${tablePrefix}_funding_pending ON ${t.runs} (run_id)
 WHERE funding_cleanup_json IS NOT NULL AND (funding_cleanup_json::jsonb->>'complete') = 'false';
 `;
@@ -277,9 +285,9 @@ export class SqlRunStore implements IRunStore {
   toJSON(): string {
     return '[SqlRunStore redacted]';
   }
-  private static readonly COLUMNS = 'run_id, owner_ref, provider_name, platform, state, keep, meeting_url, bot_name, notice_text, notice_version, notice_late_text, stop_phrase, limits_json, idempotency_key, transcriber, requested_at, join_at, dispatched_at, joined_at, notice_posted_at, capture_started_at, left_at, done_at, reason, billed_seconds, reservation_id, consent_record_id, dispatch_json, page_seen_at, last_usage_at, monitor_seen_at, participant_count, leave_commanded_at, capture_suspended_at, alone_since, reported_seconds, cleanup_pending, purged_at, provider_connection_ref, last_report_at, last_usage_source_at, creation_pending, creation_context, funding_json, funding_reservation_id, funding_settlement_json, funding_cleanup_json';
+  private static readonly COLUMNS = 'run_id, owner_ref, provider_name, platform, state, keep, meeting_url, bot_name, notice_text, notice_version, notice_late_text, stop_phrase, limits_json, idempotency_key, transcriber, requested_at, join_at, dispatched_at, joined_at, notice_posted_at, capture_started_at, left_at, done_at, reason, billed_seconds, reservation_id, consent_record_id, dispatch_json, page_seen_at, last_usage_at, monitor_seen_at, participant_count, leave_commanded_at, capture_suspended_at, alone_since, reported_seconds, cleanup_pending, purged_at, provider_connection_ref, last_report_at, last_usage_source_at, creation_pending, creation_context, funding_json, funding_reservation_id, funding_settlement_json, funding_cleanup_json, completion_hook_at, completion_hook_claimed_at';
   private row(run: MeetingRunRecord): unknown[] {
-    return [run.runId, run.ownerRef, run.providerName, run.platform, run.state, run.keep, run.meetingUrl === '' ? '' : this.opts.box.seal(run.meetingUrl, run.runId), run.botName, run.notice.text, run.notice.version, run.notice.lateArrivalText, run.stopPhrase, JSON.stringify(run.limits), run.idempotencyKey ?? null, run.transcriber ?? null, run.requestedAt, run.joinAt, run.dispatchedAt ?? null, run.joinedAt ?? null, run.noticePostedAt ?? null, run.captureStartedAt ?? null, run.leftAt ?? null, run.doneAt ?? null, run.reason ?? null, run.billedSeconds, run.reservationId ?? null, run.consentRecordId ?? null, run.dispatch ? JSON.stringify(run.dispatch) : null, run.pageSeenAt ?? null, run.lastUsageAt ?? null, run.monitorSeenAt ?? null, run.participantCount ?? null, run.leaveCommandedAt ?? null, run.captureSuspendedAt ?? null, run.aloneSince ?? null, run.reportedSeconds ?? null, run.cleanupPending ?? false, run.purgedAt ?? null, run.providerConnectionRef ?? null, run.lastReportAt ?? null, run.lastUsageSourceAt ?? null, run.creationPending ?? false, run.creationContext === undefined ? null : this.opts.box.seal(run.creationContext, creationContextAad(run.runId)), run.funding === undefined ? null : JSON.stringify(run.funding), run.fundingReservationId ?? null, run.fundingSettlement === undefined ? null : JSON.stringify(run.fundingSettlement), run.fundingCleanup === undefined ? null : JSON.stringify(run.fundingCleanup)];
+    return [run.runId, run.ownerRef, run.providerName, run.platform, run.state, run.keep, run.meetingUrl === '' ? '' : this.opts.box.seal(run.meetingUrl, run.runId), run.botName, run.notice.text, run.notice.version, run.notice.lateArrivalText, run.stopPhrase, JSON.stringify(run.limits), run.idempotencyKey ?? null, run.transcriber ?? null, run.requestedAt, run.joinAt, run.dispatchedAt ?? null, run.joinedAt ?? null, run.noticePostedAt ?? null, run.captureStartedAt ?? null, run.leftAt ?? null, run.doneAt ?? null, run.reason ?? null, run.billedSeconds, run.reservationId ?? null, run.consentRecordId ?? null, run.dispatch ? JSON.stringify(run.dispatch) : null, run.pageSeenAt ?? null, run.lastUsageAt ?? null, run.monitorSeenAt ?? null, run.participantCount ?? null, run.leaveCommandedAt ?? null, run.captureSuspendedAt ?? null, run.aloneSince ?? null, run.reportedSeconds ?? null, run.cleanupPending ?? false, run.purgedAt ?? null, run.providerConnectionRef ?? null, run.lastReportAt ?? null, run.lastUsageSourceAt ?? null, run.creationPending ?? false, run.creationContext === undefined ? null : this.opts.box.seal(run.creationContext, creationContextAad(run.runId)), run.funding === undefined ? null : JSON.stringify(run.funding), run.fundingReservationId ?? null, run.fundingSettlement === undefined ? null : JSON.stringify(run.fundingSettlement), run.fundingCleanup === undefined ? null : JSON.stringify(run.fundingCleanup), run.completionHookAt ?? null, run.completionHookClaimedAt ?? null];
   }
   private fromRow(r: Record<string, unknown>): MeetingRunRecord {
     const sealed = String(r.meeting_url ?? '');
@@ -289,7 +297,7 @@ export class SqlRunStore implements IRunStore {
       limits: JSON.parse(String(r.limits_json)), requestedAt: num(r.requested_at)!, joinAt: num(r.join_at)!, billedSeconds: num(r.billed_seconds) ?? 0,
     };
     const opt = <K extends keyof MeetingRunRecord>(key: K, value: MeetingRunRecord[K] | undefined | null): void => { if (value !== undefined && value !== null) run[key] = value; };
-    opt('idempotencyKey', r.idempotency_key as string | null); opt('transcriber', r.transcriber as string | null); opt('dispatchedAt', num(r.dispatched_at)); opt('joinedAt', num(r.joined_at)); opt('noticePostedAt', num(r.notice_posted_at)); opt('captureStartedAt', num(r.capture_started_at)); opt('leftAt', num(r.left_at)); opt('doneAt', num(r.done_at)); opt('reason', r.reason as MeetingRunRecord['reason'] | null); opt('reservationId', r.reservation_id as string | null); opt('consentRecordId', r.consent_record_id as string | null); opt('dispatch', r.dispatch_json ? JSON.parse(String(r.dispatch_json)) : undefined); opt('pageSeenAt', num(r.page_seen_at)); opt('lastUsageAt', num(r.last_usage_at)); opt('monitorSeenAt', num(r.monitor_seen_at)); opt('participantCount', num(r.participant_count)); opt('leaveCommandedAt', num(r.leave_commanded_at)); opt('captureSuspendedAt', num(r.capture_suspended_at)); opt('aloneSince', num(r.alone_since)); opt('reportedSeconds', num(r.reported_seconds)); opt('purgedAt', num(r.purged_at)); opt('lastReportAt', num(r.last_report_at)); opt('lastUsageSourceAt', num(r.last_usage_source_at));
+    opt('idempotencyKey', r.idempotency_key as string | null); opt('transcriber', r.transcriber as string | null); opt('dispatchedAt', num(r.dispatched_at)); opt('joinedAt', num(r.joined_at)); opt('noticePostedAt', num(r.notice_posted_at)); opt('captureStartedAt', num(r.capture_started_at)); opt('leftAt', num(r.left_at)); opt('doneAt', num(r.done_at)); opt('reason', r.reason as MeetingRunRecord['reason'] | null); opt('reservationId', r.reservation_id as string | null); opt('consentRecordId', r.consent_record_id as string | null); opt('dispatch', r.dispatch_json ? JSON.parse(String(r.dispatch_json)) : undefined); opt('pageSeenAt', num(r.page_seen_at)); opt('lastUsageAt', num(r.last_usage_at)); opt('monitorSeenAt', num(r.monitor_seen_at)); opt('participantCount', num(r.participant_count)); opt('leaveCommandedAt', num(r.leave_commanded_at)); opt('captureSuspendedAt', num(r.capture_suspended_at)); opt('aloneSince', num(r.alone_since)); opt('reportedSeconds', num(r.reported_seconds)); opt('purgedAt', num(r.purged_at)); opt('lastReportAt', num(r.last_report_at)); opt('lastUsageSourceAt', num(r.last_usage_source_at)); opt('completionHookAt', num(r.completion_hook_at)); opt('completionHookClaimedAt', num(r.completion_hook_claimed_at));
     if (bool(r.cleanup_pending)) run.cleanupPending = true;
     opt('providerConnectionRef', r.provider_connection_ref as string | null);
     run.creationPending = bool(r.creation_pending);
@@ -585,39 +593,63 @@ export class SqlOutbox implements IOutbox {
     this.t = meetingStoreTables(opts.tablePrefix);
   }
   private fromRow(r: Record<string, unknown>): OutboxDelivery {
-    return { id: String(r.id), runId: String(r.run_id), destinationRef: String(r.destination_ref), eventId: String(r.event_id), type: r.type as OutboxDelivery['type'], payload: String(r.payload), attempts: num(r.attempts) ?? 0, firstAttemptAt: num(r.first_attempt_at), nextAt: num(r.next_at)!, state: r.state as OutboxDelivery['state'], purged: bool(r.purged) };
+    return { id: String(r.id), runId: String(r.run_id), destinationRef: String(r.destination_ref), eventId: String(r.event_id), type: r.type as OutboxDelivery['type'], payload: String(r.payload), attempts: num(r.attempts) ?? 0, firstAttemptAt: num(r.first_attempt_at), nextAt: num(r.next_at)!, state: r.state as OutboxDelivery['state'], purged: bool(r.purged), kind: (r.kind as OutboxDelivery['kind'] | undefined) ?? 'event', expiresAt: num(r.expires_at) };
   }
-  /** Enqueues once per delivery id, refusing new content behind the run's fence. */
-  async enqueue(d: Pick<OutboxDelivery, 'id' | 'runId' | 'destinationRef' | 'eventId' | 'type' | 'payload'>, now: number): Promise<void> {
+  /** Enqueues once per delivery id, refusing new content behind the run's fence (a mail delivery is content). */
+  async enqueue(d: OutboxEnqueue, now: number): Promise<void> {
+    const kind = d.kind ?? 'event';
     await this.opts.db.transaction(async (trx) => {
       const { fencedAt } = await lockRun(trx, this.t.locks, d.runId);
-      if (fencedAt !== undefined && CONTENT_EVENT_TYPES.has(d.type)) return;
-      await trx.run(`INSERT INTO ${this.t.outbox} (id, run_id, destination_ref, event_id, type, payload, next_at, state) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending') ON CONFLICT (id) DO NOTHING`, [d.id, d.runId, d.destinationRef, d.eventId, d.type, d.payload, now]);
+      if (fencedAt !== undefined && (kind === 'mail' || CONTENT_EVENT_TYPES.has(d.type))) return;
+      await trx.run(`INSERT INTO ${this.t.outbox} (id, run_id, destination_ref, event_id, type, payload, next_at, state, kind, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT (id) DO NOTHING`, [d.id, d.runId, d.destinationRef, d.eventId, d.type, d.payload, now, kind, d.expiresAt ?? null]);
     });
   }
-  /** Lists pending deliveries due at now, ordered by due time and id. */
+  /** Lists pending deliveries due at now, ordered by due time and id; a mail delivery past its expiry is left out. */
   async due(now: number, limit = 100): Promise<OutboxDelivery[]> {
-    return (await this.opts.db.all<Record<string, unknown>>(`SELECT * FROM ${this.t.outbox} WHERE state = 'pending' AND next_at <= ? ORDER BY next_at, id LIMIT ?`, [now, limit])).map((r) => this.fromRow(r));
+    return (await this.opts.db.all<Record<string, unknown>>(`SELECT * FROM ${this.t.outbox} WHERE state = 'pending' AND next_at <= ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY next_at, id LIMIT ?`, [now, now, limit])).map((r) => this.fromRow(r));
   }
-  /** Marks a delivery accepted by its destination. */
+  /** Marks a delivery accepted by its destination; a mail's body goes with it, so it outlives no pending delivery. */
   async markDelivered(id: string): Promise<void> {
-    await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'delivered' WHERE id = ?`, [id]);
+    await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'delivered', payload = CASE WHEN kind = 'mail' THEN '' ELSE payload END WHERE id = ?`, [id]);
   }
   /** Advances retry backoff, giving up a day after the first failed attempt. A delivery no longer pending (delivered, or given up) is left as it is. */
   async markFailed(id: string, now: number): Promise<void> {
     await this.opts.db.transaction(async (trx) => {
-      const r = await trx.get<Record<string, unknown>>(`SELECT attempts, first_attempt_at, state FROM ${this.t.outbox} WHERE id = ? FOR UPDATE`, [id]);
+      const r = await trx.get<Record<string, unknown>>(`SELECT attempts, first_attempt_at, state, expires_at FROM ${this.t.outbox} WHERE id = ? FOR UPDATE`, [id]);
       // a late failure report from a sender that lost the race resurrects neither a delivery the destination took nor one given up
       if (!r || r.state !== 'pending') return;
       const attempts = (num(r.attempts) ?? 0) + 1;
       const first = num(r.first_attempt_at) ?? now;
-      const dead = now - first >= OUTBOX_GIVE_UP_MS;
-      await trx.run(`UPDATE ${this.t.outbox} SET attempts = ?, first_attempt_at = ?, next_at = ?, state = ? WHERE id = ?`, [attempts, first, dead ? now : nextAttemptAt(attempts, now), dead ? 'dead' : 'pending', id]);
+      const expires = num(r.expires_at);
+      const dead = now - first >= OUTBOX_GIVE_UP_MS || (expires !== undefined && now >= expires);
+      // a mail given up loses its body with its last attempt
+      const emptied = dead ? `, payload = CASE WHEN kind = 'mail' THEN '' ELSE payload END` : '';
+      await trx.run(`UPDATE ${this.t.outbox} SET attempts = ?, first_attempt_at = ?, next_at = ?, state = ?${emptied} WHERE id = ?`, [attempts, first, dead ? now : nextAttemptAt(attempts, now), dead ? 'dead' : 'pending', id]);
     });
   }
-  /** Resets attempts and makes a delivery due now without restoring any purged payload. */
+  /** Resets attempts and makes a delivery due now without restoring any purged payload; a mail delivery is never replayed. */
   async replay(id: string, now: number): Promise<void> {
-    await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'pending', attempts = 0, first_attempt_at = NULL, next_at = ? WHERE id = ?`, [now, id]);
+    await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'pending', attempts = 0, first_attempt_at = NULL, next_at = ? WHERE id = ? AND kind <> 'mail'`, [now, id]);
+  }
+  /** Ends a pending delivery at once, a mail's body emptied; one no longer pending is left as it is. */
+  async markDead(id: string): Promise<boolean> {
+    await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'dead', payload = CASE WHEN kind = 'mail' THEN '' ELSE payload END WHERE id = ? AND state = 'pending'`, [id]);
+    return true;
+  }
+  /** Moves a pending delivery's next attempt to `notBefore`, never earlier than it is, without counting an attempt. */
+  async holdUntil(id: string, notBefore: number): Promise<boolean> {
+    await this.opts.db.run(`UPDATE ${this.t.outbox} SET next_at = GREATEST(next_at, ?) WHERE id = ? AND state = 'pending'`, [notBefore, id]);
+    return true;
+  }
+  /** Ends every pending delivery of the run to the destination, their mail bodies emptied. */
+  async cancel(runId: string, destinationRef: string): Promise<boolean> {
+    await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'dead', payload = CASE WHEN kind = 'mail' THEN '' ELSE payload END WHERE run_id = ? AND destination_ref = ? AND state = 'pending'`, [runId, destinationRef]);
+    return true;
+  }
+  /** Ends every pending mail delivery whose expiry has passed, dead with its body emptied; the count ended. */
+  async endExpired(now: number): Promise<number> {
+    const r = await this.opts.db.run(`UPDATE ${this.t.outbox} SET state = 'dead', payload = '' WHERE kind = 'mail' AND state = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`, [now]);
+    return r.changes;
   }
   /**
    * Fences new content and scrubs content deliveries, including delivered rows; content-free deliveries keep their type
@@ -630,7 +662,8 @@ export class SqlOutbox implements IOutbox {
       await lockRun(trx, this.t.locks, runId);
       await trx.run(`UPDATE ${this.t.locks} SET fenced_at = COALESCE(fenced_at, ?) WHERE run_id = ?`, [Date.now(), runId]);
       const types = [...CONTENT_EVENT_TYPES];
-      await trx.run(`UPDATE ${this.t.outbox} SET payload = '', type = 'bot:purged', purged = TRUE WHERE run_id = ? AND type IN (${types.map(() => '?').join(', ')})`, [runId, ...types]);
+      await trx.run(`UPDATE ${this.t.outbox} SET payload = '', type = 'bot:purged', purged = TRUE WHERE run_id = ? AND kind = 'event' AND type IN (${types.map(() => '?').join(', ')})`, [runId, ...types]);
+      await trx.run(`UPDATE ${this.t.outbox} SET payload = '', purged = TRUE, state = 'dead' WHERE run_id = ? AND kind = 'mail'`, [runId]);
     });
     // again once the scrub has committed: a send claimed while it ran may have read the row before it was emptied
     abortClaimedSends(this.claims, runId);
