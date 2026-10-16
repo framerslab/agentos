@@ -15,7 +15,16 @@
  *   the other brain's trace, a brain's index is built from its own traces, and
  *   the 1,000-trace threshold counts its own traces;
  * - a brain opened later does not load another brain's index file;
- * - `health()` and a Markdown export cover the brain's own rows.
+ * - `health()` and a Markdown export cover the brain's own rows;
+ * - a SQLite export holds the brain's own rows, and an import of a SQLite
+ *   file that holds several brains is refused;
+ * - an Obsidian export links the brain's own knowledge-graph nodes, though
+ *   node ids repeat across brains;
+ * - on Postgres, a brain's full-text rebuild re-indexes its own rows.
+ *
+ * Inside one brain, recall's filters (type, scope, scope id, strength and
+ * age) bind the hybrid recall's vector candidates as they bind its full-text
+ * ones.
  *
  * hnswlib-node is a native addon whose build pnpm skips in CI, so the index
  * the sidecar loads is replaced here by an exact nearest-neighbour index with
@@ -30,6 +39,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 import { Memory, type ScoredTrace } from '../Memory.js';
 import type { Brain } from '../../../retrieval/store/Brain.js';
 import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
@@ -204,6 +214,32 @@ async function seedEmbedded(memory: Memory, count: number, vector: number[]): Pr
   });
 }
 
+/**
+ * A graph node for `traceId` linked to a node labelled `label`, in the brain's
+ * own graph. The node and edge ids are the same in every brain, as two brains
+ * that imported one file hold them.
+ */
+async function linkTrace(memory: Memory, traceId: string, label: string): Promise<void> {
+  const brain = brainOf(memory);
+  const now = Date.now();
+  const node = `INSERT INTO knowledge_nodes (brain_id, id, type, label, properties, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)`;
+  await brain.run(node, [brain.brainId, 'kn-trace', 'memory', 'trace', JSON.stringify({ trace_id: traceId }), now]);
+  await brain.run(node, [brain.brainId, 'kn-label', 'concept', label, '{}', now]);
+  await brain.run(
+    `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [brain.brainId, 'ke-trace-label', 'kn-trace', 'kn-label', 'related_to', now],
+  );
+}
+
+/** A new, empty folder under the system's temporary folder. */
+function newDir(prefix: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  dirs.push(dir);
+  return dir;
+}
+
 /** Every file under `dir`, read as text. */
 function filesUnder(dir: string): string[] {
   return (fs.readdirSync(dir, { recursive: true }) as string[])
@@ -271,6 +307,28 @@ describe.each([
     expect(healthB.activeTraces).toBe(2);
     expect(healthB.tracesPerType).toEqual({ episodic: 2 });
     expect(healthB.documentsIngested).toBe(0);
+  });
+
+  it.skipIf(skip)('writes its own rows to a SQLite export', async () => {
+    const { a, b } = await open();
+    await a.remember('Ana keeps the locker key in the blue tin');
+    await b.remember('The garden beds get water every Friday');
+    const out = path.join(newDir('agentos-brain-export-'), 'brain-a.sqlite');
+
+    const result = await a.export(out, { format: 'sqlite' });
+
+    expect(result.refused).toEqual([]);
+    const file = await resolveStorageAdapter({ filePath: out, priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    try {
+      const traces = await file.all<{ brain_id: string; content: string }>(
+        'SELECT brain_id, content FROM memory_traces',
+      );
+      expect(traces).toEqual([{ brain_id: brainOf(a).brainId, content: 'Ana keeps the locker key in the blue tin' }]);
+      const brains = await file.all<{ brain_id: string }>('SELECT DISTINCT brain_id FROM brain_meta');
+      expect(brains.map((row) => row.brain_id)).toEqual([brainOf(a).brainId]);
+    } finally {
+      await file.close();
+    }
   });
 });
 
@@ -371,5 +429,107 @@ describe('two brains in a SQLite file', () => {
     const written = filesUnder(out);
     expect(written).toHaveLength(1);
     expect(written[0]).toContain('The garden beds get water every Friday');
+  });
+
+  it("links its own knowledge graph's nodes in an Obsidian export", async () => {
+    const { a, b, file } = await sqlitePair();
+    const trace = await a.remember('Ana keeps the locker key in the blue tin');
+    // Brain B's graph uses the same node ids and names brain A's trace id.
+    await linkTrace(a, trace.id, 'Blue tin');
+    await linkTrace(b, trace.id, 'Harbor gate code');
+
+    const out = path.join(path.dirname(file), 'vault-a');
+    const result = await a.export(out, { format: 'obsidian' });
+
+    expect(result.refused).toEqual([]);
+    const written = filesUnder(out).join('\n');
+    expect(written).toContain('[[Blue tin]]');
+    expect(written).not.toContain('Harbor gate code');
+  });
+
+  it('refuses to import a SQLite file that holds several brains, and imports a single-brain export', async () => {
+    const { a, b, file } = await sqlitePair();
+    await a.remember('Ana keeps the locker key in the blue tin');
+    await b.remember('The garden beds get water every Friday');
+    const c = await openSqlite(path.join(path.dirname(file), 'brain-c.sqlite'), 'brain-c');
+    const tracesOfC = async (): Promise<string[]> =>
+      (await brainOf(c).all<{ content: string }>('SELECT content FROM memory_traces WHERE brain_id = ?', ['brain-c'])).map(
+        (row) => row.content,
+      );
+
+    const shared = await c.importFrom(file, { format: 'sqlite' });
+
+    expect(shared.imported).toBe(0);
+    expect(shared.errors).toHaveLength(1);
+    expect(shared.errors[0]).toContain('brain-a');
+    expect(shared.errors[0]).toContain('brain-b');
+    expect(await tracesOfC()).toEqual([]);
+
+    // Brain A's own SQLite export holds brain A alone.
+    const exported = path.join(path.dirname(file), 'brain-a-export.sqlite');
+    await a.export(exported, { format: 'sqlite' });
+    const single = await c.importFrom(exported, { format: 'sqlite' });
+
+    expect(single.errors).toEqual([]);
+    expect(single.imported).toBe(1);
+    expect(await tracesOfC()).toEqual(['Ana keeps the locker key in the blue tin']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// One brain: recall's filters bind the vector candidates
+// ---------------------------------------------------------------------------
+
+describe('one brain with its HNSW index active', () => {
+  it("applies recall's filters to the vector candidates as to the full-text ones", async () => {
+    const { b } = await sqlitePair();
+    const home = await b.remember('Ana keeps the locker key in the blue tin', { type: 'semantic', scopeId: 'home' });
+    const gym = await b.remember('The gym locker has a new padlock', { type: 'episodic', scope: 'team', scopeId: 'gym' });
+    // An import builds the brain's index from its traces that carry an embedding: the two above.
+    await b.importFromString(JSON.stringify({ traces: [{ content: 'Bo moved the bike rack to the yard' }] }), 'json');
+    expect((await indexOf(b))?.size).toBe(2);
+    const brain = brainOf(b);
+
+    // "combination" shares no word with any trace; its vector is the locker axis, so both
+    // traces reach the recall as vector candidates only.
+    expect(idsOf(await b.recall('combination')).sort()).toEqual([home.id, gym.id].sort());
+
+    // A recall moves the strength of what it returns, so the weak trace is set just before.
+    await brain.run('UPDATE memory_traces SET strength = 0.2 WHERE brain_id = ? AND id = ?', [brain.brainId, home.id]);
+    expect(idsOf(await b.recall('combination', { minStrength: 0.5 }))).toEqual([gym.id]);
+
+    expect(idsOf(await b.recall('combination', { type: 'episodic' }))).toEqual([gym.id]);
+    expect(idsOf(await b.recall('combination', { type: 'semantic' }))).toEqual([home.id]);
+    expect(idsOf(await b.recall('combination', { scope: 'team' }))).toEqual([gym.id]);
+    expect(idsOf(await b.recall('combination', { scopeId: 'home' }))).toEqual([home.id]);
+    expect(idsOf(await b.recall('combination', { after: Date.now() + 60_000 }))).toEqual([]);
+    expect(idsOf(await b.recall('combination', { before: 1 }))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Postgres: the full-text rebuild
+// ---------------------------------------------------------------------------
+
+describe('two brains in a Postgres database', () => {
+  it.skipIf(!POSTGRES_URL)("rebuilds the full-text index of its own rows only", async () => {
+    const { a, b } = await postgresPair();
+    const inB = await b.remember('The ferry leaves at noon');
+    const brainB = brainOf(b);
+    // Brain B's trace loses its full-text entry; a rebuild in brain A leaves brain B's rows as they are.
+    await brainB.run('UPDATE memory_traces SET _tsv = NULL WHERE brain_id = ? AND id = ?', [brainB.brainId, inB.id]);
+
+    // An import rebuilds the importing brain's full-text index.
+    await a.importFromString(
+      JSON.stringify({ traces: [{ content: 'Ana keeps the locker key in the blue tin' }] }),
+      'json',
+    );
+
+    const unindexed = await brainB.get<{ n: number | string }>(
+      'SELECT COUNT(*) AS n FROM memory_traces WHERE brain_id = ? AND id = ? AND _tsv IS NULL',
+      [brainB.brainId, inB.id],
+    );
+    expect(Number(unindexed?.n)).toBe(1);
+    expect(idsOf(await a.recall('locker blue tin'))).toHaveLength(1);
   });
 });
