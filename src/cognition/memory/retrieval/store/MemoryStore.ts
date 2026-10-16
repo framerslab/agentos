@@ -1197,8 +1197,8 @@ export class MemoryStore {
         const { dialect } = brain.features;
         const insertSql = dialect.insertOrReplace(
           'memory_traces',
-          ['brain_id', 'id', 'type', 'scope', 'content', 'embedding', 'strength', 'created_at', 'last_accessed', 'retrieval_count', 'tags', 'emotions', 'metadata', 'deleted'],
-          ['?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '0'],
+          ['brain_id', 'id', 'type', 'scope', 'content', 'embedding', 'strength', 'created_at', 'last_accessed', 'retrieval_count', 'tags', 'emotions', 'metadata', 'deleted', 'scope_id'],
+          ['?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '0', '?'],
           'brain_id, id',
         );
         const insertParams = [
@@ -1223,6 +1223,7 @@ export class MemoryStore {
             associatedTraceIds: trace.associatedTraceIds,
             structuredData: trace.structuredData,
           }),
+          trace.scopeId ?? '',
         ];
         const result = await brain.run(insertSql, insertParams);
         if (result.changes === 0) {

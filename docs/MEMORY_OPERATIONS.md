@@ -732,7 +732,7 @@ content,type,tags
 All import paths use SHA-256 content hashing to prevent duplicate traces:
 
 1. Before inserting a trace, the importer computes `SHA-256(content)` and stores it in the trace's metadata as `import_hash`.
-2. When a trace in the brain already carries that hash, the row is skipped (counted in `skipped`), whatever its type and scope. The CSV importer also matches a trace whose metadata `content_hash` equals the hash. The SQLite importer also matches a trace with identical `content`, does not read `content_hash`, and merges the skipped row's tags into the trace it matched.
+2. When a trace of the same scope and scope id already carries that hash, the row is skipped (counted in `skipped`), whatever its type. A trace of another scope id is not a duplicate: a record whose text another tenant's, user's or session's trace holds is imported under its own scope id. A record's scope id is its metadata `scopeId`, else the `scope_id` an export of a schema-3 brain carries, else `''`; Markdown, Obsidian and ChatGPT records file under `''`. The CSV importer also matches a trace whose metadata `content_hash` equals the hash. The SQLite importer also matches a trace with identical `content`, does not read `content_hash`, and merges the skipped row's tags, and the later of the two `created_at` times, into the trace it matched.
 3. Deduplication is enabled by default (`dedup: true`) and can be disabled per-import.
 
 ```ts

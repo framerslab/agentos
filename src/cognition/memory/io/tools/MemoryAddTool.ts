@@ -198,9 +198,9 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
         await trx.run(
           `INSERT INTO memory_traces
              (brain_id, id, type, scope, content, embedding, strength, created_at,
-              last_accessed, retrieval_count, tags, emotions, metadata, deleted)
-           VALUES (?, ?, ?, ?, ?, NULL, 1.0, ?, NULL, 0, ?, '{}', ?, 0)`,
-          [this.brain.brainId, traceId, type, scope, args.content, now, tags, metadata],
+              last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
+           VALUES (?, ?, ?, ?, ?, NULL, 1.0, ?, NULL, 0, ?, '{}', ?, 0, ?)`,
+          [this.brain.brainId, traceId, type, scope, args.content, now, tags, metadata, scopeId ?? ''],
         );
 
         await trx.run(

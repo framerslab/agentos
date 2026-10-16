@@ -500,8 +500,8 @@ export class Memory {
     await this._brain.run(
       `INSERT INTO memory_traces
          (brain_id, id, type, scope, content, embedding, strength, created_at,
-          last_accessed, retrieval_count, tags, emotions, metadata, deleted)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, 0)`,
+          last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, 0, ?)`,
       [
         this._brain.brainId,
         id,
@@ -514,6 +514,7 @@ export class Memory {
         JSON.stringify(tags),
         JSON.stringify({}),
         JSON.stringify(buildInitialTraceMetadata({}, { contentHash, entities, scopeId })),
+        scopeId,
       ],
     );
 
@@ -1782,8 +1783,8 @@ export class Memory {
       await this._brain.run(
         `INSERT INTO memory_traces
            (brain_id, id, type, scope, content, embedding, strength, created_at,
-            last_accessed, retrieval_count, tags, emotions, metadata, deleted)
-         VALUES (?, ?, 'semantic', 'user', ?, NULL, 1.0, ?, NULL, 0, '[]', '{}', ?, 0)`,
+            last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
+         VALUES (?, ?, 'semantic', 'user', ?, NULL, 1.0, ?, NULL, 0, '[]', '{}', ?, 0, '')`,
         [
           brainId,
           traceId,

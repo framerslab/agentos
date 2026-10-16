@@ -274,7 +274,8 @@ export class ChatGptImporter {
   /**
    * Insert a single episodic memory trace derived from a message pair.
    *
-   * Deduplication is based on SHA-256 of the combined `content` string.
+   * Deduplication is based on SHA-256 of the combined `content` string, inside
+   * the `user` scope and the scope id `''` these traces file under.
    *
    * @param content        - The `[user]:...\n[assistant]:...` content string.
    * @param createdAt      - Unix timestamp (ms) of the user message.
@@ -294,7 +295,10 @@ export class ChatGptImporter {
     if (options?.dedup ?? true) {
       const { dialect } = this.brain.features;
       const existing = await this.brain.get<{ id: string }>(
-        `SELECT id FROM memory_traces WHERE brain_id = ? AND ${dialect.jsonExtract('metadata', '$.import_hash')} = ? LIMIT 1`,
+        `SELECT id FROM memory_traces
+          WHERE brain_id = ? AND scope = 'user' AND scope_id = ''
+            AND ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
+          LIMIT 1`,
         [this.brain.brainId, hash],
       );
 
@@ -308,8 +312,8 @@ export class ChatGptImporter {
       await this.brain.run(
         `INSERT INTO memory_traces
              (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
-              retrieval_count, tags, emotions, metadata, deleted)
-           VALUES (?, ?, 'episodic', 'user', ?, NULL, 1.0, ?, NULL, 0, '[]', '{}', ?, 0)`,
+              retrieval_count, tags, emotions, metadata, deleted, scope_id)
+           VALUES (?, ?, 'episodic', 'user', ?, NULL, 1.0, ?, NULL, 0, '[]', '{}', ?, 0, '')`,
         [
           this.brain.brainId,
           `mt_${uuidv4()}`,
