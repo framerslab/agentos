@@ -4,9 +4,10 @@
  * the selectors that attach to it. A subset of Unicode's extended grapheme clusters (UAX #29) covering the scripts the
  * tag rules cut: combining marks (`\p{M}`) and the spacing vowels Thai and Lao write after a consonant (U+0E33, U+0EB3);
  * the half-width kana's voiced and semi-voiced sound marks (U+FF9E, U+FF9F), letters that extend the kana before them;
- * the zero width joiner and the character after it; the zero width non-joiner; variation selectors, emoji modifiers
- * and tag characters; a pair of regional indicators; Hangul's medial vowels and final consonants after a leading
- * consonant or a vowel; and CR LF. It imports nothing.
+ * the zero width joiner, and the pictograph after it when a pictograph stands before it; the zero width non-joiner;
+ * variation selectors, emoji modifiers and tag characters; a pair of regional indicators; Hangul's syllable rules (a
+ * leading consonant before another, a vowel or a syllable; a vowel or an LV syllable before a vowel or a final
+ * consonant; a final consonant or an LVT syllable before a final consonant); and CR LF. It imports nothing.
  *
  * @module agentos/cognition/library/graphemes
  */
@@ -49,9 +50,43 @@ function joinsBefore(char: string): boolean {
 /** A regional indicator, two of which spell a flag. */
 const REGIONAL = /^[\u{1F1E6}-\u{1F1FF}]$/u;
 
-/** A Hangul leading consonant, or a medial vowel or final consonant. */
-const JAMO_LEADING = /^[\u{1100}-\u{115F}\u{A960}-\u{A97C}]$/u;
-const JAMO_FOLLOWING = /^[\u{1160}-\u{11FF}\u{D7B0}-\u{D7FB}]$/u;
+/** A pictograph (`\p{Extended_Pictographic}`), which the zero width joiner joins to the pictograph before it. */
+const PICTOGRAPH = /^\p{Extended_Pictographic}$/u;
+
+/**
+ * A cluster that ends in a pictograph, its extending characters (`\p{Grapheme_Extend}`, or an emoji modifier) and the
+ * zero width joiner: a pictograph after the joiner joins it (UAX #29's rule GB11). After anything else the joiner
+ * closes its cluster, so a letter, the joiner and a pictograph are two clusters, as `Intl.Segmenter` cuts them.
+ */
+const PICTOGRAPH_THEN_JOINER = /\p{Extended_Pictographic}(?:\p{Grapheme_Extend}|\p{Emoji_Modifier})*‍$/u;
+
+/**
+ * A Hangul character's syllable type (Unicode's `Hangul_Syllable_Type`): a leading consonant (L), a medial vowel (V), a
+ * final consonant (T), a precomposed syllable of a leading consonant and a vowel (LV, every 28th code point from
+ * U+AC00) or of all three (LVT); null for any other character.
+ */
+function hangulType(char: string): 'L' | 'V' | 'T' | 'LV' | 'LVT' | null {
+  const point = char.codePointAt(0) ?? 0;
+  if ((point >= 0x1100 && point <= 0x115f) || (point >= 0xa960 && point <= 0xa97c)) return 'L';
+  if ((point >= 0x1160 && point <= 0x11a7) || (point >= 0xd7b0 && point <= 0xd7c6)) return 'V';
+  if ((point >= 0x11a8 && point <= 0x11ff) || (point >= 0xd7cb && point <= 0xd7fb)) return 'T';
+  if (point >= 0xac00 && point <= 0xd7a3) return (point - 0xac00) % 28 === 0 ? 'LV' : 'LVT';
+  return null;
+}
+
+/**
+ * Whether two Hangul characters stay in one cluster (UAX #29's rules GB6 to GB8): a leading consonant before another,
+ * a vowel or a syllable; a vowel or an LV syllable before a vowel or a final consonant; a final consonant or an LVT
+ * syllable before a final consonant.
+ */
+function hangulJoins(before: string, after: string): boolean {
+  const first = hangulType(before);
+  const second = hangulType(after);
+  if (first === null || second === null) return false;
+  if (first === 'L') return second !== 'T';
+  if (first === 'V' || first === 'LV') return second === 'V' || second === 'T';
+  return second === 'T';
+}
 
 /** The text's grapheme clusters, in order; joined they are the text. */
 export function graphemeClusters(text: string): string[] {
@@ -65,10 +100,10 @@ export function graphemeClusters(text: string): string[] {
       current !== '' &&
       (joinsBefore(char) ||
         char === ZWJ ||
-        previous === ZWJ ||
+        (previous === ZWJ && PICTOGRAPH.test(char) && PICTOGRAPH_THEN_JOINER.test(current)) ||
         (previous === '\r' && char === '\n') ||
         (regional && regionals % 2 === 1) ||
-        ((JAMO_LEADING.test(previous) || JAMO_FOLLOWING.test(previous)) && JAMO_FOLLOWING.test(char)));
+        hangulJoins(previous, char));
     if (joins) {
       current += char;
     } else {
