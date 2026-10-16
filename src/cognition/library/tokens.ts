@@ -101,8 +101,9 @@ export function firstWhiteSpaceAtOrAfter(text: string, position: number): number
 
 /**
  * A word without its ending: "-ing" past five letters, "-ed" and "-es" past four, "-s" past three unless it ends in
- * "-ss"; letters are code points. It joins "plans" with "plan" and "roadmaps" with "roadmap", and leaves "university"
- * and "universe" apart, which the Porter algorithm stems alike.
+ * "-ss"; letters are code points, and the endings are matched as written, so a word is passed in lower case, as the
+ * word rule reads it. It joins "plans" with "plan" and "roadmaps" with "roadmap", and leaves "university" and
+ * "universe" apart, which the Porter algorithm stems alike.
  */
 export function stemWord(word: string): string {
   const size = Array.from(word).length;
@@ -113,21 +114,24 @@ export function stemWord(word: string): string {
 }
 
 /**
- * A character of a script written without spaces between words, each script read by its Unicode script extensions
- * (`Script_Extensions`) so that no block of it is left out and a character two of these scripts share counts too:
- * Thai (its digits among them, since a number in Thai digits sits inside a Thai run), the kana (the half-width forms
- * among them, and the prolonged sound mark U+30FC of `ラーメン`, which is Script=Common and Hiragana and Katakana by
- * extension, so that it never cuts a run), the CJK ideographs (the compatibility and the supplementary blocks among
- * them) and Hangul (the syllables and the jamo).
+ * A character of a script written without spaces between words, each script read by its Unicode script extensions so
+ * that no block of it is left out and a character the scripts share is not left out either: Thai (its digits among
+ * them, since a number in Thai digits sits inside a Thai run), the kana (the half-width forms among them, and the marks
+ * the Script property files under Common: the prolonged sound mark U+30FC and its half-width form U+FF70, the voiced
+ * and semi-voiced marks, the vertical repeat marks), the CJK ideographs (the compatibility and the supplementary blocks
+ * among them, and the parenthesized and circled numerals) and Hangul (the syllables and the jamo). A character read
+ * one at a time, as a cutter of runs reads them, answers alike for every character of a kana word.
  */
-const UNSPACED = /[\p{Script_Extensions=Thai}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Han}\p{Script_Extensions=Hangul}]/u;
+const UNSPACED =
+  /[\p{Script_Extensions=Thai}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Han}\p{Script_Extensions=Hangul}]/u;
 
 /**
  * Whether a word holds a character of a script written without spaces between words (Thai, Japanese kana, the
  * ideographs Chinese and Japanese share, Korean, whose long runs are common in data), where whole words cannot be
- * compared and one edit says nothing. A half-width kana letter, a compatibility or a supplementary ideograph, a Thai
- * digit and the prolonged sound mark of `ラーメン` all count, since each script is read by its Unicode script
- * extensions.
+ * compared and one edit says nothing. A half-width kana letter, the prolonged sound mark, a compatibility or a
+ * supplementary ideograph and a Thai digit all count, since each script is read by its Unicode script extensions, and
+ * every character of a kana word counts on its own. A word of Lao, Khmer, Burmese or Tibetan letters does not: those
+ * scripts are not named, and such a word reads as spaced.
  */
 export function isUnspacedScript(word: string): boolean {
   return UNSPACED.test(word);
