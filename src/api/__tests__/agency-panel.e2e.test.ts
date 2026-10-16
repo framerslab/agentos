@@ -240,6 +240,17 @@ describe('4. the per-call guard', () => {
     const seq = agency({ modelPool: POOL(), agents: { one: { instructions: 'a' } }, strategy: 'sequential' } as never);
     await expect(seq.generate('x', { system: 'allowed outside panel' })).resolves.toBeTruthy();
   });
+  it('maxAttempts and onAttempt pass the allow list and reach the seats: a seat on 500 sends one request, and onAttempt hears it', async () => {
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiError(500, 'down')], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
+    const onAttempt = vi.fn();
+    const result = await panel().generate('review', { maxAttempts: 1, onAttempt });
+    expect(result.seats.find((s) => s.entry === 'astra')).toMatchObject({ status: 'error' });
+    expect(result.text).toBe('Merged');
+    // The provider's own count is three attempts (the nested-panel test counts them); the call's cap sends one.
+    expect(calls(OPENAI_CHAT, 'POST')).toHaveLength(1);
+    // The OpenAI provider reports each request it sends; the Anthropic and Gemini providers report none.
+    expect(onAttempt.mock.calls).toEqual([[{ attempt: 1, status: 500, ok: false }]]);
+  });
   it('a session send on a panel is not rejected, and a rejected call moves neither the rotation nor the call number', async () => {
     threeProviders();
     const team = panel({ seating: { policy: 'round-robin' } });
