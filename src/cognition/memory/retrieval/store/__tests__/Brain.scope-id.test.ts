@@ -19,6 +19,7 @@ import { MemoryAddTool } from '../../../io/tools/MemoryAddTool.js';
 import { JsonImporter } from '../../../io/JsonImporter.js';
 import { SqliteImporter } from '../../../io/SqliteImporter.js';
 import { CsvImporter } from '../../../io/CsvImporter.js';
+import { MarkdownImporter } from '../../../io/MarkdownImporter.js';
 import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
 import type { IKnowledgeGraph } from '../../graph/knowledge/IKnowledgeGraph.js';
 import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager.js';
@@ -270,5 +271,17 @@ describe('the importers file by scope id and deduplicate inside one', () => {
     await new CsvImporter(brain).importFromString(csv('A%2F42'));
     expect((await new CsvImporter(brain).importFromString(csv('B%2F42'))).imported).toBe(1);
     expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['A%2F42', 'B%2F42']);
+  });
+
+  it("Markdown: a file whose text another scope id holds is imported under '', and dedup reads only ''", async () => {
+    const brain = await open(tempFile(), 'markdown');
+    await new JsonImporter(brain).importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+    const dir = path.join(path.dirname(tempFile()), 'notes');
+    await fsp.mkdir(dir);
+    await fsp.writeFile(path.join(dir, 'same.md'), '---\nscope: user\n---\nSame words.\n', 'utf8');
+    expect((await new MarkdownImporter(brain).import(dir)).imported).toBe(1);
+    expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['', 'A%2F42']);
+    // A second import finds the trace the first filed under ''.
+    expect((await new MarkdownImporter(brain).import(dir)).skipped).toBe(1);
   });
 });
