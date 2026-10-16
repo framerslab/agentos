@@ -23,7 +23,9 @@
  * TelnyxVoiceProvider without a public key + CallManager -> nothing applied
  * ```
  * Validates that an unsigned key press or hangup posted to the webhook URL
- * changes no call and emits no call event.
+ * changes no call and emits no call event, also when the host sets
+ * `allowUnverifiedWebhooks` on its config object after constructing the
+ * provider.
  *
  * No network I/O is performed -- WebSocket and HTTP interactions are mocked.
  */
@@ -429,6 +431,49 @@ describe('CallManager + TelnyxVoiceProvider without a public key', () => {
 
     const call = await manager.initiateCall({ toNumber: '+15550004444' });
     expect(call.providerCallId).toBe('ctrl-unsigned-001');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      manager.processWebhook('telnyx', unsignedCtx('call.dtmf.received', { digit: '1' }));
+      manager.processWebhook('telnyx', unsignedCtx('call.hangup', { hangup_cause: 'normal_clearing' }));
+
+      expect(events).not.toContain('call:dtmf');
+      expect(events).not.toContain('call:ended');
+      expect(call.state).toBe('initiated');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Webhook verification failed'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('should keep dropping unsigned webhooks when the host sets allowUnverifiedWebhooks on its config object after constructing the provider', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { call_control_id: 'ctrl-unsigned-001', call_session_id: 'sess-unsigned-001' } }),
+      text: async () => '{}',
+    });
+    const config = {
+      apiKey: 'KEY_test_integration',
+      connectionId: 'conn-integration',
+      allowUnverifiedWebhooks: false,
+      fetchImpl: fetchMock as typeof fetch,
+    };
+    const provider = new TelnyxVoiceProvider(config);
+    config.allowUnverifiedWebhooks = true;
+    const manager = new CallManager({
+      provider: {
+        provider: 'telnyx',
+        config: { apiKey: 'KEY_test_integration', connectionId: 'conn-integration', fromNumber: '+15559994444' },
+      },
+      webhookBaseUrl: 'https://example.com',
+    });
+    manager.registerProvider(provider);
+
+    const events: string[] = [];
+    manager.on((e) => { events.push(e.type); });
+
+    const call = await manager.initiateCall({ toNumber: '+15550004444' });
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {

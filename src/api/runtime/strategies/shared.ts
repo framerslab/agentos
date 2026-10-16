@@ -17,11 +17,13 @@ import { knownProviderPrefixOf, routedProviderOf } from '../../model.js';
 import type {
   AgencyOptions,
   AgencyQuorumConfig,
+  AgencySeatConfig,
   Agent,
   BaseAgentConfig,
   AgentCallRecord,
   ApprovalRequest,
   ApprovalDecision,
+  SeatMetadata,
 } from '../types.js';
 import { AgencyQuorumError } from '../types.js';
 
@@ -49,6 +51,32 @@ import { AgencyQuorumError } from '../types.js';
  */
 export function isAgent(value: BaseAgentConfig | Agent): value is Agent {
   return typeof (value as Agent).generate === 'function';
+}
+
+/**
+ * What the strategies read about a seat besides running it: a config's `instructions` (as its description) and
+ * `dependsOn`, or a pre-built member's own `description` and `dependsOn` when they are a non-blank string and an
+ * array of strings ({@link SeatMetadata}).
+ *
+ * @param member - A seat config or a pre-built `Agent`.
+ * @returns The seat's description and dependencies, each left out when the seat has none.
+ */
+export function seatMetadataOf(member: BaseAgentConfig | Agent): SeatMetadata {
+  if (!isAgent(member)) {
+    const config = member as BaseAgentConfig;
+    return {
+      ...(config.instructions ? { description: config.instructions } : {}),
+      ...(Array.isArray(config.dependsOn) ? { dependsOn: config.dependsOn } : {}),
+    };
+  }
+  const carried = member as Agent & { description?: unknown; dependsOn?: unknown };
+  const description =
+    typeof carried.description === 'string' && carried.description.trim() ? carried.description : undefined;
+  const dependsOn =
+    Array.isArray(carried.dependsOn) && carried.dependsOn.every((name) => typeof name === 'string')
+      ? (carried.dependsOn as string[])
+      : undefined;
+  return { ...(description ? { description } : {}), ...(dependsOn ? { dependsOn } : {}) };
 }
 
 /**
@@ -205,6 +233,7 @@ export function buildAgentCallUsage(
  * merged additively: agency tools serve as a base layer and agent tools
  * override on name collision. This lets an agency provide a shared tool
  * set while individual agents can override or extend it.
+ * The agency's `runtime` becomes the seat's when the seat names none.
  *
  * @param agentConfig - Per-agent configuration (takes precedence).
  * @param agencyConfig - Agency-level fallback values (base layer).
@@ -226,7 +255,7 @@ export function buildAgentCallUsage(
 export function mergeDefaults(
   agentConfig: BaseAgentConfig,
   agencyConfig: AgencyOptions
-): BaseAgentConfig {
+): AgencySeatConfig {
   // A seat whose own model names a provider (`anthropic:claude-opus-5-5`) does
   // not inherit the agency's provider, so the prefix never meets an inherited
   // `ollama`, under which a colon is never split.
@@ -247,6 +276,8 @@ export function mergeDefaults(
   const seatRouted = routedProviderOf({ provider: used.provider, model: used.model });
   const agencyRouted = routedProviderOf(agencyConfig);
   const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
+  // The agency's runtime is the default engine of a config seat; the seat's own wins.
+  const runtime = (agentConfig as AgencySeatConfig).runtime ?? agencyConfig.runtime;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
@@ -259,6 +290,7 @@ export function mergeDefaults(
     // Tools are merged separately because we want additive merging
     // (agency tools + agent tools) rather than wholesale replacement.
     tools: mergeAdaptableTools(agencyConfig.tools, agentConfig.tools),
+    ...(runtime !== undefined ? { runtime } : {}),
   };
 }
 

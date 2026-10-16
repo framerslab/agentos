@@ -18,7 +18,7 @@ import type { Agent, AgentOptions, AgentSession, AgentSessionOptions, SessionSen
 import { extractTextFromContent, resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
-import type { GMIBaseConfig, IGMI } from '../cognition/substrate/IGMI.js';
+import type { GMIBaseConfig, IGMI, ToolCallRequest, ToolCallResult } from '../cognition/substrate/IGMI.js';
 import type { IPersonaDefinition } from '../cognition/substrate/personas/IPersonaDefinition.js';
 import { InMemoryWorkingMemory } from '../cognition/substrate/memory/InMemoryWorkingMemory.js';
 import { StatisticalUtilityAI } from '../cognition/nlp/ai_utilities/StatisticalUtilityAI.js';
@@ -32,11 +32,15 @@ import type { IToolOrchestrator } from '../core/tools/IToolOrchestrator.js';
 import type { ITool } from '../core/tools/ITool.js';
 import { ExtensionRegistry } from '../extensions/ExtensionRegistry.js';
 import { EXTENSION_KIND_TOOL } from '../extensions/types.js';
-import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from './runtime/approval-gate.js';
+import { APPROVAL_GRANTED, askApprovalGate, composeReceivedGate, type ApprovalGateFn } from './runtime/approval-gate.js';
 import { runCitationVerification } from './runtime/citationVerification.js';
-import { createCompletionGateway, type CompletionGateway } from './runtime/completionGateway.js';
+import { createCompletionGateway, type CompletionAttempt, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
+import { asSpendBudget, assertCallWithinBudget, promptCharsOf, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 import { adaptTools } from './runtime/toolAdapter.js';
+import { withMembers } from './runtime/withMembers.js';
+import { LAUNCH_AGENCY_TOOL_NAME, resolveLaunchLimits, type AgencyLaunchFrame, type CallerTurnContext, type ToolCallHook } from './runtime/agencyLaunch/types.js';
+import { createGmiLaunchTool } from './runtime/agencyLaunch/gmiLaunchTool.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions } from './runtime/gmiPersona.js';
 import { modelNamesAnotherProvider } from './runtime/credentialOwner.js';
@@ -59,18 +63,16 @@ export type GmiOptions = AgentOptions;
 /** The handle {@link gmi} returns: the `Agent` surface. */
 export type GmiHandle = Agent;
 
+/** Options with no GMI-path implementation yet; set, they throw at construction. */
+const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels'] as const;
 /**
- * Options with no GMI-path implementation yet; set, they throw at construction. A `budget` would go unenforced, since
- * a GMI's model calls do not pass through generateText or streamText.
+ * Per-call overrides generate() and stream() accept on the GMI path (spec D10): the completion options, the route,
+ * the step limit, the ledger, the call's stop and budget, and the tool-approval gate `agency()` passes with every
+ * call to a member.
  */
-const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels', 'budget'] as const;
-/**
- * Per-call overrides generate() and stream() accept on the GMI path (spec D10),
- * and the tool-approval gate `agency()` passes with every call to a member.
- */
-const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate']);
-/** Per-call overrides that pick the route, the step limit, the ledger or the approval gate rather than a completion option. */
-const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate']);
+const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget']);
+/** Per-call overrides that pick the route, the step limit, the ledger, the stop, the budget or the gate rather than a completion option. */
+const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget']);
 /** `agent()`'s step limit. */
 const DEFAULT_MAX_STEPS = 5;
 
@@ -121,17 +123,6 @@ function withLeadingSystemText(messages: ChatMessage[], text: string): ChatMessa
   return [{ ...first, content: text }, ...messages.slice(1)];
 }
 
-/** `target` with some members replaced; every other method runs on `target` itself. */
-function withMembers<T extends object>(target: T, members: Partial<Record<keyof T, unknown>>): T {
-  return new Proxy(target, {
-    get(t, prop) {
-      if (Object.prototype.hasOwnProperty.call(members, prop)) return (members as Record<PropertyKey, unknown>)[prop];
-      const value = Reflect.get(t, prop, t);
-      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(t) : value;
-    },
-  });
-}
-
 /**
  * A tool registry that leaves out the tools ToolExecutor registers from its own
  * constructor (the built-in getCurrentDateTime), so a tool-less agent offers the
@@ -156,54 +147,88 @@ function toolExecutorWithoutBuiltIns(): ToolExecutor {
   return executor;
 }
 
+/** A call answered without running its tool: the model is told why. */
+function skippedCall(req: ToolCallRequest, reason: string): ToolCallResult {
+  return { toolCallId: req.id, toolName: req.name, output: { skipped: true, reason }, isError: true, errorDetails: { message: `Skipped: ${reason}` } };
+}
+
 /**
- * The agent's `onBeforeToolExecution` and the call's tool-approval gate around
- * the shared orchestrator, for one GMI, as `generateText` runs them. The hook
- * runs first: `null` skips the tool, returned arguments replace the call's,
- * and a hook that throws, or resolves with no result to read arguments from,
- * is warned about and the tool runs with the arguments the model sent. The
- * gate (`agency()`'s `hitl.approvals.beforeTool`) is then asked about a tool
- * the orchestrator has, with the arguments the hook left; anything but the
- * exact approval skips the tool, and the model is told why.
+ * Every GMI's tool orchestrator: the shared one, seen through the turn that runs (read with `turnOf()`, since a
+ * session's GMI is built once and serves many turns). A seat's turn lists only its tool names and answers a call to any
+ * other with `{ skipped: true, reason: 'not available in this seat' }` before any hook runs. The hooks the turn carries
+ * (a launching turn's) run before the agent's own `onBeforeToolExecution`, outermost first: `null` from any skips the
+ * tool, returned arguments replace the call's, and a hook that throws, or resolves with no result to read arguments
+ * from, is warned about and the call goes on with the arguments it had. The turn's approval gate, else the one the GMI
+ * was built with, is then asked about a tool the orchestrator has, with the arguments the hooks left; anything but the
+ * exact approval skips the tool, and the model is told why. Every call passed on carries `callerTurn`: the gate, the
+ * budget, the explicit user, the names, the hooks (the carried ones, then the agent's) and this view's own
+ * `processToolCall`, through which the step gate runs each step of a composed tool. It carries the turn's stop too, so
+ * a call whose turn stopped while its hooks or its approval ran is refused (`STEP_ABORTED`) and nothing runs, and a
+ * seat's call carries the seat's frame (`sessionData.agencyLaunch`), which a launch from it nests under.
  */
-function hookTools(base: IToolOrchestrator, hook: AgentOptions['onBeforeToolExecution'], step: { index: number }, gate?: ApprovalGateFn): IToolOrchestrator {
-  if (!hook && !gate) return base;
+function hookTools(
+  base: IToolOrchestrator,
+  hook: AgentOptions['onBeforeToolExecution'],
+  step: { index: number },
+  turnOf: () => GmiTurnContext,
+  buildGate?: ApprovalGateFn,
+): IToolOrchestrator {
+  const visible = <T extends { name: string }>(tools: T[]): T[] => {
+    const names = turnOf().toolNames;
+    return names ? tools.filter((tool) => names.has(tool.name)) : tools;
+  };
   const processToolCall: IToolOrchestrator['processToolCall'] = async (details) => {
+    const turn = turnOf();
     const req = details.toolCallRequest;
+    if (turn.toolNames && !turn.toolNames.has(req.name)) return skippedCall(req, 'not available in this seat');
+    const hooks: ToolCallHook[] = [...(turn.toolHooks ?? []), ...(hook ? [hook] : [])];
     let args = (req.arguments ?? {}) as Record<string, unknown>;
-    if (hook) {
+    for (const run of hooks) {
       try {
-        const hookResult = await hook({ name: req.name, args, id: req.id, step: step.index });
+        const hookResult = await run({ name: req.name, args, id: req.id, step: step.index });
         if (hookResult === null) {
-          return {
-            toolCallId: req.id,
-            toolName: req.name,
-            output: { skipped: true },
-            isError: true,
-            errorDetails: { message: 'Skipped by onBeforeToolExecution hook' },
-          };
+          return { toolCallId: req.id, toolName: req.name, output: { skipped: true }, isError: true, errorDetails: { message: 'Skipped by onBeforeToolExecution hook' } };
         }
         args = hookResult.args;
       } catch (hookError) {
         console.warn('[agentos] onBeforeToolExecution hook error:', hookError);
       }
     }
+    const gate = turn.approvalGate ?? buildGate;
     // A tool the orchestrator does not have is reported by it without asking anyone.
     if (gate && (await base.getTool(req.name))) {
       const verdict = await askApprovalGate(gate, { name: req.name, args: args ?? {}, id: req.id, step: step.index });
-      if (verdict !== APPROVAL_GRANTED) {
-        return {
-          toolCallId: req.id,
-          toolName: req.name,
-          output: { skipped: true, reason: verdict.reason },
-          isError: true,
-          errorDetails: { message: `Skipped: ${verdict.reason}` },
-        };
-      }
+      if (verdict !== APPROVAL_GRANTED) return skippedCall(req, verdict.reason);
     }
-    return base.processToolCall({ ...details, toolCallRequest: { ...req, arguments: args } });
+    const callerTurn: CallerTurnContext = {
+      ...(gate ? { approvalGate: gate } : {}),
+      ...(turn.budget ? { budget: turn.budget } : {}),
+      ...(turn.providerUserId !== undefined ? { providerUserId: turn.providerUserId } : {}),
+      ...(turn.toolNames ? { toolNames: turn.toolNames } : {}),
+      toolHooks: hooks,
+      dispatch: processToolCall,
+    };
+    // The turn's stop, with the call's own when it has one (a composed tool's step).
+    const stop = turn.abortSignal;
+    const signal = stop && details.signal ? AbortSignal.any([details.signal, stop]) : (stop ?? details.signal);
+    return base.processToolCall({
+      ...details,
+      toolCallRequest: { ...req, arguments: args },
+      ...(signal ? { signal } : {}),
+      ...(turn.launchFrame ? { sessionData: { ...(details.sessionData ?? {}), agencyLaunch: turn.launchFrame } } : {}),
+      callerTurn,
+    });
   };
-  return withMembers(base, { processToolCall });
+  return withMembers(base, {
+    processToolCall,
+    listAvailableTools: async (context?: Parameters<IToolOrchestrator['listAvailableTools']>[0]) => visible(await base.listAvailableTools(context)),
+    ...(typeof base.listDiscoveredTools === 'function'
+      ? {
+          listDiscoveredTools: async (...args: Parameters<NonNullable<IToolOrchestrator['listDiscoveredTools']>>) =>
+            visible(await base.listDiscoveredTools!(...args)),
+        }
+      : {}),
+  });
 }
 
 /**
@@ -256,6 +281,20 @@ function mergeLedger(...parts: Array<AgentOSUsageLedgerOptions | undefined>): Ag
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
+/**
+ * An attempt the turn's budget refused: it sends no request and fails its hop with no retry, so the GMI ends the
+ * turn (`LLM_PROVIDER_ERROR`, the budget's message) without trying a fallback hop.
+ */
+function refusedAttempt(refusal: unknown): CompletionAttempt {
+  const error = refusal instanceof Error ? refusal : new Error(String(refusal));
+  return {
+    async *[Symbol.asyncIterator]() {
+      // Nothing is sent.
+    },
+    outcome: Promise.resolve({ kind: 'hopFailed' as const, error, retryable: false }),
+  };
+}
+
 async function recordedUsage(ledger: AgentOSUsageLedgerOptions | undefined, sessionId?: string): Promise<AgentOSUsageAggregate> {
   // Imported on use, as agent() imports it: the ledger reads files.
   const { getRecordedAgentOSUsage } = await import('./runtime/usageLedger.js');
@@ -284,6 +323,37 @@ interface SessionEntry {
   userId: string;
 }
 
+/** The session options gmi() reads beside the public ones: `__seat`, set only by a seat (sessionSeat(), launch_agency). */
+interface SeatSessionOptions extends AgentSessionOptions {
+  /** The session's memory is scoped to itself and it has no learner. */
+  __seat?: { memoryScope: 'session'; learner: 'none' };
+}
+
+/** The keys a seat puts on its session's sends (sessionSeat.ts), beside the public ones. */
+interface SeatSendKeys {
+  __approvalGate?: ApprovalGateFn;
+  __toolNames?: ReadonlySet<string>;
+  __toolHooks?: readonly ToolCallHook[];
+  __launchFrame?: AgencyLaunchFrame;
+}
+
+/** The turn options a seat's send carries. */
+function seatTurnOf(sendOpts: unknown): Pick<GmiTurnOptions, 'approvalGate' | 'toolNames' | 'toolHooks' | 'launchFrame'> {
+  const keys = (sendOpts ?? {}) as SeatSendKeys;
+  // A gate that is present but not a function refuses every tool, as a gate received from a parent agency does.
+  const gate = composeReceivedGate(keys.__approvalGate);
+  const frame = keys.__launchFrame;
+  return {
+    ...(gate ? { approvalGate: gate } : {}),
+    ...(keys.__toolNames instanceof Set ? { toolNames: keys.__toolNames } : {}),
+    ...(Array.isArray(keys.__toolHooks) ? { toolHooks: keys.__toolHooks } : {}),
+    // A launched team's seat: the frame its turn's calls carry, copied as the send gave it.
+    ...(frame && typeof frame.launchId === 'string' && typeof frame.role === 'string' && typeof frame.depth === 'number'
+      ? { launchFrame: { launchId: frame.launchId, role: frame.role, depth: frame.depth } }
+      : {}),
+  };
+}
+
 /** What a gmi() agent's options say about the loops its GMIs run, for the learning layer's manifest. */
 function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName, LoopState>> {
   const off = (detail: string): LoopState => ({ live: false, detail });
@@ -307,8 +377,9 @@ function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName,
 /**
  * An agent whose sessions are GMIs (docs/GMI.md, "GMIs from agent()").
  *
- * @param opts - The options of `agent()`. `voice`, `avatar`, `channels` and `budget` throw when set;
- *   a config that sets only `enabled: false` is unset.
+ * @param opts - The options of `agent()`. `voice`, `avatar` and `channels` throw when set;
+ *   a config that sets only `enabled: false` is unset. `budget` checks every completion call a GMI makes
+ *   (docs/GMI.md, "Spend budget").
  * @returns The `Agent` surface: `generate`, `stream`, `session`, `usage`, `close`, `export`.
  * @throws {Error} At construction, naming the option: an option the GMI path
  *   cannot honour, an unknown cognition profile or metaprompt preset, a
@@ -317,6 +388,10 @@ function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName,
  *   does not resolve, or a dimension that is not a positive integer or not known.
  *   No environment is read here: the provider and model resolve on the first
  *   call, which rejects with the error `agent()` gives when nothing resolves.
+ * @throws {RangeError} At construction, naming the field: an `agencies` bound
+ *   outside its range, or an `agencies.members` value that is not a gmi() agent.
+ * @throws {AgencyConfigError} At construction: `agencies.hitl` approvals with no handler.
+ * @throws {Error} At construction: `agencies.launch` beside a tool of its own named `launch_agency`.
  */
 export function gmi(opts: GmiOptions): GmiHandle {
   for (const key of UNSUPPORTED_ON_GMI) {
@@ -348,12 +423,23 @@ export function gmi(opts: GmiOptions): GmiHandle {
   if (cognition.memory && opts.memoryProvider?.getContext) {
     console.warn('[agentos] gmi(): cognitive memory supplies the memory context; memoryProvider.getContext is skipped (observe still runs).');
   }
+  const ledger = mergeLedger((opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger);
+  // `agencies`: every bound is checked here, `launch` on or off.
+  const launchLimits = opts.agencies ? resolveLaunchLimits(opts.agencies) : undefined;
   const tools: ITool[] = adaptTools(opts.tools);
+  // With `agencies.launch`, launch_agency is one of the agent's tools: its persona lists it and its orchestrator runs it.
+  if (launchLimits && opts.agencies?.launch === true) {
+    if (tools.some((tool) => tool.name === LAUNCH_AGENCY_TOOL_NAME)) {
+      throw new Error(`gmi(): agencies.launch registers '${LAUNCH_AGENCY_TOOL_NAME}', and the agent's tools already hold a tool of that name.`);
+    }
+    tools.push(createGmiLaunchTool({ opts, limits: launchLimits, tools: () => tools, ledger, createAgent: gmi }));
+  }
   // Put first in the system prompt of every call that offers tools, as generateText puts it.
   const chainOfThought = tools.length > 0 ? resolveChainOfThought(opts.chainOfThought ?? true) : undefined;
-  const ledger = mergeLedger((opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger);
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   const gateway = gatewayFor(opts);
+  // One budget for the agent, as agent() keeps one: every turn with no budget of its own is checked against it.
+  const agentBudget: SpendBudget | undefined = asSpendBudget(opts.budget);
 
   const shared = retryingOnce<Shared>(async () => {
     // Throws, as generateText throws, when no provider or model resolves.
@@ -404,17 +490,18 @@ export function gmi(opts: GmiOptions): GmiHandle {
   /**
    * A learner session for one session or one call of the agent; `undefined` when learning is off. A session
    * opened with a user id names a learner (the layer still answers with none for a placeholder id, or for an
-   * agent with neither a name nor `learning.agentKey`); a session opened without one, `generate()` and
-   * `stream()` have none. A layer that fails to open the session never fails the call: the GMI gets a session
-   * that asks again at each turn, and until one opens each turn has no learner and the GMI renders the
-   * persona's traits itself.
+   * agent with neither a name nor `learning.agentKey`); a seat session, a session opened without one,
+   * `generate()` and `stream()` have none. A layer that fails to open the session never fails the call: the GMI
+   * gets a session that asks again at each turn, and until one opens each turn has no learner and the GMI
+   * renders the persona's traits itself.
    */
-  async function learnerSessionFor(sessionId: string, personaId: string, userId: string | undefined): Promise<ILearnerSession | undefined> {
+  async function learnerSessionFor(sessionId: string, personaId: string, userId: string | undefined, noLearner = false): Promise<ILearnerSession | undefined> {
     const active = layer;
     if (!active) return undefined;
     const context: LearnerContext = { sessionId, personaId, authoredTraits };
-    // A named agent's persona id is stable; an agent without a name is named by `learning.agentKey` alone.
-    const learnerKey = userId === undefined ? null : { namespace: '', agentKey: opts.name?.trim() ? personaId : '', userId };
+    // A named agent's persona id is stable; an agent without a name is named by `learning.agentKey` alone. A seat session
+    // (sessionSeat(), launch_agency) has no learner: a team turn's input is a manager's or a sibling's text.
+    const learnerKey = userId === undefined || noLearner ? null : { namespace: '', agentKey: opts.name?.trim() ? personaId : '', userId };
     const open = (): Promise<ILearnerSession> => active.forLearner(learnerKey, context);
     try {
       return await open();
@@ -443,9 +530,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
     const config: GMIBaseConfig = {
       workingMemory: new InMemoryWorkingMemory(),
       promptEngine: s.promptEngine,
-      llmProviderManager: new GatewayProviderManager().asProviderManager(),
+      llmProviderManager: new GatewayProviderManager(() => turn.budget).asProviderManager(),
       utilityAI: s.utilityAI,
-      toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step, gate),
+      toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step, () => turn, gate),
       // The agent's memory as this GMI's session sees it: the shared store with a
       // working memory of its own, so one session's active context never lists
       // another's memories. `GMI.shutdown()` shuts down the memory it was given;
@@ -458,8 +545,21 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // to the turn that made the call, which meters and counts it.
       completionGateway: {
         resolve: gateway.resolve,
-        stream: (resolution, messages, options, responseSchema, schemaName, schemaInPrompt) =>
-          gateway.stream(resolution, messages, options, responseSchema, schemaName, schemaInPrompt, turn.onLateUsage),
+        stream: (resolution, messages, options, responseSchema, schemaName, schemaInPrompt) => {
+          // The turn's budget is checked before every attempt; a refusal sends nothing.
+          const budget = turn.budget;
+          if (budget) {
+            // The options the gateway sends for this hop: a fallback hop's overrides raise maxTokens by its headroom
+            // (fallbackHopOverrides in generateText.ts), so the estimate counts that cap.
+            const sent = { ...options, ...resolution.optionOverrides };
+            try {
+              assertCallWithinBudget(budget, resolution, promptCharsOf(messages, undefined, sent.tools), sent.maxTokens, 'gmi.step');
+            } catch (refusal) {
+              return refusedAttempt(refusal);
+            }
+          }
+          return gateway.stream(resolution, messages, options, responseSchema, schemaName, schemaInPrompt, turn.onLateUsage);
+        },
         schemaInstruction: gateway.schemaInstruction,
       },
       maxToolLoopIterations: steps,
@@ -549,10 +649,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
   /**
    * The session ids opened since the sessions' memory was built: an id opened
    * again after its close() is given a memory scope of its own. Only an agent
-   * with cognitive memory keeps them, since only memory reads the scope. An id
-   * stays after session.close(), so that its next opening does not reach the
-   * closed session's memory; agent.close() starts a new memory and empties the
-   * set. One entry per id, kept while the memory keeps that session's traces.
+   * with cognitive memory keeps them, since only memory reads the scope, and it
+   * never keeps a seat session's id. An id stays after session.close(), so that
+   * its next opening does not reach the closed session's memory; agent.close()
+   * starts a new memory and empties the set. One entry per id, kept while the
+   * memory keeps that session's traces.
    */
   const openedSessionIds = new Set<string>();
   const agentTally = createEmptyUsageAggregate();
@@ -602,10 +703,30 @@ export function gmi(opts: GmiOptions): GmiHandle {
     };
   }
 
+  /** What a generate() or stream() call hands its turn: its stop, its budget (a new one from settings) or the agent's, and its gate. */
+  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'budget' | 'approvalGate'> => {
+    const budget = asSpendBudget(extra?.budget) ?? agentBudget;
+    return {
+      ...(extra?.abortSignal ? { abortSignal: extra.abortSignal } : {}),
+      ...(budget ? { budget } : {}),
+      ...(extra?.__approvalGate ? { approvalGate: extra.__approvalGate } : {}),
+    };
+  };
+
   const handle: Agent = {
     async generate(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): Promise<GenerateTextResult> {
       const options = overridesOf(extra);
-      const result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options });
+      const callerSignal = extra?.abortSignal;
+      // A call whose signal has already aborted starts no turn, as a session's send does.
+      callerSignal?.throwIfAborted();
+      let result: GenerateTextResult;
+      try {
+        result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options, ...callTurn(extra) });
+      } catch (error) {
+        // Once the caller's signal has aborted, the call rejects with its reason, as a session's send does.
+        if (callerSignal?.aborted) throw callerSignal.reason;
+        throw error;
+      }
       // As agent().generate() does: the answer checked against the sources retrieved for the input.
       if (opts.verifyCitations) {
         const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
@@ -616,13 +737,18 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
     stream(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): StreamTextResult {
       const options = overridesOf(extra);
-      return streamGmiTurn(oneShotDeps('agent.stream', extra), prompt, { options });
+      // A signal that has already aborted stops the turn before its first request (streamGmiTurn), and the stream
+      // ends with an error part.
+      return streamGmiTurn(oneShotDeps('agent.stream', extra), prompt, { options, ...callTurn(extra) });
     },
 
     session(id?: string, sessionOptions?: AgentSessionOptions): AgentSession {
       const sessionId = id ?? randomUUID();
+      const seat = (sessionOptions as SeatSessionOptions | undefined)?.__seat;
       const existing = sessions.get(sessionId);
       if (existing) {
+        // A seat runs in a session of its own: one the agent serves already is never the seat's to run in or close.
+        if (seat) throw new TypeError(`gmi(): session '${sessionId}' is open; a seat opens a session of its own`);
         if (sessionOptions?.userId !== undefined && sessionOptions.userId !== existing.userId) {
           throw new Error(`gmi(): session '${sessionId}' already runs as user '${existing.userId}'; close it to open it for another user.`);
         }
@@ -633,8 +759,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // reach another's replies. An id opened again after close() is a new
       // session, so its scope is a new id: it recalls nothing the closed one
       // filed under its scope, and only a user id the caller names again is shared.
-      const memoryScopeId = openedSessionIds.has(sessionId) ? `${sessionId}:${randomUUID()}` : sessionId;
-      if (cognition.memory) openedSessionIds.add(sessionId);
+      // A seat session's memory scope is its own, new at each opening: it recalls nothing of the user it runs as.
+      const memoryScopeId = seat?.memoryScope === 'session' || openedSessionIds.has(sessionId) ? `${sessionId}:${randomUUID()}` : sessionId;
+      // A seat session's id never enters the list agent.close() empties: a long-lived member does not grow by one id
+      // per seat.
+      if (cognition.memory && !seat) openedSessionIds.add(sessionId);
       const userId = sessionOptions?.userId ?? sessionId;
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
       if (!sessionTallies.has(sessionId)) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
@@ -650,7 +779,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // first turn and ended by close(). A session that keeps no history builds a GMI per turn, and each gets it.
       const learner = retryingOnce<ILearnerSession | undefined>(async () => {
         const { persona } = await shared.get();
-        return learnerSessionFor(sessionId, persona.id, sessionOptions?.userId);
+        return learnerSessionFor(sessionId, persona.id, sessionOptions?.userId, seat?.learner === 'none');
       });
       const buildSessionGmi = async (gmiId: string): Promise<BuiltGmi> => {
         const { persona } = await shared.get();
@@ -690,14 +819,18 @@ export function gmi(opts: GmiOptions): GmiHandle {
         userId,
         // Cognitive memory files the replies under the memory scope's session and
         // the user's messages under its user: the session's own scope, a new one
-        // for an id opened again after close().
-        memoryScope: { sessionId: memoryScopeId, userId: sessionOptions?.userId ?? memoryScopeId },
+        // for an id opened again after close(). A seat session's user is its own
+        // scope too, so nothing it is told is filed under the user it runs as.
+        memoryScope: { sessionId: memoryScopeId, userId: seat?.memoryScope === 'session' ? memoryScopeId : (sessionOptions?.userId ?? memoryScopeId) },
         // Only a user id the caller passed reaches the provider's end-user field.
         providerUserId: sessionOptions?.userId,
         history,
         lock,
-        ledger: mergeLedger(ledger, { sessionId, source }),
-        useMemoryProviderContext: !cognition.memory,
+        // A seat session records under its ledger's own source when it names one (a temporary seat's is launch_agency).
+        ledger: mergeLedger(ledger, { sessionId, source: seat ? (ledger?.source ?? source) : source }),
+        // A seat session's turn takes no context from the memory provider and files nothing with it.
+        useMemoryProviderContext: !cognition.memory && !seat,
+        observeMemoryProvider: !seat,
         gmiFor: gmiFor(closing !== undefined),
         onUsage: (u) => {
           accumulateUsage(tally, u);
@@ -732,6 +865,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
               schemaName: sendOpts?.schemaName,
               blockLabel: sendOpts?.blockLabel,
               abortSignal: turnSignal(callerSignal),
+              // The turn's budget: the send's own (a new one from settings) in place of the agent's.
+              budget: asSpendBudget(sendOpts?.budget) ?? agentBudget,
+              ...seatTurnOf(sendOpts),
             });
           } catch (error) {
             // Once the caller's signal has aborted, the send rejects with its
@@ -741,8 +877,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
             throw error;
           }
         },
-        stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal }) =>
-          streamGmiTurn(deps('agent.session.stream'), input, { abortSignal: turnSignal(streamOpts?.abortSignal) }),
+        // As in send(), the turn takes the caller's budget and the gate, tool names and hooks a seat puts on its calls.
+        stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }) =>
+          streamGmiTurn(deps('agent.session.stream'), input, {
+            abortSignal: turnSignal(streamOpts?.abortSignal),
+            budget: asSpendBudget(streamOpts?.budget) ?? agentBudget,
+            ...seatTurnOf(streamOpts),
+          }),
         messages: (): SessionTranscriptMessage[] => history?.messages() ?? [],
         reseed: (snapshot: SessionTranscriptMessage[]) => {
           if (!history) throw new Error('reseed requires session history (history: false is set on this agent)');
@@ -754,9 +895,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
           const persisted = await recordedUsage(ledger, sessionId);
           return ledger?.enabled ? persisted : mergeAggregates(tally, persisted);
         },
-        // A GMI agent takes no budget (it throws at construction), so an
-        // outside cost has nothing to be charged to.
-        recordExternalCost: () => undefined,
+        // An outside cost is charged to the agent's budget, as agent()'s session charges it; without one it does nothing.
+        recordExternalCost: (costUSD: number, meta?: { kind?: string }) => agentBudget?.recordExternal(costUSD, meta?.kind ?? 'external'),
         clear: () => {
           history?.reseed([]);
           syncGmiHistory();
@@ -768,6 +908,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         close: () =>
           (closing ??= (async () => {
             if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
+            // A seat session's tally goes with it: the agent's tally holds its usage (each turn adds to both).
+            if (seat) sessionTallies.delete(sessionId);
             stopTurns.abort();
             const release = await lock.acquire();
             try {
@@ -828,6 +970,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
     ...(layer ? { learning: { manifest: () => layer.manifest() } } : {}),
   };
   Object.defineProperty(handle, '__config', { value: opts, enumerable: false, configurable: true });
+  // The mark sessionSeat() and agencies.members read: this handle is a gmi() agent.
+  Object.defineProperty(handle, '__gmiHandle', { value: true, enumerable: false, configurable: true });
   return handle;
 }
 
