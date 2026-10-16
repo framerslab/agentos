@@ -133,6 +133,26 @@ describe('generateObject', () => {
     expect(providerOptions.sessionId).toBe('bp-1234');
   });
 
+  it('forwards maxAttempts and onAttempt through generateText to the provider options', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+    const onAttempt = vi.fn();
+
+    await generateObject({
+      schema: personSchema,
+      prompt: 'Extract person info',
+      maxAttempts: 1,
+      onAttempt,
+    });
+
+    // generateObject -> generateText -> ModelCompletionOptions: the call's attempt
+    // count and its report reach the provider, which counts and reports each request.
+    expect(hoisted.generateCompletion).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ maxAttempts: 1, onAttempt }),
+    );
+  });
+
   it("honors an explicit schemaCacheTtl of '5m' on a string system (block emission, default-TTL marker)", async () => {
     hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
 

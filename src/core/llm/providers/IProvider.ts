@@ -117,6 +117,16 @@ export interface ChatMessage {
 // ... (ensure ModelCompletionOptions, ModelUsage, ModelCompletionChoice, ModelCompletionResponse, etc. are correctly defined or imported if they were part of the "..." )
 
 
+/** One request a call sent to its provider, as {@link ModelCompletionOptions.onAttempt} reports it. */
+export interface AttemptOutcome {
+  /** The request's number in the call, from 1. */
+  attempt: number;
+  /** The HTTP status it answered, or null when none came (a timeout, a network failure). */
+  status: number | null;
+  /** True when it answered with a success. */
+  ok: boolean;
+}
+
 /**
  * General options for model completion requests (both chat and legacy text completion, though chat is prioritized).
  * These options control aspects like creativity, response length, and penalties.
@@ -147,6 +157,10 @@ export interface ModelCompletionOptions {
    * this field.
    */
   requestTimeout?: number;
+  /** The most requests this call sends, a first and its retries together; the provider's configured count when left out. */
+  maxAttempts?: number;
+  /** Called after each request this call sent, so a caller can settle the attempts it paid for. */
+  onAttempt?: (outcome: AttemptOutcome) => void;
   /**
    * Anthropic extended-thinking switch. `{ budgetTokens }` turns thinking on:
    * on a thinking-capable Claude model the provider sends
