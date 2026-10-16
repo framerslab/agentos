@@ -3,9 +3,9 @@
  * error reports, the provider's health while a budget refuses calls, a fallback walk that meets a spent budget, a
  * model with no price row when the budget warns or tells a callback (and one named after a member every object
  * inherits), a token cap of NaN, estimated as a call that names none, the tool definitions a call sends, counted in
- * its estimate, a budget's own token cap and an outside cost of NaN, refused instead of ignored, a guard hook's stop
- * under `hookErrors: 'throw'` (never walked to another provider, never counted against one, and on the prompt-tool
- * path before the tool runs), and an agent on the GMI runtime, which takes no budget.
+ * its estimate, a budget's own token cap and an outside cost of NaN, refused instead of ignored, and a guard hook's
+ * stop under `hookErrors: 'throw'` (never walked to another provider, never counted against one, and on the
+ * prompt-tool path before the tool runs).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -332,13 +332,5 @@ describe("a guard hook under hookErrors: 'throw'", () => {
     ).rejects.toThrow('stopped by the tool guard');
     expect(execute).not.toHaveBeenCalled();
     expect(hoisted.generateCompletion).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('an agent on the GMI runtime', () => {
-  it('refuses a budget when it is built, since its sessions would not hold one', () => {
-    expect(() => agent({ runtime: 'gmi', provider: 'openai', model: 'gpt-6-luna', budget: { maxCostUSD: 1 } })).toThrow(
-      "'budget' is not available on the GMI path",
-    );
   });
 });

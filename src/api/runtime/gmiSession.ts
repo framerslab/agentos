@@ -32,6 +32,9 @@ import type { AgentMemoryProvider, AgentOptions } from '../agent.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './memoryProviderHooks.js';
 import type { AgentOSUsageLedgerOptions } from './usageLedger.js';
 import type { LateAttemptUsage } from './completionGateway.js';
+import { costOfUsageUSD, type SpendBudget } from './spendBudget.js';
+import type { ApprovalGateFn } from './approval-gate.js';
+import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 
@@ -62,6 +65,20 @@ export interface GmiTurnOptions {
   /** Stops the turn: the model call in progress is aborted, and the turn ends with the abort error. */
   abortSignal?: AbortSignal;
   /**
+   * The turn's spend budget: the completion gateway checks it before each model call of the turn (a refusal ends the
+   * turn), the GMI's provider manager before each metaprompt and self-reflection call, and the turn records each
+   * finished step, each billed failed attempt and each late usage report into it.
+   */
+  budget?: SpendBudget;
+  /** The approval gate the turn's tool calls are asked (agency()'s, or the one a launch carries). */
+  approvalGate?: ApprovalGateFn;
+  /** A seat's tool names: the only tools the turn lists and runs. */
+  toolNames?: ReadonlySet<string>;
+  /** The launching turn's onBeforeToolExecution hooks, run before the agent's own. */
+  toolHooks?: readonly ToolCallHook[];
+  /** A launched team's seat: the launch its team comes from, which a launch from the turn's tool calls nests under. */
+  launchFrame?: AgencyLaunchFrame;
+  /**
    * Checks the reply of a turn that ended without error, before the session
    * keeps it. A throw keeps nothing of the turn (no history, no
    * `memoryProvider.observe`) and is the turn's error: a structured send whose
@@ -86,6 +103,20 @@ export interface GmiTurnContext {
    * arrives once the turn has ended.
    */
   onLateUsage?: (report: LateAttemptUsage) => void;
+  /** The turn's spend budget ({@link GmiTurnOptions.budget}), for the GMI's gateway and provider manager. */
+  budget?: SpendBudget;
+  /** The turn's approval gate ({@link GmiTurnOptions.approvalGate}). */
+  approvalGate?: ApprovalGateFn;
+  /** A seat's tool names ({@link GmiTurnOptions.toolNames}). */
+  toolNames?: ReadonlySet<string>;
+  /** The carried hooks ({@link GmiTurnOptions.toolHooks}). */
+  toolHooks?: readonly ToolCallHook[];
+  /** The explicit user id the session named; undefined when it named none. */
+  providerUserId?: string;
+  /** The turn's stop ({@link GmiTurnOptions.abortSignal}): every tool call of the turn carries it. */
+  abortSignal?: AbortSignal;
+  /** A seat's frame ({@link GmiTurnOptions.launchFrame}): every tool call of the turn carries it in `sessionData.agencyLaunch`. */
+  launchFrame?: AgencyLaunchFrame;
 }
 
 /** The GMI that serves one turn. */
@@ -118,8 +149,10 @@ export interface GmiSessionDeps {
    * id. Unset, they send none, as agent() sends none.
    */
   providerUserId?: string;
-  /** False when cognitive memory supplies the memory context: `memoryProvider.getContext` is then skipped. */
+  /** False when cognitive memory supplies the memory context, and on a seat session: `memoryProvider.getContext` is then skipped. */
   useMemoryProviderContext: boolean;
+  /** False on a seat session: the turn calls no `memoryProvider.observe`, which would file a team turn's text in the agent's long-term store. Default true. */
+  observeMemoryProvider?: boolean;
   /** The session store, or null when the turn keeps no history. */
   history: SessionHistoryBuffer | null;
   /** Usage ledger options for this turn's events (session id and source included). */
@@ -172,6 +205,19 @@ function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', 
   } catch (observeError) {
     console.warn('[agentos] memoryProvider.observe failed:', observeError);
   }
+}
+
+/**
+ * Charges one model call of the turn to the turn's budget: the provider's reported cost, or its token counts at the
+ * model's price (`costOfUsageUSD`), and its tokens. Nothing without a budget or a usage report.
+ */
+function chargeBudget(budget: SpendBudget | undefined, providerId: string | undefined, modelId: string | undefined, report: unknown, what: string): void {
+  if (!budget || !report) return;
+  const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  addModelUsage(usage, report);
+  const tokens = usage.totalTokens > 0 ? usage.totalTokens : usage.promptTokens + usage.completionTokens;
+  const cost = providerId && modelId ? costOfUsageUSD(providerId, modelId, usage) : usage.costUSD;
+  budget.record(cost, tokens, what);
 }
 
 /**
@@ -319,9 +365,17 @@ export async function* runGmiTurn(
       memoryContext,
       onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
       structured: turn.responseSchema !== undefined,
+      budget: turn.budget,
+      approvalGate: turn.approvalGate,
+      toolNames: turn.toolNames,
+      toolHooks: turn.toolHooks,
+      providerUserId: deps.providerUserId,
+      abortSignal: turn.abortSignal,
+      launchFrame: turn.launchFrame,
       // The bill a provider reports for a call this turn stopped (close() during
-      // the call) arrives after the turn has ended: it is metered and counted
-      // as a failed attempt's, as a billed failure during the turn is.
+      // the call) arrives after the turn has ended: it is metered, counted and
+      // charged to the turn's budget as a failed attempt's, as a billed failure
+      // during the turn is.
       onLateUsage: (report) => {
         void meterCall(deps.ledger, surface, {
           providerId: report.providerId,
@@ -334,6 +388,7 @@ export async function* runGmiTurn(
         const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
         addModelUsage(usage, report.usage);
         deps.onUsage(usage);
+        chargeBudget(turn.budget, report.providerId, report.modelId, report.usage, 'gmi.step');
       },
     });
     writer = deps.history?.beginTurn(turn.blockLabel, epochAtStart);
@@ -379,6 +434,7 @@ export async function* runGmiTurn(
               startedAt: callStartedAt,
             }),
           );
+          chargeBudget(turn.budget, step.providerId, step.modelId, step.usage, 'gmi.step');
           callStartedAt = Date.now();
           break;
         }
@@ -400,6 +456,7 @@ export async function* runGmiTurn(
                 startedAt: callStartedAt,
               }),
             );
+            chargeBudget(turn.budget, meta.providerId, meta.modelId, chunk.content, 'gmi.step');
             callStartedAt = Date.now();
           }
           break;
@@ -422,7 +479,7 @@ export async function* runGmiTurn(
         throw refusal;
       }
       writer?.commit();
-      const memoryProvider = deps.opts.memoryProvider;
+      const memoryProvider = deps.observeMemoryProvider === false ? undefined : deps.opts.memoryProvider;
       if (memoryProvider?.observe) {
         observeTurn(memoryProvider, 'user', userText);
         const reply = folder.text();

@@ -39,7 +39,7 @@ import type {
 import type { ToolDefinitionMap } from '../toolAdapter.js';
 import { AgencyConfigError } from '../types.js';
 import {
-  isAgent,
+  seatMetadataOf,
   resolveAgent,
   checkBeforeAgentInput,
   checkBeforeEmergentSpawn,
@@ -72,13 +72,10 @@ type ResultUsageSnapshot = {
  * knows what each sub-agent specialises in.
  *
  * @param agentOrConfig - Either a pre-built Agent or a raw BaseAgentConfig.
- * @returns The instructions string if available, otherwise a generic label.
+ * @returns The config's instructions or the pre-built seat's own description, otherwise a generic label.
  */
 function getAgentDescription(agentOrConfig: BaseAgentConfig | Agent): string {
-  if (!isAgent(agentOrConfig) && (agentOrConfig as BaseAgentConfig).instructions) {
-    return (agentOrConfig as BaseAgentConfig).instructions!;
-  }
-  return 'General purpose';
+  return seatMetadataOf(agentOrConfig).description ?? 'General purpose';
 }
 
 /**
