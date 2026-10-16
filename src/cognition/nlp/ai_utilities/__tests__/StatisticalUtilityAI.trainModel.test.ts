@@ -150,6 +150,19 @@ describe('the default model, and how a model reads texts', () => {
     expect((await util.classifyText(ticket, { ...ask, modelId: 'tickets' })).bestClass).toBe('shipping');
   });
 
+  it('reads words in any script, so a model learns from Cyrillic examples', async () => {
+    // A reading that keeps ASCII letters alone finds no word in these texts, and the classes tie on their priors.
+    const russian = [
+      { text: 'счёт не оплачен, платёж отклонён', label: 'billing' },
+      { text: 'платёж не прошёл, счёт просрочен', label: 'billing' },
+      { text: 'посылка пришла разбитой, коробка смята', label: 'shipping' },
+      { text: 'посылка задерживается, коробка потеряна', label: 'shipping' },
+    ];
+    await util.trainModel(russian, 'text_classifier_naive_bayes', { modelId: 'russian' });
+    const result = await util.classifyText('коробка смята, посылка задерживается', { ...ask, modelId: 'russian' });
+    expect(result.bestClass).toBe('shipping');
+  });
+
   it('classifies with the model trainModel keeps under its default id', async () => {
     const trained = await util.trainModel(tickets, 'text_classifier_naive_bayes');
     expect(trained.modelId).toBe('default_bayes_classifier');

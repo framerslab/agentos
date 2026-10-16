@@ -65,6 +65,22 @@ describe('StatisticalUtilityAI', () => {
     expect(await statUtility.extractKeywords('Café crème, café noir, café au lait.', { maxKeywords: 2 })).toEqual(['café', 'crème']);
   });
 
+  it("leaves the stop words of the call's language out of the keywords", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stat-keywords-'));
+    try {
+      const file = path.join(dir, 'es.txt');
+      fs.writeFileSync(file, 'el\nla\nde\n', 'utf8');
+      const custom = new StatisticalUtilityAI();
+      await custom.initialize({ customStopWordsPaths: { es: file } });
+      // The Spanish list drops el, la and de; natural's English list drops the y.
+      expect(await custom.extractKeywords('el gato de la casa y el gato del vecino', { language: 'es', maxKeywords: 2 })).toEqual(['gato', 'casa']);
+      // With no language, the class's English list, which drops the parts of a web address too.
+      expect(await custom.extractKeywords('https www docs https www docs guide', { maxKeywords: 2 })).toEqual(['docs', 'guide']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('reads the corpusForIDF texts as it reads the two texts it compares', async () => {
     const similarity = (corpusForIDF: string[]) =>
       statUtility.calculateSimilarity('running dogs bark', 'running cats sleep', { corpusForIDF });

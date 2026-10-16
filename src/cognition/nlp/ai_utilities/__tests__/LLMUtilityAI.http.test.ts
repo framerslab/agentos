@@ -159,6 +159,16 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(systemPrompt(received[0])).toContain('"languages"');
   });
 
+  it('keeps the strings of a keyword list, and the language entries with a code and a confidence', async () => {
+    replies = [
+      '{"keywords": ["refund", 7, "card"]}',
+      '{"languages": [{"confidence": 0.5}, {"language": "fr", "confidence": "0.9"}, {"language": "it", "confidence": "high"}]}',
+    ];
+    expect(await utility.extractKeywords('My card was charged twice and I want a refund.')).toEqual(['refund', 'card']);
+    // A confidence written as a number in a string is read as that number.
+    expect(await utility.detectLanguage('Bonjour à tous', { maxCandidates: 3 })).toEqual([{ language: 'fr', confidence: 0.9 }]);
+  });
+
   it('repairs a reply that does not parse on the model and provider of the call', async () => {
     replies = ['score -0.8, polarity negative', '{"score": -0.8, "polarity": "negative"}'];
     const result = await utility.analyzeSentiment('The update broke everything.', { providerId: 'litellm', modelId: 'gpt-4o-mini' });
@@ -206,6 +216,22 @@ describe('LLMUtilityAI over a provider manager', () => {
       ['/litellm/v1/chat/completions', 'gpt-4o'],
       ['/openai/v1/chat/completions', 'gpt-4o-mini'],
     ]);
+  });
+
+  it('repairs up to maxRepairAttempts times, each repair on the text the one before answered', async () => {
+    const userText = (request: ChatRequest) => request.body.messages.find((message) => message.role === 'user')?.content ?? '';
+    replies = ['{"ok": tru', '{"ok": true}'];
+    expect(await utility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true, maxRepairAttempts: 2 })).toEqual({ ok: true });
+    expect(received).toHaveLength(2);
+    expect(userText(received[1])).toContain('{"ok": tru');
+
+    // A repair that parses and fails the schema counts as an attempt too.
+    const schema = { type: 'object', required: ['ok'] };
+    replies = ['{"other": 1}', '{"ok": true}'];
+    expect(await utility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true, maxRepairAttempts: 2, targetSchema: schema })).toEqual({ ok: true });
+    replies = ['{"other": 1}'];
+    expect(await utility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true, targetSchema: schema })).toBeNull();
+    expect(received).toHaveLength(5);
   });
 });
 

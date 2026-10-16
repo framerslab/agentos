@@ -74,6 +74,15 @@ describe('LexicalIndex', () => {
     // addDocument() refuses an empty id, and removeDocument() drops a term with no document left.
     expect(restore({ ...tuning, documents: [['', 1]], terms: [] })).toThrow(refused('documents[0] has an empty id'));
     expect(restore({ ...one, terms: [['word', []]] })).toThrow(refused('terms[0] holds no postings'));
+    // A document's length is the number of its words, each counted under one term.
+    expect(restore({ ...one, terms: [['word', [[0, 1]]]] })).toThrow(refused('documents[0] has the length 2, and its postings add up to 1'));
+    expect(restore({ ...one, terms: [['word', [[0, 1]]], ['other', [[0, 1]]]] })).not.toThrow();
+    // An entry holds the parts toJSON() writes and no more.
+    expect(restore({ ...tuning, documents: [['a', 0, {}, 'more']], terms: [] })).toThrow(
+      refused('documents[0] is not [id, length] or [id, length, metadata]'),
+    );
+    expect(restore({ ...one, terms: [['word', [[0, 2]], 'more']] })).toThrow(refused('terms[0] is not [term, postings]'));
+    expect(restore({ ...one, terms: [['word', [[0, 2, 'more']]]] })).toThrow(badPosting);
   });
 
   it('replaces a document added again, and forgets a removed one', () => {
