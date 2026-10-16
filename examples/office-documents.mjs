@@ -7,6 +7,9 @@
 //   - OfficeLoader from its own entry, @framers/agentos/cognition/memory/office, which imports
 //     officeparser on its first read
 //   - a document's bytes read under the format its caller names, with the text's word count
+//   - the same document read in a worker thread with loadIsolated, as for a file from someone
+//     you do not know, under a heap cap and a deadline made for that read
+//   - a read cancelled by its own signal, while the loader reads on
 //   - a document past a bound refused with DocumentTooLargeError, its cause naming the bound
 //   - a PDF refused with ScannedDocumentError while OCR is off (ocrPages 0, the default)
 //
@@ -27,6 +30,7 @@ import {
   OfficeLoader,
   ScannedDocumentError,
 } from '@framers/agentos/cognition/memory/office';
+import { loadIsolated } from '@framers/agentos/cognition/memory';
 
 const loader = new OfficeLoader({
   maxInflatedBytes: 32 * 1024 * 1024,
@@ -58,7 +62,7 @@ if (files.length > 0) {
       console.log(`${file}: not one of ${Object.keys(OFFICE_TYPES).join(', ')}`);
       continue;
     }
-    show(file, await loader.load(await readFile(file), { format }));
+    show(file, await loader.load(await readFile(file), { format, signal: AbortSignal.timeout(30_000) }));
   }
 } else {
   const notes = [
@@ -70,8 +74,27 @@ if (files.length > 0) {
   ].join('\n');
 
   console.log('\n=== an OpenDocument text and an EPUB book, read from their bytes ===\n');
-  show('notes.odt', await loader.load(await written(notes, 'odt'), { format: 'odt' }));
+  const odt = await written(notes, 'odt');
+  show('notes.odt', await loader.load(odt, { format: 'odt' }));
   show('notes.epub', await loader.load(await written(notes, 'epub'), { format: 'epub' }));
+
+  console.log('\n=== the same text read in a worker thread, as for a file from someone you do not know ===\n');
+  show(
+    'notes.odt',
+    await loadIsolated('odt', odt, { maxHeapMb: 256, maxTableCells: 200_000, signal: AbortSignal.timeout(30_000) }),
+  );
+
+  console.log('\n=== a read cancelled by its own signal ===\n');
+  const upload = new AbortController();
+  upload.abort(new Error('the upload was withdrawn'));
+  try {
+    await loader.load(odt, { format: 'odt', signal: upload.signal });
+    throw new Error('a read whose signal was aborted was read');
+  } catch (error) {
+    if (error !== upload.signal.reason) throw error;
+    console.log(`cancelled: ${error.message}`);
+  }
+  show('notes.odt, read again with no signal', await loader.load(odt, { format: 'odt' }));
 
   console.log('\n=== a document past a bound ===\n');
   const long = await written(Array.from({ length: 2_000 }, (_, i) => `Paragraph ${i + 1}.`).join('\n\n'), 'odt');
