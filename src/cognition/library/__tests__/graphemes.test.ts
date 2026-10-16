@@ -8,7 +8,7 @@ describe('graphemeClusters', () => {
     expect(graphemeClusters('ประชุม')).toEqual(['ป', 'ร', 'ะ', 'ชุ', 'ม']);
     expect(graphemeClusters('éa')).toEqual(['é', 'a']);
     // the zero width joiner is written as an escape: the lint step strips the character itself from a source file
-    expect(graphemeClusters('\u{1F469}‍\u{1F4BB}x')).toEqual(['\u{1F469}‍\u{1F4BB}', 'x']);
+    expect(graphemeClusters('\u{1F469}\u200D\u{1F4BB}x')).toEqual(['\u{1F469}\u200D\u{1F4BB}', 'x']);
     expect(graphemeClusters('\u{1F1EB}\u{1F1F7}\u{1F1E9}\u{1F1EA}')).toEqual(['\u{1F1EB}\u{1F1F7}', '\u{1F1E9}\u{1F1EA}']);
     expect(graphemeClusters('a\r\nb')).toEqual(['a', '\r\n', 'b']);
     expect(graphemeClusters('明日の会議')).toEqual(['明', '日', 'の', '会', '議']);

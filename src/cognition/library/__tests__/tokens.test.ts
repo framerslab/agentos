@@ -38,7 +38,7 @@ describe('tagSegments', () => {
     expect(tagSegments('किताब पढ़ो', { wordSegmenter: null }).map((s) => s.text)).toEqual([nfc('किताब'), nfc('पढ़ो')]);
     expect(tagSegments('كِتَاب جَدِيد', { wordSegmenter: null }).map((s) => s.text)).toEqual(['كِتَاب', 'جَدِيد']);
     // a combining acute accent (U+0301) with no letter before it, written as an escape
-    expect(tagSegments('́budget review!', { wordSegmenter: null }).map((s) => s.text)).toEqual(['budget', 'review']);
+    expect(tagSegments('\u0301budget review!', { wordSegmenter: null }).map((s) => s.text)).toEqual(['budget', 'review']);
     expect(tagSegments('Café plans', { wordSegmenter: null }).map((s) => s.text)).toEqual(['Café', 'plans']);
   });
 
