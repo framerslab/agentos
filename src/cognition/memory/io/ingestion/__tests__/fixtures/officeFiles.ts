@@ -130,6 +130,21 @@ export function xlsxOfCells(cells: number): Buffer {
 }
 
 /**
+ * An `.xlsx` workbook whose one sheet holds two cells as far apart as a sheet
+ * allows: `A1`, and `XFD1048576` in the last column of the last row. The grid
+ * between them is far past the positions officeparser fills when it writes a
+ * sheet as text, so it lays the two cells out next to each other and reports
+ * that it did.
+ *
+ * @param text - The text each cell holds.
+ */
+export function sparseXlsxOf(text: string): Buffer {
+  const cell = (reference: string): string =>
+    `<c r="${reference}" t="inlineStr"><is><t>${characterData(text)}</t></is></c>`;
+  return workbookOf(`<row r="1">${cell('A1')}</row><row r="1048576">${cell('XFD1048576')}</row>`);
+}
+
+/**
  * The smallest `.pptx` deck officeparser reads: the content types, the
  * package's relationships, the presentation with its slide list, its
  * relationships and one slide holding one text box.

@@ -1,9 +1,10 @@
 /**
  * @fileoverview The office loader's entry, `@framers/agentos/cognition/memory/office`,
  * read as source: importing it loads no package and no Node built-in, and
- * officeparser, its optional peer, is imported by `load` alone, so a host that
- * never reads an office document never loads it. No other module of the
- * package imports officeparser.
+ * officeparser, its optional peer, is imported by a read alone, so a host that
+ * never reads an office document never loads it. `loadOfficeparser.ts` is the
+ * one module of the package that imports officeparser, and the entry imports
+ * `loadIsolated` only to read a scan in a worker thread.
  *
  * The walk follows static imports and re-exports, and side-effect imports,
  * from the entry through the repository's own files. A type-only import is
@@ -81,11 +82,12 @@ function isOfficeparser(specifier: string): boolean {
 }
 
 describe('the office loader entry', () => {
-  it('loads only its own module and the error module: no package and no Node built-in', () => {
+  it('loads only its own module, the error module and the module that imports officeparser: no package and no Node built-in', () => {
     const graph = loadsWith(ENTRY);
     expect([...graph.keys()].map(fromRoot).sort()).toEqual([
       'src/cognition/memory/io/ingestion/DocumentTooLargeError.ts',
       'src/cognition/memory/io/ingestion/OfficeLoader.ts',
+      'src/cognition/memory/io/ingestion/loadOfficeparser.ts',
     ]);
     const outside = [...graph].flatMap(([file, found]) =>
       found.statics.filter((specifier) => !specifier.startsWith('.')).map((specifier) => `${fromRoot(file)}: ${specifier}`),
@@ -93,11 +95,14 @@ describe('the office loader entry', () => {
     expect(outside).toEqual([]);
   });
 
-  it('imports officeparser when it reads, and nothing else', () => {
+  it('imports officeparser when it reads, and the isolated reader only to read a scan', () => {
     const dynamics = [...loadsWith(ENTRY)].flatMap(([file, found]) =>
       found.dynamics.map((specifier) => `${fromRoot(file)}: ${specifier}`),
     );
-    expect(dynamics).toEqual(['src/cognition/memory/io/ingestion/OfficeLoader.ts: officeparser']);
+    expect(dynamics.sort()).toEqual([
+      'src/cognition/memory/io/ingestion/OfficeLoader.ts: ./loadIsolated.js',
+      'src/cognition/memory/io/ingestion/loadOfficeparser.ts: officeparser',
+    ]);
   });
 
   it('is the only module of the package that imports officeparser, and none imports it when it loads', () => {
@@ -106,7 +111,7 @@ describe('the office loader entry', () => {
       .map((name) => join(src, name))
       // Only a module that names officeparser can import it; the others are not parsed.
       .filter((file) => readFileSync(file, 'utf8').includes('officeparser'));
-    expect(modules.map(fromRoot)).toContain('src/cognition/memory/io/ingestion/OfficeLoader.ts');
+    expect(modules.map(fromRoot)).toContain('src/cognition/memory/io/ingestion/loadOfficeparser.ts');
     const statically: string[] = [];
     const dynamically: string[] = [];
     for (const file of modules) {
@@ -115,7 +120,7 @@ describe('the office loader entry', () => {
       if (dynamics.some(isOfficeparser)) dynamically.push(fromRoot(file));
     }
     expect(statically).toEqual([]);
-    expect(dynamically).toEqual(['src/cognition/memory/io/ingestion/OfficeLoader.ts']);
+    expect(dynamically).toEqual(['src/cognition/memory/io/ingestion/loadOfficeparser.ts']);
   });
 
   it('is the package export ./cognition/memory/office, with officeparser an optional peer and no side effects', () => {
