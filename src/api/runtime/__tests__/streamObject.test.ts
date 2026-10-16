@@ -292,4 +292,29 @@ describe('streamObject — reasoning options reach the provider', () => {
     expect(providerOptions.effort).toBe('low');
     expect(providerOptions.thinking).toBe(false);
   });
+
+  it('forwards maxAttempts and onAttempt through streamText', async () => {
+    hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
+      yield textChunk('{"name": "A", "age": 3, "hobbies": []}', {
+        isFinal: true,
+        usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+      });
+    });
+    const schema = z.object({ name: z.string(), age: z.number(), hobbies: z.array(z.string()) });
+    const onAttempt = vi.fn();
+
+    const result = streamObject({ schema, prompt: 'Create a profile', maxAttempts: 1, onAttempt });
+    for await (const _partial of result.partialObjectStream) {
+      // drain the stream so the provider call is made
+    }
+    await expect(result.object).resolves.toEqual({ name: 'A', age: 3, hobbies: [] });
+
+    // streamObject -> streamText -> ModelCompletionOptions: the call's attempt count
+    // and its report reach the provider's stream request.
+    expect(hoisted.generateCompletionStream).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ maxAttempts: 1, onAttempt }),
+    );
+  });
 });
