@@ -29,6 +29,15 @@ const LAYOUTS = [
   { file: 'lines.txt', format: 'lines' },
 ] as const;
 
+/** A text's UTF-16 bytes after its byte order mark, in the byte order given. */
+function utf16(text: string, littleEndian: boolean): Uint8Array {
+  const bytes = new Uint8Array(2 + text.length * 2);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(0, 0xfeff, littleEndian);
+  for (let at = 0; at < text.length; at += 1) view.setUint16(2 + at * 2, text.charCodeAt(at), littleEndian);
+  return bytes;
+}
+
 /** The CRC-32 of bytes, as a ZIP entry records it. */
 function crc32(bytes: Uint8Array): number {
   let crc = ~0;
@@ -148,6 +157,12 @@ describe('the transcript readers in a page', () => {
       const bytes = new TextEncoder().encode(`\ufeff${text.replace(/\n/g, '\r\n')}`);
       expect(readTranscript(bytes, format), `${file} as bytes`).toEqual(want);
       expect(transcriptFormatOf(file, bytes.subarray(0, 4096)), file).toBe(format);
+      // UTF-16 in both byte orders, which the page's own TextDecoder reads.
+      for (const littleEndian of [true, false]) {
+        const wide = utf16(text, littleEndian);
+        expect(readTranscript(wide, format), `${file} as UTF-16`).toEqual(want);
+        expect(transcriptFormatOf(file, wide.subarray(0, 4096)), `${file} as UTF-16`).toBe(format);
+      }
     }
   });
 

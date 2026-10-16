@@ -100,6 +100,13 @@ function wordFileOf(lines: readonly string[]): Buffer {
 /** The six `Name: words` lines of `lines.txt`. */
 const SIX_LINES = vector('lines.txt').split('\n').filter((line) => line.length > 0);
 
+/** A text's UTF-16 bytes in the byte order given, after its byte order mark. */
+function utf16(text: string, order: 'le' | 'be'): Buffer {
+  const units = Buffer.from(text, 'utf16le');
+  if (order === 'be') units.swap16();
+  return Buffer.concat([Buffer.from(order === 'le' ? [0xff, 0xfe] : [0xfe, 0xff]), units]);
+}
+
 /** What a call threw, or `null` when it threw nothing. */
 function thrownBy(call: () => unknown): unknown {
   try {
@@ -127,6 +134,9 @@ describe('readTranscript', () => {
       const windows = `\ufeff${text.replace(/\n/g, '\r\n')}`;
       expect(readTranscript(windows, format), `${file} with a byte order mark and CRLF`).toEqual(read);
       expect(readTranscript(new TextEncoder().encode(windows), format), `${file} as bytes`).toEqual(read);
+      // Saved as UTF-16 with its byte order mark, in either byte order, as some Windows tools save text.
+      expect(readTranscript(utf16(text, 'le'), format), `${file} as UTF-16 LE`).toEqual(read);
+      expect(readTranscript(utf16(text, 'be'), format), `${file} as UTF-16 BE`).toEqual(read);
     }
 
     // Times are milliseconds: a cue's start and end, a header's start alone, and none for plain lines.
@@ -228,6 +238,53 @@ describe('readTranscript', () => {
     expect(handed.map((buffer) => buffer.byteLength)).toEqual([file.length, file.length, file.length]);
   });
 
+  it('reads a Word file laid out as Otter\'s text by its headers, and one header-like line in other text as plain lines', async () => {
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+
+    const otter = wordFileOf(vector('otter.txt').split('\n').filter((line) => line.length > 0));
+    expect(await readWordTranscript(otter, { extractRawText })).toEqual({ ...expected('otter.txt'), format: 'docx' });
+
+    const agenda = wordFileOf(['Agenda for the call', 'Budget review first', 'Break  10:30', 'Ana Silva: hello', 'Leo Park: hi']);
+    expect(await readWordTranscript(agenda, { extractRawText })).toMatchObject({
+      turns: [
+        { text: 'Agenda for the call' },
+        { text: 'Budget review first' },
+        { text: 'Break 10:30' },
+        { text: 'Ana Silva: hello' },
+        { text: 'Leo Park: hi' },
+      ],
+      labels: [],
+    });
+  });
+
+  it('reads cues written with no blank line before them as WebVTT\'s parser does, and SubRip\'s alike', () => {
+    // A cue straight after the WEBVTT line, and the next cue straight after it.
+    const vtt = readTranscript(
+      ['WEBVTT', '00:00:01.000 --> 00:00:02.000', '<v Ana Silva>One.', '00:00:03.000 --> 00:00:04.000', '<v Leo Park>Two.'].join('\n'),
+      'vtt',
+    );
+    expect(vtt.turns).toEqual([
+      { seq: 1, startMs: 1_000, endMs: 2_000, text: 'One.' },
+      { seq: 2, startMs: 3_000, endMs: 4_000, text: 'Two.' },
+    ]);
+    expect(vtt.labels).toEqual([
+      { seq: 1, label: 'Ana Silva' },
+      { seq: 2, label: 'Leo Park' },
+    ]);
+
+    // Header lines before the first timing line are no cue, nor part of one.
+    const headed = readTranscript(['WEBVTT', 'Kind: captions', 'Language: en', '00:00:01.000 --> 00:00:02.000', '<v Ana Silva>One.'].join('\n'), 'vtt');
+    expect(headed.turns).toEqual([vtt.turns[0]]);
+
+    // SubRip: the number on the line before a timing line starts that cue.
+    const srt = readTranscript(
+      ['1', '00:00:01,000 --> 00:00:02,000', 'Ana Silva: One.', '2', '00:00:03,000 --> 00:00:04,000', 'Leo Park: Two.'].join('\n'),
+      'srt',
+    );
+    expect(srt.turns).toEqual(vtt.turns);
+    expect(srt.labels).toEqual(vtt.labels);
+  });
+
   it('names a file\'s format by its extension and its first bytes', () => {
     const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
     const head = (name: string): Uint8Array => bytes(vector(name)).subarray(0, 4096);
@@ -241,6 +298,11 @@ describe('readTranscript', () => {
     expect(transcriptFormatOf('transcript.json', head('fireflies.json'))).toBe('fireflies');
     expect(transcriptFormatOf('exports/Planning call.docx', wordFile.subarray(0, 4096))).toBe('docx');
     expect(transcriptFormatOf('bom.vtt', new Uint8Array([0xef, 0xbb, 0xbf, ...bytes('WEBVTT\n')]))).toBe('vtt');
+    expect(transcriptFormatOf('captions.srt', utf16(vector('meeting.srt'), 'le').subarray(0, 4096))).toBe('srt');
+    expect(transcriptFormatOf('captions.vtt', utf16(vector('meeting.vtt'), 'be').subarray(0, 4096))).toBe('vtt');
+
+    // Otter's text has a header before each paragraph; one line that looks like a header in other text does not make it Otter's.
+    expect(transcriptFormatOf('agenda.txt', bytes('Agenda for the call\nBudget review first\nBreak  10:30\nAna Silva: hello\nLeo Park: hi'))).toBe('lines');
 
     // A PDF is no transcript, by its name or by its first bytes under another name.
     expect(transcriptFormatOf('transcript.pdf', bytes('%PDF-1.7\n'))).toBeNull();
@@ -303,6 +365,14 @@ describe('readTranscript', () => {
     const read = (text: string): ReadTranscript => readTranscript(text, 'lines');
 
     expect(read('张伟: 你好\n李娜: 早上好')).toMatchObject({
+      turns: [{ text: '你好' }, { text: '早上好' }],
+      labels: [
+        { seq: 1, label: '张伟' },
+        { seq: 2, label: '李娜' },
+      ],
+    });
+    // Chinese and Japanese text writes the full-width colon, with no space after it.
+    expect(read('张伟：你好\n李娜： 早上好')).toMatchObject({
       turns: [{ text: '你好' }, { text: '早上好' }],
       labels: [
         { seq: 1, label: '张伟' },
