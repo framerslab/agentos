@@ -15,11 +15,19 @@ describe('graphemeClusters', () => {
     expect(graphemeClusters('')).toEqual([]);
   });
 
+  it('keeps the half-width voiced and semi-voiced sound marks with the kana before them', () => {
+    // U+FF9E and U+FF9F are letters by the word rule and extending characters by the grapheme break property, so a
+    // reader sees ｶﾞ as one character; the prolonged sound mark (U+FF70) is a letter of its own
+    expect(graphemeClusters('ｶﾞｷﾞ')).toEqual(['ｶﾞ', 'ｷﾞ']);
+    expect(graphemeClusters('ﾊﾟｿｺﾝ')).toEqual(['ﾊﾟ', 'ｿ', 'ｺ', 'ﾝ']);
+    expect(graphemeClusters('ﾗｰﾒﾝ')).toEqual(['ﾗ', 'ｰ', 'ﾒ', 'ﾝ']);
+  });
+
   it('answers what Intl.Segmenter answers for these scripts, where the runtime has it', () => {
     const Segmenter = (Intl as unknown as { Segmenter?: new (locale?: string, options?: { granularity: 'grapheme' }) => { segment(text: string): Iterable<{ segment: string }> } }).Segmenter;
     if (typeof Segmenter !== 'function') return;
     const segmenter = new Segmenter(undefined, { granularity: 'grapheme' });
-    for (const text of ['किताब', 'كِتَاب', 'ประชุมพรุ่งนี้', 'éa', '明日の会議資料', 'q3 planning', '회의']) {
+    for (const text of ['किताब', 'كِتَاب', 'ประชุมพรุ่งนี้', 'éa', '明日の会議資料', 'q3 planning', '회의', 'ｶﾞｷﾞｸﾞ', 'ﾊﾟｿｺﾝ', 'ﾗｰﾒﾝ', 'コーヒー']) {
       expect(graphemeClusters(text)).toEqual(Array.from(segmenter.segment(text), (part) => part.segment));
     }
   });

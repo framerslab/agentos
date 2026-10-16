@@ -3,6 +3,7 @@
  * @description What a reader sees as one character, without `Intl.Segmenter`: a base with the marks, the joiner and
  * the selectors that attach to it. A subset of Unicode's extended grapheme clusters (UAX #29) covering the scripts the
  * tag rules cut: combining marks (`\p{M}`) and the spacing vowels Thai and Lao write after a consonant (U+0E33, U+0EB3);
+ * the half-width kana's voiced and semi-voiced sound marks (U+FF9E, U+FF9F), letters that extend the kana before them;
  * the zero width joiner and the character after it; the zero width non-joiner; variation selectors, emoji modifiers
  * and tag characters; a pair of regional indicators; Hangul's medial vowels and final consonants after a leading
  * consonant or a vowel; and CR LF. It imports nothing.
@@ -21,10 +22,13 @@ const ZWJ = '\u200D';
 
 /**
  * A character that joins the cluster before it: a combining mark; the spacing vowels Thai and Lao write after a consonant
- * (U+0E33, U+0EB3); the zero width non-joiner (U+200C); a variation selector (U+FE00 to U+FE0F); an emoji modifier
- * (U+1F3FB to U+1F3FF); a tag character (U+E0020 to U+E007F); a variation selector supplement (U+E0100 to U+E01EF).
- * Tested by code point, one range at a time: a character class that puts a mark after a non-mark, or a modifier after a
- * selector, is what ESLint's no-misleading-character-class (in the recommended set the repository lints with) reports.
+ * (U+0E33, U+0EB3); the half-width kana's voiced and semi-voiced sound marks (U+FF9E, U+FF9F), which Unicode's grapheme
+ * break property files as extending characters though the word rule reads them as letters, so `ｶﾞ` is one cluster as
+ * `Intl.Segmenter` cuts it; the zero width non-joiner (U+200C); a variation selector (U+FE00 to U+FE0F); an emoji
+ * modifier (U+1F3FB to U+1F3FF); a tag character (U+E0020 to U+E007F); a variation selector supplement (U+E0100 to
+ * U+E01EF). Tested by code point, one range at a time: a character class that puts a mark after a non-mark, or a
+ * modifier after a selector, is what ESLint's no-misleading-character-class (in the recommended set the repository
+ * lints with) reports.
  */
 function joinsBefore(char: string): boolean {
   if (MARK.test(char)) return true;
@@ -32,6 +36,8 @@ function joinsBefore(char: string): boolean {
   return (
     point === 0x0e33 ||
     point === 0x0eb3 ||
+    point === 0xff9e ||
+    point === 0xff9f ||
     point === 0x200c ||
     (point >= 0xfe00 && point <= 0xfe0f) ||
     (point >= 0x1f3fb && point <= 0x1f3ff) ||

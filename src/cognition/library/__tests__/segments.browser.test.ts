@@ -23,7 +23,7 @@ describe("the tag rules' words in a browser", () => {
 
   it('cuts Chinese, Japanese and Thai runs into whole pieces that join back into the run', () => {
     for (const wordSegmenter of [undefined, null] as const) {
-      for (const run of ['明日の会議資料', 'かいぎのしりょう', 'ประชุมพรุ่งนี้']) {
+      for (const run of ['明日の会議資料', 'かいぎのしりょう', 'ประชุมพรุ่งนี้', 'ﾊﾟｿｺﾝ', 'ﾗｰﾒﾝ']) {
         const pieces = tagSegments(run, { wordSegmenter });
         const edges = boundaries(run);
         expect(pieces.map((piece) => piece.text).join('')).toBe(run);
