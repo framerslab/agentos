@@ -183,6 +183,8 @@ interface MemoryHealth {
 }
 ```
 
+Every count is of the brain's own rows, a number on SQLite and Postgres alike; another brain in the same database is not counted.
+
 ---
 
 ## Source Files

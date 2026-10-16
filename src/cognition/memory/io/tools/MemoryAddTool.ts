@@ -5,8 +5,10 @@
  * observations. Each invocation inserts a fresh row into `memory_traces`
  * with strength 1.0 (full encoding strength at creation time).
  *
- * ID format: `mt_<timestamp>_<counter>` — monotonically increasing within a
- * process, collision-safe across typical agent interaction rates.
+ * ID format: `mt_<uuid>`, a v4 UUID, as the Memory facade names its traces.
+ * Several brains can share a database, each with its own processes; an id
+ * unique only within one process could name another brain's row, and the
+ * full-text sync after the insert finds the new row by its id.
  *
  * @module memory/tools/MemoryAddTool
  */
@@ -19,15 +21,9 @@ import type {
 } from '../../../../core/tools/ITool.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
 import type { MemoryScope, MemoryType } from '../../core/types.js';
+import { uuid } from '../../core/util/crossPlatformCrypto.js';
 import { buildInitialTraceMetadata, sha256Hex } from '../../retrieval/store/tracePersistence.js';
 import { resolveMemoryToolScopeId } from './scopeContext.js';
-
-// ---------------------------------------------------------------------------
-// Counter for unique ID generation within the process lifetime
-// ---------------------------------------------------------------------------
-
-/** Monotonic counter shared across all MemoryAddTool instances in the process. */
-let _idCounter = 0;
 
 /** The memory types the tool stores, as its input schema lists them. */
 const MEMORY_TYPES: readonly MemoryType[] = ['episodic', 'semantic', 'procedural', 'prospective', 'relational'];
@@ -78,7 +74,7 @@ export interface MemoryAddOutput {
  *   { content: 'User prefers dark mode.', tags: ['preference', 'ui'] },
  *   context,
  * );
- * // result.output.traceId → 'mt_1711234567890_0'
+ * // result.output.traceId → 'mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b'
  * ```
  */
 export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
@@ -181,7 +177,7 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
       }
 
       const now = Date.now();
-      const traceId = `mt_${now}_${_idCounter++}`;
+      const traceId = `mt_${uuid()}`;
       const scopeId = resolveMemoryToolScopeId(scope, context);
       const tags = JSON.stringify(args.tags ?? []);
       const metadata = JSON.stringify(

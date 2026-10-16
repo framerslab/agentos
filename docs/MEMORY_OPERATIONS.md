@@ -211,7 +211,7 @@ Store a new memory trace in the agent's brain database.
 **Output:**
 
 ```json
-{ "traceId": "mt_1711234567890_0" }
+{ "traceId": "mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b" }
 ```
 
 **Behaviour:**
@@ -267,7 +267,7 @@ Update the content or tags of an existing memory trace.
 {
   "name": "memory_update",
   "arguments": {
-    "traceId": "mt_1711234567890_0",
+    "traceId": "mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b",
     "content": "User prefers dark mode, TypeScript, and VS Code.",
     "tags": ["preference", "ui", "language", "editor"]
   }
@@ -303,7 +303,7 @@ Soft-delete a memory trace by ID.
 {
   "name": "memory_delete",
   "arguments": {
-    "traceId": "mt_1711234567890_0"
+    "traceId": "mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b"
   }
 }
 ```
@@ -552,7 +552,7 @@ Each trace entry is the raw `memory_traces` row, with snake_case columns and JSO
 ```json
 {
   "brain_id": "brain",
-  "id": "mt_1711234567890_0",
+  "id": "mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b",
   "type": "semantic",
   "scope": "user",
   "content": "User prefers TypeScript over Python",
@@ -572,7 +572,7 @@ Each trace entry is the raw `memory_traces` row, with snake_case columns and JSO
 
 ### Markdown (Human-Readable)
 
-Exports each active trace as a standalone `.md` file with YAML front-matter, in a `{scope}/{type}/` folder:
+Exports each of the brain's active traces as a standalone `.md` file with YAML front-matter, in a `{scope}/{type}/` folder; another brain's traces in the same database are not read:
 
 ```ts
 await mem.export('./memory-export', { format: 'markdown' });
@@ -584,19 +584,19 @@ Produces files like:
 memory-export/
   user/
     episodic/
-      mt_1711234567890_0.md
+      mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b.md
     semantic/
-      mt_1711234567890_1.md
+      mt_8a41d6f2-0c7e-4b39-a5d8-6e2f91c4b073.md
   thread/
     procedural/
-      mt_1711234567890_2.md
+      mt_c95e0b7a-1f2d-4c68-8e3b-7d4a2f6e9b10.md
 ```
 
 Each file:
 
 ```markdown
 ---
-id: mt_1711234567890_1
+id: mt_8a41d6f2-0c7e-4b39-a5d8-6e2f91c4b073
 type: semantic
 scope: user
 strength: 0.87
@@ -617,7 +617,7 @@ for (const trace of refused) {
 }
 ```
 
-A JSON or SQLite export writes every trace into its one file, and its `refused` is empty.
+A JSON export writes the brain's traces, and a SQLite export the whole database file, into one file; their `refused` is empty.
 
 ### Obsidian (Wikilinks + Tags)
 
@@ -637,7 +637,7 @@ Example output:
 
 ```markdown
 ---
-id: mt_1711234567890_1
+id: mt_8a41d6f2-0c7e-4b39-a5d8-6e2f91c4b073
 type: semantic
 scope: user
 strength: 0.87

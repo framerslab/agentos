@@ -11,8 +11,9 @@
  * @see rag/vector-search/HnswIndexSidecar for the canonical implementation
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync, unlinkSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { HnswIndexSidecar } from '../../../rag/vector-search/HnswIndexSidecar.js';
 
 // ---------------------------------------------------------------------------
@@ -21,8 +22,16 @@ import { HnswIndexSidecar } from '../../../rag/vector-search/HnswIndexSidecar.js
 
 /** Configuration for the memory-specific HNSW sidecar wrapper. */
 export interface HnswSidecarConfig {
-  /** Path to brain.sqlite — HNSW file will be at same dir with .hnsw extension. */
+  /** Path to brain.sqlite — the HNSW files are written in the same directory. */
   sqlitePath: string;
+  /**
+   * The brain whose vectors the index holds. A database can hold several
+   * brains and a directory several databases, so with a brain id the index is
+   * `<database file name>.<digest>.hnsw`, the digest a SHA-256 of the
+   * database file name and the brain id: no two brains or databases share an
+   * index file. Without one the index is `brain.hnsw`, one per directory.
+   */
+  brainId?: string;
   /** Embedding dimensions. */
   dimensions: number;
   /** Auto-build threshold. Below this count, brute-force is used. @default 1000 */
@@ -43,6 +52,27 @@ export interface HnswQueryResult {
   distance: number;
 }
 
+/**
+ * The index file for `config`: per database file and brain when the config
+ * names a brain, `brain.hnsw` in the database's directory otherwise.
+ *
+ * The digest keeps brain ids of any spelling apart, including ones that differ
+ * only in case on a file system that ignores case, or that hold a path
+ * separator; the database file name is repeated in front, with characters
+ * outside `[A-Za-z0-9._-]` replaced, so a reader can tell which file an index
+ * belongs to.
+ */
+function hnswIndexPath(config: Pick<HnswSidecarConfig, 'sqlitePath' | 'brainId'>): string {
+  const directory = dirname(config.sqlitePath);
+  if (config.brainId === undefined) return join(directory, 'brain.hnsw');
+  const databaseFile = basename(config.sqlitePath);
+  const digest = createHash('sha256')
+    .update(`${databaseFile}\u0000${config.brainId}`, 'utf8')
+    .digest('hex')
+    .slice(0, 32);
+  return join(directory, `${databaseFile.replace(/[^A-Za-z0-9._-]/g, '_')}.${digest}.hnsw`);
+}
+
 // ---------------------------------------------------------------------------
 // HnswSidecar — thin adapter over HnswIndexSidecar
 // ---------------------------------------------------------------------------
@@ -58,7 +88,7 @@ export class HnswSidecar {
   private readonly _delegate: HnswIndexSidecar;
   private readonly _indexPath: string;
   private readonly _mapPath: string;
-  private readonly _config: Required<HnswSidecarConfig>;
+  private readonly _config: Required<Omit<HnswSidecarConfig, 'brainId'>>;
 
   constructor(config: HnswSidecarConfig) {
     this._config = {
@@ -68,7 +98,7 @@ export class HnswSidecar {
       efSearch: 50,
       ...config,
     };
-    this._indexPath = join(dirname(this._config.sqlitePath), 'brain.hnsw');
+    this._indexPath = hnswIndexPath(config);
     this._mapPath = this._indexPath + '.map.json';
     this._delegate = new HnswIndexSidecar();
   }
@@ -172,7 +202,7 @@ export class HnswSidecar {
 
   /**
    * Rebuild the entire index from a set of id/embedding pairs.
-   * Called on first threshold crossing or when brain.hnsw is missing/corrupt.
+   * Called on first threshold crossing or when the index file is missing/corrupt.
    * Filters out dimension-mismatched vectors before delegating.
    *
    * @param data - Array of { id, embedding } to index.

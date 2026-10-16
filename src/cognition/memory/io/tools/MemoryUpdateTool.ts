@@ -56,7 +56,7 @@ export interface MemoryUpdateOutput {
  * ```ts
  * const tool = new MemoryUpdateTool(brain);
  * const result = await tool.execute(
- *   { traceId: 'mt_1711234567890_0', content: 'Updated content here.' },
+ *   { traceId: 'mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b', content: 'Updated content here.' },
  *   context,
  * );
  * // result.output.updated → true
