@@ -31,6 +31,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { v4 as uuidv4 } from 'uuid';
 import type {
   StorageAdapter,
   StorageRunResult,
@@ -1299,6 +1300,12 @@ export class Brain {
    * Refuses to overwrite an existing file at `targetPath` so callers do
    * not silently lose data.
    *
+   * The rows come from one consistent view of the database (see
+   * `_readSnapshot`), so a write that lands while the export runs is wholly
+   * in the file or wholly out of it. The file is written under a temporary
+   * name beside `targetPath` and moved there once whole: a failed export
+   * leaves nothing at `targetPath`, and a retry can run.
+   *
    * Forking semantics: rows are emitted with the source brainId. Importing
    * the resulting file under a different brainId produces a fork.
    *
@@ -1319,28 +1326,89 @@ export class Brain {
       }
     }
 
-    // Open a fresh SQLite Brain at the target path. We import under the
-    // source brainId so the export file is identifiable as belonging to
-    // this brain even if the receiving Brain has a different id.
-    const target = await Brain.openSqlite(targetPath, { brainId: this.#brainId });
+    const partialPath = `${targetPath}.partial-${uuidv4()}`;
     try {
-      for (const table of PORTABLE_TABLES) {
-        const rows = await this.all<Record<string, unknown>>(
-          `SELECT * FROM ${table} WHERE brain_id = ?`,
-          [this.#brainId],
-        );
-        if (rows.length === 0) continue;
+      // Open a fresh SQLite Brain at the partial path. We import under the
+      // source brainId so the export file is identifiable as belonging to
+      // this brain even if the receiving Brain has a different id.
+      const target = await Brain.openSqlite(partialPath, { brainId: this.#brainId });
+      try {
+        await this._readSnapshot(async (source) => {
+          for (const table of PORTABLE_TABLES) {
+            const rows = await source.all<Record<string, unknown>>(
+              `SELECT * FROM ${table} WHERE brain_id = ?`,
+              [this.#brainId],
+            );
+            if (rows.length === 0) continue;
 
-        // Upsert so source rows override the brain_meta defaults
-        // (schema_version, created_at) seeded during target initialisation.
-        await this._bulkCopy(target, table, rows, this.#brainId, { upsert: true });
+            // Upsert so source rows override the brain_meta defaults
+            // (schema_version, created_at) seeded during target initialisation.
+            await this._bulkCopy(target, table, rows, this.#brainId, { upsert: true });
+          }
+        });
+        // Fold the write-ahead log into the file, so the one file moved into
+        // place holds every row.
+        await target.exec(target._features.dialect.pragma('journal_mode', 'DELETE'));
+      } finally {
+        await target.close();
       }
-    } finally {
-      await target.close();
+      await fs.rename(partialPath, targetPath);
+    } catch (error) {
+      await Promise.all(
+        ['', '-wal', '-shm', '-journal'].map((suffix) =>
+          fs.rm(`${partialPath}${suffix}`, { force: true }).catch(() => undefined),
+        ),
+      );
+      throw error;
     }
 
     const stat = await fs.stat(targetPath);
     return { bytesWritten: stat.size };
+  }
+
+  /**
+   * Run `read` against one consistent view of this brain's database, so that
+   * rows written while it reads are all in the view or all out of it.
+   *
+   * - Postgres: a `REPEATABLE READ, READ ONLY` transaction on a pooled
+   *   connection of its own; other connections' writes stay outside it.
+   * - A better-sqlite3 file in WAL mode (as `openSqlite` opens it): a read
+   *   transaction on a second, read-only connection to the file. WAL gives
+   *   it one snapshot, and the brain's own connection keeps writing.
+   * - Anything else (an in-memory database, another adapter, another
+   *   journal mode) has one connection that every call shares, so `read`
+   *   runs on the brain's adapter as it is.
+   *
+   * @param read - Reads the view; its result is returned.
+   */
+  private async _readSnapshot<T>(read: (source: StorageAdapter) => Promise<T>): Promise<T> {
+    if (this._features.dialect.name === 'postgres') {
+      return this._adapter.transaction(async (trx) => {
+        await trx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+        return read(trx);
+      });
+    }
+    if (this._adapter.kind !== 'better-sqlite3') {
+      return read(this._adapter);
+    }
+    const main = (await this._adapter.all<{ name: string; file: string }>('PRAGMA database_list')).find(
+      (database) => database.name === 'main',
+    );
+    const journal = await this._adapter.get<{ journal_mode: string }>('PRAGMA journal_mode');
+    if (!main?.file || journal?.journal_mode?.toLowerCase() !== 'wal') {
+      return read(this._adapter);
+    }
+    const reader = await resolveStorageAdapter({
+      filePath: main.file,
+      priority: ['better-sqlite3'],
+      openOptions: { readOnly: true },
+      quiet: true,
+    });
+    try {
+      return await reader.transaction(read);
+    } finally {
+      await reader.close();
+    }
   }
 
   /**

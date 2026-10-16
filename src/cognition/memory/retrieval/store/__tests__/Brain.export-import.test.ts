@@ -12,6 +12,9 @@
  *   under merge strategy (PK conflict → upsert with same data).
  * - Replace strategy wipes the receiving brain's existing rows for
  *   every brain-owned table before re-populating.
+ * - Export reads one consistent view: a document and its chunk stored
+ *   while the export runs are wholly out of the file (SQLite and Postgres).
+ * - A failed export leaves nothing at the target path, and a retry runs.
  *
  * @module memory/retrieval/store/__tests__/Brain.export-import.test
  */
@@ -114,6 +117,85 @@ describe('Brain.exportToSqlite + importFromSqlite', () => {
     await source.close();
   });
 
+  /** A document and its one chunk in `brainId`'s tables. */
+  async function addDocument(brain: Brain, brainId: string, id: string): Promise<void> {
+    await brain.run(
+      `INSERT INTO documents (brain_id, id, path, format, content_hash, chunk_count, ingested_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [brainId, id, `/docs/${id}.md`, 'markdown', `hash-${id}`, 1, 1700000100],
+    );
+    await brain.run(
+      `INSERT INTO document_chunks (brain_id, id, document_id, content, chunk_index)
+       VALUES (?, ?, ?, ?, ?)`,
+      [brainId, `${id}-chunk`, id, `text of ${id}`, 0],
+    );
+  }
+
+  /** Runs `write` against the source once, right after the export has copied its `documents` rows. */
+  function writeAfterDocumentsCopy(source: Brain, write: () => Promise<void>): { wrote: () => boolean } {
+    const internals = source as unknown as { _bulkCopy: (...args: unknown[]) => Promise<void> };
+    const copy = internals._bulkCopy.bind(source);
+    let done = false;
+    internals._bulkCopy = async (...args: unknown[]) => {
+      await copy(...args);
+      if (args[1] === 'documents' && !done) {
+        done = true;
+        await write();
+      }
+    };
+    return { wrote: () => done };
+  }
+
+  /** The ids in `table` of `brainId`, in order. */
+  async function idsIn(brain: Brain, table: string, brainId: string): Promise<string[]> {
+    const rows = await brain.all<{ id: string }>(`SELECT id FROM ${table} WHERE brain_id = ? ORDER BY id`, [brainId]);
+    return rows.map((row) => row.id);
+  }
+
+  it('exports one consistent view while the brain keeps writing', async () => {
+    const source = await Brain.openSqlite(path.join(tmpDir, 'live.sqlite'), { brainId: 'alice' });
+    const exportPath = path.join(tmpDir, 'live-export.sqlite');
+    await addDocument(source, 'alice', 'd1');
+    // The brain stores a second document and its chunk after the export has copied the documents table.
+    const hook = writeAfterDocumentsCopy(source, () => addDocument(source, 'alice', 'd2'));
+
+    await source.exportToSqlite(exportPath);
+
+    expect(hook.wrote()).toBe(true);
+    const exported = await Brain.openSqlite(exportPath, { brainId: 'alice' });
+    expect(await idsIn(exported, 'documents', 'alice')).toEqual(['d1']);
+    expect(await idsIn(exported, 'document_chunks', 'alice')).toEqual(['d1-chunk']);
+    await exported.close();
+    // The source holds both documents.
+    expect(await idsIn(source, 'documents', 'alice')).toEqual(['d1', 'd2']);
+    await source.close();
+  });
+
+  it('leaves nothing at the target when an export fails, and a retry runs', async () => {
+    const source = await Brain.openSqlite(path.join(tmpDir, 'orphan.sqlite'), { brainId: 'alice' });
+    const exportPath = path.join(tmpDir, 'orphan-export.sqlite');
+    const exportFiles = async (): Promise<string[]> =>
+      (await fs.readdir(tmpDir)).filter((name) => name.startsWith('orphan-export')).sort();
+    // A chunk whose document is missing, written with the source's foreign keys off; the
+    // export's file enforces them, so its copy of document_chunks fails.
+    await source.exec('PRAGMA foreign_keys = OFF');
+    await source.run(
+      `INSERT INTO document_chunks (brain_id, id, document_id, content, chunk_index)
+       VALUES (?, ?, ?, ?, ?)`,
+      ['alice', 'orphan-chunk', 'no-such-document', 'orphan text', 0],
+    );
+    await source.exec('PRAGMA foreign_keys = ON');
+
+    await expect(source.exportToSqlite(exportPath)).rejects.toThrow();
+    expect(await exportFiles()).toEqual([]);
+
+    await source.run('DELETE FROM document_chunks WHERE brain_id = ? AND id = ?', ['alice', 'orphan-chunk']);
+    expect((await source.exportToSqlite(exportPath)).bytesWritten).toBeGreaterThan(0);
+    // One self-contained file: its write-ahead log was folded in before it moved into place.
+    expect(await exportFiles()).toEqual(['orphan-export.sqlite']);
+    await source.close();
+  });
+
   it('merge import upserts on PK collision (idempotent re-import)', async () => {
     const sourcePath = path.join(tmpDir, 'src.sqlite');
     const exportPath = path.join(tmpDir, 'export.sqlite');
@@ -179,6 +261,30 @@ describe('Brain.exportToSqlite + importFromSqlite', () => {
   // Gated on AGENTOS_TEST_POSTGRES_URL: skipped without a Postgres instance.
   const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
   const itIfPostgres = POSTGRES_URL ? it : it.skip;
+
+  itIfPostgres('exports one consistent view of a Postgres brain while it keeps writing', async () => {
+    const brainId = `snapshot-${Date.now()}`;
+    const exportPath = path.join(tmpDir, 'pg-live-export.sqlite');
+    const source = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    try {
+      await addDocument(source, brainId, 'd1');
+      // Another pooled connection stores a second document after the documents table was copied.
+      const hook = writeAfterDocumentsCopy(source, () => addDocument(source, brainId, 'd2'));
+
+      await source.exportToSqlite(exportPath);
+
+      expect(hook.wrote()).toBe(true);
+      const exported = await Brain.openSqlite(exportPath, { brainId });
+      expect(await idsIn(exported, 'documents', brainId)).toEqual(['d1']);
+      expect(await idsIn(exported, 'document_chunks', brainId)).toEqual(['d1-chunk']);
+      await exported.close();
+    } finally {
+      for (const table of ['document_chunks', 'documents', 'brain_meta']) {
+        await source.run(`DELETE FROM ${table} WHERE brain_id = ?`, [brainId]);
+      }
+      await source.close();
+    }
+  });
 
   itIfPostgres('round-trips a brain through sqlite -> postgres -> sqlite', async () => {
     const brainId = `roundtrip-${Date.now()}`;
