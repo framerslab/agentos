@@ -162,6 +162,17 @@ reciprocalRankFusion(
 // b: 0.7/62 + 0.3/61 ≈ 0.0162, then a: 0.7/61 ≈ 0.0115, then c: 0.3/62 ≈ 0.0048
 ```
 
+`fuseRanked(lists, { idOf, k, weights, perList, groupOf, perGroup, limit })`, exported from `@framers/agentos/cognition/rag`, fuses any number of ranked lists of any items. Each list is in its own order, best first. `idOf` tells the items apart: an item that stands in several lists is one fused item, kept as its first list holds it, and an item twice in one list counts once, at its better rank. An item's score is the sum, over the lists it stands in, of the list's weight (`weights[place]`, 1 for a list with none) over `k` (60) plus its rank there. The order is by score, then by the first list the item stands in, then by its rank there, then by its id, so the same input gives the same answer on every call, and two lists fused with their weights give `reciprocalRankFusion`'s scores and order. Then the caps, walking that order: an item is passed over when its first list already gave `perList` items (one number for every list, or one a list by place) or its group, read by `groupOf`, already gave `perGroup`, and the walk stops at `limit`. Each answer is `{ item, id, score, list, ranks }`: the item, its id, its score, the place of its first list and its rank in each list it stands in. A `k` or a weight that is not a finite number, zero or more, throws a `RangeError`.
+
+```typescript
+import { fuseRanked } from '@framers/agentos/cognition/rag';
+
+const notes = [{ id: 'n1', note: 'offsite' }, { id: 'n2', note: 'offsite' }, { id: 'n3', note: 'budget' }];
+const call = [{ id: 'c1', note: 'call' }, { id: 'n1', note: 'offsite' }];
+fuseRanked([notes, call], { idOf: (item) => item.id, weights: [1, 0.8], groupOf: (item) => item.note, perGroup: 1 });
+// n1: 1/61 + 0.8/62 ≈ 0.0293, then n3: 1/63 ≈ 0.0159, then c1: 0.8/61 ≈ 0.0131; n2 is passed over, its note already gave one
+```
+
 `@framers/agentos/cognition/web-search` exports the fusion and deduplication that `WebSearchService` runs over the results of several search providers. They are pure functions:
 
 | Function | What it does |
