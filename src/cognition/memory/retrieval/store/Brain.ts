@@ -1348,7 +1348,10 @@ export class Brain {
         });
         // Fold the write-ahead log into the file, so the one file moved into
         // place holds every row.
-        await target.exec(target._features.dialect.pragma('journal_mode', 'DELETE'));
+        const rollbackJournal = target._features.dialect.pragma('journal_mode', 'DELETE');
+        if (rollbackJournal) {
+          await target.exec(rollbackJournal);
+        }
       } finally {
         await target.close();
       }
