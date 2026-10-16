@@ -7,7 +7,8 @@
  * trace content.
  *
  * Deduplication uses SHA-256 of the content body — files already present in
- * the target brain (same hash in `metadata.import_hash`) are skipped.
+ * the target brain (same hash in `metadata.import_hash`, same scope, and the
+ * scope id `''` a file carries) are skipped.
  *
  * @module memory/io/MarkdownImporter
  */
@@ -182,13 +183,17 @@ export class MarkdownImporter {
     }
 
     const hash = await sha256(body);
+    const scope = typeof fm.scope === 'string' ? fm.scope : 'user';
 
-    // Dedup check.
+    // Dedup check, inside the file's scope and the scope id '' it files under (a file names no scope id).
     const { dialect } = this.brain.features;
     if (options?.dedup ?? true) {
       const existing = await this.brain.get<{ id: string }>(
-        `SELECT id FROM memory_traces WHERE brain_id = ? AND ${dialect.jsonExtract('metadata', '$.import_hash')} = ? LIMIT 1`,
-        [this.brain.brainId, hash],
+        `SELECT id FROM memory_traces
+          WHERE brain_id = ? AND scope = ? AND scope_id = ''
+            AND ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
+          LIMIT 1`,
+        [this.brain.brainId, scope, hash],
       );
 
       if (existing) {
@@ -208,13 +213,13 @@ export class MarkdownImporter {
       await this.brain.run(
         `INSERT INTO memory_traces
              (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
-              retrieval_count, tags, emotions, metadata, deleted)
-           VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0, ?, '{}', ?, 0)`,
+              retrieval_count, tags, emotions, metadata, deleted, scope_id)
+           VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0, ?, '{}', ?, 0, '')`,
         [
           this.brain.brainId,
           traceId,
           typeof fm.type === 'string' ? fm.type : 'episodic',
-          typeof fm.scope === 'string' ? fm.scope : 'user',
+          scope,
           body,
           typeof fm.strength === 'number' ? fm.strength : 1.0,
           typeof fm.createdAt === 'number' ? fm.createdAt : Date.now(),
