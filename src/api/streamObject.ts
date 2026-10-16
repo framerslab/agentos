@@ -13,6 +13,7 @@ import type { ZodType, ZodError } from 'zod';
 
 import { streamText } from './streamText.js';
 import type { Message, TokenUsage } from './generateText.js';
+import type { AttemptOutcome } from '../core/llm/providers/IProvider.js';
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
@@ -130,6 +131,15 @@ export interface StreamObjectOptions<T extends ZodType> {
    * partial-object iteration ends, and `object` rejects with the signal's reason.
    */
   abortSignal?: AbortSignal;
+
+  /**
+   * The most requests the stream's call sends, a first and its retries together; the provider's configured count
+   * when left out. Forwarded to {@link import('./generateText.js').GenerateTextOptions.maxAttempts}.
+   */
+  maxAttempts?: number;
+
+  /** Called after each request the stream's call sent, so a caller can settle the attempts it paid for. */
+  onAttempt?: (outcome: AttemptOutcome) => void;
 }
 
 /**
@@ -418,6 +428,8 @@ export function streamObject<T extends ZodType>(
       apiKey: opts.apiKey,
       baseUrl: opts.baseUrl,
       ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+      ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
+      ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
     });
 
     try {
