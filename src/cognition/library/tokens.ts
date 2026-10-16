@@ -122,10 +122,12 @@ export function stemWord(word: string): string {
  * every character of a kana word. Script_Extensions is not read: it files U+02BC and the combining marks U+0303,
  * U+0305, U+0323 and U+0331 under Thai or Katakana, which would make a Latin word that holds one unspaced. The
  * ideographic numerals written in the Common script (the parenthesized and circled numbers, the kanbun and counting
- * rod numerals) stay out: a number is neither script.
+ * rod numerals) stay out: a number is neither script. The combining marks among the named characters (the tone marks
+ * and the combining voiced marks) sit in a class of their own: a combining mark after a letter inside one class reads
+ * as a grapheme to ESLint's no-misleading-character-class.
  */
 const UNSPACED =
-  /[\p{Script=Thai}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}\p{Script=Hangul}〆〪-〭〱-〵〼゙-゜ーｰﾞﾟ]/u;
+  /[\p{Script=Thai}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}\p{Script=Hangul}\u3006\u3031-\u3035\u303C\u309B\u309C\u30FC\uFF70\uFF9E\uFF9F]|[\u302A-\u302D\u3099\u309A]/u;
 
 /**
  * Whether a word holds a character of a script written without spaces between words (Thai, Japanese kana, the
@@ -133,9 +135,9 @@ const UNSPACED =
  * compared and one edit says nothing. A half-width kana letter, the prolonged sound mark, a compatibility or a
  * supplementary ideograph and a Thai digit all count, since each script is read by its Unicode Script property with the
  * kana's and the ideographs' shared marks named beside it, and every character of a kana word counts on its own. A
- * word of a spaced script keeps its answer whatever mark or modifier letter it holds (`lʼhomme`, `a̱`). A word
- * of Lao, Khmer, Burmese or Tibetan letters does not count: those scripts are not named, and such a word reads as
- * spaced.
+ * word of a spaced script keeps its answer whatever mark or modifier letter it holds (`lʼhomme`, an `a` with a
+ * combining macron below). A word of Lao, Khmer, Burmese or Tibetan letters does not count: those scripts are not
+ * named, and such a word reads as spaced.
  */
 export function isUnspacedScript(word: string): boolean {
   return UNSPACED.test(word);

@@ -42,7 +42,7 @@ describe('isUnspacedScript', () => {
     // the prolonged sound mark (U+30FC) and its half-width form (U+FF70), the half-width voiced and semi-voiced marks
     // (U+FF9E, U+FF9F): letters by the word rule, Common by their Script property, kana by Script_Extensions; a reader
     // of a run character by character must see every character of a kana word as unspaced
-    for (const mark of ['ー', 'ｰ', 'ﾞ', 'ﾟ']) expect(isUnspacedScript(mark)).toBe(true);
+    for (const mark of ['\u30FC', '\uFF70', '\uFF9E', '\uFF9F']) expect(isUnspacedScript(mark)).toBe(true);
     for (const word of ['コーヒー', 'ﾗｰﾒﾝ']) for (const char of word) expect(isUnspacedScript(char)).toBe(true);
   });
 
@@ -50,6 +50,19 @@ describe('isUnspacedScript', () => {
     // Script_Extensions files the modifier letter apostrophe (U+02BC) and the combining tilde, overline, dot below and
     // macron below (U+0303, U+0305, U+0323, U+0331) under Thai or Katakana; a rule that read it would route a French,
     // a Ukrainian or a transliterated word to substring matching
-    for (const word of ['lʼhomme', 'niño', 'o̅', 'ạ', 'a̱']) expect(isUnspacedScript(word)).toBe(false);
+    for (const word of ['l\u02BChomme', 'nin\u0303o', 'o\u0305', 'a\u0323', 'a\u0331']) expect(isUnspacedScript(word)).toBe(false);
+  });
+
+  it('counts the other letters and marks the kana and the ideographs share, each on its own', () => {
+    // the closing mark 〆 (U+3006), an ideographic tone mark (U+302A), a vertical kana repeat mark (U+3031), the masu
+    // mark 〼 (U+303C), the combining voiced mark (U+3099) and the spacing voiced mark (U+309B): Common or Inherited by
+    // their Script property, Han or kana by Script_Extensions, and each named in the constant one by one
+    for (const char of ['\u3006', '\u302A', '\u3031', '\u303C', '\u3099', '\u309B']) expect(isUnspacedScript(char)).toBe(true);
+  });
+
+  it('leaves the ideographic numerals written in the Common script out: a number is neither script', () => {
+    // a parenthesized ideograph one (U+3220), a circled ideograph one (U+3280), a kanbun annotation mark (U+3192) and a
+    // counting rod digit (U+1D360): numbers by the word rule, Han by Script_Extensions alone
+    for (const char of ['\u3220', '\u3280', '\u3192', '\u{1D360}']) expect(isUnspacedScript(char)).toBe(false);
   });
 });
