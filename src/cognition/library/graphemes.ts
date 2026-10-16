@@ -58,7 +58,7 @@ const PICTOGRAPH = /^\p{Extended_Pictographic}$/u;
  * zero width joiner: a pictograph after the joiner joins it (UAX #29's rule GB11). After anything else the joiner
  * closes its cluster, so a letter, the joiner and a pictograph are two clusters, as `Intl.Segmenter` cuts them.
  */
-const PICTOGRAPH_THEN_JOINER = /\p{Extended_Pictographic}(?:\p{Grapheme_Extend}|\p{Emoji_Modifier})*‍$/u;
+const PICTOGRAPH_THEN_JOINER = /\p{Extended_Pictographic}(?:\p{Grapheme_Extend}|\p{Emoji_Modifier})*\u{200D}$/u;
 
 /**
  * A Hangul character's syllable type (Unicode's `Hangul_Syllable_Type`): a leading consonant (L), a medial vowel (V), a
