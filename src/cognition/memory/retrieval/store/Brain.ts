@@ -1017,8 +1017,8 @@ export class Brain {
   /**
    * Expose the raw storage adapter for advanced usage.
    *
-   * Primarily used by SqliteExporter (VACUUM INTO) and SqliteImporter
-   * (which needs direct adapter access for the target brain).
+   * Code that needs the adapter itself reads it here; the brain's own
+   * queries go through `run`, `get`, `all` and `transaction`.
    */
   get adapter(): StorageAdapter {
     return this._adapter;
@@ -1266,6 +1266,23 @@ export class Brain {
     }
 
     return parseInt(stored, 10) === dimensions;
+  }
+
+  /**
+   * The statement that rebuilds this brain's full-text index from its traces,
+   * for `run()` on the brain or on a transaction. SQLite keeps the index in
+   * one FTS5 table per file and rebuilds it whole. Postgres keeps it in the
+   * `_tsv` column of the `memory_traces` table every brain shares, so there
+   * the statement updates this brain's rows only.
+   *
+   * @returns The SQL and its parameters.
+   */
+  fullTextRebuild(): { sql: string; params: unknown[] } {
+    const sql = this._features.fts.rebuildCommand('memory_traces_fts');
+    if (this._features.dialect.name !== 'postgres') {
+      return { sql, params: [] };
+    }
+    return { sql: `${sql} ${/\bwhere\b/i.test(sql) ? 'AND' : 'WHERE'} brain_id = ?`, params: [this.#brainId] };
   }
 
   // ---------------------------------------------------------------------------

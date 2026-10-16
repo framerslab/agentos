@@ -598,12 +598,15 @@ export class Memory {
   /**
    * Search for memory traces matching a natural-language query.
    *
-   * Uses FTS5 full-text search with the Porter tokenizer. Results are ranked
-   * by `strength * abs(fts_rank)` and filtered by optional type/scope/strength
-   * criteria.
+   * Uses FTS5 full-text search with the Porter tokenizer, ranked by
+   * `strength * abs(fts_rank)`. With the HNSW index active and an embedder,
+   * the vector index's candidates and the full-text ones are fused by
+   * reciprocal rank. The filters bind both halves: a trace of another type,
+   * scope or scope id, weaker than `minStrength` or outside `after` and
+   * `before` is never returned, however near its vector.
    *
    * @param query   - Natural-language search query.
-   * @param options - Optional filters (limit, type, scope, minStrength).
+   * @param options - Optional filters (limit, type, scope, scopeId, minStrength, after, before).
    * @returns Ranked array of {@link ScoredTrace} results.
    */
   async recall(query: string, options?: RecallOptions): Promise<ScoredTrace[]> {
@@ -675,9 +678,6 @@ export class Memory {
 
       // If HNSW returned candidates, merge with FTS5 via RRF.
       if (hnswCandidates.length > 0) {
-        const hnswIds = new Set(hnswCandidates.map(c => c.id));
-        const hnswRank = new Map(hnswCandidates.map((c, i) => [c.id, i + 1]));
-
         // Get FTS candidates. The match comes first: on Postgres the rank
         // expression reads the query text as `$1`, the statement's first
         // parameter.
@@ -702,15 +702,26 @@ export class Memory {
           }
         }
 
-        const ftsRank = new Map(ftsRows.map((r, i) => [r.id, i + 1]));
+        // The vector index holds every trace of this brain, whatever its type,
+        // scope, scope id, strength or age, so the candidates of both halves
+        // pass the recall's filters, this brain's id first, before they rank.
+        const candidateIds = [...new Set([...hnswCandidates.map(c => c.id), ...ftsRows.map(r => r.id)])];
+        const candidateRows = await this._brain.all<FtsJoinRow>(
+          `SELECT t.*, 0.0 as rank FROM memory_traces t
+           WHERE ${filters} AND t.id IN (${candidateIds.map(() => '?').join(',')})`,
+          [...params, ...candidateIds],
+        );
+        const rowById = new Map(candidateRows.map(r => [r.id, r]));
 
-        // Merge all candidate IDs.
-        const allIds = new Set([...hnswIds, ...ftsRows.map(r => r.id)]);
+        // Each half's ranks count the candidates that passed.
+        const hnswRank = new Map(hnswCandidates.filter(c => rowById.has(c.id)).map((c, i) => [c.id, i + 1]));
+        const ftsRank = new Map(ftsRows.filter(r => rowById.has(r.id)).map((r, i) => [r.id, i + 1]));
         const rrfK = 60; // Standard RRF constant.
 
-        // Compute RRF score for each candidate.
+        // Compute RRF score for each candidate that passed.
         const scored: { id: string; rrfScore: number }[] = [];
-        for (const id of allIds) {
+        for (const id of candidateIds) {
+          if (!rowById.has(id)) continue;
           const denseRank = hnswRank.get(id) ?? 10000;
           const lexRank = ftsRank.get(id) ?? 10000;
           const rrfScore = 1 / (rrfK + denseRank) + 1 / (rrfK + lexRank);
@@ -719,19 +730,15 @@ export class Memory {
 
         // Sort by RRF score descending, take top limit.
         scored.sort((a, b) => b.rrfScore - a.rrfScore);
-        const topIds = scored.slice(0, candidateLimit).map(s => s.id);
+        const top = scored.slice(0, candidateLimit);
 
-        // Fetch full rows for the top candidates, this brain's only.
-        if (topIds.length > 0) {
-          const placeholders = topIds.map(() => '?').join(',');
-          const fullRows = await this._brain.all<FtsJoinRow>(
-            `SELECT t.*, 0.0 as rank FROM memory_traces t
-             WHERE t.brain_id = ? AND t.deleted = 0 AND t.id IN (${placeholders})`,
-            [this._brain.brainId, ...topIds],
-          );
-
-          const updatedRows = await this._applyRecallAccessUpdates(fullRows);
-          const rrfMap = new Map(scored.map(s => [s.id, s.rrfScore]));
+        // With no candidate left, the full-text path below answers.
+        if (top.length > 0) {
+          const topRows = top
+            .map(s => rowById.get(s.id))
+            .filter((row): row is FtsJoinRow => row !== undefined);
+          const updatedRows = await this._applyRecallAccessUpdates(topRows);
+          const rrfMap = new Map(top.map(s => [s.id, s.rrfScore]));
 
           const results = updatedRows.map((row) => ({
             trace: this._buildTrace(row),
@@ -1277,8 +1284,12 @@ export class Memory {
    *
    * Format is detected from `options.format` or the file extension:
    * - `.json` -> JSON
-   * - `.sqlite` / `.db` -> SQLite file copy
+   * - `.sqlite` / `.db` -> a new SQLite file holding this brain's own rows
    * - directory path -> Markdown or Obsidian (based on `options.format`)
+   *
+   * A SQLite export writes this brain's rows of every portable table, from a
+   * SQLite or a Postgres brain; another brain in the same database is left
+   * out. Nothing may exist at `outputPath` yet.
    *
    * A Markdown or Obsidian export writes one file per trace, in folders named
    * after the trace's scope and type, and leaves out a trace whose scope, type
@@ -1331,6 +1342,9 @@ export class Memory {
    *
    * Format is detected from `options.format`, the file extension, or by
    * inspecting the content.
+   *
+   * A SQLite source is read one brain at a time: a file whose rows carry
+   * several brain ids imports nothing, and `errors` names the ids.
    *
    * @param source  - Path to the import source (file or directory).
    * @param options - Optional format hint and dedup settings.
@@ -1853,7 +1867,8 @@ export class Memory {
    */
   private async _rebuildFtsIndex(): Promise<void> {
     try {
-      await this._brain.exec(this._brain.features.fts.rebuildCommand('memory_traces_fts'));
+      const rebuild = this._brain.fullTextRebuild();
+      await this._brain.run(rebuild.sql, rebuild.params);
     } catch {
       // Best-effort; imports still succeed even if the FTS rebuild is unavailable.
     }

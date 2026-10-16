@@ -177,7 +177,8 @@ export class MemoryUpdateTool implements ITool<MemoryUpdateInput, MemoryUpdateOu
         const info = await trx.run(sql, [nextContent, nextTags, nextMetadata, brainId, traceId]);
 
         if (info.changes > 0) {
-          await trx.exec(this.brain.features.fts.rebuildCommand('memory_traces_fts'));
+          const rebuild = this.brain.fullTextRebuild();
+          await trx.run(rebuild.sql, rebuild.params);
         }
 
         return info.changes;

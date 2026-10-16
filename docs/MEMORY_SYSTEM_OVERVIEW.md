@@ -166,7 +166,7 @@ const forkBrain = await Brain.openPostgres(connStr, { brainId: 'alice-fork' });
 await forkBrain.importFromSqlite('/tmp/alice-snapshot.sqlite');
 ```
 
-The adapter's [`IDatabaseExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/exporter.ts) ships [`SqliteFileExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/exporters/SqliteFileExporter.ts) (`VACUUM INTO`) and [`PostgresExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/exporters/PostgresExporter.ts) (`pg_dump`) for backend-native export paths.
+The adapter's [`IDatabaseExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/exporter.ts) ships [`SqliteFileExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/exporters/SqliteFileExporter.ts) (`VACUUM INTO`) and [`PostgresExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/exporters/PostgresExporter.ts) (`pg_dump`) for backend-native export paths. Each copies the whole database, every brain in it included; the memory facade's SQLite export (`mem.export(path, { format: 'sqlite' })`) goes through `Brain.exportToSqlite` and writes one brain's rows from either backend.
 
 ### Why this matters for the benchmarks
 
