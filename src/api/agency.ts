@@ -65,6 +65,7 @@
  */
 
 import { compileStrategy, isAgent } from './runtime/strategies/index.js';
+import { seatMetadataOf } from './runtime/strategies/shared.js';
 import type {
   AgencyOptions,
   Agent,
@@ -148,9 +149,7 @@ export function agency(opts: AgencyOptions): Agent {
   //    Auto-detect 'graph' when any sub-agent declares `dependsOn`.
   //    `hitl.approvals.beforeTool` is not copied into the roster: it is
   //    enforced per call by the approval gate (see buildCallOptions below).
-  const hasDependsOn = Object.values(opts.agents).some(
-    (a) => !isAgent(a) && Array.isArray((a as BaseAgentConfig).dependsOn) && (a as BaseAgentConfig).dependsOn!.length > 0,
-  );
+  const hasDependsOn = Object.values(opts.agents).some((a) => (seatMetadataOf(a).dependsOn?.length ?? 0) > 0);
   const chosenStrategy = opts.adaptive
     ? 'hierarchical'
     : (opts.strategy ?? (hasDependsOn ? 'graph' : 'sequential'));
@@ -974,6 +973,7 @@ interface AgencySession {
  * - HITL approvals require a `handler` to be configured.
  * - `parallel` and `debate` strategies require an agency-level `model` or `provider`
  *   for their synthesis step.
+ * - `runtime`, when set, is `'legacy'` or `'gmi'`.
  *
  * @param opts - The agency options to validate.
  * @throws {AgencyConfigError} On the first validation failure encountered.
@@ -981,6 +981,11 @@ interface AgencySession {
 function validateAgencyOptions(opts: AgencyOptions): void {
   if (!opts.agents || Object.keys(opts.agents).length === 0) {
     throw new AgencyConfigError('agency() requires at least one agent in the agents roster');
+  }
+
+  // `runtime` is the config seats' default engine; anything else would reach agent() and be ignored there.
+  if (opts.runtime !== undefined && opts.runtime !== 'legacy' && opts.runtime !== 'gmi') {
+    throw new AgencyConfigError(`agency(): runtime must be 'legacy' or 'gmi', not ${JSON.stringify(opts.runtime)}`);
   }
 
   if (opts.emergent?.enabled && opts.strategy !== 'hierarchical' && !opts.adaptive) {
