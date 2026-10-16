@@ -169,7 +169,44 @@ A budget and a `CostGuard` keep their totals in one process's memory. To hold a 
 
 A store that holds fenced reservations also sets `fencedReservations: true` and implements `addFencedReservation(reservation)`, which records a reservation made with `requireFence`, and `deferReservation(id, retryAt, evidence)`, which keeps a deferred reservation's next check and evidence; its `expiredReservations` leaves a deferred reservation out until that check comes. `reserveSpend` refuses an admission with `requireFence` on any other store, and `releaseExpiredSpend` refuses a resolver there.
 
-`InMemorySpendDayStore` keeps the rows in memory, fenced reservations included, and takes no lock, so two admissions awaited at the same time can both read the same total: it is for tests and for a process that admits one reservation at a time.
+An admission can also be bound to an operation that may run more than once under one reservation, such as a request a client sends again after a lost answer. The operation keeps one row, which a process finds again by the operation's name after a restart; the row holds a recorded figure, the runs begun and a lease that one run holds at a time. `reserveOperationSpend(store, admission)` admits it under the day's cap as `reserveSpend` does, with three more fields: `operation`, its name, unique among the store's reservations; `runMicro`, the first run's bound, at most `micro`; and `leaseUntil`, when the first run's lease ends. It records the row with the first run counted and holding the lease, and returns `{ status: 'reserved', id, run: 1 }`, or `{ status: 'in_flight' }`, reserving nothing, when the operation has a row already. The recorded figure is what the row settles at: each ended run's settled figure plus each other run's whole bound, so a run that a process lost counts whole.
+
+- `beginOperationRun(store, id, { runMicro, leaseUntil, maxRuns, at })` returns `{ status: 'gone' }` for a settled row or one whose time is up, then `{ status: 'in_flight', leaseUntil }` while another run's lease is live, then `{ status: 'gone' }` once the row has had `maxRuns` runs or the run's bound would take the recorded figure past `micro`. Otherwise it adds the run's bound to the recorded figure, gives the run the lease and returns `{ status: 'begun', run }`. Run numbers only grow, so a run's number is a fencing token.
+- `endOperationRun(store, id, { run, settledMicro, at, close })` writes the run's settled figure on the run's own row, held to its bound. When the run still holds the lease, that figure takes the place of the run's bound in the recorded figure, the lease is cleared, and the row settles in the same step when its time is up or `close` is set. A run whose lease passed to a later run changes neither the lease nor the recorded figure. It returns `{ holder, settled }`; a figure that is not a finite number, zero or more, settles the run at its whole bound.
+- `renewOperationRun(store, id, { run, leaseUntil, at })` moves the lease forward only for the run that holds it while it is live, and returns `false` otherwise, so a run can settle what it holds elsewhere before another run may begin.
+- `releaseExpiredSpend(store, at)` settles an operation's row once its time is up and no run holds a live lease, at its recorded figure.
+
+A store that holds operation reservations sets `operationReservations: true` and implements `addOperationReservation(row)`, `openOperationReservation(operation)`, `beginRun(id, run)`, `endRun(id, end)` and `renewRun(id, renew)`, each in one locked step of the caller's transaction; its `expiredReservations` lists an operation's row at its recorded figure, and only once no run holds a live lease. `reserveOperationSpend` and the three run functions refuse any other store with an `Error`. `reserveOperationSpend` throws a `RangeError` for an admission with `requireFence`, since the runs' lease fences the row, and each of the four throws one for an amount that is not whole micro-dollars, a run number or run count that is not a whole number from 1, or a time that is not a valid date.
+
+```ts
+import { InMemorySpendDayStore, beginOperationRun, endOperationRun, reserveOperationSpend } from '@framers/agentos';
+
+const store = new InMemorySpendDayStore();
+const at = new Date();
+const after = (seconds: number) => new Date(at.getTime() + seconds * 1000);
+const admitted = await reserveOperationSpend(store, {
+  kind: 'answer',
+  operation: 'answer:7d1f0c', // the client's id for the request, sent again with a retry
+  micro: 6_000, // two runs of at most 3,000 micro-dollars each
+  runMicro: 3_000,
+  at,
+  expires: after(600), // a retry is admitted for ten minutes
+  leaseUntil: after(45),
+  capMicro: 60_000_000,
+});
+if (admitted.status === 'reserved') {
+  // ... the first run's answer cost 800 micro-dollars ...
+  await endOperationRun(store, admitted.id, { run: 1, settledMicro: 800, at: after(20), close: false });
+  // A retry inside the window begins run 2, which takes the lease: the row now records 800 plus 3,000.
+  const retry = await beginOperationRun(store, admitted.id, { runMicro: 3_000, leaseUntil: after(90), maxRuns: 2, at: after(30) });
+  if (retry.status === 'begun') {
+    // The retry cost 700; with close, the row settles now at 1,500.
+    await endOperationRun(store, admitted.id, { run: retry.run, settledMicro: 700, at: after(60), close: true });
+  }
+}
+```
+
+`InMemorySpendDayStore` keeps the rows in memory, fenced and operation reservations included, and takes no lock, so two admissions awaited at the same time can both read the same total: it is for tests and for a process that admits one reservation at a time.
 
 Each admission names its own cap in `capMicro`: the whole day's limit, or a share of it for one class of admission. Every admission is checked against the same committed total, so an admission of a class given a lower cap (sessions on a free plan, say) is refused once it would take the day's total past that share, while admissions given the whole limit are admitted until the total would pass the limit.
 
