@@ -119,7 +119,9 @@ export interface TelnyxVoiceProviderConfig {
    * Receives the warning that
    * {@link TelnyxVoiceProviderConfig.allowUnverifiedWebhooks} logs. When
    * omitted, the warning goes to `createLogger('TelnyxVoiceProvider')` from
-   * `@framers/agentos/logging`, which is loaded only to write it.
+   * `@framers/agentos/logging`, which is loaded only to write it. When its
+   * `warn` throws, the warning goes to `console.warn` instead and the
+   * provider is still constructed.
    */
   logger?: ILogger;
   /**
@@ -187,19 +189,26 @@ const UNVERIFIED_WEBHOOKS_WARNING =
  * Writes {@link UNVERIFIED_WEBHOOKS_WARNING} to the host's logger or, without
  * one, to the library's `createLogger`. The logging module is imported here
  * rather than at the top of the file, so the telephony entry loads pino and
- * OpenTelemetry only when this warning is written. If that import or the
- * write fails, the warning goes to the console instead of being lost.
+ * OpenTelemetry only when this warning is written. If the host's logger
+ * throws, or that import or the write fails, the warning goes to the console
+ * instead of being lost, and the provider is still constructed.
  *
  * @param logger - The logger from the provider's config, if any.
  */
 function warnUnverifiedWebhooks(logger: ILogger | undefined): void {
+  const warnOnConsole = (): void => console.warn(`[TelnyxVoiceProvider] ${UNVERIFIED_WEBHOOKS_WARNING}`);
   if (logger) {
-    logger.warn(UNVERIFIED_WEBHOOKS_WARNING);
+    // A host logger that throws must not stop the provider from being built.
+    try {
+      logger.warn(UNVERIFIED_WEBHOOKS_WARNING);
+    } catch {
+      warnOnConsole();
+    }
     return;
   }
   void import('../../../../core/logging/loggerFactory.js')
     .then(({ createLogger }) => createLogger('TelnyxVoiceProvider').warn(UNVERIFIED_WEBHOOKS_WARNING))
-    .catch(() => console.warn(`[TelnyxVoiceProvider] ${UNVERIFIED_WEBHOOKS_WARNING}`));
+    .catch(warnOnConsole);
 }
 
 /**
