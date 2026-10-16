@@ -17,7 +17,7 @@ export interface FuseRankedOptions<T> {
   idOf: (item: T) => string;
   /** The smoothing constant. @default 60 */
   k?: number;
-  /** Each list's weight by the list's place; a list with none weighs 1. */
+  /** Each list's weight by the list's place, a finite number, zero or more; a list with none weighs 1. */
   weights?: readonly number[];
   /**
    * The most items kept whose first list is a given list: one number for every list, or one a list by place. A cap is
@@ -51,6 +51,12 @@ function finiteNonNegative(value: number): boolean {
   return Number.isFinite(value) && value >= 0;
 }
 
+/** Throws unless the weight of the list at the place named, when given, is a finite number, zero or more. */
+function checkWeight(place: number, value: number | undefined): void {
+  if (value === undefined || finiteNonNegative(value)) return;
+  throw new RangeError(`fuseRanked: the weight of list ${place} is a finite number, zero or more`);
+}
+
 /** Throws unless the cap named, when given, is a whole number, zero or more, or positive infinity. */
 function checkCap(name: string, value: number | undefined): void {
   if (value === undefined) return;
@@ -60,7 +66,7 @@ function checkCap(name: string, value: number | undefined): void {
 
 /**
  * Fuses the lists. A list's items are in its own rank order, best first; an item twice in one list counts once, at its
- * better rank.
+ * better rank. Every option is checked before anything is fused, a weight given for a place no list holds included.
  * @throws {RangeError} When `k` or a weight is not a finite number, zero or more, or a cap (`perList`, `perGroup`,
  * `limit`) is not a whole number, zero or more, or positive infinity.
  * @throws {TypeError} When `perGroup` is given without `groupOf`.
@@ -68,6 +74,7 @@ function checkCap(name: string, value: number | undefined): void {
 export function fuseRanked<T>(lists: ReadonlyArray<readonly T[]>, options: FuseRankedOptions<T>): FusedItem<T>[] {
   const k = options.k ?? 60;
   if (!finiteNonNegative(k)) throw new RangeError('fuseRanked: k is a finite number, zero or more');
+  options.weights?.forEach((value, place) => checkWeight(place, value));
   checkCap('limit', options.limit);
   checkCap('perGroup', options.perGroup);
   if (typeof options.perList === 'number') checkCap('perList', options.perList);
@@ -76,7 +83,6 @@ export function fuseRanked<T>(lists: ReadonlyArray<readonly T[]>, options: FuseR
   const byId = new Map<string, { item: T; id: string; score: number; list: number; rank: number; ranks: Map<number, number> }>();
   lists.forEach((list, place) => {
     const weight = options.weights?.[place] ?? 1;
-    if (!finiteNonNegative(weight)) throw new RangeError(`fuseRanked: the weight of list ${place} is a finite number, zero or more`);
     const seen = new Set<string>();
     list.forEach((item, at) => {
       const id = options.idOf(item);

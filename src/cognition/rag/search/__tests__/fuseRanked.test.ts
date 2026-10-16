@@ -64,6 +64,7 @@ describe('fuseRanked', () => {
     expect(fuseRanked<Doc>([], { idOf: (item) => item.id })).toEqual([]);
     expect(fuseRanked<Doc>([[], []], { idOf: (item) => item.id })).toEqual([]);
     expect(() => fuseRanked([[doc('a')]], { idOf: (item) => item.id, weights: [-1] })).toThrow(RangeError);
+    expect(() => fuseRanked([[doc('a')]], { idOf: (item) => item.id, weights: [1, Number.NaN] })).toThrow(RangeError);
     expect(() => fuseRanked([[doc('a')]], { idOf: (item) => item.id, k: Number.NaN })).toThrow(RangeError);
   });
 
