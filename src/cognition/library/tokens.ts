@@ -110,15 +110,18 @@ export function stemWord(word: string): string {
 }
 
 /**
- * A character of a script written without spaces between words: Thai, the kana, the CJK ideographs, Hangul
- * syllables.
+ * A character of a script written without spaces between words, each script read by its Unicode script property so
+ * that no block of it is left out: Thai (its digits among them, since a number in Thai digits sits inside a Thai run),
+ * the kana (the half-width forms among them), the CJK ideographs (the compatibility and the supplementary blocks among
+ * them) and Hangul (the syllables and the jamo).
  */
-const UNSPACED = /[\u0E00-\u0E7F\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/u;
+const UNSPACED = /[\p{Script=Thai}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}\p{Script=Hangul}]/u;
 
 /**
  * Whether a word holds a character of a script written without spaces between words (Thai, Japanese kana, the
- * ideographs Chinese and Japanese share, Korean syllables, whose long runs are common in data), where whole words
- * cannot be compared and one edit says nothing.
+ * ideographs Chinese and Japanese share, Korean, whose long runs are common in data), where whole words cannot be
+ * compared and one edit says nothing. A half-width kana letter, a compatibility or a supplementary ideograph and a
+ * Thai digit all count, since each script is read by its Unicode script property.
  */
 export function isUnspacedScript(word: string): boolean {
   return UNSPACED.test(word);

@@ -23,4 +23,10 @@ describe('isUnspacedScript', () => {
     for (const word of ['会議', 'ประชุม', 'かいぎ', 'カイギ', '회의', 'meeting会議']) expect(isUnspacedScript(word)).toBe(true);
     for (const word of ['budget', 'किताब', 'كِتَاب', 'q3', '']) expect(isUnspacedScript(word)).toBe(false);
   });
+
+  it('reads each script by its Unicode property, so no block of it is left out', () => {
+    // half-width katakana; a compatibility ideograph with no canonical decomposition (U+FA11); a supplementary
+    // ideograph (U+20BB7); a number in Thai digits, which sits inside a Thai run; a conjoining jamo (U+1112)
+    for (const word of ['ｶｲｷﾞ', '﨑', '𠮷', '๒๕๖๙', 'ᄒ']) expect(isUnspacedScript(word)).toBe(true);
+  });
 });
