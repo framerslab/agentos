@@ -89,6 +89,24 @@ describe('analyzeSentiment in English (AFINN)', () => {
       { token: 'great', score: 3 },
     ]);
   });
+
+  it('flips nothing past three words after the negation', async () => {
+    expect((await util.analyzeSentiment('Never did anyone say the plan is good')).polarity).toBe('positive');
+    expect((await util.analyzeSentiment('The plan is never good')).polarity).toBe('negative');
+  });
+
+  it('scores a phrase the lexicon lists as one entry, before its words', async () => {
+    const result = await util.analyzeSentiment("I can't stand it");
+    expect(result.negativeTokens).toEqual([{ token: "can't stand", score: -3 }]);
+    expect(result.positiveTokens).toEqual([]);
+  });
+
+  it('scores a word only in a form the lexicon lists', async () => {
+    // AFINN lists lively (2) and not lives: a word that shares a listed word's stem adds nothing.
+    const result = await util.analyzeSentiment('The deploy key lives in the vault.');
+    expect(result.score).toBe(0);
+    expect(result.positiveTokens).toEqual([]);
+  });
 });
 
 describe('analyzeSentiment in other languages', () => {
@@ -158,5 +176,12 @@ describe('analyzeSentiment with a custom lexicon', () => {
     await expect(
       util.analyzeSentiment('bueno', { language: 'es', lexiconNameOrPath: 'pattern' }),
     ).rejects.toMatchObject({ code: GMIErrorCode.NOT_SUPPORTED });
+  });
+
+  it('refuses a lexicon file a call names that cannot be read', async () => {
+    const missing = path.join(os.tmpdir(), `stat-no-such-lexicon-${process.pid}.tsv`);
+    await expect(util.analyzeSentiment('good', { lexiconNameOrPath: missing })).rejects.toMatchObject({
+      code: GMIErrorCode.RESOURCE_NOT_FOUND,
+    });
   });
 });

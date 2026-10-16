@@ -122,6 +122,12 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(routes()).toEqual([['/litellm/v1/chat/completions', 'gpt-4o-mini']]);
   });
 
+  it('summarizes on the provider its providerId names', async () => {
+    replies = ['A short summary.'];
+    expect(await utility.summarize('A long text to summarize.', { providerId: 'litellm' })).toBe('A short summary.');
+    expect(routes()).toEqual([['/litellm/v1/chat/completions', 'gpt-4o']]);
+  });
+
   it('still takes a provider from methodOptions.providerId', async () => {
     replies = ['{"bestClass": "billing", "confidence": 0.9}'];
     const result = await utility.classifyText('Where is my refund?', {
@@ -170,6 +176,25 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(routes()).toEqual([
       ['/litellm/v1/chat/completions', 'gpt-4o-mini'],
       ['/litellm/v1/chat/completions', 'gpt-4o-mini'],
+    ]);
+  });
+
+  it('normalizes text on textNormalizationModelId, in any language and with none named', async () => {
+    const normalizer = new LLMUtilityAI('llm-normalizer');
+    await normalizer.initialize({
+      llmProviderManager: manager,
+      defaultProviderId: 'openai',
+      defaultModelId: 'gpt-4o',
+      textNormalizationModelId: 'gpt-4o-mini',
+    });
+    replies = ['bonjour', 'some text', 'some text'];
+    expect(await normalizer.normalizeText('Bonjour !', { language: 'fr' })).toBe('bonjour');
+    await normalizer.normalizeText('Some TEXT');
+    await normalizer.normalizeText('Some TEXT', { language: 'en-GB' });
+    expect(routes()).toEqual([
+      ['/openai/v1/chat/completions', 'gpt-4o-mini'],
+      ['/openai/v1/chat/completions', 'gpt-4o-mini'],
+      ['/openai/v1/chat/completions', 'gpt-4o-mini'],
     ]);
   });
 

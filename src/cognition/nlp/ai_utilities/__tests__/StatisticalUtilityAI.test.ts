@@ -41,6 +41,36 @@ describe('StatisticalUtilityAI', () => {
       "Third sentence?"
     ]);
   });
+
+  it('keeps the letters of any script, an accent included, inside one word', async () => {
+    expect(await statUtility.tokenize('Привет мир, café crème')).toEqual(['привет', 'мир', 'café', 'crème']);
+    // A letter and its accent written as two code points read as one letter.
+    expect(await statUtility.tokenize('café')).toEqual(['café']);
+    // An apostrophe or a hyphen ends a word.
+    expect(await statUtility.tokenize("don't stop-start")).toEqual(['don', 't', 'stop', 'start']);
+  });
+
+  it('lower-cases sentences when toLowerCase is true, and keeps their case otherwise', async () => {
+    const text = 'First one. Second one.';
+    expect(await statUtility.tokenize(text, { type: 'sentence', toLowerCase: true })).toEqual(['first one.', 'second one.']);
+    expect(await statUtility.tokenize(text, { type: 'sentence' })).toEqual(['First one.', 'Second one.']);
+  });
+
+  it("expands a contraction that ends in n't, written with a curly apostrophe too", async () => {
+    const text = "I don't know, they won't go and she can’t stay";
+    expect(await statUtility.normalizeText(text, { expandContractions: true })).toBe('i do not know they will not go and she cannot stay');
+  });
+
+  it('counts the words of any script for keywords, most frequent first', async () => {
+    expect(await statUtility.extractKeywords('Café crème, café noir, café au lait.', { maxKeywords: 2 })).toEqual(['café', 'crème']);
+  });
+
+  it('reads the corpusForIDF texts as it reads the two texts it compares', async () => {
+    const similarity = (corpusForIDF: string[]) =>
+      statUtility.calculateSimilarity('running dogs bark', 'running cats sleep', { corpusForIDF });
+    // Both corpus texts stem to run and late, so they give every word the same inverse document frequency.
+    expect(await similarity(['running late'])).toBe(await similarity(['run late']));
+  });
   
   it('should perform basic summarization (first_n_sentences)', async () => {
     const text = "Sentence one. Sentence two. Sentence three. Sentence four. Sentence five.";
