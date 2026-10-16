@@ -7,16 +7,23 @@
  * officeparser inflates the parts of an archive it reads and builds element
  * trees and cell nodes from them, so a small file can ask for far more memory
  * than its size. The loader hands officeparser the caller's bounds on what
- * those parts inflate to, on the XML elements read and on the table cells, and
- * refuses a document that reaches a bound, one officeparser only warns of
- * included, with {@link DocumentTooLargeError}.
+ * those parts inflate to, on the XML elements read and on the table cells. At
+ * the first bound a read reaches, one officeparser only warns of included, the
+ * loader stops the read and refuses the document with
+ * {@link DocumentTooLargeError}, before any of its text is written.
+ *
+ * A scan is read by OCR in a worker thread of its own, through `loadIsolated`'s
+ * kind `'scan'`. tesseract.js, which officeparser runs for OCR, throws a
+ * failure its worker reports outside the promise of the read; in that thread
+ * the failure ends the worker, and the read rejects with it, while the
+ * caller's process reads on.
  *
  * This module is the package's entry `@framers/agentos/cognition/memory/office`.
- * Importing it loads no package and no Node built-in: officeparser is
- * imported by the first `load`, and officeparser imports pdf.js and
- * tesseract.js only to read a scanned PDF; `DocumentTooLargeError` comes from
- * a module that imports nothing. The memory module's index exports the same
- * names.
+ * Importing it loads no package and no Node built-in: officeparser is imported
+ * by the first read, `loadIsolated` by the first scan, and officeparser imports
+ * pdf.js and tesseract.js only to read a scan; `DocumentTooLargeError` comes
+ * from a module that imports nothing. The memory module's index exports the
+ * same names.
  *
  * @module memory/ingestion/OfficeLoader
  */
@@ -24,6 +31,7 @@
 import type { DocumentMetadata, LoadOptions, LoadedDocument } from '../facade/types.js';
 import { DocumentTooLargeError } from './DocumentTooLargeError.js';
 import type { IDocumentLoader } from './IDocumentLoader.js';
+import { loadOfficeparser } from './loadOfficeparser.js';
 
 // The error this loader throws past a bound, the one DocxLoader throws, so a
 // caller of this entry can check for it without importing another.
@@ -71,13 +79,14 @@ export class ScannedDocumentError extends Error {
 
 /**
  * The part of officeparser this loader calls: its `parseOffice` export, which
- * answers a document that writes itself as text.
+ * answers a document that writes itself as text. The text writer's result
+ * lists the issues it reported among its `messages`.
  */
 export type OfficeParse = (
   input: Buffer,
   config: Record<string, unknown>,
 ) => Promise<{
-  to(format: 'text', config?: Record<string, unknown>): Promise<{ value: unknown }>;
+  to(format: 'text', config?: Record<string, unknown>): Promise<{ value: unknown; messages?: unknown }>;
   metadata?: { pages?: number };
 }>;
 
@@ -103,17 +112,30 @@ export interface OfficeLoaderOptions {
   maxTableCells?: number;
   /** Pages of a scanned PDF read by OCR, from the first: a whole number; 0 refuses a PDF. Default 0. */
   ocrPages?: number;
-  /** The heap, in MB, of the separate process pdf.js runs in during OCR: 64 or more. Default 256. */
+  /**
+   * The heap, in MB, of the separate process pdf.js runs in while a scan is
+   * read: 64 or more. Default 256. A scan whose pdf.js would run in the
+   * reading thread instead, outside this cap, is refused.
+   */
   pdfProcessMemoryMb?: number;
   /**
-   * Cancels a read. officeparser checks the signal between its steps and ends
-   * OCR and the pdf.js process on it, and the read rejects with its
-   * `AbortError`; a step that reads one part's markup finishes first. A
-   * deadline is a signal: `AbortSignal.timeout(ms)`.
+   * officeparser's `parseOffice`. Given, every read calls it in the thread
+   * that calls `load`, a scan read by OCR included. Left out, officeparser is
+   * imported on the first read, and a scan is read in a worker thread of its own.
+   */
+  parse?: OfficeParse;
+}
+
+/** Options of one read. */
+export interface OfficeLoadOptions extends LoadOptions {
+  /**
+   * Cancels this read and no other: `load` rejects with the signal's reason.
+   * officeparser checks the signal between its steps, so a step that reads
+   * one part's markup finishes first; a scan read in a worker thread ends with
+   * its worker. A deadline is a signal made for the read:
+   * `AbortSignal.timeout(ms)`.
    */
   signal?: AbortSignal;
-  /** officeparser's `parseOffice`; imported on the first read when left out. */
-  parse?: OfficeParse;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +157,13 @@ const LIMIT_CODES: ReadonlySet<string> = new Set([
   'PDF_CONTENT_LIMIT_EXCEEDED',
 ]);
 
+/**
+ * officeparser's warnings that pdf.js is about to read a PDF in the reading
+ * thread, outside the process `pdfProcessMemoryMb` caps: no process could
+ * start, or pdf.js's worker file was not found on disk.
+ */
+const PDF_IN_THREAD_CODES: ReadonlySet<string> = new Set(['PDF_SEPARATE_PROCESS_UNAVAILABLE', 'PDF_WORKER_FALLBACK']);
+
 /** The bound when {@link OfficeLoaderOptions.maxInflatedBytes} is left out: 64 MiB. */
 const DEFAULT_MAX_INFLATED_BYTES = 67_108_864;
 
@@ -144,30 +173,16 @@ const DEFAULT_PDF_PROCESS_MEMORY_MB = 256;
 /** The smallest heap, in MB, officeparser starts its pdf.js process with. */
 const MIN_PDF_PROCESS_MEMORY_MB = 64;
 
+/**
+ * The deadline a scan's worker thread is given: the longest delay a Node
+ * timer holds, so the caller's signal is the read's deadline, as it is for a
+ * read in the caller's thread.
+ */
+const SCAN_TIMEOUT_MS = 2_147_483_647;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** officeparser's `parseOffice`, imported once and only when a document needs it. */
-let parser: Promise<OfficeParse> | null = null;
-
-/**
- * Imports officeparser on the first read. A failed import is tried again on
- * the next read, so a package installed meanwhile is found.
- *
- * @throws {Error} When officeparser is not installed; the import's error is its `cause`.
- */
-function loadParser(): Promise<OfficeParse> {
-  parser ??= import('officeparser')
-    .then((module) => module.parseOffice as unknown as OfficeParse)
-    .catch((error: unknown) => {
-      parser = null;
-      throw Object.assign(new Error(`OfficeLoader needs the optional peer dependency officeparser: ${String(error)}`), {
-        cause: error,
-      });
-    });
-  return parser;
-}
 
 /**
  * The format a load's hint names.
@@ -195,6 +210,31 @@ function tooLarge(limit: number, code: string): DocumentTooLargeError {
   return Object.assign(new DocumentTooLargeError(limit), { cause: new Error(`officeparser: ${code}`) });
 }
 
+/**
+ * The refusal of a scan whose pdf.js would read it in the reading thread,
+ * where `pdfProcessMemoryMb` does not hold it.
+ *
+ * @param reason - officeparser's warning code, or what else runs pdf.js in this thread.
+ */
+function pdfInThread(reason: string): Error {
+  return new Error(
+    `OfficeLoader: pdf.js would read the scan in this thread, outside the process pdfProcessMemoryMb caps (${reason}); the scan was not read.`,
+  );
+}
+
+/**
+ * The codes of the issues officeparser's text writer lists among the messages of its result.
+ *
+ * @param messages - The result's `messages`.
+ */
+function codesOf(messages: unknown): string[] {
+  if (!Array.isArray(messages)) return [];
+  return messages.flatMap((issue: unknown) => {
+    const code = (issue as { code?: unknown } | null)?.code;
+    return typeof code === 'string' ? [code] : [];
+  });
+}
+
 // ---------------------------------------------------------------------------
 // OfficeLoader
 // ---------------------------------------------------------------------------
@@ -210,16 +250,13 @@ function tooLarge(limit: number, code: string): DocumentTooLargeError {
  * pictures.
  *
  * With {@link OfficeLoaderOptions.ocrPages} above 0, `load(bytes, { format: 'pdf' })`
- * reads a scanned PDF: officeparser reads the first `ocrPages` pages with
- * pdf.js, in a process of its own where one can start, and tesseract.js
- * recognizes the text of each picture on them. A picture OCR could not read
- * is left out of the text, and the read goes on.
- *
- * tesseract.js throws a failure its worker reports from the worker's message
- * listener unless it is given an error handler, and officeparser gives it
- * none: such a failure (the language data that could not be fetched is one)
- * is an uncaught exception of the thread that called `load`, outside the
- * promise `load` returns.
+ * reads a scanned PDF in a worker thread of its own (`loadIsolated`'s kind
+ * `'scan'`): officeparser reads the first `ocrPages` pages with pdf.js, in a
+ * process of its own capped at `pdfProcessMemoryMb`, and tesseract.js
+ * recognizes the text of each picture on them. A picture OCR could not read is
+ * left out of the text, and the read goes on. A failure tesseract.js throws
+ * outside officeparser's promise ends the worker thread, and the read rejects
+ * with it.
  *
  * @implements {IDocumentLoader}
  *
@@ -227,7 +264,7 @@ function tooLarge(limit: number, code: string): DocumentTooLargeError {
  * ```ts
  * const loader = new OfficeLoader({ maxInflatedBytes: 32 * 1024 * 1024, maxXmlElements: 400_000 });
  * try {
- *   const doc = await loader.load(uploadedBuffer, { format: 'pptx' });
+ *   const doc = await loader.load(uploadedBuffer, { format: 'pptx', signal: AbortSignal.timeout(30_000) });
  *   console.log(doc.metadata.wordCount);
  * } catch (error) {
  *   if (error instanceof DocumentTooLargeError) {
@@ -238,8 +275,8 @@ function tooLarge(limit: number, code: string): DocumentTooLargeError {
  *
  * @example A scanned PDF, its first three pages read by OCR
  * ```ts
- * const loader = new OfficeLoader({ ocrPages: 3, signal: AbortSignal.timeout(60_000) });
- * const doc = await loader.load(scanBuffer, { format: 'pdf' });
+ * const loader = new OfficeLoader({ ocrPages: 3 });
+ * const doc = await loader.load(scanBuffer, { format: 'pdf', signal: AbortSignal.timeout(120_000) });
  * ```
  */
 export class OfficeLoader implements IDocumentLoader {
@@ -302,7 +339,7 @@ export class OfficeLoader implements IDocumentLoader {
    *
    * @param source - The file's bytes. A path is refused: the loader reads no file.
    * @param options - `format` names the document's format: a value of {@link OFFICE_TYPES}, with or without a
-   *   leading dot, or `pdf` for a scanned PDF.
+   *   leading dot, or `pdf` for a scanned PDF. `signal` cancels this read.
    * @returns The document's text, with `metadata.wordCount`, and `metadata.pageCount` when officeparser reports
    *   a page count.
    * @throws {DocumentTooLargeError} When the document reaches a bound, one officeparser only warns of included.
@@ -310,26 +347,91 @@ export class OfficeLoader implements IDocumentLoader {
    *   the bound by officeparser's code.
    * @throws {ScannedDocumentError} For a PDF while `ocrPages` is 0, and for a scan whose pages gave no text. When
    *   officeparser reported a picture OCR could not read, the first such failure is the error's `cause`.
-   * @throws {Error} When `source` is a path, when `options.format` names none of the formats, and when
-   *   officeparser is not installed; and officeparser's own error for a file it cannot read or a read its
-   *   signal cancelled.
+   * @throws The reason of `options.signal` when the caller aborts it.
+   * @throws {Error} When `source` is a path, when `options.format` names none of the formats, when officeparser
+   *   is not installed, and when a scan's pdf.js would run in the reading thread; the error a scan's worker
+   *   thread ended on, and `loadIsolated`'s refusals of a scan's worker; and officeparser's own error for a file
+   *   it cannot read.
    */
-  async load(source: string | Buffer, options?: LoadOptions): Promise<LoadedDocument> {
+  async load(source: string | Buffer, options?: OfficeLoadOptions): Promise<LoadedDocument> {
     if (!Buffer.isBuffer(source)) throw new Error('OfficeLoader reads bytes: pass the file as a Buffer.');
     const format = formatOf(options?.format);
     const ocrPages = this.options.ocrPages ?? 0;
     if (format === 'pdf' && ocrPages === 0) {
       throw new ScannedDocumentError('OfficeLoader reads a PDF only by OCR, and ocrPages is 0.');
     }
-    const limit = this.options.maxInflatedBytes ?? DEFAULT_MAX_INFLATED_BYTES;
-    const { maxXmlElements, maxTableCells, signal } = this.options;
+    const signal = options?.signal;
+    signal?.throwIfAborted();
+    const { parse } = this.options;
+    if (format === 'pdf' && parse === undefined) return this.readScanInWorker(source, ocrPages, signal);
+    return this.read(source, format, parse ?? (await loadOfficeparser()), signal);
+  }
 
-    // officeparser only warns past some bounds (a sheet's cells): a warned bound
-    // refuses the document as a thrown one does. A picture OCR could not read is a
-    // warning too, and officeparser reads on without that picture's text: the
-    // first such failure is kept, for a scan that gives no text at all.
+  // -------------------------------------------------------------------------
+  // Reads
+  // -------------------------------------------------------------------------
+
+  /**
+   * Reads a scan by OCR in a worker thread of its own, through `loadIsolated`'s kind `'scan'`, under this loader's
+   * bounds and the caller's signal. The worker builds an office loader with officeparser handed in, which reads
+   * the scan in that thread.
+   *
+   * @param source - The scan's bytes.
+   * @param ocrPages - The pages read by OCR, 1 or more.
+   * @param signal - The caller's signal for this read.
+   */
+  private async readScanInWorker(
+    source: Buffer,
+    ocrPages: number,
+    signal: AbortSignal | undefined,
+  ): Promise<LoadedDocument> {
+    const { loadIsolated } = await import('./loadIsolated.js');
+    const { maxInflatedBytes, maxXmlElements, maxTableCells, pdfProcessMemoryMb } = this.options;
+    return loadIsolated('scan', source, {
+      ocrPages,
+      maxInflatedBytes,
+      maxXmlElements,
+      maxTableCells,
+      pdfProcessMemoryMb,
+      signal,
+      timeoutMs: SCAN_TIMEOUT_MS,
+    });
+  }
+
+  /**
+   * Reads a document in the calling thread with officeparser's `parse`. The read stops at the first bound
+   * officeparser reaches or warns of, and refuses the document before its text is written; a scan stops where
+   * pdf.js would read it in this thread.
+   *
+   * @param source - The document's bytes.
+   * @param format - Its format.
+   * @param parse - officeparser's `parseOffice`.
+   * @param signal - The caller's signal for this read.
+   */
+  private async read(
+    source: Buffer,
+    format: OfficeFormat,
+    parse: OfficeParse,
+    signal: AbortSignal | undefined,
+  ): Promise<LoadedDocument> {
+    // pdf.js preloaded in this thread is the one officeparser reads a PDF with, outside any process of its own.
+    if (format === 'pdf' && (globalThis as unknown as { pdfjsWorker?: unknown }).pdfjsWorker !== undefined) {
+      throw pdfInThread('pdf.js preloaded as globalThis.pdfjsWorker');
+    }
+    const limit = this.options.maxInflatedBytes ?? DEFAULT_MAX_INFLATED_BYTES;
+    const { maxXmlElements, maxTableCells } = this.options;
+
+    // officeparser checks its signal between its steps: this one ends the read at the first bound reached, and
+    // with the caller's signal when there is one.
+    const stop = new AbortController();
+    const abortSignal = signal === undefined ? stop.signal : AbortSignal.any([signal, stop.signal]);
+    // A bound officeparser only warns of refuses the document as a thrown one does. A picture OCR could not read
+    // is a warning too, and officeparser reads on without that picture's text: the first such failure is kept,
+    // for a scan that gives no text at all.
     const reached: string[] = [];
     const unread: unknown[] = [];
+    // Set by the warning handler, so typed as it may end up rather than as it starts.
+    let inThread = undefined as string | undefined;
     const config: Record<string, unknown> = {
       fileType: format,
       decompressionLimits: {
@@ -339,15 +441,24 @@ export class OfficeLoader implements IDocumentLoader {
         // given, so the file's length is taken out of the caller's bound here.
         ...(maxTableCells === undefined ? {} : { maxTableCells: maxTableCells - source.length }),
       },
-      abortSignal: signal ?? null,
+      abortSignal,
       ignoreComments: true,
       onWarning: (issue: { code?: unknown; details?: unknown }) => {
-        if (typeof issue.code !== 'string') return;
-        if (LIMIT_CODES.has(issue.code)) reached.push(issue.code);
-        else if (issue.code === 'OCR_FAILED' && unread.length === 0) unread.push(issue.details);
+        const { code } = issue;
+        if (typeof code !== 'string') return;
+        if (LIMIT_CODES.has(code)) {
+          reached.push(code);
+          stop.abort();
+        } else if (format === 'pdf' && PDF_IN_THREAD_CODES.has(code)) {
+          inThread ??= code;
+          stop.abort();
+        } else if (code === 'OCR_FAILED' && unread.length === 0) {
+          unread.push(issue.details);
+        }
       },
     };
     if (format === 'pdf') {
+      const ocrPages = this.options.ocrPages ?? 0;
       config.ocr = true;
       // officeparser recognizes text in the pictures it extracts, and in no others.
       config.extractAttachments = true;
@@ -357,23 +468,40 @@ export class OfficeLoader implements IDocumentLoader {
       };
     }
 
-    let text: string;
+    let text = '';
     let pages: unknown;
+    let failed = false;
+    let failure: unknown;
     try {
-      const parse = this.options.parse ?? (await loadParser());
       const parsed = await parse(source, config);
-      // Written as text, a picture is a line naming it by default. Asked for the
-      // recognized text alone, a picture read by OCR is its text, and any other
-      // picture is left out.
-      const written = await parsed.to('text', { includeImages: 'ocr-text-only', abortSignal: signal ?? null });
-      text = typeof written.value === 'string' ? written.value : '';
-      pages = parsed.metadata?.pages;
+      // A document refused while it was parsed has no text written.
+      if (!stop.signal.aborted) {
+        // Written as text, a picture is a line naming it by default. Asked for the
+        // recognized text alone, a picture read by OCR is its text, and any other
+        // picture is left out.
+        const written = await parsed.to('text', { includeImages: 'ocr-text-only', abortSignal });
+        // The writer reports a bound it reaches to the parse's warning handler and
+        // lists it among its result's messages; either refuses the document.
+        for (const code of codesOf(written.messages)) {
+          if (LIMIT_CODES.has(code)) reached.push(code);
+        }
+        text = typeof written.value === 'string' ? written.value : '';
+        pages = parsed.metadata?.pages;
+      }
     } catch (error) {
-      const code = (error as { officeIssue?: { code?: unknown } } | null)?.officeIssue?.code;
-      if (typeof code === 'string' && LIMIT_CODES.has(code)) throw tooLarge(limit, code);
-      throw error;
+      failed = true;
+      failure = error;
     }
+    // A bound reached, or pdf.js about to run here, ended the read: officeparser's
+    // abort is this loader's own, and the refusal says why.
     if (reached.length > 0) throw tooLarge(limit, reached[0]);
+    if (inThread !== undefined) throw pdfInThread(`officeparser: ${inThread}`);
+    if (failed) {
+      if (signal?.aborted) throw signal.reason;
+      const code = (failure as { officeIssue?: { code?: unknown } } | null)?.officeIssue?.code;
+      if (typeof code === 'string' && LIMIT_CODES.has(code)) throw tooLarge(limit, code);
+      throw failure;
+    }
 
     const trimmed = text.trim();
     if (format === 'pdf' && trimmed === '') {
