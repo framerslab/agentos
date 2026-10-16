@@ -6,7 +6,8 @@
  * holds it. The fused order is by score, then by the first list the item stands in, then by its rank there, then by
  * its id, so the same input always gives the same answer. Then the caps, walking that order: an item is passed over
  * when its first list already gave `perList` items or its group already gave `perGroup`, and the walk stops at
- * `limit`. Two lists fused with their weights give {@link reciprocalRankFusion}'s scores and order.
+ * `limit`. Two lists fused with their weights give {@link reciprocalRankFusion}'s scores and order, but for a tie,
+ * which that function breaks by the id alone, and an item twice in one list, which it scores at each of its ranks.
  * @module agentos/rag/search/fuseRanked
  */
 
@@ -18,13 +19,16 @@ export interface FuseRankedOptions<T> {
   k?: number;
   /** Each list's weight by the list's place; a list with none weighs 1. */
   weights?: readonly number[];
-  /** The most items kept whose first list is a given list: one number for every list, or one a list by place. */
+  /**
+   * The most items kept whose first list is a given list: one number for every list, or one a list by place. A cap is
+   * a whole number, zero or more, or positive infinity for no cap.
+   */
   perList?: number | readonly number[];
   /** An item's group, which `perGroup` counts. */
   groupOf?: (item: T) => string;
-  /** The most items kept of one group. */
+  /** The most items kept of one group, a whole number, zero or more, or positive infinity; needs `groupOf`. */
   perGroup?: number;
-  /** The most items answered. */
+  /** The most items answered, a whole number, zero or more, or positive infinity. */
   limit?: number;
 }
 
@@ -47,14 +51,28 @@ function finiteNonNegative(value: number): boolean {
   return Number.isFinite(value) && value >= 0;
 }
 
+/** Throws unless the cap named, when given, is a whole number, zero or more, or positive infinity. */
+function checkCap(name: string, value: number | undefined): void {
+  if (value === undefined) return;
+  if ((Number.isInteger(value) && value >= 0) || value === Number.POSITIVE_INFINITY) return;
+  throw new RangeError(`fuseRanked: ${name} is a whole number, zero or more, or positive infinity`);
+}
+
 /**
  * Fuses the lists. A list's items are in its own rank order, best first; an item twice in one list counts once, at its
  * better rank.
- * @throws {RangeError} When `k` or a weight is not a finite number, zero or more.
+ * @throws {RangeError} When `k` or a weight is not a finite number, zero or more, or a cap (`perList`, `perGroup`,
+ * `limit`) is not a whole number, zero or more, or positive infinity.
+ * @throws {TypeError} When `perGroup` is given without `groupOf`.
  */
 export function fuseRanked<T>(lists: ReadonlyArray<readonly T[]>, options: FuseRankedOptions<T>): FusedItem<T>[] {
   const k = options.k ?? 60;
   if (!finiteNonNegative(k)) throw new RangeError('fuseRanked: k is a finite number, zero or more');
+  checkCap('limit', options.limit);
+  checkCap('perGroup', options.perGroup);
+  if (typeof options.perList === 'number') checkCap('perList', options.perList);
+  else options.perList?.forEach((value, place) => checkCap(`perList[${place}]`, value));
+  if (options.perGroup !== undefined && options.groupOf === undefined) throw new TypeError('fuseRanked: perGroup needs groupOf');
   const byId = new Map<string, { item: T; id: string; score: number; list: number; rank: number; ranks: Map<number, number> }>();
   lists.forEach((list, place) => {
     const weight = options.weights?.[place] ?? 1;

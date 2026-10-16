@@ -66,4 +66,25 @@ describe('fuseRanked', () => {
     expect(() => fuseRanked([[doc('a')]], { idOf: (item) => item.id, weights: [-1] })).toThrow(RangeError);
     expect(() => fuseRanked([[doc('a')]], { idOf: (item) => item.id, k: Number.NaN })).toThrow(RangeError);
   });
+
+  it('departs from reciprocalRankFusion where its own rules say: a tie goes to the first list, not the lower id, and an item twice in one list counts once', () => {
+    const tie = fuseRanked([[doc('z')], [doc('a')]], { idOf: (item) => item.id, weights: [1, 1] });
+    expect(ids(tie)).toEqual(['z', 'a']);
+    const byId = reciprocalRankFusion([{ id: 'z', rank: 1 }], [{ id: 'a', rank: 1 }], { denseWeight: 1, sparseWeight: 1 });
+    expect(byId.map((item) => item.id)).toEqual(['a', 'z']);
+    const once = fuseRanked([[doc('a'), doc('b'), doc('a')]], { idOf: (item) => item.id, weights: [1] });
+    expect(once[0]!.score).toBeCloseTo(1 / 61, 12);
+    const again = reciprocalRankFusion([{ id: 'a', rank: 1 }, { id: 'b', rank: 2 }, { id: 'a', rank: 3 }], [], { denseWeight: 1 });
+    expect(again[0]!.score).toBeCloseTo(1 / 61 + 1 / 63, 12);
+  });
+
+  it('refuses a cap that is not a whole number, zero or more, or positive infinity, and perGroup without groupOf', () => {
+    const idOf = (item: Doc): string => item.id;
+    expect(() => fuseRanked([[doc('a')]], { idOf, perList: 1.5 })).toThrow(RangeError);
+    expect(() => fuseRanked([[doc('a')]], { idOf, perList: [1, Number.NaN] })).toThrow(RangeError);
+    expect(() => fuseRanked([[doc('a')]], { idOf, groupOf: (item) => item.group, perGroup: -1 })).toThrow(RangeError);
+    expect(() => fuseRanked([[doc('a')]], { idOf, limit: Number.NaN })).toThrow(RangeError);
+    expect(() => fuseRanked([[doc('a')]], { idOf, perGroup: 1 })).toThrow(TypeError);
+    expect(ids(fuseRanked([[doc('a'), doc('b')], [doc('c'), doc('d')]], { idOf, perList: [1, Number.POSITIVE_INFINITY] }))).toEqual(['a', 'c', 'd']);
+  });
 });
