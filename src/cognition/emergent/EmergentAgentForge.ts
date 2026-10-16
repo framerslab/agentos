@@ -12,6 +12,7 @@
  */
 
 import type { BaseAgentConfig } from '../../api/types.js';
+import { IDENTIFIER_PATTERN } from './ToolName.js';
 
 /** Minimum spec the manager must supply when calling `spawn_specialist`. */
 export interface AgentSpec {
@@ -53,9 +54,6 @@ const RESERVED_ROLE_NAMES: ReadonlySet<string> = new Set([
   'final_answer',
   'plan',
 ]);
-
-/** Identifier rules for synthesised role names. */
-const VALID_IDENTIFIER = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 
 /**
  * Synthesizes BaseAgentConfig instances from manager-supplied specs.
@@ -105,10 +103,12 @@ export class EmergentAgentForge {
       };
     }
 
-    if (!VALID_IDENTIFIER.test(spec.role)) {
+    // A role names the synthesised agent's delegate_to_<role> tool, so it is held to the identifier pattern a
+    // forged tool's name is held to.
+    if (!IDENTIFIER_PATTERN.test(spec.role)) {
       return {
         ok: false,
-        reason: `spec.role "${spec.role}" is not a valid identifier (must match /^[a-zA-Z][a-zA-Z0-9_-]*$/)`,
+        reason: `spec.role "${spec.role}" is not a valid identifier (must match ${IDENTIFIER_PATTERN})`,
         spec,
       };
     }

@@ -214,9 +214,9 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
         }
       }
       return parsed as T;
-    } catch (initialError: any) {
+    } catch {
       if (options?.attemptFixWithLLM) {
-        console.warn(`LLMUtilityAI (${this.utilityId}): Standard JSON parsing failed for input (length ${jsonString.length}). Attempting LLM fix. Error: ${initialError.message}`);
+        console.warn(`LLMUtilityAI (${this.utilityId}): Standard JSON parsing failed for input (length ${jsonString.length}). Attempting LLM fix.`);
         try {
           const fixPrompt = `The following text is supposed to be a valid JSON object but failed to parse. Please correct it and return ONLY the valid JSON object. If it's unrecoverable or not JSON, return an empty JSON object {}. Text to fix:\n\n${jsonString.substring(0, 2000)}`; // Limit length of potentially broken JSON
           const fixedJsonString = await this.makeLLMCall(
@@ -239,8 +239,8 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
                 }
             }
             return reparsed as T;
-          } catch (reparseError: any) {
-            console.error(`LLMUtilityAI (${this.utilityId}): Failed to parse LLM-fixed JSON string: ${reparseError.message}. Fixed string was: "${fixedJsonString.substring(0,200)}..."`);
+          } catch {
+            console.error(`LLMUtilityAI (${this.utilityId}): Failed to parse LLM-fixed JSON string.`, { textLength: fixedJsonString.length });
             return null;
           }
         } catch (fixLlmError: any) {
@@ -248,7 +248,7 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
           return null;
         }
       }
-      console.log(`LLMUtilityAI (${this.utilityId}): JSON parsing failed and LLM fix not attempted or failed. String (start): "${jsonString.substring(0,100)}..."`);
+      console.log(`LLMUtilityAI (${this.utilityId}): JSON parsing failed and LLM fix not attempted or failed.`, { textLength: jsonString.length });
       return null;
     }
   }
@@ -300,7 +300,7 @@ Respond with ONLY a JSON array of strings, e.g., ["keyword1", "keyphrase two"].`
     );
     const parsed = await this.parseJsonSafe<string[]>(responseText, { attemptFixWithLLM: true, llmModelIdForFix: this.config.jsonFixerModelId });
     if (!parsed || !Array.isArray(parsed)) {
-      console.warn("LLMUtilityAI: Keyword extraction did not return a valid array, returning empty. Raw: ", responseText);
+      console.warn('LLMUtilityAI: Keyword extraction did not return a valid array, returning empty.', { textLength: responseText.length });
       return [];
     }
     return parsed.slice(0, maxKeywords);
@@ -350,7 +350,7 @@ Respond with ONLY a JSON array of objects, each with "language" (BCP-47 code lik
     );
     const parsed = await this.parseJsonSafe<LanguageDetectionResult[]>(responseText, { attemptFixWithLLM: true, llmModelIdForFix: this.config.jsonFixerModelId });
     if (!parsed || !Array.isArray(parsed)) {
-        console.warn("LLMUtilityAI: Language detection did not return valid array, returning unknown. Raw: ", responseText);
+        console.warn('LLMUtilityAI: Language detection did not return valid array, returning unknown.', { textLength: responseText.length });
         return [{ language: 'und', confidence: 0.1 }]; // 'und' for undetermined
     }
     return parsed.slice(0, maxCandidates);

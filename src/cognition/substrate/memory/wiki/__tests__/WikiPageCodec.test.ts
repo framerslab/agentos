@@ -21,6 +21,57 @@ describe('WikiPageCodec', () => {
     expect(parsed.links).toEqual(['Frame', 'wilds-ai']);
   });
 
+  it('keeps a body that opens with a front-matter block, and evaluates none marked as JavaScript', () => {
+    // Evaluated, the block would set this global and give the type 'log'.
+    const mark = '__agentosWikiFrontMatterEvaluated';
+    const body = `---js\n{ type: (globalThis.${mark} = true) && 'log' }\n---\nNotes on [[Frame]].\n`;
+    const page = {
+      id: 'concepts/notes',
+      type: 'concept' as const,
+      summary: 'Notes.',
+      updated: '2026-06-02T10:00:00Z',
+      sources: ['trace:a'],
+      body,
+      links: ['Frame'],
+    };
+
+    try {
+      // Written under the page's own front matter, the body comes back whole.
+      const parsed = parsePage('concepts/notes', serializePage(page));
+      expect(parsed.type).toBe('concept');
+      expect(parsed.summary).toBe('Notes.');
+      expect(parsed.body).toBe(body);
+
+      // As a page file's own front matter, the block is dropped and the id decides the type.
+      const direct = parsePage('concepts/notes', body);
+      expect(direct.type).toBe('concept');
+      expect(direct.body).toBe('Notes on [[Frame]].\n');
+
+      expect(Reflect.get(globalThis, mark)).toBeUndefined();
+    } finally {
+      Reflect.deleteProperty(globalThis, mark);
+    }
+  });
+
+  it('keeps the indentation of a body that opens with an indented line, and drops blank lines before a body', () => {
+    // Indented four spaces, the first line is a code block in Markdown.
+    const body = '    const total = 2;\n\nThe line above is code.\n';
+    const page = {
+      id: 'concepts/code',
+      type: 'concept' as const,
+      summary: 'Code.',
+      updated: '2026-06-02T10:00:00Z',
+      sources: [],
+      body,
+      links: [],
+    };
+
+    expect(parsePage('concepts/code', serializePage(page)).body).toBe(body);
+
+    // A page file written by hand may leave blank lines after its front matter.
+    expect(parsePage('concepts/code', `---\ntype: concept\n---\n\n \n${body}`).body).toBe(body);
+  });
+
   it('extractWikiLinks dedupes and trims', () => {
     expect(extractWikiLinks('see [[Frame]] and [[ Frame ]] and [[AgentOS]]')).toEqual(['Frame', 'AgentOS']);
   });

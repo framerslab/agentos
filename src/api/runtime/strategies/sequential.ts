@@ -13,13 +13,14 @@
  *
  * ## HITL integration
  *
- * Each agent is gated by {@link checkBeforeAgent} before invocation. If the
- * HITL handler rejects an agent, it is skipped and the chain continues with
- * the next agent using the same context (the rejected agent's contribution
- * is simply omitted).
+ * Each agent is gated by {@link checkBeforeAgentInput} before invocation. If
+ * the HITL handler rejects an agent, or the post-approval check blocks the
+ * input it would receive (the approver's instructions included), it is
+ * skipped and the chain continues with the next agent using the same context
+ * (the rejected agent's contribution is simply omitted).
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
- * @see {@link checkBeforeAgent} -- the HITL gate applied before each agent.
+ * @see {@link checkBeforeAgentInput} -- the HITL gate applied before each agent.
  */
 import { agent as createAgent } from '../agent.js';
 import type {
@@ -35,7 +36,7 @@ import { createBufferedAsyncReplay } from '../streamBuffer.js';
 import {
   isAgent,
   mergeDefaults,
-  checkBeforeAgent,
+  checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
@@ -84,11 +85,12 @@ export function compileSequential(
       const totalUsage: StrategyTotalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
       for (const [name, agentOrConfig] of Object.entries(agents)) {
-        // HITL: check beforeAgent gate before invoking this agent.
-        // Returns null when no gate applies; returns a decision when the
-        // agent is in the approval list.
-        const decision = await checkBeforeAgent(name, context, agentCalls, agencyConfig);
-        if (decision && !decision.approved) {
+        // HITL: check beforeAgent gate before invoking this agent. The
+        // decision is null when no gate applies. The input carries the
+        // approver's instructions, if any, and the post-approval check read
+        // it, instructions included.
+        const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig);
+        if (gate.decision && !gate.decision.approved) {
           // Agent was rejected by HITL -- skip and continue to the next
           // agent in the chain. The context remains unchanged.
           continue;
@@ -98,12 +100,9 @@ export function compileSequential(
           ? agentOrConfig
           : createAgent({ ...mergeDefaults(agentOrConfig, agencyConfig) });
 
-        // Apply instruction modifications from the approval decision if any.
-        // This allows the human reviewer to inject additional guidance into
-        // the agent's context without modifying the original prompt.
-        const effectiveContext = decision?.modifications?.instructions
-          ? `${context}\n\n[Additional instructions]: ${decision.modifications.instructions}`
-          : context;
+        // The approval's instructions, if any, ride on the input without
+        // changing the original prompt.
+        const effectiveContext = gate.input;
 
         const start = Date.now();
         const result = (await a.generate(effectiveContext, opts)) as Record<string, unknown>;
@@ -172,14 +171,12 @@ export function compileSequential(
         yield { type: 'agent-start' as const, agent: '__agency__', input: prompt };
 
         for (const [name, agentOrConfig] of Object.entries(agents)) {
-          const decision = await checkBeforeAgent(name, currentPrompt, agentCalls, agencyConfig);
-          if (decision && !decision.approved) {
+          const gate = await checkBeforeAgentInput(name, currentPrompt, agentCalls, agencyConfig);
+          if (gate.decision && !gate.decision.approved) {
             continue;
           }
 
-          const effectivePrompt = decision?.modifications?.instructions
-            ? `${currentPrompt}\n\n[Additional instructions]: ${decision.modifications.instructions}`
-            : currentPrompt;
+          const effectivePrompt = gate.input;
           const agentStart = Date.now();
 
           yield { type: 'agent-start' as const, agent: name, input: effectivePrompt };

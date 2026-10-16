@@ -102,9 +102,12 @@ export class VectorStoreManager implements IVectorStoreManager {
     }
 
     // Initialize providers
-    for (const providerConfig of this.managerConfig.providers) {
+    for (const [index, providerConfig] of this.managerConfig.providers.entries()) {
       if (!providerConfig.id || !providerConfig.type) {
-        console.error(`VectorStoreManager (ID: ${this.managerInstanceId}): Provider config is missing 'id' or 'type'. Skipping.`, providerConfig);
+        console.error(`VectorStoreManager (ID: ${this.managerInstanceId}): Provider config is missing 'id' or 'type'. Skipping.`, {
+          index,
+          missingFields: ['id', 'type'].filter((field) => !providerConfig[field as 'id' | 'type']),
+        });
         continue;
       }
       try {

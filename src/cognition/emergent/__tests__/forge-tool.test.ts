@@ -262,12 +262,17 @@ describe('ForgeToolMetaTool', () => {
   // 7. Input validation — missing required fields
   // =========================================================================
 
-  it('returns error when name is missing', async () => {
-    const input = makeInput({ name: '' as any });
+  it.each([
+    ['empty', '', 'empty'],
+    ['missing', undefined, 'type'],
+    ['not a string', 42, 'type'],
+  ])('returns error when name is %s, with the typed details', async (_label, name, problem) => {
+    const input = makeInput({ name: name as any });
     const result = await metaTool.execute(input, makeContext());
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('name is required');
+    expect(result.details).toEqual({ code: 'INVALID_TOOL_NAME', problem });
     // Engine.forge should NOT have been called.
     expect(mockEngine.forge).not.toHaveBeenCalled();
   });

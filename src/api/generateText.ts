@@ -13,6 +13,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { resolveModelOption, resolveProvider, createProviderManager, knownProviderPrefixOf } from './model.js';
+import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import {
@@ -28,10 +29,12 @@ import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { createLogger } from '../core/logging/loggerFactory.js';
+import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';
 import { ContextWindowExceededError } from '../core/llm/providers/errors/ContextWindowExceededError.js';
+import { OPENROUTER_ONLY_PARAM_KEYS } from '../core/llm/providers/openrouter-only-params.js';
 import {
   catalogEntryHasCapability,
   createUncensoredModelCatalog,
@@ -589,6 +592,11 @@ export interface GenerateTextOptions {
    *
    * Keys collide last-wins with the typed fields at the provider layer, so
    * only pass params the target provider understands.
+   *
+   * With `planning` on, the planning call takes OpenRouter's routing controls
+   * (`provider`, `models`, `route`, `transforms`) and `plugins` from this
+   * record, so the preferences that say where the caller's messages may go
+   * hold for it too. Every other key goes to the turn's requests alone.
    */
   customModelParams?: Record<string, unknown>;
   /** Override the API key instead of reading from environment variables. */
@@ -965,8 +973,8 @@ export interface GenerateTextResult {
    */
   trace?: AgencyTraceEvent[];
   /**
-   * Parsed structured output produced when `BaseAgentConfig.output` is a Zod
-   * schema.  `undefined` when no output schema is configured.
+   * Parsed structured output from `BaseAgentConfig.output`, or from
+   * `agent().generate()` with `responseSchema`. Undefined without a schema.
    */
   parsed?: unknown;
   /**
@@ -1110,6 +1118,32 @@ Describe what tools you'll need for each step. Output a JSON plan:
 Return ONLY the JSON object: no markdown fences, no commentary.`;
 
 /**
+ * The `customModelParams` keys a planning call takes from its turn:
+ * OpenRouter's routing controls and its `plugins`. They say which upstreams
+ * may be sent the caller's messages and how the prompt is processed (context
+ * compression is a `plugins` entry), and the planning request carries those
+ * messages as the turn's does. Every other key shapes the turn's own request
+ * (`messages`, `tools`, `max_tokens`, `response_format`): spread last by the
+ * provider, it would replace the planner's messages or lift its output limit
+ * past the one its budget check counted.
+ */
+const PLANNING_INHERITED_PARAM_KEYS: readonly string[] = [...OPENROUTER_ONLY_PARAM_KEYS, 'plugins'];
+
+/**
+ * The part of a call's `customModelParams` its planning call inherits
+ * (`PLANNING_INHERITED_PARAM_KEYS`), or `undefined` when the call sets none
+ * of it.
+ */
+function planningModelParams(params: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!params) return undefined;
+  let inherited: Record<string, unknown> | undefined;
+  for (const key of PLANNING_INHERITED_PARAM_KEYS) {
+    if (params[key] !== undefined) (inherited ??= {})[key] = params[key];
+  }
+  return inherited;
+}
+
+/**
  * Makes a single LLM call to create an execution plan before the tool loop.
  *
  * The plan is a lightweight JSON object containing ordered steps.  It is
@@ -1120,8 +1154,9 @@ Return ONLY the JSON object: no markdown fences, no commentary.`;
  * @param modelId - Model identifier to use for the planning call.
  * @param userMessages - The user-supplied messages that describe the task.
  * @param toolNames - Names of available tools (informational context for the planner).
- * @param config - Optional planning configuration overrides, and the call's abort signal, which the planning request
- *   is handed as it is handed `requestTimeout`.
+ * @param config - Optional planning configuration overrides, the call's abort signal, which the planning request
+ *   is handed as it is handed `requestTimeout`, and the call's `customModelParams`, of which the planning request
+ *   takes the routing keys (`PLANNING_INHERITED_PARAM_KEYS`).
  * @param totalUsage - Mutable usage aggregator: the planning call's tokens are added here.
  * @param spend - The run's spend budget, the provider the planning call is sent to, and what to call the call in the
  *   budget's records: the planning call is checked against the budget before it is made and recorded after it.
@@ -1134,7 +1169,7 @@ export async function createPlan(
   modelId: string,
   userMessages: Array<Record<string, unknown>>,
   toolNames: string[],
-  config: (PlanningConfig & { abortSignal?: AbortSignal }) | undefined,
+  config: (PlanningConfig & { abortSignal?: AbortSignal; customModelParams?: Record<string, unknown> }) | undefined,
   totalUsage: TokenUsage,
   spend?: { budget: SpendBudget; providerId: string; what: string },
 ): Promise<Plan | undefined> {
@@ -1142,6 +1177,7 @@ export async function createPlan(
   const temperature = config?.temperature ?? 0.2;
   const maxTokens = config?.maxTokens ?? 2048;
   const requestTimeout = config?.requestTimeout;
+  const inheritedParams = planningModelParams(config?.customModelParams);
 
   // Build the planning conversation: system prompt + user context
   const planMessages: Array<Record<string, unknown>> = [
@@ -1173,6 +1209,9 @@ export async function createPlan(
     // call's planning sub-call must not auto-cache behind the caller's back.
     ...(config?.cache !== undefined ? { cache: config.cache } : {}),
     ...(config?.thinking === false ? { thinking: false } : {}),
+    // Of the caller's provider-specific fields, the routing ones (OpenRouter's
+    // provider preferences and plugins) apply to the planning call too.
+    ...(inheritedParams ? { customModelParams: inheritedParams } : {}),
   });
 
   spend?.budget.record(costOfUsageUSD(spend.providerId, modelId, response.usage), response.usage?.totalTokens ?? 0, spend.what);
@@ -2089,6 +2128,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
   let metricStatus: 'ok' | 'error' = 'ok';
   let metricUsage: TokenUsage | undefined;
   let metricProviderId: string | undefined;
+  /** The id this attempt's health is recorded under: see providerHealthKey. */
+  let healthProviderId: string | undefined;
   let metricModelId: string | undefined;
   // What this attempt did that a failover must not repeat. Written inside
   // the span callback and read by the fallback walk below, so it lives on an
@@ -2124,6 +2165,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
   try {
     const successResult: GenerateTextResult = await withAgentOSSpan('agentos.api.generate_text', async (span) => {
       let { providerId, modelId } = resolveModelOption(opts, 'text');
+      // The provider the call's own key and base URL are for. A router that
+      // moves the call to another provider sends it there on that provider's
+      // own credentials, as a fallback leg runs.
+      const credentialProviderId = providerId;
 
       // --- Model routing (optional) ---
       if (opts.router) {
@@ -2177,14 +2222,21 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         }
       }
 
-      const resolved = resolveProvider(providerId, modelId, {
-        apiKey: opts.apiKey,
-        baseUrl: opts.baseUrl,
-        // An agency seat resolves strictly: no provider-less default, no reroute.
-        strict: opts.__strictCredentials === true,
-      });
+      const ownCredentials =
+        providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
+      // An agency seat resolves strictly: no provider-less default, no reroute.
+      const strict = opts.__strictCredentials === true;
+      const resolved = resolveProvider(
+        providerId,
+        modelId,
+        providerId === credentialProviderId ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl, strict } : { strict },
+      );
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
+      // A key or base URL of the call's own, when it differs from the
+      // provider's, has a health record of its own.
+      const healthId = providerHealthKey(resolved, ownCredentials ? () => resolveProvider(providerId, modelId) : undefined);
+      healthProviderId = healthId;
 
       // ── Provider health circuit-breaker ──────────────────────────────
       // If the resolved primary has tripped its breaker (e.g. a recent
@@ -2197,8 +2249,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // when a provider is considered open. This check runs BEFORE
       // `createProviderManager` so we don't spend the SDK init cost
       // on a known-bad provider either.
-      if (globalLLMProviderHealth.isOpen(resolved.providerId)) {
-        const stats = globalLLMProviderHealth.getStats(resolved.providerId);
+      if (globalLLMProviderHealth.isOpen(healthId)) {
+        const stats = globalLLMProviderHealth.getStats(healthId);
         throw new LLMProviderCircuitOpenError(
           resolved.providerId,
           stats?.cooldownRemainingMs ?? 0,
@@ -2360,6 +2412,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               : {}),
             ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
             ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+            ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
           },
           totalUsage,
           budget ? { budget, providerId: resolved.providerId, what: 'generate_text.plan' } : undefined,
@@ -3075,8 +3128,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // The primary attempt succeeded: let the registry know so its
     // failure streak resets. Safe to call on a never-failed provider;
     // the registry no-ops in that case.
-    if (metricProviderId) {
-      globalLLMProviderHealth.recordSuccess(metricProviderId);
+    if (healthProviderId) {
+      globalLLMProviderHealth.recordSuccess(healthProviderId);
     }
     return {
       ...successResult,
@@ -3102,13 +3155,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // nothing about the provider and is not recorded; neither is a timeout
     // the panel's own deadline produced, when the deadline flag is set.
     if (
-      metricProviderId &&
+      healthProviderId &&
       !(error instanceof LLMProviderCircuitOpenError) &&
       !aborted &&
       !isCallerStop(error) &&
       !(opts.__panelDeadline && isTimeoutError(error))
     ) {
-      globalLLMProviderHealth.recordFailure(metricProviderId, error);
+      globalLLMProviderHealth.recordFailure(healthProviderId, error);
     }
     // The failed attempt is billed for its completed steps and for a step
     // the provider ended with usage attached (a refused turn). It is metered

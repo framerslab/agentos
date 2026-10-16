@@ -5,11 +5,27 @@
  * `StreamingTTSChain`. Reads provider keys from an env-like object and
  * builds priority-ordered chains with shared circuit breaker and metrics
  * reporter. Host apps can skip the manual wiring and use this factory as
- * the default integration point.
+ * the default integration point. {@link createSttChainFromEnv} builds the
+ * STT chain alone, for a consumer with no speech output.
+ * {@link createSttChain} builds an STT chain from a list of provider entries
+ * the host chooses, such as `openai:gpt-4o-transcribe`, in place of the
+ * environment's keys. {@link createRegisteredSttChain} builds one from
+ * entries of vendors the host registers, through the host's own factories,
+ * and reads no environment.
  */
 
-import { DeepgramStreamingSTT } from './providers/DeepgramStreamingSTT.js';
-import { ElevenLabsStreamingSTT } from './providers/ElevenLabsStreamingSTT.js';
+import {
+  DeepgramStreamingSTT,
+  type DeepgramStreamingSTTConfig,
+} from './providers/DeepgramStreamingSTT.js';
+import {
+  ElevenLabsStreamingSTT,
+  type ElevenLabsStreamingSTTConfig,
+} from './providers/ElevenLabsStreamingSTT.js';
+import {
+  OpenAIRealtimeTranscriptionSTT,
+  type OpenAIRealtimeTranscriptionSTTConfig,
+} from './providers/OpenAIRealtimeTranscriptionSTT.js';
 import { ElevenLabsStreamingTTS } from './providers/ElevenLabsStreamingTTS.js';
 import { DeepgramAuraStreamingTTS } from './providers/DeepgramAuraStreamingTTS.js';
 import { OpenAIRealtimeTTS } from './providers/OpenAIRealtimeTTS.js';
@@ -17,12 +33,19 @@ import { ElevenLabsBatchTTS } from './providers/ElevenLabsBatchTTS.js';
 import { CartesiaStreamingTTS } from './providers/CartesiaStreamingTTS.js';
 import { HumeStreamingTTS } from './providers/HumeStreamingTTS.js';
 import { OpenAIBatchTTS } from './providers/OpenAIBatchTTS.js';
-import { StreamingSTTChain } from './providers/StreamingSTTChain.js';
+import {
+  StreamingSTTChain,
+  type StreamingSTTChainOptions,
+} from './providers/StreamingSTTChain.js';
 import { StreamingTTSChain } from './providers/StreamingTTSChain.js';
 import { CircuitBreaker } from './CircuitBreaker.js';
 import { VoiceMetricsReporter } from './VoiceMetricsReporter.js';
 import type { IStreamingSTT, IStreamingTTS } from './types.js';
 import type { HealthyProvider } from './HealthyProvider.js';
+import { openAITranscriptionPricing } from '../../core/llm/providers/implementations/openaiPricing.js';
+import { deepgramStreamingPricing } from './providers/deepgramPricing.js';
+import { parseSttEntry } from './sttEntries.js';
+import { legacyProviderPolicy } from './ProviderPolicy.js';
 
 export class NoVoiceProvidersAvailableError extends Error {
   readonly checkedEnvVars: string[];
@@ -54,15 +77,33 @@ export interface VoiceProviderEnvConfig {
    * first (used for a paid-tier premium-voice opt-in); `'cartesia'` / `'hume'`
    * promote those vendors' streaming providers to first-try when their keys
    * are present. Either way the other vendors stay in the chain as automatic
-   * fallbacks.
+   * fallbacks, except Hume: Hume ends its TTS API on 13 November 2026, so
+   * its streaming provider joins the chain only when `'hume'` names it, never
+   * from `HUME_API_KEY` alone.
    */
   ttsPreference?: 'deepgram' | 'elevenlabs' | 'cartesia' | 'hume';
-  /** Whether the STT chain keeps a ring buffer + re-routes mid-utterance.
-   *  Default true — this is the whole point of the resilience work. */
+  /**
+   * Whether the STT chain keeps a ring buffer and re-routes mid-utterance.
+   * Default true. A session is then the chain's failover facade: it forwards
+   * transcripts, speech events, `'usage'` and `'warning'` from its provider
+   * sessions, and its `flush()` drains the provider session in use.
+   * A provider close after flush and before the next frame emits one facade
+   * `close`; later audio is ignored and no backup starts.
+   */
   enableMidUtteranceFailover?: boolean;
   /** Whether the TTS chain re-sends accumulated tokens on primary
    *  failure. Default true. */
   enableMidSynthesisFailover?: boolean;
+  /**
+   * Options for the OpenAI Realtime transcription provider, which joins the
+   * STT chain when `OPENAI_API_KEY` is set (model, turn detection, rollover,
+   * usage reports and the rest; the key comes from the environment). With
+   * mid-utterance failover on, a session's `flush()` reaches the provider
+   * session in use, so a configuration in which the caller commits each
+   * turn (`turnDetection: null`, or a model that takes no server turn
+   * detection) commits through the failover facade too.
+   */
+  openaiRealtime?: Omit<OpenAIRealtimeTranscriptionSTTConfig, 'apiKey'>;
 }
 
 export interface VoiceProviderBundle {
@@ -76,6 +117,50 @@ export interface VoiceProviderBundle {
   dispose(): Promise<void>;
 }
 
+/** The STT keys the constructors read, in the order their providers are tried. */
+const STT_ENV_KEYS = ['DEEPGRAM_API_KEY', 'ELEVENLABS_API_KEY', 'OPENAI_API_KEY'];
+
+/**
+ * Streaming STT providers for the keys present in `env`. OpenAI Realtime
+ * transcription is tried after Deepgram and ElevenLabs (priority 30, unless
+ * `openaiRealtime.priority` says otherwise), so an environment that already
+ * had a first-try STT provider keeps it.
+ */
+function sttProvidersFromEnv(
+  env: Record<string, string | undefined>,
+  openaiRealtime: Omit<OpenAIRealtimeTranscriptionSTTConfig, 'apiKey'> = {}
+): Array<IStreamingSTT & HealthyProvider> {
+  const providers: Array<IStreamingSTT & HealthyProvider> = [];
+  const deepgramKey = env['DEEPGRAM_API_KEY'];
+  const elevenLabsKey = env['ELEVENLABS_API_KEY'];
+  const openaiKey = env['OPENAI_API_KEY'];
+  if (deepgramKey) {
+    providers.push(new DeepgramStreamingSTT({ apiKey: deepgramKey, priority: 10 }));
+  }
+  if (elevenLabsKey) {
+    providers.push(new ElevenLabsStreamingSTT({ apiKey: elevenLabsKey, priority: 20 }));
+  }
+  if (openaiKey) {
+    providers.push(
+      new OpenAIRealtimeTranscriptionSTT({ priority: 30, ...openaiRealtime, apiKey: openaiKey })
+    );
+  }
+  return providers;
+}
+
+/**
+ * Builds the STT and TTS chains from the provider keys in the environment,
+ * with a shared circuit breaker and metrics reporter. Both chains fail over
+ * mid-call by default. An STT session is then the chain's failover facade:
+ * it forwards transcripts, speech events, `'usage'` and `'warning'` from its
+ * provider sessions, and its `flush()` drains the provider session in use.
+ * A provider close after flush and before the next frame emits one facade
+ * `close`; later audio is ignored and no backup starts.
+ *
+ * @param config - Environment source, preferences, failover switches and OpenAI Realtime options.
+ * @returns The chains with their metrics reporter and circuit breaker.
+ * @throws {NoVoiceProvidersAvailableError} When the keys set build no STT provider or no TTS provider.
+ */
 export function createVoiceProvidersFromEnv(
   config: VoiceProviderEnvConfig = {}
 ): VoiceProviderBundle {
@@ -102,17 +187,7 @@ export function createVoiceProvidersFromEnv(
     cooldownMs: 60_000,
   });
 
-  const sttProviders: Array<IStreamingSTT & HealthyProvider> = [];
-  if (deepgramKey) {
-    sttProviders.push(
-      new DeepgramStreamingSTT({ apiKey: deepgramKey, priority: 10 })
-    );
-  }
-  if (elevenLabsKey) {
-    sttProviders.push(
-      new ElevenLabsStreamingSTT({ apiKey: elevenLabsKey, priority: 20 })
-    );
-  }
+  const sttProviders = sttProvidersFromEnv(env, config.openaiRealtime);
 
   // Deepgram Aura is the default first-try TTS (priority 5). An explicit
   // 'elevenlabs' preference drops Aura behind ElevenLabs streaming (15 > 10).
@@ -158,11 +233,14 @@ export function createVoiceProvidersFromEnv(
       })
     );
   }
-  if (humeKey) {
+  // Hume ends its TTS API on 13 November 2026 (the speech retirement register,
+  // src/io/speech/retirements.ts), so the key alone never makes it a fallback:
+  // it joins, as the first try, only when the caller names it.
+  if (humeKey && config.ttsPreference === 'hume') {
     ttsProviders.push(
       new HumeStreamingTTS({
         apiKey: humeKey,
-        priority: config.ttsPreference === 'hume' ? 4 : 14,
+        priority: 4,
       })
     );
   }
@@ -174,12 +252,14 @@ export function createVoiceProvidersFromEnv(
   const stt = new StreamingSTTChain(sttProviders, {
     breaker,
     metrics,
+    policy: legacyProviderPolicy,
     enableMidUtteranceFailover: config.enableMidUtteranceFailover ?? true,
     ringBufferCapacityMs: 3000,
   });
   const tts = new StreamingTTSChain(ttsProviders, {
     breaker,
     metrics,
+    policy: legacyProviderPolicy,
     enableMidSynthesisFailover: config.enableMidSynthesisFailover ?? true,
   });
 
@@ -192,4 +272,193 @@ export function createVoiceProvidersFromEnv(
       /* Sessions clean themselves up; nothing global to release today. */
     },
   };
+}
+
+/** Configuration for {@link createSttChainFromEnv}. */
+export interface SttProviderEnvConfig {
+  /** Environment source. Defaults to process.env. */
+  env?: Record<string, string | undefined>;
+  /**
+   * Whether the chain keeps a ring buffer and re-routes mid-utterance.
+   * Default false here: with failover off a session is its provider's own,
+   * with `flush()` and every event the provider emits. The failover facade
+   * forwards transcripts, speech events, `'usage'` and `'warning'`, and its
+   * `flush()` drains the provider session in use.
+   * A provider close after flush and before the next frame emits one facade
+   * `close`; later audio is ignored and no backup starts.
+   */
+  enableMidUtteranceFailover?: boolean;
+  /**
+   * Options for the OpenAI Realtime transcription provider when
+   * `OPENAI_API_KEY` is set (the key comes from the environment).
+   */
+  openaiRealtime?: Omit<OpenAIRealtimeTranscriptionSTTConfig, 'apiKey'>;
+}
+
+/** What {@link createSttChainFromEnv} returns. */
+export interface SttProviderBundle {
+  stt: StreamingSTTChain;
+  metrics: VoiceMetricsReporter;
+  breaker: CircuitBreaker;
+  /** Release any global resources the bundle owns. Currently a no-op
+   *  because sessions clean up themselves. */
+  dispose(): Promise<void>;
+}
+
+/**
+ * Builds the speech-to-text chain alone, for a consumer with no speech
+ * output, such as a transcriber or a note taker.
+ * {@link createVoiceProvidersFromEnv} needs a TTS key as well and throws
+ * without one.
+ *
+ * @param config - Environment source, failover switch and OpenAI Realtime options.
+ * @returns The STT chain with its metrics reporter and circuit breaker.
+ * @throws {NoVoiceProvidersAvailableError} When none of `DEEPGRAM_API_KEY`,
+ *   `ELEVENLABS_API_KEY` and `OPENAI_API_KEY` is set.
+ *
+ * @example
+ * ```typescript
+ * const { stt } = createSttChainFromEnv({ openaiRealtime: { usageIntervalMs: 15_000 } });
+ * const session = await stt.startSession({ language: 'en' });
+ * session.on('transcript', (event) => console.log(event.itemId, event.text));
+ * ```
+ */
+export function createSttChainFromEnv(config: SttProviderEnvConfig = {}): SttProviderBundle {
+  const env = config.env ?? (globalThis.process?.env as Record<string, string | undefined>) ?? {};
+  const sttProviders = sttProvidersFromEnv(env, config.openaiRealtime);
+  if (sttProviders.length === 0) {
+    throw new NoVoiceProvidersAvailableError([...STT_ENV_KEYS]);
+  }
+
+  const metrics = new VoiceMetricsReporter();
+  const breaker = new CircuitBreaker({
+    failureThreshold: 3,
+    windowMs: 60_000,
+    cooldownMs: 60_000,
+  });
+  const stt = new StreamingSTTChain(sttProviders, {
+    breaker,
+    metrics,
+    policy: legacyProviderPolicy,
+    enableMidUtteranceFailover: config.enableMidUtteranceFailover ?? false,
+  });
+
+  return {
+    stt,
+    metrics,
+    breaker,
+    async dispose() {
+      /* Sessions clean themselves up; nothing global to release today. */
+    },
+  };
+}
+
+export { STT_CHAIN_VENDORS, parseSttEntry, type SttChainVendor, type SttEntry } from './sttEntries.js';
+
+/** Each vendor's options for {@link createSttChain}, its key among them; the entry gives the model and the order gives the priority. */
+export interface SttChainEntryOptions {
+  openai?: Omit<OpenAIRealtimeTranscriptionSTTConfig, 'model' | 'priority'>;
+  deepgram?: Omit<DeepgramStreamingSTTConfig, 'model' | 'priority'>;
+  elevenlabs?: Omit<ElevenLabsStreamingSTTConfig, 'model' | 'priority'>;
+}
+
+/**
+ * US dollars a minute of an entry's audio, from the providers' price rows;
+ * `undefined` when there is no row.
+ *
+ * @throws {RangeError} For an entry {@link parseSttEntry} refuses: another
+ *   shape, or a vendor outside `STT_CHAIN_VENDORS`, such as
+ *   `device:moonshine-auto`.
+ */
+export function sttEntryPricePerMinute(entry: string): number | undefined {
+  const { vendor, model } = parseSttEntry(entry);
+  const price = vendor === 'openai' ? openAITranscriptionPricing(model) : vendor === 'deepgram' ? deepgramStreamingPricing(model) : undefined;
+  // A model named like a member every object inherits (`constructor`, `toString`)
+  // has no row; the guard keeps the answer a number or undefined for it.
+  return typeof price === 'number' ? price : undefined;
+}
+
+/**
+ * A speech-to-text chain that tries the entries in the order given (priority
+ * 10, 20, 30 ...). Mid-utterance failover is off unless the chain options turn
+ * it on, as in {@link createSttChainFromEnv}. With failover off a session is
+ * its provider's own, with `flush()` and every event the provider emits; the
+ * failover facade forwards transcripts, speech events, `'usage'` and
+ * `'warning'`, and its `flush()` drains the provider session in use.
+ * A provider close after flush and before the next frame emits one facade
+ * `close`; later audio is ignored and no backup starts.
+ *
+ * Entries of one vendor share that vendor's provider id (every `openai`
+ * entry is `openai-realtime-transcription`), so `currentProviderId` cannot
+ * tell them apart. The chain's provider events and a `CircuitBreaker` in the
+ * chain options name each entry by that id and its place among the vendor's
+ * entries (`openai-realtime-transcription#2`): a breaker counts each entry's
+ * failures, and skips only the entries it has tripped.
+ *
+ * @throws {RangeError} For no entry, an entry twice, an entry
+ *   {@link parseSttEntry} refuses, or a vendor with no options.
+ */
+export function createSttChain(
+  entries: readonly string[],
+  options: SttChainEntryOptions,
+  chainOptions: StreamingSTTChainOptions = {}
+): StreamingSTTChain {
+  if (entries.length === 0) throw new RangeError('createSttChain: no entry');
+  if (new Set(entries).size !== entries.length) throw new RangeError('createSttChain: an entry is named twice');
+  const providers = entries.map((entry, index) => {
+    const { vendor, model } = parseSttEntry(entry);
+    const priority = (index + 1) * 10;
+    switch (vendor) {
+      case 'openai': {
+        if (!options.openai) throw new RangeError('createSttChain: an openai entry needs options.openai');
+        return new OpenAIRealtimeTranscriptionSTT({ ...options.openai, model, priority });
+      }
+      case 'deepgram': {
+        if (!options.deepgram) throw new RangeError('createSttChain: a deepgram entry needs options.deepgram');
+        return new DeepgramStreamingSTT({ ...options.deepgram, model, priority });
+      }
+      case 'elevenlabs': {
+        if (!options.elevenlabs) throw new RangeError('createSttChain: an elevenlabs entry needs options.elevenlabs');
+        return new ElevenLabsStreamingSTT({ ...options.elevenlabs, model, priority });
+      }
+    }
+  });
+  return new StreamingSTTChain(providers, chainOptions);
+}
+
+/** Host-supplied scoped factory for a registered model id. It must perform no work until its session is opened. */
+export type RegisteredSttFactory = (model: string, priority: number) => IStreamingSTT & HealthyProvider;
+
+/**
+ * Builds only explicit registered entries. Credentials and locality belong to the already-scoped factories/policy.
+ *
+ * Each entry is `<vendor>:<model>` with a vendor the registry holds; that vendor's factory is called with the model
+ * and the entry's priority (10, 20, 30 ... in the order given) and returns the provider the chain tries. The chain
+ * options apply as they are, so a `policy` in them decides which of these providers are opened and in what order:
+ * under a `ProviderPolicy` the chain keeps only the providers the policy selects, and each id it selects must belong
+ * to exactly one of them.
+ *
+ * @param entries - The entries; their order sets the priorities, the order the legacy policy tries them in.
+ * @param registry - Each registered vendor's factory.
+ * @param options - The chain's options, its policy among them.
+ * @returns The chain over the registered providers.
+ * @throws {RangeError} For no entry, an entry twice, or an entry {@link parseSttEntry} refuses for the registry's
+ *   vendors. The chain's own constructor throws as {@link StreamingSTTChain} documents.
+ *
+ * @example
+ * ```typescript
+ * const stt = createRegisteredSttChain(['local-stt:base-en'], new Map([['local-stt', (model, priority) => makeLocalStt(model, priority)]]), { policy });
+ * const session = await stt.startSession({ call: identity });
+ * ```
+ */
+export function createRegisteredSttChain(entries: readonly string[], registry: ReadonlyMap<string, RegisteredSttFactory>, options: StreamingSTTChainOptions): StreamingSTTChain {
+  if (!entries.length || new Set(entries).size !== entries.length) throw new RangeError('registered STT entries must be nonempty and unique');
+  const vendors = [...registry.keys()];
+  const providers = entries.map((entry, index) => {
+    const parsed = parseSttEntry(entry, vendors);
+    const factory = registry.get(parsed.vendor);
+    if (!factory) throw new RangeError('unregistered STT vendor');
+    return factory(parsed.model, (index + 1) * 10);
+  });
+  return new StreamingSTTChain(providers, options);
 }

@@ -13,6 +13,9 @@
  *    with correct mandatory fields and edge map.
  * 5. **Checkpoint persistence** -- checkpoint data (turnIndex, transcript) is stored
  *    in scratchUpdate after execution.
+ * 6. **Node input from a started pipeline** -- VoiceTransportAdapter.getNodeInput()
+ *    resolves with the transcript of the turn a real HeuristicEndpointDetector ends
+ *    inside a started VoicePipelineOrchestrator.
  *
  * All tests use plain `EventEmitter` instances as transport/session mocks -- no real
  * audio hardware, STT, or TTS provider is needed.
@@ -23,6 +26,11 @@ import { EventEmitter } from 'events';
 import { VoiceNodeExecutor } from '../runtime/VoiceNodeExecutor.js';
 import { VoiceTransportAdapter } from '../runtime/VoiceTransportAdapter.js';
 import { voiceNode } from '../builders/VoiceNodeBuilder.js';
+import { VoicePipelineOrchestrator } from '../../io/voice-pipeline/VoicePipelineOrchestrator.js';
+import { HeuristicEndpointDetector } from '../../io/voice-pipeline/HeuristicEndpointDetector.js';
+import { HardCutBargeinHandler } from '../../io/voice-pipeline/HardCutBargeinHandler.js';
+import type { IStreamTransport, StreamingSTTSession, StreamingTTSSession } from '../../io/voice-pipeline/types.js';
+import type { GraphEvent } from '../events/GraphEvent.js';
 import type { GraphNode, GraphState } from '../ir/types.js';
 
 // ---------------------------------------------------------------------------
@@ -143,6 +151,70 @@ describe('Voice Graph Integration', () => {
     const audioEvents = events.filter((e) => e.type === 'voice_audio');
     expect(audioEvents).toHaveLength(1);
     expect(audioEvents[0].direction).toBe('outbound');
+  });
+
+  /**
+   * The path a graph node waits on: the STT's final reaches a real
+   * HeuristicEndpointDetector inside a started orchestrator, the detector ends
+   * the turn, and getNodeInput() on an adapter given that pipeline resolves
+   * with its transcript. The pipeline is passed in, so init() imports nothing.
+   */
+  it('getNodeInput() resolves with the turn the endpoint detector ends in a started pipeline', async () => {
+    const transport: IStreamTransport = Object.assign(new EventEmitter(), {
+      id: 'transport-1',
+      state: 'open' as const,
+      sendAudio: async () => undefined,
+      sendControl: async () => undefined,
+      close: () => undefined,
+    });
+    const sttSession: StreamingSTTSession = Object.assign(new EventEmitter(), {
+      pushAudio: () => undefined,
+      flush: async () => undefined,
+      close: () => undefined,
+    });
+    const ttsSession: StreamingTTSSession = Object.assign(new EventEmitter(), {
+      pushTokens: () => undefined,
+      flush: async () => undefined,
+      cancel: () => undefined,
+      close: () => undefined,
+    });
+    const pipeline = new VoicePipelineOrchestrator({ stt: 'fake-stt', tts: 'fake-tts' });
+    await pipeline.startSession(
+      transport,
+      {
+        sendText: async function* () {
+          yield 'Booked.';
+        },
+      },
+      {
+        streamingSTT: { providerId: 'fake-stt', isStreaming: true, startSession: async () => sttSession },
+        streamingTTS: { providerId: 'fake-tts', startSession: async () => ttsSession },
+        endpointDetector: new HeuristicEndpointDetector(),
+        bargeinHandler: new HardCutBargeinHandler(),
+      },
+    );
+    const events: GraphEvent[] = [];
+    const adapter = new VoiceTransportAdapter({}, transport, (event) => events.push(event), { pipeline });
+    const state: Partial<GraphState> = { scratch: {} };
+    await adapter.init(state);
+
+    try {
+      const input = adapter.getNodeInput('greet');
+      // A final that ends in a full stop: the detector ends the turn at the end of speech.
+      sttSession.emit('transcript', { text: 'Book a table for two.', confidence: 0.92, words: [], isFinal: true });
+      sttSession.emit('speech_end');
+
+      await expect(input).resolves.toBe('Book a table for two.');
+      expect(events).toContainEqual({
+        type: 'voice_turn_complete',
+        nodeId: 'greet',
+        transcript: 'Book a table for two.',
+        turnIndex: 0,
+        endpointReason: 'punctuation',
+      });
+    } finally {
+      await adapter.dispose();
+    }
   });
 
   it('voiceNode builder produces valid GraphNode', () => {

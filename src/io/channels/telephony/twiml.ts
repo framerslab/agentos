@@ -27,37 +27,23 @@
  */
 
 import { escapeXml } from './telephony-audio.js';
+import type { CarrierProtocolOptions } from './MediaStreamParser.js';
 
 // ============================================================================
 // Twilio TwiML
 // ============================================================================
 
-/**
- * Generate TwiML for Twilio conversation mode using a bidirectional media stream.
- *
- * The returned markup instructs Twilio to open a WebSocket to `streamUrl` and
- * stream audio in both directions for the duration of the call. Twilio will
- * send mu-law 8 kHz audio chunks as JSON `media` events on the WebSocket.
- *
- * @param streamUrl - WebSocket URL Twilio should connect to (e.g. `wss://api.example.com/stream`).
- * @param token - Optional bearer token appended as a `?token=` query parameter
- *   for authenticating the WebSocket connection.
- * @returns A complete TwiML XML document string.
- *
- * @example
- * ```typescript
- * // Without auth token:
- * twilioConversationTwiml('wss://api.example.com/call');
- * // => '<?xml version="1.0" encoding="UTF-8"?>\n<Response><Connect><Stream url="wss://api.example.com/call" /></Connect></Response>'
- *
- * // With auth token:
- * twilioConversationTwiml('wss://api.example.com/call', 'jwt-token-here');
- * // => '<?xml version="1.0" ...><Response><Connect><Stream url="wss://api.example.com/call?token=jwt-token-here" /></Connect></Response>'
- * ```
- */
-export function twilioConversationTwiml(streamUrl: string, token?: string): string {
-  const url = token ? `${streamUrl}?token=${token}` : streamUrl;
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Connect><Stream url="${escapeXml(url)}" /></Connect></Response>`;
+/** Generates bidirectional stream XML; carrier mode carries tokens in custom parameters. */
+export function twilioConversationTwiml(streamUrl: string, token?: string, options: CarrierProtocolOptions = {}): string {
+  if (options.protocol !== 'carrier') {
+    const url = token ? `${streamUrl}?token=${token}` : streamUrl;
+    return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Connect><Stream url="${escapeXml(url)}" /></Connect></Response>`;
+  }
+  const url = new URL(streamUrl);
+  if (url.protocol !== 'wss:' || url.search || url.hash || url.username || url.password) throw new Error('invalid carrier stream URL');
+  if (token !== undefined && (!token || token.length + 'token'.length >= 500)) throw new Error('invalid carrier parameter length');
+  const parameter = token === undefined ? '' : `<Parameter name="token" value="${escapeXml(token)}" />`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Connect><Stream url="${escapeXml(streamUrl)}">${parameter}</Stream></Connect></Response>`;
 }
 
 /**
@@ -112,24 +98,12 @@ export function telnyxStreamXml(streamUrl: string): string {
 // Plivo XML
 // ============================================================================
 
-/**
- * Generate Plivo bidirectional streaming XML.
- *
- * Instructs Plivo to open a bidirectional WebSocket stream and keep the call
- * alive for the duration of the stream session. The stream URL is placed as
- * element text content (not an attribute) per the Plivo XML spec.
- *
- * @param streamUrl - WebSocket URL Plivo should connect to.
- * @returns A complete Plivo XML document string.
- *
- * @example
- * ```typescript
- * plivoStreamXml('wss://api.example.com/plivo-stream');
- * // => '<?xml version="1.0" encoding="UTF-8"?>\n<Response><Stream bidirectional="true" keepCallAlive="true">wss://api.example.com/plivo-stream</Stream></Response>'
- * ```
- */
-export function plivoStreamXml(streamUrl: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Stream bidirectional="true" keepCallAlive="true">${escapeXml(streamUrl)}</Stream></Response>`;
+/** Generates Plivo stream XML; carrier mode explicitly selects the parser's PCMU 8 kHz format. */
+export function plivoStreamXml(streamUrl: string, options: CarrierProtocolOptions = {}): string {
+  if (options.protocol !== 'carrier') return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Stream bidirectional="true" keepCallAlive="true">${escapeXml(streamUrl)}</Stream></Response>`;
+  const url = new URL(streamUrl);
+  if (url.protocol !== 'wss:' || url.hash || url.username || url.password) throw new Error('invalid carrier stream URL');
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Stream bidirectional="true" keepCallAlive="true" audioTrack="inbound" contentType="audio/x-mulaw;rate=8000">${escapeXml(streamUrl)}</Stream></Response>`;
 }
 
 /**

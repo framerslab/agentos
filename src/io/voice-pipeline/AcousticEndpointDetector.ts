@@ -119,6 +119,9 @@ export class AcousticEndpointDetector extends EventEmitter implements IEndpointD
    */
   public readonly mode = 'acoustic' as const;
 
+  /** Maximum silence wait plus one polling interval, used when draining a listen session. */
+  public readonly turnCompletionTimeoutMs: number;
+
   /**
    * Underlying silence-duration tracker from `media/audio/`.
    * Handles the actual timer management and threshold comparison.
@@ -162,6 +165,7 @@ export class AcousticEndpointDetector extends EventEmitter implements IEndpointD
     };
 
     this.silenceDetector = new SilenceDetector(sdConfig);
+    this.turnCompletionTimeoutMs = Math.max(500, sdConfig.utteranceEndThresholdMs || 3000) + 250;
 
     // When SilenceDetector decides the utterance has ended (silence exceeded
     // utteranceEndThresholdMs), translate that into a TurnCompleteEvent.

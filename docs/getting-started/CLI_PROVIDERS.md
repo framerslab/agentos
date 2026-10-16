@@ -26,9 +26,11 @@ execa → local CLI binary                   ← user's authenticated CLI (claud
 
 The generalized subprocess bridge lives at `src/safety/sandbox/subprocess/`:
 
-- **[`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts)** — abstract base class (template method pattern). Owns process lifecycle: spawn, stdin pipe, NDJSON line splitting, timeout, abort signal. Subclasses implement `buildArgs()`, `classifyError()`, `parseStreamEvent()`.
+- **[`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts)** — abstract base class (template method pattern). Owns process lifecycle: spawn, stdin pipe, NDJSON line splitting, timeout, abort signal, and ending the process when the consumer of `stream()` stops reading before the end. `stream()` reads stdout as the CLI writes it, whatever the consumer's pace, so the timeout measures the CLI (a caller's abort still counts until the consumer has read the stream to its end), and decodes it as one UTF-8 stream, so a character split between two reads arrives whole. Subclasses implement `buildArgs()`, `classifyError()`, `parseStreamEvent()`; `parseStreamEvent()` gets a `StreamParseContext` object of its own for each stream, for a value a CLI writes on one line that a later event needs.
 - **[`CLISubprocessError`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/errors.ts)** — generic error with open string codes, `guidance` (user-facing fix instructions), and `recoverable` flag. Works for any binary, not just LLM CLIs.
 - **[`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts)** — PATH scanner that discovers installed CLIs. It loads 54 bundled descriptors from the JSON files in `registry/` (LLM CLIs such as `claude`, `gemini` and `ollama`, dev tools, runtimes, package managers, cloud CLIs, databases, media and networking tools), and `register()` adds more.
+
+[CLI Error Codes](../features/CLI_ERROR_CODES.md) lists the error codes and when the two CLI providers raise each one.
 
 ## Available CLI Providers
 
@@ -76,8 +78,8 @@ AgentOS exports an [`OpenAIOAuthFlow`](https://github.com/framerslab/agentos/blo
 - **Binary**: `claude` (install: `npm install -g @anthropic-ai/claude-code`)
 - **Auth**: User logs into Claude Code separately by running `claude` in terminal
 - **System prompt**: `--system-prompt` flag (direct)
-- **Tool calling**: tool schemas written into the system prompt; when tools are present, `--json-schema` constrains the reply to text or tool calls (a reply that does not parse as that shape is retried once without the schema and returned as text)
-- **Streaming**: `--output-format stream-json` with `--verbose --include-partial-messages`
+- **Tool calling**: tool schemas written into the system prompt; when tools are present, `--json-schema` constrains the reply to text or tool calls. Claude Code returns that reply in the result's `structured_output`, which the provider reads first; it parses the result text when there is none (a reply that does not parse as that shape is retried once without the schema and returned as text)
+- **Streaming**: `--output-format stream-json` with `--verbose --include-partial-messages`; the reply's text arrives as `stream_event` lines that wrap the Messages API's `content_block_delta` events, and the `result` line closes the turn. With tools, a text reply in the result's `structured_output` that the text deltas did not already carry (none came, or only text the model wrote before the reply, such as whitespace) goes out as one text delta once the CLI has exited, just before the final chunk, so `streamText()` reads it once
 - **Key flags**: `--bare` (skip plugins/hooks), `--max-turns 1` (single completion)
 - **Models**: claude-opus-5-5, claude-fable-5-1, claude-fable-5, claude-sonnet-5-5, claude-sonnet-5, claude-sonnet-4-6 (default), claude-haiku-4-5-20251001
 - **Cost**: $0 per token (subscription)
@@ -88,8 +90,8 @@ AgentOS exports an [`OpenAIOAuthFlow`](https://github.com/framerslab/agentos/blo
 - **Binary**: `gemini` (install: `npm install -g @google/gemini-cli`)
 - **Auth**: User logs in via Google account by running `gemini` in terminal
 - **System prompt**: Temp file + `GEMINI_SYSTEM_MD` env var (no `--system-prompt` flag)
-- **Tool calling**: XML prompt-based with `<tool_call>` markers (no `--json-schema` support)
-- **Streaming**: `--output-format stream-json`
+- **Tool calling**: XML prompt-based with `<tool_call>` markers (no `--json-schema` support); the provider reads the tool calls from the whole reply once it has ended
+- **Streaming**: `--output-format stream-json`; the reply's text arrives as `message` events (`role: 'assistant'`, `delta: true`) and the token counts in the `result` event's `stats`. The session id comes on the `init` event that opens the stream, and the bridge gives it to the result, which carries none. An `error` event of `severity: 'warning'` does not end the stream. With tools, the reply's text streams without the `<tool_call>` blocks the provider reads as tool calls, which arrive as the final chunk's tool calls alone (a block whose body is not JSON is no tool call, and streams as text): text from a `<` that may open a block is held back until the block's closing tag shows whether it is one, and text still held when the reply ends goes out as one text delta just before the final chunk
 - **Key flags**: `-p` (headless), `-m` (model selection)
 - **Models**: gemini-3.5-flash (default), gemini-3.1-pro-preview, gemini-3.5-flash-lite, gemini-2.5-flash-lite. The CLI answers gemini-2.5-flash with gemini-3.5-flash and returns 404 for gemini-2.5-pro.
 - **Cost**: $0 per token (Google account — free tier: 60 req/min, 1000 req/day; higher with AI Pro/Ultra)
@@ -102,7 +104,7 @@ To add support for a new CLI binary:
 1. Create `{Name}CLIBridge extends CLISubprocessBridge` — implement `buildArgs()`, `classifyError()`, `parseStreamEvent()`
 2. Create `{Name}CLIProviderError extends CLISubprocessError` — define CLI-specific error codes
 3. Create `{Name}CLIProvider implements IProvider` — message formatting, tool calling strategy, response mapping
-4. Register in `CLIRegistry.WELL_KNOWN_CLIS` if it should be auto-discovered
+4. For a `CLIRegistry` scan to report the binary, add its descriptor to a JSON file in `src/safety/sandbox/subprocess/registry/` ([CLI Registry](../features/CLI_REGISTRY.md#option-1-contribute-a-descriptor)). The registry feeds no provider: auto-detection reads the PATH probe of step 5
 5. Register the provider id in [`AIModelProviderManager`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/AIModelProviderManager.ts), and add its default models and its PATH probe to `PROVIDER_DEFAULTS` and `AUTO_DETECT_ORDER` in [`provider-defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/provider-defaults.ts)
 
 The [`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts) base class handles the spawn, the stdin pipe, NDJSON parsing, timeouts and health checks; subclasses implement what is specific to their CLI.

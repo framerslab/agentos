@@ -8,18 +8,24 @@
  * ## Deepgram WebSocket Protocol
  *
  * - **Endpoint:** `wss://api.deepgram.com/v1/listen`
- * - **Authentication:** `token=<apiKey>` query parameter
- * - **Inbound (client → Deepgram):** Binary PCM frames or encoded audio
+ * - **Authentication:** `Authorization: Token <apiKey>` on the upgrade
+ * - **Inbound (client → Deepgram):** 16 kHz mono PCM16 frames, converted from each frame's own rate
  * - **Outbound (Deepgram → client):** JSON messages with transcript results
- * - **Close:** Send zero-byte message to signal end-of-stream
+ * - **Close:** Send `CloseStream`, then close the socket after draining
  *
  * ## Event Mapping
  *
  * Deepgram's `Results` messages are mapped to the pipeline's event model:
  * - `is_final: true` → emits `'transcript'` with `isFinal: true`
  * - `is_final: false` → emits `'transcript'` with `isFinal: false` (interim)
- * - `speech_final: true` → emits `'speech_end'` VAD event
- * - Utterance start → emits `'speech_start'`
+ * - every interim and the final of one segment share an `itemId`, and carry
+ *   `startMs` and `endMs` on the socket's audio clock
+ * - every result carries `beforeSpeechEnd: true`: Deepgram sends a segment's
+ *   final before the end of speech of its utterance, so the session's
+ *   `'speech_end'` for that speech follows it
+ * - `speech_final: true` or `UtteranceEnd` → emits `'speech_end'` VAD event
+ * - `SpeechStarted` or a segment's first words → emits `'speech_start'`
+ * - the audio sent on the socket → `'usage'` (an `SttMeasuredUsageEvent`)
  *
  * @see https://developers.deepgram.com/docs/streaming
  */
@@ -33,7 +39,6 @@ import type {
   StreamingSTTConfig,
   AudioFrame,
   TranscriptEvent,
-  TranscriptWord,
 } from '../types.js';
 import {
   defaultCapabilities,
@@ -42,6 +47,11 @@ import {
   type ProviderCapabilities,
 } from '../HealthyProvider.js';
 import { VoicePipelineError } from '../VoicePipelineError.js';
+import { StreamResampler } from './StreamResampler.js';
+import { sttLanguageOptions } from '../LowestCostStt.js';
+import { SttConnectionMeter } from './SttConnectionMeter.js';
+import { SttConnectionAuthorizationError } from '../SttConnectionAuthorizationError.js';
+import { RollingSTTSession } from './RollingSTTSession.js';
 
 /**
  * Shape of the injected health probe used for deterministic tests.
@@ -68,7 +78,7 @@ async function defaultDeepgramProbe(apiKey: string) {
  * Configuration for the {@link DeepgramStreamingSTT} provider.
  */
 export interface DeepgramStreamingSTTConfig {
-  /** Deepgram API key. Sent as a query parameter on the WebSocket URL. */
+  /** Deepgram API key, sent only in the upgrade Authorization header. */
   apiKey: string;
 
   /**
@@ -85,12 +95,25 @@ export interface DeepgramStreamingSTTConfig {
 
   /**
    * Opt every session out of Deepgram's Model Improvement Program by sending
-   * `mip_opt_out=true`. Off by default because Deepgram notes that opting out
-   * has pricing impacts. A single session can opt out with
-   * `providerOptions.mip_opt_out: true`.
+   * `mip_opt_out=true`: Deepgram keeps an opted-out request's data only for
+   * the duration necessary to process the request. Off by default: Deepgram's
+   * API reference asks callers to refer to its docs for pricing impacts before
+   * setting it. A single session can opt out with
+   * `providerOptions.mip_opt_out: true`; a session's `false` does not undo
+   * this option.
    * @default false
    */
   mipOptOut?: boolean;
+
+  /**
+   * Expected input frame rate. When supplied, a mismatch throws before any
+   * audio is sent. Frames are converted to the declared 16000 Hz wire rate.
+   * When absent, each frame's sampleRate supplies the input rate.
+   */
+  inputSampleRate?: number;
+
+  /** Cumulative usage interval in milliseconds; zero reports only on close. Default zero. */
+  usageIntervalMs?: number;
 
   /**
    * Chain priority. Lower values are tried first.
@@ -172,24 +195,56 @@ function stripKeywordIntensifier(keyword: string): string {
 // Session Implementation
 // ---------------------------------------------------------------------------
 
-/**
- * A live streaming STT session connected to Deepgram via WebSocket.
- * Emits `transcript`, `speech_start`, `speech_end`, `error`, and `close` events
- * as required by the voice pipeline orchestrator.
- */
 /** How long to wait for the Deepgram WS upgrade before failing the connect. */
 const CONNECT_TIMEOUT_MS = 8_000;
 
+/** Deepgram's declared wire rate: every frame is converted to it before it is sent. */
+const WIRE_SAMPLE_RATE = 16_000;
+
+/**
+ * A live streaming STT session connected to Deepgram over one WebSocket.
+ * Emits `transcript`, `speech_start`, `speech_end`, `usage`, `error`, and
+ * `close` events as required by the voice pipeline orchestrator.
+ */
 class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSession {
   private ws: WebSocket | null = null;
   private speechActive = false;
   private closed = false;
+  private readonly resampler = new StreamResampler(WIRE_SAMPLE_RATE);
+  private readonly meter: SttConnectionMeter;
+  private samplesSent = 0;
+  private utteranceSequence = 0;
+  private itemId: string | undefined;
+  private usageTimer: ReturnType<typeof setInterval> | undefined;
+
+  /** Wire seconds sent on this socket so far. */
+  get audioSeconds(): number {
+    return this.samplesSent / WIRE_SAMPLE_RATE;
+  }
+
+  /** The host's funded ceiling for this socket, in wire seconds; unbounded without the hook. */
+  get audioCeiling(): number {
+    return this.sessionConfig.connectionHooks?.audioCeiling?.(this.meter.opening) ?? Infinity;
+  }
+
+  /** The socket is open and takes audio. */
+  get isOpen(): boolean {
+    return !this.closed && this.ws?.readyState === WebSocket.OPEN;
+  }
 
   constructor(
     private readonly config: DeepgramStreamingSTTConfig,
     private readonly sessionConfig: StreamingSTTConfig
   ) {
     super();
+    if (config.inputSampleRate !== undefined && (!Number.isSafeInteger(config.inputSampleRate) || config.inputSampleRate <= 0)) {
+      throw new RangeError('invalid input sample rate');
+    }
+    if (!Number.isSafeInteger(config.usageIntervalMs ?? 0) || (config.usageIntervalMs ?? 0) < 0) {
+      throw new RangeError('invalid usage interval');
+    }
+    const model = config.model ?? DEFAULT_MODEL;
+    this.meter = new SttConnectionMeter('deepgram-streaming', `deepgram:${model}`, model, sessionConfig.connectionHooks);
   }
 
   /**
@@ -204,215 +259,254 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     }
   }
 
+  private reportUsage(final: boolean): void {
+    const event = this.meter.report(1, this.samplesSent / WIRE_SAMPLE_RATE, final);
+    if (event) this.emit('usage', event);
+  }
+
+  /** Ends the session once: its timer and speech, its final usage report, then `'close'`. */
+  private finish(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.usageTimer !== undefined) clearInterval(this.usageTimer);
+    this.usageTimer = undefined;
+    this.meter.cancelAuthorization();
+    this.endSpeech();
+    this.reportUsage(true);
+    this.emit('close');
+  }
+
   /**
-   * Open the WebSocket connection to Deepgram.
-   * Resolves once the connection is established and ready to receive audio.
+   * Authorizes the socket with the host's hooks, then opens it. Resolves once the
+   * connection is established and ready to receive audio.
+   *
+   * The failure paths settle the connect exactly once and reject first: an
+   * `'error'` emitted before the rejection would throw with no listener attached
+   * yet and leave the promise unsettled. A refused upgrade carries the HTTP body
+   * (`unexpected-response`), so Deepgram's own error is visible. A failed opening
+   * terminates its socket and reports a final zero.
+   *
+   * @throws {SttConnectionAuthorizationError} When the host refuses the socket; no socket is constructed.
+   * @throws {RangeError} For a language that is not a language tag.
    */
   async connect(): Promise<void> {
-    const baseUrl = this.config.baseUrl ?? 'wss://api.deepgram.com/v1/listen';
     const model = this.config.model ?? DEFAULT_MODEL;
-    const language = this.sessionConfig.language ?? 'en-US';
-    const interim = this.sessionConfig.interimResults !== false;
-    const punctuate = this.sessionConfig.punctuate !== false;
-
-    // Provider options from pipeline config (sentiment, keywords, smart_format, etc.)
+    const languageOptions = sttLanguageOptions(`deepgram:${model}`, this.sessionConfig.language);
+    if (!languageOptions) throw new Error('automatic language has no verified Deepgram tariff');
+    await this.meter.authorize();
+    if (this.closed) throw new Error('deepgram opening closed');
     const opts = this.sessionConfig.providerOptions ?? {};
-
-    const params = new URLSearchParams({
+    const url = new URL(this.config.baseUrl ?? 'wss://api.deepgram.com/v1/listen');
+    const params = url.searchParams;
+    for (const [name, value] of Object.entries({
       model,
-      language,
-      punctuate: String(punctuate),
-      interim_results: String(interim),
+      language: languageOptions.language!,
+      punctuate: String(this.sessionConfig.punctuate !== false),
+      interim_results: String(this.sessionConfig.interimResults !== false),
       endpointing: 'true',
       vad_events: 'true',
       encoding: 'linear16',
-      sample_rate: '16000',
+      sample_rate: String(WIRE_SAMPLE_RATE),
       channels: '1',
-    });
+    })) params.set(name, value);
 
     // Deepgram feature flags from providerOptions
     if (opts.sentiment) params.set('sentiment', 'true');
     if (opts.smart_format) params.set('smart_format', 'true');
     if (opts.diarize) params.set('diarize', 'true');
     if (opts.utterance_end_ms) params.set('utterance_end_ms', String(opts.utterance_end_ms));
-    if (this.config.mipOptOut === true || opts.mip_opt_out === true) {
-      params.set('mip_opt_out', 'true');
-    }
+    if (this.config.mipOptOut === true || opts.mip_opt_out === true) params.set('mip_opt_out', 'true');
     if (Array.isArray(opts.keywords)) {
       // Nova-3 does not support `keywords`; it boosts terms through `keyterm`,
       // which takes plain terms, so the `:intensifier` suffix is dropped there.
-      const useKeyterm = isNova3Model(model);
-      for (const kw of opts.keywords) {
-        if (useKeyterm) params.append('keyterm', stripKeywordIntensifier(String(kw)));
-        else params.append('keywords', String(kw));
+      for (const keyword of opts.keywords) {
+        if (isNova3Model(model)) params.append('keyterm', stripKeywordIntensifier(String(keyword)));
+        else params.append('keywords', String(keyword));
       }
     }
 
-    const url = `${baseUrl}?${params.toString()}`;
-
-    // Failure paths settle the promise EXACTLY once and reject FIRST: the
-    // previous implementation ran `this.emit('error', err)` before
-    // `reject(err)` — with no 'error' listener attached at connect time the
-    // emit threw synchronously (Node EventEmitter contract), `reject` never
-    // executed, and the connect promise never settled, hanging the caller
-    // forever. Handshake rejections also capture the HTTP body now
-    // (`unexpected-response`) so the real Deepgram error is visible instead
-    // of the blind "Unexpected server response: NNN".
-    return new Promise<void>((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       let settled = false;
-      const timer = setTimeout(() => {
-        fail(new Error(`deepgram stt ws connect timed out after ${CONNECT_TIMEOUT_MS}ms`));
-      }, CONNECT_TIMEOUT_MS);
-      const fail = (err: Error): void => {
+      const timer = setTimeout(
+        () => fail(new Error(`deepgram stt ws connect timed out after ${CONNECT_TIMEOUT_MS}ms`)),
+        CONNECT_TIMEOUT_MS
+      );
+      const fail = (error: Error): void => {
         if (settled) {
-          this._emitErrorSafe(err);
+          if (!this.closed) this._emitErrorSafe(error);
           return;
         }
         settled = true;
         clearTimeout(timer);
-        reject(err);
+        reject(error);
+        const socket = this.ws;
+        this.ws = null;
+        this.finish();
+        socket?.terminate();
       };
-
-      this.ws = new WebSocket(url, {
-        headers: {
-          Authorization: `Token ${this.config.apiKey}`,
-        },
-      });
-
-      this.ws.on('unexpected-response', (_req, res) => {
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(url.toString(), { headers: { Authorization: `Token ${this.config.apiKey}` } });
+        this.ws = socket;
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error('deepgram socket construction failed'));
+        return;
+      }
+      socket.on('unexpected-response', (_request, response) => {
         let body = '';
-        res.on('data', (d: Buffer) => {
-          body += d.toString('utf-8');
+        response.on('data', (chunk: Buffer) => {
+          body = (body + chunk.toString('utf-8')).slice(0, 300);
         });
-        res.on('end', () => {
-          fail(
-            new Error(
-              `deepgram stt ws rejected: HTTP ${res.statusCode}${body ? ` — ${body.slice(0, 300)}` : ''}`
-            )
-          );
+        response.on('end', () => {
+          fail(new Error(`deepgram stt ws rejected: HTTP ${response.statusCode}${body ? ` - ${body}` : ''}`));
         });
       });
-
-      this.ws.on('open', () => {
-        if (settled) return;
+      socket.on('open', () => {
+        if (settled || this.closed) return;
         settled = true;
         clearTimeout(timer);
+        if ((this.config.usageIntervalMs ?? 0) > 0) {
+          this.usageTimer = setInterval(() => this.reportUsage(false), this.config.usageIntervalMs);
+        }
         resolve();
       });
-      this.ws.on('error', (err) => fail(err as Error));
-
-      this.ws.on('message', (data: Buffer | string) => {
+      socket.on('error', (error) => fail(error as Error));
+      socket.on('message', (data: Buffer | string) => {
         this._handleMessage(typeof data === 'string' ? data : data.toString('utf-8'));
       });
-
-      this.ws.on('close', () => {
+      socket.on('close', () => {
         if (!settled) fail(new Error('deepgram stt ws closed before the upgrade completed'));
-        this.closed = true;
-        this.emit('close');
+        this.ws = null;
+        this.finish();
       });
     });
+    // An open followed by a close in the same turn leaves nothing to adopt.
+    if (!this.isOpen) throw new Error('deepgram closed before adoption');
   }
 
   /**
-   * Push a PCM audio frame to Deepgram for transcription.
-   * Converts Float32Array samples to 16-bit linear PCM (what Deepgram expects).
+   * Converts a live or replayed frame to 16 kHz PCM16 and sends it, counting
+   * the samples sent.
+   *
+   * @throws {RangeError} For a frame whose rate differs from `inputSampleRate`, or that is not a positive whole
+   *   number, or a sample that is not finite; nothing of the frame is sent or counted.
    */
   pushAudio(frame: AudioFrame): void {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-    // Convert Float32Array [-1.0, 1.0] to Int16 PCM
-    const pcm = new Int16Array(frame.samples.length);
-    for (let i = 0; i < frame.samples.length; i++) {
-      const s = Math.max(-1, Math.min(1, frame.samples[i]));
-      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    if (this.config.inputSampleRate !== undefined && frame.sampleRate !== this.config.inputSampleRate) {
+      throw new RangeError('unexpected input sample rate');
     }
-
-    this.ws.send(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength));
+    const samples = this.resampler.process(frame.samples, frame.sampleRate);
+    if (samples.length === 0) return;
+    const pcm = Buffer.allocUnsafe(samples.length * 2);
+    for (let i = 0; i < samples.length; i++) {
+      const sample = Math.max(-1, Math.min(1, samples[i]!));
+      pcm.writeInt16LE(Math.trunc(sample < 0 ? sample * 0x8000 : sample * 0x7fff), i * 2);
+    }
+    const next = (this.samplesSent + samples.length) / WIRE_SAMPLE_RATE;
+    if (this.sessionConfig.connectionHooks?.beforeAudio?.(this.meter.opening, next) === false) {
+      // The host's funded limit: nothing of this frame is sent, and the refusal ends the socket.
+      this._emitErrorSafe(new SttConnectionAuthorizationError());
+      this.close();
+      return;
+    }
+    this.ws.send(pcm);
+    this.samplesSent += samples.length;
   }
 
-  /**
-   * Signal end-of-audio to Deepgram by sending a zero-byte message.
-   * Waits for any final results before resolving.
-   */
+  /** Requests final results; the existing 200 ms drain bound is preserved. */
   async flush(): Promise<void> {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-    // Deepgram uses a close_stream message to finalize
     this.ws.send(JSON.stringify({ type: 'CloseStream' }));
-
-    // Give Deepgram a moment to send final results
-    return new Promise<void>((resolve) => {
-      setTimeout(resolve, 200);
-    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
   }
 
-  /**
-   * Close the WebSocket connection and clean up.
-   */
+  /** Stops the socket and reports its final measured total exactly once. */
   close(): void {
     if (this.closed) return;
-    this.closed = true;
-
-    if (this.ws) {
-      if (this.ws.readyState === WebSocket.OPEN) {
-        this.ws.close(1000, 'session closed');
-      }
-      this.ws = null;
-    }
-
-    this.emit('close');
+    const socket = this.ws;
+    this.ws = null;
+    this.finish();
+    if (socket?.readyState === WebSocket.OPEN) socket.close(1000, 'session closed');
+    else socket?.terminate();
   }
 
   // -------------------------------------------------------------------------
   // Private
   // -------------------------------------------------------------------------
 
+  private beginSpeech(): void {
+    if (this.speechActive) return;
+    this.speechActive = true;
+    this.emit('speech_start');
+  }
+
+  private endSpeech(): void {
+    // An empty terminal message ends VAD but never promotes speculative interim text.
+    this.itemId = undefined;
+    if (!this.speechActive) return;
+    this.speechActive = false;
+    this.emit('speech_end');
+  }
+
   /**
-   * Parse and dispatch a Deepgram WebSocket message.
-   * Maps Deepgram's result format to the pipeline's TranscriptEvent model.
+   * Parse and dispatch a Deepgram WebSocket message. Every final segment ends
+   * its transcript identity, so later interim and final segments get a new
+   * `itemId`, within one VAD span too. An empty terminal discards unfinalized
+   * interim text, emits one speech end and never fabricates a final.
    */
   private _handleMessage(raw: string): void {
     let msg: Record<string, unknown>;
     try {
-      msg = JSON.parse(raw);
+      msg = JSON.parse(raw) as Record<string, unknown>;
     } catch {
       return; // Malformed JSON — skip
     }
-
-    const type = msg.type as string;
-
-    // Handle speech started event (Deepgram VAD)
-    if (type === 'SpeechStarted') {
-      if (!this.speechActive) {
-        this.speechActive = true;
-        this.emit('speech_start');
+    if (this.closed) return;
+    const metadata = msg.metadata as { request_id?: unknown } | undefined;
+    const requestId = metadata?.request_id ?? (msg.type === 'Metadata' ? msg.request_id : undefined);
+    if (typeof requestId === 'string') {
+      try {
+        this.meter.bindSupplierRequest(requestId);
+      } catch {
+        // The socket's first valid request id stays bound; usage keeps that identity.
       }
+    }
+    if (msg.type === 'SpeechStarted') {
+      this.beginSpeech();
       return;
     }
-
-    // Handle results
-    if (type === 'Results') {
-      const result = msg as unknown as DGResult;
-      const alt = result.channel?.alternatives?.[0];
-      if (!alt || !alt.transcript) return;
-
-      // Map Deepgram words to pipeline TranscriptWord format
-      const words: TranscriptWord[] = (alt.words ?? []).map((w) => ({
-        word: w.word,
-        start: Math.round(w.start * 1000), // seconds → ms
-        end: Math.round(w.end * 1000),
-        confidence: w.confidence,
-        speaker: w.speaker !== undefined ? String(w.speaker) : undefined,
-      }));
-
+    if (msg.type === 'UtteranceEnd') {
+      this.endSpeech();
+      return;
+    }
+    if (msg.type !== 'Results') return;
+    const result = msg as unknown as DGResult;
+    const alt = result.channel?.alternatives?.[0];
+    if (alt?.transcript?.trim()) {
+      const startMs = Math.round(result.start * 1000);
+      const endMs = Math.round((result.start + result.duration) * 1000);
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs < 0 || endMs < startMs) return;
+      this.beginSpeech();
+      this.itemId ??= `${this.meter.opening.connectionId}:${++this.utteranceSequence}`;
       const event: TranscriptEvent = {
+        itemId: this.itemId,
         text: alt.transcript,
         confidence: alt.confidence,
-        words,
         isFinal: result.is_final,
-        durationMs: Math.round(result.duration * 1000),
+        startMs,
+        endMs,
+        durationMs: endMs - startMs,
+        // Speech has begun above, and its end (`speech_final`, `UtteranceEnd` or the close) follows this result.
+        beforeSpeechEnd: true,
+        words: (alt.words ?? []).map((word) => ({
+          word: word.word,
+          start: Math.round(word.start * 1000), // seconds → ms
+          end: Math.round(word.end * 1000),
+          confidence: word.confidence,
+          ...(word.speaker === undefined ? {} : { speaker: String(word.speaker) }),
+        })),
       };
-
       // Attach sentiment when Deepgram returns it
       if (result.sentiments?.average) {
         event.sentiment = {
@@ -420,15 +514,11 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
           confidence: Math.abs(result.sentiments.average.sentiment_score),
         };
       }
-
       this.emit('transcript', event);
-
-      // speech_final indicates the speaker paused — emit speech_end
-      if (result.speech_final && this.speechActive) {
-        this.speechActive = false;
-        this.emit('speech_end');
-      }
+      if (event.isFinal) this.itemId = undefined;
     }
+    // speech_final indicates the speaker paused — emit speech_end
+    if (result.speech_final) this.endSpeech();
   }
 }
 
@@ -502,12 +592,24 @@ export class DeepgramStreamingSTT implements IStreamingSTT, HealthyProvider {
 
   /**
    * Create a new streaming STT session connected to Deepgram.
-   * Each session gets a fresh key from the round-robin pool.
+   * Each socket gets a fresh key from the round-robin pool. With
+   * `config.connectionHooks.audioCeiling`, the session moves to a new,
+   * separately authorized socket of the same vendor before a socket's funded
+   * ceiling; without it the session is the single socket's own.
+   *
+   * @throws {SttConnectionAuthorizationError} When the host's hooks refuse the first socket.
+   * @throws {RangeError} For an invalid `inputSampleRate` or `usageIntervalMs`, or a language that is not a tag.
    */
   async startSession(config?: StreamingSTTConfig): Promise<StreamingSTTSession> {
-    const resolvedConfig = { ...this.config, apiKey: this.keyPool.next() };
-    const session = new DeepgramStreamingSTTSession(resolvedConfig, config ?? {});
-    await session.connect();
-    return session;
+    const open = async (): Promise<DeepgramStreamingSTTSession> => {
+      const session = new DeepgramStreamingSTTSession({ ...this.config, apiKey: this.keyPool.next() }, config ?? {});
+      await session.connect();
+      if (!session.isOpen) {
+        session.close();
+        throw new Error('deepgram closed before adoption');
+      }
+      return session;
+    };
+    return config?.connectionHooks?.audioCeiling ? RollingSTTSession.start(open) : open();
   }
 }

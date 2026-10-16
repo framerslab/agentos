@@ -50,17 +50,57 @@ describe('ReplicateImageProvider — Character Consistency', () => {
     expect(body.input.main_face_image).toBe('https://ref.test/face.png');
   });
 
-  it('maps referenceImageUrl to image for Flux Redux models', async () => {
+  it('sends a Flux Redux reference as redux_image, with no prompt, as its schema takes it', async () => {
     mockFetch.mockResolvedValueOnce(mockSuccess());
 
     await provider.generateImage({
       modelId: 'black-forest-labs/flux-redux-dev',
       prompt: 'style transfer',
+      negativePrompt: 'blur',
       referenceImageUrl: 'https://ref.test/style.png',
     });
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.input.image).toBe('https://ref.test/style.png');
+    expect(body.input.redux_image).toBe('https://ref.test/style.png');
+    expect(body.input).not.toHaveProperty('image');
+    expect(body.input).not.toHaveProperty('prompt');
+    expect(body.input).not.toHaveProperty('negative_prompt');
+  });
+
+  it('drops the prompt for a Redux reference given in providerOptions.input too', async () => {
+    mockFetch.mockResolvedValueOnce(mockSuccess());
+
+    await provider.generateImage({
+      modelId: 'black-forest-labs/flux-redux-dev',
+      prompt: 'a variation',
+      providerOptions: { replicate: { input: { redux_image: 'https://ref.test/direct.png' } } },
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.input).toEqual(expect.objectContaining({ redux_image: 'https://ref.test/direct.png' }));
+    expect(body.input).not.toHaveProperty('prompt');
+  });
+
+  it('refuses a Flux Redux generation with no reference image, before any request', async () => {
+    await expect(
+      provider.generateImage({ modelId: 'black-forest-labs/flux-redux-dev', prompt: 'a lighthouse' }),
+    ).rejects.toThrow('pass referenceImageUrl, which it takes as redux_image');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('sends a pinned Redux request whose extraBody input carries redux_image, as that input replaces the body\'s', async () => {
+    mockFetch.mockResolvedValueOnce(mockSuccess());
+    const version = `black-forest-labs/flux-redux-dev:${'b'.repeat(64)}`;
+
+    await provider.generateImage({
+      modelId: version,
+      prompt: 'unused',
+      providerOptions: { replicate: { extraBody: { input: { redux_image: 'https://ref.test/pinned.png' } } } },
+    });
+
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(String(url)).toMatch(/\/v1\/predictions$/);
+    expect(JSON.parse(init.body)).toMatchObject({ version, input: { redux_image: 'https://ref.test/pinned.png' } });
   });
 
   it('sets image_strength based on consistencyMode for standard Flux models', async () => {

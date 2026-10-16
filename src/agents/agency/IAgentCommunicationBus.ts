@@ -247,7 +247,7 @@ export interface DeliveryStatus {
   acknowledgedAt?: Date;
   /** Failure reason */
   failureReason?: string;
-  /** Retry count */
+  /** Retries made through `retryDelivery()`; the status a re-send stores keeps the count. */
   retryCount: number;
 }
 
@@ -556,6 +556,10 @@ export interface IAgentCommunicationBus {
 
   /**
    * Retries delivery of a failed message.
+   *
+   * Each call counts one retry, which the returned status carries in
+   * `retryCount`. Once `RoutingConfig.maxRetries` retries have been made, the
+   * call throws without sending.
    *
    * @param messageId - Message to retry
    * @returns New delivery status

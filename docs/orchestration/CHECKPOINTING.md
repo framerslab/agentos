@@ -91,7 +91,7 @@ The graph-wide `checkpointPolicy` and each node's `checkpoint` setting decide wh
 | `explicit` | Save only around nodes with `checkpoint: 'before'`, `'after'`, or `'both'`. |
 | `none` | The same as `explicit`: the runtime saves around nodes that set `checkpoint`, and no others. The default of [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts). |
 
-Whatever the policy, the runtime also saves a checkpoint when a node fails (after its retries) and when a node interrupts the run for human approval, so a failed or interrupted run can always be resumed.
+Whatever the policy, the runtime also saves a checkpoint when a node fails (after its retries) and when a node interrupts the run for human approval, so a failed or interrupted run can always be resumed. It saves that checkpoint before it yields any event that reports the node's result, so a host that leaves its `for await` loop over `stream()` or `streamResume()` at `interrupt` or `error` can still resume the run. The `checkpoint_saved` event for that checkpoint comes after `interrupt` or `error`, so such a host resumes by the run id from `run_start` (see [Resuming a Run](#resuming-a-run)).
 
 ```typescript
 // Graph-wide policy
@@ -134,6 +134,8 @@ toolNode('json_formatter', {}, { effectClass: 'pure' })
 toolNode('create_record', {}, { effectClass: 'write' })
 ```
 
+Nodes that become ready together run as one parallel batch (see [Scheduling](./ORCHESTRATION.md#scheduling)). A node of the batch that saves a checkpoint after it runs, as every node does under `every_node`, saves its own copy of the state; once the batch has merged, the runtime saves one more checkpoint, of the merged state and named for the batch's last node in the order the nodes are declared, so the last checkpoint of the batch holds what every node wrote. When a node of the batch interrupts or fails, the others in the batch have run too, and the ones that completed are in the checkpoint's `visitedNodes`, so a resume does not run them again. The checkpoint's `scratch` and `artifacts` hold what each of them wrote, merged with what the halting node wrote in the order the nodes are declared, so the nodes after the batch read their outputs when the run resumes. The run reports the halting node alone, the first in the order the nodes are declared. Another node of the batch that interrupted has not been asked, so the checkpoint holds neither its writes nor its result: a resume executes it again, and it interrupts the resumed run with its own `interrupt`.
+
 ## Resuming a Run
 
 ```typescript
@@ -153,6 +155,18 @@ for await (const event of graph.stream(input)) {
 // Resume after a failure, a human approval or a timeout.
 // Pass either the run id (its latest checkpoint) or an exact checkpoint id.
 const result = await graph.resume(lastCheckpointId!);
+```
+
+A host that stops reading at `interrupt` or `error` has not seen the `checkpoint_saved` that follows it, and resumes by the run id from `run_start`:
+
+```typescript
+let runId: string | undefined;
+for await (const event of graph.stream(input)) {
+  if (event.type === 'run_start') runId = event.runId;
+  if (event.type === 'interrupt' || event.type === 'error') break;
+}
+
+const result = await graph.resume(runId!);
 ```
 
 The same API applies to compiled `workflow()` and `mission()` graphs. The `resume()` of `AgentGraph` and `mission()` accepts a second `patch` argument and does not apply it; patch state with `fork()` instead:
@@ -225,7 +239,7 @@ class PostgresCheckpointStore implements ICheckpointStore {
 
   async save(checkpoint: Checkpoint): Promise<void> {
     await this.pool.query(
-      'INSERT INTO checkpoints (id, run_id, graph_id, node_id, timestamp, payload) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO UPDATE SET payload = $6',
+      'INSERT INTO checkpoints (id, run_id, graph_id, node_id, timestamp, payload) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO UPDATE SET run_id = EXCLUDED.run_id, graph_id = EXCLUDED.graph_id, node_id = EXCLUDED.node_id, timestamp = EXCLUDED.timestamp, payload = EXCLUDED.payload, seq = DEFAULT',
       [checkpoint.id, checkpoint.runId, checkpoint.graphId, checkpoint.nodeId, checkpoint.timestamp, JSON.stringify(checkpoint)]
     );
   }
@@ -237,8 +251,8 @@ class PostgresCheckpointStore implements ICheckpointStore {
 
   async load(runId: string, nodeId?: string): Promise<Checkpoint | null> {
     const query = nodeId
-      ? 'SELECT payload FROM checkpoints WHERE run_id = $1 AND node_id = $2 ORDER BY timestamp DESC LIMIT 1'
-      : 'SELECT payload FROM checkpoints WHERE run_id = $1 ORDER BY timestamp DESC LIMIT 1';
+      ? 'SELECT payload FROM checkpoints WHERE run_id = $1 AND node_id = $2 ORDER BY timestamp DESC, seq DESC LIMIT 1'
+      : 'SELECT payload FROM checkpoints WHERE run_id = $1 ORDER BY timestamp DESC, seq DESC LIMIT 1';
     const { rows } = await this.pool.query(query, nodeId ? [runId, nodeId] : [runId]);
     return rows[0] ? JSON.parse(rows[0].payload) : null;
   }
@@ -250,7 +264,7 @@ class PostgresCheckpointStore implements ICheckpointStore {
   async list(graphId: string, options?: { limit?: number; runId?: string }): Promise<CheckpointMetadata[]> {
     // Return lightweight metadata, not full payloads
     const { rows } = await this.pool.query(
-      'SELECT id, run_id, graph_id, node_id, timestamp, length(payload) as state_size FROM checkpoints WHERE graph_id = $1 AND ($2::text IS NULL OR run_id = $2) ORDER BY timestamp DESC LIMIT $3',
+      'SELECT id, run_id, graph_id, node_id, timestamp, length(payload) as state_size FROM checkpoints WHERE graph_id = $1 AND ($2::text IS NULL OR run_id = $2) ORDER BY timestamp DESC, seq DESC LIMIT $3',
       [graphId, options?.runId ?? null, options?.limit ?? 100]
     );
     return rows.map(r => ({ id: r.id, runId: r.run_id, graphId: r.graph_id, nodeId: r.node_id, timestamp: r.timestamp, stateSize: r.state_size, hasMemorySnapshot: false }));
@@ -278,6 +292,10 @@ class PostgresCheckpointStore implements ICheckpointStore {
   }
 }
 ```
+
+The runtime can save several checkpoints of one run in the same millisecond, such as the checkpoints of a parallel batch's nodes and the one it saves after the batch, so `load()` and `latest()` return the checkpoint saved last of those with the latest `timestamp`, and `list()` puts it first. The example's `checkpoints` table has a `seq bigserial` column to order them: it takes the next value at each insert, and `save()` sets it again (`seq = DEFAULT`) when it saves a checkpoint again under its id, so that save counts as the last. `InMemoryCheckpointStore` orders them by each checkpoint's last save.
+
+The order a store has to keep is that of saves that do not overlap. The runtime starts each save once the one before it has finished, except the saves of a parallel batch's nodes, which run together; a checkpoint it saves after them, such as the one after the batch or the one of a batch that halts, starts once they have all finished. In the example, a save that starts after another has finished takes the larger `seq`, since a sequence with the default `CACHE 1` hands out its values in the order they are asked for.
 
 Then pass it to any graph:
 

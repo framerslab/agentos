@@ -81,6 +81,7 @@
  */
 
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../llm/providers/errors/errorCodes.js';
+import { contentSafeConsole as console } from '../logging/contentSafeConsole.js';
 
 /** Snapshot of breaker state for a single provider. */
 export interface LLMProviderHealthStats {
@@ -280,6 +281,14 @@ function isContentPolicyDecline(error: unknown): boolean {
 }
 
 /**
+ * The most per-credential records the registry keeps: one for each key or
+ * base URL of a caller's own that failed (see `providerHealthKey`). A
+ * service that passes each tenant's key would otherwise keep one per key for
+ * the life of the process.
+ */
+export const MAX_SCOPED_HEALTH_RECORDS = 256;
+
+/**
  * Per-process registry of provider health. Construct once per agentos
  * runtime; the module-level `globalLLMProviderHealth` singleton is
  * what the in-tree router code uses. Tests instantiate their own
@@ -289,6 +298,24 @@ function isContentPolicyDecline(error: unknown): boolean {
  */
 export class LLMProviderHealthRegistry {
   private readonly records: Map<string, ProviderHealthRecord> = new Map();
+
+  /**
+   * Drops the per-credential records (ids with an `@` scope, from
+   * `providerHealthKey`) that failed least recently, past
+   * {@link MAX_SCOPED_HEALTH_RECORDS}. A dropped key's next call is tried
+   * again. The providers' own records are kept.
+   */
+  private evictScopedRecords(): void {
+    let scoped = 0;
+    for (const id of this.records.keys()) if (id.includes('@')) scoped += 1;
+    for (const id of this.records.keys()) {
+      if (scoped <= MAX_SCOPED_HEALTH_RECORDS) return;
+      if (id.includes('@')) {
+        this.records.delete(id);
+        scoped -= 1;
+      }
+    }
+  }
 
   /**
    * Returns `true` when the named provider's breaker is open. Callers
@@ -383,7 +410,11 @@ export class LLMProviderHealthRegistry {
       }
       record.openUntil = Date.now() + policy.cooldownMs;
     }
+    // Most recent failure last: the map's order is the order the
+    // per-credential records are dropped in.
+    this.records.delete(providerId);
     this.records.set(providerId, record);
+    if (providerId.includes('@')) this.evictScopedRecords();
   }
 
   /**

@@ -76,8 +76,11 @@ declare module '@xenova/transformers' {
 declare module '@huggingface/transformers' {
   export const env: any;
   export const pipeline: any;
+  /** Loads a model's processor (image processor and tokenizer); the vision layout tier loads Florence-2's. */
   export const AutoProcessor: any;
+  /** The Florence-2 model class, which no transformers.js pipeline task loads; the vision layout tier loads it itself. */
   export const Florence2ForConditionalGeneration: any;
+  /** transformers.js's image type; `RawImage.read` decodes a Blob, a URL or a file path. */
   export const RawImage: any;
 }
 

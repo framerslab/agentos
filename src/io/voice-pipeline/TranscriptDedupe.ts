@@ -31,9 +31,22 @@ export interface DedupeResult {
 const PUNCT_RE = /[.,!?;:"'()[\]{}]/g;
 const WS_RE = /\s+/g;
 
-function normalize(text: string): string {
+/**
+ * A transcript's text as it is compared: in lower case, with the marks `. , ! ? ; : " ' ( ) [ ] { }` removed, every
+ * run of white space made one space, and no space at either end. `'Hello, World!  Again.'` becomes
+ * `'hello world again'`. Every other character is kept, a hyphen among them.
+ *
+ * {@link TranscriptDedupe} compares two providers' transcripts by it; a caller that joins texts of its own can
+ * compare their words by the same rule.
+ *
+ * @param text - The text as a provider returned it.
+ * @returns The text to compare.
+ */
+export function normalizeTranscriptText(text: string): string {
   return text.toLowerCase().replace(PUNCT_RE, '').replace(WS_RE, ' ').trim();
 }
+
+const normalize = normalizeTranscriptText;
 
 function tokenSet(text: string): Set<string> {
   return new Set(normalize(text).split(' ').filter(Boolean));

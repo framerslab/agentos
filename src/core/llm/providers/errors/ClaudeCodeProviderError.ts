@@ -22,6 +22,11 @@ import { CLISubprocessError } from '../../../../safety/sandbox/subprocess/errors
  * - `RATE_LIMITED` — subscription rate limit hit
  * - `CONTEXT_TOO_LONG` — conversation exceeds model context window
  *
+ * The code the OpenAI, Anthropic and Gemini providers throw from
+ * generateCompletion() for a caller's abort:
+ * - `REQUEST_ABORTED` — the call was cancelled through its abort signal;
+ *   `isRetryableError()` never counts it as retryable
+ *
  * Claude-specific:
  * - `SCHEMA_PARSE_FAILED` — `--json-schema` response did not parse
  * - `EMBEDDINGS_NOT_SUPPORTED` — Claude Code CLI does not support embeddings
@@ -36,6 +41,7 @@ export type ClaudeCodeErrorCode =
   | 'CRASHED'
   | 'RATE_LIMITED'
   | 'CONTEXT_TOO_LONG'
+  | 'REQUEST_ABORTED'
   | 'SCHEMA_PARSE_FAILED'
   | 'EMBEDDINGS_NOT_SUPPORTED'
   | 'UNKNOWN';
@@ -72,5 +78,42 @@ export class ClaudeCodeProviderError extends CLISubprocessError {
     this.name = 'ClaudeCodeProviderError';
 
     Object.setPrototypeOf(this, ClaudeCodeProviderError.prototype);
+  }
+
+  /**
+   * The error a result Claude Code flags as an error stands for, `CRASHED`
+   * with the failure's message. ClaudeCodeProvider throws it from
+   * generateCompletion() and ends a stream with it, and ClaudeCodeCLIBridge
+   * throws it from execute() when the CLI exits non-zero after such a result.
+   *
+   * @param message — the failure's message, as the bridge reads it from the result
+   * @param details — optional context, such as the run's exit code and stderr
+   */
+  static fromErrorResult(message: string, details?: unknown): ClaudeCodeProviderError {
+    return new ClaudeCodeProviderError(
+      `Claude Code returned an error: ${message}`,
+      'CRASHED',
+      'Try running "claude --bare -p test" manually to diagnose.',
+      true,
+      details,
+    );
+  }
+
+  /**
+   * The error of a call the caller cancelled through its abort signal,
+   * `REQUEST_ABORTED`. ClaudeCodeCLIBridge classifies a run execa marks
+   * `isCanceled` as it, and ClaudeCodeProvider ends a stream with it when the
+   * caller aborts after the run has ended but before the stream's final chunk.
+   *
+   * @param details — optional context, such as the run's exit code and stderr
+   */
+  static requestAborted(details?: unknown): ClaudeCodeProviderError {
+    return new ClaudeCodeProviderError(
+      'Claude Code CLI call aborted by the caller.',
+      'REQUEST_ABORTED',
+      'The call was cancelled through its abort signal. Send it again if it is still needed.',
+      false,
+      details,
+    );
   }
 }

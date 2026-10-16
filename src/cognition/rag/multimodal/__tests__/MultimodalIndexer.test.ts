@@ -217,6 +217,17 @@ describe('MultimodalIndexer', () => {
     expect(calledWith).toMatch(/^data:image\/png;base64,/);
   });
 
+  it('labels a Buffer data URL with the type its bytes show, so a JPEG is not sent as PNG', async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+    const webp = Buffer.from('RIFF\x00\x00\x00\x00WEBPVP8 ', 'latin1');
+    await indexer.indexImage({ image: jpeg });
+    await indexer.indexImage({ image: webp });
+
+    const calls = (visionProvider.describeImage as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[0][0]).toBe(`data:image/jpeg;base64,${jpeg.toString('base64')}`);
+    expect(calls[1][0]).toMatch(/^data:image\/webp;base64,/);
+  });
+
   it('should use custom collection name for image indexing', async () => {
     await indexer.indexImage({
       image: 'https://example.com/img.jpg',

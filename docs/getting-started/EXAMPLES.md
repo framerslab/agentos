@@ -202,7 +202,7 @@ console.log('Posted:', posted);
 
 ## 4. Call Center over a WebSocket
 
-A hierarchical agency behind a local WebSocket. With `voice.enabled: true`, `agency()` attaches a `listen()` method that starts a WebSocket server on `127.0.0.1`. Each client sends JSON text frames (`{ "text": "..." }`) and receives the agency's reply as `{ "text": "..." }`. `agency()` reads no other `voice` field: it runs no speech-to-text, text-to-speech or telephony. For audio, put the [Voice Pipeline](/features/voice-pipeline) or a [telephony provider](/features/telephony-providers) in front of the socket. `listen()` needs the `ws` package (`npm install ws`).
+A hierarchical agency behind a local WebSocket. With `voice.enabled: true`, `agency()` attaches a `listen()` method that starts a WebSocket server on `127.0.0.1`. Each client sends JSON text frames (`{ "text": "..." }`) and receives the agency's reply as `{ "text": "..." }`. `agency()` reads no other `voice` field: it runs no speech-to-text, text-to-speech or telephony. For audio, put the [Voice Pipeline](/features/voice-pipeline) or a [telephony provider](/features/telephony-providers) in front of the socket: a binary frame sent to `listen()` receives an `audio_not_supported` error and close code 1003.
 
 ```typescript
 import { agency } from '@framers/agentos';
@@ -942,7 +942,7 @@ Compose-mode `forge_tool` requests work as soon as `emergent` is on; code-forged
 
 ## Runnable Example Files
 
-The `examples/` directory of the repository contains standalone `.mjs` files. They import the built package from `../dist`, so build once and run them with Node:
+The `examples/` directory of the repository contains standalone `.mjs` files. They import the built package, from `../dist` or by its name through the package's `exports` map, so build once and run them with Node:
 
 ```bash
 pnpm install && pnpm run build
@@ -969,6 +969,11 @@ node examples/<file>.mjs
 | [`agentos-config-tools.mjs`](../../examples/agentos-config-tools.mjs) | The full runtime initialized with a tool from its config; the script fetches the tool from the orchestrator and runs it | [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), `createTestAgentOSConfig({ tools })`, `getToolOrchestrator().getTool()` |
 | [`gmi-completion-gateway.mjs`](../../examples/gmi-completion-gateway.mjs) | A GMI built with a completion gateway: the primary fails before any output, a fallback hop serves the turn, and the script prints each `USAGE_UPDATE`, `STEP_FINISHED` and `TOOL_RESULT` chunk and the turn's usage total | [`createCompletionGateway`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/completionGateway.ts), [`GatewayProviderManager`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gatewayProviderManager.ts), [`GMI`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) `processTurnStream()` |
 | [`schema-on-demand-local-module.mjs`](../../examples/schema-on-demand-local-module.mjs) | Loads an extension pack from a local module at run time through the `extensions_enable` meta-tool | [`createSchemaOnDemandPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/packs/schema-on-demand-pack.ts), [`ExtensionManager`](https://github.com/framerslab/agentos/blob/master/src/extensions/ExtensionManager.ts) |
+| [`text-processing-pipeline.mjs`](../../examples/text-processing-pipeline.mjs) | The three preset text pipelines over a paragraph and a line of code, tokens with positions and stems, and a pipeline built stage by stage; no API key | [`TextProcessingPipeline`](https://github.com/framerslab/agentos/blob/master/src/cognition/nlp/TextProcessingPipeline.ts), `createProsePipeline`, `createRagPipeline`, `createCodePipeline` |
+| [`text-statistics.mjs`](../../examples/text-statistics.mjs) | Words, sentences, stems, n-grams, keywords, readability, similarity, language and keyword classification of a text, with no model and no API key | [`StatisticalUtilityAI`](https://github.com/framerslab/agentos/blob/master/src/cognition/nlp/ai_utilities/StatisticalUtilityAI.ts) |
+| [`text-search-bm25.mjs`](../../examples/text-search-bm25.mjs) | BM25 keyword search with any, all and prefix matching, an index saved as JSON and restored, a stemming pipeline, and snippets; no API key | [`BM25Index`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/BM25Index.ts), [`LexicalIndex`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/LexicalIndex.ts), `snippetAround` |
+| [`text-hybrid-search.mjs`](../../examples/text-hybrid-search.mjs) | BM25 and vector search fused by reciprocal rank fusion over a chunked handbook, with a stand-in embedder; no API key | [`HybridSearcher`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/HybridSearcher.ts), `SemanticChunker`, `InMemoryVectorStore`, `reciprocalRankFusion` |
+| [`office-documents.mjs`](../../examples/office-documents.mjs) | An OpenDocument text and an EPUB book read to text from their bytes, the same text read in a worker thread, a read cancelled by its own signal, a document refused past a bound, a PDF refused while OCR is off, or the office files named on the command line; no API key | [`OfficeLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/OfficeLoader.ts), `OFFICE_TYPES`, [`loadIsolated`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/loadIsolated.ts), `DocumentTooLargeError`, `ScannedDocumentError` |
 
 ---
 

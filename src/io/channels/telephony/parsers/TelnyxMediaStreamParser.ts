@@ -1,78 +1,42 @@
 /**
- * @fileoverview Telnyx media stream WebSocket parser.
- *
- * ## Telnyx's asymmetric protocol
- *
- * Telnyx uses a fundamentally different approach than Twilio for inbound vs.
- * outbound audio on the media stream WebSocket:
- *
- * - **Inbound** (phone -> server): JSON-encoded messages with `event`, `stream_id`,
- *   and `media.chunk` (base64 mu-law audio) fields.
- * - **Outbound** (server -> phone): **Raw binary** WebSocket frames containing
- *   mu-law PCM bytes directly, with no JSON envelope whatsoever.
- *
- * This asymmetry means {@link formatOutgoing} returns the `Buffer` unchanged,
- * while {@link parseIncoming} parses JSON and base64-decodes the audio payload.
- *
- * ## Field name mapping
- *
- * Telnyx uses snake_case field names that differ from Twilio's conventions.
- * This parser normalises them to the shared {@link MediaStreamIncoming} shape:
- *
- * | Telnyx field         | Normalised field  |
- * |----------------------|-------------------|
- * | `stream_id`          | `streamSid`       |
- * | `call_control_id`    | `callSid`         |
- * | `media.chunk`        | `payload` (Buffer)|
- * | `media.track`        | (used for filtering, not emitted) |
- *
- * ## DTMF limitation
- *
- * Telnyx does NOT deliver DTMF events over the media stream WebSocket.
- * DTMF key-presses arrive as `call.dtmf.received` HTTP webhook events and
- * must be handled by {@link TelnyxVoiceProvider.parseWebhookEvent} instead.
- *
- * @see {@link https://developers.telnyx.com/docs/voice/media-streaming}
- * @module @framers/agentos/voice/parsers/TelnyxMediaStreamParser
+ * Telnyx media parser with an explicit documented carrier profile and a retained legacy profile.
+ * Carrier mode requires PCMU 8 kHz mono and preserves carrier timestamps and chunk counters.
+ * Legacy mode exists for existing callers and fixtures; it is not a live-carrier conformance claim.
  */
 
-import type { MediaStreamParser, MediaStreamIncoming } from '../MediaStreamParser.js';
+import { parseCarrierMedia, carrierAudio, carrierClear, carrierMark, type MediaStreamParser, type MediaStreamIncoming } from '../MediaStreamParser.js';
 
 /**
- * Parses the Telnyx media stream WebSocket protocol.
- *
- * Telnyx sends JSON-encoded messages for stream lifecycle events (`start`,
- * `stop`) and audio chunks (`media`). Unlike Twilio, Telnyx does NOT deliver
- * DTMF events over the media stream WebSocket -- those arrive as HTTP webhooks
- * to a separate endpoint and must be handled outside this parser.
- *
- * Outgoing audio is sent as a **raw binary Buffer** (mu-law PCM bytes without
- * any JSON envelope) because Telnyx accepts unframed binary WebSocket frames
- * directly. No explicit connection acknowledgment is needed after the
- * handshake.
- *
- * @see {@link https://developers.telnyx.com/docs/voice/media-streaming}
+ * Telnyx media parser with an explicit documented carrier profile and a retained legacy profile.
+ * Carrier mode requires PCMU 8 kHz mono and preserves carrier timestamps and chunk counters.
+ * Legacy mode exists for existing callers and fixtures; it is not a live-carrier conformance claim.
  */
-export class TelnyxMediaStreamParser implements MediaStreamParser {
+export class TelnyxMediaStreamParser<P extends 'legacy' | 'carrier' = 'legacy'> implements MediaStreamParser {
+  /** Selected once; omission preserves the old binary-output protocol. */
+  readonly protocol: P;
+  /** Carrier mode requires Telnyx bidirectional RTP with PCMU configured by the host. */
+  constructor(options: { protocol?: P } = {}) { this.protocol = (options.protocol ?? 'legacy') as P; }
+
   /**
-   * Parse a raw WebSocket frame from Telnyx's media stream.
+   * Parse a raw WebSocket frame from a Telnyx media stream.
    *
-   * Supported Telnyx event types:
-   * - `start` -- stream established; `stream_id` maps to `streamSid`,
-   *   `call_control_id` maps to `callSid`.
-   * - `media` -- audio chunk; `media.chunk` field contains base64-encoded mu-law
-   *   bytes; only `inbound` track frames are returned (outbound echoes are
-   *   discarded to prevent feedback loops).
-   * - `stop`  -- stream ended (call terminated or stream explicitly closed).
+   * The carrier profile ({@link parseCarrierMedia}) reads `start` with the nested
+   * `start.call_control_id` and `start.media_format`, which must declare PCMU at
+   * 8 kHz mono; `media` with its base64 `media.payload`, inbound track only;
+   * `dtmf`, `mark` and `stop`. An unsupported start format, an `error` event or
+   * an oversized frame throws.
    *
-   * Any other event type (e.g., future Telnyx additions, DTMF attempts) is
-   * silently dropped by returning `null`.
+   * The legacy profile keeps the released mapping: `stream_id` to `streamSid`, a
+   * top-level `call_control_id` to `callSid` and the audio in `media.chunk`, with
+   * `start`, `media` and `stop` alone.
    *
    * @param data - Raw WebSocket frame payload (JSON string or Buffer from Telnyx).
    * @returns Normalised {@link MediaStreamIncoming} event, or `null` for
    *   outbound audio tracks, unknown event types, or malformed messages.
    */
   parseIncoming(data: Buffer | string): MediaStreamIncoming | null {
+    if (this.protocol === 'carrier') return parseCarrierMedia('telnyx', data);
+
     const raw = typeof data === 'string' ? data : data.toString('utf8');
 
     let msg: Record<string, unknown>;
@@ -111,7 +75,7 @@ export class TelnyxMediaStreamParser implements MediaStreamParser {
         const track = media['track'] as string | undefined;
         if (track === 'outbound') return null;
 
-        // Telnyx names its audio payload field `chunk` (not `payload` like Twilio).
+        // The legacy profile reads the audio from `media.chunk`; the carrier profile reads `media.payload`.
         const chunk = media['chunk'] as string | undefined;
         if (!chunk) return null;
 
@@ -133,20 +97,9 @@ export class TelnyxMediaStreamParser implements MediaStreamParser {
     }
   }
 
-  /**
-   * Encode mu-law audio for transmission back to Telnyx.
-   *
-   * Telnyx accepts raw binary WebSocket frames -- no JSON wrapping is needed.
-   * This is the key asymmetry in Telnyx's protocol: inbound is JSON, outbound
-   * is raw binary.
-   *
-   * @param audio - Raw mu-law PCM bytes to send to the caller.
-   * @param _streamSid - Unused by Telnyx binary framing (accepted for interface
-   *   parity with other parsers).
-   * @returns The audio Buffer unchanged, ready to send as a binary WS frame.
-   */
-  formatOutgoing(audio: Buffer, _streamSid: string): Buffer {
-    return audio;
+  /** Carrier mode sends JSON media; legacy mode returns the original bytes. */
+  formatOutgoing(audio: Buffer, streamSid: string): P extends 'carrier' ? string : Buffer {
+    return (this.protocol === 'carrier' ? carrierAudio('telnyx', audio, streamSid) : audio) as P extends 'carrier' ? string : Buffer;
   }
 
   /**
@@ -161,4 +114,9 @@ export class TelnyxMediaStreamParser implements MediaStreamParser {
   formatConnected(_streamSid: string): null {
     return null;
   }
+
+  /** Stops queued carrier playback. */
+  formatClear(streamSid: string): string | null { return this.protocol === 'carrier' ? carrierClear('telnyx', streamSid) : null; }
+  /** Marks carrier playback. */
+  formatMark(streamSid: string, name: string): string | null { return this.protocol === 'carrier' ? carrierMark('telnyx', streamSid, name) : null; }
 }

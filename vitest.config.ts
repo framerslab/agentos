@@ -54,6 +54,7 @@ export default defineConfig({
     include: ['tests/**/*.{test,spec}.ts', 'src/**/*.{test,spec}.ts'],
     exclude: [
       'dist', 'coverage', 'node_modules',
+      'src/**/*.browser.test.ts',
       // onnxruntime-node native binary fails to self-register in CI (ERR_DLOPEN_FAILED)
       'src/io/media/audio/__tests__/MusicGenLocalProvider.test.ts',
       'src/io/media/audio/__tests__/AudioGenLocalProvider.test.ts',

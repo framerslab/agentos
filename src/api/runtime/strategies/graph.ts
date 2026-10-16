@@ -11,6 +11,13 @@
  * dependencies have all completed are started immediately — maximising
  * concurrency within the DAG constraints.
  *
+ * Each agent is gated by {@link checkBeforeAgentInput} over the input it
+ * receives, its dependencies' outputs included, and is sent the input the
+ * check read. The post-approval check also reads the task and each
+ * dependency's output on its own. An agent the handler rejects, or whose
+ * input the post-approval check blocks, does not run, and `[skipped by HITL]`
+ * stands as its output for the agents that depend on it.
+ *
  * @example
  * ```ts
  * agency({
@@ -39,10 +46,11 @@ import { AgencyConfigError } from '../types.js';
 import {
   isAgent,
   mergeDefaults,
-  checkBeforeAgent,
+  checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
+  seatMetadataOf,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -83,7 +91,7 @@ function topoSort(
   const deps = new Map<string, Set<string>>();
   for (const name of names) {
     const config = agents[name];
-    const dependsOn = (!isAgent(config) && (config as BaseAgentConfig).dependsOn) || [];
+    const dependsOn = seatMetadataOf(config).dependsOn ?? [];
     for (const dep of dependsOn) {
       if (!nameSet.has(dep)) {
         throw new AgencyConfigError(
@@ -151,20 +159,8 @@ export function compileGraph(
           tier.map(async (name) => {
             const agentOrConfig = agents[name];
 
-            /* HITL: check beforeAgent gate. */
-            const decision = await checkBeforeAgent(name, prompt, agentCalls, agencyConfig);
-            if (decision && !decision.approved) {
-              outputs.set(name, '[skipped by HITL]');
-              return null;
-            }
-
-            const a: Agent = isAgent(agentOrConfig)
-              ? agentOrConfig
-              : createAgent({ ...mergeDefaults(agentOrConfig as BaseAgentConfig, agencyConfig) });
-
             // Build context from dependsOn predecessors.
-            const config = agentOrConfig as BaseAgentConfig;
-            const depNames = (!isAgent(agentOrConfig) && config.dependsOn) || [];
+            const depNames = seatMetadataOf(agentOrConfig).dependsOn ?? [];
             let context = prompt;
             if (depNames.length > 0) {
               const depOutputs = depNames
@@ -173,8 +169,26 @@ export function compileGraph(
               context = `Original task: ${prompt}\n\nOutputs from dependencies:\n${depOutputs}`;
             }
 
+            /* HITL: check the beforeAgent gate over the input this agent
+               receives, its dependencies' outputs included, and over the task
+               and each of those outputs on its own, since the input puts more
+               text after them. The agent is sent the input the check read,
+               the approver's instructions with it. */
+            const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig, [
+              prompt,
+              ...depNames.map((d) => outputs.get(d) ?? ''),
+            ]);
+            if (gate.decision && !gate.decision.approved) {
+              outputs.set(name, '[skipped by HITL]');
+              return null;
+            }
+
+            const a: Agent = isAgent(agentOrConfig)
+              ? agentOrConfig
+              : createAgent({ ...mergeDefaults(agentOrConfig as BaseAgentConfig, agencyConfig) });
+
             const start = Date.now();
-            const result = (await a.generate(context, opts)) as Record<string, unknown>;
+            const result = (await a.generate(gate.input, opts)) as Record<string, unknown>;
             const durationMs = Date.now() - start;
 
             const resultText = (result.text as string) ?? '';
@@ -226,14 +240,8 @@ export function compileGraph(
           // agent-start/agent-end markers so the consumer knows the structure.
           for (const name of tier) {
             const agentOrConfig = agents[name];
-            const decision = await checkBeforeAgent(name, prompt, agentCalls, agencyConfig);
-            if (decision && !decision.approved) {
-              outputs.set(name, '[skipped by HITL]');
-              continue;
-            }
-
             const config = agentOrConfig as BaseAgentConfig;
-            const depNames = (!isAgent(agentOrConfig) && config.dependsOn) || [];
+            const depNames = seatMetadataOf(agentOrConfig).dependsOn ?? [];
 
             let context = prompt;
             if (depNames.length > 0) {
@@ -243,7 +251,20 @@ export function compileGraph(
               context = `Original task: ${prompt}\n\nOutputs from dependencies:\n${depOutputs}`;
             }
 
-            yield { type: 'agent-start' as const, agent: name, input: context };
+            // HITL: the beforeAgent gate reads the input this agent receives,
+            // and the task and each dependency's output on its own, as under
+            // execute(), and the agent is sent the input it read.
+            const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig, [
+              prompt,
+              ...depNames.map((d) => outputs.get(d) ?? ''),
+            ]);
+            if (gate.decision && !gate.decision.approved) {
+              outputs.set(name, '[skipped by HITL]');
+              continue;
+            }
+            const agentInput = gate.input;
+
+            yield { type: 'agent-start' as const, agent: name, input: agentInput };
 
             const a: Agent = isAgent(agentOrConfig)
               ? agentOrConfig
@@ -254,7 +275,7 @@ export function compileGraph(
             let resultToolCalls: Array<{ name: string; args: unknown; result?: unknown; error?: string }> = [];
             let recordExtras: ReturnType<typeof callRecordExtras>;
             const agentStart = Date.now();
-            const agentStream = a.stream(context, opts) as {
+            const agentStream = a.stream(agentInput, opts) as {
               textStream?: AsyncIterable<string>;
               text?: Promise<string>;
               usage?: Promise<ResultUsageSnapshot>;
@@ -292,7 +313,7 @@ export function compileGraph(
                 fallback: streamFallback,
               });
             } else {
-              const result = (await a.generate(context, opts)) as Record<string, unknown>;
+              const result = (await a.generate(agentInput, opts)) as Record<string, unknown>;
               agentText = (result.text as string) ?? '';
               if (agentText) {
                 yield { type: 'text' as const, text: agentText, agent: name };

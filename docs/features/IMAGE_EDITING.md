@@ -11,7 +11,7 @@
 3. [upscaleImage() API](#upscaleimage-api)
 4. [variateImage() API](#variateimage-api)
 5. [Provider Matrix](#provider-matrix)
-6. [Img2Img (Style Transfer)](#img2img-style-transfer)
+6. [Img2Img (a style from the prompt)](#img2img-a-style-from-the-prompt)
 7. [Inpainting](#inpainting)
 8. [Outpainting](#outpainting)
 9. [Upscaling](#upscaling)
@@ -46,7 +46,13 @@ const image = await imageToBuffer(imageUrl, { untrusted: true });
 const result = await editImage({ image, prompt: 'Make it a watercolor' });
 ```
 
-With `untrusted: true`, a file path or `file:` URL is refused (`code: 'IMAGE_LOCAL_FILE_REFUSED'`). An http(s) URL is fetched only from public network addresses: an address in the URL is checked before connecting, every address a host name resolves to is checked when the connection is made, and each of up to five redirects is checked the same way (`code: 'IMAGE_URL_REFUSED'`). The fetch stops at `maxBytes` (default 50 MiB) and `timeoutMs` (default 30 seconds). `isPublicNetworkAddress()` is the address check on its own.
+With `untrusted: true`, a file path or `file:` URL is refused (`code: 'IMAGE_LOCAL_FILE_REFUSED'`). An http(s) URL is fetched only from public network addresses (`code: 'IMAGE_URL_REFUSED'` otherwise):
+
+- An address in the URL is checked before connecting. Every address a host name resolves to, in both address families, is checked when the connection is made, and each of up to five redirects is checked the same way.
+- Public means inside the space allocated for the internet and outside its special blocks: for IPv6, `2000::/3` only. An IPv6 address that stands for an IPv4 address (IPv4-mapped, 6to4, NAT64) is judged by that address. The network's own NAT64 prefixes count too: the resolver reveals them through `ipv4only.arpa` (RFC 7050), and they are asked for only when a fetch goes to an IPv6 address. When the resolver fails to answer that question, the IPv6 address is refused. A network that announces its NAT64 prefix by other means than DNS64 is not covered.
+- A refusal's message is the same for a name that resolves to a refused address and for a name that does not resolve. `imageUrlRefusalDetail(error)` gives the difference for a log; it is not a property of the error.
+
+The image is held to `maxBytes` (default 50 MiB) whether it is fetched or decoded from the string (a data URL, raw base64): a fetched body is counted on the wire and after decoding, and an inline image's size is worked out from its text, so one over the limit is not decoded. The fetch stops at `timeoutMs` (default 30 seconds). `isPublicNetworkAddress()` is the address check on its own.
 
 **Mature edits:** `editImage` accepts a `policyTier` option. With `'mature'` or `'private-adult'`, Replicate's safety checker is turned off, and when the call pins neither `provider` nor `model`, the edit moves to the uncensored catalog's preferred Replicate model for its `capabilities` (default `['img2img']`). Pass `capabilities: ['face-consistency', 'img2img']` when preserving an existing character's identity matters. A mature edit has no fallback model. See [UNCENSORED_CONTENT.md](./UNCENSORED_CONTENT.md).
 
@@ -69,7 +75,7 @@ const result = await editImage({
 
   // Optional
   provider: 'stability',     // openai | stability | replicate | fal | stable-diffusion-local
-  model: 'sd3-medium',       // Provider-specific model override
+  model: 'sd3.5-medium',     // Provider-specific model override
   mask: maskBuffer,          // Mask for inpainting (white = edit, black = keep)
   strength: 0.75,            // How much to transform (0.0 = identical, 1.0 = full regeneration)
   negativePrompt: 'blurry, low quality',  // What to avoid
@@ -85,9 +91,21 @@ console.log(result.usage);              // { costUSD? }
 
 `mode` (`'img2img' | 'inpaint' | 'outpaint'`) is recorded on the call's trace span; no provider reads it. A provider inpaints when a `mask` is passed.
 
+Without `model`, each provider edits with its own default for edits, not with its text-to-image default:
+
+| Provider | Edit model when none is named |
+|----------|-------------------------------|
+| OpenAI | `gpt-image-2.5-sunburst` |
+| Stability AI | `sd3.5-medium` on the SD3 route in its image-to-image mode; with a `mask`, the inpaint endpoint, which takes no model |
+| Replicate | `stability-ai/sdxl` at a pinned version, or `black-forest-labs/flux-fill-pro` when a `mask` is passed |
+| fal | `fal-ai/flux/dev/image-to-image`, or `fal-ai/flux-lora/inpainting` when a `mask` is passed. `fal-ai/flux/dev` is text-to-image, so an edit that names it runs on the same endpoints |
+| Local SD (A1111) | the checkpoint the server has loaded |
+
+Replicate runs a model by its name alone only when it is one of its official models; any other model needs its version (`owner/name:version`), which is why the SDXL default carries one. Replicate gets an input image (the source, a mask, a style reference) inline as a data URL of its type when it is under 1 MB, as Replicate recommends; from 1 MB it is uploaded to Replicate's Files API (`POST /v1/files`) and the input names the file's URL. The upload, the prediction and its polling use one key of a key pool, since Replicate lets only the account that uploaded a file use it, and the file is deleted once the prediction ends, however it ends (Replicate keeps an uploaded file for 24 hours otherwise). A `baseUrl` that is not Replicate's, such as a self-hosted model, has no Files API and gets every image inline.
+
 ### Strength Parameter
 
-`strength` controls the balance between the source image and the prompt. Stability, Replicate, fal and the local A1111 provider pass it on; OpenAI's edit endpoint has no strength control and ignores it.
+`strength` controls the balance between the source image and the prompt. Stability, Replicate, fal and the local A1111 provider pass it on (Replicate's SDXL takes it as `prompt_strength`); OpenAI's edit endpoint has no strength control and ignores it.
 
 | Strength | Behavior |
 |----------|----------|
@@ -125,7 +143,7 @@ console.log(upscaled.url ?? `${upscaled.base64?.length} base64 chars`);
 
 | Provider | What it calls | Scale |
 |----------|---------------|-------|
-| Stability AI | the `stable-image/upscale/conservative` endpoint, with a target width of `width`, else 512 × `scale`, else 2048 | width-based |
+| Stability AI | the fast upscaler, `stable-image/upscale/fast`, which takes the image alone; `scale`, `width` and `height` are not used | 4x |
 | Replicate | `nightmareai/real-esrgan` unless `model` names another | 2x or 4x |
 | Local SD (A1111) | `/sdapi/v1/extra-single-image` with the `R-ESRGAN 4x+` upscaler | `scale`, or `width`/`height` |
 
@@ -135,7 +153,7 @@ OpenAI and fal do not upscale.
 
 ## variateImage() API
 
-Only the OpenAI provider implements variations.
+OpenAI makes a variation through its image edits endpoint, with `gpt-image-2.5-sunburst` and a prompt that asks for one; its `/images/variations` endpoint and the DALL·E models it served are retired. Every other provider that can edit makes a variation as an img2img edit whose strength is `variance`.
 
 ```typescript
 import { variateImage } from '@framers/agentos';
@@ -158,7 +176,7 @@ for (const variant of result.images) {
 }
 ```
 
-`variance` (0 to 1, default 0.5) is accepted for providers with a strength control; OpenAI's variations endpoint has none, so it has no effect there.
+`variance` (0 to 1, default 0.5) is the edit strength on the providers that make a variation as an edit. OpenAI's edits endpoint has no strength control, so there `variance` picks the prompt: below 0.5 it asks for a close variation, otherwise for a looser one.
 
 ---
 
@@ -170,7 +188,7 @@ for (const variant of result.images) {
 | **Img2Img** | Yes | Yes | Yes | Yes | Yes |
 | **Inpainting (mask)** | Yes | Yes | Yes | Yes | Yes |
 | **Upscaling** | No | Yes | Yes | No | Yes |
-| **Variations** | Yes | No | No | No | No |
+| **Variations** | Yes, as an edit with a variation prompt | As an img2img edit | As an img2img edit | As an img2img edit | As an img2img edit |
 | **Strength** | No | Yes | Yes | Yes | Yes |
 | **Negative Prompt** | No | Yes | Yes | Yes | Yes |
 | **Seed** | No | Yes | Yes | Yes | Yes |
@@ -181,9 +199,9 @@ A local server running ComfyUI serves text-to-image only; edits and upscales go 
 
 ---
 
-## Img2Img (Style Transfer)
+## Img2Img (a style from the prompt)
 
-Transform the style of an image while preserving its composition:
+Restyle an image by describing the style in the prompt, keeping its composition. To take the style from a reference image instead, use [`transferStyle()`](./STYLE_TRANSFER.md), which sends the provider both images.
 
 ```typescript
 import { editImage } from '@framers/agentos';
@@ -314,8 +332,8 @@ if (result.image.base64) {
 | `image` | `Buffer \| string` | **required** | Source image |
 | `provider` | `string` | Auto-detect | Upscale provider ID |
 | `model` | `string` | Provider default | Upscale model override |
-| `scale` | `2 \| 4` | `2` (Replicate, A1111) | Upscale factor; Stability uses a 2048-pixel width when neither `scale` nor `width` is set |
-| `width`, `height` | `number` | — | Target dimensions; they take precedence over `scale` |
+| `scale` | `2 \| 4` | `2` (Replicate, A1111) | Upscale factor; Stability's fast upscaler always returns 4x |
+| `width`, `height` | `number` | — | Target dimensions for the local A1111 provider, where they take precedence over `scale` |
 | `apiKey`, `baseUrl`, `providerOptions`, `usageLedger` | | | As for `editImage()` |
 
 ### variateImage() Options

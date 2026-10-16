@@ -104,6 +104,23 @@ describe('AgentOS memory tool auto-registration', () => {
     });
   }
 
+  it('logs feedback metadata without the feedback or correction', async () => {
+    const agentos = new AgentOS();
+    await agentos.initialize(createConfig());
+    const processFeedback = vi.spyOn(GMIManager.prototype, 'processUserFeedback').mockResolvedValue(undefined);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const sentinel = 'sentinel-words-7731';
+    const payload = { text: sentinel, correctedContent: sentinel };
+    await agentos.receiveFeedback('user-1', 'session-1', 'persona-1', payload);
+    expect(processFeedback).toHaveBeenCalledWith('user-1', 'session-1', 'persona-1', payload);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("UserID 'user-1', SessionID 'session-1', PersonaID 'persona-1'"),
+      { fields: ['text', 'correctedContent'], textLength: sentinel.length },
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);
+    await agentos.shutdown();
+  });
+
   it('loads standalone memory tools from AgentOS config during initialize()', async () => {
     const agentos = new AgentOS();
     const memory = await createTempMemory(true);

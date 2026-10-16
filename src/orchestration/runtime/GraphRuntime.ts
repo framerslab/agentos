@@ -26,7 +26,7 @@ import type {
   MissionGraphPatch,
 } from '../events/GraphEvent.js';
 import type { ICheckpointStore, Checkpoint } from '../checkpoint/ICheckpointStore.js';
-import { StateManager } from './StateManager.js';
+import { StateManager, type ParallelBranchWrites } from './StateManager.js';
 import { NodeScheduler } from './NodeScheduler.js';
 import { NodeExecutor, type NodeExecutionResult } from './NodeExecutor.js';
 import { safeEvaluateExpression } from './safeExpressionEvaluator.js';
@@ -185,7 +185,11 @@ export class GraphRuntime {
    *
    * Checkpoints are saved according to both the graph-wide `checkpointPolicy` and
    * per-node `checkpoint` settings. An `interrupt` event causes immediate suspension
-   * followed by a terminal `run_end`.
+   * followed by a terminal `run_end`. When a node interrupts or fails, the checkpoint
+   * the run resumes from is saved before any event that reports the node's result is
+   * yielded, so a consumer may stop iterating at `interrupt` or `error` and still
+   * resume the run. The `checkpoint_saved` event for that checkpoint comes after
+   * `interrupt` or `error`, so such a consumer resumes by the `runId` of `run_start`.
    *
    * @param graph - Compiled execution graph to run.
    * @param input - Initial user-provided input; frozen into `GraphState.input`.
@@ -215,10 +219,11 @@ export class GraphRuntime {
 
       // ── Parallel execution ───────────────────────────────────────────────
       // When multiple nodes are ready simultaneously (e.g. fan-out from START),
-      // execute them in parallel via Promise.all and merge their scratch updates
-      // using StateManager.mergeParallelBranches(). This is the key optimisation
-      // that makes fan-out/fan-in graphs like the parallel agency strategy
-      // actually run concurrently instead of sequentially.
+      // execute them in parallel via Promise.all and merge what they write to
+      // scratch and artifacts using StateManager.mergeParallelBranches(). This
+      // is the key optimisation that makes fan-out/fan-in graphs like the
+      // parallel agency strategy actually run concurrently instead of
+      // sequentially.
       //
       // Single-node batches fall through to the same code path (Promise.all
       // with a single element) so the logic is unified.
@@ -237,8 +242,8 @@ export class GraphRuntime {
       if (parallelBatchSize > 1) {
         const parallelReadyNodes = readyNodes.slice(0, parallelBatchSize);
         // Snapshot the state before fan-out so each branch starts from the
-        // same baseline. After all branches complete, we merge their scratch
-        // updates back into this baseline.
+        // same baseline. After all branches complete, we merge what each one
+        // wrote to scratch and artifacts back into this baseline.
         const baseState = state;
 
         // Collect events from parallel branches so we can yield them in order
@@ -302,17 +307,22 @@ export class GraphRuntime {
             if (result.scratchUpdate) {
               branchState = stateManager.updateScratch(branchState, result.scratchUpdate);
             }
-            if (result.artifactsUpdate) {
-              branchState = stateManager.updateArtifacts(branchState, result.artifactsUpdate);
-            } else if (result.success && result.output !== undefined && !result.routeTarget) {
+            let artifactsWrite: Record<string, unknown> | undefined = result.artifactsUpdate;
+            if (!artifactsWrite && result.success && result.output !== undefined && !result.routeTarget) {
               // Same default artifact promotion as the sequential path —
               // see the comment at the matching block below for context.
               const artifactKey =
                 typeof node.metadata?.outputAs === 'string' && node.metadata.outputAs.length > 0
                   ? node.metadata.outputAs
                   : nodeId;
-              branchState = stateManager.updateArtifacts(branchState, { [artifactKey]: result.output });
+              artifactsWrite = { [artifactKey]: result.output };
             }
+            if (artifactsWrite) {
+              branchState = stateManager.updateArtifacts(branchState, artifactsWrite);
+            }
+            // What this branch wrote: the merge after the batch takes these
+            // keys from its state, and none it only carried from `baseState`.
+            const writes: ParallelBranchWrites = { scratch: result.scratchUpdate, artifacts: artifactsWrite };
             events.push(...getResultEvents(result));
 
             // Check for interrupt / error in the parallel branch.
@@ -321,7 +331,7 @@ export class GraphRuntime {
               const terminationEvents: GraphEvent[] = [
                 { type: 'interrupt', nodeId, reason: 'human_approval' },
               ];
-              return { nodeId, events, branchState, earlyTermination: { type: 'interrupt' as const, events: terminationEvents } };
+              return { nodeId, events, branchState, writes, earlyTermination: { type: 'interrupt' as const, events: terminationEvents } };
             }
 
             if (!result.success) {
@@ -335,7 +345,7 @@ export class GraphRuntime {
                 type: 'error', nodeId,
                 error: { code: timeoutMs !== null ? 'NODE_TIMEOUT' : 'NODE_EXECUTION_FAILED', message: errorMessage },
               });
-              return { nodeId, events, branchState, earlyTermination: { type: 'error' as const, events: terminationEvents } };
+              return { nodeId, events, branchState, writes, earlyTermination: { type: 'error' as const, events: terminationEvents } };
             }
 
             events.push({ type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata });
@@ -359,27 +369,80 @@ export class GraphRuntime {
             }
 
             // Checkpoint AFTER (parallel branch).
+            const pendingEdges = this.resolvePendingEdgeIds(outEdges, targets);
+            let checkpointedAfter = false;
             if (node.checkpoint === 'after' || node.checkpoint === 'both' || graph.checkpointPolicy === 'every_node') {
               const checkpointId = await this.saveCheckpoint(
                 activeGraph, runId, nodeId, branchState, nodeResults,
-                completedNodes, skippedNodes, this.resolvePendingEdgeIds(outEdges, targets),
+                completedNodes, skippedNodes, pendingEdges,
               );
               branchState = this.attachCheckpointMetadata(branchState, checkpointId);
               events.push({ type: 'checkpoint_saved', checkpointId, nodeId });
+              checkpointedAfter = true;
             }
 
             return {
               nodeId,
               events,
               branchState,
+              writes,
+              pendingEdges,
+              checkpointedAfter,
               expansionRequests: [...(result.expansionRequests ?? [])],
             };
           }),
         );
 
+        // A branch that interrupted or failed stops the run, and the first one
+        // in batch order is where the loop below stops. Every branch has run,
+        // so save the checkpoint the run resumes from before yielding any of
+        // the batch's events: a consumer that stops iterating at one of them
+        // (`interrupt`, `error`) closes this generator at that `yield`, and
+        // the code after it never runs. The branches that completed are in
+        // `completedNodes`, so a resume does not run them again: the
+        // checkpoint holds what they wrote, merged with what the halting
+        // branch wrote, in batch order.
+        const haltingOutcome = parallelOutcomes.find((outcome) => outcome?.earlyTermination);
+        let haltState: GraphState | undefined;
+        let haltCheckpointId: string | undefined;
+        if (haltingOutcome) {
+          const haltedBatch = parallelOutcomes.filter(
+            (outcome) => !!outcome && (!outcome.earlyTermination || outcome === haltingOutcome),
+          ) as Array<NonNullable<typeof haltingOutcome>>;
+          const merged = stateManager.mergeParallelBranches(
+            baseState,
+            haltedBatch.map((outcome) => stateAsWritten(outcome.branchState, outcome.writes)),
+            haltedBatch.map((outcome) => outcome.writes),
+          );
+          haltState = { ...haltingOutcome.branchState, scratch: merged.scratch, artifacts: merged.artifacts };
+          // Another branch that interrupted waits for an answer nobody has
+          // been asked for, since the run reports the halting branch alone.
+          // A resume marks a `human`, `write` or `external` node complete
+          // from its recorded result, so the checkpoint leaves that branch's
+          // result out: the resumed run executes it again, and it interrupts.
+          const unanswered = new Set(
+            parallelOutcomes
+              .filter((outcome) => outcome?.earlyTermination?.type === 'interrupt' && outcome !== haltingOutcome)
+              .map((outcome) => outcome!.nodeId),
+          );
+          const haltNodeResults = Object.fromEntries(
+            Object.entries(nodeResults).filter(([resultNodeId]) => !unanswered.has(resultNodeId)),
+          );
+          haltCheckpointId = await this.saveCheckpoint(
+            activeGraph, runId, haltingOutcome.nodeId, haltState,
+            haltNodeResults, completedNodes, skippedNodes, [],
+          );
+        }
+
         // Yield all collected events from parallel branches in order,
         // then merge branch states into the shared baseline.
-        const successfulBranches: GraphState[] = [];
+        const successfulBranches: Array<{
+          nodeId: string;
+          branchState: GraphState;
+          writes: ParallelBranchWrites;
+          pendingEdges?: string[];
+          checkpointedAfter?: boolean;
+        }> = [];
         let earlyTermination = false;
 
         for (const outcome of parallelOutcomes) {
@@ -395,16 +458,15 @@ export class GraphRuntime {
             for (const event of outcome.earlyTermination.events) {
               yield event;
             }
-            // Save checkpoint and terminate.
-            const checkpointId = await this.saveCheckpoint(
-              activeGraph, runId, outcome.nodeId, outcome.branchState,
-              nodeResults, completedNodes, skippedNodes, [],
-            );
-            state = this.attachCheckpointMetadata(outcome.branchState, checkpointId);
+            // This is the halting branch; the batch's checkpoint was saved above.
+            const checkpointId = haltCheckpointId!;
+            state = this.attachCheckpointMetadata(haltState!, checkpointId);
             yield { type: 'checkpoint_saved', checkpointId, nodeId: outcome.nodeId };
-            if (outcome.earlyTermination.type === 'interrupt') {
-              yield { type: 'interrupt', nodeId: outcome.nodeId, reason: 'human_approval' };
-            } else {
+            // An interrupting branch's termination events already hold its
+            // `interrupt`. A failing branch's hold its `error`, and the
+            // `interrupt` that stops the run follows the checkpoint, as for a
+            // node outside a batch.
+            if (outcome.earlyTermination.type === 'error') {
               const node = graph.nodes.find(n => n.id === outcome.nodeId);
               yield { type: 'interrupt', nodeId: outcome.nodeId, reason: node?.type === 'guardrail' ? 'guardrail_violation' : 'error' };
             }
@@ -413,17 +475,38 @@ export class GraphRuntime {
             break;
           }
 
-          successfulBranches.push(outcome.branchState);
+          successfulBranches.push(outcome);
         }
 
         if (earlyTermination) return;
 
         // Merge all branch states back into the baseline using StateManager.
-        // This is the merge step that makes parallel execution correct:
-        // each branch may have written to different scratch keys, and the
-        // reducer configuration determines how conflicts are resolved.
+        // This is the merge step that makes parallel execution correct: each
+        // branch contributes the scratch and artifacts keys it wrote, in batch
+        // order, and the reducer configuration determines how writes to the
+        // same key combine.
         if (successfulBranches.length > 0) {
-          state = stateManager.mergeParallelBranches(baseState, successfulBranches);
+          state = stateManager.mergeParallelBranches(
+            baseState,
+            successfulBranches.map((branch) => stateAsWritten(branch.branchState, branch.writes)),
+            successfulBranches.map((branch) => branch.writes),
+          );
+
+          // A branch that saved a checkpoint after it ran saved its own copy of
+          // the state, and the nodes that checkpoint lists as completed can
+          // include siblings that finished before it. Save the merged state as
+          // well, so the last checkpoint of the batch holds what every branch
+          // wrote.
+          if (successfulBranches.some((branch) => branch.checkpointedAfter)) {
+            const checkpointNodeId = successfulBranches[successfulBranches.length - 1]!.nodeId;
+            const checkpointId = await this.saveCheckpoint(
+              activeGraph, runId, checkpointNodeId, state, nodeResults,
+              completedNodes, skippedNodes,
+              successfulBranches.flatMap((branch) => branch.pendingEdges ?? []),
+            );
+            state = this.attachCheckpointMetadata(state, checkpointId);
+            yield { type: 'checkpoint_saved', checkpointId, nodeId: checkpointNodeId };
+          }
         }
 
         if (this.config.expansionHandler) {
@@ -578,16 +661,14 @@ export class GraphRuntime {
               : nodeId;
           state = stateManager.updateArtifacts(state, { [artifactKey]: result.output });
         }
-        for (const event of getResultEvents(result)) {
-          yield event;
-        }
-
-        // ── Human interrupt ───────────────────────────────────────────────────
-        if (result.interrupt) {
-          yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
-          yield { type: 'interrupt', nodeId, reason: 'human_approval' };
-          // Persist so the run can be resumed later.
-          const checkpointId = await this.saveCheckpoint(
+        // A node that interrupts or fails stops the run here. Save the
+        // checkpoint the run resumes from before yielding the node's events:
+        // a consumer that stops iterating at one of them (`interrupt`,
+        // `error`) closes this generator at that `yield`, and the code after
+        // it never runs.
+        let haltCheckpointId: string | undefined;
+        if (result.interrupt || !result.success) {
+          haltCheckpointId = await this.saveCheckpoint(
             activeGraph,
             runId,
             nodeId,
@@ -597,8 +678,18 @@ export class GraphRuntime {
             skippedNodes,
             [],
           );
-          state = this.attachCheckpointMetadata(state, checkpointId);
-          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+          state = this.attachCheckpointMetadata(state, haltCheckpointId);
+        }
+
+        for (const event of getResultEvents(result)) {
+          yield event;
+        }
+
+        // ── Human interrupt ───────────────────────────────────────────────────
+        if (result.interrupt) {
+          yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
+          yield { type: 'interrupt', nodeId, reason: 'human_approval' };
+          yield { type: 'checkpoint_saved', checkpointId: haltCheckpointId!, nodeId };
           yield { type: 'run_end', runId, finalOutput: state.artifacts, totalDurationMs: Date.now() - startTime };
           return;
         }
@@ -617,18 +708,7 @@ export class GraphRuntime {
               message: errorMessage,
             },
           };
-          const checkpointId = await this.saveCheckpoint(
-            activeGraph,
-            runId,
-            nodeId,
-            state,
-            nodeResults,
-            completedNodes,
-            skippedNodes,
-            [],
-          );
-          state = this.attachCheckpointMetadata(state, checkpointId);
-          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+          yield { type: 'checkpoint_saved', checkpointId: haltCheckpointId!, nodeId };
           yield {
             type: 'interrupt',
             nodeId,
@@ -903,14 +983,12 @@ export class GraphRuntime {
               : nodeId;
           state = stateManager.updateArtifacts(state, { [artifactKey]: result.output });
         }
-        for (const event of getResultEvents(result)) {
-          yield event;
-        }
-
-        if (result.interrupt) {
-          yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
-          yield { type: 'interrupt', nodeId, reason: 'human_approval' };
-          const checkpointId = await this.saveCheckpoint(
+        // As in stream(): save the checkpoint of a node that interrupts or
+        // fails before yielding its events, so a consumer that stops
+        // iterating at `interrupt` or `error` still finds it saved.
+        let haltCheckpointId: string | undefined;
+        if (result.interrupt || !result.success) {
+          haltCheckpointId = await this.saveCheckpoint(
             activeGraph,
             runId,
             nodeId,
@@ -920,8 +998,17 @@ export class GraphRuntime {
             skippedNodes,
             [],
           );
-          state = this.attachCheckpointMetadata(state, checkpointId);
-          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+          state = this.attachCheckpointMetadata(state, haltCheckpointId);
+        }
+
+        for (const event of getResultEvents(result)) {
+          yield event;
+        }
+
+        if (result.interrupt) {
+          yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
+          yield { type: 'interrupt', nodeId, reason: 'human_approval' };
+          yield { type: 'checkpoint_saved', checkpointId: haltCheckpointId!, nodeId };
           yield { type: 'run_end', runId, finalOutput: state.artifacts, totalDurationMs: Date.now() - startTime };
           return;
         }
@@ -940,18 +1027,7 @@ export class GraphRuntime {
               message: errorMessage,
             },
           };
-          const checkpointId = await this.saveCheckpoint(
-            activeGraph,
-            runId,
-            nodeId,
-            state,
-            nodeResults,
-            completedNodes,
-            skippedNodes,
-            [],
-          );
-          state = this.attachCheckpointMetadata(state, checkpointId);
-          yield { type: 'checkpoint_saved', checkpointId, nodeId };
+          yield { type: 'checkpoint_saved', checkpointId: haltCheckpointId!, nodeId };
           yield {
             type: 'interrupt',
             nodeId,
@@ -1260,6 +1336,27 @@ function evaluateConditionExpression(expr: string, state: GraphState): unknown {
 
 function getResultEvents(result: NodeExecutionResult): GraphEvent[] {
   return Array.isArray(result.events) ? result.events : [];
+}
+
+/**
+ * The state a branch of a parallel batch gives the merge after the batch: its
+ * own state, with each scratch key it wrote holding the value it wrote.
+ *
+ * Inside the branch, a reducer registered for the key has already combined the
+ * write with the value from before the batch. The merge combines each branch's
+ * value with the value merged so far, which starts from that same value, so
+ * given the combined value it would count the value from before the batch once
+ * more for every branch that wrote the key.
+ *
+ * @param branchState - The branch's state after its node ran.
+ * @param writes      - What the branch wrote.
+ */
+function stateAsWritten(branchState: GraphState, writes: ParallelBranchWrites): GraphState {
+  if (!writes.scratch) return branchState;
+  return {
+    ...branchState,
+    scratch: { ...(branchState.scratch as Record<string, unknown>), ...writes.scratch },
+  };
 }
 
 /**

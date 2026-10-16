@@ -6,6 +6,7 @@ import type {
   JSONSchemaObject,
 } from '../../../../core/tools/ITool.js';
 import type { WikiPage } from '../../../substrate/memory/wiki/types.js';
+import { assertWikiPageId, InvalidWikiPageIdError } from '../../../substrate/memory/wiki/WikiPageId.js';
 
 /** The slice of the wiki store this tool needs (injected for testability). */
 export interface ReadMemoryPagePort {
@@ -31,6 +32,10 @@ interface ReadMemoryPageOutput {
  * Lets an agent open a full page from its long-term memory wiki by id. Pairs
  * with the `index.md` catalog injected into the system prelude: the agent sees
  * the catalog, then reads the page it needs.
+ *
+ * An id without the wiki's id form (see `isWikiPageId`) is answered with an
+ * error result whose `details.code` is `INVALID_WIKI_PAGE_ID`, and the port is
+ * not called for it.
  */
 export class ReadMemoryPageTool implements ITool<ReadMemoryPageInput, ReadMemoryPageOutput> {
   readonly id = 'read-memory-page-v1';
@@ -58,7 +63,16 @@ export class ReadMemoryPageTool implements ITool<ReadMemoryPageInput, ReadMemory
     args: ReadMemoryPageInput,
     _context: ToolExecutionContext,
   ): Promise<ToolExecutionResult<ReadMemoryPageOutput>> {
-    const page = await this.port.readPage(args.id);
+    const id: unknown = args?.id;
+    let page: WikiPage | null;
+    try {
+      // Checked here as well as in the store, so a port that maps ids to files without the check is covered too.
+      assertWikiPageId(id);
+      page = await this.port.readPage(id);
+    } catch (err) {
+      if (!(err instanceof InvalidWikiPageIdError)) throw err;
+      return { success: false, error: err.message, details: { code: err.code, problem: err.problem } };
+    }
     if (!page) {
       return { success: false, error: `No memory page found with id "${args.id}".` };
     }

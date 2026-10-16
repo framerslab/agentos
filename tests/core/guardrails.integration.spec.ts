@@ -4,10 +4,13 @@ import type { AgentOSConfig } from '../../src/api/AgentOS';
 import type { AgentOSInput } from '../../src/api/types/AgentOSInput';
 import {
   AgentOSResponseChunkType,
+  isActionableToolCallRequestChunk,
   type AgentOSResponse,
   type AgentOSFinalResponseChunk,
   type AgentOSErrorChunk,
+  type AgentOSToolCallRequestChunk,
 } from '../../src/api/types/AgentOSResponse';
+import { wrapOutputGuardrails } from '../../src/safety/guardrails/guardrailDispatcher';
 import type { IStreamClient, StreamClientId } from '../../src/core/streaming/IStreamClient';
 import type { StreamId } from '../../src/core/streaming/StreamingManager';
 import type { ILogger } from '../../src/logging/ILogger';
@@ -518,3 +521,162 @@ describe('AgentOS.processRequest guardrail integration', () => {
   });
 });
 
+
+describe('AgentOS.processRequest output guards and tool calls', () => {
+  const SHELL_CALL = { id: 'call-1', name: 'shell_execute', arguments: { command: 'rm -rf /' } };
+
+  function buildToolCallChunk(streamId: StreamId, executionMode: 'external' | 'internal' = 'external'): AgentOSResponse {
+    return {
+      type: AgentOSResponseChunkType.TOOL_CALL_REQUEST,
+      streamId,
+      gmiInstanceId: 'gmi-1',
+      personaId: 'persona-default',
+      isFinal: false,
+      timestamp: new Date().toISOString(),
+      toolCalls: [SHELL_CALL],
+      rationale: 'Agent requires tool execution.',
+      executionMode,
+      requiresExternalToolResult: executionMode === 'external',
+    } as AgentOSResponse;
+  }
+
+  /** A guard that evaluates tool calls: it records each chunk it is given and answers a tool call with `verdict`. */
+  function toolCallGuard(
+    verdict: GuardrailEvaluationResult | null,
+    config: GuardrailConfig = {},
+  ): IGuardrailService & { seen: AgentOSResponse[] } {
+    const seen: AgentOSResponse[] = [];
+    return {
+      id: 'tool-call-guard',
+      config: { ...config, evaluateToolCalls: true } as GuardrailConfig,
+      seen,
+      async evaluateOutput({ chunk }: GuardrailOutputPayload) {
+        seen.push(chunk);
+        return chunk.type === AgentOSResponseChunkType.TOOL_CALL_REQUEST ? verdict : null;
+      },
+    };
+  }
+
+  /** A guard written for text: it blocks any chunk that is not text, so a tool call that reached it would be refused. */
+  function textOnlyGuard(): IGuardrailService & { seen: AgentOSResponse[] } {
+    const seen: AgentOSResponse[] = [];
+    return {
+      id: 'text-guard',
+      config: { evaluateStreamingChunks: true },
+      seen,
+      async evaluateOutput({ chunk }: GuardrailOutputPayload) {
+        seen.push(chunk);
+        const isText = chunk.type === AgentOSResponseChunkType.TEXT_DELTA || chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE;
+        return isText ? null : { action: GuardrailAction.BLOCK, reasonCode: 'NOT_TEXT' };
+      },
+    };
+  }
+
+  /** Reads the stream as a host does: each actionable tool call it receives, it executes. */
+  async function runAsHost(agent: AgentOS, execute: (call: unknown) => void): Promise<AgentOSResponse[]> {
+    const responses: AgentOSResponse[] = [];
+    for await (const chunk of agent.processRequest(baseInput)) {
+      responses.push(chunk);
+      if (isActionableToolCallRequestChunk(chunk)) {
+        for (const call of chunk.toolCalls) execute(call);
+      }
+    }
+    return responses;
+  }
+
+  function turnThatCallsATool(streamId: StreamId, guard: IGuardrailService): AgentOS {
+    const streamingManager = new FakeStreamingManager();
+    const chunks = [buildDeltaChunk(streamId, 'persona-default', 'Clearing the disk now.'), buildToolCallChunk(streamId)];
+    return createAgentUnderTest(guard, streamingManager, new StubOrchestrator(streamingManager, streamId, chunks));
+  }
+
+  it('a guard that evaluates tool calls receives the tool-call chunk as the stream carries it, and a call it allows reaches the host', async () => {
+    const guard = toolCallGuard({ action: GuardrailAction.FLAG, reason: 'a shell command', reasonCode: 'SHELL' });
+    const execute = vi.fn();
+    const responses = await runAsHost(turnThatCallsATool('stream-tool-flag', guard), execute);
+    expect(guard.seen.map((c) => c.type)).toEqual([AgentOSResponseChunkType.TOOL_CALL_REQUEST]);
+    expect((guard.seen[0] as AgentOSToolCallRequestChunk).toolCalls).toEqual([SHELL_CALL]);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledWith(SHELL_CALL);
+    const sent = responses.find((r) => r.type === AgentOSResponseChunkType.TOOL_CALL_REQUEST);
+    expect(sent?.metadata?.guardrail?.output?.[0]).toMatchObject({
+      action: GuardrailAction.FLAG,
+      reasonCode: 'SHELL',
+      metadata: { guardrailId: 'tool-call-guard' },
+    });
+  });
+
+  it('a block stops the call: the host never receives it, and the stream ends with the guard\'s verdict', async () => {
+    const guard = toolCallGuard({ action: GuardrailAction.BLOCK, reason: 'a destructive shell command', reasonCode: 'CODE_SAFETY_CRITICAL' });
+    const execute = vi.fn();
+    const responses = await runAsHost(turnThatCallsATool('stream-tool-block', guard), execute);
+    expect(execute).not.toHaveBeenCalled();
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.ERROR]);
+    const error = responses[1] as AgentOSErrorChunk;
+    expect(error.code).toBe('CODE_SAFETY_CRITICAL');
+    expect(error.message).toBe('a destructive shell command');
+    expect(error.details).toMatchObject({ action: GuardrailAction.BLOCK, metadata: { guardrailId: 'tool-call-guard' } });
+  });
+
+  it('a block with a replacement reply ends the stream with that reply, as a block on text does', async () => {
+    const guard = toolCallGuard({ action: GuardrailAction.BLOCK, reasonCode: 'OUTWARD_ACT', replacementText: 'Your guide runs no commands on your machine.' });
+    const execute = vi.fn();
+    const responses = await runAsHost(turnThatCallsATool('stream-tool-replace', guard), execute);
+    expect(execute).not.toHaveBeenCalled();
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.FINAL_RESPONSE]);
+    const final = responses[1] as AgentOSFinalResponseChunk;
+    expect(final.finalResponseText).toBe('Your guide runs no commands on your machine.');
+    expect(final.metadata?.guardrail?.output?.[0]).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'OUTWARD_ACT' });
+  });
+
+  it('a sanitize cannot rewrite a tool call: it is applied as a block that keeps the guard\'s reason', async () => {
+    const guard = toolCallGuard(
+      { action: GuardrailAction.SANITIZE, modifiedText: '{}', reason: 'the command names the root folder', reasonCode: 'ROOT_PATH' },
+      { canSanitize: true },
+    );
+    const execute = vi.fn();
+    const responses = await runAsHost(turnThatCallsATool('stream-tool-sanitize', guard), execute);
+    expect(execute).not.toHaveBeenCalled();
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.ERROR]);
+    const error = responses[1] as AgentOSErrorChunk;
+    expect(error.code).toBe('ROOT_PATH');
+    expect(error.message).toContain('the command names the root folder');
+    expect(error.details).toMatchObject({ action: GuardrailAction.BLOCK });
+  });
+
+  it('a call the runtime runs itself reaches the guard too, and a block ends the stream with the verdict', async () => {
+    const streamId = 'stream-tool-internal';
+    const streamingManager = new FakeStreamingManager();
+    const chunks = [buildToolCallChunk(streamId, 'internal'), buildFinalChunk(streamId, 'persona-default', 'The disk is clear.')];
+    const guard = toolCallGuard({ action: GuardrailAction.BLOCK, reasonCode: 'CODE_SAFETY_CRITICAL' });
+    const responses = await collectResponses(createAgentUnderTest(guard, streamingManager, new StubOrchestrator(streamingManager, streamId, chunks)), baseInput);
+    expect(guard.seen.map((c) => c.type)).toEqual([AgentOSResponseChunkType.TOOL_CALL_REQUEST]);
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+    expect((responses[0] as AgentOSErrorChunk).code).toBe('CODE_SAFETY_CRITICAL');
+  });
+
+  it('a guard that does not evaluate tool calls never receives one, and the call reaches the host as before', async () => {
+    const guard = textOnlyGuard();
+    const execute = vi.fn();
+    const responses = await runAsHost(turnThatCallsATool('stream-tool-text-guard', guard), execute);
+    expect(guard.seen.map((c) => c.type)).toEqual([AgentOSResponseChunkType.TEXT_DELTA]);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.TOOL_CALL_REQUEST]);
+  });
+
+  it('beside a guard that evaluates tool calls, a text-only guard still sees only text', async () => {
+    const streamId = 'stream-tool-two-guards';
+    async function* turn(): AsyncGenerator<AgentOSResponse, void, undefined> {
+      yield buildDeltaChunk(streamId, 'persona-default', 'Clearing the disk now.');
+      yield buildToolCallChunk(streamId);
+    }
+    const text = textOnlyGuard();
+    const tools = toolCallGuard(null);
+    const out: AgentOSResponse[] = [];
+    const context = { userId: 'user-1', sessionId: 'session-1' };
+    for await (const chunk of wrapOutputGuardrails([text, tools], context, turn(), { streamId })) out.push(chunk);
+    expect(text.seen.map((c) => c.type)).toEqual([AgentOSResponseChunkType.TEXT_DELTA]);
+    expect(tools.seen.map((c) => c.type)).toEqual([AgentOSResponseChunkType.TOOL_CALL_REQUEST]);
+    expect(out.map((r) => r.type)).toEqual([AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.TOOL_CALL_REQUEST]);
+  });
+});

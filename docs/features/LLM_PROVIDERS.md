@@ -1,6 +1,6 @@
 # LLM Providers — multi-provider configuration & routing
 
-AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/IProvider.ts) interface. Thirteen providers are wired in directly: eleven reached with an API key or a base URL, and two local CLI bridges that ride an existing Claude Max or Google account subscription. Three of the thirteen are gateways: OpenRouter and Requesty route to models from many vendors, and LiteLLM is a proxy you host. Every provider speaks the same streaming protocol, supports the same tool-call shape (with the documented exceptions below), and participates in the same cost ledger. The fallback chain is auto-built from whichever keys are set in the environment and is overridable per agent.
+AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/IProvider.ts) interface. Thirteen providers are wired in directly: eleven reached with an API key or a base URL, and two local CLI bridges that ride an existing Claude Max or Google account subscription. Three of the thirteen are gateways: OpenRouter and Requesty route to models from many vendors, and LiteLLM is a proxy you host. Every provider speaks the same streaming protocol, supports the same tool-call shape (with the documented exceptions below), and reports each call's token usage in the same shape; [Prices and Cost Reporting](#prices-and-cost-reporting) says which providers also report the call's cost. The fallback chain is auto-built from whichever keys are set in the environment and is overridable per agent.
 
 ---
 
@@ -12,7 +12,7 @@ AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/fra
 4. [Auto-Detection Order](#auto-detection-order)
 5. [Provider Configuration](#provider-configuration)
 6. [Fallback Behavior](#fallback-behavior)
-7. [Cost Tiers](#cost-tiers)
+7. [Prices and Cost Reporting](#prices-and-cost-reporting)
 8. [Provider Details](#provider-details)
    - [OpenAI](#openai)
    - [Anthropic](#anthropic)
@@ -50,21 +50,23 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 
 ## Provider Matrix
 
-| Provider | Env Var | Default Model | Streaming | Tool Calling | Vision | Embedding | Cost Tier |
+| Provider | Env Var | Default Model | Streaming | Tool Calling | Vision | Embedding | Default model's price (input / output, USD per 1M tokens) |
 |----------|---------|---------------|-----------|--------------|--------|-----------|-----------|
-| **OpenAI** | `OPENAI_API_KEY` | `gpt-4o` | Yes | Yes | Yes | Yes | $$$ |
-| **Anthropic** | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` | Yes | Yes | Yes | No | $$$ |
-| **Gemini** | `GEMINI_API_KEY` | `gemini-2.5-flash` | Yes | Yes | Yes | Yes | $$ |
-| **Groq** | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | Yes | Yes | No | No | $ |
-| **Together** | `TOGETHER_API_KEY` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | Yes | Yes | No | No | $ |
-| **Mistral** | `MISTRAL_API_KEY` | `mistral-large-latest` | Yes | Yes | No | Yes | $$ |
-| **xAI** | `XAI_API_KEY` | `grok-2` | Yes | Yes | Yes | No | $$ |
-| **OpenRouter** | `OPENROUTER_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | Varies |
-| **Requesty** | `REQUESTY_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | Varies |
-| **LiteLLM** | _(none read; pass `apiKey`)_ | _(none; pass `model`)_ | Yes | Yes* | Yes* | Yes* | Varies |
+| **OpenAI** | `OPENAI_API_KEY` | `gpt-4o` | Yes | Yes | Yes | Yes | $2.50 / $10.00 |
+| **Anthropic** | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` | Yes | Yes | Yes | No | $3.00 / $15.00 |
+| **Gemini** | `GEMINI_API_KEY` | `gemini-2.5-flash` | Yes | Yes | Yes | Yes | $0.30 / $2.50 |
+| **Groq** | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | Yes | Yes | No | No | Enterprise contracts only |
+| **Together** | `TOGETHER_API_KEY` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | Yes | Yes | No | No | $1.04 / $1.04 |
+| **Mistral** | `MISTRAL_API_KEY` | `mistral-large-latest` | Yes | Yes | No | Yes | $0.50 / $1.50 |
+| **xAI** | `XAI_API_KEY` | `grok-2` | Yes | Yes | Yes | No | Not on xAI's model list |
+| **OpenRouter** | `OPENROUTER_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | $2.50 / $10.00 |
+| **Requesty** | `REQUESTY_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | $2.50 / $10.00 |
+| **LiteLLM** | _(none read; pass `apiKey`)_ | _(none; pass `model`)_ | Yes | Yes* | Yes* | Yes* | Your proxy's upstream prices |
 | **Ollama** | `OLLAMA_BASE_URL` | `llama3.2` | Yes | Partial | Model-dep. | Yes | Free |
 | **Claude Code CLI** | _(PATH detection)_ | `claude-sonnet-4-6` | Yes | Yes | Yes | No | Free* |
 | **Gemini CLI** | _(PATH detection)_ | `gemini-3.5-flash` | Yes | Partial** | Yes | No | Free* |
+
+Prices are the vendors' list prices, read on 2026-10-12; [Prices and Cost Reporting](#prices-and-cost-reporting) links each source.
 
 *CLI providers use your existing subscription — $0 per token.
 **Gemini CLI tool calling uses XML prompt-based parsing (less reliable than native API tool calling).
@@ -172,6 +174,8 @@ OPENROUTER_API_KEY=sk-or-...
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
+For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list that its requests draw their key from. [API Key Rotation](../KEY_ROTATION.md) lists those providers, the ones that rest a key after a quota error, and the ones that need a single key.
+
 ### Per-Agent Override
 
 Individual agents pick their provider/model directly in the `agent({ ... })` config:
@@ -225,6 +229,12 @@ another vendor accepts: OpenRouter's routing controls (`provider`, `models`,
 `route`, `transforms`) reach only OpenRouter, and Gemini's request fields
 (`thinkingConfig`, `topK`, `safetySettings` and the rest of
 [`GEMINI_ONLY_PARAM_KEYS`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/openrouter-only-params.ts)) reach only Gemini.
+
+With `planning` on, the planning call carries the caller's messages, so it
+takes OpenRouter's routing controls and `plugins` from `customModelParams`: a
+`provider.data_collection: 'deny'` or a context-compression plugin set for
+the turn holds for it too. The other keys, such as `max_tokens` or
+`response_format`, go to the turn's requests alone.
 
 ```
 Primary provider (e.g., Anthropic)
@@ -286,15 +296,34 @@ export OPENROUTER_API_KEY=sk-or-...
 
 ---
 
-## Cost Tiers
+## Prices and Cost Reporting
 
-AgentOS tracks token usage and cost across all providers:
+Every provider reports each call's token usage. Whether the result also carries the call's cost, `usage.costUSD`, depends on the provider:
 
-| Tier | Providers | Approximate Cost (1M tokens) |
-|------|-----------|------------------------------|
-| **$** (Budget) | Groq, Together, Ollama (free) | $0.00–$0.60 |
-| **$$** (Standard) | Gemini, Mistral, xAI, OpenRouter (varies) | $0.50–$3.00 |
-| **$$$** (Premium) | OpenAI, Anthropic | $3.00–$15.00 |
+| Provider | `usage.costUSD` |
+|----------|-----------------|
+| OpenAI, Anthropic, Gemini | Priced from the provider's own table of the vendor's list prices ([`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), [`AnthropicProvider.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/AnthropicProvider.ts), [`GeminiProvider.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiProvider.ts)). A model the table has no row for reports no cost. |
+| OpenRouter, Requesty | The cost the gateway returns with the response |
+| Ollama, Claude Code CLI, Gemini CLI | `0` |
+| Groq, Together, Mistral, xAI, LiteLLM | These providers send their calls through the OpenAI provider, which prices a call from OpenAI's table ([`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts)) by the model id the response names, exact or with a trailing `-YYYY-MM-DD` removed; an id the table has no row for reports no cost. The table lists only OpenAI's models, so a call to the default model of Groq, Together, Mistral or xAI reports no cost, and a LiteLLM call whose response names an OpenAI model, such as `gpt-4o-mini`, is priced at OpenAI's list price. |
+
+The list prices of the default text models, in USD per 1M tokens, as each vendor's page gave them on 2026-10-12. Each vendor's other models cost more or less; the linked pages list them.
+
+| Provider | Default text model | Input | Output | Source |
+|----------|--------------------|-------|--------|--------|
+| Ollama | `llama3.2` | 0 | 0 | Runs on your machine |
+| Claude Code CLI | `claude-sonnet-4-6` | 0 | 0 | Uses your existing subscription |
+| Gemini CLI | `gemini-3.5-flash` | 0 | 0 | Uses your existing subscription |
+| Gemini | `gemini-2.5-flash` | $0.30 ($1.00 for audio) | $2.50, thinking included | [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing) |
+| Mistral | `mistral-large-latest` (Mistral Large 3) | $0.50 | $1.50 | [Mistral Large 3](https://docs.mistral.ai/models/mistral-large-3-25-12) |
+| Together | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | $1.04 | $1.04 | [Together AI pricing](https://www.together.ai/pricing) |
+| OpenAI | `gpt-4o` | $2.50 | $10.00 | [OpenAI pricing](https://developers.openai.com/api/docs/pricing) |
+| OpenRouter | `openai/gpt-4o` | $2.50 | $10.00 | [OpenRouter: GPT-4o](https://openrouter.ai/openai/gpt-4o) |
+| Requesty | `openai/gpt-4o` | $2.50 | $10.00 | [Requesty model list](https://router.requesty.ai/v1/models) |
+| Anthropic | `claude-sonnet-4-6` | $3.00 | $15.00 | [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing) |
+| Groq | `llama-3.3-70b-versatile` | On request | On request | [Groq models](https://console.groq.com/docs/models): enterprise contracts only ([Groq](#groq)) |
+| xAI | `grok-2` | Not listed | Not listed | [xAI models](https://docs.x.ai/developers/models) ([xAI](#xai-grok)) |
+| LiteLLM | none; pass `model` | Your proxy's upstream | Your proxy's upstream | |
 
 ### Cost-Aware Caps
 
@@ -362,7 +391,8 @@ export OPENAI_API_KEY=sk-...
 | `gpt-5.6-sol` | 1.05M | Yes | Yes | GPT-5.6 flagship ($4/$20 per MTok) |
 | `gpt-4o` | 128K | Yes | Yes | Accepts `temperature` |
 | `gpt-4o-mini` | 128K | Yes | Yes | Fast, cheap |
-| `gpt-image-1` | n/a | n/a | n/a | Image generation only. OpenAI retires it on 2026-10-23 |
+| `gpt-image-2.5-flare` | n/a | n/a | n/a | Image generation only: the `generateImage()` default |
+| `gpt-image-2.5-sunburst` | n/a | n/a | n/a | Image editing: the `editImage()`, `variateImage()` and `transferStyle()` default |
 
 The GPT-5, GPT-6 and o-series models reject `temperature` and `top_p` and require `max_completion_tokens`; the provider handles both. Streamed and non-streamed calls follow one routing rule. The provider sends a call to the Responses API when it goes to a Responses-only model (the `-pro` models, the codex models, `gpt-5.6-cyber` and the deep-research models), when it is a GPT-6 call carrying function tools, or when it is a GPT-5 call carrying function tools and an `effort`; everything else goes to Chat Completions. OpenAI serves GPT-6 tool calls only through Responses (Chat Completions accepts them from Sol and Luna only with `reasoning_effort: "none"`). On the Responses path, `responseFormat` travels as `text.format`, images in user turns and tool results travel as `input_image`, and a streamed call reports its usage on the final chunk. A message part Responses cannot carry, such as audio, fails a call that has no Chat Completions route with `RESPONSES_UNMAPPABLE_CONTENT`. OpenAI retires `o1`, `o1-pro`, `o3-mini` and `o4-mini` on 2026-10-23, and `o3` and `o3-pro` on 2026-12-11.
 
@@ -412,19 +442,27 @@ The key travels in the `x-goog-api-key` header, never in the request URL, so pro
 
 Google has retired `gemini-2.0-flash`, `gemini-2.0-flash-lite` and `gemini-1.5-pro`, and requests for them return HTTP 404. A request for `gemini-3.1-pro-preview` that returns 404 is retried once on `gemini-pro-latest`. On `gemini-3.1-pro-preview`, `effort` sets the thinking level (`low`, `medium` or `high`; `xhigh` and `max` send `high`), and other models keep the API default. A `thinkingConfig` object passed through `customModelParams` takes precedence: `thinkingBudget` on Gemini 2.5, `thinkingLevel` on Gemini 3. With `thinkingConfig.includeThoughts`, the model's thought summaries come back on the provider's message as `reasoningText` (streamed as `reasoningTextDelta` chunks), apart from the answer; no provider sends them back. The shared `thinking` option is Anthropic's and Gemini ignores it. Gemini 3 requires its thought signature back on every tool-call turn; the provider captures and replays it, and sends Google's placeholder when a turn has none, such as a call made by another provider in a fallback chain.
 
+Images go to Gemini in two ways. A data URL is sent inline, read as WHATWG Fetch reads it, and a request carries at most 100 MB of inline data counted in base64 ([Google's file limits](https://blog.google/innovation-and-ai/technology/developers-tools/gemini-api-new-file-limits/)). An https URL is sent as `fileData`, and Gemini fetches it itself, up to 15 MB a file ([file input methods](https://ai.google.dev/gemini-api/docs/file-input-methods)); the provider fetches nothing. An http URL, a malformed data URL and too much inline data are refused before the request, with HTTP status 400, so they count as the caller's error and not against Gemini's health. A prompt Gemini blocks (`promptFeedback.blockReason`) and an answer its filters stop with no content (`SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII` and the `IMAGE_` reasons) throw a `content_filter` error that names the reason.
+
 ### Groq
 
 ```bash
 export GROQ_API_KEY=gsk_...
 ```
 
-| Model | Context | Vision | Tool Calling | Notes |
-|-------|---------|--------|-------------|-------|
-| `llama-3.3-70b-versatile` | 128K | No | Yes | Best Groq model |
-| `llama-3.1-8b-instant` | 128K | No | Yes | Ultra-fast |
-| `mixtral-8x7b-32768` | 32K | No | Yes | Mixtral on Groq |
+`provider: 'groq'` without a model uses `llama-3.3-70b-versatile`. Groq shut that model and `llama-3.1-8b-instant` down for its free and developer plans on 2026-08-16 and serves them only under enterprise contracts, and it shut `mixtral-8x7b-32768` down on 2025-03-20 ([Groq deprecations](https://console.groq.com/docs/deprecations), read 2026-10-12). On other plans, name a model from [Groq's model list](https://console.groq.com/docs/models), such as `openai/gpt-oss-120b`, which Groq recommends in place of Llama 3.3 70B ($0.15 input and $0.60 output per 1M tokens on 2026-10-12):
 
-Groq provides extremely fast inference (~500 tok/s) via custom LPU hardware.
+```typescript
+import { generateText } from '@framers/agentos';
+
+const { text } = await generateText({
+  provider: 'groq',
+  model: 'openai/gpt-oss-120b',
+  prompt: 'Hello',
+});
+```
+
+Groq runs its models on its own LPU hardware; its model list gives each model's speed in tokens per second.
 
 ### Together AI
 
@@ -448,9 +486,11 @@ export MISTRAL_API_KEY=...
 
 | Model | Context | Vision | Tool Calling | Notes |
 |-------|---------|--------|-------------|-------|
-| `mistral-large-latest` | 128K | No | Yes | Best Mistral model |
-| `codestral-latest` | 32K | No | Yes | Code-optimized |
-| `mistral-small-latest` | 32K | No | Yes | Fast, cheap |
+| `mistral-large-latest` | 256K | No | Yes | Mistral Large 3 (`mistral-large-2512`); the default |
+| `codestral-latest` | 128K | No | Yes | Codestral (`codestral-2508`), for code |
+| `mistral-small-latest` | 256K | No | Yes | Mistral Small 4 (`mistral-small-2603`) |
+
+Each alias's model and context window are from its page in [Mistral's model list](https://docs.mistral.ai/models), read 2026-10-12.
 
 ### xAI (Grok)
 
@@ -458,10 +498,7 @@ export MISTRAL_API_KEY=...
 export XAI_API_KEY=xai-...
 ```
 
-| Model | Context | Vision | Tool Calling | Notes |
-|-------|---------|--------|-------------|-------|
-| `grok-2` | 128K | Yes | Yes | Default |
-| `grok-2-mini` | 128K | No | Yes | Faster |
+`provider: 'xai'` without a model uses `grok-2`. [xAI's model list](https://docs.x.ai/developers/models) names neither `grok-2` nor `grok-2-mini` on 2026-10-12, so name a model from that list.
 
 ### OpenRouter
 
@@ -688,6 +725,8 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 - [Cost Optimization](../safety/COST_OPTIMIZATION.md) — Budget management and routing
 - [Architecture](../architecture/ARCHITECTURE.md) — System architecture overview
 - [Structured Output](../orchestration/STRUCTURED_OUTPUT.md) — JSON schema enforcement per provider
+- [API Key Rotation](../KEY_ROTATION.md): comma-separated key lists, and which providers rotate and rest keys
+- [CLI Error Codes](./CLI_ERROR_CODES.md): the errors the Claude Code and Gemini CLI providers raise
 
 ## Prompt caching
 

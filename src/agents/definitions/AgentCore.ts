@@ -688,9 +688,13 @@ export abstract class AgentCore implements IAgent {
               toolId: tc.function.name,
               arguments: JSON.parse(tc.function.arguments || '{}'), // Ensure arguments are parsed; default to empty object if null/undefined
             });
-          } catch (e: any) {
-            const parseErrorMsg = `Failed to parse tool call arguments for tool '${tc.function.name}' (ID: ${tc.id}). Arguments: "${tc.function.arguments}". Error: ${e.message}`;
-            console.error(`Agent '${this.name}': ${parseErrorMsg}`, e);
+          } catch {
+            console.error(`Agent '${this.name}': Failed to parse tool call arguments.`, {
+              toolName: tc.function.name,
+              callId: tc.id,
+              argumentsLength: tc.function.arguments?.length ?? 0,
+              error: 'Invalid tool arguments JSON.',
+            });
             // Optionally, include this error information in the agent's output or a system message to the user/orchestrator.
             // For now, we skip the malformed tool call.
             // A more robust system might try to self-correct or ask for clarification.

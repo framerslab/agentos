@@ -17,9 +17,76 @@
  *    `'silence_timeout'`. The timeout acts as a safety net for STT providers
  *    that don't produce terminal punctuation reliably.
  *
- * 3. Backchannel phrases (e.g. "uh huh", "yeah") are recognised, suppressed
- *    from accumulation, and re-emitted as `'backchannel_detected'` events so
- *    the pipeline can decide whether to suppress an agent response.
+ * 3. Backchannel phrases (e.g. "uh huh", "yeah") are suppressed from
+ *    accumulation and re-emitted as `'backchannel_detected'`, by one of two
+ *    rules. Until a caller reports the agent's state through
+ *    `setAgentContext()`, and again after a reset with `'session'`, a final
+ *    is one when its whole text, trimmed and lowercased, is one of the
+ *    phrases, and it is suppressed whatever the agent is doing, with or
+ *    without an `itemId`: a caller that never reports, such as a listen
+ *    session, keeps that rule. Once a caller reports, a final is one when its
+ *    text, trimmed, lowercased and stripped of trailing `.`, `,`, `!` and
+ *    ellipses, is one of the phrases, with or without an `itemId`; a question
+ *    mark is never stripped, so a final that ends with one ("Okay?",
+ *    "Right?!") asks something and is never a backchannel. A backchannel is
+ *    a response made while the other party holds the floor, so it is then
+ *    suppressed only while the agent holds it, from the moment the user's
+ *    turn completes until the agent's reply ends or a barge-in cuts it;
+ *    while the agent listens, a lone one is the user's turn and accumulates
+ *    as any final does.
+ *
+ * 4. A `speech_end` that finds no final transcript leaves the decision to the
+ *    first final that arrives before speech resumes, for providers that
+ *    transcribe an utterance after its end of speech. The silence timeout
+ *    still counts from that end of speech. A final with no text (a provider
+ *    retracting interim text it showed) adds nothing to the turn's text.
+ *
+ * 5. Finals that carry an `itemId`, the key a provider gives each utterance
+ *    (`OpenAIRealtimeTranscriptionSTT` does, and sends an utterance's final
+ *    after its end of speech), are kept per item, and the turn's text joins
+ *    them in the order the items began. Such a turn is decided once every
+ *    `speech_end` since it began has its final, as a single final is, the
+ *    silence counted from the latest `speech_end`; an utterance that starts
+ *    before the previous one's final arrives stays in the same turn. An
+ *    item's final with no words answers its `speech_end` and adds no text.
+ *    A `speech_end` whose final has not come within the silence timeout (an
+ *    utterance the provider found no words in gets none) stops holding the
+ *    turn. A final that finds no `speech_end` waiting answers one that
+ *    stopped waiting without its final, if any, or else the transcriber's
+ *    next `speech_end` the moment it comes, so a final that arrives before
+ *    its end of speech (as a flush delivers it under client commits, before
+ *    a listen session's stop supplies the `speech_end`) decides the turn at
+ *    that `speech_end` without waiting. A `speech_end` with
+ *    `source: 'vad'` (a standalone VAD, or the orchestrator's turn-duration
+ *    watchdog) is none of the provider's utterances, so it decides the turn
+ *    on the finals held. Finals answer the transcriber's `speech_end` events
+ *    in the order they arrive, so a final that comes more than the silence
+ *    timeout after its own `speech_end` can answer a later one and end the
+ *    turn without that utterance's words. After a reset (each
+ *    `turn_complete` makes one) of a turn in which speech started, an
+ *    item-keyed final that arrives before speech ends again is that turn's
+ *    late final: it is dropped instead of joining the next turn's text, and
+ *    reported as `'late_final'`. That holds while the transcriber reports
+ *    the next utterance too: an item-keyed transcriber sends an utterance's
+ *    final after that utterance's end of speech
+ *    (`OpenAIRealtimeTranscriptionSTT` does), so a final that arrives during
+ *    it belongs to the turn that ended, and pays none of the next turn's
+ *    `speech_end` events. A `speech_start` from a standalone VAD
+ *    (`source: 'vad'`) ends that window, as a `speech_end` does: its speech
+ *    events say nothing about when the transcriber's finals come. So does a
+ *    reset with `'session'`, which a session makes as it starts on the
+ *    detector: the new session's transcriber sends no final of an earlier
+ *    session's turns, so a detector handed to one session after another
+ *    waits for no late final of the last turn before.
+ *
+ * 6. A final its provider marks `beforeSpeechEnd` belongs to the speech it
+ *    arrives in: `DeepgramStreamingSTT` marks every result, since Deepgram
+ *    sends a segment's final before the end of speech of its utterance.
+ *    Such an item-keyed final is never a late final, after a completed turn
+ *    or after a reset while its speech was spoken (a barge-in's cut makes
+ *    one), and it answers its own speech's coming `speech_end`, never one
+ *    that waits already: a `speech_end` that a sound with no words left
+ *    waiting holds the turn for at most the silence timeout from that end.
  *
  * ## Why heuristic over acoustic-only?
  *
@@ -33,7 +100,8 @@
  */
 
 import { EventEmitter } from 'node:events';
-import type { IEndpointDetector, TranscriptEvent, VadEvent, TurnCompleteEvent } from './types.js';
+import type { EndpointAgentContext, IEndpointDetector, TranscriptEvent, VadEvent, TurnCompleteEvent } from './types.js';
+import { describeReason } from './describeReason.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -64,7 +132,10 @@ const TERMINAL_PUNCTUATION = /[.?!]$/;
 
 /**
  * Normalised backchannel phrases that indicate the listener is acknowledging
- * but not taking a full conversational turn. Compared after `.trim().toLowerCase()`.
+ * but not taking a full conversational turn. Compared with a final's text
+ * trimmed and lowercased, and, once a caller has reported the agent's
+ * context, as {@link backchannelKey} reads it: also without trailing
+ * punctuation other than a question mark.
  *
  * These 13 phrases were selected because:
  * - They are the most common English-language backchannel markers in the
@@ -95,6 +166,34 @@ const BACKCHANNEL_PHRASES: ReadonlySet<string> = new Set([
   'gotcha',
 ]);
 
+/**
+ * A character {@link backchannelKey} strips from the end of a final's text:
+ * a full stop (three of them make an ellipsis), a comma, an exclamation mark,
+ * the ellipsis character, or a space among them. A question mark is none of
+ * them: a final that ends with one asks something.
+ */
+const TRAILING_PUNCTUATION = /[\s.,!\u2026]/u;
+
+/**
+ * A final's text as it is compared with {@link BACKCHANNEL_PHRASES} once a
+ * caller has reported the agent's context: trimmed, lowercased and stripped
+ * of trailing punctuation other than a question mark, so "Sure." and
+ * "Uh huh!" read as "sure" and "uh huh" whichever provider punctuated them.
+ * The strip stops at a question mark, so "Okay?", "Right?!" and "Yeah ?"
+ * keep the question mark that ends them and match no phrase: a question is
+ * never a backchannel. The text is read back from its end one character at a
+ * time, so its length costs a single pass.
+ *
+ * @param text - A final's text.
+ * @returns The text to look up among the phrases.
+ */
+function backchannelKey(text: string): string {
+  const key = text.trim().toLowerCase();
+  let end = key.length;
+  while (end > 0 && TRAILING_PUNCTUATION.test(key[end - 1])) end -= 1;
+  return key.slice(0, end);
+}
+
 // ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
@@ -111,7 +210,9 @@ export interface HeuristicEndpointDetectorOptions {
   /**
    * How long (ms) to wait after `speech_end` before emitting `turn_complete`
    * when no terminal punctuation is detected. Lower values reduce latency
-   * but risk firing mid-sentence during natural pauses.
+   * but risk firing mid-sentence during natural pauses. A finite number, zero
+   * or more: the constructor throws a `RangeError` for a negative number, `NaN`
+   * or `Infinity`; zero waits for no late final and decides at each speech end.
    * @defaultValue 1500
    */
   silenceTimeoutMs?: number;
@@ -130,7 +231,22 @@ export interface HeuristicEndpointDetectorOptions {
  * | Event                    | Payload                  | Description                        |
  * |--------------------------|--------------------------|------------------------------------|
  * | `'turn_complete'`        | {@link TurnCompleteEvent}| User turn has ended.               |
- * | `'backchannel_detected'` | `{ text: string }`       | Backchannel phrase was recognised.  |
+ * | `'backchannel_detected'` | `{ text: string }`       | A backchannel was suppressed (see `isBackchannel()`). |
+ * | `'late_final'`           | {@link TranscriptEvent}  | A completed turn's late final.     |
+ *
+ * `'late_final'` carries, as it was pushed, an item-keyed final that
+ * arrived after a reset ended its turn (each `turn_complete` makes one) and
+ * before the next `speech_end`, a standalone VAD's next `speech_start` or a
+ * session's start (`reset('session')`), while the transcriber's next
+ * utterance was spoken included, once per such final; a final its provider
+ * marks `beforeSpeechEnd` is never one. The detector drops it from its
+ * turns, so it never joins the next turn's text. Each listener gets
+ * it: one that throws or rejects is written as a console warning, and the
+ * listeners after it still run, so nothing is thrown into the code that
+ * pushed the final.
+ * `VoicePipelineOrchestrator` does not listen for it, so the conversation
+ * leaves those words out; `startListenSession` writes the final to its sink
+ * as a turn of its own.
  *
  * @see {@link IEndpointDetector} for the interface contract.
  * @see {@link AcousticEndpointDetector} for the purely acoustic alternative.
@@ -159,7 +275,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   private readonly silenceTimeoutMs: number;
 
   /**
-   * The latest final transcript text accumulated for the current turn.
+   * The current turn's text: the latest final transcript without an
+   * `itemId`, or the turn's item-keyed finals joined (see {@link itemFinals}).
    * Only updated by final (non-interim) transcript events.
    * Reset to empty string after each `turn_complete` emission.
    */
@@ -192,6 +309,90 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    */
   private lastConfidence = 1;
 
+  /**
+   * Timestamp of a `speech_end` that found no final transcript, or `null`.
+   * Some providers transcribe an utterance only after its end of speech, so
+   * the first final without an `itemId` that follows, before speech resumes,
+   * is decided as that `speech_end` would have been. Item-keyed finals are
+   * decided through {@link unansweredSpeechEnds} instead.
+   */
+  private speechEndWithoutText: number | null = null;
+
+  /**
+   * When the `speech_end` in {@link speechEndWithoutText} arrived, on this
+   * detector's own clock (`Date.now()`), so the silence that has passed can
+   * be counted when its final arrives. The event's timestamp is the caller's
+   * and serves the turn's duration only.
+   */
+  private speechEndWithoutTextAt = 0;
+
+  /**
+   * The current turn's finals that carry an `itemId`, by that id, in the
+   * order each item's first final arrived: the text the item adds to the
+   * turn (empty for a backchannel or a final with no words) and the item's
+   * `startMs`.
+   */
+  private readonly itemFinals = new Map<string, { text: string; startMs?: number }>();
+
+  /**
+   * When the turn's `speech_end` events from the transcriber (any `source`
+   * but `'vad'`) that no item-keyed final has answered yet arrived, on this
+   * detector's own clock, oldest first. A new item's final answers the
+   * oldest; one that has waited the silence timeout is dropped, stops
+   * holding the turn and is counted in {@link expiredSpeechEnds}.
+   */
+  private unansweredSpeechEnds: number[] = [];
+
+  /**
+   * How many of the turn's `speech_end` events from the transcriber stopped
+   * waiting (see {@link unansweredSpeechEnds}) before an item-keyed final
+   * answered them. A new item's final that finds no `speech_end` waiting
+   * answers one of these, as its late final.
+   */
+  private expiredSpeechEnds = 0;
+
+  /**
+   * How many of the turn's item-keyed finals answered no `speech_end`: each
+   * came before its end of speech, marked `beforeSpeechEnd` or with none
+   * waiting and none expired. The transcriber's next `speech_end` pairs with
+   * the earliest of them at once instead of waiting for a final.
+   */
+  private finalsWithoutSpeechEnd = 0;
+
+  /**
+   * Set when a reset ends a turn in which speech started, and cleared by the
+   * next `speech_end`, by a reset with `'session'` (a new session's
+   * transcriber sends no final of an earlier session's turns), or by a
+   * `speech_start` from a standalone VAD (`source: 'vad'`), whose speech
+   * events say nothing about when the transcriber's finals come: an
+   * item-keyed final that arrives meanwhile is the late final of the turn
+   * that ended, and is dropped and reported as `'late_final'`. The
+   * transcriber's own `speech_start` leaves it set: the transcriber sends an
+   * utterance's final after that utterance's end of speech, so a final that
+   * arrives while the next utterance is spoken is still the ended turn's. A
+   * final its provider marks `beforeSpeechEnd` came before its own end of
+   * speech instead: it is the speech's own, and is kept.
+   */
+  private awaitingNextSpeechEnd = false;
+
+  /**
+   * The turn's latest `speech_end`: its timestamp, for the turn's duration,
+   * and when it arrived on this detector's clock, for the silence since.
+   * `null` before the turn's first `speech_end`.
+   */
+  private lastSpeechEnd: { timestamp: number; at: number } | null = null;
+
+  /**
+   * Whether the agent holds the floor, as a caller last reported it through
+   * {@link setAgentContext}, or `null` before the first report and after a
+   * reset with `'session'`. While it is `null`, a backchannel is its exact
+   * phrase, trimmed and lowercased, suppressed whatever the agent is doing,
+   * so a caller that never reports, such as a listen session, keeps that
+   * rule. A reset with `'turn'` leaves it as it is: a turn's end does not
+   * move the floor by itself, and the caller reports each move.
+   */
+  private agentContext: EndpointAgentContext | null = null;
+
   // ---------------------------------------------------------------------------
   // Constructor
   // ---------------------------------------------------------------------------
@@ -200,10 +401,71 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * Create a new {@link HeuristicEndpointDetector}.
    *
    * @param options - Optional configuration overrides.
+   * @throws {RangeError} When `silenceTimeoutMs` is given and is not a finite number of zero or more.
    */
   constructor(options: HeuristicEndpointDetectorOptions = {}) {
     super();
-    this.silenceTimeoutMs = options.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS;
+    const silenceTimeoutMs = options.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS;
+    // NaN or Infinity never lets a waiting speech end expire, and a negative number is no duration; zero waits
+    // for no late final and decides at each speech end.
+    if (!Number.isFinite(silenceTimeoutMs) || silenceTimeoutMs < 0) {
+      throw new RangeError(
+        `HeuristicEndpointDetector: silenceTimeoutMs must be a finite number of zero or more, got ${String(silenceTimeoutMs)}`
+      );
+    }
+    this.silenceTimeoutMs = silenceTimeoutMs;
+  }
+
+  /** Maximum wait for a pending turn after speech ends, used when draining a listen session. */
+  get turnCompletionTimeoutMs(): number {
+    return this.silenceTimeoutMs;
+  }
+
+  // ---------------------------------------------------------------------------
+  // IEndpointDetector -- the agent's context and backchannels
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Records whether the agent holds the floor, and reads backchannels by it
+   * from now until a reset with `'session'`: a final is one when its text,
+   * trimmed, lowercased and stripped of trailing `.`, `,`, `!` and ellipses,
+   * is one of the phrases, and never when it ends with `?`. A backchannel is
+   * a response made while the other party holds the floor, so one is
+   * suppressed only while the agent holds it. While the agent listens, the
+   * user holds it: a lone "okay" or "yeah" accumulates as the user's turn and
+   * completes at its end of speech, whatever the agent's last reply said.
+   * `VoicePipelineOrchestrator` reports as its session starts, as each user
+   * turn completes, and as each reply ends or a barge-in cuts it.
+   *
+   * See `IEndpointDetector.setAgentContext()`.
+   *
+   * @param context - Whether the agent holds the floor; its deprecated `askedQuestion` is ignored.
+   */
+  setAgentContext(context: EndpointAgentContext): void {
+    this.agentContext = { speaking: context.speaking };
+  }
+
+  /**
+   * Whether a final with this text would be suppressed as a backchannel now.
+   * Until a caller reports the agent's context (see {@link setAgentContext}),
+   * and after a reset with `'session'`: the text, trimmed and lowercased, is
+   * one of the backchannel phrases. Once one has: the text, trimmed,
+   * lowercased and stripped of trailing `.`, `,`, `!` and ellipses, is one of
+   * the phrases, which a text that ends with `?` never is, and the agent
+   * holds the floor. The detector decides its own finals, with and without
+   * an `itemId`, by this method.
+   *
+   * See `IEndpointDetector.isBackchannel()`.
+   *
+   * @param text - A final's text.
+   * @returns `true` when such a final would be suppressed and reported as `'backchannel_detected'`.
+   */
+  isBackchannel(text: string): boolean {
+    const context = this.agentContext;
+    // No caller has reported the agent's context: the exact phrase, whatever the agent is doing, as before it existed.
+    if (context === null) return BACKCHANNEL_PHRASES.has(text.trim().toLowerCase());
+    // A backchannel is said while the other party holds the floor: while the agent listens, every final is the user's.
+    return context.speaking && BACKCHANNEL_PHRASES.has(backchannelKey(text));
   }
 
   // ---------------------------------------------------------------------------
@@ -220,10 +482,18 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * 2. Their text is unstable -- a word ending with "." may be revised in
    *    the next interim result, causing false turn-completion signals.
    *
-   * If the final text is a recognised backchannel phrase, the detector emits
-   * `'backchannel_detected'` and returns WITHOUT accumulating the text. This
-   * prevents a subsequent `speech_end` event from triggering `turn_complete`
-   * for what was merely an acknowledgement, not a real conversational turn.
+   * If the final is a backchannel the detector suppresses now (see
+   * {@link isBackchannel}), the detector emits `'backchannel_detected'` and
+   * returns WITHOUT accumulating the text. This prevents a subsequent
+   * `speech_end` event from triggering `turn_complete` for what was merely an
+   * acknowledgement, not a real conversational turn. Once a caller reports
+   * the agent's context, a backchannel phrase said while the agent listens
+   * is the user's own turn, and accumulates.
+   *
+   * A final with an `itemId` is kept with the turn's other item-keyed finals,
+   * and the turn's text joins them, unless it is a completed turn's late
+   * final, which is reported as `'late_final'` instead; a final without one
+   * replaces the turn's text.
    *
    * @param transcript - Transcript event from the STT session.
    */
@@ -234,12 +504,21 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
       return;
     }
 
+    if (transcript.itemId) {
+      this._pushItemFinal(transcript.itemId, transcript);
+      return;
+    }
+
     const text = transcript.text;
-    const normalised = text.trim().toLowerCase();
+
+    // A final with no words (a provider retracting interim text it showed)
+    // leaves the turn's text as it is.
+    if (!text.trim()) return;
 
     // Check for backchannel phrases BEFORE accumulating. This ensures that
-    // "uh huh" followed by speech_end does NOT produce a turn_complete.
-    if (BACKCHANNEL_PHRASES.has(normalised)) {
+    // "uh huh" followed by speech_end does NOT produce a turn_complete while
+    // the agent holds the floor.
+    if (this.isBackchannel(text)) {
       this.emit('backchannel_detected', { text });
       return;
     }
@@ -249,6 +528,17 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     // provider represents the complete hypothesis for the current utterance.
     this.accumulatedText = text;
     this.lastConfidence = transcript.confidence;
+    // The latest final replaces the turn's item-keyed finals as well.
+    this.itemFinals.clear();
+    this.finalsWithoutSpeechEnd = 0;
+
+    // The speech already ended without a transcript: decide the turn now. The
+    // silence began at that end of speech, so what has passed since counts.
+    if (this.speechEndWithoutText !== null && !this.speechActive) {
+      const speechEndTimestamp = this.speechEndWithoutText;
+      this.speechEndWithoutText = null;
+      this._decideTurnEnd(speechEndTimestamp, Date.now() - this.speechEndWithoutTextAt);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -268,6 +558,16 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * - **`speech_end`**: If accumulated text is available, either fires
    *   `turn_complete` immediately (when text ends with terminal punctuation)
    *   or starts the silence timer (when no punctuation is detected).
+   *   Otherwise the first final transcript that arrives before speech
+   *   resumes is decided the same way when it arrives, with the silence
+   *   timeout still counted from this `speech_end`. A turn of item-keyed
+   *   finals is decided once every `speech_end` the transcriber reported
+   *   since it began has its final, or has waited the silence timeout for
+   *   it; an item-keyed final that answered no `speech_end` when it came
+   *   is this one's, so it has its final at once. A `speech_end` with
+   *   `source: 'vad'` (a standalone VAD, or the orchestrator's
+   *   turn-duration watchdog) gets no final of its own: it decides the turn
+   *   on the finals held, as a single final is decided.
    *
    * - **`silence`**: Periodic heartbeat events are ignored. The silence timer
    *   (started on `speech_end`) already handles delayed turn-completion
@@ -279,6 +579,12 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     switch (event.type) {
       case 'speech_start': {
         this.speechActive = true;
+        // A final that arrives from now on belongs to speech still in progress.
+        this.speechEndWithoutText = null;
+        // The transcriber sends an item-keyed final of this speech after its end, so one that arrives in the late-final
+        // window before that end stays a late final. A standalone VAD's start says nothing about when the
+        // transcriber's finals come, and ends the window.
+        if (event.source === 'vad') this.awaitingNextSpeechEnd = false;
         // Cancel any pending silence timer -- the user is speaking again
         this._clearSilenceTimer();
         // Record turn start only once (first speech_start in this turn)
@@ -290,24 +596,40 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
       case 'speech_end': {
         this.speechActive = false;
+        // A final that arrives from now on can be this speech's.
+        this.awaitingNextSpeechEnd = false;
+        const at = Date.now();
+        this.lastSpeechEnd = { timestamp: event.timestamp, at };
+        // The transcriber's speech gets an item-keyed final: one that came
+        // before this end of speech pairs with it at once, and otherwise the
+        // end waits for one. An end from a standalone VAD or the orchestrator's
+        // turn-duration watchdog (`source: 'vad'`) is none of the provider's
+        // utterances and gets none.
+        const transcriberEnd = event.source !== 'vad';
+        if (transcriberEnd) {
+          this._dropExpiredSpeechEnds(at);
+          if (this.finalsWithoutSpeechEnd > 0) this.finalsWithoutSpeechEnd -= 1;
+          else this.unansweredSpeechEnds.push(at);
+        }
 
-        if (!this.accumulatedText) {
-          // No transcript has arrived yet -- nothing to flush.
-          // This can happen when the VAD detects a very short burst of
-          // noise that doesn't produce any STT output.
+        // A turn of item-keyed finals is decided once each of the transcriber's speech ends has its final.
+        if (this.itemFinals.size > 0 && transcriberEnd) {
+          this._decideItemTurn();
           break;
         }
 
-        if (TERMINAL_PUNCTUATION.test(this.accumulatedText)) {
-          // Sentence-terminal punctuation detected -> fire immediately.
-          // This is the fast path that eliminates the 1.5 s silence wait.
-          this._emitTurnComplete('punctuation', event.timestamp);
-        } else {
-          // No terminal punctuation -> start the silence timer.
-          // If the user doesn't resume speaking within silenceTimeoutMs,
-          // we'll fire turn_complete with reason 'silence_timeout'.
-          this._startSilenceTimer(event.timestamp);
+        if (!this.accumulatedText) {
+          // No transcript has arrived yet -- nothing to flush now.
+          // This can happen when the VAD detects a very short burst of
+          // noise that doesn't produce any STT output, or when the
+          // provider transcribes the utterance after its end of speech:
+          // the first final before speech resumes is decided then.
+          this.speechEndWithoutText = event.timestamp;
+          this.speechEndWithoutTextAt = Date.now();
+          break;
         }
+
+        this._decideTurnEnd(event.timestamp);
         break;
       }
 
@@ -329,19 +651,226 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    *
    * Called by the pipeline after each `turn_complete` event (both internally
    * and by the orchestrator's flush_complete handler) to ensure clean state
-   * before audio for the next turn begins to arrive.
+   * before audio for the next turn begins to arrive. When speech started in
+   * the turn it ends, an item-keyed final that arrives after it and before
+   * the next `speech_end` or a standalone VAD's next `speech_start`, while
+   * the transcriber's next utterance is spoken included, is that turn's late
+   * final, and is dropped and reported as `'late_final'`, unless its provider
+   * marks it `beforeSpeechEnd`, which makes it the final of the speech it
+   * arrives in.
+   *
+   * A session that starts on the detector resets it with `'session'`
+   * (`VoicePipelineOrchestrator.startSession()` and `startListenSession()`
+   * do): the new session's transcriber sends no final of an earlier
+   * session's turns, so no late final is awaited after it.
+   *
+   * @param scope - `'turn'` (the default) ends a turn; `'session'` starts a
+   *   session, ends the wait for a late final of the turns before it, and
+   *   forgets the agent's context (see {@link setAgentContext}), which a
+   *   reset with `'turn'` keeps, so a backchannel is its exact phrase again
+   *   until the next report.
    */
-  reset(): void {
+  reset(scope: 'turn' | 'session' = 'turn'): void {
+    // A turn in which speech started can still get a final after it has ended; a session that starts gets none of an
+    // earlier session's turns.
+    this.awaitingNextSpeechEnd = scope === 'turn' && (this.awaitingNextSpeechEnd || this.turnStartMs !== null);
+    // The caller reports who holds the floor, so a turn's end leaves it as it was; a new session has reported none.
+    if (scope === 'session') this.agentContext = null;
     this._clearSilenceTimer();
     this.accumulatedText = '';
     this.speechActive = false;
     this.turnStartMs = null;
     this.lastConfidence = 1;
+    this.speechEndWithoutText = null;
+    this.itemFinals.clear();
+    this.unansweredSpeechEnds = [];
+    this.expiredSpeechEnds = 0;
+    this.finalsWithoutSpeechEnd = 0;
+    this.lastSpeechEnd = null;
   }
 
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Decide the turn once speech has ended and a final transcript is held:
+   * terminal punctuation fires `turn_complete` at once; otherwise the
+   * silence timer starts, for what is left of the timeout.
+   *
+   * @param speechEndTimestamp - Timestamp of the `speech_end`, for the turn's duration.
+   * @param silenceSoFarMs - Silence that has already passed since that `speech_end`
+   *   (a final that arrived after it); 0 when the decision is made at the `speech_end`.
+   */
+  private _decideTurnEnd(speechEndTimestamp: number, silenceSoFarMs = 0): void {
+    if (TERMINAL_PUNCTUATION.test(this.accumulatedText)) {
+      // Sentence-terminal punctuation detected -> fire immediately.
+      // This is the fast path that eliminates the 1.5 s silence wait.
+      this._emitTurnComplete('punctuation', speechEndTimestamp);
+    } else {
+      // No terminal punctuation -> start the silence timer.
+      // If the user doesn't resume speaking within silenceTimeoutMs,
+      // we'll fire turn_complete with reason 'silence_timeout'.
+      this._startSilenceTimer(speechEndTimestamp, silenceSoFarMs);
+    }
+  }
+
+  /**
+   * Keep a final that carries an `itemId`. The turn holds one text per item,
+   * from the item's latest final, and its text joins them. A new item's
+   * final answers the oldest `speech_end` still waiting for one; with none
+   * waiting, one that stopped waiting without its final; with neither, the
+   * transcriber's next `speech_end`, which pairs with it when it comes. A
+   * new item's final its provider marks `beforeSpeechEnd` came before its own
+   * end of speech, so it answers the transcriber's next `speech_end` whatever
+   * waits: a `speech_end` already waiting belongs to speech that had no final
+   * of its own. A backchannel the detector suppresses now (see
+   * {@link isBackchannel}) or a final with no words answers one too and adds
+   * no text.
+   * Once speech has ended in this turn, the turn is decided again. A
+   * backchannel is announced last, so a `'backchannel_detected'` listener
+   * that throws leaves the final recorded and the turn decided. A final that
+   * arrives while {@link awaitingNextSpeechEnd} holds, unless it is marked
+   * `beforeSpeechEnd`, is dropped and reported as `'late_final'` through
+   * {@link _emitLateFinal}; the drop changes no state, and a listener that
+   * throws is written as a console warning.
+   *
+   * @param itemId - The provider input item the final belongs to.
+   * @param transcript - The final transcript event.
+   */
+  private _pushItemFinal(itemId: string, transcript: TranscriptEvent): void {
+    // A final that comes before its own end of speech belongs to the speech it arrives in, never to a turn that ended.
+    const beforeSpeechEnd = transcript.beforeSpeechEnd === true;
+    // The late final of a turn that has ended stays out of the next turn. It is
+    // reported for a listener that keeps every final, such as a listen session.
+    if (this.awaitingNextSpeechEnd && !beforeSpeechEnd) {
+      this._emitLateFinal(transcript);
+      return;
+    }
+
+    const hasWords = transcript.text.trim() !== '';
+    const backchannel = hasWords && this.isBackchannel(transcript.text);
+
+    if (!this.itemFinals.has(itemId)) {
+      this._dropExpiredSpeechEnds(Date.now());
+      if (beforeSpeechEnd) {
+        // Its own end of speech is still to come: the transcriber's next speech_end pairs with it at once.
+        this.finalsWithoutSpeechEnd += 1;
+      } else if (this.unansweredSpeechEnds.length > 0) {
+        this.unansweredSpeechEnds.shift();
+      } else if (this.expiredSpeechEnds > 0) {
+        // A speech end stopped waiting before its final came: this is that late final.
+        this.expiredSpeechEnds -= 1;
+      } else {
+        // No speech end waits for it yet: the transcriber's next one pairs with it at once.
+        this.finalsWithoutSpeechEnd += 1;
+      }
+    }
+    const text = hasWords && !backchannel ? transcript.text : '';
+    this.itemFinals.set(itemId, { text, startMs: transcript.startMs });
+    if (text) this.lastConfidence = transcript.confidence;
+    this.accumulatedText = this._joinItemFinals();
+
+    if (!this.speechActive && this.lastSpeechEnd !== null) this._decideItemTurn();
+
+    if (backchannel) this.emit('backchannel_detected', { text: transcript.text });
+  }
+
+  /**
+   * Hands a late final to each `'late_final'` listener in order, as `emit()`
+   * would, except that a listener that throws or rejects is written as a
+   * console warning and the listeners after it still run. `emit()` stops at a
+   * throw and throws into the code that pushed the final, so a listener added
+   * before a listen session's would keep the session from writing the final,
+   * and the throw would reach the transcriber that delivered it.
+   *
+   * @param transcript - The late final, as it was pushed.
+   */
+  private _emitLateFinal(transcript: TranscriptEvent): void {
+    const warn = (thrown: unknown): void => {
+      console.warn("[heuristic-endpoint-detector] a 'late_final' listener failed:", describeReason(thrown));
+    };
+    for (const listener of this.rawListeners('late_final')) {
+      try {
+        const result: unknown = (listener as (event: TranscriptEvent) => unknown).call(this, transcript);
+        // Promise.resolve() also takes a promise of another realm or library, and leaves any other value alone.
+        Promise.resolve(result).catch(warn);
+      } catch (thrown) {
+        warn(thrown);
+      }
+    }
+  }
+
+  /**
+   * The turn's item-keyed finals as one text: the texts of those with words,
+   * each trimmed, with one space between them, so spaces a provider leaves
+   * around a final neither pile up between two texts nor hide the turn's
+   * terminal punctuation. The texts follow the order their items began: the
+   * finals whose items have a `startMs` take the places such finals hold in
+   * arrival order, sorted by that start, and a final whose item has none
+   * keeps its own place in the order the first finals arrived. A final with
+   * no words adds nothing, and its item's start plays no part in the order.
+   */
+  private _joinItemFinals(): string {
+    const finals = [...this.itemFinals.values()]
+      .map((final) => ({ text: final.text.trim(), startMs: final.startMs }))
+      .filter((final) => final.text !== '');
+    // A stable sort: items that began at the same offset keep their arrival order.
+    const byStart = finals
+      .filter((final) => final.startMs !== undefined)
+      .sort((a, b) => (a.startMs ?? 0) - (b.startMs ?? 0));
+    return finals
+      .map((final) => (final.startMs === undefined ? final : (byStart.shift() ?? final)).text)
+      .join(' ');
+  }
+
+  /**
+   * Decide a turn of item-keyed finals after its latest `speech_end`. While
+   * one of the turn's `speech_end` events still waits for its final, the
+   * turn waits too, for at most the silence timeout after that `speech_end`:
+   * an utterance the provider found no words in gets no final. With none
+   * waiting, the joined finals are decided as a single final is, the silence
+   * counted from the latest `speech_end`.
+   */
+  private _decideItemTurn(): void {
+    this._clearSilenceTimer();
+    const now = Date.now();
+    this._dropExpiredSpeechEnds(now);
+    if (!this.accumulatedText || this.lastSpeechEnd === null) return;
+
+    if (this.unansweredSpeechEnds.length > 0) {
+      // Decide again when the oldest waiting speech end has waited the silence timeout.
+      const waitMs = this.unansweredSpeechEnds[0] + this.silenceTimeoutMs - now;
+      this.silenceTimer = setTimeout(() => {
+        this.silenceTimer = null;
+        this._decideItemTurn();
+      }, waitMs);
+      return;
+    }
+
+    this._decideTurnEnd(this.lastSpeechEnd.timestamp, now - this.lastSpeechEnd.at);
+  }
+
+  /**
+   * Drop the `speech_end` events that have waited the silence timeout for an
+   * item-keyed final, and count them in {@link expiredSpeechEnds}. A clock
+   * set back counts as no silence yet, as in `_startSilenceTimer`: a
+   * `speech_end` recorded later than `now` waits from `now`, so a step back
+   * delays the turn by at most one more silence timeout, not by the size of
+   * the step.
+   *
+   * @param now - The current time on this detector's clock.
+   */
+  private _dropExpiredSpeechEnds(now: number): void {
+    this.unansweredSpeechEnds = this.unansweredSpeechEnds.map((at) => Math.min(at, now));
+    while (
+      this.unansweredSpeechEnds.length > 0 &&
+      now - this.unansweredSpeechEnds[0] >= this.silenceTimeoutMs
+    ) {
+      this.unansweredSpeechEnds.shift();
+      this.expiredSpeechEnds += 1;
+    }
+  }
 
   /**
    * Emit `turn_complete` with the currently accumulated transcript and then
@@ -376,20 +905,30 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   /**
    * Start the silence-timeout timer. If the user does not resume speaking
    * within `silenceTimeoutMs` ms, the detector fires `turn_complete`
-   * with reason `'silence_timeout'`.
+   * with reason `'silence_timeout'`. The timeout counts from the end of
+   * speech: when the final arrived after it, the timer runs for what is
+   * left, and a timeout that has already passed ends the turn at once.
    *
    * Any previously running silence timer is cleared first to prevent
    * double-fires from rapid speech_end -> speech_start -> speech_end sequences.
    *
    * @param speechEndTimestamp - Timestamp passed through to the internal turn-complete emitter
    *   for duration calculation.
+   * @param silenceSoFarMs - Silence that has already passed since the end of speech.
    */
-  private _startSilenceTimer(speechEndTimestamp: number): void {
+  private _startSilenceTimer(speechEndTimestamp: number, silenceSoFarMs = 0): void {
     this._clearSilenceTimer();
+    // A negative value (the clock was set back) counts as no silence yet.
+    const silenceMs = Math.max(0, silenceSoFarMs);
+    if (silenceMs > 0 && silenceMs >= this.silenceTimeoutMs) {
+      // The final arrived after the timeout had passed: the turn is already over.
+      this._emitTurnComplete('silence_timeout', speechEndTimestamp);
+      return;
+    }
     this.silenceTimer = setTimeout(() => {
       this.silenceTimer = null;
       this._emitTurnComplete('silence_timeout', speechEndTimestamp);
-    }, this.silenceTimeoutMs);
+    }, this.silenceTimeoutMs - silenceMs);
   }
 
   /**

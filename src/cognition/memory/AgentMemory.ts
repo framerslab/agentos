@@ -59,6 +59,7 @@ import type {
   IngestOptions,
   IngestResult,
   ExportOptions,
+  ExportResult,
   ImportOptions,
   ImportResult,
   MemoryHealth as StandaloneMemoryHealth,
@@ -435,13 +436,15 @@ export class AgentMemory {
   /**
    * Export memory data. Available only when backed by the standalone
    * SQLite-first Memory facade.
+   *
+   * @returns The traces the export left out, with the reason for each (see `Memory.export`).
    */
-  async export(outputPath: string, options?: ExportOptions): Promise<void> {
+  async export(outputPath: string, options?: ExportOptions): Promise<ExportResult> {
     this.ensureReady();
     if (!this.standalone) {
       this.throwUnsupportedForCognitive('export');
     }
-    await this.standalone.export(outputPath, options);
+    return this.standalone.export(outputPath, options);
   }
 
   /**

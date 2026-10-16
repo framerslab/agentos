@@ -39,9 +39,9 @@ import type {
 import type { ToolDefinitionMap } from '../toolAdapter.js';
 import { AgencyConfigError } from '../types.js';
 import {
-  isAgent,
+  seatMetadataOf,
   resolveAgent,
-  checkBeforeAgent,
+  checkBeforeAgentInput,
   checkBeforeEmergentSpawn,
   accumulateExtraUsage,
   buildAgentCallUsage,
@@ -73,13 +73,10 @@ type ResultUsageSnapshot = {
  * knows what each sub-agent specialises in.
  *
  * @param agentOrConfig - Either a pre-built Agent or a raw BaseAgentConfig.
- * @returns The instructions string if available, otherwise a generic label.
+ * @returns The config's instructions or the pre-built seat's own description, otherwise a generic label.
  */
 function getAgentDescription(agentOrConfig: BaseAgentConfig | Agent): string {
-  if (!isAgent(agentOrConfig) && (agentOrConfig as BaseAgentConfig).instructions) {
-    return (agentOrConfig as BaseAgentConfig).instructions!;
-  }
-  return 'General purpose';
+  return seatMetadataOf(agentOrConfig).description ?? 'General purpose';
 }
 
 /**
@@ -216,16 +213,16 @@ export function buildHierarchicalTools(
         required: ['task' as const],
       },
       execute: async (args: { task: string }) => {
-        const decision = await checkBeforeAgent(name, args.task, agentCalls, agencyConfig);
-        if (decision && !decision.approved) {
+        // The task carries the approver's instructions, if any, and the
+        // post-approval check read it, instructions included.
+        const gate = await checkBeforeAgentInput(name, args.task, agentCalls, agencyConfig);
+        if (gate.decision && !gate.decision.approved) {
           return refusal(`Agent "${name}" execution was rejected by HITL.`);
         }
 
         const a = resolveAgent(agentOrConfig, agencyConfig);
 
-        const effectiveTask = decision?.modifications?.instructions
-          ? `${args.task}\n\n[Additional instructions]: ${decision.modifications.instructions}`
-          : args.task;
+        const effectiveTask = gate.input;
 
         const start = Date.now();
         let result: Record<string, unknown>;
@@ -332,8 +329,8 @@ export function buildHierarchicalTools(
 
         // HITL gate (when hitl.approvals.beforeEmergent is true) — fires
         // BEFORE the forge runs so a rejected spawn doesn't waste any
-        // validation work. Mirrors the checkBeforeAgent pattern used by
-        // delegate_to_<name>.
+        // validation work. Mirrors the checkBeforeAgentInput gate used by
+        // delegate_to_<name>, without its post-approval check.
         const hitlDecision = await checkBeforeEmergentSpawn(
           args.role,
           args.instructions,

@@ -21,6 +21,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { WebSocketStreamTransport } from '../WebSocketStreamTransport.js';
+import { isClientTranscriptMessage, toClientTranscriptMessage } from '../clientTranscript.js';
 import type { AudioFrame, EncodedAudioChunk } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -219,6 +220,35 @@ describe('WebSocketStreamTransport', () => {
 
     expect(msgListener).toHaveBeenCalledOnce();
     expect(msgListener.mock.calls[0][0]).toEqual(payload);
+    expect(audioListener).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A client that transcribes on its own device sends `transcript` messages
+   * in place of audio. The transport passes one through whole, as it does
+   * every JSON message, and the consumer checks its shape.
+   */
+  it('should emit a client transcript message whole as "message", never as audio', () => {
+    const msgListener = vi.fn();
+    const audioListener = vi.fn();
+    transport.on('message', msgListener);
+    transport.on('audio', audioListener);
+
+    const transcript = toClientTranscriptMessage({
+      text: 'Hello there.',
+      confidence: 0.8,
+      words: [],
+      isFinal: true,
+      itemId: '7',
+      startMs: 1200,
+      endMs: 2100,
+      language: 'en',
+    });
+    ws.emit('message', Buffer.from(JSON.stringify(transcript), 'utf-8'), false);
+
+    expect(msgListener).toHaveBeenCalledOnce();
+    expect(msgListener.mock.calls[0][0]).toEqual(transcript);
+    expect(isClientTranscriptMessage(msgListener.mock.calls[0][0])).toBe(true);
     expect(audioListener).not.toHaveBeenCalled();
   });
 

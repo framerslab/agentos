@@ -16,15 +16,26 @@ import type { ITool } from '../../core/tools/ITool.js';
 import type { IModelRouter, ModelRouteParams } from '../../core/llm/routing/IModelRouter.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
-import { resolveModelOption, resolveProvider, createProviderManager } from '../model.js';
+import { resolveModelOption, resolveProvider, createProviderManager, type ModelOption } from '../model.js';
+import { providerHealthKey } from './providerHealthKey.js';
+import { credentialsGoWith, modelNamesAnotherProvider } from './credentialOwner.js';
 import {
+  advanceFallbackWalk,
   buildPolicyAwareFallbackChain,
+  explicitRequiredCapabilities,
   fallbackHopOverrides,
+  gateFallbackEntry,
+  INITIAL_FALLBACK_WALK,
   isContentPolicyRefusal,
   isRetryableError,
+  resolveFallbackChain,
+  resolvePolicyTier,
   usageOfError,
   type FallbackProviderEntry,
+  type FallbackSkipReason,
+  type FallbackWalkState,
   type GenerateTextOptions,
+  type ResolvedFallbackEntry,
 } from '../generateText.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities, type HostLLMPolicy } from './hostPolicy.js';
 import { buildResponseFormatForProvider, responseFormatCarriesSchema } from './responseFormatForProvider.js';
@@ -41,9 +52,17 @@ export interface CompletionRoute {
   routerParams?: Partial<ModelRouteParams>;
   hostPolicy?: HostLLMPolicy;
   policyTier?: GenerateTextOptions['policyTier'];
-  /** Caller chain. Undefined builds the policy-aware chain from the environment; an empty array disables fallback. */
+  /**
+   * Caller chain. Undefined builds the policy-aware chain from the environment; an empty array disables fallback.
+   * Either is resolved once, as generateText's walk resolves its chain: entries naming an excluded model or lacking
+   * an explicitly required capability are passed over, and so is the policy chain's entry for the first model.
+   */
   fallbackProviders?: FallbackProviderEntry[];
-  /** Credentials for the primary only; fallback hops read the environment, as streamText's walk does. */
+  /**
+   * Credentials for the primary only; fallback hops read the environment, as streamText's walk does.
+   * Set in the gateway defaults beside a provider or model, they are for that provider: a turn that
+   * names another provider does not take them.
+   */
   apiKey?: string;
   baseUrl?: string;
   /** The call's own effort, cache and output budget, from which each fallback hop's overrides are derived. */
@@ -52,13 +71,34 @@ export interface CompletionRoute {
   onFallback?: (info: { from: string; to: string; hop: number; error: Error }) => void;
   /** Called for every hop that could not start (initialisation failure or open circuit). */
   onHopFailure?: (info: { providerId: string; hop: number; error: Error }) => void;
+  /**
+   * Called for every chain entry the walk passes over without an attempt: an
+   * excluded model, a missing required capability, the policy chain's entry
+   * for the first model, a refill no standing leg is owed, a Claude leg after
+   * a refusal.
+   */
+  onHopSkipped?: (info: CompletionHopSkip) => void;
+}
+
+/** A chain entry the walk passed over without an attempt, and why. */
+export interface CompletionHopSkip {
+  provider: string;
+  model?: string;
+  reason: FallbackSkipReason;
 }
 
 /** One entry of the hop list a route resolves to. */
 export interface CompletionHop {
   provider: string;
   model?: string;
-  entry?: FallbackProviderEntry;
+  /** The chain entry behind a fallback hop, with its role in the walk when the policy chain gave it one. */
+  entry?: ResolvedFallbackEntry;
+  /**
+   * The primary only: whether the route's own key and base URL are for this
+   * provider. False when a router picked another one, which then runs on its
+   * own credentials.
+   */
+  ownCredentials?: boolean;
 }
 
 /** A hop that is ready to serve: its provider is initialised and its window is known. */
@@ -71,10 +111,34 @@ export interface CompletionResolution {
   /** Same strings as ModelTargetInfo.toolSupport.format. */
   toolFormat: 'openai_functions' | 'anthropic_tools' | 'google_function_calling';
   providerManager: AIModelProviderManager;
+  /**
+   * The id the hop's health is recorded under: for the first hop on a key or
+   * base URL of the route's own that differs from the provider's, the
+   * provider id with a digest of them (see `providerHealthKey`). Absent
+   * means the provider id.
+   */
+  healthId?: string;
   /** Per-hop effort, cache and output budget from `fallbackHopOverrides`; merged over the caller's options. */
   optionOverrides: Partial<ModelCompletionOptions>;
   /** The hop list fixed by the route's first `resolve()`; later calls walk it. */
   readonly chain: ReadonlyArray<CompletionHop>;
+  /**
+   * What the route's walk had seen before this hop ran: standing legs owed a
+   * refill, and whether a model refused. `resolve()` reads it from the hop it
+   * is handed.
+   *
+   * @internal
+   */
+  readonly walk?: FallbackWalkState;
+  /**
+   * The entries the chain's one-time resolution passed over (an excluded
+   * model, a missing capability, the policy chain's entry for the first
+   * model), held on the first hop until a walk starts, as the walkers log
+   * theirs only when they walk.
+   *
+   * @internal
+   */
+  readonly pendingSkips?: ReadonlyArray<CompletionHopSkip>;
 }
 
 /**
@@ -123,7 +187,15 @@ export interface LateAttemptUsage {
 }
 
 export interface CompletionGateway {
-  resolve(route: CompletionRoute, after?: CompletionResolution): Promise<CompletionResolution | null>;
+  /**
+   * The route's first hop that can start, or, given the hop that failed, the
+   * next one. `failure` is the error that hop failed with: the walk reads it
+   * as generateText's and streamText's walks do (a refusal passes over the
+   * policy chain's Claude legs; a standing uncensored leg that failed on
+   * availability is owed the next ranked model). Without it the hop counts
+   * as an availability failure.
+   */
+  resolve(route: CompletionRoute, after?: CompletionResolution, failure?: unknown): Promise<CompletionResolution | null>;
   stream(
     resolution: CompletionResolution,
     messages: ChatMessage[],
@@ -193,8 +265,8 @@ function toolNamesOf(tools: CompletionRoute['tools']): string[] {
 }
 
 /** The error a hop with an open circuit fails with, worded as streamText words it. */
-function circuitOpenError(providerId: string): Error {
-  const stats = globalLLMProviderHealth.getStats(providerId);
+function circuitOpenError(providerId: string, healthId: string = providerId): Error {
+  const stats = globalLLMProviderHealth.getStats(healthId);
   return Object.assign(
     new Error(`[503] Provider '${providerId}' circuit open; cooldown ${stats?.cooldownRemainingMs ?? 0}ms`),
     { name: 'LLMProviderCircuitOpenError', httpStatus: 503 },
@@ -202,8 +274,16 @@ function circuitOpenError(providerId: string): Error {
 }
 
 /** Primary selection, the same as streamText's: explicit model and provider, then the router when one is set. */
-async function selectPrimary(route: CompletionRoute): Promise<{ provider: string; model: string }> {
-  let { providerId, modelId } = resolveModelOption({ provider: route.providerId, model: route.modelId }, 'text');
+async function selectPrimary(route: CompletionRoute): Promise<{ provider: string; model: string; ownCredentials: boolean }> {
+  // With the route's own key or base URL, so a model prefix that names
+  // another provider than the route's is refused rather than handed the key.
+  let { providerId, modelId } = resolveModelOption(
+    { provider: route.providerId, model: route.modelId, apiKey: route.apiKey, baseUrl: route.baseUrl } as ModelOption,
+    'text',
+  );
+  // The provider the route's own credentials are for: a router that picks
+  // another serves the primary on that provider's own credentials.
+  const credentialProviderId = providerId;
   if (route.router) {
     try {
       const toolNames = toolNamesOf(route.tools);
@@ -230,7 +310,7 @@ async function selectPrimary(route: CompletionRoute): Promise<{ provider: string
       console.warn('[agentos] Model router error, falling back to standard resolution:', routerErr);
     }
   }
-  return { provider: providerId, model: modelId };
+  return { provider: providerId, model: modelId, ownCredentials: providerId === credentialProviderId };
 }
 
 type InBandError = NonNullable<ModelCompletionResponse['error']>;
@@ -542,29 +622,95 @@ function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): M
 }
 
 export function createCompletionGateway(defaults: Partial<CompletionRoute> = {}): CompletionGateway {
-  async function resolve(input: CompletionRoute, after?: CompletionResolution): Promise<CompletionResolution | null> {
-    const route: CompletionRoute = { ...defaults, ...definedOnly(input as unknown as Record<string, unknown>) } as CompletionRoute;
+  async function resolve(input: CompletionRoute, after?: CompletionResolution, failure?: unknown): Promise<CompletionResolution | null> {
+    const own = definedOnly(input as unknown as Record<string, unknown>) as Partial<CompletionRoute>;
+    const route: CompletionRoute = { ...defaults, ...own } as CompletionRoute;
+    // A turn whose model's `provider:` prefix names another provider than the
+    // defaults' does not inherit the defaults' provider.
+    if (
+      own.providerId === undefined &&
+      own.modelId !== undefined &&
+      defaults.providerId !== undefined &&
+      modelNamesAnotherProvider(defaults.providerId, own.modelId)
+    ) {
+      route.providerId = undefined;
+    }
+    // The defaults' key and base URL are for the provider the defaults name:
+    // a turn that names another provider takes only its own, and the
+    // primary then reads that provider's from the environment.
+    if (
+      (defaults.apiKey !== undefined || defaults.baseUrl !== undefined) &&
+      !credentialsGoWith({ provider: defaults.providerId, model: defaults.modelId }, { provider: route.providerId, model: route.modelId })
+    ) {
+      route.apiKey = own.apiKey;
+      route.baseUrl = own.baseUrl;
+    }
     let chain: ReadonlyArray<CompletionHop>;
+    let walk: FallbackWalkState;
+    // The resolution's passed-over entries, reported when a walk starts.
+    let pendingSkips: CompletionHopSkip[] = [];
     if (after) {
+      for (const skip of after.pendingSkips ?? []) route.onHopSkipped?.(skip);
       chain = after.chain;
+      // The failed hop updates the walk: a refusal is recorded, and a standing
+      // leg that failed on availability is owed a refill.
+      walk = advanceFallbackWalk(after.walk ?? INITIAL_FALLBACK_WALK, chain[after.hop]?.entry?.walkRole, failure);
     } else {
       const primary = await selectPrimary(route);
-      const fallbacks = route.fallbackProviders ?? buildPolicyAwareFallbackChain(route.policyTier, primary.provider);
-      chain = [{ provider: primary.provider, model: primary.model }, ...fallbacks.map((entry) => ({ provider: entry.provider, model: entry.model, entry }))];
+      // The tier the walkers read: route params, the call's own, the host policy's, the router's.
+      const tier = resolvePolicyTier({ routerParams: route.routerParams, policyTier: route.policyTier, hostPolicy: route.hostPolicy, router: route.router });
+      const fallbacks = route.fallbackProviders ?? buildPolicyAwareFallbackChain(tier, primary.provider);
+      // Resolved once, as generateText and streamText resolve a walk's chain:
+      // the policy chain's entry for the first model is dropped, the route's
+      // explicit capability and exclusion requirements apply to every entry
+      // as it will be sent, and the uncensored group's standing legs and
+      // refills are marked.
+      const resolved = resolveFallbackChain(fallbacks, {
+        primary,
+        requiredCapabilities: explicitRequiredCapabilities({ hostPolicy: route.hostPolicy, routerParams: route.routerParams }),
+        excludedModelIds: route.routerParams?.excludedModelIds,
+        onSkip: (entry, reason) => pendingSkips.push({ provider: entry.provider, model: entry.model, reason }),
+      });
+      chain = [
+        { provider: primary.provider, model: primary.model, ownCredentials: primary.ownCredentials },
+        ...resolved.map((entry) => ({ provider: entry.provider, model: entry.model, entry })),
+      ];
+      walk = INITIAL_FALLBACK_WALK;
     }
     let lastError: Error | undefined;
     for (let hop = after ? after.hop + 1 : 0; hop < chain.length; hop++) {
       const h = chain[hop];
+      // A refill runs only while a standing leg is owed one, and the policy
+      // chain's Claude legs are passed over after a refusal.
+      if (h.entry) {
+        const gate = gateFallbackEntry(walk, h.entry);
+        if (!gate.run) {
+          route.onHopSkipped?.({ provider: h.provider, model: h.model, reason: gate.reason });
+          continue;
+        }
+        walk = gate.state;
+      }
       // Set once credentials resolve: the provider that serves the hop (resolveProvider
-      // may serve anthropic through openrouter), whose circuit and health are the hop's.
+      // may serve anthropic through openrouter), and the id its circuit and health
+      // are kept under (the route's own key and base URL have one of their own).
       let servingProviderId: string | undefined;
+      let healthId: string | undefined;
       try {
         const parsed = hop === 0 && h.model ? { providerId: h.provider, modelId: h.model } : resolveModelOption({ provider: h.provider, model: h.model }, 'text');
-        const resolved = hop === 0
+        // The route's own credentials go to the primary only when they are for
+        // its provider (a router may have picked another).
+        const routeCredentials = hop === 0 && h.ownCredentials !== false;
+        const resolved = routeCredentials
           ? resolveProvider(parsed.providerId, parsed.modelId, { apiKey: route.apiKey, baseUrl: route.baseUrl })
           : resolveProvider(parsed.providerId, parsed.modelId);
         servingProviderId = resolved.providerId;
-        if (globalLLMProviderHealth.isOpen(resolved.providerId)) throw circuitOpenError(resolved.providerId);
+        const ownCredentials = routeCredentials && (route.apiKey !== undefined || route.baseUrl !== undefined);
+        const hopHealthId = providerHealthKey(
+          resolved,
+          ownCredentials ? () => resolveProvider(parsed.providerId, parsed.modelId) : undefined,
+        );
+        healthId = hopHealthId;
+        if (globalLLMProviderHealth.isOpen(hopHealthId)) throw circuitOpenError(resolved.providerId, hopHealthId);
         const providerManager = await createProviderManager(resolved);
         const info = await providerManager.getModelInfo(resolved.modelId, resolved.providerId);
         const overrides = h.entry ? fallbackHopOverrides(route.callOptions ?? {}, h.entry) : undefined;
@@ -576,13 +722,19 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           capabilities: [...(info?.capabilities ?? [])],
           toolFormat: toolFormatFor(resolved.providerId),
           providerManager,
+          healthId: hopHealthId,
           optionOverrides: overrides
             ? (definedOnly({ maxTokens: overrides.maxTokens, effort: overrides.effort, cache: overrides.cache }) as Partial<ModelCompletionOptions>)
             : {},
           chain,
+          walk,
+          ...(hop === 0 && pendingSkips.length > 0 ? { pendingSkips } : {}),
         };
         if (hop > 0) {
-          route.onFallback?.({ from: after?.providerId ?? chain[0].provider, to: resolved.providerId, hop, error: lastError ?? new Error('the previous hop failed') });
+          // The most recent error, as the walkers report it: a hop that could not
+          // start on the way here, else the one the previous hop failed with.
+          const cause = lastError ?? (failure instanceof Error ? failure : undefined) ?? new Error('the previous hop failed');
+          route.onFallback?.({ from: after?.providerId ?? chain[0].provider, to: resolved.providerId, hop, error: cause });
         }
         return resolution;
       } catch (err) {
@@ -590,13 +742,20 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         // As in streamText: a configuration error (no credentials, unknown model)
         // says nothing about the provider's health, and an open circuit is the
         // registry's own verdict; neither is recorded.
-        if (servingProviderId && lastError.name !== 'LLMProviderCircuitOpenError') {
-          globalLLMProviderHealth.recordFailure(servingProviderId, lastError);
+        if (healthId && lastError.name !== 'LLMProviderCircuitOpenError') {
+          globalLLMProviderHealth.recordFailure(healthId, lastError);
         }
         route.onHopFailure?.({ providerId: servingProviderId ?? h.provider, hop, error: lastError });
         // The primary's configuration error (no credentials, unknown provider) is the caller's to see.
         // A fallback leg that cannot start is skipped.
         if (hop === 0 && !isRetryableError(lastError)) throw lastError;
+        // The primary could not start, so the walk starts here.
+        if (hop === 0) {
+          for (const skip of pendingSkips) route.onHopSkipped?.(skip);
+          pendingSkips = [];
+        }
+        // A hop that could not start failed on availability: a standing leg is owed a refill.
+        walk = advanceFallbackWalk(walk, h.entry?.walkRole, lastError);
       }
     }
     return null;
@@ -658,7 +817,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         const provider = resolution.providerManager.getProvider(resolution.providerId);
         if (!provider) {
           const error = Object.assign(new Error(`Provider '${resolution.providerId}' is not available.`), { name: 'ProviderInitializationError' });
-          globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+          globalLLMProviderHealth.recordFailure(resolution.healthId ?? resolution.providerId, error);
           finish(failed(error, undefined));
           return;
         }
@@ -672,7 +831,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
             // hop and says nothing about the provider's health (as in streamText).
             const aborted = chunk.error.type === 'abort';
             const error = errorFromChunk(chunk.error);
-            if (!aborted) globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+            if (!aborted) globalLLMProviderHealth.recordFailure(resolution.healthId ?? resolution.providerId, error);
             if (!delivered) {
               const usage = billedUsage(buffer, error, chunk.usage);
               finish(aborted ? failed(error, usage, false) : failed(error, usage));
@@ -703,11 +862,11 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           yield* buffer.splice(0);
         }
         completed = true;
-        globalLLMProviderHealth.recordSuccess(resolution.providerId);
+        globalLLMProviderHealth.recordSuccess(resolution.healthId ?? resolution.providerId);
         finish({ kind: 'delivered' });
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+        globalLLMProviderHealth.recordFailure(resolution.healthId ?? resolution.providerId, error);
         if (!delivered) {
           finish(failed(error, billedUsage(buffer, error)));
           return;

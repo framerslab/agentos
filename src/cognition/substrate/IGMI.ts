@@ -19,6 +19,8 @@ import { IUtilityAI } from '../nlp/ai_utilities/IUtilityAI';
 import { IToolOrchestrator } from '../../core/tools/IToolOrchestrator';
 import type { ToolEffectRecord } from '../../core/tools/ITool';
 import type { ChatMessage, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
+import type { HexacoTraitValues } from './personas/hexaco';
+import type { ILearnerSession } from '../learning/types.js';
 
 /**
  * Defines the possible moods a GMI can be in, influencing its behavior and responses.
@@ -107,6 +109,36 @@ export interface ToolCallResult {
   errorDetails?: any;
   /** The call's effects, as the tool's result carried them (see `ToolExecutionResult.effects`). */
   effects?: ToolEffectRecord[];
+}
+
+/**
+ * Why a {@link GMIToolCallGate} refused a call.
+ * @interface GMIToolCallRefusal
+ */
+export interface GMIToolCallRefusal {
+  /** Why the call was refused. The model reads it in the refused tool result. */
+  reason: string;
+  /** A machine-readable code for the rule that refused the call. */
+  reasonCode?: string;
+  /** The id of the guardrail that refused the call, when it has one. */
+  guardrailId?: string;
+}
+
+/**
+ * Asked before the GMI runs a call of its own tool round. Resolving to null lets the call run. A refusal turns the call
+ * into a refused tool result that the model reads (an error with the code `AUTH_PERMISSION_DENIED`, as a permission
+ * refusal is recorded), and the tool is not called; a gate that throws refuses the call too. AgentOS builds one from its
+ * output guardrails that set `config.evaluateToolCalls`.
+ */
+export type GMIToolCallGate = (call: ToolCallRequest) => Promise<GMIToolCallRefusal | null>;
+
+/**
+ * Options for the continuation a tool result starts.
+ * @interface GMIToolResultOptions
+ */
+export interface GMIToolResultOptions {
+  /** Asked before each call of the continuation's own tool round. Unset, the continuation asks the gate of the turn it continues. */
+  toolCallGate?: GMIToolCallGate;
 }
 
 /**
@@ -227,6 +259,21 @@ export interface GMIBaseConfig {
    * `GMIManager` passes its own `shutdownTimeoutMs`.
    */
   shutdownTimeoutMs?: number;
+  /**
+   * The session's learner session, passed by a host whose `learning` option is on. The GMI asks it once per user
+   * turn, before the tool loop, for the personality section (a system prompt at priority 2, after the persona's base
+   * prompt) and tells each tool call the turn's learner and mode (`sessionData.learning`). A session that fails or
+   * does not answer within 2,000 ms never fails the turn. The host that passes the session ends it.
+   */
+  learning?: ILearnerSession;
+  /**
+   * The persona's traits as the GMI renders them itself, when it has no learner session or the session did not
+   * answer: `authored` is the registry persona's traits and `overlay` a workflow role overlay's patch. They are read
+   * once, at `initialize()`, never from the persona copy `setPersonalityTrait()` replaces. Honesty-humility and
+   * emotionality always come from `authored`; an overlay that names either is not applied to it, and the trace says
+   * so. Without this field the GMI renders no personality section of its own.
+   */
+  personaTraits?: { authored: HexacoTraitValues; overlay?: HexacoTraitValues };
 }
 
 /**
@@ -273,6 +320,11 @@ export interface GMITurnInput {
      * uses the turn's ids.
      */
     memoryScope?: { userId?: string; sessionId?: string } | null;
+    /**
+     * Asked before each call of this turn's tool round runs (see {@link GMIToolCallGate}). A tool continuation that names
+     * none asks the gate of the turn it continues.
+     */
+    toolCallGate?: GMIToolCallGate;
     /**
      * Optional conversation history snapshot to use for prompt construction.
      * When provided, the GMI should prefer this over any internal ephemeral history so
@@ -652,13 +704,15 @@ export interface IGMI {
     toolName: string,
     resultPayload: ToolResultPayload,
     userId: string,
-    userApiKeys?: Record<string, string>
+    userApiKeys?: Record<string, string>,
+    options?: GMIToolResultOptions,
   ): Promise<GMIOutput>;
 
   handleToolResults?(
     toolResults: ToolCallResult[],
     userId: string,
-    userApiKeys?: Record<string, string>
+    userApiKeys?: Record<string, string>,
+    options?: GMIToolResultOptions,
   ): Promise<GMIOutput>;
 
   hydrateConversationHistory?(
@@ -703,6 +757,12 @@ export interface IGMI {
    * @param value - New trait value.
    */
   setPersonalityTrait?(trait: string, value: number): void;
+
+  /**
+   * The learner session this instance was built with (`GMIBaseConfig.learning`), or `undefined` when its host has
+   * no learning layer. Optional so that custom IGMI implementations keep compiling.
+   */
+  getLearnerSession?(): ILearnerSession | undefined;
 
   getReasoningTrace(): Readonly<ReasoningTrace>;
   getWorkingMemorySnapshot(): Promise<Record<string, any>>;

@@ -7,6 +7,7 @@
  */
 
 export { StateManager } from './StateManager.js';
+export type { ParallelBranchWrites } from './StateManager.js';
 export { NodeScheduler } from './NodeScheduler.js';
 export { LoopController } from './LoopController.js';
 export type {

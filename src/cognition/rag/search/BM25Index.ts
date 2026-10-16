@@ -25,41 +25,10 @@
  * @see HybridSearcher for combining BM25 with dense vector search
  */
 
-// ── Types ─────────────────────────────────────────────────────────────────
+import { getNaturalStopWords } from '../../nlp/filters/StopWordFilter.js';
+import { LexicalIndex, type LexicalIndexJSON } from './LexicalIndex.js';
 
-/**
- * Internal document representation stored in the BM25 index.
- *
- * @interface BM25Document
- * @property {string} id - Unique document identifier.
- * @property {number} length - Number of tokens in the document after tokenization.
- * @property {Record<string, unknown>} [metadata] - Optional metadata attached to the document.
- */
-export interface BM25Document {
-  /** Unique document identifier. */
-  id: string;
-  /** Number of tokens in the document after tokenization. */
-  length: number;
-  /** Optional metadata attached to the document. */
-  metadata?: Record<string, unknown>;
-}
-
-/**
- * A single BM25 search result with relevance score.
- *
- * @interface BM25Result
- * @property {string} id - Document identifier.
- * @property {number} score - BM25 relevance score (higher = more relevant).
- * @property {Record<string, unknown>} [metadata] - Document metadata if available.
- */
-export interface BM25Result {
-  /** Document identifier. */
-  id: string;
-  /** BM25 relevance score (higher = more relevant). */
-  score: number;
-  /** Document metadata if available. */
-  metadata?: Record<string, unknown>;
-}
+export type { BM25Document, BM25Result, BM25Stats } from './LexicalIndex.js';
 
 /**
  * Configuration options for the BM25 index.
@@ -69,6 +38,7 @@ export interface BM25Result {
  *   the influence of term frequency. Range: 1.2-2.0 typical.
  * @property {number} [b=0.75] - Document length normalization factor.
  *   0 = no normalization, 1 = full normalization. Range: 0-1.
+ * @property {Function} [tokenize] - A tokenizer used in place of `pipeline` and the built-in one.
  */
 export interface BM25Config {
   /** Term saturation parameter. Default: 1.2. */
@@ -81,41 +51,23 @@ export interface BM25Config {
    * stemming, lemmatization, and stop word handling.
    * @see createRagPipeline from nlp for the recommended default.
    */
-  pipeline?: import('../../nlp/TextProcessingPipeline').TextProcessingPipeline;
+  pipeline?: import('../../nlp/TextProcessingPipeline.js').TextProcessingPipeline;
+  /** A tokenizer in place of the pipeline and the built-in one. When given, `pipeline` is not used. */
+  tokenize?: (text: string) => string[];
 }
 
-/**
- * Index statistics for monitoring and debugging.
- *
- * @interface BM25Stats
- * @property {number} documentCount - Total documents in the index.
- * @property {number} termCount - Total unique terms across all documents.
- * @property {number} avgDocLength - Average document length in tokens.
- */
-export interface BM25Stats {
-  /** Total documents in the index. */
-  documentCount: number;
-  /** Total unique terms across all documents. */
-  termCount: number;
-  /** Average document length in tokens. */
-  avgDocLength: number;
+/** The stop words of the built-in tokenizer, read on first use (natural's list when it is installed). */
+let stopWords: ReadonlySet<string> | undefined;
+
+/** The built-in tokenizer: lower case, split on white space and punctuation, stop words and one-letter tokens dropped. */
+function builtInTokenize(text: string): string[] {
+  stopWords ??= getNaturalStopWords();
+  const stops = stopWords;
+  return text
+    .toLowerCase()
+    .split(/[\s\-_.,;:!?'"()[\]{}<>/\\|@#$%^&*~`+=]+/)
+    .filter((token) => token.length >= 2 && !stops.has(token));
 }
-
-// ── Stop Words ────────────────────────────────────────────────────────────
-
-import { getNaturalStopWords } from '../../nlp/filters/StopWordFilter';
-
-/**
- * Stop words used by the fallback regex tokenizer (when no pipeline is configured).
- * Uses `natural`'s 170-word list when available, falls back to the built-in
- * 120-word ENGLISH_STOP_WORDS set.
- *
- * When a `TextProcessingPipeline` is configured via `BM25Config.pipeline`,
- * the pipeline handles stop word filtering internally and this set is not used.
- */
-const STOP_WORDS: ReadonlySet<string> = getNaturalStopWords();
-
-// ── BM25 Index ────────────────────────────────────────────────────────────
 
 /**
  * BM25 sparse keyword index for hybrid retrieval.
@@ -124,6 +76,12 @@ const STOP_WORDS: ReadonlySet<string> = getNaturalStopWords();
  * (e.g., error codes, function names, product IDs). BM25 catches these by
  * scoring documents based on term frequency, inverse document frequency,
  * and document length normalization.
+ *
+ * It is a {@link LexicalIndex} with AgentOS's tokenizer: the configured
+ * `tokenize` or `pipeline`, else the built-in one, whose stop words are
+ * `natural`'s English list when that package loads and `ENGLISH_STOP_WORDS`
+ * otherwise, read on the first tokenization, not when the module is imported.
+ * `toJSON()` saves it and {@link BM25Index.fromJSON} restores it.
  *
  * @example Basic usage
  * ```typescript
@@ -149,45 +107,11 @@ const STOP_WORDS: ReadonlySet<string> = getNaturalStopWords();
  * const results = await hybrid.search('What does error TS2304 mean?');
  * ```
  */
-export class BM25Index {
-  /** Term saturation parameter (typical range: 1.2-2.0). */
-  private k1: number;
-
-  /** Document length normalization (0 = none, 1 = full). */
-  private b: number;
-
-  /** Map of document ID to internal document representation. */
-  private documents: Map<string, BM25Document>;
-
-  /**
-   * Inverted index mapping each term to a map of document IDs and their
-   * raw term frequencies: `term -> { docId -> termFrequency }`.
-   */
-  private invertedIndex: Map<string, Map<string, number>>;
-
-  /**
-   * Pre-computed IDF (Inverse Document Frequency) for each indexed term.
-   * Recomputed when documents are added or removed.
-   */
-  private idf: Map<string, number>;
-
-  /** Average document length across the entire corpus (in tokens). */
-  private avgDocLength: number;
-
-  /** Whether the IDF cache needs recomputation. */
-  private idfDirty: boolean;
-
-  /**
-   * Optional pluggable text processing pipeline. When set, replaces the
-   * built-in regex tokenizer with configurable stemming, lemmatization,
-   * and stop word handling.
-   */
-  private pipeline?: import('../../nlp/TextProcessingPipeline').TextProcessingPipeline;
-
+export class BM25Index extends LexicalIndex {
   /**
    * Creates a new BM25 index.
    *
-   * @param {BM25Config} [config] - Optional BM25 tuning parameters.
+   * @param {BM25Config} [config] - Optional BM25 tuning parameters and tokenizer.
    * @param {number} [config.k1=1.2] - Term saturation parameter.
    * @param {number} [config.b=0.75] - Document length normalization.
    *
@@ -201,275 +125,21 @@ export class BM25Index {
    * ```
    */
   constructor(config?: BM25Config) {
-    this.k1 = config?.k1 ?? 1.2;
-    this.b = config?.b ?? 0.75;
-    this.pipeline = config?.pipeline;
-    this.documents = new Map();
-    this.invertedIndex = new Map();
-    this.idf = new Map();
-    this.avgDocLength = 0;
-    this.idfDirty = false;
-  }
-
-  /**
-   * Tokenizes raw text into an array of normalized terms.
-   *
-   * Processing pipeline:
-   * 1. Convert to lowercase
-   * 2. Split on whitespace and punctuation boundaries
-   * 3. Filter out stop words and tokens shorter than 2 characters
-   *
-   * @param {string} text - Raw text to tokenize.
-   * @returns {string[]} Array of normalized tokens.
-   *
-   * @example
-   * ```typescript
-   * // "The Quick Brown FOX!" -> ["quick", "brown", "fox"]
-   * ```
-   */
-  private tokenize(text: string): string[] {
-    /* Use pluggable pipeline when configured (supports stemming, lemmatization, etc.) */
-    if (this.pipeline) {
-      return this.pipeline.processToStrings(text);
-    }
-    /* Fallback: built-in regex tokenizer (backwards compatible) */
-    return text
-      .toLowerCase()
-      .split(/[\s\-_.,;:!?'"()[\]{}<>/\\|@#$%^&*~`+=]+/)
-      .filter((token) => token.length >= 2 && !STOP_WORDS.has(token));
-  }
-
-  /**
-   * Recomputes IDF values for all terms in the index.
-   *
-   * Uses the Robertson-Walker IDF formula:
-   * `IDF(t) = log((N - n(t) + 0.5) / (n(t) + 0.5) + 1)`
-   *
-   * Where:
-   * - N = total number of documents
-   * - n(t) = number of documents containing term t
-   *
-   * The `+ 1` prevents negative IDF values for extremely common terms.
-   */
-  private recomputeIdf(): void {
-    if (!this.idfDirty) return;
-
-    const N = this.documents.size;
-    this.idf.clear();
-
-    for (const [term, docMap] of this.invertedIndex) {
-      const n = docMap.size;
-      // Robertson-Walker IDF: log((N - n + 0.5) / (n + 0.5) + 1)
-      this.idf.set(term, Math.log((N - n + 0.5) / (n + 0.5) + 1));
-    }
-
-    // Recompute average document length
-    if (N === 0) {
-      this.avgDocLength = 0;
-    } else {
-      let totalLength = 0;
-      for (const doc of this.documents.values()) {
-        totalLength += doc.length;
-      }
-      this.avgDocLength = totalLength / N;
-    }
-
-    this.idfDirty = false;
-  }
-
-  /**
-   * Adds a single document to the BM25 index.
-   *
-   * The text is tokenized, stop words are removed, and term frequencies
-   * are recorded in the inverted index. IDF values are lazily recomputed
-   * on the next search.
-   *
-   * @param {string} id - Unique document identifier.
-   * @param {string} text - Document text content to index.
-   * @param {Record<string, unknown>} [metadata] - Optional metadata to store.
-   * @throws {Error} If `id` is empty or `text` is empty.
-   *
-   * @example
-   * ```typescript
-   * index.addDocument('readme', 'AgentOS is a framework for building AI agents');
-   * index.addDocument('changelog', 'v2.0: Added BM25 hybrid search', { version: '2.0' });
-   * ```
-   */
-  addDocument(id: string, text: string, metadata?: Record<string, unknown>): void {
-    if (!id) throw new Error('BM25Index.addDocument: id must not be empty.');
-    if (!text) throw new Error('BM25Index.addDocument: text must not be empty.');
-
-    // Remove previous version if exists
-    if (this.documents.has(id)) {
-      this.removeDocument(id);
-    }
-
-    const tokens = this.tokenize(text);
-
-    // Count term frequencies for this document
-    const termFreqs = new Map<string, number>();
-    for (const token of tokens) {
-      termFreqs.set(token, (termFreqs.get(token) ?? 0) + 1);
-    }
-
-    // Store document metadata
-    this.documents.set(id, {
-      id,
-      length: tokens.length,
-      metadata,
+    const pipeline = config?.pipeline;
+    super({
+      k1: config?.k1,
+      b: config?.b,
+      tokenize: config?.tokenize ?? (pipeline ? (text: string) => pipeline.processToStrings(text) : builtInTokenize),
     });
-
-    // Update inverted index
-    for (const [term, freq] of termFreqs) {
-      let docMap = this.invertedIndex.get(term);
-      if (!docMap) {
-        docMap = new Map();
-        this.invertedIndex.set(term, docMap);
-      }
-      docMap.set(id, freq);
-    }
-
-    this.idfDirty = true;
   }
 
   /**
-   * Adds multiple documents to the index in a single batch.
-   *
-   * More efficient than calling {@link addDocument} repeatedly because
-   * IDF recomputation is deferred until the next search.
-   *
-   * @param {Array<{ id: string; text: string; metadata?: Record<string, unknown> }>} docs
-   *   Array of documents to index.
-   *
-   * @example
-   * ```typescript
-   * index.addDocuments([
-   *   { id: 'doc-1', text: 'First document content' },
-   *   { id: 'doc-2', text: 'Second document content', metadata: { source: 'api' } },
-   * ]);
-   * ```
+   * A saved index restored; give the configuration it was made with. Its k1 and b come from the saved index, and
+   * its tokenizer from `config`, which must read text as the one the index was made with.
    */
-  addDocuments(
-    docs: Array<{ id: string; text: string; metadata?: Record<string, unknown> }>,
-  ): void {
-    for (const doc of docs) {
-      this.addDocument(doc.id, doc.text, doc.metadata);
-    }
-  }
-
-  /**
-   * Searches the BM25 index for documents matching the query.
-   *
-   * Scoring formula per document D and query Q:
-   * ```
-   * score(D, Q) = sum_{t in Q} IDF(t) * (tf(t,D) * (k1 + 1)) / (tf(t,D) + k1 * (1 - b + b * |D| / avgdl))
-   * ```
-   *
-   * @param {string} query - Search query text.
-   * @param {number} [topK=10] - Maximum number of results to return.
-   * @returns {BM25Result[]} Array of results sorted by BM25 score descending.
-   *
-   * @example
-   * ```typescript
-   * const results = index.search('typescript error TS2304', 5);
-   * for (const r of results) {
-   *   console.log(`${r.id}: score=${r.score.toFixed(4)}`);
-   * }
-   * ```
-   */
-  search(query: string, topK: number = 10): BM25Result[] {
-    // Ensure IDF is up-to-date
-    this.recomputeIdf();
-
-    const queryTokens = this.tokenize(query);
-    if (queryTokens.length === 0) return [];
-
-    const scores = new Map<string, number>();
-
-    for (const term of queryTokens) {
-      const idfValue = this.idf.get(term);
-      if (idfValue === undefined) continue;
-
-      const docMap = this.invertedIndex.get(term);
-      if (!docMap) continue;
-
-      for (const [docId, tf] of docMap) {
-        const doc = this.documents.get(docId)!;
-        const dl = doc.length;
-        const avgdl = this.avgDocLength || 1;
-
-        // BM25 score for this term in this document
-        const numerator = tf * (this.k1 + 1);
-        const denominator = tf + this.k1 * (1 - this.b + this.b * (dl / avgdl));
-        const termScore = idfValue * (numerator / denominator);
-
-        scores.set(docId, (scores.get(docId) ?? 0) + termScore);
-      }
-    }
-
-    // Sort by score descending and return top K
-    const results: BM25Result[] = [];
-    for (const [id, score] of scores) {
-      const doc = this.documents.get(id)!;
-      results.push({ id, score, metadata: doc.metadata });
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, topK);
-  }
-
-  /**
-   * Removes a document from the index by its ID.
-   *
-   * Cleans up all term frequency entries in the inverted index and
-   * marks IDF for recomputation.
-   *
-   * @param {string} id - Document ID to remove.
-   * @returns {boolean} `true` if the document existed and was removed, `false` otherwise.
-   *
-   * @example
-   * ```typescript
-   * const removed = index.removeDocument('doc-obsolete');
-   * console.log(removed ? 'Removed' : 'Not found');
-   * ```
-   */
-  removeDocument(id: string): boolean {
-    const doc = this.documents.get(id);
-    if (!doc) return false;
-
-    // Remove all entries for this document from the inverted index
-    for (const [term, docMap] of this.invertedIndex) {
-      docMap.delete(id);
-      if (docMap.size === 0) {
-        this.invertedIndex.delete(term);
-      }
-    }
-
-    this.documents.delete(id);
-    this.idfDirty = true;
-    return true;
-  }
-
-  /**
-   * Returns current index statistics.
-   *
-   * @returns {BM25Stats} Object containing document count, term count,
-   *   and average document length.
-   *
-   * @example
-   * ```typescript
-   * const stats = index.getStats();
-   * console.log(`${stats.documentCount} docs, ${stats.termCount} unique terms`);
-   * ```
-   */
-  getStats(): BM25Stats {
-    // Ensure avgDocLength is current
-    this.recomputeIdf();
-
-    return {
-      documentCount: this.documents.size,
-      termCount: this.invertedIndex.size,
-      avgDocLength: this.avgDocLength,
-    };
+  static override fromJSON(json: LexicalIndexJSON, config?: BM25Config): BM25Index {
+    const index = new BM25Index(config);
+    index.restore(json);
+    return index;
   }
 }

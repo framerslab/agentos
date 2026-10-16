@@ -32,6 +32,7 @@ import {
   ProviderEmbeddingResponse,
 } from '../../core/llm/providers/IProvider';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js'; // Assuming a GMIError utility
+import { contentSafeConsole as console } from '../../core/logging/contentSafeConsole.js';
 
 /**
  * Represents a cached embedding entry.

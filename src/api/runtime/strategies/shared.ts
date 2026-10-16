@@ -2,11 +2,12 @@
  * @file shared.ts
  * Shared utilities for strategy compilers.
  *
- * Centralises `isAgent()`, `mergeDefaults()`, `resolveAgent()`, and
- * `checkBeforeAgent()` so every strategy compiler uses a single implementation.
- * This avoids subtle divergence in how configs are merged or how HITL gates
- * are evaluated across sequential, parallel, debate, review-loop, and
- * hierarchical strategies.
+ * Centralises `isAgent()`, `mergeDefaults()`, `resolveAgent()`, and the
+ * `beforeAgent` gate, `checkBeforeAgentInput()` (with `checkBeforeAgent()`
+ * beside it for a caller that sends the input as given), so every strategy
+ * compiler uses a single implementation. This avoids subtle divergence in how
+ * configs are merged or how HITL gates are evaluated across the sequential,
+ * parallel, debate, review-loop, hierarchical and graph strategies.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects and invokes strategy compilers.
  */
@@ -16,11 +17,13 @@ import { knownProviderPrefixOf, routedProviderOf } from '../../model.js';
 import type {
   AgencyOptions,
   AgencyQuorumConfig,
+  AgencySeatConfig,
   Agent,
   BaseAgentConfig,
   AgentCallRecord,
   ApprovalRequest,
   ApprovalDecision,
+  SeatMetadata,
 } from '../types.js';
 import { AgencyQuorumError } from '../types.js';
 
@@ -48,6 +51,32 @@ import { AgencyQuorumError } from '../types.js';
  */
 export function isAgent(value: BaseAgentConfig | Agent): value is Agent {
   return typeof (value as Agent).generate === 'function';
+}
+
+/**
+ * What the strategies read about a seat besides running it: a config's `instructions` (as its description) and
+ * `dependsOn`, or a pre-built member's own `description` and `dependsOn` when they are a non-blank string and an
+ * array of strings ({@link SeatMetadata}).
+ *
+ * @param member - A seat config or a pre-built `Agent`.
+ * @returns The seat's description and dependencies, each left out when the seat has none.
+ */
+export function seatMetadataOf(member: BaseAgentConfig | Agent): SeatMetadata {
+  if (!isAgent(member)) {
+    const config = member as BaseAgentConfig;
+    return {
+      ...(config.instructions ? { description: config.instructions } : {}),
+      ...(Array.isArray(config.dependsOn) ? { dependsOn: config.dependsOn } : {}),
+    };
+  }
+  const carried = member as Agent & { description?: unknown; dependsOn?: unknown };
+  const description =
+    typeof carried.description === 'string' && carried.description.trim() ? carried.description : undefined;
+  const dependsOn =
+    Array.isArray(carried.dependsOn) && carried.dependsOn.every((name) => typeof name === 'string')
+      ? (carried.dependsOn as string[])
+      : undefined;
+  return { ...(description ? { description } : {}), ...(dependsOn ? { dependsOn } : {}) };
 }
 
 /**
@@ -226,6 +255,7 @@ export function callRecordExtras(
  * merged additively: agency tools serve as a base layer and agent tools
  * override on name collision. This lets an agency provide a shared tool
  * set while individual agents can override or extend it.
+ * The agency's `runtime` becomes the seat's when the seat names none.
  *
  * @param agentConfig - Per-agent configuration (takes precedence).
  * @param agencyConfig - Agency-level fallback values (base layer).
@@ -247,7 +277,7 @@ export function callRecordExtras(
 export function mergeDefaults(
   agentConfig: BaseAgentConfig,
   agencyConfig: AgencyOptions
-): BaseAgentConfig {
+): AgencySeatConfig {
   // A seat whose own model names a provider (`anthropic:claude-opus-5-5`) does
   // not inherit the agency's provider, so the prefix never meets an inherited
   // `ollama`, under which a colon is never split.
@@ -268,6 +298,8 @@ export function mergeDefaults(
   const seatRouted = routedProviderOf({ provider: used.provider, model: used.model });
   const agencyRouted = routedProviderOf(agencyConfig);
   const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
+  // The agency's runtime is the default engine of a config seat; the seat's own wins.
+  const runtime = (agentConfig as AgencySeatConfig).runtime ?? agencyConfig.runtime;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
@@ -280,6 +312,7 @@ export function mergeDefaults(
     // Tools are merged separately because we want additive merging
     // (agency tools + agent tools) rather than wholesale replacement.
     tools: mergeAdaptableTools(agencyConfig.tools, agentConfig.tools),
+    ...(runtime !== undefined ? { runtime } : {}),
   };
 }
 
@@ -313,12 +346,47 @@ export function resolveAgent(
 }
 
 /**
+ * The input an agent receives after a `beforeAgent` decision: the strategy's
+ * input, with the approver's `modifications.instructions` appended when the
+ * decision carries them.
+ *
+ * @param input - The input the strategy passes the agent.
+ * @param decision - The gate's decision, or `null` when no gate applied.
+ * @returns The input with the approver's instructions, or the input as given.
+ */
+export function withApprovalInstructions(input: string, decision: ApprovalDecision | null): string {
+  const instructions = decision?.modifications?.instructions;
+  return instructions ? `${input}\n\n[Additional instructions]: ${instructions}` : input;
+}
+
+/**
+ * The outcome of the `beforeAgent` gate for a strategy that applies an
+ * approval's instructions.
+ */
+export interface BeforeAgentGate {
+  /** The decision, as {@link checkBeforeAgent} returns it. */
+  decision: ApprovalDecision | null;
+  /**
+   * The input the agent receives when it runs: the strategy's input, with the
+   * approver's instructions appended when the approval carries them. The
+   * post-approval check read it, the strategy's input on its own, and each
+   * text the strategy built that input from.
+   */
+  input: string;
+}
+
+/**
  * Checks the HITL `beforeAgent` gate for a named agent.
  *
  * When the agency-level `hitl.approvals.beforeAgent` list includes the agent
  * name, this function invokes the HITL handler and returns the decision.
  * If the agent name is not in the approval list, or no handler is configured,
  * returns `null` (meaning "no gate -- proceed normally").
+ *
+ * The post-approval check reads `context` as given. A strategy that appends
+ * an approval's `modifications.instructions` to the agent's input gates the
+ * agent with {@link checkBeforeAgentInput} instead, so the check reads the
+ * input with the instructions.
  *
  * ## Why return `null` instead of `{ approved: true }`?
  *
@@ -353,12 +421,75 @@ export async function checkBeforeAgent(
   agentCalls: AgentCallRecord[],
   agencyConfig: AgencyOptions
 ): Promise<ApprovalDecision | null> {
+  return (await runBeforeAgentGate(name, context, agentCalls, agencyConfig, false)).decision;
+}
+
+/**
+ * Checks the HITL `beforeAgent` gate for a strategy that appends an
+ * approval's `modifications.instructions` to the agent's input, and returns
+ * the input the agent receives.
+ *
+ * After an approval, the post-approval check reads that input, the
+ * instructions included, so instructions the check blocks turn the approval
+ * into a rejection exactly as a blocked input does. It also reads the
+ * strategy's input on its own, as it does for an approval without
+ * instructions, so the instructions hide nothing at the end of that input
+ * from a check that matches only there. The strategy sends the returned
+ * `input`, the text the check read.
+ *
+ * A strategy that builds the input from other texts and writes more after
+ * them (the task, other agents' output) passes those texts as `parts`, and the
+ * check reads each of them on its own too: it reads its texts as JSON, where a
+ * line break inside a text is escaped, so a statement it matches only at the
+ * end of a text (an unconditional `DELETE FROM <table>`, `rm -rf .`) no longer
+ * matches once the strategy's text follows it.
+ *
+ * @param name - The agent's declared name in the roster.
+ * @param context - The input the strategy passes the agent.
+ * @param agentCalls - Agent call records accumulated so far in this run.
+ * @param agencyConfig - The full agency configuration containing HITL settings.
+ * @param parts - The texts the strategy built `context` from, each read on its
+ *   own by the post-approval check. An empty text, or one equal to `context`,
+ *   adds nothing.
+ * @returns The decision (`null` when no gate applies) and the agent's input.
+ *
+ * @example
+ * ```ts
+ * const gate = await checkBeforeAgentInput('researcher', prompt, calls, config);
+ * if (gate.decision && !gate.decision.approved) return;
+ * await researcher.generate(gate.input);
+ * ```
+ */
+export async function checkBeforeAgentInput(
+  name: string,
+  context: string,
+  agentCalls: AgentCallRecord[],
+  agencyConfig: AgencyOptions,
+  parts: readonly string[] = [],
+): Promise<BeforeAgentGate> {
+  return runBeforeAgentGate(name, context, agentCalls, agencyConfig, true, parts);
+}
+
+/**
+ * The `beforeAgent` gate both entry points share: asks the handler, then
+ * runs the post-approval check over the input the agent receives, which
+ * carries the approver's instructions only when `appliesInstructions` is set,
+ * and over each of `parts` on its own.
+ */
+async function runBeforeAgentGate(
+  name: string,
+  context: string,
+  agentCalls: AgentCallRecord[],
+  agencyConfig: AgencyOptions,
+  appliesInstructions: boolean,
+  parts: readonly string[] = [],
+): Promise<BeforeAgentGate> {
   const beforeAgent = agencyConfig.hitl?.approvals?.beforeAgent;
   const handler = agencyConfig.hitl?.handler;
 
   // Short-circuit: no gate configured or agent not in the approval list.
   if (!beforeAgent?.includes(name) || !handler) {
-    return null;
+    return { decision: null, input: context };
   }
 
   // Build the approval request with full run context so the human reviewer
@@ -385,14 +516,29 @@ export async function checkBeforeAgent(
   // Fire the approvalDecided callback so event consumers know the outcome.
   agencyConfig.on?.approvalDecided?.(decision);
 
+  // The input the agent receives: built once, read by the check below and
+  // sent by the strategy, so the text checked is the text sent.
+  const input = appliesInstructions ? withApprovalInstructions(context, decision) : context;
+
   // --- Post-approval guardrail override ---
-  // Even after HITL approves, run guardrails as a final safety net.
+  // Even after HITL approves, run guardrails as a final safety net. With
+  // instructions appended, the check reads the strategy's input on its own
+  // beside the input the agent is sent: two code-safety patterns match a
+  // statement only at the end of the text they read (an unconditional
+  // `DELETE FROM <table>`, `rm -rf .`), and with the instructions after it
+  // such a statement no longer ends the text. For the same reason it reads
+  // each text the strategy built its input from on its own: the strategy's
+  // own text after the task or after another agent's output would hide such
+  // a statement at the end of either.
   if (decision.approved && agencyConfig.hitl?.guardrailOverride !== false) {
     const { runPostApprovalGuardrails } = await import('../../agency.js');
     const postGuardrails = agencyConfig.hitl?.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'];
+    const checked: Record<string, unknown> = input === context ? { input } : { input: context, sent: input };
+    const ownParts = parts.filter((part) => part !== '' && part !== context);
+    if (ownParts.length > 0) checked.parts = ownParts;
     const overrideResult = await runPostApprovalGuardrails(
       `agent:${name}`,
-      { input: context },
+      checked,
       postGuardrails,
       agencyConfig.on,
     );
@@ -404,13 +550,16 @@ export async function checkBeforeAgent(
         timestamp: Date.now(),
       });
       return {
-        approved: false,
-        reason: `Guardrail overrode HITL approval — ${overrideResult.guardrailId}: ${overrideResult.reason}`,
+        decision: {
+          approved: false,
+          reason: `Guardrail overrode HITL approval — ${overrideResult.guardrailId}: ${overrideResult.reason}`,
+        },
+        input,
       };
     }
   }
 
-  return decision;
+  return { decision, input };
 }
 
 /**

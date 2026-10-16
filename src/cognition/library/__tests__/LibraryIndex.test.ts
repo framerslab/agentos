@@ -149,6 +149,9 @@ describe('LibraryIndex over a vector store', () => {
     await index.indexSource(source({ sourceId: 'document:a1', kind: 'document', folderId: 'a', passages: [{ text: 'The budget grows.' }, { text: 'The weather turns.' }] }));
     await index.indexSource(source({ sourceId: 'document:c', kind: 'document', passages: [{ text: 'Hiring opens in May.' }] }));
     await index.indexSource(source({ sourceId: 'session:s1', kind: 'session', passages: [{ text: 'The budget and the weather.' }] }));
+    // No branch names this session, though it is as near the text as the best passage: a search that ignored the
+    // branches would answer it.
+    await index.indexSource(source({ sourceId: 'session:s2', kind: 'session', passages: [{ text: 'The budget again.' }] }));
     const scope = { tenantId: 'org1', aclGroups: ['acct:ann'] };
     // The folder's first passage is found by the first two branches.
     const anyOf = [{ folderIds: ['a'] }, { kinds: ['document'] }, { sourceIds: ['session:s1'] }];
@@ -159,6 +162,8 @@ describe('LibraryIndex over a vector store', () => {
     const best = await index.search({ text: 'budget', mode: 'dense', topK: 2, scope, anyOf });
     expect(best.map((passage) => passage.id)).toEqual(['document:a1#0', 'session:s1#0']);
     expect(best[0].score).toBeGreaterThan(best[1].score);
+    // The in-memory store has no lexicalSearch, so a hybrid choice runs the dense leg alone and keeps the store's scores.
+    expect(await index.search({ text: 'budget', mode: 'hybrid', topK: 10, scope, anyOf })).toEqual(all);
   });
 
   it('applies the scope to every branch', async () => {

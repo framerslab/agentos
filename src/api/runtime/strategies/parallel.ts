@@ -18,8 +18,10 @@
  *
  * ## HITL integration
  *
- * Each agent is gated by {@link checkBeforeAgent} before invocation. Rejected
- * agents return `null` and are filtered out before synthesis.
+ * Each agent is gated by {@link checkBeforeAgentInput} before invocation.
+ * Rejected agents, and agents whose input the post-approval check blocks (the
+ * approver's instructions included), return `null` and are filtered out
+ * before synthesis.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileSequential} -- the simpler alternative for ordered pipelines.
@@ -36,7 +38,7 @@ import { AgencyConfigError } from '../types.js';
 import {
   isAgent,
   mergeDefaults,
-  checkBeforeAgent,
+  checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
@@ -104,9 +106,11 @@ export function compileParallel(
       const entries = Object.entries(agents);
       const allSettled = await Promise.allSettled(
         entries.map(async ([name, agentOrConfig]) => {
-          // HITL: check beforeAgent gate before invoking this agent.
-          const decision = await checkBeforeAgent(name, prompt, [], agencyConfig);
-          if (decision && !decision.approved) {
+          // HITL: check beforeAgent gate before invoking this agent. The
+          // input carries the approver's instructions, if any, and the
+          // post-approval check read it, instructions included.
+          const gate = await checkBeforeAgentInput(name, prompt, [], agencyConfig);
+          if (gate.decision && !gate.decision.approved) {
             // Agent was rejected -- exclude from results.
             return null;
           }
@@ -115,10 +119,7 @@ export function compileParallel(
             ? agentOrConfig
             : createAgent({ ...mergeDefaults(agentOrConfig, agencyConfig) });
 
-          // Apply instruction modifications from the approval decision if any.
-          const effectivePrompt = decision?.modifications?.instructions
-            ? `${prompt}\n\n[Additional instructions]: ${decision.modifications.instructions}`
-            : prompt;
+          const effectivePrompt = gate.input;
 
           const start = Date.now();
           const result = (await a.generate(effectivePrompt, opts)) as Record<string, unknown>;

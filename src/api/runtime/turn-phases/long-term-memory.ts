@@ -11,6 +11,7 @@ import {
 } from '../../../core/conversation/LongTermMemoryPolicy';
 import { MessageRole } from '../../../core/conversation/ConversationMessage';
 import { GMIInteractionType, type GMITurnInput } from '../../../cognition/substrate/IGMI';
+import { turnContentText } from '../../../cognition/substrate/turnContent';
 
 type LongTermMemoryRetrievalState = {
   lastReviewedUserTurn: number;
@@ -75,7 +76,7 @@ export async function executeLongTermMemoryPhase(
       input.gmiInput.type === GMIInteractionType.TEXT && typeof input.gmiInput.content === 'string'
         ? input.gmiInput.content.trim()
         : input.gmiInput.type === GMIInteractionType.MULTIMODAL_CONTENT
-          ? JSON.stringify(input.gmiInput.content).trim()
+          ? turnContentText(input.gmiInput.content).trim()
           : '';
 
     const userTurnCount = (conversationContext.getAllMessages() as any[]).filter(

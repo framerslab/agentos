@@ -318,6 +318,8 @@ export type {
   IngestOptions,
   IngestResult,
   ExportOptions,
+  ExportResult,
+  RefusedExportTrace,
   ImportOptions,
   ImportResult,
   ConsolidationResult as MemoryConsolidationResult,
@@ -338,6 +340,8 @@ export { HtmlLoader } from './io/ingestion/HtmlLoader.js';
 export { PdfLoader } from './io/ingestion/PdfLoader.js';
 export { DocxLoader, DocumentTooLargeError } from './io/ingestion/DocxLoader.js';
 export type { DocxLoaderOptions } from './io/ingestion/DocxLoader.js';
+export { OfficeLoader, OFFICE_TYPES, ScannedDocumentError } from './io/ingestion/OfficeLoader.js';
+export type { OfficeLoaderOptions, OfficeLoadOptions, OfficeFormat, OfficeParse } from './io/ingestion/OfficeLoader.js';
 export { loadIsolated, DocumentTooComplexError, DocumentReadTimeoutError } from './io/ingestion/loadIsolated.js';
 export type { IsolatedLoadKind, IsolatedLoadOptions } from './io/ingestion/loadIsolated.js';
 export { LoaderRegistry } from './io/ingestion/LoaderRegistry.js';
@@ -345,6 +349,9 @@ export { FolderScanner } from './io/ingestion/FolderScanner.js';
 export { ChunkingEngine } from './io/ingestion/ChunkingEngine.js';
 export { MultimodalAggregator } from './io/ingestion/MultimodalAggregator.js';
 export { UrlLoader } from './io/ingestion/UrlLoader.js';
+export type { LoaderSource, UrlLoaderOptions } from './io/ingestion/UrlLoader.js';
+export { guardedFetch, GuardedFetchError, isPublicAddress } from './io/ingestion/guardedFetch.js';
+export type { GuardedFetchOptions, GuardedFetchReason, GuardedResponse } from './io/ingestion/guardedFetch.js';
 
 // --- Agent Memory Tools ---
 export {

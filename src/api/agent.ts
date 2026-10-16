@@ -25,8 +25,10 @@ import {
   type ToolCallHookInfo,
 } from './generateText.js';
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
-import { buildSchemaInstructionText } from './runtime/structuredReply.js';
+import { buildSchemaInstructionText, extractJson } from './runtime/structuredReply.js';
+import { createLogger } from '../core/logging/loggerFactory.js';
 import { resolveModelOption } from './model.js';
+import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
@@ -35,10 +37,9 @@ import type { HostLLMPolicy } from './runtime/hostPolicy.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
 import { loadSoulSync, parseSoul } from '../cognition/substrate/personas/SoulLoader.js';
-import {
-  normalizeHexacoTraits,
-  type HexacoTraitKey,
-} from '../cognition/substrate/personas/hexaco.js';
+import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
+import type { LearningConfig, LoopManifest } from '../cognition/learning/types.js';
+import type { AgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
 import { runCitationVerification } from './runtime/citationVerification.js';
 import type {
   AgentOSUsageAggregate,
@@ -69,6 +70,8 @@ import type { SessionTranscriptMessage } from './sessionTranscript.js';
 import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
 // gmi.ts imports this module back (through gmiPersona.ts); each side calls the other only inside functions.
 import { gmi } from './gmi.js';
+import type { VoiceSessionFactory, StartVoiceSession, ManagedVoiceSession } from '../io/voice-platform/VoiceSessionFactory.js';
+import type { VoiceAgent } from '../io/voice-platform/contracts/index.js';
 
 /**
  * Provider hook interface consumed by `agent()` for memory integration.
@@ -118,9 +121,11 @@ export interface AgentMemoryProvider {
  * Configuration options for the {@link agent} factory function.
  *
  * Extends `BaseAgentConfig` with backward-compatible convenience fields.
- * All `BaseAgentConfig` fields (rag, discovery, permissions, emergent, voice,
- * etc.) are accepted and stored in config but are not actively wired in the
- * lightweight agent — they will be consumed by `agency()` and the full runtime.
+ * All `BaseAgentConfig` fields are accepted. Without `runtime: 'gmi'`, the
+ * lightweight agent does not apply the ones the `agent` column of the
+ * capability contract defers (rag, discovery, guardrails, security,
+ * permissions, emergent, voice, etc.), and one warning at construction names
+ * those that are set. No surface applies `security` or `permissions`.
  */
 export interface AgentOptions extends BaseAgentConfig {
   /**
@@ -163,7 +168,8 @@ export interface AgentOptions extends BaseAgentConfig {
    * One spend budget for every call this agent and its sessions make: each provider call is checked against what is
    * left before it is made and recorded after it, and {@link AgentSession.recordExternalCost} charges costs made
    * outside AgentOS to it. Settings make one {@link SpendBudget} for the agent; pass an instance to share it wider.
-   * Not available with `runtime: 'gmi'`, which throws at construction.
+   * With `runtime: 'gmi'` every completion call a GMI makes is checked against it before it is sent, metaprompts and
+   * self-reflection included; its cognitive memory's embeddings and the learning layer's own calls are not counted.
    */
   budget?: SpendBudget | SpendBudgetOptions;
   /**
@@ -205,7 +211,7 @@ export interface AgentOptions extends BaseAgentConfig {
    *
    * When provided, the agent's `generate()` result includes a `parsed` field
    * with the Zod-validated and typed output. JSON extraction and validation
-   * happen automatically in the `onAfterGeneration` hook. On validation failure,
+   * happen after generation. On validation failure,
    * the agent retries internally (up to `controls.maxValidationRetries ?? 1`).
    *
    * When omitted, behavior is unchanged — `result.parsed` is undefined.
@@ -236,7 +242,8 @@ export interface AgentOptions extends BaseAgentConfig {
    *
    * - `getContext` runs before each LLM call; result prepended as a system
    *   message.
-   * - `observe` runs after each LLM call as fire-and-forget.
+   * - `observe` runs as fire-and-forget after each LLM call, except schema
+   *   calls, which observe only the accepted exchange after validation.
    */
   memoryProvider?: AgentMemoryProvider;
   /**
@@ -323,6 +330,31 @@ export interface AgentOptions extends BaseAgentConfig {
    * switch set in a {@link CognitionConfig}.
    */
   cognition?: CognitionProfile | CognitionConfig;
+  /**
+   * The learning layer when `runtime` is `'gmi'` (docs/GMI.md, "Learning"). Unset or `false`: off, and the agent
+   * runs as it did before the layer existed. `true` or a {@link LearningConfig}: the agent's GMIs send the
+   * personality section as a system prompt of its own on every turn, and each session opened with a user id is
+   * bound to a learner. The legacy runtime ignores it.
+   */
+  learning?: boolean | LearningConfig;
+  /**
+   * Temporary teams this agent launches from a turn, with `runtime: 'gmi'`: `launch: true` registers the
+   * `launch_agency` tool, which runs an `agency()` team on one goal and returns its answer as the call's result, and
+   * the other fields bound every launch (depth, seats, launches in flight, budget share and pool, deadline, `members`
+   * a launch may seat by key, `hitl`). Every bound is checked at construction. Off unless `launch` is true; the legacy
+   * runtime throws when it is.
+   */
+  agencies?: AgencyLaunchOptions;
+  /** Explicit runtime binding. No provider is discovered from the process environment for this path. */
+  voice?: BaseAgentConfig['voice'] & { session?: { factory: VoiceSessionFactory; agent: VoiceAgent } };
+}
+
+/**
+ * What a host reads of an agent's learning layer ({@link Agent.learning}).
+ */
+export interface AgentLearning {
+  /** Which loops the agent runs, and for each one that is off, why. */
+  manifest(): Promise<LoopManifest>;
 }
 
 /**
@@ -352,6 +384,8 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * Sanitized to /[a-zA-Z0-9_]/ and truncated to 64 chars.
    */
   schemaName?: string;
+  /** Extra schema-validation attempts on the default runtime. Defaults to 0. */
+  maxValidationRetries?: number;
   /**
    * Telemetry + eviction-boundary label for this send's transcript block
    * (spec §1c(iv)). Labels are markers, not pins.
@@ -376,6 +410,12 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * one, and the steps it finished stay in `messages()`, marked partial.
    */
   abortSignal?: AbortSignal;
+  /**
+   * A spend budget for this send in place of the agent's: every provider call of the send is checked against it
+   * before it is made and recorded after it (settings make a new {@link SpendBudget} for the send). With
+   * `runtime: 'gmi'`, every completion call of the turn, metaprompts included.
+   */
+  budget?: SpendBudget | SpendBudgetOptions;
 }
 
 /**
@@ -401,7 +441,7 @@ export interface AgentSession {
    * Accepts plain text or multimodal content (text + image parts).
    *
    * @param input - User message as text string or MessageContent array.
-   * @param opts - Per-send options without a `responseSchema`: the generation overrides and `abortSignal`.
+   * @param opts - Per-send options without a `responseSchema`: the generation overrides, `abortSignal` and `budget`.
    * @returns The full generation result including text, usage, and tool calls.
    */
   send(input: MessageContent, opts?: SessionSendOptions): Promise<GenerateTextResult>;
@@ -415,7 +455,7 @@ export interface AgentSession {
    *
    * @throws {ObjectGenerationError} If the provider returns
    *         schema-enforced JSON that nonetheless fails Zod validation
-   *         (real provider bug; not retried).
+   *         after `maxValidationRetries` extra attempts (default 0).
    *
    * @param input - User message as text string or MessageContent array.
    * @param opts - Must include `responseSchema`.
@@ -432,10 +472,11 @@ export interface AgentSession {
    *
    * @param input - User message as text string or MessageContent array.
    * @param opts - `abortSignal` ends this stream when it aborts, as {@link SessionSendOptions.abortSignal} ends a
-   *   send: the provider's stream stops and the stream ends with an `error` part. The session stays open.
+   *   send: the provider's stream stops and the stream ends with an `error` part. The session stays open. `budget`
+   *   takes the agent's place for this stream, as {@link SessionSendOptions.budget} takes it for a send.
    * @returns A {@link StreamTextResult} with async iterables and awaitable aggregates.
    */
-  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal }): StreamTextResult;
+  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }): StreamTextResult;
   /**
    * Returns a snapshot of the current conversation transcript for this
    * session in provider-replayable shape (assistant tool_calls, tool
@@ -529,6 +570,10 @@ export interface Agent {
   /** Releases all in-memory session state held by this agent. */
   close(): Promise<void>;
   /**
+   * The agent's learning layer as its host reads it. Set only with `runtime: 'gmi'` and `learning` on.
+   */
+  learning?: AgentLearning;
+  /**
    * Exports the agent's configuration as a portable object. Secrets are
    * redacted unless `options.redactSecrets` is `false`.
    * @param metadata - Optional human-readable metadata to attach.
@@ -548,6 +593,8 @@ export interface Agent {
   getAvatarBindings(): import('./types').AvatarBindingInputs & Record<string, unknown>;
   /** Inject game-specific binding overrides (healthBand, combatMode, etc.). */
   setAvatarBindingOverrides(overrides: Record<string, unknown>): void;
+  /** Prepares the configured scoped voice call; present only with voice.session. */
+  voiceSession?(request: Omit<StartVoiceSession, 'agent'>): Promise<ManagedVoiceSession>;
 }
 
 function mergeUsageLedgerOptions(
@@ -562,59 +609,6 @@ async function loadRecordedAgentOSUsage(
 ): Promise<AgentOSUsageAggregate> {
   const { getRecordedAgentOSUsage } = await import('./runtime/usageLedger.js');
   return getRecordedAgentOSUsage(options);
-}
-
-
-/**
- * Convert HEXACO trait values (0-1) into behavioral descriptions the LLM can act on.
- *
- * Each trait produces a directive when it deviates from the neutral midpoint (0.5).
- * High values (>0.65) and low values (<0.35) produce distinct behavioral instructions.
- * Moderate values (0.35-0.65) are omitted to avoid over-constraining the model.
- * Trait keys are normalized first, so the SOUL.md spelling `honestyHumility`
- * reads as `honesty`.
- */
-function buildPersonalityDescription(
-  traits: Partial<Record<string, number>>
-): string | null {
-  const lines: string[] = [];
-  const normalized = normalizeHexacoTraits(traits);
-  const v = (key: HexacoTraitKey) => normalized[key] ?? 0.5;
-
-  const h = v('honesty');
-  const e = v('emotionality');
-  const x = v('extraversion');
-  const a = v('agreeableness');
-  const c = v('conscientiousness');
-  const o = v('openness');
-
-  // Honesty-Humility
-  if (h > 0.65) lines.push('Be straightforward and transparent. Avoid flattery, spin, or evasion. Acknowledge limitations directly.');
-  else if (h < 0.35) lines.push('Be strategically diplomatic. Frame information to serve the conversation goal. Emphasize advantages.');
-
-  // Emotionality
-  if (e > 0.65) lines.push('Respond with emotional awareness and empathy. Acknowledge feelings in the conversation. Express concern when appropriate.');
-  else if (e < 0.35) lines.push('Maintain emotional composure. Be matter-of-fact and solution-oriented. Keep responses grounded and pragmatic.');
-
-  // Extraversion
-  if (x > 0.65) lines.push('Be energetic and engaging. Use vivid language. Take initiative in the conversation. Offer suggestions proactively.');
-  else if (x < 0.35) lines.push('Be measured and reflective. Listen more than you speak. Respond thoughtfully rather than quickly. Prefer depth over breadth.');
-
-  // Agreeableness
-  if (a > 0.65) lines.push('Prioritize harmony and cooperation. Validate the other perspective before offering alternatives. Be supportive and encouraging.');
-  else if (a < 0.35) lines.push('Be direct and challenge-oriented. Question assumptions. Prioritize accuracy over comfort. Push back when something seems wrong.');
-
-  // Conscientiousness
-  if (c > 0.65) lines.push('Be thorough and systematic. Structure responses clearly. Follow through on details. Prefer precision over speed.');
-  else if (c < 0.35) lines.push('Be flexible and adaptive. Prioritize the big picture over details. Respond quickly. Tolerate ambiguity and improvise.');
-
-  // Openness
-  if (o > 0.65) lines.push('Explore creative angles and unconventional ideas. Draw unexpected connections. Question established approaches.');
-  else if (o < 0.35) lines.push('Stick to proven approaches and established knowledge. Be practical and concrete. Favor reliability over novelty.');
-
-  if (lines.length === 0) return null;
-
-  return `## Personality & Communication Style\n\n${lines.join('\n')}`;
 }
 
 export function buildSystemPrompt(opts: AgentOptions): string | undefined {
@@ -653,7 +647,7 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
   }
 
   if (opts.personality) {
-    const desc = buildPersonalityDescription(opts.personality);
+    const desc = renderPersonalitySection(opts.personality);
     if (desc) {
       sections.push(desc);
     }
@@ -753,7 +747,92 @@ function pickSendGenerationOverrides(
   if (sendOpts.cache !== undefined) out.cache = sendOpts.cache;
   if (sendOpts.maxTokens !== undefined) out.maxTokens = sendOpts.maxTokens;
   if (sendOpts.abortSignal !== undefined) out.abortSignal = sendOpts.abortSignal;
+  // Settings become one budget here, so a send's validation retries are charged to the same one.
+  if (sendOpts.budget !== undefined) out.budget = asSpendBudget(sendOpts.budget);
   return out;
+}
+
+/** Observe a validated exchange without letting memory failures reject it. */
+function observeValidatedExchange(
+  provider: AgentMemoryProvider | undefined,
+  userText: string,
+  replyText: string,
+): void {
+  if (!provider?.observe) return;
+  for (const [role, text] of [['user', userText], ['assistant', replyText]] as const) {
+    if (role === 'assistant' && !text) continue;
+    try {
+      void provider.observe(role, text).catch(() => { /* fire-and-forget */ });
+    } catch {
+      // A synchronous observation failure is also non-fatal.
+    }
+  }
+}
+
+/** Generate a reply with optional JSON validation and bounded repair turns. */
+async function generateWithValidation(
+  options: GenerateTextOptions,
+  schema: ZodType | undefined,
+  maxRetries: number,
+  extract: boolean,
+  onResult: (result: GenerateTextResult) => void,
+  memory: { provider?: AgentMemoryProvider; userText: string; options?: MemoryProviderHookOptions },
+): Promise<{ result: GenerateTextResult; object: unknown; retried: boolean }> {
+  if (schema && (!Number.isInteger(maxRetries) || maxRetries < 0)) {
+    throw new RangeError('maxValidationRetries must be a non-negative integer');
+  }
+  // Schema attempts retain recall and caller hooks, but only an accepted
+  // result may write to memory. Bind recall to preserve provider instances.
+  const attemptMemory = schema && memory.provider
+    ? { getContext: memory.provider.getContext?.bind(memory.provider) }
+    : memory.provider;
+  let request = applyMemoryProvider(options, attemptMemory, memory.userText, memory.options) as GenerateTextOptions;
+  for (let attempt = 0; ; attempt++) {
+    const result = await generateText(request);
+    onResult(result);
+    if (!schema) return { result, object: undefined, retried: false };
+
+    let failure: ObjectGenerationError;
+    try {
+      const parsed = extract ? extractJson(result.text) : JSON.parse(result.text);
+      const safe = schema.safeParse(parsed);
+      if (safe.success) {
+        observeValidatedExchange(memory.provider, memory.userText, result.text);
+        return { result, object: safe.data, retried: attempt > 0 };
+      }
+      failure = new ObjectGenerationError('Response failed Zod validation', result.text, safe.error);
+    } catch (err) {
+      failure = new ObjectGenerationError(
+        `Response is not valid JSON (${err instanceof Error ? err.message : String(err)})`,
+        result.text,
+      );
+    }
+    if (attempt >= maxRetries) throw failure;
+    const feedback = failure.validationErrors?.message ?? failure.message;
+    const priorMessages = request.messages ?? [];
+    const repairMessages: Message[] = result.transcriptDelta
+      ? [
+          ...priorMessages.slice(0, priorMessages.length - (request._transcriptIncludeTrailingCallerMessages ?? 0)),
+          ...(result.transcriptDelta as unknown as Message[]),
+        ]
+      : [
+          ...priorMessages,
+          ...(request.prompt !== undefined ? [{ role: 'user' as const, content: request.prompt }] : []),
+          { role: 'assistant', content: result.text },
+        ];
+    request = {
+      ...request,
+      prompt: undefined,
+      // Repair from completed tool results without permitting another action.
+      tools: undefined,
+      toolChoice: undefined,
+      _transcriptIncludeTrailingCallerMessages: 0,
+      messages: [
+        ...repairMessages,
+        { role: 'user', content: `Your reply did not match the schema: ${feedback}. Reply again with JSON that matches it.` },
+      ],
+    };
+  }
 }
 
 /**
@@ -767,13 +846,14 @@ function pickSendGenerationOverrides(
  * surface, with every session served by a Generalized Mind Instance built from
  * these options, and the construction checks and diagnostics of that path.
  *
- * @param opts - Agent configuration including model, instructions, and optional tools.
- *   All `BaseAgentConfig` fields are accepted; advanced fields (rag, discovery,
- *   permissions, emergent, voice, guardrails, etc.) are stored but not actively
- *   wired in the lightweight layer — they are consumed by `agency()` and the full runtime.
+ * @param opts - Agent configuration. Deferred fields are reported at construction.
+ *   Voice is applied only through an explicit `voice.session` binding and the
+ *   returned `voiceSession()` method. Ordinary generate/stream/session calls
+ *   remain text calls. The full runtime does not apply the voice flag.
  * @returns An {@link Agent} instance with `generate`, `stream`, `session`, and `close` methods.
  * @throws {Error} With `runtime: 'gmi'`, at construction, naming an option the GMI path
- *   cannot honour (see {@link gmi}).
+ *   cannot honour (see {@link gmi}); without it, when `agencies.launch` is set, which only
+ *   the GMI path runs.
  *
  * @example
  * ```ts
@@ -786,8 +866,16 @@ function pickSendGenerationOverrides(
  * @category Core
  */
 export function agent(opts: AgentOptions): Agent {
+  if (opts.voice?.session) {
+    const keys = Object.keys(opts.voice);
+    if (opts.runtime === 'gmi' || opts.voice.enabled !== true || keys.some((key) => !['enabled', 'session'].includes(key)) || Object.keys(opts.voice.session).some((key) => !['factory', 'agent'].includes(key))) throw new Error('configured voice fields refused');
+  }
   // Before anything of the legacy path runs: its diagnostics and warnings describe that path.
   if (opts.runtime === 'gmi') return gmi(opts);
+  // A legacy agent has no tool loop of a GMI to run launch_agency in; taking the option would offer no tool.
+  if (opts.agencies?.launch === true) {
+    throw new Error("agent(): agencies.launch runs on the GMI path; set runtime: 'gmi' or use gmi().");
+  }
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
@@ -800,7 +888,7 @@ export function agent(opts: AgentOptions): Agent {
   // costs a session records from outside AgentOS.
   const agentBudget = asSpendBudget(opts.budget);
   let avatarBindingOverrides: Record<string, unknown> = {};
-  warnOnDeferredLightweightAgentCapabilities(opts);
+  warnOnDeferredLightweightAgentCapabilities(opts.voice?.session ? { ...opts, voice: undefined } : opts);
 
   /*
    * The cognitive mechanisms run inside a CognitiveMemoryManager, which this
@@ -896,6 +984,29 @@ export function agent(opts: AgentOptions): Agent {
     ...(agentBudget ? { budget: agentBudget } : {}),
   };
 
+  /**
+   * One generate() or stream() call's options: the agent's, under the call's.
+   * A call whose model's `provider:` prefix names another provider does not
+   * inherit the agent's. The agent's key and base URL are for the provider
+   * the agent names, so a call that names another provider takes only its
+   * own, and that provider's from the environment otherwise.
+   */
+  const callOptions = (extra: Partial<GenerateTextOptions> | undefined): Partial<GenerateTextOptions> => {
+    let merged = { ...baseOpts, ...extra };
+    if (!extra || (extra.provider === undefined && extra.model === undefined)) return merged;
+    if (
+      extra.provider === undefined &&
+      extra.model !== undefined &&
+      baseOpts.provider !== undefined &&
+      modelNamesAnotherProvider(baseOpts.provider, extra.model)
+    ) {
+      merged = { ...merged, provider: undefined };
+    }
+    if (baseOpts.apiKey === undefined && baseOpts.baseUrl === undefined) return merged;
+    if (credentialsGoWith(baseOpts, merged)) return merged;
+    return { ...merged, apiKey: extra.apiKey, baseUrl: extra.baseUrl };
+  };
+
   const agentInstance: Agent = {
     async generate(
       prompt: MessageContent,
@@ -903,25 +1014,29 @@ export function agent(opts: AgentOptions): Agent {
     ): Promise<GenerateTextResult> {
       try {
         const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
-        const genOpts: Partial<GenerateTextOptions> = applyMemoryProvider(
-          {
-            ...baseOpts,
-            ...extra,
-            usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
-              source: extra?.usageLedger?.source ?? 'agent.generate',
-            }),
-          },
-          opts.memoryProvider,
-          userText,
-          opts.memoryProviderOptions,
-        );
+        const genOpts: Partial<GenerateTextOptions> = {
+          ...callOptions(extra),
+          usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
+            source: extra?.usageLedger?.source ?? 'agent.generate',
+          }),
+        };
         if (typeof prompt === 'string') {
           genOpts.prompt = prompt;
         } else {
           genOpts.messages = [...(genOpts.messages ?? []), { role: 'user', content: prompt }];
         }
-        const result = await generateText(genOpts as GenerateTextOptions);
-        accumulateUsage(agentUsageTally, result.usage);
+        if (opts.responseSchema) {
+          genOpts._schemaInstruction = buildSchemaInstructionText(lowerZodToJsonSchema(opts.responseSchema), 'response');
+        }
+        const { result, object } = await generateWithValidation(
+          genOpts as GenerateTextOptions,
+          opts.responseSchema,
+          opts.controls?.maxValidationRetries ?? 1,
+          true,
+          (attempt) => accumulateUsage(agentUsageTally, attempt.usage),
+          { provider: opts.memoryProvider, userText, options: opts.memoryProviderOptions },
+        );
+        if (opts.responseSchema) result.parsed = object;
         if (opts.verifyCitations) {
           result.grounding = await runCitationVerification(
             result.text,
@@ -940,8 +1055,7 @@ export function agent(opts: AgentOptions): Agent {
       const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
       const streamOpts: Partial<GenerateTextOptions> = applyMemoryProvider(
         {
-          ...baseOpts,
-          ...extra,
+          ...callOptions(extra),
           usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
             source: extra?.usageLedger?.source ?? 'agent.stream',
           }),
@@ -1072,57 +1186,59 @@ export function agent(opts: AgentOptions): Agent {
               })()
             : baseOpts;
 
-          const wrappedOpts = applyMemoryProvider(
-            {
-              ...baseForRequest,
-              ...pickSendGenerationOverrides(sendOpts),
-              messages: requestMessages,
-              ...(inputIsString
-                ? { prompt: input as string }
-                : { _transcriptIncludeTrailingCallerMessages: 1 }),
-              usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, {
-                sessionId,
-                source: 'agent.session.send',
-              }),
-              ...(responseFormat ? { _responseFormat: responseFormat } : {}),
-              ...(responseFormatBuilder
-                ? { _responseFormatBuilder: responseFormatBuilder }
-                : {}),
-              ...(schemaInstruction ? { _schemaInstruction: schemaInstruction } : {}),
-            },
-            opts.memoryProvider,
-            textForMemory,
-            opts.memoryProviderOptions,
-          );
-
-          const result = await generateText(wrappedOpts as GenerateTextOptions);
-          accumulateUsage(sessionUsageTally, result.usage);
-          accumulateUsage(agentUsageTally, result.usage);
-
-          // Validate + parse when a schema was supplied. Native enforcement
-          // guarantees a valid shape on every successful response, so a
-          // parse/validation failure here is a real provider bug rather
-          // than retry-worthy. Throw with the rawText + Zod error attached.
-          let object: unknown;
-          if (sendOpts?.responseSchema) {
+          let system = baseForRequest.system;
+          const working = typeof opts.memory === 'object' ? opts.memory?.working : undefined;
+          if (typeof working === 'function') {
             try {
-              const parsed = JSON.parse(result.text);
-              const safe = sendOpts.responseSchema.safeParse(parsed);
-              if (!safe.success) {
-                throw new ObjectGenerationError(
-                  'session.send: provider-enforced JSON failed Zod validation',
-                  result.text,
-                  safe.error,
-                );
+              const block = await working();
+              if (block) {
+                system = Array.isArray(system)
+                  ? [{ text: block }, ...system]
+                  : [block, system].filter(Boolean).join('\n\n');
               }
-              object = safe.data;
-            } catch (err) {
-              if (err instanceof ObjectGenerationError) throw err;
-              throw new ObjectGenerationError(
-                `session.send: provider response is not valid JSON despite enforcement (${err instanceof Error ? err.message : String(err)})`,
-                result.text,
-              );
+            } catch {
+              createLogger('api').warn('memory.working failed; continuing without the working-memory block.');
             }
+          }
+
+          const generationOptions: GenerateTextOptions = {
+            ...baseForRequest,
+            ...pickSendGenerationOverrides(sendOpts),
+            system,
+            messages: requestMessages,
+            ...(inputIsString
+              ? { prompt: input as string }
+              : { _transcriptIncludeTrailingCallerMessages: 1 }),
+            usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, {
+              sessionId,
+              source: 'agent.session.send',
+            }),
+            ...(responseFormat ? { _responseFormat: responseFormat } : {}),
+            ...(responseFormatBuilder
+              ? { _responseFormatBuilder: responseFormatBuilder }
+              : {}),
+            ...(schemaInstruction ? { _schemaInstruction: schemaInstruction } : {}),
+          };
+
+          const { result, object, retried } = await generateWithValidation(
+            generationOptions,
+            sendOpts?.responseSchema,
+            sendOpts?.maxValidationRetries ?? 0,
+            false,
+            (attempt) => {
+              accumulateUsage(sessionUsageTally, attempt.usage);
+              accumulateUsage(agentUsageTally, attempt.usage);
+            },
+            { provider: opts.memoryProvider, userText: textForMemory, options: opts.memoryProviderOptions },
+          );
+          if (retried) {
+            result.transcriptDelta = [
+              userMessage as unknown as SessionTranscriptMessage,
+              { role: 'assistant', content: result.text },
+            ];
+          }
+          if (opts.verifyCitations) {
+            result.grounding = await runCitationVerification(result.text, textForMemory, opts.verifyCitations);
           }
 
           if (historyBuffer) {
@@ -1148,7 +1264,7 @@ export function agent(opts: AgentOptions): Agent {
             : result;
         },
 
-        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal }): StreamTextResult {
+        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }): StreamTextResult {
           const textForMemory = typeof input === 'string' ? input : extractTextFromContent(input);
           const userMessage: Message = { role: 'user', content: input };
 
@@ -1165,6 +1281,8 @@ export function agent(opts: AgentOptions): Agent {
               // The caller's signal ends the stream; a stream that ends in an
               // error is added to no history (below).
               ...(streamOpts?.abortSignal ? { abortSignal: streamOpts.abortSignal } : {}),
+              // A stream's own budget takes the agent's place; without one the agent's applies.
+              ...(streamOpts?.budget !== undefined ? { budget: streamOpts.budget } : {}),
             },
             opts.memoryProvider,
             textForMemory,
@@ -1172,6 +1290,13 @@ export function agent(opts: AgentOptions): Agent {
           );
 
           const result = streamText(wrappedOpts as GenerateTextOptions);
+          if (opts.verifyCitations) {
+            const verification = opts.verifyCitations;
+            result.grounding = result.text.then(
+              (text) => runCitationVerification(text, textForMemory, verification),
+              () => undefined,
+            );
+          }
           void result.usage
             .then((usage) => {
               accumulateUsage(sessionUsageTally, usage);
@@ -1334,10 +1459,17 @@ export function agent(opts: AgentOptions): Agent {
     },
   };
 
+  if (opts.voice?.session) {
+    const voice = opts.voice.session;
+    const factory = voice.factory;
+    const revision = structuredClone(voice.agent);
+    agentInstance.voiceSession = (request) => factory.startSession({ ...request, agent: revision });
+  }
+
   // Stash the original config as a non-enumerable property so that
   // exportAgentConfig() can retrieve it without polluting the public API.
   Object.defineProperty(agentInstance, '__config', {
-    value: opts,
+    value: opts.voice?.session ? { ...opts, voice: { enabled: true } } : opts,
     enumerable: false,
     configurable: true,
   });
