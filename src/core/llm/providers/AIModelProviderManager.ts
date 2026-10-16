@@ -32,6 +32,7 @@ import { GeminiProvider, GeminiProviderConfig } from './implementations/GeminiPr
 import { ClaudeCodeProvider, ClaudeCodeProviderConfig } from './implementations/ClaudeCodeProvider';
 import { GeminiCLIProvider, GeminiCLIProviderConfig } from './implementations/GeminiCLIProvider';
 import { LiteLLMProvider, LiteLLMProviderConfig } from './implementations/LiteLLMProvider';
+import { MiniMaxProvider, MiniMaxProviderConfig } from './implementations/MiniMaxProvider';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/errors.js'; // Corrected import path
 import { contentSafeConsole as console } from '../../logging/contentSafeConsole.js';
 
@@ -42,7 +43,7 @@ import { contentSafeConsole as console } from '../../logging/contentSafeConsole.
 export interface ProviderConfigEntry {
   providerId: string;
   enabled: boolean;
-  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | RequestyProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | Record<string, any>>;
+  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | RequestyProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | MiniMaxProviderConfig | Record<string, any>>;
   isDefault?: boolean;
 }
 
@@ -164,6 +165,9 @@ export class AIModelProviderManager {
             break;
           case 'litellm':
             providerInstance = new LiteLLMProvider();
+            break;
+          case 'minimax':
+            providerInstance = new MiniMaxProvider();
             break;
           default:
             console.warn(`AIModelProviderManager: Unknown provider ID '${providerEntry.providerId}'. Skipping.`);

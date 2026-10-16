@@ -37,7 +37,9 @@ export type ProviderDefaultTask = 'text' | 'image' | 'embedding';
  */
 export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
   minimax: {
+    text: 'MiniMax-M3',
     image: 'image-01',
+    cheap: 'MiniMax-M2.7',
   },
   openai: {
     text: 'gpt-4o',
