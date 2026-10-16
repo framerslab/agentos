@@ -1,10 +1,11 @@
 /**
  * @file tokens.ts
  * @description The word rule of the library's lexical legs: a text read in NFC and in lower case, and its words, in
- * order, in any script, each a letter or a digit followed by letters, digits and combining marks. A mark stays inside
- * its word, so an accent written as a combining mark or a Devanagari vowel sign does not split one, and a text reads
- * the same words whether it came composed or decomposed. The rule stems nothing: a prefix match stands in for
- * stemming in every language.
+ * order, in any script, each a letter or a digit followed by letters, digits and combining marks. It also holds the
+ * rules tags match words by: a word's stem, and whether a word's script is written without spaces; the one-edit rule
+ * is FuzzyIndex's. A mark stays inside its word, so an accent written as a combining mark or a Devanagari vowel sign
+ * does not split one, and a text reads the same words whether it came composed or decomposed. The rule stems nothing:
+ * a prefix match stands in for stemming in every language.
  *
  * PostgresVectorStore.lexicalSearch builds its query from runs of letters and digits in lower case. On a text in NFC
  * that holds no combining mark once in lower case, as precomposed Latin, Greek and Cyrillic, Chinese and Japanese are
@@ -93,4 +94,32 @@ export function firstWhiteSpaceAtOrAfter(text: string, position: number): number
     if (/\s/.test(text[at])) return at;
   }
   return -1;
+}
+
+/**
+ * A word without its ending: "-ing" past five letters, "-ed" and "-es" past four, "-s" past three unless it ends in
+ * "-ss"; letters are code points. It joins "plans" with "plan" and "roadmaps" with "roadmap", and leaves "university"
+ * and "universe" apart, which the Porter algorithm stems alike.
+ */
+export function stemWord(word: string): string {
+  const size = Array.from(word).length;
+  if (size > 5 && word.endsWith('ing')) return word.slice(0, -3);
+  if (size > 4 && (word.endsWith('ed') || word.endsWith('es'))) return word.slice(0, -2);
+  if (size > 3 && word.endsWith('s') && !word.endsWith('ss')) return word.slice(0, -1);
+  return word;
+}
+
+/**
+ * A character of a script written without spaces between words: Thai, the kana, the CJK ideographs, Hangul
+ * syllables.
+ */
+const UNSPACED = /[\u0E00-\u0E7F\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/u;
+
+/**
+ * Whether a word holds a character of a script written without spaces between words (Thai, Japanese kana, the
+ * ideographs Chinese and Japanese share, Korean syllables, whose long runs are common in data), where whole words
+ * cannot be compared and one edit says nothing.
+ */
+export function isUnspacedScript(word: string): boolean {
+  return UNSPACED.test(word);
 }
