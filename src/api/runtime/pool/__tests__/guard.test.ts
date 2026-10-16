@@ -21,6 +21,8 @@ const PANEL_DECISION: Record<keyof GenerateTextOptions, 'allow' | 'deny'> = {
   _schemaInstruction: 'deny', _transcriptIncludeTrailingCallerMessages: 'deny', _continuation: 'deny',
   // Added on master after the allow list was written, and allowed: each can stop a seat's call, none moves a seat off its seating.
   budget: 'allow', hookErrors: 'allow', abortSignal: 'allow',
+  // Added on master later, and allowed: maxAttempts caps a seat's requests, onAttempt reports each; neither moves a seat off its seating.
+  maxAttempts: 'allow', onAttempt: 'allow',
 };
 
 describe('the pooled guard (deny list, presence not value)', () => {
@@ -54,8 +56,14 @@ describe('the panel guard (allow list)', () => {
 });
 
 describe('per-call options added on master after the lists were written', () => {
-  it('lets a spend budget, hookErrors and an abort signal through, under panel and in a pooled agency', () => {
-    const opts = { budget: { maxCostUSD: 1 }, hookErrors: 'throw', abortSignal: new AbortController().signal };
+  it('lets a spend budget, hookErrors, an abort signal, maxAttempts and onAttempt through, under panel and in a pooled agency', () => {
+    const opts = {
+      budget: { maxCostUSD: 1 },
+      hookErrors: 'throw',
+      abortSignal: new AbortController().signal,
+      maxAttempts: 2,
+      onAttempt: () => undefined,
+    };
     expect(() => guardPerCallOptions(opts, 'panel')).not.toThrow();
     expect(() => guardPerCallOptions(opts, 'pool')).not.toThrow();
   });

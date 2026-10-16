@@ -23,13 +23,16 @@ export const CUSTOM_MODEL_PARAMS_DENIED_POOL = ['model', 'models'] as const;
  * `abortSignal` can stop a seat's call (a refused spend, a hook's error, the
  * caller's abort) but change no seat's provider, model, key, URL, prompt or
  * tools. A `budget` given as settings makes one budget per seat call; pass a
- * `SpendBudget` instance to cap the whole run.
+ * `SpendBudget` instance to cap the whole run. `maxAttempts` caps the
+ * requests of each seat's call and of the chair's, each on its own count, and
+ * `onAttempt` is told of every one of them with its number, status and
+ * success, nothing more.
  */
 export const PANEL_ALLOWED_KEYS = [
   'temperature', 'topP', 'frequencyPenalty', 'presencePenalty', 'maxTokens', 'thinking', 'effort', 'requestTimeout', 'cache',
   'promptCacheKey', 'promptCacheRetention', 'serviceTier', 'cacheDiagnostics', 'sessionId', 'usageLedger', 'source', 'toolChoice',
   'chainOfThought', 'planning', 'onAfterGeneration', 'onBeforeToolExecution', '__approvalGate', '__panelDeadline', 'customModelParams',
-  'budget', 'hookErrors', 'abortSignal',
+  'budget', 'hookErrors', 'abortSignal', 'maxAttempts', 'onAttempt',
 ] as const;
 
 /** `customModelParams` keys a panel call may not carry: each would give every seat one shared prompt, tool set or model. */
