@@ -275,6 +275,7 @@ export type {
   SystemContentBlock,
 } from './api/generateText.js';
 export type {
+  AttemptOutcome,
   CacheDiagnostics,
   CacheMissReason,
 } from './core/llm/providers/IProvider.js';

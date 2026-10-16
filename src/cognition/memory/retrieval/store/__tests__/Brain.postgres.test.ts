@@ -71,7 +71,7 @@ describeIfPostgres('Brain.openPostgres', () => {
 
     // Schema initialised; brain_meta seeded.
     const ver = await brain.getMeta('schema_version');
-    expect(ver).toBe('2');
+    expect(ver).toBe('3');
   });
 
   it('throws when brainId is missing', async () => {
@@ -136,14 +136,14 @@ describeIfPostgres('Brain.openPostgres', () => {
 
     const brain1 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
     openedBrains.push(brain1);
-    expect(await brain1.getMeta('schema_version')).toBe('2');
+    expect(await brain1.getMeta('schema_version')).toBe('3');
     await brain1.close();
     openedBrains.pop();
 
-    // Second open should detect v2 and skip migration without error.
+    // Second open should detect v3 and skip migration without error.
     const brain2 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
     openedBrains.push(brain2);
-    expect(await brain2.getMeta('schema_version')).toBe('2');
+    expect(await brain2.getMeta('schema_version')).toBe('3');
   });
 
   it('serializes concurrent first-opens against the same brainId', async () => {
@@ -155,12 +155,12 @@ describeIfPostgres('Brain.openPostgres', () => {
     ]);
     openedBrains.push(brainA, brainB);
 
-    // Both must see schema_version = '2' (latest). The lock + transaction
+    // Both must see schema_version = '3' (latest). The lock + transaction
     // serialization in MigrationRunner ensures only one runs the migration
     // (or in the fresh-DB case, both safely no-op since _initSchema is
     // idempotent).
-    expect(await brainA.getMeta('schema_version')).toBe('2');
-    expect(await brainB.getMeta('schema_version')).toBe('2');
+    expect(await brainA.getMeta('schema_version')).toBe('3');
+    expect(await brainB.getMeta('schema_version')).toBe('3');
 
     // Both must be able to write and read independently (no corruption).
     await brainA.run(

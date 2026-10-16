@@ -112,7 +112,8 @@ describe('MemoryAddTool', () => {
 
     expect(result.success).toBe(true);
     expect(result.output?.traceId).toBeDefined();
-    expect(result.output?.traceId).toMatch(/^mt_\d+_\d+$/);
+    // A v4 UUID, unique across processes: several brains can share a database.
+    expect(result.output?.traceId).toMatch(/^mt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 
     // Verify the row exists in the database.
     const row = await brain.get<{ content: string; type: string; scope: string; deleted: number; tags: string }>(

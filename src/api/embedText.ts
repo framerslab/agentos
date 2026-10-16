@@ -12,6 +12,7 @@
  * @see {@link resolveModelOption} for model resolution with `TaskType = 'embedding'`.
  */
 import { resolveModelOption, resolveProvider } from './model.js';
+import type { AttemptOutcome } from '../core/llm/providers/IProvider.js';
 import { GeminiProvider } from '../core/llm/providers/implementations/GeminiProvider.js';
 import { GeminiProviderError } from '../core/llm/providers/errors/GeminiProviderError.js';
 import { getDefaultProvider } from './runtime/global-default.js';
@@ -120,6 +121,18 @@ export interface EmbedTextOptions {
    * call rejects with the signal's reason.
    */
   abortSignal?: AbortSignal;
+
+  /**
+   * The most requests a batch sends; a batch is sent once and never retried here, so any count from 1 allows it
+   * and the option stands for parity with the completion calls. Below 1 is refused with a `RangeError`.
+   */
+  maxAttempts?: number;
+
+  /**
+   * Called after each request this call sent to an OpenAI-compatible endpoint, one a batch: its number (1), its
+   * HTTP status or null when none came, and whether it succeeded. Gemini's and Ollama's requests are not reported.
+   */
+  onAttempt?: (outcome: AttemptOutcome) => void;
 }
 
 /**
@@ -231,6 +244,8 @@ interface OllamaEmbedResponse {
  * @param input - Array of strings to embed.
  * @param dimensions - Optional dimensionality reduction hint.
  * @param abortSignal - The caller's signal, which cancels the request in flight.
+ * @param onAttempt - The caller's report, told of the request once it is sent: attempt 1, with the HTTP status it
+ *   answered, or null when no answer came (a network failure, or the caller's abort once the request had begun).
  * @returns Parsed {@link OpenAIEmbeddingResponse}.
  * @throws {Error} On non-2xx HTTP status or network failure, with base URL
  *   credentials and the API key masked out of the message; the signal's
@@ -243,6 +258,7 @@ async function callOpenAIEmbedding(
   input: string[],
   dimensions?: number,
   abortSignal?: AbortSignal,
+  onAttempt?: (outcome: AttemptOutcome) => void,
 ): Promise<OpenAIEmbeddingResponse> {
   // Construct the request body, omitting `dimensions` when not specified
   // to avoid confusing models that don't support it.
@@ -265,10 +281,13 @@ async function callOpenAIEmbedding(
       ...(abortSignal ? { signal: abortSignal } : {}),
     });
   } catch (error) {
+    // The request got no answer, so it is reported as sent with no status.
+    reportAttempt(onAttempt, null, false);
     // An abort is the caller's own: its reason, not a masked network error.
     if (abortSignal?.aborted) throw abortSignal.reason;
     throw embeddingFetchError(error, 'Embedding', baseUrl, [apiKey]);
   }
+  reportAttempt(onAttempt, response.status, response.ok);
 
   if (!response.ok) {
     const text = await response.text().catch(() => '(no body)');
@@ -277,6 +296,26 @@ async function callOpenAIEmbedding(
   }
 
   return response.json() as Promise<OpenAIEmbeddingResponse>;
+}
+
+/**
+ * Tells the caller's `onAttempt` of one embedding request it sent. A batch is sent once, so its request is attempt
+ * 1; a callback that throws never ends the call.
+ *
+ * @param onAttempt - The caller's report, when given.
+ * @param status - The HTTP status the request answered, or null when no answer came.
+ * @param ok - Whether it answered with a success.
+ */
+function reportAttempt(
+  onAttempt: ((outcome: AttemptOutcome) => void) | undefined,
+  status: number | null,
+  ok: boolean,
+): void {
+  try {
+    onAttempt?.({ attempt: 1, status, ok });
+  } catch {
+    // a caller's callback never ends the call
+  }
 }
 
 /**
@@ -451,6 +490,10 @@ function withGeminiEmbeddingDefault(opts: EmbedTextOptions): EmbedTextOptions {
 export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult> {
   // A call whose signal has already aborted is refused before anything is sent.
   opts.abortSignal?.throwIfAborted();
+  // So is an attempt count the completion calls would refuse, whichever provider serves the call.
+  if (opts.maxAttempts !== undefined && (!Number.isInteger(opts.maxAttempts) || opts.maxAttempts < 1)) {
+    throw new RangeError('maxAttempts is a whole number, 1 or more');
+  }
   const startedAt = Date.now();
   let metricStatus: 'ok' | 'error' = 'ok';
   let metricProviderId: string | undefined;
@@ -588,6 +631,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                 batch,
                 opts.dimensions,
                 opts.abortSignal,
+                opts.onAttempt,
               );
 
               // Each response's indices start at zero for its own batch.

@@ -715,6 +715,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               : {}),
             ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
             ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+            ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
+            ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
             ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
           },
           usage,
@@ -778,6 +780,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // matching generateText's own shim path.
               ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
               ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+              // The call's attempt count and its report, as on the stream path below.
+              ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
+              ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
               ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
@@ -922,6 +927,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // The caller's signal stops the provider's stream, which ends with
             // its abort chunk.
             ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+            // The most requests the stream's call sends and the report of each, so a caller can settle the attempts it paid for.
+            ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
+            ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
             // Mirror generateText: forward the sampling controls so a
             // streaming caller's topP / frequency / presence penalties
             // actually reach the provider instead of being silently
