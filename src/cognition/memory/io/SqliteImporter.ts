@@ -6,10 +6,14 @@
  * nodes, and edges into the target `Brain`.
  *
  * ## Merge strategy
- * - **memory_traces**: deduplicated by SHA-256 of `content`.
- *   - If a trace with the same hash already exists in the target:
- *     - Keep the newer `created_at` / `last_accessed` timestamp.
+ * - **memory_traces**: deduplicated by SHA-256 of `content` (or equal `content`)
+ *   inside the trace's scope and scope id.
+ *   - If a trace of the same scope and scope id with the same hash already
+ *     exists in the target:
+ *     - Keep the newer `created_at` timestamp.
  *     - Merge `tags` arrays (union, dedup).
+ *   - A trace of another scope id is not a duplicate: its tags and time are
+ *     left as they are.
  *   - New traces are inserted wholesale.
  * - **knowledge_nodes**: deduplicated by `label` + `type`.
  *   - New nodes are inserted; existing nodes are left unchanged.
@@ -25,6 +29,7 @@ import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
+import { importedScopeId } from './importScope.js';
 
 // ---------------------------------------------------------------------------
 // Internal row types (matched to Brain DDL)
@@ -44,6 +49,8 @@ interface TraceRow {
   emotions: string;
   metadata: string;
   deleted: number;
+  /** Present when the source is a schema-3 Brain; `metadata.scopeId` holds it too. */
+  scope_id?: string;
 }
 
 interface NodeRow {
@@ -149,24 +156,31 @@ export class SqliteImporter {
     const brainId = this.brain.brainId;
     const checkSql = `SELECT id, created_at, tags
        FROM memory_traces
-       WHERE brain_id = ?
+       WHERE brain_id = ? AND scope = ? AND scope_id = ?
          AND (${dialect.jsonExtract('metadata', '$.import_hash')} = ?
               OR content = ?)
        LIMIT 1`;
 
     const insertSql = `INSERT INTO memory_traces
          (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
-          retrieval_count, tags, emotions, metadata, deleted)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+          retrieval_count, tags, emotions, metadata, deleted, scope_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
     const updateTimestampSql = `UPDATE memory_traces SET created_at = ?, tags = ? WHERE brain_id = ? AND id = ?`;
 
     for (const row of sourceRows) {
       try {
         const hash = await this._sha256(row.content);
+        const scope = row.scope ?? 'user';
+
+        // The metadata names the scope id, so it is read before the dedup check.
+        let meta: Record<string, unknown> = {};
+        try { meta = JSON.parse(row.metadata) as Record<string, unknown>; } catch { /* ignore */ }
+        const scopeId = importedScopeId(meta, row.scope_id);
+
         if (options?.dedup ?? true) {
           const existing = await trx.get<{ id: string; created_at: number; tags: string }>(
-            checkSql, [brainId, hash, row.content],
+            checkSql, [brainId, scope, scopeId, hash, row.content],
           );
 
           if (existing) {
@@ -182,8 +196,6 @@ export class SqliteImporter {
           }
         }
 
-        let meta: Record<string, unknown> = {};
-        try { meta = JSON.parse(row.metadata) as Record<string, unknown>; } catch { /* ignore */ }
         meta['import_hash'] = hash;
 
         const id = await this._resolveTraceId(trx, row.id ?? `mt_${uuidv4()}`);
@@ -192,7 +204,7 @@ export class SqliteImporter {
           brainId,
           id,
           row.type ?? 'episodic',
-          row.scope ?? 'user',
+          scope,
           row.content,
           row.embedding ?? null,
           row.strength ?? 1.0,
@@ -203,6 +215,7 @@ export class SqliteImporter {
           row.emotions ?? '{}',
           JSON.stringify(meta),
           row.deleted ?? 0,
+          scopeId,
         ]);
 
         result.imported++;

@@ -15,10 +15,10 @@
  * - `retrieval_count`
  * - `deleted`
  * - `tags` (JSON array, comma-separated, or pipe-separated)
- * - `metadata` (JSON object)
+ * - `metadata` (JSON object; its `scopeId` names the trace's scope id)
  *
- * Deduplication uses SHA-256 of the `content` field and stores the hash in
- * `metadata.import_hash`.
+ * Deduplication uses SHA-256 of the `content` field, inside the row's scope
+ * and scope id, and stores the hash in `metadata.import_hash`.
  *
  * @module memory/io/CsvImporter
  */
@@ -27,6 +27,7 @@ import { sha256 } from '../core/util/crossPlatformCrypto.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
+import { importedScopeId } from './importScope.js';
 
 /**
  * Imports a flat CSV file into a `Brain`.
@@ -112,15 +113,15 @@ export class CsvImporter {
     const brainId = this.brain.brainId;
     const checkSql = `SELECT id
        FROM memory_traces
-       WHERE brain_id = ?
+       WHERE brain_id = ? AND scope = ? AND scope_id = ?
          AND (${dialect.jsonExtract('metadata', '$.import_hash')} = ?
               OR ${dialect.jsonExtract('metadata', '$.content_hash')} = ?)
        LIMIT 1`;
 
     const insertSql = `INSERT INTO memory_traces
          (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
-          retrieval_count, tags, emotions, metadata, deleted)
-       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, '{}', ?, ?)`;
+          retrieval_count, tags, emotions, metadata, deleted, scope_id)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, '{}', ?, ?, ?)`;
 
     await this.brain.transaction(async (trx) => {
       for (const row of dataRows) {
@@ -132,14 +133,9 @@ export class CsvImporter {
           }
 
           const hash = await this._sha256(content);
-          if (options?.dedup ?? true) {
-            const existing = await trx.get<{ id: string }>(checkSql, [brainId, hash, hash]);
-            if (existing) {
-              result.skipped++;
-              continue;
-            }
-          }
+          const scope = this._readCell(row, scopeIndex) || 'user';
 
+          // The metadata cell names the scope id, so it is read before the dedup check.
           let metadata: Record<string, unknown> = {};
           const rawMetadata = metadataIndex >= 0 ? row[metadataIndex] ?? '' : '';
           if (rawMetadata.trim()) {
@@ -147,6 +143,15 @@ export class CsvImporter {
               metadata = JSON.parse(rawMetadata) as Record<string, unknown>;
             } catch {
               result.errors.push(`CSV metadata parse error for content "${content.slice(0, 40)}..."`);
+              continue;
+            }
+          }
+          const scopeId = importedScopeId(metadata);
+
+          if (options?.dedup ?? true) {
+            const existing = await trx.get<{ id: string }>(checkSql, [brainId, scope, scopeId, hash, hash]);
+            if (existing) {
+              result.skipped++;
               continue;
             }
           }
@@ -166,7 +171,7 @@ export class CsvImporter {
             brainId,
             traceId,
             this._readCell(row, typeIndex) || 'episodic',
-            this._readCell(row, scopeIndex) || 'user',
+            scope,
             content,
             this._toNumber(rawStrength) ?? 1.0,
             this._toInteger(rawCreatedAt) ?? Date.now(),
@@ -175,6 +180,7 @@ export class CsvImporter {
             JSON.stringify(this._parseTags(tagsIndex >= 0 ? row[tagsIndex] ?? '' : '')),
             JSON.stringify(metadata),
             this._toInteger(rawDeleted) ?? 0,
+            scopeId,
           ]);
 
           result.imported++;

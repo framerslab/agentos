@@ -561,8 +561,9 @@ export interface ImportOptions {
   format?: 'auto' | 'sqlite' | 'json' | 'markdown' | 'obsidian' | 'chatgpt' | 'csv';
 
   /**
-   * Whether to skip importing traces whose content hash already exists in the
-   * store, preventing duplicates on repeated imports.
+   * Whether to skip importing traces whose content hash a trace of the same
+   * scope and scope id already holds, preventing duplicates on repeated
+   * imports. A trace of another scope id is not a duplicate.
    * @default true
    */
   dedup?: boolean;
