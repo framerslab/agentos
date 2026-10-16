@@ -111,24 +111,31 @@ export function stemWord(word: string): string {
 }
 
 /**
- * A character of a script written without spaces between words, each script read by its Unicode script extensions so
- * that no block of it is left out and a character the scripts share is not left out either: Thai (its digits among
- * them, since a number in Thai digits sits inside a Thai run), the kana (the half-width forms among them, and the marks
- * the Script property files under Common: the prolonged sound mark U+30FC and its half-width form U+FF70, the voiced
- * and semi-voiced marks, the vertical repeat marks), the CJK ideographs (the compatibility and the supplementary blocks
- * among them, and the parenthesized and circled numerals) and Hangul (the syllables and the jamo). A character read
- * one at a time, as a cutter of runs reads them, answers alike for every character of a kana word.
+ * A character of a script written without spaces between words, each script read by its Unicode Script property so
+ * that no block of it is left out: Thai (its digits among them, since a number in Thai digits sits inside a Thai run),
+ * the kana (the half-width forms among them), the CJK ideographs (the compatibility and the supplementary blocks among
+ * them) and Hangul (the syllables and the jamo); then, named one by one, the letters and marks of the kana and of the
+ * ideographs that the property files under Common or Inherited: the closing mark 〆 (U+3006), the ideographic tone
+ * marks (U+302A to U+302D), the vertical repeat marks (U+3031 to U+3035), the masu mark 〼 (U+303C), the voiced and
+ * semi-voiced marks (U+3099 to U+309C), the prolonged sound mark ー (U+30FC) and the half-width prolonged and voiced
+ * marks (U+FF70, U+FF9E, U+FF9F). A character read one at a time, as a cutter of runs reads them, answers alike for
+ * every character of a kana word. Script_Extensions is not read: it files U+02BC and the combining marks U+0303,
+ * U+0305, U+0323 and U+0331 under Thai or Katakana, which would make a Latin word that holds one unspaced. The
+ * ideographic numerals written in the Common script (the parenthesized and circled numbers, the kanbun and counting
+ * rod numerals) stay out: a number is neither script.
  */
 const UNSPACED =
-  /[\p{Script_Extensions=Thai}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Han}\p{Script_Extensions=Hangul}]/u;
+  /[\p{Script=Thai}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}\p{Script=Hangul}〆〪-〭〱-〵〼゙-゜ーｰﾞﾟ]/u;
 
 /**
  * Whether a word holds a character of a script written without spaces between words (Thai, Japanese kana, the
  * ideographs Chinese and Japanese share, Korean, whose long runs are common in data), where whole words cannot be
  * compared and one edit says nothing. A half-width kana letter, the prolonged sound mark, a compatibility or a
- * supplementary ideograph and a Thai digit all count, since each script is read by its Unicode script extensions, and
- * every character of a kana word counts on its own. A word of Lao, Khmer, Burmese or Tibetan letters does not: those
- * scripts are not named, and such a word reads as spaced.
+ * supplementary ideograph and a Thai digit all count, since each script is read by its Unicode Script property with the
+ * kana's and the ideographs' shared marks named beside it, and every character of a kana word counts on its own. A
+ * word of a spaced script keeps its answer whatever mark or modifier letter it holds (`lʼhomme`, `a̱`). A word
+ * of Lao, Khmer, Burmese or Tibetan letters does not count: those scripts are not named, and such a word reads as
+ * spaced.
  */
 export function isUnspacedScript(word: string): boolean {
   return UNSPACED.test(word);

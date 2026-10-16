@@ -45,4 +45,11 @@ describe('isUnspacedScript', () => {
     for (const mark of ['ー', 'ｰ', 'ﾞ', 'ﾟ']) expect(isUnspacedScript(mark)).toBe(true);
     for (const word of ['コーヒー', 'ﾗｰﾒﾝ']) for (const char of word) expect(isUnspacedScript(char)).toBe(true);
   });
+
+  it('leaves a word of a spaced script spaced whatever mark or modifier letter it holds', () => {
+    // Script_Extensions files the modifier letter apostrophe (U+02BC) and the combining tilde, overline, dot below and
+    // macron below (U+0303, U+0305, U+0323, U+0331) under Thai or Katakana; a rule that read it would route a French,
+    // a Ukrainian or a transliterated word to substring matching
+    for (const word of ['lʼhomme', 'niño', 'o̅', 'ạ', 'a̱']) expect(isUnspacedScript(word)).toBe(false);
+  });
 });
