@@ -3,7 +3,7 @@
  * What an agency seat's per-call internals do in both failover walkers, with
  * only the provider transport stubbed: each hop is sent with the key and URL
  * its own entry carries, never the primary's; `__strictCredentials` reaches
- * the resolution of every hop; under `__panelDeadline` a timeout is left out
+ * the resolution of every hop's request; under `__panelDeadline` a timeout is left out
  * of the provider's health while any other failure still counts;
  * `__maskError` masks a tool's error in the call record and in the turn the
  * next request carries, on the native tool loop and on the prompt shim; and a
@@ -134,9 +134,17 @@ const PRIMARY = {
   __strictCredentials: true,
   fallbackProviders: HOPS,
 };
+// Each hop's request is resolved strictly on its own entry's key and URL. A
+// hop that carries a key or URL of its own is resolved once more with no
+// overrides: the provider's shared credentials, against which
+// providerHealthKey decides whether the hop shares the provider's health
+// record or keeps one of its own. That second resolution sends nothing and
+// takes none of the hop's key.
 const RESOLVED = [
   ['openai', { apiKey: 'sk-primary-key-0001', baseUrl: 'https://primary.example/v1', strict: true }],
+  ['openai', undefined],
   ['anthropic', { apiKey: 'sk-hop-key-0002', baseUrl: 'https://hop.example/v1', strict: true }],
+  ['anthropic', undefined],
   ['gemini', { apiKey: undefined, baseUrl: undefined, strict: true }],
 ];
 
