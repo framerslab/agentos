@@ -206,6 +206,19 @@ describeIfPostgres('Brain.openPostgres', () => {
         [schema],
       );
       expect(Number(created[0]?.n)).toBe(1);
+      // The fresh schema gets the table's indexes too, though public, later on the search path and set up by
+      // the admin brain's open, already holds indexes of the same names.
+      const indexes = await admin.all<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'memory_traces'`,
+        [schema],
+      );
+      expect(indexes.map((row) => row.indexname)).toEqual(
+        expect.arrayContaining([
+          'idx_memory_traces_brain_type',
+          'idx_memory_traces_brain_scope',
+          'idx_memory_traces_brain_scope_id',
+        ]),
+      );
     } finally {
       for (const brain of fresh) await brain.close().catch(() => undefined);
       await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
