@@ -563,7 +563,8 @@ async function syncTraceFullTextIndex(
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    // SQL.js builds without FTS5 never create the index; nothing to sync.
+    // A database the index was never created in has nothing to sync. sql.js and the IndexedDB adapter
+    // get an FTS4 index (sql-storage-adapter 0.7.5 and later), every other SQLite adapter FTS5.
     if (message.includes('no such module: fts5') || message.includes('no such table: memory_traces_fts')) {
       return;
     }

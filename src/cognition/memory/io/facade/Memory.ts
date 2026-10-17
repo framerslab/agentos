@@ -683,13 +683,15 @@ export class Memory {
         // statement that holds a `$n` as written, so a rank left on its
         // default `$1` would leave the other `?` unbound on Postgres. There
         // the rank reads the query text through its own `?`; on SQLite it
-        // reads the match and binds nothing.
+        // reads the match and binds nothing. The index keeps its own name in
+        // the join: FTS4's rank, offsets(memory_traces_fts), takes the
+        // table's hidden column, which carries the table's name and no alias.
         const { fts: ftsHelper } = this._brain.features;
-        const rankA = ftsHelper.rankExpression('fts', '?');
+        const rankA = ftsHelper.rankExpression('memory_traces_fts', '?');
         const rankBindingsA = bindingsFor(rankA, ftsQuery);
         const ftsSql = `
           SELECT t.*, ${rankA} as rank
-          FROM ${ftsHelper.joinClause('memory_traces', 't', 'fts', 'memory_traces_fts')}
+          FROM ${ftsHelper.joinClause('memory_traces', 't', 'memory_traces_fts', 'memory_traces_fts')}
           WHERE ${ftsHelper.matchClause('memory_traces_fts', '?')}
           AND ${filters}
           ORDER BY abs(${rankA}) DESC
@@ -770,13 +772,13 @@ export class Memory {
     // This is the original behavior — pure text search ranked by
     // strength * abs(fts_rank). Works without any embeddings. The rank binds
     // the query text as in path A: through its own `?` on Postgres, not at
-    // all on SQLite.
+    // all on SQLite; and the index keeps its own name in the join, as there.
     const { fts: ftsB } = this._brain.features;
-    const rankB = ftsB.rankExpression('fts', '?');
+    const rankB = ftsB.rankExpression('memory_traces_fts', '?');
     const rankBindingsB = bindingsFor(rankB, ftsQuery);
     const sql = `
       SELECT t.*, ${rankB} as rank
-      FROM ${ftsB.joinClause('memory_traces', 't', 'fts', 'memory_traces_fts')}
+      FROM ${ftsB.joinClause('memory_traces', 't', 'memory_traces_fts', 'memory_traces_fts')}
       WHERE ${ftsB.matchClause('memory_traces_fts', '?')}
       AND ${filters}
       ORDER BY (t.strength * abs(${rankB})) DESC

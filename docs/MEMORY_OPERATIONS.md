@@ -380,8 +380,8 @@ Full-text search over memory traces using the FTS5 index with BM25 ranking.
 ```
 
 **Behaviour:**
-- Queries the brain's full-text index: the `memory_traces_fts` FTS5 virtual table on SQLite, the `_tsv` column of the brain's own rows on Postgres.
-- The best match comes first on both backends: by BM25 on SQLite, by `ts_rank` on Postgres.
+- Queries the brain's full-text index: the `memory_traces_fts` virtual table on SQLite (FTS5 on better-sqlite3; FTS4 on sql.js and the IndexedDB adapter, whose SQLite builds have no FTS5), the `_tsv` column of the brain's own rows on Postgres.
+- The best match comes first on every backend: by BM25 on FTS5, by the number of matches (`length(offsets())`) on FTS4, by `ts_rank` on Postgres.
 - Only active traces are returned (soft-deleted traces are excluded).
 - Optional `type` and `scope` filters are applied via SQL WHERE clauses on the join; a `scope` filter also matches the scope id resolved from the execution context.
 - `limit` takes 1 to 100.
