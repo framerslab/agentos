@@ -266,6 +266,42 @@ describe('MemoryStore — full-text index stays in step with durable writes', ()
     }
   });
 
+  it('a revival whose rowid move fails is found by its new words only, before and after a reopen', async (ctx) => {
+    const { dir, dbPath } = tmpBrainPath();
+    let brain = await Brain.openSqlite(dbPath);
+    try {
+      if (!(await ftsAvailable(brain))) ctx.skip();
+      const store = await mkStore();
+      store.setBrain(brain);
+      await store.store(mkTrace('t-stuck', 'The street I grew up on was Thornquay Lane.'));
+      const originalRun = brain.run.bind(brain);
+      vi.spyOn(brain, 'run').mockImplementation(async (sql, params) => {
+        // Another writer holds the database for this one statement.
+        if (isRowidMove(sql)) throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+        return originalRun(sql, params);
+      });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      // The upsert rewrites the row in place under the rowid whose entry holds the old words.
+      await store.store(mkTrace('t-stuck', 'My childhood parakeet was named Silverpip.'));
+
+      expect(await ftsIds(brain, 'Silverpip')).toEqual(['t-stuck']);
+      expect(await ftsIds(brain, 'Thornquay')).toEqual([]);
+      const lines = warn.mock.calls.map(([line]) => String(line)).filter((line) => line.startsWith('[MemoryStore]'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('t-stuck');
+      expect(lines[0]).toMatch(/rebuil/);
+      // The open-time check compares row sets, not content: an open would not clear old words left here.
+      await brain.close();
+      brain = await Brain.openSqlite(dbPath);
+      expect(await ftsIds(brain, 'Thornquay')).toEqual([]);
+      expect(await ftsIds(brain, 'Silverpip')).toEqual(['t-stuck']);
+    } finally {
+      await brain.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('syncs the storing brain\'s own row when another brain shares the database and the trace id', async (ctx) => {
     const { dir, dbPath } = tmpBrainPath();
     const brain = await Brain.openSqlite(dbPath);
