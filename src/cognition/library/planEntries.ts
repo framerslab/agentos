@@ -31,8 +31,9 @@ export interface PlanRules {
   archiveExtensions?: readonly string[];
   /**
    * The most bytes an entry of each kind may hold, and, for `archive`, the most a nested archive may hold for the plan
-   * to open it. An entry whose size is no byte count (a finite number of 0 or more) is skipped with the reason `size`;
-   * a bound that is not a number of 0 or more rejects the plan with a `RangeError`.
+   * to open it: 0, any positive number or `Infinity`. An entry whose size is no byte count (a finite number of 0 or
+   * more) is skipped with the reason `size`; a bound below 0, `NaN` or no number at all rejects the plan with a
+   * `RangeError`.
    */
   maxBytes: (kind: PlannedKind | 'archive') => number;
   /**
@@ -41,8 +42,8 @@ export interface PlanRules {
    */
   openArchive?: (path: string) => Promise<PlanEntryInput[]>;
   /**
-   * The most entries planned, skipped ones included: those past it are skipped with the reason `count`. A count that
-   * is not a number of 0 or more rejects the plan with a `RangeError`.
+   * The most entries planned, skipped ones included: those past it are skipped with the reason `count`. A count below
+   * 0, `NaN` or no number at all rejects the plan with a `RangeError`. @default Infinity
    */
   maxEntries?: number;
 }
@@ -111,7 +112,8 @@ function climbs(path: string): boolean {
  *
  * @param entries - The entries of an archive or a folder.
  * @param rules - The caller's types, bounds and archive opener.
- * @throws RangeError when `maxEntries`, or what `maxBytes` answers, is not a number of 0 or more.
+ * @throws RangeError when `maxEntries`, or what `maxBytes` answers for a kind it is asked about, is below 0, `NaN` or no
+ * number at all.
  */
 export async function planEntries(entries: readonly PlanEntryInput[], rules: PlanRules): Promise<PlannedEntry[]> {
   const planned: PlannedEntry[] = [];
