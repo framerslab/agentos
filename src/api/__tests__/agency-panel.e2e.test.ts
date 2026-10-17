@@ -50,6 +50,7 @@ vi.mock('../runtime/provider-defaults.js', async (importOriginal) => {
 
 import { agent } from '../agent.js';
 import { agency } from '../agency.js';
+import { generateText } from '../generateText.js';
 import { hitl } from '../hitl.js';
 import { exportAgentConfig, importAgent } from '../agentExport.js';
 import { setDefaultProvider, clearDefaultProvider } from '../runtime/global-default.js';
@@ -456,6 +457,41 @@ describe('8. keys on a hop', () => {
     expect(JSON.stringify(fetchMock.mock.calls.map(([, i]) => (i as RequestInit).headers))).not.toContain('sk-nameless-default-0013');
     expect(result.agentCalls[0]).toMatchObject({ provider: 'openai' });
     expect(result.agentCalls[0].fallback?.fired).toBe(true);
+  });
+  it("beside a nameless setDefaultProvider a fixed seat's default-chain hop keeps the breaker of the environment key it sends: its 401 stops no call on the default's key, and the default key's 401 skips no hop", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    vi.stubEnv('GEMINI_API_KEY', K.gemEnv);
+    // The default chain is then one OpenAI hop.
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENROUTER_API_KEY', '');
+    const nameless = 'sk-nameless-default-0013';
+    setDefaultProvider({ apiKey: nameless });
+    // OpenAI refuses one key and answers any other.
+    let refused = K.oaiEnv;
+    const openai = (answer: Handler): Handler => (req) => (header(req, 'Authorization') === `Bearer ${refused}` ? openaiError(401, 'bad key')() : answer(req));
+    route([[GEMINI, geminiError(529, 'overloaded', 'UNAVAILABLE')], [OPENAI_LIST, openaiListing], [OPENAI_CHAT, openai(openaiText('from openai'))], [OPENAI_RESP, openai(openaiResponsesText('from openai'))]]);
+    const seat = () => agency({ modelPool: { astra: POOL().astra }, agents: { fixed: { provider: 'gemini', model: 'gemini-2.5-flash', instructions: 'x' } }, strategy: 'sequential' } as never).generate('go');
+    // A call that names its provider and no key runs on the nameless default's key.
+    const direct = () => generateText({ provider: 'openai', model: 'gpt-4.1', prompt: 'hi', fallbackProviders: [] });
+    const openaiKeys = () => calls(/api\.openai\.com\/v1\/(chat\/completions|responses)/, 'POST').map((c) => header(c, 'Authorization'));
+
+    // The seat's hop is refused on the environment's key; a call on the default's key is still sent and answered.
+    await expect(seat()).rejects.toThrow();
+    expect(openaiKeys().length).toBeGreaterThan(0);
+    expect(openaiKeys().every((k) => k === `Bearer ${K.oaiEnv}`)).toBe(true);
+    const before = openaiKeys().length;
+    expect((await direct()).text).toBe('from openai');
+    expect(openaiKeys().slice(before)).toEqual([`Bearer ${nameless}`]);
+
+    // The default's key is refused, which opens the provider's own record; the seat's hop still runs on the
+    // environment's key.
+    globalLLMProviderHealth.reset();
+    refused = nameless;
+    await expect(direct()).rejects.toThrow();
+    expect(globalLLMProviderHealth.isOpen('openai')).toBe(true);
+    const result = await seat();
+    expect(result.text).toBe('from openai');
+    expect(openaiKeys().slice(-1)).toEqual([`Bearer ${K.oaiEnv}`]);
   });
   it('an Anthropic hop with no Anthropic key is dropped from a fixed seat chain and nothing goes to OpenRouter', async () => {
     vi.stubEnv('OPENROUTER_API_KEY', K.orEnv);
