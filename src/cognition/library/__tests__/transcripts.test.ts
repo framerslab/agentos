@@ -537,6 +537,37 @@ describe('readTranscript', () => {
     );
   });
 
+  it('reads an Otter header whose speaker is named in lower case, as a name typed in Otter can be, as a header', () => {
+    // Read as words, the first turn's header and words would be dropped with the lines before the first header, and
+    // a later one read into the turn before it, said by the wrong speaker.
+    const call = 'john  0:01\nHello.\n\nAna Silva  0:04\nHi, John.\n\nana  0:09\nThat is me too.\n\nTranscribed by https://otter.ai\n';
+    expect(readTranscript(call, 'otter')).toEqual({
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: 1_000, endMs: null, text: 'Hello.' },
+        { seq: 2, startMs: 4_000, endMs: null, text: 'Hi, John.' },
+        { seq: 3, startMs: 9_000, endMs: null, text: 'That is me too.' },
+      ],
+      labels: [
+        { seq: 1, label: 'john' },
+        { seq: 2, label: 'Ana Silva' },
+        { seq: 3, label: 'ana' },
+      ],
+      durationMs: null,
+    });
+
+    // An export whose every speaker is named in lower case is Otter's, from its text or from a Word file's.
+    const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+    expect(transcriptFormatOf('call.txt', bytes('john  0:01\nHello.\n\nana  0:04\nHi.\n'))).toBe('otter');
+    expect(transcriptFormatOf('call.txt', bytes('李娜  0:01\n早上好。\n\nmaría  0:04\nHola.\n'))).toBe('otter');
+
+    // A name still holds at most forty characters and no colon, and the `Name: words` rule keeps its capital.
+    expect(readTranscript(`${'a'.repeat(41)}  0:01\nWords.\n\nana  0:04\nHi.\n`, 'otter').turns).toEqual([
+      { seq: 1, startMs: 4_000, endMs: null, text: 'Hi.' },
+    ]);
+    expect(readTranscript('note: one\nnote: two\n', 'lines').labels).toEqual([]);
+  });
+
   it('reads Fireflies\'s sentences from a list at the top, with times given as text, and a sentence with no speaker', () => {
     const read = readTranscript(
       JSON.stringify([
