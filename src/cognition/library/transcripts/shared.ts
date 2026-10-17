@@ -141,17 +141,29 @@ export function cuesOf(blocks: readonly string[][], numbered: boolean): Cue[] {
 /** A letter a speaker's name may start with: a capital, a title-case letter, or a letter of a script with no case. */
 const NAME_START = /^[\p{Lu}\p{Lt}\p{Lo}]/u;
 
+/** A letter of any case or script, as the start of a name a header gives. */
+const LETTER_START = /^\p{L}/u;
+
 /** The most characters a speaker's name holds. */
 const NAME_LENGTH = 40;
 
 /** A colon that ends a speaker's name: the ASCII colon, or the full-width colon of Chinese and Japanese text. */
 const COLON = /[:：]/;
 
-/** Whether a text, already trimmed, can be a speaker's name: forty characters at most, no colon, the right start. */
-export function isName(text: string): boolean {
+/**
+ * Whether a text, already trimmed, can be a speaker's name: forty characters at most, no colon, and the right start.
+ * In running text, where `Name: words` tells a name from a sentence only by its start, the start is a capital or a
+ * letter of a script with no case, so `note: one` is a sentence. With `anyCase`, for a name a header gives on a line of
+ * its own (Otter's `john  0:01`), any letter starts it, since a name typed in lower case is still the speaker's.
+ *
+ * @param text - The text, already trimmed.
+ * @param options - `anyCase` to take a name that starts with a letter of any case.
+ */
+export function isName(text: string, options: { anyCase?: boolean } = {}): boolean {
   // A code point is one or two UTF-16 units, so a longer text is no name and is never split into code points.
   if (text.length === 0 || text.length > 2 * NAME_LENGTH) return false;
-  return Array.from(text).length <= NAME_LENGTH && !COLON.test(text) && NAME_START.test(text);
+  const start = options.anyCase === true ? LETTER_START : NAME_START;
+  return Array.from(text).length <= NAME_LENGTH && !COLON.test(text) && start.test(text);
 }
 
 /**
