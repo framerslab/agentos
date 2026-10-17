@@ -26,7 +26,7 @@ export interface UtilityAIConfigBase {
 // --- Summarization Types ---
 /** Options for text summarization. */
 export interface SummarizationOptions {
-  desiredLength?: 'short' | 'medium' | 'long' | number; // number as % (0-1) or target sentences/tokens (>1)
+  desiredLength?: 'short' | 'medium' | 'long' | number; // A number of 1 or less is a share of the text's length, a larger one a count of sentences
   method?: 'extractive_sentence_rank' | 'first_n_sentences' | 'abstractive_llm' | 'key_points_llm' | string; // Allow custom methods
   modelId?: string; // For LLM-based methods
   providerId?: string; // For LLM-based methods
@@ -66,8 +66,10 @@ export interface KeywordExtractionOptions {
 // --- Tokenization Types ---
 export interface TokenizationOptions {
   type?: 'word' | 'sentence' | 'subword_bpe'; // Default 'word'
-  toLowerCase?: boolean; // Default true
-  removePunctuation?: boolean; // Default true for words, false for sentences
+  /** Default true. StatisticalUtilityAI keeps a sentence's case unless it is true. */
+  toLowerCase?: boolean;
+  /** LLMUtilityAI: default true for words, false for sentences. StatisticalUtilityAI's words never hold punctuation. */
+  removePunctuation?: boolean;
   language?: string; // BCP-47
   modelId?: string; // For subword tokenizers like BPE
 }
@@ -93,17 +95,26 @@ export interface SimilarityOptions {
 
 // --- Sentiment Analysis Types ---
 export interface SentimentAnalysisOptions {
+  /**
+   * Read by HybridUtilityAI alone, which sends `'llm'` to its LLM-backed class and `'lexicon_based'` to its
+   * statistical class. LLMUtilityAI asks a provider and StatisticalUtilityAI scores with a lexicon, whatever it names.
+   */
   method?: 'lexicon_based' | 'llm' | 'trained_classifier' | string;
-  modelId?: string; // For LLM or trained classifier
-  providerId?: string; // For LLM-based methods
-  lexiconNameOrPath?: string; // Name of built-in lexicon or path to custom
+  modelId?: string; // LLMUtilityAI's, else its sentimentModelId, else its defaultModelId
+  /** The provider LLMUtilityAI calls: this, else `methodOptions.providerId`, else its `defaultProviderId`. */
+  providerId?: string;
+  /**
+   * StatisticalUtilityAI: a lexicon `natural` ships, by name (`afinn`, `afinnFinancialMarketNews`, `pattern`,
+   * `senticon`), or the path of a lexicon file, which is then the lexicon alone.
+   */
+  lexiconNameOrPath?: string;
   language?: string; // BCP-47
   methodOptions?: Record<string, any>;
 }
 export interface SentimentResult {
   score: number; // Overall sentiment score (interpretation depends on method, e.g., -1 to 1)
   polarity: 'positive' | 'negative' | 'neutral';
-  comparative?: number; // e.g., score normalized by number of sentiment words
+  comparative?: number; // StatisticalUtilityAI: the sum of the word values over the number of words
   intensity?: number; // Estimated intensity (0-1)
   positiveTokens?: Array<{ token: string; score?: number }>;
   negativeTokens?: Array<{ token: string; score?: number }>;
@@ -112,7 +123,7 @@ export interface SentimentResult {
 
 // --- Language Detection Types ---
 export interface LanguageDetectionOptions {
-  maxCandidates?: number; // Default 1
+  maxCandidates?: number; // Default 3 for StatisticalUtilityAI, 1 for LLMUtilityAI
   method?: 'n_gram' | 'llm' | 'heuristic' | string;
   modelId?: string; // For LLM-based methods
   providerId?: string; // For LLM-based methods
@@ -126,11 +137,11 @@ export interface LanguageDetectionResult {
 // --- Text Normalization Types ---
 export interface TextNormalizationOptions {
   toLowerCase?: boolean; // Default true
-  removePunctuation?: boolean; // Default true
+  removePunctuation?: boolean; // Default false; StatisticalUtilityAI joins words, so its output never holds punctuation
   removeStopWords?: boolean; // Default false
   stem?: boolean; // Default false
   stemAlgorithm?: StemmingOptions['algorithm'];
-  expandContractions?: boolean; // Default true
+  expandContractions?: boolean; // Default false; StatisticalUtilityAI expands English contractions only
   replaceNumbersWith?: string | null; // null to remove, string to replace (e.g., "<NUM>")
   stripHtml?: boolean; // Default false
   language?: string; // BCP-47
@@ -164,16 +175,20 @@ export interface ReadabilityResult {
 export interface ParseJsonOptions<_T = any> {
   /** If true, attempts to use an LLM to fix or extract JSON if standard parsing fails. */
   attemptFixWithLLM?: boolean;
-  /** Model ID to use for LLM-based fixing. */
+  /** The model a repair calls. LLMUtilityAI: else its `jsonFixerModelId`, else its `defaultModelId`. */
   llmModelIdForFix?: string;
-  /** Provider ID for the LLM fixer. */
+  /** The provider a repair calls. LLMUtilityAI: else its `defaultProviderId`. */
   llmProviderIdForFix?: string;
   /**
-   * Optional JSON schema to validate the parsed object against.
-   * If validation fails, the method may return null or attempt to fix again.
+   * Optional JSON schema to validate the parsed object against. LLMUtilityAI sends a value that fails it for repair
+   * as it sends a text that does not parse, names the schema (and a parsed value's errors) in the repair request, and
+   * answers `null` when no repair passes it.
    */
   targetSchema?: JSONSchemaObject; // Using the type from ITool.ts for consistency
-  /** Max repair attempts with LLM if schema validation fails. */
+  /**
+   * LLMUtilityAI: how many repairs to try, each on the text the last one answered, while a repair does not parse or
+   * fails `targetSchema`. 1 unless it is a whole number of 1 or more, so `Infinity` is 1 too.
+   */
   maxRepairAttempts?: number;
 }
 
