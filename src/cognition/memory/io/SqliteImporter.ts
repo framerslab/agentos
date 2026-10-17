@@ -11,9 +11,7 @@
  *   - If a trace of the same scope and scope id with the same hash already
  *     exists in the target:
  *     - Keep the newer `created_at` timestamp.
- *     - Merge `tags` arrays (union, dedup). The full-text index covers the
- *       tags, so when a merge changes a trace's tags the importer rebuilds the
- *       brain's index once the import has committed.
+ *     - Merge `tags` arrays (union, dedup).
  *   - A trace of another scope id is not a duplicate: its tags and time are
  *     left as they are.
  *   - New traces are inserted wholesale.
@@ -21,6 +19,12 @@
  *   - New nodes are inserted; existing nodes are left unchanged.
  * - **knowledge_edges**: deduplicated by `source_id` + `target_id` + `type`.
  *   - New edges are inserted; existing edges are left unchanged.
+ *
+ * ## Full-text index
+ * The brain's full-text index covers each trace's content and tags. Once the
+ * import has committed, the importer rebuilds it, once, when the import
+ * inserted a trace or a merge gave a trace the brain holds new tags.
+ * `Memory.importFrom` does not rebuild it again after a SQLite import.
  *
  * ## One brain per source
  * A database can hold several brains: every row of a brain's tables carries
@@ -152,16 +156,17 @@ export class SqliteImporter {
           ? [`SELECT * FROM ${table} WHERE brain_id = ?`, [brainIds[0]]]
           : [`SELECT * FROM ${table}`, []];
 
-      let retagged = 0;
+      let traces = { inserted: 0, retagged: 0 };
       await this.brain.transaction(async (trx) => {
-        retagged = await this._mergeTraces(sourceAdapter, read, result, trx, options);
+        traces = await this._mergeTraces(sourceAdapter, read, result, trx, options);
         await this._mergeNodes(sourceAdapter, read, result, trx);
         await this._mergeEdges(sourceAdapter, read, result, trx);
       });
-      // A tag merge rewrites a held trace's tags in place and counts as
-      // skipped, so a caller that rebuilds after inserts (Memory.importFrom,
-      // when `imported` is above zero) would not rebuild for it.
-      if (retagged > 0) {
+      // The inserts are not synced into the full-text index, and a tag merge
+      // rewrites a held trace's tags in place and counts as skipped. One
+      // rebuild covers both, here rather than in each caller: a caller that
+      // rebuilt after inserts alone would miss a merge.
+      if (traces.inserted > 0 || traces.retagged > 0) {
         await this._rebuildFullTextIndex();
       }
     } finally {
@@ -205,7 +210,8 @@ export class SqliteImporter {
    * Insert the source's traces, or merge a duplicate's tags and time into
    * the trace the brain holds.
    *
-   * @returns How many held traces a merge gave new tags.
+   * @returns How many traces it inserted, and how many held traces a merge
+   *   gave new tags.
    */
   private async _mergeTraces(
     src: StorageAdapter,
@@ -213,14 +219,15 @@ export class SqliteImporter {
     result: ImportResult,
     trx: { run: Brain['run']; get: Brain['get'] },
     options?: Pick<ImportOptions, 'dedup'>,
-  ): Promise<number> {
+  ): Promise<{ inserted: number; retagged: number }> {
+    let inserted = 0;
+    let retagged = 0;
     let sourceRows: TraceRow[];
     try {
       sourceRows = await src.all<TraceRow>(...read('memory_traces'));
     } catch {
-      return 0;
+      return { inserted, retagged };
     }
-    let retagged = 0;
 
     const { dialect } = this.brain.features;
     const brainId = this.brain.brainId;
@@ -289,12 +296,13 @@ export class SqliteImporter {
           scopeId,
         ]);
 
+        inserted++;
         result.imported++;
       } catch (err) {
         result.errors.push(`Trace merge error: ${String(err)}`);
       }
     }
-    return retagged;
+    return { inserted, retagged };
   }
 
   /**
@@ -314,7 +322,7 @@ export class SqliteImporter {
         return;
       }
       console.warn(
-        `[SqliteImporter] full-text index rebuild after a tag merge failed for brain ${this.brain.brainId}: ${message}`,
+        `[SqliteImporter] full-text index rebuild after an import failed for brain ${this.brain.brainId}: ${message}`,
       );
     }
   }

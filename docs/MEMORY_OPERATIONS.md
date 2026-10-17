@@ -663,7 +663,7 @@ User prefers TypeScript over Python
 
 ### SQLite
 
-Merges one brain's SQLite file into the current brain. The importer reads the rows of the one brain the file holds: a file whose rows carry several brain ids imports nothing, and `errors` names the ids. A SQLite export holds one brain, so export each brain and import its file. A file older than the `brain_id` column holds one brain, and every row of it is read. A source trace is not inserted when a trace of the same scope and scope id in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. When a merge changes a trace's tags, the importer rebuilds the brain's full-text index once the import has committed (on Postgres, the `_tsv` column of the brain's own rows), so `memory_search` finds the trace by a merged tag. Knowledge nodes are matched by label and type, edges by source, target and type.
+Merges one brain's SQLite file into the current brain. The importer reads the rows of the one brain the file holds: a file whose rows carry several brain ids imports nothing, and `errors` names the ids. A SQLite export holds one brain, so export each brain and import its file. A file older than the `brain_id` column holds one brain, and every row of it is read. A source trace is not inserted when a trace of the same scope and scope id in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. Once the import has committed, the importer rebuilds the brain's full-text index, once, when it inserted a trace or a merge changed a trace's tags (on Postgres, the `_tsv` column of the brain's own rows), so `memory_search` finds the imported traces, and a trace by a merged tag. Knowledge nodes are matched by label and type, edges by source, target and type.
 
 ```ts
 const result = await mem.importFrom('./backup.sqlite', { format: 'sqlite' });
@@ -761,7 +761,7 @@ interface ImportResult {
 }
 ```
 
-After an import that inserted at least one trace (`imported` above zero), `importFrom` and `importFromString` rebuild the brain's full-text index, and its HNSW index when the brain has one, from the brain's embedded traces.
+After an import whose `imported` count is above zero, `importFrom` and `importFromString` rebuild the brain's HNSW index, when the brain has one, from the brain's embedded traces, and its full-text index; a SQLite import rebuilds the full-text index itself, so `importFrom` does not rebuild it again.
 
 
 ### ExportOptions Reference

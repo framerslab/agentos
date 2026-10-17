@@ -1368,6 +1368,9 @@ export class Memory {
 
     const format = await this._detectImportFormat(source, options);
     let result: ImportResult;
+    // The SQLite importer rebuilds the full-text index itself, once, after an
+    // import that inserted a trace or merged new tags into one.
+    let importerRebuildsFullText = false;
 
     switch (format) {
       case 'json': {
@@ -1388,6 +1391,7 @@ export class Memory {
       case 'sqlite': {
         const { SqliteImporter } = await import('../SqliteImporter.js');
         result = await new SqliteImporter(this._brain).import(source, options);
+        importerRebuildsFullText = true;
         break;
       }
       case 'chatgpt': {
@@ -1406,7 +1410,9 @@ export class Memory {
     }
 
     if (result.imported > 0) {
-      await this._rebuildFtsIndex();
+      if (!importerRebuildsFullText) {
+        await this._rebuildFtsIndex();
+      }
       await this._rebuildHnswIndex();
     }
 
