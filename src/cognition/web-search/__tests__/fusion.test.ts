@@ -67,4 +67,19 @@ describe('semanticDedup', () => {
     expect(merged).toHaveLength(1);
     expect([...merged[0].providerRanks]).toEqual([['firecrawl', 0], ['tavily', 2]]);
   });
+
+  it('leaves the candidates it is given as they were', () => {
+    // One address merge (first and second), then one snippet merge (third), both into the first candidate's group.
+    const first = candidate('https://www.example.com/page/', 'breaking news today markets', [['firecrawl', 0]]);
+    const second = candidate('http://example.com/page', 'another snippet entirely', [['tavily', 2]]);
+    const third = candidate('https://wire.example/b', 'breaking news today markets', [['serper', 1]]);
+    const merged = semanticDedup([first, second, third]);
+    expect(merged).toHaveLength(1);
+    expect([...merged[0].providerRanks]).toEqual([['firecrawl', 0], ['tavily', 2], ['serper', 1]]);
+    expect(merged[0].providerSources).toEqual(['firecrawl', 'tavily', 'serper']);
+    expect([...first.providerRanks]).toEqual([['firecrawl', 0]]);
+    expect(first.providerSources).toEqual(['firecrawl']);
+    expect([...second.providerRanks]).toEqual([['tavily', 2]]);
+    expect([...third.providerRanks]).toEqual([['serper', 1]]);
+  });
 });
