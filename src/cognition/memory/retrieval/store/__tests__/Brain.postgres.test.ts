@@ -71,7 +71,7 @@ describeIfPostgres('Brain.openPostgres', () => {
 
     // Schema initialised; brain_meta seeded.
     const ver = await brain.getMeta('schema_version');
-    expect(ver).toBe('2');
+    expect(ver).toBe('3');
   });
 
   it('throws when brainId is missing', async () => {
@@ -136,14 +136,14 @@ describeIfPostgres('Brain.openPostgres', () => {
 
     const brain1 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
     openedBrains.push(brain1);
-    expect(await brain1.getMeta('schema_version')).toBe('2');
+    expect(await brain1.getMeta('schema_version')).toBe('3');
     await brain1.close();
     openedBrains.pop();
 
-    // Second open should detect v2 and skip migration without error.
+    // Second open should detect v3 and skip migration without error.
     const brain2 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
     openedBrains.push(brain2);
-    expect(await brain2.getMeta('schema_version')).toBe('2');
+    expect(await brain2.getMeta('schema_version')).toBe('3');
   });
 
   it('serializes concurrent first-opens against the same brainId', async () => {
@@ -155,12 +155,12 @@ describeIfPostgres('Brain.openPostgres', () => {
     ]);
     openedBrains.push(brainA, brainB);
 
-    // Both must see schema_version = '2' (latest). The lock + transaction
-    // serialization in MigrationRunner ensures only one runs the migration
-    // (or in the fresh-DB case, both safely no-op since _initSchema is
-    // idempotent).
-    expect(await brainA.getMeta('schema_version')).toBe('2');
-    expect(await brainB.getMeta('schema_version')).toBe('2');
+    // Both must see schema_version = '3' (latest). MigrationRunner's lock
+    // and transaction let one open run the migrations while the other waits;
+    // both run the schema step, where a create that loses the race to the
+    // other connection runs again and finds the object.
+    expect(await brainA.getMeta('schema_version')).toBe('3');
+    expect(await brainB.getMeta('schema_version')).toBe('3');
 
     // Both must be able to write and read independently (no corruption).
     await brainA.run(
@@ -179,6 +179,37 @@ describeIfPostgres('Brain.openPostgres', () => {
       [brainId],
     );
     expect(rows.map((r) => r.id)).toEqual(['race-trace-a', 'race-trace-b']);
+  });
+
+  it('sets the shared schema up once when several brains first open a fresh database at once', async () => {
+    // A schema of its own stands in for a fresh database: the opens below create every table in it.
+    const schema = `agentos_fresh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    await admin.exec(`CREATE SCHEMA ${schema}`);
+    const url = new URL(POSTGRES_URL!);
+    url.searchParams.set('options', `-c search_path=${schema},public`);
+    const fresh: Brain[] = [];
+    try {
+      // Different brains: their CREATE ... IF NOT EXISTS statements race on the shared tables, and
+      // one that loses (pg_type_typname_nsp_index) runs again and finds the object.
+      fresh.push(
+        ...(await Promise.all(
+          Array.from({ length: 6 }, () => Brain.openPostgres(url.toString(), { brainId: uniqueBrainId() })),
+        )),
+      );
+      for (const brain of fresh) {
+        expect(await brain.getMeta('schema_version')).toBe('3');
+      }
+      const created = await admin.all<{ n: string | number }>(
+        `SELECT count(*) AS n FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'memory_traces'`,
+        [schema],
+      );
+      expect(Number(created[0]?.n)).toBe(1);
+    } finally {
+      for (const brain of fresh) await brain.close().catch(() => undefined);
+      await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
+    }
   });
 
   it('enforces FK constraints across brain-scoped tables', async () => {

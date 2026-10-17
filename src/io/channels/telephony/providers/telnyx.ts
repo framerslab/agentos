@@ -39,9 +39,10 @@
  *    the key as DER SPKI. As in telnyx-node, a timestamp more than 300
  *    seconds old is rejected.
  *
- * When no public key is configured, carrier mode refuses every webhook;
- * legacy mode skips verification (returns `valid: true`) to support
- * development environments.
+ * When no public key is configured, every webhook is refused in either
+ * profile, unless the provider is constructed with
+ * `allowUnverifiedWebhooks: true` for local development: it then accepts
+ * every webhook unverified and logs one warning.
  *
  * ## Event mapping table (hangup_cause)
  *
@@ -79,6 +80,7 @@ import type {
 } from '../types.js';
 
 import { stableCarrierEvents, callbackOccurrence } from '../CarrierEventIdentity.js';
+import type { ILogger } from '../../../../core/logging/ILogger.js';
 
 // ============================================================================
 // Config
@@ -96,11 +98,32 @@ export interface TelnyxVoiceProviderConfig {
    * Ed25519 public key for webhook verification, base64-encoded: the 32-byte
    * key as the Telnyx portal shows it, or a DER SPKI blob.
    *
-   * When omitted, carrier mode refuses every webhook, and legacy mode skips
-   * verification (always returns `valid: true`), which is acceptable for
-   * development only.
+   * Without it, {@link TelnyxVoiceProvider.verifyWebhook} refuses every
+   * webhook in either profile, unless the provider was constructed with
+   * {@link TelnyxVoiceProviderConfig.allowUnverifiedWebhooks} set and no key.
    */
   publicKey?: string;
+  /**
+   * Accepts every webhook without verifying it when no `publicKey` is set.
+   * For local development only: an unverified webhook can press keys in a
+   * call or end it. Only `true` turns it on, in either profile, and the
+   * provider then logs one warning when it is constructed. A configured
+   * `publicKey` is checked whatever this says.
+   *
+   * It is read once, when the provider is constructed: setting it, or
+   * removing `publicKey`, on this object afterwards does not open the
+   * webhook.
+   */
+  allowUnverifiedWebhooks?: boolean;
+  /**
+   * Receives the warning that
+   * {@link TelnyxVoiceProviderConfig.allowUnverifiedWebhooks} logs. When
+   * omitted, the warning goes to `createLogger('TelnyxVoiceProvider')` from
+   * `@framers/agentos/logging`, which is loaded only to write it. When its
+   * `warn` throws, the warning goes to `console.warn` instead and the
+   * provider is still constructed.
+   */
+  logger?: ILogger;
   /**
    * How old a webhook's `Telnyx-Timestamp` may be, in seconds, before it is
    * rejected as a replay. Defaults to 300, telnyx-node's default; 0 turns
@@ -155,6 +178,39 @@ const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 /** Default webhook replay window in seconds, telnyx-node's `DEFAULT_TOLERANCE`. */
 const DEFAULT_WEBHOOK_TOLERANCE_SEC = 300;
 
+/** The refusal of a webhook when no public key is configured and unverified webhooks are not allowed. */
+const NO_PUBLIC_KEY_ERROR = 'No publicKey configured to verify Telnyx webhooks';
+
+/** The warning a provider logs once when it is constructed to accept webhooks unverified. */
+const UNVERIFIED_WEBHOOKS_WARNING =
+  'Telnyx webhooks are accepted without verification: allowUnverifiedWebhooks is set and no publicKey is configured. Use it in local development only.';
+
+/**
+ * Writes {@link UNVERIFIED_WEBHOOKS_WARNING} to the host's logger or, without
+ * one, to the library's `createLogger`. The logging module is imported here
+ * rather than at the top of the file, so the telephony entry loads pino and
+ * OpenTelemetry only when this warning is written. If the host's logger
+ * throws, or that import or the write fails, the warning goes to the console
+ * instead of being lost, and the provider is still constructed.
+ *
+ * @param logger - The logger from the provider's config, if any.
+ */
+function warnUnverifiedWebhooks(logger: ILogger | undefined): void {
+  const warnOnConsole = (): void => console.warn(`[TelnyxVoiceProvider] ${UNVERIFIED_WEBHOOKS_WARNING}`);
+  if (logger) {
+    // A host logger that throws must not stop the provider from being built.
+    try {
+      logger.warn(UNVERIFIED_WEBHOOKS_WARNING);
+    } catch {
+      warnOnConsole();
+    }
+    return;
+  }
+  void import('../../../../core/logging/loggerFactory.js')
+    .then(({ createLogger }) => createLogger('TelnyxVoiceProvider').warn(UNVERIFIED_WEBHOOKS_WARNING))
+    .catch(warnOnConsole);
+}
+
 /**
  * The configured public key as DER SPKI. A 32-byte key (the portal's form)
  * gets the Ed25519 SPKI header; anything else is taken as DER SPKI already.
@@ -172,14 +228,16 @@ function telnyxPublicKeyDer(publicKey: string): Buffer {
  *
  * Uses the Telnyx Call Control v2 API for outbound call initiation and
  * in-call actions (hangup, speak). Webhook verification uses Ed25519 public
- * key signing.
+ * key signing; without a public key every webhook is refused, unless the
+ * provider is constructed with `allowUnverifiedWebhooks` for local
+ * development.
  *
  * @example
  * ```typescript
  * const provider = new TelnyxVoiceProvider({
  *   apiKey:       process.env.TELNYX_API_KEY!,
  *   connectionId: process.env.TELNYX_CONNECTION_ID!,
- *   publicKey:    process.env.TELNYX_PUBLIC_KEY,   // optional
+ *   publicKey:    process.env.TELNYX_PUBLIC_KEY!,  // verifies webhooks
  * });
  * ```
  */
@@ -190,8 +248,16 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
   /** Declares whether callback ids satisfy the durable manager contract. */
   get webhookIdentity(): 'legacy' | 'stable-v1' { return this.config.protocol === 'carrier' ? 'stable-v1' : 'legacy'; }
 
-  /** Immutable configuration snapshot. */
+  /** The caller's config object. It is not copied: the methods read its current values. */
   private readonly config: TelnyxVoiceProviderConfig;
+
+  /**
+   * Whether webhooks are accepted without verification: `allowUnverifiedWebhooks`
+   * was `true` and no `publicKey` was set when the provider was constructed.
+   * It is decided once, by the check that logs the warning, so a later change
+   * to the config object cannot open the webhook without that warning.
+   */
+  private readonly acceptsUnverifiedWebhooks: boolean;
 
   /** Base URL for the Telnyx v2 API. */
   private readonly baseUrl: string;
@@ -203,13 +269,18 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
   private readonly fetch: typeof fetch;
 
   /**
-   * @param config - Telnyx credentials and optional overrides.
+   * @param config - Telnyx credentials and optional overrides. With
+   *   `allowUnverifiedWebhooks: true` and no `publicKey`, the provider logs
+   *   one warning and accepts webhooks unverified. That is decided here,
+   *   once: a later change to `config` does not open the webhook.
    */
   constructor(config: TelnyxVoiceProviderConfig) {
     this.config = config;
     this.baseUrl = 'https://api.telnyx.com/v2';
     this.authHeader = `Bearer ${config.apiKey}`;
     this.fetch = config.fetchImpl ?? globalThis.fetch;
+    this.acceptsUnverifiedWebhooks = config.allowUnverifiedWebhooks === true && !config.publicKey;
+    if (this.acceptsUnverifiedWebhooks) warnUnverifiedWebhooks(config.logger);
   }
 
   // ── Webhook ───────────────────────────────────────────────────────────────
@@ -219,9 +290,10 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    *
    * ## Algorithm (step by step)
    *
-   * 1. If no public key is configured, carrier mode refuses the webhook and
-   *    legacy mode skips verification (returns `valid: true`), which supports
-   *    development environments without cryptographic setup.
+   * 1. If no public key is configured, refuse the webhook in either profile,
+   *    unless the provider was constructed with `allowUnverifiedWebhooks`
+   *    and no key, for local development: then skip verification and return
+   *    `valid: true`.
    * 2. Extract the `Telnyx-Timestamp` and `Telnyx-Signature-Ed25519` headers
    *    (or their `X-` prefixed forms).
    * 3. Decode the signature from base64 into a raw byte Buffer.
@@ -232,13 +304,17 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    * 8. Return the verification result.
    *
    * @param ctx - Raw webhook request context.
-   * @returns Verification result. Without a public key it is `{ valid: true }`
-   *   in legacy mode (development) and `{ valid: false }` in carrier mode.
+   * @returns Verification result. Without a public key it is `{ valid: false }`
+   *   in either profile, or `{ valid: true }` when the provider was
+   *   constructed with `allowUnverifiedWebhooks` and no key.
    */
   verifyWebhook(ctx: WebhookContext): WebhookVerificationResult {
-    // Without a public key, legacy mode skips verification so development
-    // needs no Ed25519 key pair; carrier mode refuses the webhook.
-    if (!this.config.publicKey) return this.config.protocol === 'carrier' ? { valid: false, error: 'Carrier verification key required' } : { valid: true };
+    // Nothing can be verified without a public key: refuse the webhook in
+    // either profile, unless the host opted in for local development when it
+    // constructed the provider.
+    if (!this.config.publicKey) {
+      return this.acceptsUnverifiedWebhooks ? { valid: true } : { valid: false, error: NO_PUBLIC_KEY_ERROR };
+    }
 
     const timestamp = ctx.headers['telnyx-timestamp'] ?? ctx.headers['x-telnyx-timestamp'];
     const sigHeader = ctx.headers['telnyx-signature-ed25519'] ?? ctx.headers['x-telnyx-signature-ed25519'];

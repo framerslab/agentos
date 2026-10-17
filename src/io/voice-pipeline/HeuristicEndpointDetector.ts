@@ -79,6 +79,15 @@
  *    session's turns, so a detector handed to one session after another
  *    waits for no late final of the last turn before.
  *
+ * 6. A final its provider marks `beforeSpeechEnd` belongs to the speech it
+ *    arrives in: `DeepgramStreamingSTT` marks every result, since Deepgram
+ *    sends a segment's final before the end of speech of its utterance.
+ *    Such an item-keyed final is never a late final, after a completed turn
+ *    or after a reset while its speech was spoken (a barge-in's cut makes
+ *    one), and it answers its own speech's coming `speech_end`, never one
+ *    that waits already: a `speech_end` that a sound with no words left
+ *    waiting holds the turn for at most the silence timeout from that end.
+ *
  * ## Why heuristic over acoustic-only?
  *
  * Pure silence timeout adds up to 1.5 s of unnecessary latency on every turn
@@ -229,8 +238,9 @@ export interface HeuristicEndpointDetectorOptions {
  * arrived after a reset ended its turn (each `turn_complete` makes one) and
  * before the next `speech_end`, a standalone VAD's next `speech_start` or a
  * session's start (`reset('session')`), while the transcriber's next
- * utterance was spoken included, once per such final. The detector drops it
- * from its turns, so it never joins the next turn's text. Each listener gets
+ * utterance was spoken included, once per such final; a final its provider
+ * marks `beforeSpeechEnd` is never one. The detector drops it from its
+ * turns, so it never joins the next turn's text. Each listener gets
  * it: one that throws or rejects is written as a console warning, and the
  * listeners after it still run, so nothing is thrown into the code that
  * pushed the final.
@@ -343,9 +353,9 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
   /**
    * How many of the turn's item-keyed finals answered no `speech_end`: each
-   * came with none waiting and none expired, before its end of speech. The
-   * transcriber's next `speech_end` pairs with the earliest of them at once
-   * instead of waiting for a final.
+   * came before its end of speech, marked `beforeSpeechEnd` or with none
+   * waiting and none expired. The transcriber's next `speech_end` pairs with
+   * the earliest of them at once instead of waiting for a final.
    */
   private finalsWithoutSpeechEnd = 0;
 
@@ -359,7 +369,9 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * that ended, and is dropped and reported as `'late_final'`. The
    * transcriber's own `speech_start` leaves it set: the transcriber sends an
    * utterance's final after that utterance's end of speech, so a final that
-   * arrives while the next utterance is spoken is still the ended turn's.
+   * arrives while the next utterance is spoken is still the ended turn's. A
+   * final its provider marks `beforeSpeechEnd` came before its own end of
+   * speech instead: it is the speech's own, and is kept.
    */
   private awaitingNextSpeechEnd = false;
 
@@ -643,7 +655,9 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * the turn it ends, an item-keyed final that arrives after it and before
    * the next `speech_end` or a standalone VAD's next `speech_start`, while
    * the transcriber's next utterance is spoken included, is that turn's late
-   * final, and is dropped and reported as `'late_final'`.
+   * final, and is dropped and reported as `'late_final'`, unless its provider
+   * marks it `beforeSpeechEnd`, which makes it the final of the speech it
+   * arrives in.
    *
    * A session that starts on the detector resets it with `'session'`
    * (`VoicePipelineOrchestrator.startSession()` and `startListenSession()`
@@ -707,22 +721,29 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * final answers the oldest `speech_end` still waiting for one; with none
    * waiting, one that stopped waiting without its final; with neither, the
    * transcriber's next `speech_end`, which pairs with it when it comes. A
-   * backchannel the detector suppresses now (see {@link isBackchannel}) or a
-   * final with no words answers one too and adds no text.
+   * new item's final its provider marks `beforeSpeechEnd` came before its own
+   * end of speech, so it answers the transcriber's next `speech_end` whatever
+   * waits: a `speech_end` already waiting belongs to speech that had no final
+   * of its own. A backchannel the detector suppresses now (see
+   * {@link isBackchannel}) or a final with no words answers one too and adds
+   * no text.
    * Once speech has ended in this turn, the turn is decided again. A
    * backchannel is announced last, so a `'backchannel_detected'` listener
    * that throws leaves the final recorded and the turn decided. A final that
-   * arrives while {@link awaitingNextSpeechEnd} holds is dropped and reported
-   * as `'late_final'` through {@link _emitLateFinal}; the drop changes no
-   * state, and a listener that throws is written as a console warning.
+   * arrives while {@link awaitingNextSpeechEnd} holds, unless it is marked
+   * `beforeSpeechEnd`, is dropped and reported as `'late_final'` through
+   * {@link _emitLateFinal}; the drop changes no state, and a listener that
+   * throws is written as a console warning.
    *
    * @param itemId - The provider input item the final belongs to.
    * @param transcript - The final transcript event.
    */
   private _pushItemFinal(itemId: string, transcript: TranscriptEvent): void {
+    // A final that comes before its own end of speech belongs to the speech it arrives in, never to a turn that ended.
+    const beforeSpeechEnd = transcript.beforeSpeechEnd === true;
     // The late final of a turn that has ended stays out of the next turn. It is
     // reported for a listener that keeps every final, such as a listen session.
-    if (this.awaitingNextSpeechEnd) {
+    if (this.awaitingNextSpeechEnd && !beforeSpeechEnd) {
       this._emitLateFinal(transcript);
       return;
     }
@@ -732,7 +753,10 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
     if (!this.itemFinals.has(itemId)) {
       this._dropExpiredSpeechEnds(Date.now());
-      if (this.unansweredSpeechEnds.length > 0) {
+      if (beforeSpeechEnd) {
+        // Its own end of speech is still to come: the transcriber's next speech_end pairs with it at once.
+        this.finalsWithoutSpeechEnd += 1;
+      } else if (this.unansweredSpeechEnds.length > 0) {
         this.unansweredSpeechEnds.shift();
       } else if (this.expiredSpeechEnds > 0) {
         // A speech end stopped waiting before its final came: this is that late final.

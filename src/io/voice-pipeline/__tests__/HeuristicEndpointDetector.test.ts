@@ -23,6 +23,9 @@
  * - An item final that comes before its end of speech, and one left over from a completed turn, reported as late_final,
  *   also when it arrives while the transcriber reports the next utterance; a standalone VAD's start of speech ends
  *   that window
+ * - A final its provider marks beforeSpeechEnd, as Deepgram sends each final before its end of speech: never a late
+ *   final, after a completed turn or after a reset while its speech was spoken, and paired with its own end of
+ *   speech, not with an earlier one that a sound with no words left waiting
  * - Each late_final listener gets the final when one before it throws; the throw is written as a console warning
  * - By the agent's context (setAgentContext()): a backchannel is dropped only while the agent holds the floor, and
  *   while the agent listens a lone one is the user's turn whatever its last reply asked, keyed by an item or not;
@@ -66,6 +69,15 @@ function itemFinal(text: string, itemId: string, startMs?: number): TranscriptEv
 /** Build a speech event the transcriber reported, as the orchestrator forwards it. */
 function transcriberSpeech(type: 'speech_start' | 'speech_end'): VadEvent {
   return { type, timestamp: Date.now(), source: 'stt' };
+}
+
+/**
+ * Build a final keyed by item that its provider sends before the end of speech of the utterance it transcribes, and
+ * marks so, as DeepgramStreamingSTT marks every result.
+ */
+function finalBeforeSpeechEnd(text: string, itemId: string): TranscriptEvent {
+  const final = { ...itemFinal(text, itemId), beforeSpeechEnd: true };
+  return final;
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +764,67 @@ describe('HeuristicEndpointDetector: finals keyed by item', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('keeps the final of each turn that its provider sends before the end of speech, as Deepgram does, so no turn after the first is taken for a late final', () => {
+    const handler = vi.fn();
+    const late = vi.fn();
+    detector.on('turn_complete', handler);
+    detector.on('late_final', late);
+
+    for (const [text, itemId] of [
+      ['Book a table for two.', 'dg:1'],
+      ['At seven tonight.', 'dg:2'],
+      ['Thank you.', 'dg:3'],
+    ]) {
+      detector.pushVadEvent(transcriberSpeech('speech_start'));
+      detector.pushTranscript(finalBeforeSpeechEnd(text, itemId));
+      detector.pushVadEvent(transcriberSpeech('speech_end'));
+      detector.reset(); // as the orchestrator does once the reply has played
+    }
+
+    expect(handler.mock.calls.map(([event]) => [event.transcript, event.reason])).toEqual([
+      ['Book a table for two.', 'punctuation'],
+      ['At seven tonight.', 'punctuation'],
+      ['Thank you.', 'punctuation'],
+    ]);
+    expect(late).not.toHaveBeenCalled();
+  });
+
+  it("keeps a final its provider sends before its end of speech when a reset came while that speech was spoken, as a barge-in's cut makes one", () => {
+    const handler = vi.fn();
+    const late = vi.fn();
+    detector.on('turn_complete', handler);
+    detector.on('late_final', late);
+
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.reset(); // as the orchestrator does when a barge-in cuts the reply
+    detector.pushTranscript(finalBeforeSpeechEnd('No, make it eight.', 'dg:2'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+
+    expect(late).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toMatchObject({ transcript: 'No, make it eight.', reason: 'punctuation' });
+  });
+
+  it('pairs a final its provider sends before its end of speech with that end of speech, not with an earlier one a sound with no words left waiting', () => {
+    const handler = vi.fn();
+    detector.on('turn_complete', handler);
+
+    // A sound the provider found no words in: its end of speech gets no final.
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+    vi.advanceTimersByTime(600);
+    detector.pushVadEvent(transcriberSpeech('speech_start'));
+    detector.pushTranscript(finalBeforeSpeechEnd('Book a table for two.', 'dg:1'));
+    detector.pushVadEvent(transcriberSpeech('speech_end'));
+
+    // The sound's end of speech holds the turn until the silence timeout counted from it, and no longer.
+    vi.advanceTimersByTime(399);
+    expect(handler).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][0]).toMatchObject({ transcript: 'Book a table for two.', reason: 'punctuation' });
   });
 });
 

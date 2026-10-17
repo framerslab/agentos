@@ -648,10 +648,10 @@ export class ConsolidationLoop {
     compacted: number,
     durationMs: number,
   ): Promise<void> {
-    // Rebuild FTS5 index.
-    // The 'rebuild' command reconstructs the FTS index from the content table.
+    // Rebuild the brain's full-text index from its traces.
     try {
-      await this.brain.exec(this.brain.features.fts.rebuildCommand('memory_traces_fts'));
+      const rebuild = this.brain.fullTextRebuild();
+      await this.brain.run(rebuild.sql, rebuild.params);
     } catch {
       // FTS rebuild may fail if the table structure has drifted; non-critical.
     }

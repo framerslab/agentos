@@ -229,6 +229,7 @@ export type {
 // ============================================================================
 
 export { BM25Index, type BM25Config, type BM25Document, type BM25Result, type BM25Stats } from './search/index.js';
+export { fuseRanked, type FuseRankedOptions, type FusedItem } from './search/index.js';
 export { HybridSearcher, type HybridSearcherConfig, type HybridResult } from './search/index.js';
 
 // ============================================================================

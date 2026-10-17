@@ -14,6 +14,7 @@ import { EventEmitter } from 'node:events';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { LiveKitStreamTransport } from '../LiveKitStreamTransport.js';
 import { VoicePipelineOrchestrator, type CallPipelineProfile } from '../VoicePipelineOrchestrator.js';
+import { SoftFadeBargeinHandler } from '../SoftFadeBargeinHandler.js';
 import type {
   AudioFrame,
   AudioIdentity,
@@ -468,6 +469,18 @@ function pcmChunk(sampleRate = 24_000): EncodedAudioChunk {
   return { audio: Buffer.alloc((sampleRate / 50) * 2), format: 'pcm', container: 'raw', sampleRate, durationMs: 20, text: 'Hello' };
 }
 
+/** A 20 ms chunk of 48 kHz PCM16, the speaking track's rate, whose every sample is `value`, so the track's frames name it. */
+function toneChunk(value: number): EncodedAudioChunk {
+  const audio = Buffer.alloc(960 * 2);
+  for (let i = 0; i < 960; i++) audio.writeInt16LE(value, i * 2);
+  return { audio, format: 'pcm', container: 'raw', sampleRate: 48_000, durationMs: 20, text: 'Hello' };
+}
+
+/** The `toneChunk()` values the track captured, in order. */
+function capturedTones(): number[] {
+  return FakeAudioSource.created.flatMap((source) => source.captured.map((frame) => frame.data[0]!));
+}
+
 /** The fences the call below starts with. */
 const firstGeneration: VoiceGeneration = { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 };
 
@@ -517,11 +530,15 @@ function textStream(text: string) {
   };
 }
 
+/** A barge-in handler that cancels the reply as soon as the participant speaks over it. */
+const cancelAtOnce: IBargeinHandler = { mode: 'hard-cut', handleBargein: () => ({ type: 'cancel' }) };
+
 /**
  * A session without a call profile on a speaking transport to `participantIdentity`, whose TTS session the test
- * drives: `reply()` completes a user turn and waits for the agent to speak.
+ * drives: `reply()` completes a user turn and waits for the agent to speak. The barge-in handler is `cancelAtOnce`
+ * unless `bargeinHandler` is given.
  */
-async function converse(room: FakeRoom, participantIdentity: string) {
+async function converse(room: FakeRoom, participantIdentity: string, { bargeinHandler = cancelAtOnce }: { bargeinHandler?: IBargeinHandler } = {}) {
   const transport = new LiveKitStreamTransport({
     room,
     participantIdentity,
@@ -550,7 +567,6 @@ async function converse(room: FakeRoom, participantIdentity: string) {
   const errors: Error[] = [];
   const orchestrator = new VoicePipelineOrchestrator({ stt: 'fake-stt', tts: 'fake-tts' });
   orchestrator.on('error', (error: Error) => errors.push(error));
-  const bargeinHandler: IBargeinHandler = { mode: 'hard-cut', handleBargein: () => ({ type: 'cancel' }) };
   await orchestrator.startSession(
     transport,
     {
@@ -839,4 +855,197 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     await runtime.stopSession();
     await transport.whenClosed();
   });
+
+  it('stays speaking until the track has played the reply out, and only then sends agent_done', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const s = await converse(room, 'user-1');
+    await s.reply();
+    for (let i = 0; i < 3; i++) s.tts.emit('audio', pcmChunk());
+    await vi.waitFor(() => expect(capturedSamples()).toBe(3 * 960));
+    s.tts.emit('flush_complete');
+    await settle();
+    // The synthesis is complete, and the track still holds the reply.
+    expect(s.orchestrator.state).toBe('speaking');
+    expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking']);
+    FakeAudioSource.created[0]!.playOut();
+    await vi.waitFor(() => expect(s.orchestrator.state).toBe('listening'));
+    expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking', 'agent_done']);
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
+
+  it('takes speech over the rest of the reply, after its synthesis completed, as a barge-in that clears the track', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const bargeinHandler: IBargeinHandler = { mode: 'hard-cut', handleBargein: vi.fn(() => ({ type: 'cancel' as const })) };
+    const s = await converse(room, 'user-1', { bargeinHandler });
+    await s.reply();
+    for (let i = 0; i < 3; i++) s.tts.emit('audio', pcmChunk());
+    await vi.waitFor(() => expect(capturedSamples()).toBe(3 * 960));
+    s.tts.emit('flush_complete');
+    await settle();
+    // The participant says "stop" while the track still plays the reply.
+    s.stt.emit('speech_start');
+    await vi.waitFor(() => expect(bargeinHandler.handleBargein).toHaveBeenCalled());
+    await vi.waitFor(() => expect(s.orchestrator.state).toBe('listening'));
+    expect(FakeAudioSource.created[0]!.clears).toBeGreaterThan(0);
+    expect(s.tts.cancel).toHaveBeenCalledOnce();
+    // The track's playout, which the clear ended, does not report the cut reply as done.
+    await settle();
+    expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking', 'barge_in']);
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
+
+  it('holds the track on a pause: nothing more is captured until the reply resumes, and the rest then plays in order', async () => {
+    const room = new FakeRoom();
+    const { s, source } = await pausedReply(room);
+    // The queue was cleared at the pause, and only the chunk whose capture was under way then reached the track.
+    expect(capturedTones()).toEqual([1, 2]);
+    expect(source.clears).toBeGreaterThan(0);
+    // The speech ends with no words: a false interruption, and the reply resumes.
+    s.stt.emit('transcript', { text: '', confidence: 0, words: [], isFinal: true });
+    s.stt.emit('speech_end');
+    await vi.waitFor(() => expect(capturedTones()).toEqual([1, 2, 3, 4, 5]));
+    expect(sentTypes(room).filter((type) => type === 'barge_in')).toHaveLength(2);
+    expect(s.orchestrator.state).toBe('speaking');
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
+
+  it('discards what a pause held when the speech cuts the reply, and captures nothing more of it', async () => {
+    const room = new FakeRoom();
+    const { s } = await pausedReply(room);
+    // The participant's words cut the reply.
+    s.stt.emit('transcript', { text: 'Stop there.', confidence: 0.9, words: [], isFinal: true });
+    s.stt.emit('speech_end');
+    await vi.waitFor(() => expect(s.orchestrator.state).toBe('listening'));
+    await settle();
+    expect(capturedTones()).toEqual([1, 2]);
+    expect(s.tts.cancel).toHaveBeenCalledOnce();
+    expect(sentTypes(room).filter((type) => type === 'barge_in')).toHaveLength(2);
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
+
+  it('publishes the track as a session starts, and plays its first reply once the participant has subscribed', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    let subscribe!: () => void;
+    room.subscription = new Promise<void>((resolve) => {
+      subscribe = resolve;
+    });
+    const s = await converse(room, 'user-1');
+    // Published before the first reply, so the participant can subscribe while it speaks its first turn.
+    await vi.waitFor(() => expect(room.localParticipant.publishTrack).toHaveBeenCalledOnce());
+    await s.reply();
+    s.tts.emit('audio', pcmChunk());
+    await settle();
+    expect(capturedSamples()).toBe(0);
+    subscribe();
+    await vi.waitFor(() => expect(capturedSamples()).toBe(960));
+    expect(room.localParticipant.publishTrack).toHaveBeenCalledOnce();
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
+
+  it("plays natively to a phone caller who joins after readyForPlayback(), though the host asks for 'participant' playout", async () => {
+    const room = new FakeRoom();
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'sip_caller',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...receipts, ...speaking, rtc: fakePublishingRtc() },
+    });
+    // An outbound call gets the track ready before the callee answers.
+    await transport.readyForPlayback();
+    room.addSipCaller('sip_caller', new FakePublication(new FakeTrack('TR_CALLER')));
+    await transport.sendAudio(scopedChunk(1));
+    expect(transport.playout).toBe('native');
+    const playback = transport.waitForPlayback(firstGeneration, 1, new AbortController().signal);
+    FakeAudioSource.created[0]!.playOut();
+    expect(await playback).toMatchObject({ sequence: 1, playedSamples: 320, sampleRate: 16_000 });
+    expect(room.localParticipant.sendText).not.toHaveBeenCalled();
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it('holds the track for a phone caller on a barge-in pause, sending the caller nothing, and releases it on resume', async () => {
+    const room = new FakeRoom();
+    room.addSipCaller('sip_caller', new FakePublication(new FakeTrack('TR_CALLER')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'sip_caller',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    await transport.sendAudio(toneChunk(1));
+    await transport.sendControl({ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } });
+    expect(FakeAudioSource.created[0]!.clears).toBe(1);
+    const held = transport.sendAudio(toneChunk(2));
+    await settle();
+    expect(capturedTones()).toEqual([1]);
+    await transport.sendControl({ type: 'barge_in', action: { type: 'resume' } });
+    await held;
+    expect(capturedTones()).toEqual([1, 2]);
+    expect(room.localParticipant.sendText).not.toHaveBeenCalled();
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it('plays a chunk sent before the participant joins natively, and fixes the mode once the participant is in the room', async () => {
+    const room = new FakeRoom();
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...receipts, ...speaking, rtc: fakePublishingRtc() },
+    });
+    // Nobody is there to announce the chunk to: it plays on the track, and the mode waits.
+    await transport.sendAudio(scopedChunk(1));
+    expect(transport.playout).toBeUndefined();
+    const playback = transport.waitForPlayback(firstGeneration, 1, new AbortController().signal);
+    FakeAudioSource.created[0]!.playOut();
+    expect(await playback).toMatchObject({ sequence: 1, playedSamples: 320, sampleRate: 16_000 });
+    expect(room.localParticipant.sendText).not.toHaveBeenCalled();
+    // The page joins: the host's participant playout holds from its first chunk.
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    await transport.sendAudio(scopedChunk(2));
+    expect(transport.playout).toBe('participant');
+    expect(sentTypes(room)).toEqual(['audio']);
+    transport.close();
+    await transport.whenClosed();
+  });
 });
+
+/**
+ * A reply to a plain participant, paused by SoftFadeBargeinHandler while the track's native queue is full: the track
+ * captured the first chunk, the second waited for room in the queue as the pause came, the third and fourth follow it,
+ * and the fifth arrived during the pause, which the session holds. The queue then has room again.
+ */
+async function pausedReply(room: FakeRoom) {
+  room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+  const s = await converse(room, 'user-1', { bargeinHandler: new SoftFadeBargeinHandler() });
+  await s.reply();
+  s.tts.emit('audio', toneChunk(1));
+  await vi.waitFor(() => expect(capturedTones()).toEqual([1]));
+  const source = FakeAudioSource.created[0]!;
+  let free!: () => void;
+  source.gate = new Promise<void>((resolve) => {
+    free = resolve;
+  });
+  for (const value of [2, 3, 4]) s.tts.emit('audio', toneChunk(value));
+  await settle();
+  // The participant speaks over the reply, and SoftFadeBargeinHandler pauses it at 100 ms of speech.
+  s.stt.emit('speech_start');
+  await vi.waitFor(() => expect(sentTypes(room)).toContain('barge_in'));
+  s.tts.emit('audio', toneChunk(5));
+  source.gate = undefined;
+  free();
+  await settle();
+  return { s, source };
+}

@@ -66,9 +66,12 @@ CREATE TABLE IF NOT EXISTS memory_traces (
   emotions        TEXT    NOT NULL DEFAULT '{}',  -- JSON
   metadata        TEXT    NOT NULL DEFAULT '{}',  -- JSON: scopeId, entities, decay state, contentHash, ...
   deleted         INTEGER NOT NULL DEFAULT 0,     -- soft delete
+  scope_id        TEXT    NOT NULL DEFAULT '',    -- the scope id, as in metadata.scopeId
   PRIMARY KEY (brain_id, id)
 );
 ```
+
+`scope_id` holds the trace's scope id, the value `metadata.scopeId` holds, and `''` for a trace filed under no scope id. The index `idx_memory_traces_brain_scope_id` covers `(brain_id, scope, scope_id, created_at)`. A database written at schema version 2 gains the column at its first open at version 3, filled from each row's metadata JSON for every brain the table holds; a row whose JSON cannot be read, or names no scope id, keeps `''`.
 
 ### `memory_traces_fts`
 
@@ -151,7 +154,7 @@ import { Brain } from '@framers/agentos';
 const brain = await Brain.openSqlite('/path/to/brain.sqlite');
 const row = await brain.get('SELECT * FROM memory_traces WHERE brain_id = ? AND id = ?', [brain.brainId, id]);
 await brain.setMeta('last_sync', Date.now().toString());
-const version = await brain.getMeta('schema_version'); // '2'
+const version = await brain.getMeta('schema_version'); // '3'
 await brain.close();
 ```
 
@@ -180,6 +183,8 @@ interface MemoryHealth {
 }
 ```
 
+Every count is of the brain's own rows, a number on SQLite and Postgres alike; another brain in the same database is not counted.
+
 ---
 
 ## Source Files
@@ -187,7 +192,7 @@ interface MemoryHealth {
 | File | Purpose |
 |------|---------|
 | [`retrieval/store/Brain.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) | Connection, DDL, migrations, meta helpers, export to SQLite |
-| [`retrieval/store/migrations/`](https://github.com/framerslab/agentos/tree/master/src/cognition/memory/retrieval/store/migrations) | Schema migrations (`schema_version` 2) |
+| [`retrieval/store/migrations/`](https://github.com/framerslab/agentos/tree/master/src/cognition/memory/retrieval/store/migrations) | Schema migrations (`schema_version` 3) |
 | [`archive/SqlStorageMemoryArchive.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/SqlStorageMemoryArchive.ts) | Archive tables and the `IMemoryArchive` implementation |
 | [`retrieval/store/SqlKnowledgeGraph.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/SqlKnowledgeGraph.ts) | `IKnowledgeGraph` over the graph tables |
 | [`retrieval/store/SqlMemoryGraph.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/SqlMemoryGraph.ts) | `IMemoryGraph` with spreading activation and co-activation edges |

@@ -27,15 +27,19 @@
  * `sendAudio()` carries a handler of its own, so a caller that does not wait
  * for it raises no unhandled rejection. With it, the transport speaks on one
  * microphone track through {@link LiveKitAudioPublisher}: its input must be
- * mono at 16 kHz, `readyForPlayback()` publishes the track, and `sendAudio()`
- * takes raw or WAV-wrapped PCM16. How a chunk counts as played is the
- * publisher's playout mode, fixed by `readyForPlayback()` or the first
- * `sendAudio()`:
+ * mono at 16 kHz, `readyForPlayback()` publishes the track and waits, at most
+ * `receiptTimeoutMs`, for a participant to subscribe to it (a first chunk
+ * sent before then waits the same way), and `sendAudio()` takes raw or
+ * WAV-wrapped PCM16. How a chunk counts as played is the publisher's playout
+ * mode, fixed by `readyForPlayback()` or `sendAudio()` once the participant
+ * is in the room; a chunk sent before then plays natively:
  * - Native playout, the default and the only mode for a SIP participant:
  *   every participant subscribed to the track hears it, chunks queue on the
  *   track in order, `waitForPlayback()` resolves once the track has played
- *   the chunk out, `clearPlayback()` needs no answer, and a `barge_in`
- *   message that cancels clears the track as it is sent.
+ *   the chunk out, `waitForPlayout()` once it has played out every chunk
+ *   sent, `clearPlayback()` needs no answer, and a `barge_in` message acts
+ *   on the track as it is sent: a cancel clears it, a pause holds it, and a
+ *   resume releases it.
  * - Participant playout, when `publisher.playout` is `'participant'` or the
  *   participant's `agentos.playout` attribute is: one chunk at a time,
  *   announced to the participant, and `waitForPlayback()` resolves only after
@@ -220,9 +224,15 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   }
   /** Physical state; call reconnecting state remains the manager's responsibility. */
   get state(): 'connecting' | 'open' | 'closing' | 'closed' { return this._state; }
-  /** The publisher's playout mode once `readyForPlayback()` or the first `sendAudio()` fixed it; `undefined` before, and for a listen-only transport. */
+  /**
+   * The publisher's playout mode once `readyForPlayback()` or `sendAudio()` fixed it, which waits for the participant
+   * to be in the room; `undefined` before, and for a listen-only transport.
+   */
   get playout(): LiveKitPlayout | undefined { return this.publisher?.playout; }
-  /** Waits for the one speaking track. Listen-only readiness allocates nothing. */
+  /**
+   * Publishes the one speaking track and waits for a participant to subscribe to it, at most
+   * `publisher.receiptTimeoutMs`. Listen-only readiness allocates nothing.
+   */
   async readyForPlayback(): Promise<void> { if (this._state !== 'open') throw new Error('transport closed'); await this.publisher?.ready(); }
   /** Listen-only construction still rejects; speaking delegates to the one native conversion boundary. */
   sendAudio(chunk: EncodedAudioChunk): Promise<void> {
@@ -234,6 +244,11 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     if (!this.publisher) return Promise.reject(new Error('LiveKitStreamTransport does not publish audio'));
     return this.publisher.waitForPlayback(generation, sequence, signal);
   }
+  /**
+   * Resolves once the track has played out what the transport was handed: every chunk sent so far, and any sent while
+   * it waits; what a clear or a pause discarded counts as played out. A listen-only transport resolves at once.
+   */
+  async waitForPlayout(): Promise<void> { await this.publisher?.waitForPlayout(); }
   /** Discards only this physical path's queued output; a closed path must finish native cleanup. */
   async clearPlayback(generation: VoiceGeneration): Promise<void> {
     if (this._state === 'closed') { await this.closing; return; }
@@ -258,14 +273,19 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   /**
    * Sends one JSON message to the participant as a text stream on the topic. Existing server messages retain their
    * wire representation; call-profile messages carry their captured scope and generation. A SIP participant reads no
-   * text streams, so nothing is sent to one and the send resolves. In native playout a `barge_in` message that cancels
-   * first clears what the track holds, as a page clears the audio it plays.
+   * text streams, so nothing is sent to one and the send resolves. Outside participant playout a `barge_in` message
+   * first acts on the track, as a page acts on the audio it plays: a `cancel` clears what the track holds, a `pause`
+   * holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases it.
    *
    * @throws {Error} When the transport is not open or the room has no local participant.
    */
   async sendControl(message: ServerTextMessage): Promise<void> {
     if (this._state !== 'open') throw new Error('LiveKitStreamTransport: cannot send while ' + this._state);
-    if (message.type === 'barge_in' && message.action.type === 'cancel' && this.publisher?.playout === 'native') await this.publisher.clearPlayback();
+    if (message.type === 'barge_in' && this.publisher && this.publisher.playout !== 'participant') {
+      if (message.action.type === 'cancel') await this.publisher.clearPlayback();
+      else if (message.action.type === 'pause') this.publisher.pause();
+      else if (message.action.type === 'resume') this.publisher.resume();
+    }
     if (isLiveKitSipParticipant(this.linkedParticipant())) return;
     await this.sendWire(message);
   }

@@ -20,6 +20,7 @@ import { ToolCallRequest, UserContext } from '../../cognition/substrate/IGMI';
 import type { IAuthService, ISubscriptionService } from '../types/auth';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../utils/errors.js';
 import { ExtensionRegistry, EXTENSION_KIND_TOOL, ToolDescriptor } from '../../extensions';
+import type { CallerTurnContext } from '../../api/runtime/agencyLaunch/types.js';
 
 type AjvValidationError = {
   instancePath?: string;
@@ -69,6 +70,8 @@ export interface ToolExecutionRequestDetails {
    * runs.
    */
   signal?: AbortSignal;
+  /** The calling turn's live objects; copied into the tool's context (see ToolExecutionContext.callerTurn). */
+  callerTurn?: CallerTurnContext;
   /**
    * Whether this call's console lines carry the tool's arguments, its output and the details of a failure.
    * Set by `ToolOrchestrator.processToolCall` from the orchestrator's own `logToolCalls`, so two orchestrators
@@ -370,6 +373,7 @@ export class ToolExecutor {
       ...(personaCapabilities ? { personaCapabilities } : {}),
       // A composed tool passes the expiry on to its own steps.
       ...(signal ? { signal } : {}),
+      ...(requestDetails.callerTurn ? { callerTurn: requestDetails.callerTurn } : {}),
     };
 
     try {

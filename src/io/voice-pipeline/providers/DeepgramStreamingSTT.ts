@@ -20,6 +20,9 @@
  * - `is_final: false` → emits `'transcript'` with `isFinal: false` (interim)
  * - every interim and the final of one segment share an `itemId`, and carry
  *   `startMs` and `endMs` on the socket's audio clock
+ * - every result carries `beforeSpeechEnd: true`: Deepgram sends a segment's
+ *   final before the end of speech of its utterance, so the session's
+ *   `'speech_end'` for that speech follows it
  * - `speech_final: true` or `UtteranceEnd` → emits `'speech_end'` VAD event
  * - `SpeechStarted` or a segment's first words → emits `'speech_start'`
  * - the audio sent on the socket → `'usage'` (an `SttMeasuredUsageEvent`)
@@ -494,6 +497,8 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
         startMs,
         endMs,
         durationMs: endMs - startMs,
+        // Speech has begun above, and its end (`speech_final`, `UtteranceEnd` or the close) follows this result.
+        beforeSpeechEnd: true,
         words: (alt.words ?? []).map((word) => ({
           word: word.word,
           start: Math.round(word.start * 1000), // seconds → ms

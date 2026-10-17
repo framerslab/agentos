@@ -160,9 +160,9 @@ describe('Brain', () => {
   // -------------------------------------------------------------------------
 
   describe('schema version', () => {
-    it('sets schema_version to "2" on first creation', async () => {
+    it('sets schema_version to "3" on first creation', async () => {
       const { brain } = await openBrain();
-      expect(await brain.getMeta('schema_version')).toBe('2');
+      expect(await brain.getMeta('schema_version')).toBe('3');
     });
 
     it('sets created_at on first creation', async () => {
@@ -183,10 +183,10 @@ describe('Brain', () => {
       const { brain: first } = await openBrain(dbPath);
       await first.close();
 
-      // Re-open — schema_version must still be '2' (INSERT OR IGNORE in _seedMeta).
+      // Re-open — schema_version must still be '3' (INSERT OR IGNORE in _seedMeta).
       const brain2 = await Brain.openSqlite(dbPath);
       openBrains.push({ brain: brain2, dbPath });
-      expect(await brain2.getMeta('schema_version')).toBe('2');
+      expect(await brain2.getMeta('schema_version')).toBe('3');
     });
   });
 

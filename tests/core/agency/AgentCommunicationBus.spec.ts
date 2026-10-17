@@ -645,5 +645,20 @@ describe('AgentCommunicationBus', () => {
         retryCount: 0,
       });
     });
+
+    it('records the message in history only once across retries', async () => {
+      const retrying = new AgentCommunicationBus({ routingConfig: { maxRetries: 3 } });
+      const handler = subscribeFailingHandler(retrying, 'agent-1');
+
+      const sent = await retrying.sendToAgent('agent-1', question);
+      await retrying.retryDelivery(sent.messageId);
+      await retrying.retryDelivery(sent.messageId);
+
+      const targetHistory = await retrying.getMessageHistory('agent-1');
+      const senderHistory = await retrying.getMessageHistory('agent-2');
+      expect(targetHistory.filter((m) => m.messageId === sent.messageId)).toHaveLength(1);
+      expect(senderHistory.filter((m) => m.messageId === sent.messageId)).toHaveLength(1);
+      expect(handler).toHaveBeenCalledTimes(3);
+    });
   });
 });

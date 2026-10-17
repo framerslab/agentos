@@ -256,7 +256,8 @@ export class MemoryMergeTool implements ITool<MemoryMergeInput, MemoryMergeOutpu
           }
         }
 
-        await trx.exec(this.brain.features.fts.rebuildCommand('memory_traces_fts'));
+        const rebuild = this.brain.fullTextRebuild();
+        await trx.run(rebuild.sql, rebuild.params);
       });
       return {
         success: true,

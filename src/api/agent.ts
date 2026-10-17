@@ -32,12 +32,14 @@ import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credenti
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
+import type { SeatInternals } from './runtime/pool/seating.js';
 import type { HostLLMPolicy } from './runtime/hostPolicy.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
 import { loadSoulSync, parseSoul } from '../cognition/substrate/personas/SoulLoader.js';
 import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
 import type { LearningConfig, LoopManifest } from '../cognition/learning/types.js';
+import type { AgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
 import { runCitationVerification } from './runtime/citationVerification.js';
 import type {
   AgentOSUsageAggregate,
@@ -166,7 +168,8 @@ export interface AgentOptions extends BaseAgentConfig {
    * One spend budget for every call this agent and its sessions make: each provider call is checked against what is
    * left before it is made and recorded after it, and {@link AgentSession.recordExternalCost} charges costs made
    * outside AgentOS to it. Settings make one {@link SpendBudget} for the agent; pass an instance to share it wider.
-   * Not available with `runtime: 'gmi'`, which throws at construction.
+   * With `runtime: 'gmi'` every completion call a GMI makes is checked against it before it is sent, metaprompts and
+   * self-reflection included; its cognitive memory's embeddings and the learning layer's own calls are not counted.
    */
   budget?: SpendBudget | SpendBudgetOptions;
   /**
@@ -334,6 +337,14 @@ export interface AgentOptions extends BaseAgentConfig {
    * bound to a learner. The legacy runtime ignores it.
    */
   learning?: boolean | LearningConfig;
+  /**
+   * Temporary teams this agent launches from a turn, with `runtime: 'gmi'`: `launch: true` registers the
+   * `launch_agency` tool, which runs an `agency()` team on one goal and returns its answer as the call's result, and
+   * the other fields bound every launch (depth, seats, launches in flight, budget share and pool, deadline, `members`
+   * a launch may seat by key, `hitl`). Every bound is checked at construction. Off unless `launch` is true; the legacy
+   * runtime throws when it is.
+   */
+  agencies?: AgencyLaunchOptions;
   /** Explicit runtime binding. No provider is discovered from the process environment for this path. */
   voice?: BaseAgentConfig['voice'] & { session?: { factory: VoiceSessionFactory; agent: VoiceAgent } };
 }
@@ -399,6 +410,12 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * one, and the steps it finished stay in `messages()`, marked partial.
    */
   abortSignal?: AbortSignal;
+  /**
+   * A spend budget for this send in place of the agent's: every provider call of the send is checked against it
+   * before it is made and recorded after it (settings make a new {@link SpendBudget} for the send). With
+   * `runtime: 'gmi'`, every completion call of the turn, metaprompts included.
+   */
+  budget?: SpendBudget | SpendBudgetOptions;
 }
 
 /**
@@ -424,7 +441,7 @@ export interface AgentSession {
    * Accepts plain text or multimodal content (text + image parts).
    *
    * @param input - User message as text string or MessageContent array.
-   * @param opts - Per-send options without a `responseSchema`: the generation overrides and `abortSignal`.
+   * @param opts - Per-send options without a `responseSchema`: the generation overrides, `abortSignal` and `budget`.
    * @returns The full generation result including text, usage, and tool calls.
    */
   send(input: MessageContent, opts?: SessionSendOptions): Promise<GenerateTextResult>;
@@ -455,10 +472,11 @@ export interface AgentSession {
    *
    * @param input - User message as text string or MessageContent array.
    * @param opts - `abortSignal` ends this stream when it aborts, as {@link SessionSendOptions.abortSignal} ends a
-   *   send: the provider's stream stops and the stream ends with an `error` part. The session stays open.
+   *   send: the provider's stream stops and the stream ends with an `error` part. The session stays open. `budget`
+   *   takes the agent's place for this stream, as {@link SessionSendOptions.budget} takes it for a send.
    * @returns A {@link StreamTextResult} with async iterables and awaitable aggregates.
    */
-  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal }): StreamTextResult;
+  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }): StreamTextResult;
   /**
    * Returns a snapshot of the current conversation transcript for this
    * session in provider-replayable shape (assistant tool_calls, tool
@@ -648,6 +666,43 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
 }
 
 /**
+ * Passes every error that leaves a stream result through `mask`: thrown by
+ * the iterables, carried by an error part, or rejecting any of the result's
+ * promises. The result's other members are returned as they are.
+ *
+ * @param result - The stream result `streamText` returned for a seated config.
+ * @param mask - The seat's error mask.
+ * @returns A stream result with the same members, whose errors come out masked.
+ */
+function maskStreamResult(result: StreamTextResult, mask: (error: unknown) => unknown): StreamTextResult {
+  const wrapIterable = <T>(iterable: AsyncIterable<T>, mapPart: (part: T) => T): AsyncIterable<T> => ({
+    async *[Symbol.asyncIterator]() {
+      try {
+        for await (const part of iterable) yield mapPart(part);
+      } catch (error) {
+        throw mask(error);
+      }
+    },
+  });
+  const out = { ...result } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(result)) {
+    if (value && typeof (value as Promise<unknown>).then === 'function') {
+      out[key] = (value as Promise<unknown>).then(
+        (settled) => settled,
+        (error: unknown) => {
+          throw mask(error);
+        },
+      );
+    }
+  }
+  out.textStream = wrapIterable(result.textStream, (text) => text);
+  out.fullStream = wrapIterable(result.fullStream, (part) =>
+    part.type === 'error' ? { ...part, error: mask(part.error) as Error } : part,
+  );
+  return out as unknown as StreamTextResult;
+}
+
+/**
  * Resolve an `AgentOptions.soul` value (string path | { content } | { path })
  * into a `LoadedSoul`. Returns null on failure so the agent can still boot
  * (the soul is additive, not load-blocking).
@@ -692,6 +747,8 @@ function pickSendGenerationOverrides(
   if (sendOpts.cache !== undefined) out.cache = sendOpts.cache;
   if (sendOpts.maxTokens !== undefined) out.maxTokens = sendOpts.maxTokens;
   if (sendOpts.abortSignal !== undefined) out.abortSignal = sendOpts.abortSignal;
+  // Settings become one budget here, so a send's validation retries are charged to the same one.
+  if (sendOpts.budget !== undefined) out.budget = asSpendBudget(sendOpts.budget);
   return out;
 }
 
@@ -795,7 +852,8 @@ async function generateWithValidation(
  *   remain text calls. The full runtime does not apply the voice flag.
  * @returns An {@link Agent} instance with `generate`, `stream`, `session`, and `close` methods.
  * @throws {Error} With `runtime: 'gmi'`, at construction, naming an option the GMI path
- *   cannot honour (see {@link gmi}).
+ *   cannot honour (see {@link gmi}); without it, when `agencies.launch` is set, which only
+ *   the GMI path runs.
  *
  * @example
  * ```ts
@@ -814,6 +872,10 @@ export function agent(opts: AgentOptions): Agent {
   }
   // Before anything of the legacy path runs: its diagnostics and warnings describe that path.
   if (opts.runtime === 'gmi') return gmi(opts);
+  // A legacy agent has no tool loop of a GMI to run launch_agency in; taking the option would offer no tool.
+  if (opts.agencies?.launch === true) {
+    throw new Error("agent(): agencies.launch runs on the GMI path; set runtime: 'gmi' or use gmi().");
+  }
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
@@ -849,6 +911,12 @@ export function agent(opts: AgentOptions): Agent {
    */
   const effectiveLedger: AgentOSUsageLedgerOptions | undefined =
     (opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger;
+
+  // What an agency's seating writes onto a seated config: strict provider
+  // resolution, and the call's error mask, which every error that leaves
+  // generate() or stream() passes through before a strategy sees it.
+  const seatInternals = opts as AgentOptions & Partial<SeatInternals>;
+  const maskError = seatInternals.__maskError;
 
   const baseOpts: Partial<GenerateTextOptions> = {
     provider: opts.provider,
@@ -904,6 +972,12 @@ export function agent(opts: AgentOptions): Agent {
     onBeforeGeneration: opts.onBeforeGeneration,
     onAfterGeneration: opts.onAfterGeneration,
     onBeforeToolExecution: opts.onBeforeToolExecution,
+    // Set by an agency's seating: strict provider resolution on every call
+    // and every failover hop.
+    ...(seatInternals.__strictCredentials ? { __strictCredentials: true } : {}),
+    // The call's mask reaches the tool loops, which mask a tool's error
+    // before they write it anywhere.
+    ...(maskError ? { __maskError: maskError } : {}),
     // The agent's one budget, on every generate / stream / session call
     // (each spreads baseOpts). A `budget` passed to generate() or stream()
     // replaces it for that call.
@@ -938,38 +1012,43 @@ export function agent(opts: AgentOptions): Agent {
       prompt: MessageContent,
       extra?: Partial<GenerateTextOptions>
     ): Promise<GenerateTextResult> {
-      const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
-      const genOpts: Partial<GenerateTextOptions> = {
-        ...callOptions(extra),
-        usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
-          source: extra?.usageLedger?.source ?? 'agent.generate',
-        }),
-      };
-      if (typeof prompt === 'string') {
-        genOpts.prompt = prompt;
-      } else {
-        genOpts.messages = [...(genOpts.messages ?? []), { role: 'user', content: prompt }];
-      }
-      if (opts.responseSchema) {
-        genOpts._schemaInstruction = buildSchemaInstructionText(lowerZodToJsonSchema(opts.responseSchema), 'response');
-      }
-      const { result, object } = await generateWithValidation(
-        genOpts as GenerateTextOptions,
-        opts.responseSchema,
-        opts.controls?.maxValidationRetries ?? 1,
-        true,
-        (attempt) => accumulateUsage(agentUsageTally, attempt.usage),
-        { provider: opts.memoryProvider, userText, options: opts.memoryProviderOptions },
-      );
-      if (opts.responseSchema) result.parsed = object;
-      if (opts.verifyCitations) {
-        result.grounding = await runCitationVerification(
-          result.text,
-          userText,
-          opts.verifyCitations,
+      try {
+        const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
+        const genOpts: Partial<GenerateTextOptions> = {
+          ...callOptions(extra),
+          usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
+            source: extra?.usageLedger?.source ?? 'agent.generate',
+          }),
+        };
+        if (typeof prompt === 'string') {
+          genOpts.prompt = prompt;
+        } else {
+          genOpts.messages = [...(genOpts.messages ?? []), { role: 'user', content: prompt }];
+        }
+        if (opts.responseSchema) {
+          genOpts._schemaInstruction = buildSchemaInstructionText(lowerZodToJsonSchema(opts.responseSchema), 'response');
+        }
+        const { result, object } = await generateWithValidation(
+          genOpts as GenerateTextOptions,
+          opts.responseSchema,
+          opts.controls?.maxValidationRetries ?? 1,
+          true,
+          (attempt) => accumulateUsage(agentUsageTally, attempt.usage),
+          { provider: opts.memoryProvider, userText, options: opts.memoryProviderOptions },
         );
+        if (opts.responseSchema) result.parsed = object;
+        if (opts.verifyCitations) {
+          result.grounding = await runCitationVerification(
+            result.text,
+            userText,
+            opts.verifyCitations,
+          );
+        }
+        return result;
+      } catch (error) {
+        // A seated config's error leaves the seat masked.
+        throw maskError ? maskError(error) : error;
       }
-      return result;
     },
 
     stream(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): StreamTextResult {
@@ -994,7 +1073,9 @@ export function agent(opts: AgentOptions): Agent {
       void result.usage
         .then((usage) => accumulateUsage(agentUsageTally, usage))
         .catch(() => { /* stream errored; usage tally unchanged */ });
-      return result;
+      // A seated config's errors leave the seat masked: error parts, a
+      // throwing iterable and rejected result promises alike.
+      return maskError ? maskStreamResult(result, maskError) : result;
     },
 
     session(id?: string): AgentSession {
@@ -1183,7 +1264,7 @@ export function agent(opts: AgentOptions): Agent {
             : result;
         },
 
-        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal }): StreamTextResult {
+        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }): StreamTextResult {
           const textForMemory = typeof input === 'string' ? input : extractTextFromContent(input);
           const userMessage: Message = { role: 'user', content: input };
 
@@ -1200,6 +1281,8 @@ export function agent(opts: AgentOptions): Agent {
               // The caller's signal ends the stream; a stream that ends in an
               // error is added to no history (below).
               ...(streamOpts?.abortSignal ? { abortSignal: streamOpts.abortSignal } : {}),
+              // A stream's own budget takes the agent's place; without one the agent's applies.
+              ...(streamOpts?.budget !== undefined ? { budget: streamOpts.budget } : {}),
             },
             opts.memoryProvider,
             textForMemory,

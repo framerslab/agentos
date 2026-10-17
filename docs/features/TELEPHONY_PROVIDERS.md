@@ -63,7 +63,7 @@ const provider = new TwilioVoiceProvider({
 
 1. Create a Telnyx account and generate an **API key** (Mission Control Portal → Auth → API Keys).
 2. Buy a phone number and assign it to a TeXML or Call Control application; its id is the `connectionId`.
-3. Copy the account's Ed25519 **public key** for webhook verification.
+3. Copy the account's Ed25519 **public key** for webhook verification. Without it the provider refuses every webhook.
 
 ```typescript
 import { TelnyxVoiceProvider } from '@framers/agentos';
@@ -71,7 +71,7 @@ import { TelnyxVoiceProvider } from '@framers/agentos';
 const provider = new TelnyxVoiceProvider({
   apiKey: process.env.TELNYX_API_KEY!,
   connectionId: process.env.TELNYX_CONNECTION_ID!,
-  publicKey: process.env.TELNYX_PUBLIC_KEY!, // without publicKey, verifyWebhook() accepts every webhook
+  publicKey: process.env.TELNYX_PUBLIC_KEY!, // without publicKey, verifyWebhook() refuses every webhook
 });
 ```
 
@@ -173,7 +173,7 @@ All three providers sign their webhook payloads:
 | Telnyx | Ed25519 over the timestamp and the raw body; a timestamp more than 300 seconds old is rejected | `telnyx-signature-ed25519`, `telnyx-timestamp` |
 | Plivo | HMAC-SHA256 (V3) over the URL, its query, the sorted form params and the nonce | `x-plivo-signature-v3` or `x-plivo-signature-ma-v3`, `x-plivo-signature-v3-nonce` |
 
-`CallManager.processWebhook()` verifies before parsing: it calls the provider's `verifyWebhook()` before it parses any event, and drops a webhook that fails. A legacy Telnyx provider without `publicKey` retains its development bypass: it skips the check and accepts every webhook, so anyone who can reach the webhook URL can post call events to `CallManager`; pass the key outside local development. Carrier mode refuses verification without a key: with `protocol: 'carrier'`, a Telnyx provider without `publicKey` refuses every webhook. `webhookToleranceSec` (300 by default, 0 turns it off) sets the timestamp window. Use `processWebhookDurable` and a persisted admitted call for restart-safe processing ([Callback identity and persistence](#callback-identity-and-persistence)). Authentication, call admission and callback retention remain host responsibilities.
+`CallManager.processWebhook()` verifies before parsing: it calls the provider's `verifyWebhook()` before it parses any event, and drops a webhook that fails. A Telnyx provider without `publicKey` refuses every webhook, in the legacy and carrier profiles alike. For local development without a key, construct it with `allowUnverifiedWebhooks: true`: it then accepts every webhook unverified, so anyone who can reach the webhook URL can post call events to `CallManager`, and it logs one warning, to the `logger` it is given or else through `createLogger` from `@framers/agentos/logging`; when that write fails, the warning goes to the console instead. Whether it accepts webhooks unverified is decided when it is constructed: setting the flag, or removing `publicKey`, on its config object afterwards does not open the webhook. With `publicKey` set, the key is checked whatever the flag says. `webhookToleranceSec` (300 by default, 0 turns it off) sets the timestamp window. Use `processWebhookDurable` and a persisted admitted call for restart-safe processing ([Callback identity and persistence](#callback-identity-and-persistence)). Authentication, call admission and callback retention remain host responsibilities.
 
 ### Provider console settings
 

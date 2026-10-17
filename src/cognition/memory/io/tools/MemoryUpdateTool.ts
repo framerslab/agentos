@@ -56,7 +56,7 @@ export interface MemoryUpdateOutput {
  * ```ts
  * const tool = new MemoryUpdateTool(brain);
  * const result = await tool.execute(
- *   { traceId: 'mt_1711234567890_0', content: 'Updated content here.' },
+ *   { traceId: 'mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b', content: 'Updated content here.' },
  *   context,
  * );
  * // result.output.updated → true
@@ -177,7 +177,8 @@ export class MemoryUpdateTool implements ITool<MemoryUpdateInput, MemoryUpdateOu
         const info = await trx.run(sql, [nextContent, nextTags, nextMetadata, brainId, traceId]);
 
         if (info.changes > 0) {
-          await trx.exec(this.brain.features.fts.rebuildCommand('memory_traces_fts'));
+          const rebuild = this.brain.fullTextRebuild();
+          await trx.run(rebuild.sql, rebuild.params);
         }
 
         return info.changes;

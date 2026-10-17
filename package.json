@@ -1,6 +1,6 @@
 {
   "name": "@framers/agentos",
-  "version": "0.13.147",
+  "version": "0.13.150",
   "description": "AgentOS: open-source TypeScript framework for autonomous AI agents. Unified graph orchestration, cognitive memory, runtime tool forging, multi-tier guardrails, voice pipeline, and 11 LLM providers.",
   "homepage": "https://agentos.sh",
   "repository": {
@@ -194,6 +194,11 @@
       "import": "./dist/cognition/memory/index.js",
       "default": "./dist/cognition/memory/index.js",
       "types": "./dist/cognition/memory/index.d.ts"
+    },
+    "./cognition/memory/office": {
+      "types": "./dist/cognition/memory/io/ingestion/OfficeLoader.d.ts",
+      "import": "./dist/cognition/memory/io/ingestion/OfficeLoader.js",
+      "default": "./dist/cognition/memory/io/ingestion/OfficeLoader.js"
     },
     "./cognition/memory/retrieval/typed-network": {
       "import": "./dist/cognition/memory/retrieval/typed-network/index.js",
@@ -621,7 +626,8 @@
   "files": [
     "dist",
     "knowledge",
-    "README.md"
+    "README.md",
+    ".github/badges/tests.json"
   ],
   "publishConfig": {
     "access": "public"
@@ -735,6 +741,7 @@
     "eslint-plugin-import": "^2.29.1",
     "fake-indexeddb": "6.2.5",
     "mediabunny": "1.61.3",
+    "officeparser": "8.1.1",
     "playwright": "1.63.0",
     "prettier": "^3.3.2",
     "quickjs-emscripten-core": "0.32.0",
@@ -783,6 +790,7 @@
     "hnswlib-node": ">=3.0.0",
     "mediabunny": "^1.61.3",
     "neo4j-driver": ">=5.0.0",
+    "officeparser": "^8.1.1",
     "ppu-paddle-ocr": ">=3.0.0",
     "quickjs-emscripten-core": "0.32.0",
     "tesseract.js": ">=5.0.0",
@@ -814,6 +822,9 @@
       "optional": true
     },
     "neo4j-driver": {
+      "optional": true
+    },
+    "officeparser": {
       "optional": true
     },
     "ppu-paddle-ocr": {

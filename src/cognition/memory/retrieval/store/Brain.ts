@@ -31,6 +31,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { v4 as uuidv4 } from 'uuid';
 import type {
   StorageAdapter,
   StorageRunResult,
@@ -46,6 +47,7 @@ import {
   DDL_ARCHIVE_ACCESS_LOG_IDX,
 } from '../../archive/SqlStorageMemoryArchive.js';
 import { MigrationRunner, MIGRATIONS, LATEST_SCHEMA_VERSION } from './migrations/index.js';
+import { ensureScopeIdColumn } from './migrations/v2-to-v3.js';
 import { PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 
@@ -59,6 +61,77 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
  * Used by {@link Brain.open} when the caller does not supply an
  * explicit `brainId`.
  */
+/**
+ * Runs one idempotent schema step, and once more if it lost a race. Every brain
+ * in a Postgres database shares its tables, and `CREATE ... IF NOT EXISTS` is
+ * not atomic there: two connections can both find an object missing, and the
+ * second then fails on the catalog's unique index (23505, such as
+ * pg_type_typname_nsp_index) or as duplicate_table (42P07), duplicate_object
+ * (42710) or duplicate_column (42701). Run again, the step finds the object and
+ * does nothing. Each statement commits on its own, so no table lock outlives it.
+ */
+async function retryLostCreate(step: () => Promise<void>): Promise<void> {
+  try {
+    await step();
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code !== '23505' && code !== '42P07' && code !== '42710' && code !== '42701') {
+      throw error;
+    }
+    await step();
+  }
+}
+
+/**
+ * Whether anything is at `entry`: a file, a folder, or a link, dangling or
+ * not. `lstat` reads the entry itself, where `access` follows a link and
+ * reports a dangling one as free.
+ */
+async function entryExists(entry: string): Promise<boolean> {
+  return fs.lstat(entry).then(
+    () => true,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    },
+  );
+}
+
+/**
+ * Moves the finished file at `from` to `to` in one step, so `to` holds the
+ * whole file or nothing, and never replaces a file already at `to`.
+ *
+ * A hard link fails with EEXIST when `to` exists; once it succeeds the export
+ * is published, and the temporary name is removed on a best-effort basis (a
+ * file left at `from` never turns a published export into a failure). A file
+ * system without hard links (FAT and exFAT, some network shares) gets a check
+ * that `to` is free and then a rename, which is atomic but replaces: the
+ * instant between the two is the only moment a file appearing at `to` could
+ * be replaced there.
+ *
+ * @throws {Error} Naming `to` when a file is already there.
+ */
+async function publishWithoutReplacing(from: string, to: string): Promise<void> {
+  const taken = (): Error => new Error(`Brain.exportToSqlite: target already exists: ${to}`);
+  try {
+    await fs.link(from, to);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST') {
+      throw taken();
+    }
+    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EXDEV' && code !== 'ENOSYS') {
+      throw error;
+    }
+    if (await entryExists(to)) {
+      throw taken();
+    }
+    await fs.rename(from, to);
+    return;
+  }
+  await fs.rm(from, { force: true }).catch(() => undefined);
+}
+
 function parseBetterSqliteUri(dbPath: string): {
   body: string;
   params: URLSearchParams;
@@ -388,6 +461,8 @@ CREATE TABLE IF NOT EXISTS brain_meta (
  * - `strength` is the Ebbinghaus retrievability R ∈ [0, 1].
  * - `tags` / `emotions` / `metadata` are JSON TEXT columns.
  * - `deleted` is a soft-delete flag (0 = active, 1 = tombstoned).
+ * - `scope_id` is the trace's scope id, also kept in `metadata.scopeId`; `''` for a trace filed under no scope id.
+ *   Its index is created by `ensureScopeIdColumn` (migrations/v2-to-v3.ts), after the column is known to exist.
  */
 const DDL_MEMORY_TRACES = `
 CREATE TABLE IF NOT EXISTS memory_traces (
@@ -405,6 +480,7 @@ CREATE TABLE IF NOT EXISTS memory_traces (
   emotions        TEXT    NOT NULL DEFAULT '{}',
   metadata        TEXT    NOT NULL DEFAULT '{}',
   deleted         INTEGER NOT NULL DEFAULT 0,
+  scope_id        TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (brain_id, id)
 );
 
@@ -792,7 +868,7 @@ export class Brain {
    * @param opts.priority - Override the default adapter priority.
    * @param opts.coordinationToken - Optional process-local identity for
    *   non-filesystem adapters whose resource name is adapter-specific.
-   * @returns A fully initialised `Brain` instance with the v2 schema.
+   * @returns A fully initialised `Brain` instance with the latest schema.
    */
   static async openSqlite(
     dbPath: string,
@@ -925,7 +1001,7 @@ export class Brain {
    * 1. Build platform-aware feature bundle.
    * 2. Set WAL mode (dialect.pragma returns null on Postgres).
    * 3. Enable foreign key enforcement (dialect.pragma returns null on Postgres).
-   * 4. Auto-migrate v1 schemas to v2 (idempotent; no-op for fresh DBs and v2).
+   * 4. Run the pending schema migrations (idempotent; no-op for fresh DBs and the latest schema).
    * 5. Apply full DDL via _initSchema().
    * 6. Seed brain_meta defaults.
    */
@@ -1013,8 +1089,8 @@ export class Brain {
   /**
    * Expose the raw storage adapter for advanced usage.
    *
-   * Primarily used by SqliteExporter (VACUUM INTO) and SqliteImporter
-   * (which needs direct adapter access for the target brain).
+   * Code that needs the adapter itself reads it here; the brain's own
+   * queries go through `run`, `get`, `all` and `transaction`.
    */
   get adapter(): StorageAdapter {
     return this._adapter;
@@ -1039,6 +1115,7 @@ export class Brain {
    * is sufficient and avoids adapter-specific transaction quirks during DDL.
    */
   private async _initSchema(): Promise<void> {
+    const adapter = this._adapter;
     const ddlStatements = [
       DDL_BRAIN_META,
       DDL_MEMORY_TRACES,
@@ -1061,8 +1138,12 @@ export class Brain {
     ];
 
     for (const statement of ddlStatements) {
-      await this._adapter.exec(this._normalizeDdlForDialect(statement));
+      const ddl = this._normalizeDdlForDialect(statement);
+      await retryLostCreate(() => adapter.exec(ddl));
     }
+
+    // A table another path created without `scope_id` (a migration engine's copy) gains it here; a fresh table has it.
+    await retryLostCreate(() => ensureScopeIdColumn(adapter));
 
     // FTS index via feature abstraction (FTS5 on SQLite, tsvector/GIN on Postgres).
     // SQL.js builds may not include FTS5, so keep the core schema independent.
@@ -1073,7 +1154,7 @@ export class Brain {
       tokenizer: 'porter ascii',
     });
     try {
-      await this._adapter.exec(ftsDdl);
+      await retryLostCreate(() => adapter.exec(ftsDdl));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes('no such module: fts5')) {
@@ -1261,6 +1342,23 @@ export class Brain {
     return parseInt(stored, 10) === dimensions;
   }
 
+  /**
+   * The statement that rebuilds this brain's full-text index from its traces,
+   * for `run()` on the brain or on a transaction. SQLite keeps the index in
+   * one FTS5 table per file and rebuilds it whole. Postgres keeps it in the
+   * `_tsv` column of the `memory_traces` table every brain shares, so there
+   * the statement updates this brain's rows only.
+   *
+   * @returns The SQL and its parameters.
+   */
+  fullTextRebuild(): { sql: string; params: unknown[] } {
+    const sql = this._features.fts.rebuildCommand('memory_traces_fts');
+    if (this._features.dialect.name !== 'postgres') {
+      return { sql, params: [] };
+    }
+    return { sql: `${sql} ${/\bwhere\b/i.test(sql) ? 'AND' : 'WHERE'} brain_id = ?`, params: [this.#brainId] };
+  }
+
   // ---------------------------------------------------------------------------
   // Portable artifact: export to / import from a SQLite snapshot
   // ---------------------------------------------------------------------------
@@ -1275,6 +1373,13 @@ export class Brain {
    * Refuses to overwrite an existing file at `targetPath` so callers do
    * not silently lose data.
    *
+   * The rows come from one consistent view of the database (see
+   * `_readSnapshot`), so a write that lands while the export runs is wholly
+   * in the file or wholly out of it. The file is written under a temporary
+   * name beside `targetPath` and moved there once whole: a failed export
+   * leaves nothing at `targetPath`, and a retry can run. A file that appears
+   * at `targetPath` while the export runs is kept, and the export fails.
+   *
    * Forking semantics: rows are emitted with the source brainId. Importing
    * the resulting file under a different brainId produces a fork.
    *
@@ -1282,41 +1387,97 @@ export class Brain {
    * @returns Bytes written to the destination file.
    */
   async exportToSqlite(targetPath: string): Promise<{ bytesWritten: number }> {
-    // Refuse to overwrite an existing file.
-    try {
-      await fs.access(targetPath);
+    // Refuse to overwrite anything at the target, a dangling link included.
+    if (await entryExists(targetPath)) {
       throw new Error(`Brain.exportToSqlite: target already exists: ${targetPath}`);
-    } catch (err: unknown) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        // Re-throw the "already exists" error and any other access error
-        // that isn't a missing-file response.
-        throw err;
-      }
     }
 
-    // Open a fresh SQLite Brain at the target path. We import under the
-    // source brainId so the export file is identifiable as belonging to
-    // this brain even if the receiving Brain has a different id.
-    const target = await Brain.openSqlite(targetPath, { brainId: this.#brainId });
+    const partialPath = `${targetPath}.partial-${uuidv4()}`;
     try {
-      for (const table of PORTABLE_TABLES) {
-        const rows = await this.all<Record<string, unknown>>(
-          `SELECT * FROM ${table} WHERE brain_id = ?`,
-          [this.#brainId],
-        );
-        if (rows.length === 0) continue;
+      // Open a fresh SQLite Brain at the partial path. We import under the
+      // source brainId so the export file is identifiable as belonging to
+      // this brain even if the receiving Brain has a different id.
+      const target = await Brain.openSqlite(partialPath, { brainId: this.#brainId });
+      try {
+        await this._readSnapshot(async (source) => {
+          for (const table of PORTABLE_TABLES) {
+            const rows = await source.all<Record<string, unknown>>(
+              `SELECT * FROM ${table} WHERE brain_id = ?`,
+              [this.#brainId],
+            );
+            if (rows.length === 0) continue;
 
-        // Upsert so source rows override the brain_meta defaults
-        // (schema_version, created_at) seeded during target initialisation.
-        await this._bulkCopy(target, table, rows, this.#brainId, { upsert: true });
+            // Upsert so source rows override the brain_meta defaults
+            // (schema_version, created_at) seeded during target initialisation.
+            await this._bulkCopy(target, table, rows, this.#brainId, { upsert: true });
+          }
+        });
+        // Fold the write-ahead log into the file, so the one file moved into
+        // place holds every row.
+        const rollbackJournal = target._features.dialect.pragma('journal_mode', 'DELETE');
+        if (rollbackJournal) {
+          await target.exec(rollbackJournal);
+        }
+      } finally {
+        await target.close();
       }
-    } finally {
-      await target.close();
+      await publishWithoutReplacing(partialPath, targetPath);
+    } catch (error) {
+      await Promise.all(
+        ['', '-wal', '-shm', '-journal'].map((suffix) =>
+          fs.rm(`${partialPath}${suffix}`, { force: true }).catch(() => undefined),
+        ),
+      );
+      throw error;
     }
 
     const stat = await fs.stat(targetPath);
     return { bytesWritten: stat.size };
+  }
+
+  /**
+   * Run `read` against one consistent view of this brain's database, so that
+   * rows written while it reads are all in the view or all out of it.
+   *
+   * - Postgres: a `REPEATABLE READ, READ ONLY` transaction on a pooled
+   *   connection of its own; other connections' writes stay outside it.
+   * - A better-sqlite3 file in WAL mode (as `openSqlite` opens it): a read
+   *   transaction on a second, read-only connection to the file. WAL gives
+   *   it one snapshot, and the brain's own connection keeps writing.
+   * - Anything else (an in-memory database, another adapter, another
+   *   journal mode) has one connection that every call shares, so `read`
+   *   runs on the brain's adapter as it is.
+   *
+   * @param read - Reads the view; its result is returned.
+   */
+  private async _readSnapshot<T>(read: (source: StorageAdapter) => Promise<T>): Promise<T> {
+    if (this._features.dialect.name === 'postgres') {
+      return this._adapter.transaction(async (trx) => {
+        await trx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+        return read(trx);
+      });
+    }
+    if (this._adapter.kind !== 'better-sqlite3') {
+      return read(this._adapter);
+    }
+    const main = (await this._adapter.all<{ name: string; file: string }>('PRAGMA database_list')).find(
+      (database) => database.name === 'main',
+    );
+    const journal = await this._adapter.get<{ journal_mode: string }>('PRAGMA journal_mode');
+    if (!main?.file || journal?.journal_mode?.toLowerCase() !== 'wal') {
+      return read(this._adapter);
+    }
+    const reader = await resolveStorageAdapter({
+      filePath: main.file,
+      priority: ['better-sqlite3'],
+      openOptions: { readOnly: true },
+      quiet: true,
+    });
+    try {
+      return await reader.transaction(read);
+    } finally {
+      await reader.close();
+    }
   }
 
   /**

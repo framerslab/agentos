@@ -31,6 +31,7 @@ import {
   ModelUsage,
   ProviderEmbeddingOptions,
   ProviderEmbeddingResponse,
+  AttemptOutcome,
 } from '../IProvider';
 import { stripForeignVendorParams } from '../openrouter-only-params';
 import { resolveOpenAiCacheRetentionParams, resolvePromptCacheKey } from '../openai-cache-params';
@@ -43,6 +44,7 @@ import { computeRetryBackoffMs } from './retry-backoff.js';
 import { redactUrlSecrets } from '../url-secrets.js';
 import { OPENAI_MODEL_PRICING, openAIModelPricing } from './openaiPricing.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { AttemptBudgetExhaustedError, CountingAttemptBudget } from '../../../../safety/runtime/ModelAttemptBudget.js';
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
 // import fetch, { RequestInit, Response as FetchResponse, AbortController } from 'node-fetch'; // Example for Node
@@ -1142,7 +1144,8 @@ export class OpenAIProvider implements IProvider {
         responsesBody,
         false,
         options.requestTimeout,
-        options.abortSignal
+        options.abortSignal,
+        { max: options.maxAttempts, onAttempt: options.onAttempt },
       );
       return this.mapResponsesToCompletionResponse(responsesApiResponse, modelId);
     }
@@ -1156,7 +1159,8 @@ export class OpenAIProvider implements IProvider {
       requestBody,
       false,
       options.requestTimeout,
-      options.abortSignal
+      options.abortSignal,
+      { max: options.maxAttempts, onAttempt: options.onAttempt },
     );
 
     return this.mapApiToCompletionResponse(apiResponse);
@@ -1196,6 +1200,7 @@ export class OpenAIProvider implements IProvider {
         true,
         options.requestTimeout,
         abortSignal,
+        { max: options.maxAttempts, onAttempt: options.onAttempt },
       );
     } catch (error: unknown) {
       // An abort during the request surfaces as the abort chunk, not a throw.
@@ -2503,9 +2508,13 @@ export class OpenAIProvider implements IProvider {
    * @param {number} [requestTimeoutOverride] - Per-call timeout in ms, over the configured default.
    * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, and once
    *   it has fired no further attempt is sent.
+   * @param [attempts] - The call's attempt count (`max`, the configured `maxRetries` when left out) and its
+   *   report (`onAttempt`, called once for each request sent). A {@link CountingAttemptBudget} authorizes
+   *   each attempt before it is sent, so one past the count is refused first.
    * @returns {Promise<T | ReadableStream<Uint8Array>>} The API response or stream.
    * @throws {OpenAIProviderError} If the request fails after retries or for non-retryable errors;
    *   `REQUEST_ABORTED` when the caller's signal ends it.
+   * @throws {RangeError} When the attempt count is not a whole number of 1 or more.
    */
   private async makeApiRequest<T = unknown>(
     endpoint: string,
@@ -2514,7 +2523,8 @@ export class OpenAIProvider implements IProvider {
     body?: Record<string, unknown>,
     expectStream?: false,
     requestTimeoutOverride?: number,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void },
   ): Promise<T>;
   private async makeApiRequest(
     endpoint: string,
@@ -2523,7 +2533,8 @@ export class OpenAIProvider implements IProvider {
     body: Record<string, unknown> | undefined,
     expectStream: true,
     requestTimeoutOverride?: number,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void },
   ): Promise<ReadableStream<Uint8Array>>;
   private async makeApiRequest<T = unknown>(
     endpoint: string,
@@ -2532,7 +2543,8 @@ export class OpenAIProvider implements IProvider {
     body?: Record<string, unknown>,
     expectStream: boolean = false,
     requestTimeoutOverride?: number,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void },
   ): Promise<T | ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
     const headers: Record<string, string> = {
@@ -2549,10 +2561,34 @@ export class OpenAIProvider implements IProvider {
 
     let lastError: Error = new OpenAIProviderError('Request failed after all retries.', 'MAX_RETRIES_REACHED');
 
-    for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
+    // The requests this call may send, a first and its retries together: the call's own count, or the
+    // configured one. The attempt authorizer the voice platform calls before each of its requests counts
+    // them here too, so an attempt past the count is refused before anything is sent.
+    const allowed = attempts?.max ?? this.config.maxRetries!;
+    if (!Number.isInteger(allowed) || allowed < 1) throw new RangeError('maxAttempts is a whole number, 1 or more');
+    const budget = new CountingAttemptBudget({ maxAttempts: allowed, perAttempt: {} });
+    // Each request sent is reported once, with its answer's status, or with none when no answer came.
+    let reported = -1;
+    const report = (attempt: number, status: number | null, ok: boolean): void => {
+      if (attempt === reported) return;
+      reported = attempt;
+      try {
+        attempts?.onAttempt?.({ attempt: attempt + 1, status, ok });
+      } catch {
+        // a caller's callback never ends the request
+      }
+    };
+    for (let attempt = 0; ; attempt++) {
       if (abortSignal?.aborted) {
         throw new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
       }
+      try {
+        await budget.authorize({ purpose: attempt === 0 ? 'initial' : 'retry' });
+      } catch (refused) {
+        if (refused instanceof AttemptBudgetExhaustedError) break;
+        throw refused;
+      }
+      const last = attempt === allowed - 1;
       const controller = new AbortController();
       // CR8: honor a per-call requestTimeout override (e.g. long codegen) over
       // the provider's default; only Anthropic read this before.
@@ -2566,6 +2602,9 @@ export class OpenAIProvider implements IProvider {
       // is cancelled by parseSseStream instead.
       const abortAttempt = () => controller.abort();
       abortSignal?.addEventListener('abort', abortAttempt, { once: true });
+      // Set once the fetch has begun, so a request that got no answer is reported as sent, and one whose
+      // body would not serialize is not.
+      let sent = false;
 
       try {
         const requestOptions: RequestInit = {
@@ -2575,8 +2614,10 @@ export class OpenAIProvider implements IProvider {
           signal: controller.signal,
         };
 
+        sent = true;
         const response = await fetch(url, requestOptions);
         clearTimeout(timeoutId);
+        report(attempt, response.status, response.ok);
 
         if (!response.ok) {
           const errorData: OpenAIAPITypes.APIErrorResponse = await response.json().catch(() => ({}));
@@ -2592,15 +2633,18 @@ export class OpenAIProvider implements IProvider {
           lastError = new OpenAIProviderError(errorMessage, 'API_SERVER_ERROR', errorCode || undefined, errorType, response.status, errorData);
           if (response.status === 429) { // Rate limit
             lastError = new OpenAIProviderError(errorMessage, 'RATE_LIMIT_EXCEEDED', errorCode || undefined, errorType, response.status, errorData);
-            const retryAfter = response.headers.get('retry-after'); // seconds
-            // Retry-After is authoritative when present; otherwise jittered backoff.
-            const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : computeRetryBackoffMs(attempt);
-            await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+            // On the last attempt the loop goes on to the budget's refusal, which ends it with lastError.
+            if (!last) {
+              const retryAfter = response.headers.get('retry-after'); // seconds
+              // Retry-After is authoritative when present; otherwise jittered backoff.
+              const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : computeRetryBackoffMs(attempt);
+              await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+            }
             continue; // Retry
           }
           // Other retryable server errors
           if (response.status >= 500) {
-            await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt))); // jittered exponential backoff
+            if (!last) await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt))); // jittered exponential backoff
             continue; // Retry
           }
           throw lastError; // If not explicitly handled for retry, throw
@@ -2616,6 +2660,9 @@ export class OpenAIProvider implements IProvider {
 
       } catch (error: unknown) {
         clearTimeout(timeoutId);
+        // A request that got no answer (a timeout, a network failure, or the caller's abort once the fetch
+        // had begun) is reported as sent; an answer was reported as it came, so nothing is reported twice.
+        if (sent) report(attempt, null, false);
         // A caller abort ends the request here; it is not a timeout to retry.
         if (abortSignal?.aborted) {
           throw new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
@@ -2635,7 +2682,7 @@ export class OpenAIProvider implements IProvider {
           );
         }
         
-        if (attempt === this.config.maxRetries! - 1) {
+        if (last) {
           break; // Last attempt failed, break to throw lastError
         }
         // Equal-jitter exponential backoff for retries not handled by 429
@@ -2643,7 +2690,7 @@ export class OpenAIProvider implements IProvider {
         // Keep retry logs concise — network errors are common and the stack trace is noise
         const isNetwork = lastError instanceof OpenAIProviderError && lastError.code === 'NETWORK_ERROR';
         const shortMsg = isNetwork ? 'Network unreachable' : lastError.message;
-        console.warn(`[LLM] Retry ${attempt + 1}/${this.config.maxRetries! - 1} in ${(delay / 1000).toFixed(1)}s — ${shortMsg}`);
+        console.warn(`[LLM] Retry ${attempt + 1}/${allowed - 1} in ${(delay / 1000).toFixed(1)}s: ${shortMsg}`);
         await new Promise(resolve => setTimeout(resolve, delay));
       } finally {
         abortSignal?.removeEventListener('abort', abortAttempt);

@@ -1000,7 +1000,7 @@ The real-time voice conversation pipeline lives in `io/voice-pipeline/` and is o
 IDLE -------> startSession() ---------> LISTENING
 LISTENING --> turn_complete ----------> PROCESSING
 PROCESSING -> LLM tokens start -------> SPEAKING
-SPEAKING ---> TTS flush_complete -----> LISTENING
+SPEAKING ---> TTS flush_complete -----> LISTENING (once played out, on a transport that reports it)
 SPEAKING ---> barge-in (cancel) ------> INTERRUPTING -> LISTENING
 ANY --------> transport disconnect ---> CLOSED
 ANY --------> stopSession() ----------> CLOSED

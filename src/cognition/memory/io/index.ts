@@ -8,7 +8,7 @@
  * - `JsonExporter`     — JSON file with optional base64-encoded embeddings.
  * - `MarkdownExporter` — directory of `.md` files with YAML front-matter.
  * - `ObsidianExporter` — Obsidian vault with `[[wikilinks]]` and `#tags`.
- * - `SqliteExporter`   — full-fidelity SQLite file copy via `VACUUM INTO`.
+ * - `SqliteExporter`   — new SQLite file holding the brain's own rows of every portable table.
  *
  * **Importers** — merge external data into a `Brain`:
  * - `JsonImporter`     — parses a `JsonExporter` JSON file.
