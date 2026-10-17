@@ -10,7 +10,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { AIModelProviderManager } from '../../../../core/llm/providers/AIModelProviderManager';
 import { GMIErrorCode } from '../../../../core/utils/errors.js';
+import { HybridUtilityAI } from '../HybridUtilityAI';
 import { LLMUtilityAI } from '../LLMUtilityAI';
+import { StatisticalUtilityAI } from '../StatisticalUtilityAI';
 
 interface ChatRequest {
   path: string;
@@ -18,6 +20,7 @@ interface ChatRequest {
     model: string;
     messages: Array<{ role: string; content: string }>;
     response_format?: unknown;
+    max_tokens?: number;
   };
 }
 
@@ -126,6 +129,64 @@ describe('LLMUtilityAI over a provider manager', () => {
     replies = ['A short summary.'];
     expect(await utility.summarize('A long text to summarize.', { providerId: 'litellm' })).toBe('A short summary.');
     expect(routes()).toEqual([['/litellm/v1/chat/completions', 'gpt-4o']]);
+  });
+
+  it('gives a summary room for the length it asks for, and a longer one never less room', async () => {
+    replies = ['One.', 'Two.', 'Three.', 'Four.', 'Five.', 'Six.'];
+    // 44 characters, 100 times: 4,400.
+    const text = 'The refund goes back to the card that paid. '.repeat(100);
+    await utility.summarize(text, { desiredLength: 'short' });
+    await utility.summarize(text, { desiredLength: 20 });
+    await utility.summarize(text, { desiredLength: 100 });
+    await utility.summarize(text, { desiredLength: 150 });
+    await utility.summarize(text, { desiredLength: 0.25 });
+    await utility.summarize(text, { desiredLength: 150, methodOptions: { maxTokens: 300 } });
+    // 500 tokens at least and 4,000 at most: 60 a sentence for a count, a token a character of the text for a share,
+    // and methodOptions.maxTokens over both.
+    expect(received.map((request) => request.body.max_tokens)).toEqual([500, 1200, 4000, 4000, 1100, 300]);
+    expect(systemPrompt(received[3])).toContain('about 150 sentences');
+  });
+
+  it('sends a hybrid call whose method only one of its classes has to that class', async () => {
+    const stats = new StatisticalUtilityAI('stat-for-hybrid');
+    await stats.initialize({ utilityId: 'stat-for-hybrid', defaultLanguage: 'en' });
+    await stats.trainModel(
+      [
+        { text: 'invoices overdue, payments failed', label: 'billing' },
+        { text: 'payments bouncing, invoices unpaid', label: 'billing' },
+        { text: 'parcels arrived damaged, boxes crushed', label: 'shipping' },
+        { text: 'parcels delayed, boxes missing', label: 'shipping' },
+      ],
+      'text_classifier_naive_bayes',
+      { modelId: 'tickets' },
+    );
+    const hybrid = new HybridUtilityAI({ llm: utility, statistical: stats });
+
+    // Methods the statistical class has and the LLM-backed one refuses or would send to a model: no request leaves.
+    const summary = await hybrid.summarize('The parcel is late. It was due on Monday. Where is it now?', {
+      method: 'first_n_sentences',
+      desiredLength: 'short',
+    });
+    expect(summary).toBe('The parcel is late. It was due on Monday.');
+    const ticket = await hybrid.classifyText('boxes crushed, parcels delayed', {
+      candidateClasses: ['billing', 'shipping'],
+      method: 'naive_bayes',
+      modelId: 'tickets',
+    });
+    expect(ticket.bestClass).toBe('shipping');
+    expect(received).toHaveLength(0);
+
+    // Methods only the LLM-backed class has, where the statistical class refuses the method or scores without it.
+    replies = ['{"similarityScore": 0.9}', '{"score": -0.8, "polarity": "negative"}'];
+    expect(await hybrid.calculateSimilarity('a refund', 'money back', { method: 'llm_semantic' })).toBe(0.9);
+    expect((await hybrid.analyzeSentiment('The update broke everything.', { method: 'llm' })).score).toBe(-0.8);
+    expect(received).toHaveLength(2);
+
+    // A call that names no method goes where it always went.
+    replies = ['A short summary.'];
+    expect(await hybrid.summarize('The parcel is late.')).toBe('A short summary.');
+    expect((await hybrid.analyzeSentiment('I love it.')).polarity).toBe('positive');
+    expect(received).toHaveLength(3);
   });
 
   it('still takes a provider from methodOptions.providerId', async () => {
