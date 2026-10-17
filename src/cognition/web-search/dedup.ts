@@ -65,7 +65,8 @@ function mergeCandidates(target: RRFCandidate, source: RRFCandidate): void {
  *    (catches same article at different URLs)
  *
  * The first candidate of each group stays and gains the providers only later ones hold, with their ranks. It takes
- * a later candidate's content when it has none, and the higher relevanceScore.
+ * a later candidate's content when it has none, and the higher relevanceScore. The candidates given are left as they
+ * were: a merge changes a copy of the first.
  *
  * @param candidates - Raw candidates from all providers
  * @param threshold - Cosine similarity threshold for dedup (default 0.85)
@@ -84,7 +85,13 @@ export function semanticDedup(
     if (existing) {
       mergeCandidates(existing, c);
     } else {
-      urlMap.set(normUrl, { ...c, normalizedUrl: normUrl });
+      // A copy with its own ranks and sources, so the merges below leave the caller's candidate as it was.
+      urlMap.set(normUrl, {
+        ...c,
+        normalizedUrl: normUrl,
+        providerRanks: new Map(c.providerRanks),
+        providerSources: [...c.providerSources],
+      });
     }
   }
 
