@@ -55,13 +55,25 @@ function bodyOf(text: string): string[] {
  * and times with no words under them.
  *
  * @param text - The text, its line ends already line feeds.
+ * @param options - `cutLastLine` when the text is a file's first bytes and its last line may stop short: that line is
+ * then weighed only where it comes straight after a header, as the words of that header's turn, since a header cut
+ * short reads as a line of words.
  */
-export function isOtterLayout(text: string): boolean {
+export function isOtterLayout(text: string, options: { cutLastLine?: boolean } = {}): boolean {
+  const lines = bodyOf(text);
+  // The last line's place in the text: bodyOf keeps every line's place, and leaves the last line out when it is blank
+  // or the closing line.
+  const cut = options.cutLastLine === true ? text.split('\n').length - 1 : -1;
   let headed = false;
   let open = false;
   let turns = 0;
-  for (const line of bodyOf(text)) {
+  for (let at = 0; at < lines.length; at += 1) {
+    const line = lines[at];
     if (line.trim() === '') continue;
+    if (at === cut) {
+      if (open) turns += 1;
+      break;
+    }
     if (otterHeader(line) !== null) {
       headed = true;
       open = true;

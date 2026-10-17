@@ -69,8 +69,8 @@ function isZip(head: Uint8Array): boolean {
  * whatever its name.
  *
  * @param name - The file's name or path.
- * @param head - The file's first bytes (4 KB is enough), or its text. Its last line is weighed for Otter's layout only
- * when a line feed ends it, since the first bytes of a file can stop inside a line.
+ * @param head - The file's first bytes (4 KB is enough), or its text. The first bytes of a file can stop inside a line,
+ * so a last line with no line feed after it is weighed for Otter's layout only where it comes straight after a header.
  */
 export function transcriptFormatOf(name: string, head: Uint8Array | string): TranscriptFormat | null {
   const dot = name.lastIndexOf('.');
@@ -91,7 +91,7 @@ export function transcriptFormatOf(name: string, head: Uint8Array | string): Tra
       return /^\s*[[{]/.test(text) && /"(?:sentences|speaker_name)"\s*:/.test(text) ? 'fireflies' : null;
     case 'txt':
     case 'md':
-      return isOtterLayout(text.slice(0, text.lastIndexOf('\n') + 1)) ? 'otter' : 'lines';
+      return isOtterLayout(text, { cutLastLine: !text.endsWith('\n') }) ? 'otter' : 'lines';
     default:
       return null;
   }
