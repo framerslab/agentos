@@ -206,9 +206,57 @@ describeIfPostgres('Brain.openPostgres', () => {
         [schema],
       );
       expect(Number(created[0]?.n)).toBe(1);
+      // The fresh schema gets the table's indexes too, though public, later on the search path and set up by
+      // the admin brain's open, already holds indexes of the same names.
+      const indexes = await admin.all<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'memory_traces'`,
+        [schema],
+      );
+      expect(indexes.map((row) => row.indexname)).toEqual(
+        expect.arrayContaining([
+          'idx_memory_traces_brain_type',
+          'idx_memory_traces_brain_scope',
+          'idx_memory_traces_brain_scope_id',
+        ]),
+      );
     } finally {
       for (const brain of fresh) await brain.close().catch(() => undefined);
       await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
+  it('opens while another connection holds a write transaction on the shared tables', async () => {
+    const writer = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(writer);
+    // The opening connection gives up on any lock after two seconds instead of waiting for the writer.
+    const url = new URL(POSTGRES_URL!);
+    url.searchParams.set('options', '-c lock_timeout=2000');
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let inserted!: () => void;
+    const writing = new Promise<void>((resolve) => {
+      inserted = resolve;
+    });
+    // A write transaction left open on memory_traces, as a long import holds one.
+    const transaction = writer.transaction(async (trx) => {
+      await trx.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+        [writer.brainId, 'held-trace', 'episodic', 'user', 'held open', Date.now()],
+      );
+      inserted();
+      await held;
+    });
+    try {
+      await writing;
+      const opened = await Brain.openPostgres(url.toString(), { brainId: uniqueBrainId() });
+      openedBrains.push(opened);
+      expect(await opened.getMeta('schema_version')).toBe('3');
+    } finally {
+      release();
+      await transaction;
     }
   });
 
