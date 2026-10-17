@@ -11,7 +11,9 @@
  *   - If a trace of the same scope and scope id with the same hash already
  *     exists in the target:
  *     - Keep the newer `created_at` timestamp.
- *     - Merge `tags` arrays (union, dedup).
+ *     - Merge `tags` arrays (union, dedup). The full-text index covers the
+ *       tags, so when a merge changes a trace's tags the importer rebuilds the
+ *       brain's index once the import has committed.
  *   - A trace of another scope id is not a duplicate: its tags and time are
  *     left as they are.
  *   - New traces are inserted wholesale.
@@ -150,11 +152,18 @@ export class SqliteImporter {
           ? [`SELECT * FROM ${table} WHERE brain_id = ?`, [brainIds[0]]]
           : [`SELECT * FROM ${table}`, []];
 
+      let retagged = 0;
       await this.brain.transaction(async (trx) => {
-        await this._mergeTraces(sourceAdapter, read, result, trx, options);
+        retagged = await this._mergeTraces(sourceAdapter, read, result, trx, options);
         await this._mergeNodes(sourceAdapter, read, result, trx);
         await this._mergeEdges(sourceAdapter, read, result, trx);
       });
+      // A tag merge rewrites a held trace's tags in place and counts as
+      // skipped, so a caller that rebuilds after inserts (Memory.importFrom,
+      // when `imported` is above zero) would not rebuild for it.
+      if (retagged > 0) {
+        await this._rebuildFullTextIndex();
+      }
     } finally {
       await sourceAdapter.close();
     }
@@ -192,19 +201,26 @@ export class SqliteImporter {
     return crossSha256(s);
   }
 
+  /**
+   * Insert the source's traces, or merge a duplicate's tags and time into
+   * the trace the brain holds.
+   *
+   * @returns How many held traces a merge gave new tags.
+   */
   private async _mergeTraces(
     src: StorageAdapter,
     read: SourceRead,
     result: ImportResult,
     trx: { run: Brain['run']; get: Brain['get'] },
     options?: Pick<ImportOptions, 'dedup'>,
-  ): Promise<void> {
+  ): Promise<number> {
     let sourceRows: TraceRow[];
     try {
       sourceRows = await src.all<TraceRow>(...read('memory_traces'));
     } catch {
-      return;
+      return 0;
     }
+    let retagged = 0;
 
     const { dialect } = this.brain.features;
     const brainId = this.brain.brainId;
@@ -243,8 +259,9 @@ export class SqliteImporter {
             try { existingTags = JSON.parse(existing.tags) as string[]; } catch { /* ignore */ }
             let sourceTags: string[] = [];
             try { sourceTags = JSON.parse(row.tags) as string[]; } catch { /* ignore */ }
-            const merged = Array.from(new Set([...existingTags, ...sourceTags]));
-            await trx.run(updateTimestampSql, [newerAt, JSON.stringify(merged), brainId, existing.id]);
+            const merged = JSON.stringify(Array.from(new Set([...existingTags, ...sourceTags])));
+            await trx.run(updateTimestampSql, [newerAt, merged, brainId, existing.id]);
+            if (merged !== existing.tags) retagged++;
             result.skipped++;
             continue;
           }
@@ -276,6 +293,29 @@ export class SqliteImporter {
       } catch (err) {
         result.errors.push(`Trace merge error: ${String(err)}`);
       }
+    }
+    return retagged;
+  }
+
+  /**
+   * Rebuild the brain's full-text index (best-effort) with the statement
+   * `Brain.fullTextRebuild` returns: the whole index on SQLite, the `_tsv`
+   * column of the brain's rows on Postgres. The import's rows are committed,
+   * so a failure is logged and never fails the import.
+   */
+  private async _rebuildFullTextIndex(): Promise<void> {
+    try {
+      const rebuild = this.brain.fullTextRebuild();
+      await this.brain.run(rebuild.sql, rebuild.params);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // A database the index was never created in has nothing to rebuild.
+      if (message.includes('no such module: fts5') || message.includes('no such table: memory_traces_fts')) {
+        return;
+      }
+      console.warn(
+        `[SqliteImporter] full-text index rebuild after a tag merge failed for brain ${this.brain.brainId}: ${message}`,
+      );
     }
   }
 

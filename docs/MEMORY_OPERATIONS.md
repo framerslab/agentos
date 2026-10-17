@@ -663,7 +663,7 @@ User prefers TypeScript over Python
 
 ### SQLite
 
-Merges one brain's SQLite file into the current brain. The importer reads the rows of the one brain the file holds: a file whose rows carry several brain ids imports nothing, and `errors` names the ids. A SQLite export holds one brain, so export each brain and import its file. A file older than the `brain_id` column holds one brain, and every row of it is read. A source trace is not inserted when a trace of the same scope and scope id in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. Knowledge nodes are matched by label and type, edges by source, target and type.
+Merges one brain's SQLite file into the current brain. The importer reads the rows of the one brain the file holds: a file whose rows carry several brain ids imports nothing, and `errors` names the ids. A SQLite export holds one brain, so export each brain and import its file. A file older than the `brain_id` column holds one brain, and every row of it is read. A source trace is not inserted when a trace of the same scope and scope id in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. When a merge changes a trace's tags, the importer rebuilds the brain's full-text index once the import has committed (on Postgres, the `_tsv` column of the brain's own rows), so `memory_search` finds the trace by a merged tag. Knowledge nodes are matched by label and type, edges by source, target and type.
 
 ```ts
 const result = await mem.importFrom('./backup.sqlite', { format: 'sqlite' });
@@ -737,7 +737,7 @@ A row's `metadata` cell names its scope id, so it is read before the duplicate c
 All import paths use SHA-256 content hashing to prevent duplicate traces:
 
 1. Before inserting a trace, the importer computes `SHA-256(content)` and stores it in the trace's metadata as `import_hash`.
-2. When a trace of the same scope and scope id already carries that hash, the row is skipped (counted in `skipped`), whatever its type. A trace of another scope id is not a duplicate: a record whose text another tenant's, user's or session's trace holds is imported under its own scope id. A record's scope id is its metadata `scopeId`, else the `scope_id` an export of a schema-3 brain carries, else `''`; Markdown, Obsidian and ChatGPT records file under `''`. The CSV importer also matches a trace whose metadata `content_hash` equals the hash. The SQLite importer also matches a trace with identical `content`, does not read `content_hash`, and merges the skipped row's tags, and the later of the two `created_at` times, into the trace it matched.
+2. When a trace of the same scope and scope id already carries that hash, the row is skipped (counted in `skipped`), whatever its type. A trace of another scope id is not a duplicate: a record whose text another tenant's, user's or session's trace holds is imported under its own scope id. A record's scope id is its metadata `scopeId`, else the `scope_id` an export of a schema-3 brain carries, else `''`; Markdown, Obsidian and ChatGPT records file under `''`. The CSV importer also matches a trace whose metadata `content_hash` equals the hash. The SQLite importer also matches a trace with identical `content`, does not read `content_hash`, and merges the skipped row's tags, and the later of the two `created_at` times, into the trace it matched; when that changes the trace's tags, it rebuilds the full-text index, so the trace is found by the merged tags.
 3. Deduplication is enabled by default (`dedup: true`) and can be disabled per-import.
 
 ```ts
@@ -760,6 +760,8 @@ interface ImportResult {
   errors: string[];  // Human-readable error messages for failures
 }
 ```
+
+After an import that inserted at least one trace (`imported` above zero), `importFrom` and `importFromString` rebuild the brain's full-text index, and its HNSW index when the brain has one, from the brain's embedded traces.
 
 
 ### ExportOptions Reference
