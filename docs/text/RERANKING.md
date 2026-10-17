@@ -59,7 +59,7 @@ A provider implements [`IRerankerProvider`](../../src/cognition/rag/reranking/IR
 
 `LlmJudgeReranker.rerank(input, config)` scores the first `maxPointwiseDocuments` passages, has the ranking call order the `pointwiseTopK` best of them, and answers every passage it scored: the ones the ranking names, in its order, each once (an id the ranking repeats counts once, and an id it was not given is passed over), then the rest by score, a tie in the order the passages came. A request's `topN` cuts the answer to that many, past `pointwiseTopK` too; without one, the answer holds every scored passage, and the passages past `maxPointwiseDocuments` are left out. An answer's `relevanceScore` is `1 - i / n` for its place `i`, from 0, among the `n` it answers.
 
-Each call of `llmCallFn` waits up to the request's `timeoutMs`, else the judge's own, 30 seconds unless given; `RerankerService.rerank()` always sets the request's. A scoring call that fails, runs past it or answers no JSON array scores its batch 0, and a score that is not a number counts 0. A ranking call that fails, runs past it or answers something other than a JSON array leaves the order to the scores.
+Each call of `llmCallFn` waits up to the request's `timeoutMs`, else the judge's own, 30 seconds unless given; `RerankerService.rerank()` always sets the request's. Past it the judge stops waiting, and the call it made runs on to its end, since `llmCallFn` takes no abort signal. A scoring call that fails, runs past it or answers no JSON array scores its batch 0, and a score that is not a number counts 0. A ranking call that fails, runs past it or answers something other than a JSON array leaves the order to the scores.
 
 ## RerankerService
 
