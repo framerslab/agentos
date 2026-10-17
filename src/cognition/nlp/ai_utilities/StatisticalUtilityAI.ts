@@ -258,12 +258,18 @@ const DEFAULT_ENGLISH_STOP_WORDS = new Set([
 ]);
 
 export interface StatisticalUtilityAIConfig extends UtilityAIConfigBase {
-  // Path to directory for models, lexicons, stop words etc. Default language is from UtilityAIConfigBase.
+  /**
+   * The folder a relative path in `customStopWordsPaths`, `sentimentConfig.lexiconPath` or a call's
+   * `lexiconNameOrPath` is read under. Naive Bayes models are kept under `classifierConfig.naiveBayes.modelStoragePath`.
+   */
   resourcePath?: string;
 
-  defaultStopWordsLanguage?: string; // e.g., 'en'
-  customStopWordsPaths?: Record<string, string>; // lang_code -> file_path
+  /** Not read: stop words follow a call's `language`, else `defaultLanguage`. */
+  defaultStopWordsLanguage?: string;
+  /** A stop-word file for each language code, one word a line. */
+  customStopWordsPaths?: Record<string, string>;
 
+  /** Not read: `summarize()` answers the first sentences of a text. */
   summarizerConfig?: {
     lexRank?: { // Parameters for LexRank-like summarization
       similarityThreshold?: number; // Default 0.1
@@ -275,7 +281,7 @@ export interface StatisticalUtilityAIConfig extends UtilityAIConfigBase {
   classifierConfig?: {
     naiveBayes?: {
       modelStoragePath?: string; // Directory to save/load trained Naive Bayes models
-      defaultModelId?: string;   // Default model ID to load/use if not specified in classifyText options
+      defaultModelId?: string;   // Loaded at initialize() when saved; the id trainModel() and classifyText() use when a call names none
       defaultAlpha?: number;     // Laplace smoothing, default 0.05
     }
   };
@@ -292,11 +298,12 @@ export interface StatisticalUtilityAIConfig extends UtilityAIConfigBase {
     /** The language a call that names none is scored in, and the language `lexiconPath` adds to. `defaultLanguage` unless given. */
     defaultLexiconLanguage?: string;
   };
+  /** Not read: `detectLanguage()` uses the package's built-in profiles. */
   languageDetectionConfig?: {
-    // Config for n-gram profiles or other statistical language detection models
     nGramProfilePath?: string;
   };
-  readabilitySyllableAlgorithm?: 'regex_approx' | 'dictionary_lookup'; // For more precise syllable counting
+  /** Not read: syllables are counted by vowel groups. */
+  readabilitySyllableAlgorithm?: 'regex_approx' | 'dictionary_lookup';
 }
 
 export class StatisticalUtilityAI implements IUtilityAI {

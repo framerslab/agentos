@@ -589,7 +589,7 @@ Notes:
 
 If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augmentor builds a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) and registers the built-in providers its `providers` list names: `cohere` (needs `apiKey`) and `local` (an offline cross-encoder through Transformers.js: `@huggingface/transformers`, or `@xenova/transformers`). Reranking is opt-in per request: with `RagRetrievalOptions.rerankerConfig.enabled: true`, or, on a request without `rerankerConfig`, with a `policy` whose `reranker` is `'always'`.
 
-`RerankerService.rerankChain(query, chunks, stages)` runs several providers one after another, each stage keeping its `topK`. The caller passes the stages; no config file or research depth sets a chain.
+`RerankerService.rerankChain(query, chunks, stages)` runs several providers one after another, each stage keeping its `topK`. A stage asks for its `model`, else the provider's `defaultModelId` in the service config, else the service's `defaultModelId`, else the provider's own default. The caller passes the stages; no config file or research depth sets a chain.
 
 ### Providers
 
@@ -597,7 +597,7 @@ If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augm
 |---|---|---|
 | `local` | `LocalCrossEncoderReranker` | Transformers.js cross-encoder; default model `cross-encoder/ms-marco-MiniLM-L-6-v2` (`LOCAL_RERANKER_MODELS` lists the others) |
 | `cohere` | `CohereReranker` | Cohere's rerank API with the `apiKey` in its config; `COHERE_RERANKER_MODELS` lists the model ids, `rerank-v4.0-pro`, `rerank-v4.0-fast` and `rerank-v3.5` among them |
-| `llm-judge` | `LlmJudgeReranker` | Your `llmCallFn(system, user, model?)`: phase 1 scores up to 100 documents 0-10 in batches of 10 with `scoringModel`; phase 2 ranks the best 20 with `rankingModel`, falling back to the phase-1 order when it fails |
+| `llm-judge` | `LlmJudgeReranker` | Your `llmCallFn(system, user, model?)`: phase 1 scores up to 100 documents 0-10 in batches of 10 with `scoringModel`; phase 2 ranks the best 20 with `rankingModel`, falling back to the phase-1 order when it fails or runs past `timeoutMs`. It answers every scored document, the ranked ones first and each once, unless the request's `topN` (a stage's `topK`) cuts it ([The LLM judge](../text/RERANKING.md#the-llm-judge)) |
 
 ### Skipped stages
 

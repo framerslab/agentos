@@ -66,8 +66,10 @@ export interface KeywordExtractionOptions {
 // --- Tokenization Types ---
 export interface TokenizationOptions {
   type?: 'word' | 'sentence' | 'subword_bpe'; // Default 'word'
-  toLowerCase?: boolean; // Default true
-  removePunctuation?: boolean; // Default true for words, false for sentences
+  /** Default true. StatisticalUtilityAI keeps a sentence's case unless it is true. */
+  toLowerCase?: boolean;
+  /** LLMUtilityAI: default true for words, false for sentences. StatisticalUtilityAI's words never hold punctuation. */
+  removePunctuation?: boolean;
   language?: string; // BCP-47
   modelId?: string; // For subword tokenizers like BPE
 }
@@ -108,7 +110,7 @@ export interface SentimentAnalysisOptions {
 export interface SentimentResult {
   score: number; // Overall sentiment score (interpretation depends on method, e.g., -1 to 1)
   polarity: 'positive' | 'negative' | 'neutral';
-  comparative?: number; // e.g., score normalized by number of sentiment words
+  comparative?: number; // StatisticalUtilityAI: the sum of the word values over the number of words
   intensity?: number; // Estimated intensity (0-1)
   positiveTokens?: Array<{ token: string; score?: number }>;
   negativeTokens?: Array<{ token: string; score?: number }>;
@@ -117,7 +119,7 @@ export interface SentimentResult {
 
 // --- Language Detection Types ---
 export interface LanguageDetectionOptions {
-  maxCandidates?: number; // Default 1
+  maxCandidates?: number; // Default 3 for StatisticalUtilityAI, 1 for LLMUtilityAI
   method?: 'n_gram' | 'llm' | 'heuristic' | string;
   modelId?: string; // For LLM-based methods
   providerId?: string; // For LLM-based methods
