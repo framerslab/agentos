@@ -516,8 +516,12 @@ describe('two brains in a Postgres database', () => {
     const { a, b } = await postgresPair();
     const inB = await b.remember('The ferry leaves at noon');
     const brainB = brainOf(b);
-    // Brain B's trace loses its full-text entry; a rebuild in brain A leaves brain B's rows as they are.
-    await brainB.run('UPDATE memory_traces SET _tsv = NULL WHERE brain_id = ? AND id = ?', [brainB.brainId, inB.id]);
+    // Brain B's trace carries a marker in its full-text column; a rebuild in brain A leaves brain B's
+    // rows as they are. (Not a null: a brain opening meanwhile fills a null in, whoever owns the row.)
+    await brainB.run(`UPDATE memory_traces SET _tsv = to_tsvector('simple', 'untouched') WHERE brain_id = ? AND id = ?`, [
+      brainB.brainId,
+      inB.id,
+    ]);
 
     // An import rebuilds the importing brain's full-text index.
     await a.importFromString(
@@ -525,11 +529,11 @@ describe('two brains in a Postgres database', () => {
       'json',
     );
 
-    const unindexed = await brainB.get<{ n: number | string }>(
-      'SELECT COUNT(*) AS n FROM memory_traces WHERE brain_id = ? AND id = ? AND _tsv IS NULL',
+    const marked = await brainB.get<{ n: number | string }>(
+      `SELECT COUNT(*) AS n FROM memory_traces WHERE brain_id = ? AND id = ? AND _tsv = to_tsvector('simple', 'untouched')`,
       [brainB.brainId, inB.id],
     );
-    expect(Number(unindexed?.n)).toBe(1);
+    expect(Number(marked?.n)).toBe(1);
     expect(idsOf(await a.recall('locker blue tin'))).toHaveLength(1);
   });
 });

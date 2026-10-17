@@ -62,6 +62,13 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
  * explicit `brainId`.
  */
 /**
+ * The advisory lock a Postgres brain holds while it sets up the tables every
+ * brain in the database shares. The migrations lock `agentos_brain:<brain id>`,
+ * which this name can never equal.
+ */
+const POSTGRES_SCHEMA_LOCK = 'agentos_brain_schema';
+
+/**
  * Whether anything is at `entry`: a file, a folder, or a link, dangling or
  * not. `lstat` reads the entry itself, where `access` follows a link and
  * reports a dangling one as free.
@@ -998,8 +1005,22 @@ export class Brain {
     const fkPragma = features.dialect.pragma('foreign_keys', 'ON');
     if (fkPragma) await adapter.exec(fkPragma);
 
-    await MigrationRunner.runPending(adapter, features, brainId, MIGRATIONS);
-    await brain._initSchema();
+    if (features.dialect.name === 'postgres') {
+      // Every brain in a Postgres database shares its tables, and two connections
+      // running CREATE TABLE IF NOT EXISTS at once can both pass the check, the
+      // second failing on pg_type_typname_nsp_index. The migrations' lock names one
+      // brain, so the schema is set up under one lock for the whole database, in one
+      // transaction on one connection: a brain opening meanwhile waits, then finds
+      // every table.
+      await adapter.transaction(async (trx) => {
+        await trx.run('SELECT pg_advisory_xact_lock(hashtext($1))', [POSTGRES_SCHEMA_LOCK]);
+        await MigrationRunner.runPending(trx, features, brainId, MIGRATIONS);
+        await brain._initSchema(trx);
+      });
+    } else {
+      await MigrationRunner.runPending(adapter, features, brainId, MIGRATIONS);
+      await brain._initSchema();
+    }
     await brain._seedMeta();
     await brain._repairFullTextIndex();
 
@@ -1093,7 +1114,7 @@ export class Brain {
    * `CREATE TABLE IF NOT EXISTS` is safe to re-run, so a sequential setup path
    * is sufficient and avoids adapter-specific transaction quirks during DDL.
    */
-  private async _initSchema(): Promise<void> {
+  private async _initSchema(adapter: StorageAdapter = this._adapter): Promise<void> {
     const ddlStatements = [
       DDL_BRAIN_META,
       DDL_MEMORY_TRACES,
@@ -1116,11 +1137,11 @@ export class Brain {
     ];
 
     for (const statement of ddlStatements) {
-      await this._adapter.exec(this._normalizeDdlForDialect(statement));
+      await adapter.exec(this._normalizeDdlForDialect(statement));
     }
 
     // A table another path created without `scope_id` (a migration engine's copy) gains it here; a fresh table has it.
-    await ensureScopeIdColumn(this._adapter);
+    await ensureScopeIdColumn(adapter);
 
     // FTS index via feature abstraction (FTS5 on SQLite, tsvector/GIN on Postgres).
     // SQL.js builds may not include FTS5, so keep the core schema independent.
@@ -1131,7 +1152,7 @@ export class Brain {
       tokenizer: 'porter ascii',
     });
     try {
-      await this._adapter.exec(ftsDdl);
+      await adapter.exec(ftsDdl);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes('no such module: fts5')) {
