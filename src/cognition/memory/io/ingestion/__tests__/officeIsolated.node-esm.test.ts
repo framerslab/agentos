@@ -257,13 +257,14 @@ describe.skipIf(!inCI && !existsSync(builtModule))('office documents in a worker
     }
   });
 
-  it("passes the office loader's bound through as DocumentTooLargeError, its cause naming the bound", () => {
+  it("passes the office loader's bound through as DocumentTooLargeError, its message and cause naming the bound", () => {
     expect(result.cases.cellBound).toMatchObject({
       ok: false,
       tooLarge: true,
       name: 'DocumentTooLargeError',
       code: 'DOCUMENT_TOO_LARGE',
       limit: DEFAULT_MAX_INFLATED_BYTES,
+      message: 'the document reached the bound officeparser reports as TABLE_CELL_LIMIT_EXCEEDED',
       cause: 'officeparser: TABLE_CELL_LIMIT_EXCEEDED',
       started: 1,
       leftRunning: 0,

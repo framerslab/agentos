@@ -210,3 +210,14 @@ export function buildNaturalLanguageFtsQuery(query: string): string {
 
   return tokens.map((token) => `${token}*`).join(' OR ');
 }
+
+/**
+ * One binding of `value` for each `?` in an SQL fragment the full-text helpers
+ * made with `?` as their query placeholder. Postgres's rank and relevance order
+ * read the query text through a placeholder of their own; SQLite's read the
+ * match and hold none, so a statement binds the query text once per fragment
+ * on one engine and not at all on the other.
+ */
+export function bindingsFor(fragment: string, value: unknown): unknown[] {
+  return Array.from({ length: (fragment.match(/\?/g) ?? []).length }, () => value);
+}
