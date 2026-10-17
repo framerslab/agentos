@@ -33,7 +33,7 @@ export interface PlanRules {
    * The most bytes an entry of each kind may hold, and, for `archive`, the most a nested archive may hold for the plan
    * to open it: 0, any positive number or `Infinity`. An entry whose size is no byte count (a finite number of 0 or
    * more) is skipped with the reason `size`; a bound below 0, `NaN` or no number at all (`null`, a numeric text such as
-   * `'5'`, `true`) rejects the plan with a `RangeError`.
+   * `'5'`, `true`, an object) rejects the plan with a `RangeError`.
    */
   maxBytes: (kind: PlannedKind | 'archive') => number;
   /**
@@ -43,7 +43,8 @@ export interface PlanRules {
   openArchive?: (path: string) => Promise<PlanEntryInput[]>;
   /**
    * The most entries planned, skipped ones included: those past it are skipped with the reason `count`. A count below
-   * 0, `NaN` or no number at all (`null`, a numeric text such as `'5'`, `true`) rejects the plan with a `RangeError`.
+   * 0, `NaN` or no number at all (`null`, a numeric text such as `'5'`, `true`, an object) rejects the plan with a
+   * `RangeError`.
    * @default Infinity
    */
   maxEntries?: number;
@@ -114,9 +115,17 @@ function isCount(value: unknown): value is number {
   return typeof value === 'number' && value >= 0;
 }
 
-/** A count or a bound as an error names it: a text quoted, so `'5'` reads apart from 5. */
+/**
+ * A count or a bound as an error names it, with none of its own code run: a text quoted, so `'5'` reads apart from 5;
+ * a bigint with its `n`; an object or a function by its kind alone, since its own `toString` could throw in place of
+ * the `RangeError`, and an object made with no prototype has no `toString` to call.
+ */
 function shown(value: unknown): string {
-  return typeof value === 'string' ? JSON.stringify(value) : String(value);
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'bigint') return `${value}n`;
+  if (typeof value === 'function') return 'a function';
+  if (typeof value === 'object' && value !== null) return 'an object';
+  return String(value);
 }
 
 /**
@@ -127,7 +136,7 @@ function shown(value: unknown): string {
  * @param entries - The entries of an archive or a folder.
  * @param rules - The caller's types, bounds and archive opener.
  * @throws RangeError when `maxEntries`, or what `maxBytes` answers for a kind it is asked about, is below 0, `NaN` or no
- * number at all (`null`, a numeric text, `true`).
+ * number at all (`null`, a numeric text, `true`, an object, whatever its own `toString` does).
  */
 export async function planEntries(entries: readonly PlanEntryInput[], rules: PlanRules): Promise<PlannedEntry[]> {
   const planned: PlannedEntry[] = [];
