@@ -39,6 +39,195 @@ import { detectLanguageTrigram } from './trigram-language-profiles';
 const natural: typeof naturalModule =
   (naturalModule as unknown as { default?: typeof naturalModule }).default ?? naturalModule;
 
+/** A sentiment lexicon `natural` ships. AFINN scores a word from -5 to 5; pattern and senticon from -1 to 1. */
+export type SentimentLexiconName = 'afinn' | 'afinnFinancialMarketNews' | 'pattern' | 'senticon';
+
+/** The largest value a word takes in each lexicon `natural` ships. */
+const SENTIMENT_LEXICON_SCALE: Record<SentimentLexiconName, number> = {
+  afinn: 5,
+  afinnFinancialMarketNews: 5,
+  pattern: 1,
+  senticon: 1,
+};
+
+/**
+ * The languages `natural` holds a sentiment lexicon for, by language code: `natural`'s name for the language and
+ * its lexicons there, the first one the lexicon a call scores with unless it names another.
+ */
+const SENTIMENT_LANGUAGES: Record<string, { name: string; lexicons: readonly SentimentLexiconName[] }> = {
+  en: { name: 'English', lexicons: ['afinn', 'senticon', 'pattern', 'afinnFinancialMarketNews'] },
+  es: { name: 'Spanish', lexicons: ['afinn', 'senticon'] },
+  pt: { name: 'Portuguese', lexicons: ['afinn'] },
+  fr: { name: 'French', lexicons: ['pattern'] },
+  de: { name: 'German', lexicons: ['pattern'] },
+  it: { name: 'Italian', lexicons: ['pattern'] },
+  nl: { name: 'Dutch', lexicons: ['pattern'] },
+  ca: { name: 'Catalan', lexicons: ['senticon'] },
+  eu: { name: 'Basque', lexicons: ['senticon'] },
+  gl: { name: 'Galician', lexicons: ['senticon'] },
+};
+
+/**
+ * The normalization VADER gives its compound score: a sum `s` of word values maps into -1 to 1 as
+ * `s / sqrt(s * s + 15)` (Hutto and Gilbert, 2014; `normalize()` in vaderSentiment, alpha 15). Here `s` is on AFINN's
+ * scale, -5 to 5 a word, where VADER's own lexicon runs from -4 to 4.
+ */
+const SENTIMENT_NORMALIZATION_ALPHA = 15;
+/** The largest value of a word in AFINN: pattern and senticon values, -1 to 1, are multiplied by it before the sum. */
+const AFINN_SCALE = 5;
+/**
+ * A negation flips the sign of the lexicon entries that start among the next this many words of its clause. VADER
+ * looks as far back for a negation; it scales the value by -0.74 where this flips it whole.
+ */
+const NEGATION_REACH = 3;
+/** The marks that end a clause, and with it the reach of a negation. */
+const CLAUSE_END = /[.,;:!?…]+/u;
+/** A word for sentiment: letters, combining marks and digits, an apostrophe inside it kept, as in `don't`. */
+const SENTIMENT_WORD = /[\p{L}\p{N}][\p{L}\p{M}\p{N}]*(?:'[\p{L}\p{M}\p{N}]+)*/gu;
+
+/**
+ * A sentiment lexicon ready to score with. A word scores only in a form the lexicon lists: AFINN and pattern list
+ * inflected forms, senticon lists lemmas, and no word is stemmed, since a stem shared with a listed word (`lives`
+ * and `lively`) carries none of its meaning.
+ */
+interface SentimentLexicon {
+  /** Each listed entry of one word, in the form {@link sentimentKey} gives, with its value. */
+  words: Map<string, number>;
+  /**
+   * Each listed entry of two words or more (`can't stand`, `well-being`), its words in the form {@link sentimentKey}
+   * gives joined by one space, with its value.
+   */
+  phrases: Map<string, number>;
+  /** The most words an entry of {@link SentimentLexicon.phrases} holds; 0 when there is none. */
+  longestPhrase: number;
+  /** The language's negation words. */
+  negations: ReadonlySet<string>;
+  /** Whether a word ending in `n't` negates, as in English. */
+  contractedNegation: boolean;
+  /** The largest value a word can take on the lexicon's scale: 5 for AFINN and a lexicon file, 1 for pattern and senticon. */
+  scale: number;
+}
+
+/** A lexicon word or entry in the form the scorer compares: NFC, lower case, a curly apostrophe made straight. */
+function sentimentKey(word: string): string {
+  return word.normalize('NFC').toLowerCase().replace(/’/g, "'").trim();
+}
+
+/** The text's clauses, each as its words in the form {@link sentimentKey} gives. */
+function sentimentClauses(text: string): string[][] {
+  return sentimentKey(text)
+    .split(CLAUSE_END)
+    .map((clause) => clause.match(SENTIMENT_WORD) ?? [])
+    .filter((words) => words.length > 0);
+}
+
+/**
+ * Builds a lexicon from its entries and values, a later entry replacing an earlier one with the same words. An entry
+ * is read into words as a text is, so `well-being` and `well being` are one phrase. A value that is not a finite number
+ * is left out. `scale` is AFINN's, 5, unless given.
+ */
+function buildSentimentLexicon(
+  entries: Iterable<[string, unknown]>,
+  options: { negations?: Iterable<string>; contractedNegation: boolean; scale?: number },
+): SentimentLexicon {
+  const words = new Map<string, number>();
+  const phrases = new Map<string, number>();
+  let longestPhrase = 0;
+  for (const [entry, value] of entries) {
+    const number =
+      typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN;
+    if (!Number.isFinite(number)) continue;
+    const parts = sentimentKey(entry).match(SENTIMENT_WORD) ?? [];
+    if (parts.length === 1) {
+      words.set(parts[0], number);
+    } else if (parts.length > 1) {
+      phrases.set(parts.join(' '), number);
+      longestPhrase = Math.max(longestPhrase, parts.length);
+    }
+  }
+  return {
+    words,
+    phrases,
+    longestPhrase,
+    negations: new Set(Array.from(options.negations ?? [], sentimentKey)),
+    contractedNegation: options.contractedNegation,
+    scale: options.scale ?? AFINN_SCALE,
+  };
+}
+
+/** The phrase of the lexicon that starts at `at` in a clause, the longest when several do, or undefined. */
+function sentimentPhraseAt(
+  lexicon: SentimentLexicon,
+  clause: readonly string[],
+  at: number,
+): { text: string; length: number; value: number } | undefined {
+  for (let length = Math.min(lexicon.longestPhrase, clause.length - at); length >= 2; length -= 1) {
+    const text = clause.slice(at, at + length).join(' ');
+    const value = lexicon.phrases.get(text);
+    if (value !== undefined) return { text, length, value };
+  }
+  return undefined;
+}
+
+/**
+ * Reads a sentiment lexicon file: a JSON object of word to value, or one entry a line, the word, white space (a tab
+ * in an AFINN file) and the value. Empty lines, lines that start with `#` and lines that end in no number are passed
+ * over.
+ *
+ * @throws {SyntaxError} When a text that starts with `{` is not a JSON object.
+ */
+function parseSentimentLexicon(text: string): Array<[string, unknown]> {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{')) {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new SyntaxError('A sentiment lexicon in JSON must be an object of word to value.');
+    }
+    return Object.entries(parsed as Record<string, unknown>);
+  }
+  const entries: Array<[string, unknown]> = [];
+  for (const line of text.split(/\r?\n/)) {
+    const entry = /^\s*([^#\s].*?)\s+([-+]?\d+(?:\.\d+)?)\s*$/.exec(line);
+    if (entry) entries.push([entry[1], Number(entry[2])]);
+  }
+  return entries;
+}
+
+/** Whether a value names one of the lexicons `natural` ships rather than a file. */
+function isSentimentLexiconName(value: string): value is SentimentLexiconName {
+  return Object.prototype.hasOwnProperty.call(SENTIMENT_LEXICON_SCALE, value);
+}
+
+/** The id `trainModel()` keeps a model under, and `classifyText()` asks for, unless the config or a call names one. */
+const DEFAULT_BAYES_MODEL_ID = 'default_bayes_classifier';
+
+/**
+ * The class's word rule: a letter, a digit or an underscore, then letters, combining marks, digits and underscores, in
+ * any script. It is the rule of `natural`'s word tokenizer (runs of `A-Z`, `a-z`, `0-9` and `_`, and the Cyrillic
+ * `А-я`) for every script, so `café`, `straße` and `привет` stay whole words. An apostrophe or a hyphen ends a word,
+ * as it does there: `don't` is `don` and `t`.
+ */
+const WORD = /[\p{L}\p{N}_][\p{L}\p{M}\p{N}_]*/gu;
+
+/** The words of a text by {@link WORD}, read in NFC so a letter and its accent are one either way they came. */
+function wordsOf(text: string): string[] {
+  return text.normalize('NFC').match(WORD) ?? [];
+}
+
+/** `natural`'s English stop words: `extractKeywords()` leaves them out, as `natural`'s TF-IDF does. */
+const NATURAL_STOP_WORDS: ReadonlySet<string> = new Set(Array.isArray(natural.stopwords) ? natural.stopwords : []);
+
+/**
+ * The words a Naive Bayes model learns from an example, and reads in a text it classifies: the class's words (any
+ * script) in lower case, less `natural`'s English stop words, each stemmed with the model's stemmer. `natural`'s own
+ * reading keeps ASCII letters alone, so a text in another script would teach a model nothing.
+ */
+function bayesWords(text: string, stemmer: naturalModule.Stemmer): string[] {
+  return wordsOf(text.toLowerCase())
+    .filter((word) => !NATURAL_STOP_WORDS.has(word))
+    .map((word) => stemmer.stem(word));
+}
+
 const NATURAL_STEMMER_LANGUAGE_KEYS: Record<string, string> = {
   De: 'de',
   Es: 'es',
@@ -91,8 +280,17 @@ export interface StatisticalUtilityAIConfig extends UtilityAIConfigBase {
     }
   };
   sentimentConfig?: {
-    lexiconPath?: string; // Path to a custom sentiment lexicon file (e.g., AFINN format: word\tscore)
-    defaultLexiconLanguage?: string; // Language of the default or loaded lexicon
+    /**
+     * A sentiment lexicon of your own: a JSON object of word to value, or one entry a line, the word, white space
+     * and the value (an AFINN file). Its entries join the lexicon of `defaultLexiconLanguage`, each replacing the
+     * built-in value of its word, and are read on that lexicon's scale: -5 to 5 where it is AFINN, -1 to 1 where it
+     * is pattern or senticon. In a language `natural` has no lexicon for, they are the lexicon, read on AFINN's
+     * scale. A relative path is read under `resourcePath`. A file that cannot be read or parsed logs a warning and
+     * adds nothing.
+     */
+    lexiconPath?: string;
+    /** The language a call that names none is scored in, and the language `lexiconPath` adds to. `defaultLanguage` unless given. */
+    defaultLexiconLanguage?: string;
   };
   languageDetectionConfig?: {
     // Config for n-gram profiles or other statistical language detection models
@@ -112,8 +310,10 @@ export class StatisticalUtilityAI implements IUtilityAI {
 
   // For Naive Bayes classifier instances: modelId -> classifier
   private classifiers: Map<string, naturalModule.BayesClassifier>;
-  // For sentiment analysis
-  private sentimentAnalyzers: Map<string, naturalModule.SentimentAnalyzer>; // language -> analyzer
+  /** The sentiment lexicons built so far: a language code, with a lexicon name or file after a colon when a call named one. */
+  private sentimentLexicons: Map<string, SentimentLexicon>;
+  /** The entries of `sentimentConfig.lexiconPath`, read by `initialize()`. */
+  private customSentimentEntries: Array<[string, unknown]> = [];
 
   private createStemmerRegistry(): Record<string, naturalModule.Stemmer> {
     const registry: Record<string, naturalModule.Stemmer> = {
@@ -156,7 +356,7 @@ export class StatisticalUtilityAI implements IUtilityAI {
     this.stemmers = this.createStemmerRegistry();
     this.stopWords = new Map<string, Set<string>>([['en', DEFAULT_ENGLISH_STOP_WORDS]]);
     this.classifiers = new Map();
-    this.sentimentAnalyzers = new Map();
+    this.sentimentLexicons = new Map();
   }
 
   public async initialize(config: StatisticalUtilityAIConfig): Promise<void> {
@@ -166,14 +366,16 @@ export class StatisticalUtilityAI implements IUtilityAI {
       this.stopWords.clear();
       this.stopWords.set('en', DEFAULT_ENGLISH_STOP_WORDS);
       this.classifiers.clear();
-      this.sentimentAnalyzers.clear();
+      this.sentimentLexicons.clear();
+      this.customSentimentEntries = [];
     }
+    const defaultLanguage = config.defaultLanguage || 'en';
     this.config = {
-        defaultLanguage: 'en', // Default language for the utility itself
         ...config,
+        defaultLanguage, // Default language for the utility itself
         summarizerConfig: { lexRank: { similarityThreshold: 0.1, dampingFactor: 0.85, maxIterations:100, epsilon:1e-4, ...config.summarizerConfig?.lexRank } },
         classifierConfig: { naiveBayes: { defaultAlpha: 0.05, ...config.classifierConfig?.naiveBayes } },
-        sentimentConfig: { defaultLexiconLanguage: 'en', ...config.sentimentConfig },
+        sentimentConfig: { ...config.sentimentConfig, defaultLexiconLanguage: config.sentimentConfig?.defaultLexiconLanguage || defaultLanguage },
     };
 
 
@@ -181,8 +383,7 @@ export class StatisticalUtilityAI implements IUtilityAI {
     if (this.config.customStopWordsPaths) {
       for (const [lang, filePath] of Object.entries(this.config.customStopWordsPaths)) {
         try {
-          const fullPath = this.config.resourcePath ? path.join(this.config.resourcePath, filePath) : filePath;
-          const stopWordsStr = await fs.readFile(fullPath, 'utf-8');
+          const stopWordsStr = await fs.readFile(this.resourceFile(filePath), 'utf-8');
           this.stopWords.set(lang.toLowerCase(), new Set(stopWordsStr.split(/\r?\n/).map(sw => sw.trim().toLowerCase()).filter(Boolean)));
           console.log(`StatisticalUtilityAI (ID: ${this.utilityId}): Loaded custom stop words for '${lang}' from ${filePath}.`);
         } catch (error: any) {
@@ -190,23 +391,74 @@ export class StatisticalUtilityAI implements IUtilityAI {
         }
       }
     }
-    
-    // Initialize default sentiment analyzer
-    const defaultSentimentLang = this.config.sentimentConfig?.defaultLexiconLanguage || this.config.defaultLanguage || 'en';
-    this.getSentimentAnalyzer(defaultSentimentLang); // Pre-initialize for default language
 
-    // Pre-load default Naive Bayes classifier if modelId specified
-    if (this.config.classifierConfig?.naiveBayes?.defaultModelId) {
-        try {
-            await this.loadTrainedModel(this.config.classifierConfig.naiveBayes.defaultModelId, 'naive_bayes');
-        } catch {
-            console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): Failed to pre-load default Naive Bayes classifier '${this.config.classifierConfig.naiveBayes.defaultModelId}'. It may need training or explicit loading.`);
-        }
+    // Read the custom sentiment lexicon, then build the lexicon a call that names no language scores with.
+    const lexiconPath = this.config.sentimentConfig?.lexiconPath;
+    if (lexiconPath) {
+      try {
+        this.customSentimentEntries = parseSentimentLexicon(await fs.readFile(this.resourceFile(lexiconPath), 'utf-8'));
+        console.log(`StatisticalUtilityAI (ID: ${this.utilityId}): Read ${this.customSentimentEntries.length} sentiment lexicon entries from ${lexiconPath}.`);
+      } catch (error: any) {
+        console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): Failed to read the sentiment lexicon '${lexiconPath}': ${error?.message}. It adds nothing.`);
+      }
+    }
+    try {
+      this.sentimentLexiconFor(this.config.sentimentConfig?.defaultLexiconLanguage || defaultLanguage);
+    } catch (error: any) {
+      console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): Failed to build the default sentiment lexicon: ${error?.message}.`);
+    }
+
+    // Load the default Naive Bayes model when the config names one and it was saved where the config says.
+    const defaultModelId = this.config.classifierConfig?.naiveBayes?.defaultModelId;
+    if (defaultModelId) {
+      const loaded = await this.loadBayesModel(defaultModelId, this.bayesModelPath(defaultModelId));
+      if (!loaded.success) {
+        console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): Did not load the default Naive Bayes model '${defaultModelId}': ${loaded.message} Train it, or load it with loadTrainedModel().`);
+      }
     }
 
 
     this.isInitialized = true;
     console.log(`StatisticalUtilityAI (ID: ${this.utilityId}) initialized.`);
+  }
+
+  /** A resource file's path: a relative one under `resourcePath` when it is set, an absolute one as given. */
+  private resourceFile(filePath: string): string {
+    return this.config.resourcePath && !path.isAbsolute(filePath) ? path.join(this.config.resourcePath, filePath) : filePath;
+  }
+
+  /** Where a Naive Bayes model is saved and loaded: the path given, else under `modelStoragePath`, else the working directory. */
+  private bayesModelPath(modelId: string, storagePath?: string): string {
+    if (storagePath) return storagePath;
+    const folder = this.config.classifierConfig?.naiveBayes?.modelStoragePath;
+    return folder ? path.join(folder, `${modelId}.nbc.json`) : `${modelId}.nbc.json`;
+  }
+
+  /** The id `trainModel()` keeps a model under and `classifyText()` asks for when a call names none. */
+  private defaultBayesModelId(): string {
+    return this.config.classifierConfig?.naiveBayes?.defaultModelId || DEFAULT_BAYES_MODEL_ID;
+  }
+
+  /**
+   * Loads a saved Naive Bayes model under `modelId`, with the stemmer it was trained with (Porter for a model that
+   * does not record one). The file is read and parsed here rather than by `natural`'s `load()`, which parses inside
+   * a callback, where a file that is not JSON would throw past every caller.
+   */
+  private async loadBayesModel(modelId: string, loadPath: string): Promise<{ success: boolean; message?: string }> {
+    let saved: unknown;
+    try {
+      saved = JSON.parse(await fs.readFile(loadPath, 'utf-8'));
+    } catch (error: any) {
+      return { success: false, message: `Failed to load model: ${error?.message || 'the file could not be read.'}` };
+    }
+    try {
+      const stemmer = this.getStemmer((saved as { stemmerAlgorithm?: unknown })?.stemmerAlgorithm === 'lancaster' ? 'lancaster' : 'porter');
+      const classifier: naturalModule.BayesClassifier = (natural.BayesClassifier as any).restore(saved, stemmer);
+      this.classifiers.set(modelId, classifier);
+      return { success: true, message: 'Model loaded successfully.' };
+    } catch (error: any) {
+      return { success: false, message: `Failed to load model: the file holds no Naive Bayes model (${error?.message}).` };
+    }
   }
 
   private ensureInitialized(): void {
@@ -232,49 +484,119 @@ export class StatisticalUtilityAI implements IUtilityAI {
     return this.stemmers[algo] || natural.PorterStemmer; // Fallback to Porter
   }
 
-  private getSentimentAnalyzer(language: string): naturalModule.SentimentAnalyzer {
-    const langCode = language.toLowerCase().split('-')[0];
-    if (!this.sentimentAnalyzers.has(langCode)) {
-      try {
-        const stemmer = langCode === 'en' ? natural.PorterStemmer : undefined;
-        const analyzer = new (natural.SentimentAnalyzer as any)(langCode, stemmer, 'afinn');
-        const customLexicon =
-          langCode === 'en' && this.config.sentimentConfig?.lexiconPath
-            ? this.loadSentimentLexiconFromFile(this.config.sentimentConfig.lexiconPath)
-            : undefined;
-        if (customLexicon) {
-          (analyzer as any).vocabulary = {
-            ...(analyzer as any).vocabulary,
-            ...customLexicon,
-          };
-        }
-        this.sentimentAnalyzers.set(langCode, analyzer);
-        console.log(
-          `StatisticalUtilityAI (ID: ${this.utilityId}): Initialized sentiment analyzer for language '${langCode}'.`,
-        );
-      } catch (e: any) {
-        console.warn(
-          `StatisticalUtilityAI (ID: ${this.utilityId}): Failed to initialize sentiment analyzer for '${langCode}' (${e?.message}). Falling back to neutral analyzer.`,
-        );
-        const neutralAnalyzer = {
-          getSentiment: (_tokens: string[]) => 0,
-          vocabulary: {},
-        } as any;
-        this.sentimentAnalyzers.set(langCode, neutralAnalyzer as unknown as naturalModule.SentimentAnalyzer);
-      }
+  /** The language code of a BCP-47 tag: `en` for `en-GB`. */
+  private static languageCode(language: string): string {
+    return language.toLowerCase().split('-')[0];
+  }
+
+  /** A lexicon `natural` ships, as its words and values and the language's negation words. */
+  private naturalSentimentLexicon(code: string, name: SentimentLexiconName): { entries: Array<[string, unknown]>; negations: string[] } {
+    const language = SENTIMENT_LANGUAGES[code];
+    // natural reads a language by its English name ('English'), never by its code ('en').
+    const SentimentAnalyzer = natural.SentimentAnalyzer as unknown as new (
+      language: string,
+      stemmer: undefined,
+      type: string,
+    ) => { vocabulary: Record<string, unknown>; negations?: string[] };
+    const analyzer = new SentimentAnalyzer(language.name, undefined, name);
+    return { entries: Object.entries(analyzer.vocabulary), negations: analyzer.negations ?? [] };
+  }
+
+  /** The negation words `natural` lists for a language, none for a language it has no lexicon for. */
+  private sentimentNegations(code: string): string[] {
+    const language = SENTIMENT_LANGUAGES[code];
+    return language ? this.naturalSentimentLexicon(code, language.lexicons[0]).negations : [];
+  }
+
+  /**
+   * The lexicon a call scores with when it names none: the first lexicon `natural` holds for the language, with the
+   * entries of `sentimentConfig.lexiconPath` in the language `defaultLexiconLanguage` names. A language with neither
+   * scores every text 0, and its first call logs a warning.
+   */
+  private sentimentLexiconFor(language: string): SentimentLexicon {
+    const code = StatisticalUtilityAI.languageCode(language);
+    const cached = this.sentimentLexicons.get(code);
+    if (cached) return cached;
+    const support = SENTIMENT_LANGUAGES[code];
+    const custom =
+      code === StatisticalUtilityAI.languageCode(this.config.sentimentConfig?.defaultLexiconLanguage || this.config.defaultLanguage || 'en')
+        ? this.customSentimentEntries
+        : [];
+    const builtIn = support ? this.naturalSentimentLexicon(code, support.lexicons[0]) : { entries: [], negations: [] };
+    const lexicon = buildSentimentLexicon([...builtIn.entries, ...custom], {
+      negations: builtIn.negations,
+      contractedNegation: code === 'en',
+      scale: support ? SENTIMENT_LEXICON_SCALE[support.lexicons[0]] : undefined,
+    });
+    if (lexicon.words.size === 0) {
+      console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): No sentiment lexicon for '${code}'; its texts score 0.`);
+    } else {
+      console.log(
+        `StatisticalUtilityAI (ID: ${this.utilityId}): Built the sentiment lexicon for '${code}' (${support ? support.lexicons[0] : 'custom'}, ${lexicon.words.size} words).`,
+      );
     }
-    return this.sentimentAnalyzers.get(langCode)!;
+    this.sentimentLexicons.set(code, lexicon);
+    return lexicon;
   }
 
-  // Helper to load lexicon (conceptual for now, needs actual file reading)
-  private loadSentimentLexiconFromFile(filePath: string): Record<string, number> | undefined {
-    // This would read a file (e.g., AFINN format: word\tscore) and parse it.
-    // For this example, it's a placeholder. In initialize, a basic lexicon is hardcoded.
-    console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): Custom sentiment lexicon loading from '${filePath}' is conceptual.`);
-    return undefined;
+  /** The lexicon a call names: one `natural` ships, or a file, read under `resourcePath` when relative, which is the lexicon alone. */
+  private async namedSentimentLexicon(language: string, nameOrPath: string): Promise<SentimentLexicon> {
+    const code = StatisticalUtilityAI.languageCode(language);
+    if (isSentimentLexiconName(nameOrPath)) {
+      const key = `${code}:${nameOrPath}`;
+      const cached = this.sentimentLexicons.get(key);
+      if (cached) return cached;
+      if (!SENTIMENT_LANGUAGES[code]?.lexicons.includes(nameOrPath)) {
+        throw new GMIError(
+          `The sentiment lexicon '${nameOrPath}' has no '${code}' version.`,
+          GMIErrorCode.NOT_SUPPORTED,
+          { language: code, lexicon: nameOrPath },
+        );
+      }
+      const builtIn = this.naturalSentimentLexicon(code, nameOrPath);
+      const lexicon = buildSentimentLexicon(builtIn.entries, {
+        negations: builtIn.negations,
+        contractedNegation: code === 'en',
+        scale: SENTIMENT_LEXICON_SCALE[nameOrPath],
+      });
+      this.sentimentLexicons.set(key, lexicon);
+      return lexicon;
+    }
+    const file = this.resourceFile(nameOrPath);
+    const key = `${code}:${file}`;
+    const cached = this.sentimentLexicons.get(key);
+    if (cached) return cached;
+    let entries: Array<[string, unknown]>;
+    try {
+      entries = parseSentimentLexicon(await fs.readFile(file, 'utf-8'));
+    } catch (error: any) {
+      throw new GMIError(
+        `Could not read the sentiment lexicon '${nameOrPath}': ${error?.message}`,
+        GMIErrorCode.RESOURCE_NOT_FOUND,
+        { lexicon: nameOrPath },
+      );
+    }
+    const lexicon = buildSentimentLexicon(entries, {
+      negations: this.sentimentNegations(code),
+      contractedNegation: code === 'en',
+    });
+    this.sentimentLexicons.set(key, lexicon);
+    return lexicon;
   }
 
 
+  /**
+   * The first sentences of the text, joined by spaces.
+   *
+   * How many: 3 unless `desiredLength` says otherwise. `'short'` is 2, `'medium'` 30 percent of the sentences and at
+   * least 3, `'long'` half of them and at least 4. A number of 1 or less is a fraction of the sentences, rounded, so
+   * 0 asks for none; a larger number is a count; a number that is not a number (`NaN`) keeps the default. At least
+   * 1 sentence and at most all of them.
+   *
+   * `method: 'first_n_sentences'` does this, and so does the default, `'extractive_sentence_rank'`, after a warning.
+   *
+   * @throws {GMIError} `NOT_SUPPORTED` for any other method.
+   */
   public async summarize(textToSummarize: string, options?: SummarizationOptions): Promise<string> {
     this.ensureInitialized();
     const method = options?.method || 'extractive_sentence_rank'; // 'natural' does not have built-in LexRank.
@@ -283,13 +605,13 @@ export class StatisticalUtilityAI implements IUtilityAI {
       const sentences = this.tokenizers.sentence.tokenize(textToSummarize);
       if (!sentences || sentences.length === 0) return "";
       let numSentences = 3; // Default
-      if (options?.desiredLength) {
-        if (options.desiredLength === 'short') numSentences = 2;
-        else if (options.desiredLength === 'medium') numSentences = Math.max(3, Math.floor(sentences.length * 0.3));
-        else if (options.desiredLength === 'long') numSentences = Math.max(4, Math.floor(sentences.length * 0.5));
-        else if (typeof options.desiredLength === 'number') {
-            numSentences = options.desiredLength <= 1 ? Math.round(options.desiredLength * sentences.length) : options.desiredLength;
-        }
+      const desiredLength = options?.desiredLength;
+      if (desiredLength === 'short') numSentences = 2;
+      else if (desiredLength === 'medium') numSentences = Math.max(3, Math.floor(sentences.length * 0.3));
+      else if (desiredLength === 'long') numSentences = Math.max(4, Math.floor(sentences.length * 0.5));
+      else if (typeof desiredLength === 'number' && !Number.isNaN(desiredLength)) {
+        // 0 is a fraction too: none of the sentences, held to the one sentence a summary keeps.
+        numSentences = desiredLength <= 1 ? Math.round(desiredLength * sentences.length) : desiredLength;
       }
       numSentences = Math.min(Math.max(1, numSentences), sentences.length);
       return sentences.slice(0, numSentences).join(" ").trim();
@@ -302,18 +624,24 @@ export class StatisticalUtilityAI implements IUtilityAI {
     throw new GMIError(`Summarization method '${method}' not supported by StatisticalUtilityAI.`, GMIErrorCode.NOT_SUPPORTED);
   }
 
+  /**
+   * Classifies a text. With `method: 'naive_bayes'` and a model trained or loaded under `modelId` (else
+   * `classifierConfig.naiveBayes.defaultModelId`, else `'default_bayes_classifier'`, the id `trainModel()` uses), the
+   * model reads the text as it read its examples (the class's words in any script, lower case, `natural`'s English
+   * stop words left out, each stemmed with the stemmer the model learned with; `language` is not read) and answers
+   * its classes, best first. Otherwise it logs a warning and scores each candidate class by the words of its name
+   * (split at spaces) found in the lower-cased text, inside a longer word too.
+   */
   public async classifyText(textToClassify: string, options: ClassificationOptions): Promise<ClassificationResult> {
     this.ensureInitialized();
-    const modelId = options.modelId || this.config.classifierConfig?.naiveBayes?.defaultModelId || 'default_bayes';
+    const modelId = options.modelId || this.defaultBayesModelId();
     const classifier = this.classifiers.get(modelId);
 
     if (options.method === 'naive_bayes' && classifier) {
       try {
-        const tokens = this.tokenizers.word.tokenize(textToClassify.toLowerCase());
-        if (!tokens) throw new GMIError("Tokenization failed for classification.", GMIErrorCode.PROCESSING_ERROR);
-        const stemmedTokens = tokens.map(t => this.getStemmer('porter', options.language).stem(t));
-        const classifications = classifier.getClassifications(stemmedTokens.join(' '));
-        
+        // The reading trainModel() taught the model with, so the text and the examples share words.
+        const classifications = classifier.getClassifications(bayesWords(textToClassify, classifier.stemmer));
+
         if (!classifications || classifications.length === 0) {
             throw new GMIError("Naive Bayes classifier returned no classifications.", GMIErrorCode.PROCESSING_ERROR);
         }
@@ -367,35 +695,42 @@ export class StatisticalUtilityAI implements IUtilityAI {
     }
   }
 
+  /**
+   * The text's most frequent words, most frequent first, a tie in the order the words first appear: 5 unless
+   * `maxKeywords` says otherwise. The words are the class's (any script, lower case), less `natural`'s English stop
+   * words and the class's stop words for `language` (else `defaultLanguage`): the built-in English list, or the list
+   * `customStopWordsPaths` gave the language. A TF-IDF over the one text would rank them the same, since every word
+   * of a single text has the same inverse document frequency.
+   */
   public async extractKeywords(textToAnalyze: string, options?: KeywordExtractionOptions): Promise<string[]> {
     this.ensureInitialized();
     const maxKeywords = options?.maxKeywords || 5;
-    // 'natural' TfIdf is better with a corpus. For a single document, it's term frequency.
-    const tfidf = new natural.TfIdf();
-    tfidf.addDocument(textToAnalyze.toLowerCase());
-    const terms = tfidf.listTerms(0) // document index 0
-                   .sort((a,b) => b.tfidf - a.tfidf) // Sort by score
-                   .slice(0, maxKeywords)
-                   .map(item => item.term);
-    return terms;
+    const stopWords = this.getStopWords(options?.language);
+    const counts = new Map<string, number>();
+    for (const word of wordsOf(textToAnalyze.toLowerCase())) {
+      if (NATURAL_STOP_WORDS.has(word) || stopWords.has(word)) continue;
+      counts.set(word, (counts.get(word) ?? 0) + 1);
+    }
+    // A stable sort keeps the first-appearance order among words with the same count.
+    return Array.from(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, maxKeywords)
+      .map(([word]) => word);
   }
 
+  /**
+   * Words by the class's word rule (a letter, digit or underscore, then letters, marks, digits and underscores, in any
+   * script), lower-cased unless `toLowerCase: false`. A word never holds punctuation, so `removePunctuation` changes
+   * nothing. With `type: 'sentence'`, the sentences from `natural`'s sentence tokenizer, case kept unless
+   * `toLowerCase: true`.
+   */
   public async tokenize(text: string, options?: TokenizationOptions): Promise<string[]> {
     this.ensureInitialized();
-    let processedText = text;
-    const shouldLowerCase = options?.type === 'sentence' ? false : options?.toLowerCase !== false;
-    if (shouldLowerCase) processedText = processedText.toLowerCase(); // Default true for word tokenization
-
     if (options?.type === 'sentence') {
-      return this.tokenizers.sentence.tokenize(processedText) || [];
+      const sentences = this.tokenizers.sentence.tokenize(options.toLowerCase === true ? text.toLowerCase() : text) || [];
+      return sentences;
     }
-    // Default to word tokenization
-    let tokens = this.tokenizers.word.tokenize(processedText) || [];
-    if (options?.removePunctuation !== false) { // Default true for words
-        // More robust punctuation removal needed than simple regex for all cases
-        tokens = tokens.map(token => token.replace(/[^\w\s'-]|(?<!\w)-(?!\w)|(?<!\w)'(?!\w)/g, "")).filter(Boolean);
-    }
-    return tokens;
+    return wordsOf(options?.toLowerCase === false ? text : text.toLowerCase());
   }
 
   public async stemTokens(tokens: string[], options?: StemmingOptions): Promise<string[]> {
@@ -404,25 +739,27 @@ export class StatisticalUtilityAI implements IUtilityAI {
     return tokens.map(token => stemmer.stem(token));
   }
 
+  /**
+   * A similarity from 0 to 1. `'jaccard'` and `'cosine_tfidf'` (the default) compare the texts' words: the class's
+   * words in lower case, the stop words of `language` dropped (`removeStopWords`, on unless `false`) and Porter-stemmed
+   * for the language (`stem`, on unless `false`). The `corpusForIDF` texts are read the same way. `'levenshtein'`
+   * compares the raw texts.
+   */
   public async calculateSimilarity(text1: string, text2: string, options?: SimilarityOptions): Promise<number> {
     this.ensureInitialized();
     const method = options?.method || 'cosine_tfidf';
     const lang = options?.language || this.config.defaultLanguage || 'en';
-    const stemAlgo = 'porter'; // Default for 'natural' based similarity
-
-    let tokens1 = await this.tokenize(text1, { language: lang, toLowerCase: true, removePunctuation: true });
-    let tokens2 = await this.tokenize(text2, { language: lang, toLowerCase: true, removePunctuation: true });
-
-    if (options?.removeStopWords !== false) { // Default true
-        const stopWordsSet = this.getStopWords(lang);
-        tokens1 = tokens1.filter(t => !stopWordsSet.has(t));
-        tokens2 = tokens2.filter(t => !stopWordsSet.has(t));
-    }
-    if (options?.stem !== false) { // Default true
-        const stemmer = this.getStemmer(stemAlgo, lang);
-        tokens1 = tokens1.map(t => stemmer.stem(t));
-        tokens2 = tokens2.map(t => stemmer.stem(t));
-    }
+    const stopWordsSet = this.getStopWords(lang);
+    const stemmer = this.getStemmer('porter', lang);
+    /** A text's words as the methods compare them. */
+    const read = (text: string): string[] => {
+      let tokens = wordsOf(text.toLowerCase());
+      if (options?.removeStopWords !== false) tokens = tokens.filter((t) => !stopWordsSet.has(t));
+      if (options?.stem !== false) tokens = tokens.map((t) => stemmer.stem(t));
+      return tokens;
+    };
+    const tokens1 = read(text1);
+    const tokens2 = read(text2);
 
     if (method === 'jaccard') {
       const set1 = new Set(tokens1);
@@ -443,18 +780,15 @@ export class StatisticalUtilityAI implements IUtilityAI {
       const maxLength = Math.max(text1.length, text2.length);
       return maxLength === 0 ? 1 : 1 - (distance / maxLength);
     } else if (method === 'cosine_tfidf') {
+      // natural counts a list of words as given; a string it would split again with its ASCII word rule.
       const tfidf = new natural.TfIdf();
-      if (options?.corpusForIDF && options.corpusForIDF.length > 0) {
-          options.corpusForIDF.forEach(doc => tfidf.addDocument(doc.toLowerCase()));
-      }
-      tfidf.addDocument(tokens1.join(' '));
-      tfidf.addDocument(tokens2.join(' '));
-      // Get vectors for the last two added documents (text1, text2)
-      // This requires careful indexing if a corpus was also added.
-      // Assuming text1 is doc N-2 and text2 is doc N-1 if corpus added before them.
-      // If no corpus, text1 is doc 0, text2 is doc 1.
-      const docIndex1 = (options?.corpusForIDF?.length || 0) + 0;
-      const docIndex2 = (options?.corpusForIDF?.length || 0) + 1;
+      const corpus = options?.corpusForIDF ?? [];
+      corpus.forEach((doc) => tfidf.addDocument(read(doc)));
+      tfidf.addDocument(tokens1);
+      tfidf.addDocument(tokens2);
+      // The two texts are the last two documents, after the corpus.
+      const docIndex1 = corpus.length;
+      const docIndex2 = corpus.length + 1;
 
       // This part is tricky with 'natural'. We need to construct vectors manually.
       const termsInDoc1 = new Map(tfidf.listTerms(docIndex1).map(t => [t.term, t.tfidf]));
@@ -472,66 +806,106 @@ export class StatisticalUtilityAI implements IUtilityAI {
     throw new GMIError(`Similarity method '${method}' not supported or fully implemented by StatisticalUtilityAI.`, GMIErrorCode.NOT_SUPPORTED);
   }
 
+  /**
+   * Scores a text's sentiment with a word lexicon, with no model call.
+   *
+   * The lexicon is the first one `natural` ships for the language (`options.language`, else
+   * `sentimentConfig.defaultLexiconLanguage`, else `defaultLanguage`): AFINN for English, Spanish and Portuguese,
+   * pattern for French, German, Italian and Dutch, senticon for Catalan, Basque and Galician. The entries of
+   * `sentimentConfig.lexiconPath` join it in the default lexicon language. `options.lexiconNameOrPath` picks another
+   * of `natural`'s lexicons by name (`'afinn'`, `'afinnFinancialMarketNews'`, `'pattern'`, `'senticon'`), or a file
+   * that is then the lexicon alone. Another language scores 0 unless `lexiconPath` gives it words.
+   *
+   * The text is read as words (letters, marks and digits, an apostrophe inside a word kept, lower case) in clauses
+   * that end at `. , ; : ! ?` or `…`. At each word, a phrase the lexicon lists that starts there (`can't stand`,
+   * `not good`, `well-being`; the longest when several do) takes its value; else a negation word of the language (in
+   * English `not`, `no`, `never`, `neither` and any word ending in `n't`) flips the value of the lexicon entries that
+   * start among the next three words of its clause; else a word the lexicon lists takes its value. A word scores only
+   * in a form the lexicon lists: nothing is stemmed. `score` is the sum of the values put on AFINN's scale (pattern
+   * and senticon values times 5) and mapped into -1 to 1 as VADER maps its compound score: `s / sqrt(s * s + 15)`.
+   * `polarity` is `positive` from 0.05, `negative` from -0.05, else `neutral`; `intensity` is the score's size;
+   * `comparative` is the sum over the number of words, as `natural` computes it. `positiveTokens` and
+   * `negativeTokens` hold each scored word or phrase with its signed value, and `neutralTokens` the other words.
+   *
+   * @throws {GMIError} `NOT_SUPPORTED` when `lexiconNameOrPath` names a lexicon `natural` has no version of in the
+   * language, and `RESOURCE_NOT_FOUND` when it names a file that cannot be read.
+   */
   public async analyzeSentiment(text: string, options?: SentimentAnalysisOptions): Promise<SentimentResult> {
     this.ensureInitialized();
     const lang = options?.language || this.config.sentimentConfig?.defaultLexiconLanguage || this.config.defaultLanguage || 'en';
-    const analyzer = this.getSentimentAnalyzer(lang);
-    const tokens = await this.tokenize(text, { language: lang, toLowerCase: true }); // Keep punctuation for sentiment context
-    const stemmedTokensForSentiment = (await this.stemTokens(tokens, { algorithm: 'porter', language: lang })); // 'natural' sentiment analyzer uses stemming
+    const lexicon = options?.lexiconNameOrPath
+      ? await this.namedSentimentLexicon(lang, options.lexiconNameOrPath)
+      : this.sentimentLexiconFor(lang);
 
-    const score = analyzer.getSentiment(stemmedTokensForSentiment); // This is the 'comparative' score in 'natural'
-    
-    let polarity: 'positive' | 'negative' | 'neutral' = 'neutral';
-    if (score > 0.05) polarity = 'positive'; // Thresholds from 'natural' are typically small
-    else if (score < -0.05) polarity = 'negative';
-
-    // 'natural' doesn't easily give positive/negative tokens or overall score.
-    // This is a more manual approximation based on the lexicon if available.
-    let detailedScore = 0;
     const positiveTokens: Array<{ token: string; score: number }> = [];
     const negativeTokens: Array<{ token: string; score: number }> = [];
-    const analyzerEntry = this.sentimentAnalyzers.get(lang);
-    const lexicon = analyzerEntry ? ((analyzerEntry as any).vocabulary as Record<string, number> | undefined) : undefined;
-
-    if (lexicon) {
-        tokens.forEach(t => {
-            const tokenScore = lexicon[t.toLowerCase()];
-            if (tokenScore !== undefined) {
-                detailedScore += tokenScore;
-                if (tokenScore > 0) positiveTokens.push({token: t, score: tokenScore});
-                else if (tokenScore < 0) negativeTokens.push({token: t, score: tokenScore});
-            }
-        });
+    const neutralTokens: Array<{ token: string }> = [];
+    let sum = 0;
+    let wordCount = 0;
+    for (const clause of sentimentClauses(text ?? '')) {
+      let lastNegation = Number.NEGATIVE_INFINITY;
+      /** Adds an entry's value, flipped when a negation stands among the three words before it. */
+      const count = (token: string, at: number, value: number | undefined): void => {
+        if (value === undefined || value === 0) {
+          neutralTokens.push({ token });
+          return;
+        }
+        const signed = at - lastNegation <= NEGATION_REACH ? -value : value;
+        sum += signed;
+        (signed > 0 ? positiveTokens : negativeTokens).push({ token, score: signed });
+      };
+      let at = 0;
+      while (at < clause.length) {
+        // A phrase of the lexicon first, so `not good` and `can't stand` count as the lexicon scores them.
+        const phrase = sentimentPhraseAt(lexicon, clause, at);
+        if (phrase) {
+          wordCount += phrase.length;
+          count(phrase.text, at, phrase.value);
+          at += phrase.length;
+          continue;
+        }
+        const word = clause[at];
+        wordCount += 1;
+        if (lexicon.negations.has(word) || (lexicon.contractedNegation && word.endsWith("n't"))) {
+          lastNegation = at;
+          neutralTokens.push({ token: word });
+        } else {
+          count(word, at, lexicon.words.get(word));
+        }
+        at += 1;
+      }
     }
 
-
+    const onAfinnScale = sum * (AFINN_SCALE / lexicon.scale);
+    const score = onAfinnScale === 0 ? 0 : onAfinnScale / Math.sqrt(onAfinnScale * onAfinnScale + SENTIMENT_NORMALIZATION_ALPHA);
+    const polarity: SentimentResult['polarity'] = score >= 0.05 ? 'positive' : score <= -0.05 ? 'negative' : 'neutral';
     return {
-      score: detailedScore || score, // Use detailed if available, else analyzer's overall
+      score,
       polarity,
-      comparative: score, // 'natural' getSentiment result is comparative
+      comparative: wordCount > 0 ? sum / wordCount : 0,
+      intensity: Math.abs(score),
       positiveTokens,
       negativeTokens,
-      neutralTokens: [], // Not easily extracted from 'natural'
-      intensity: Math.abs(score),
+      neutralTokens,
     };
   }
 
   /**
-   * Detect the language of a text string using trigram frequency analysis.
+   * Detect the language of a text with the package's 21 language profiles.
    *
-   * Uses a Cavnar & Trenkle style algorithm that compares the input text's
-   * trigram frequency profile against pre-computed reference profiles for 20+
-   * languages.  Accuracy improves with longer text; passages under 10
-   * characters return `'und'` (undetermined).
+   * The script that holds more than half of the text's letters decides first: Hangul is Korean, Han with kana that
+   * make up a tenth of those letters or more is Japanese and with fewer Chinese, and Arabic, Devanagari, Bengali and
+   * Cyrillic text is Arabic, Hindi, Bengali, Russian or Ukrainian when its letters show which; that language comes back
+   * alone. Latin-script text is ranked against 13 trigram profiles (English, Spanish, French, German, Portuguese,
+   * Italian, Dutch, Turkish, Vietnamese, Polish, Swedish, Danish, Norwegian) by Cavnar and Trenkle's out-of-place
+   * distance.
+   *
+   * A text shorter than 10 characters after trimming, and one the profiles do not decide, answers
+   * `[{ language: defaultLanguage, confidence: 0.1 }]`, never `'und'`.
    *
    * @param text    - The input text to analyse.
-   * @param options - `maxCandidates` controls how many ranked results to
-   *                  return (default 3).  The `method` field is accepted but
-   *                  only `'n_gram'` (the default) is supported by this
-   *                  statistical implementation.
-   * @returns Ranked array of `{ language, confidence }` where `language` is
-   *          an ISO 639-1 code (e.g. `'en'`, `'fr'`) and `confidence` is
-   *          in the range 0-1.
+   * @param options - `maxCandidates` caps the ranked list (3 unless given). `method` is not read.
+   * @returns Ranked `{ language, confidence }` pairs: ISO 639-1 codes (`'en'`, `'fr'`), confidences from 0 to 1.
    */
   public async detectLanguage(text: string, options?: LanguageDetectionOptions): Promise<LanguageDetectionResult[]> {
     this.ensureInitialized();
@@ -565,22 +939,27 @@ export class StatisticalUtilityAI implements IUtilityAI {
     if (options?.toLowerCase !== false) {
       normalizedText = normalizedText.toLowerCase();
     }
-    if (options?.expandContractions) { // Basic, language-dependent
-        if (lang === 'en') {
-            normalizedText = normalizedText.replace(/\bwon't\b/g, "will not")
-              .replace(/\bcan't\b/g, "cannot").replace(/\bain't\b/g, "am not") // Example
-              .replace(/\bn't\b/g, " not").replace(/\b're\b/g, " are")
-              .replace(/\b's\b/g, " is").replace(/\b'd\b/g, " would") // Ambiguous ('s, 'd)
-              .replace(/\b'll\b/g, " will").replace(/\b've\b/g, " have")
-              .replace(/\b'm\b/g, " am");
-        }
+    if (options?.expandContractions && StatisticalUtilityAI.languageCode(lang) === 'en') {
+      // English only. A curly apostrophe counts as a straight one; `'s` and `'d` are read as `is` and `would`.
+      normalizedText = normalizedText
+        .replace(/’/g, "'")
+        .replace(/\bwon't\b/gi, 'will not')
+        .replace(/\bcan't\b/gi, 'cannot')
+        .replace(/\bain't\b/gi, 'am not')
+        .replace(/n't\b/gi, ' not')
+        .replace(/\b're\b/g, ' are')
+        .replace(/\b's\b/g, ' is')
+        .replace(/\b'd\b/g, ' would')
+        .replace(/\b'll\b/g, ' will')
+        .replace(/\b've\b/g, ' have')
+        .replace(/\b'm\b/g, ' am');
     }
     if (options?.removePunctuation) {
       normalizedText = normalizedText.replace(/[.,/#!$%^&*;:{}=\-_`~()?"]/g, " ");
     }
-    
-    // Tokenize for stop word removal and stemming
-    let tokens = this.tokenizers.word.tokenize(normalizedText) || [];
+
+    // The class's words, for stop word removal and stemming.
+    let tokens = wordsOf(normalizedText);
 
     if (options?.removeStopWords) {
       tokens = tokens.filter(token => !this.getStopWords(lang).has(token));
@@ -686,7 +1065,7 @@ export class StatisticalUtilityAI implements IUtilityAI {
         defaultLanguage: this.config?.defaultLanguage,
         loadedStopWordLanguages: Array.from(this.stopWords.keys()),
         loadedClassifierModels: Array.from(this.classifiers.keys()),
-        loadedSentimentAnalyzers: Array.from(this.sentimentAnalyzers.keys()),
+        loadedSentimentAnalyzers: Array.from(this.sentimentLexicons.keys()),
       }
     };
   }
@@ -702,20 +1081,20 @@ export class StatisticalUtilityAI implements IUtilityAI {
       return { success: false, message: `Model type '${modelType}' not supported for training by StatisticalUtilityAI.` };
     }
 
-    const modelId = trainingOptions?.modelId || 'default_bayes_classifier';
-    const stemmerAlgo = trainingOptions?.stemmer || 'porter';
+    const modelId = trainingOptions?.modelId || this.defaultBayesModelId();
+    const stemmerAlgo = trainingOptions?.stemmer === 'lancaster' ? 'lancaster' : 'porter';
     const stemmer = this.getStemmer(stemmerAlgo);
     const alpha = trainingOptions?.alpha || this.config.classifierConfig?.naiveBayes?.defaultAlpha || 0.05;
-    
+
     const classifier = new (natural.BayesClassifier as any)(stemmer, alpha);
+    // Saved with the model, so loadTrainedModel() restores the stemmer it learned with.
+    classifier.stemmerAlgorithm = stemmerAlgo;
     console.log(`StatisticalUtilityAI (ID: ${this.utilityId}): Training Naive Bayes classifier '${modelId}' with ${trainingData.length} samples.`);
 
     for (const item of trainingData) {
-      // Basic tokenization for training; consider using this.tokenize for consistency if options differ
-      const tokens = this.tokenizers.word.tokenize(item.text.toLowerCase());
-      if (tokens) {
-        classifier.addDocument(tokens, item.label);
-      }
+      // Each example is read as classifyText() reads a text, so the two share words. natural passes over an example
+      // left with no word (stop words alone), which then teaches nothing.
+      classifier.addDocument(bayesWords(item.text, stemmer), item.label);
     }
     try {
         classifier.train();
@@ -740,7 +1119,7 @@ export class StatisticalUtilityAI implements IUtilityAI {
       return { success: false, message: `Classifier model ID '${modelId}' not found for saving.` };
     }
 
-    const savePath = storagePath || (this.config.classifierConfig?.naiveBayes?.modelStoragePath ? path.join(this.config.classifierConfig.naiveBayes.modelStoragePath, `${modelId}.nbc.json`) : `${modelId}.nbc.json`);
+    const savePath = this.bayesModelPath(modelId, storagePath);
 
     return new Promise((resolve) => {
       // 'natural' BayesClassifier.save uses a callback
@@ -763,20 +1142,14 @@ export class StatisticalUtilityAI implements IUtilityAI {
         return { success: false, message: `Loading model type '${typeToLoad}' not supported.` };
     }
 
-    const loadPath = storagePath || (this.config.classifierConfig?.naiveBayes?.modelStoragePath ? path.join(this.config.classifierConfig.naiveBayes.modelStoragePath, `${modelId}.nbc.json`) : `${modelId}.nbc.json`);
-
-    return new Promise((resolve) => {
-      (natural.BayesClassifier as any).load(loadPath, this.getStemmer('porter'), (err: any, classifier: naturalModule.BayesClassifier) => {
-        if (err || !classifier) {
-          console.error(`StatisticalUtilityAI (ID: ${this.utilityId}): Error loading Naive Bayes model '${modelId}' from '${loadPath}':`, err);
-          resolve({ success: false, message: `Failed to load model: ${err?.message || 'Classifier could not be loaded.'}` });
-        } else {
-          this.classifiers.set(modelId, classifier);
-          console.log(`StatisticalUtilityAI (ID: ${this.utilityId}): Naive Bayes model '${modelId}' loaded from '${loadPath}'.`);
-          resolve({ success: true, message: 'Model loaded successfully.' });
-        }
-      });
-    });
+    const loadPath = this.bayesModelPath(modelId, storagePath);
+    const loaded = await this.loadBayesModel(modelId, loadPath);
+    if (loaded.success) {
+      console.log(`StatisticalUtilityAI (ID: ${this.utilityId}): Naive Bayes model '${modelId}' loaded from '${loadPath}'.`);
+    } else {
+      console.error(`StatisticalUtilityAI (ID: ${this.utilityId}): Error loading Naive Bayes model '${modelId}' from '${loadPath}': ${loaded.message}`);
+    }
+    return loaded;
   }
 
   private computeCosineSimilarity(vecA: number[], vecB: number[]): number {
@@ -819,7 +1192,8 @@ export class StatisticalUtilityAI implements IUtilityAI {
     this.isInitialized = false;
     // Clear any resources, though 'natural' instances are mostly self-contained.
     this.classifiers.clear();
-    this.sentimentAnalyzers.clear();
+    this.sentimentLexicons.clear();
+    this.customSentimentEntries = [];
     this.stopWords.clear();
     console.log(`StatisticalUtilityAI (ID: ${this.utilityId}) shut down.`);
   }

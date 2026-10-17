@@ -95,8 +95,13 @@ export interface SimilarityOptions {
 export interface SentimentAnalysisOptions {
   method?: 'lexicon_based' | 'llm' | 'trained_classifier' | string;
   modelId?: string; // For LLM or trained classifier
-  providerId?: string; // For LLM-based methods
-  lexiconNameOrPath?: string; // Name of built-in lexicon or path to custom
+  /** The provider LLMUtilityAI calls: this, else `methodOptions.providerId`, else its `defaultProviderId`. */
+  providerId?: string;
+  /**
+   * StatisticalUtilityAI: a lexicon `natural` ships, by name (`afinn`, `afinnFinancialMarketNews`, `pattern`,
+   * `senticon`), or the path of a lexicon file, which is then the lexicon alone.
+   */
+  lexiconNameOrPath?: string;
   language?: string; // BCP-47
   methodOptions?: Record<string, any>;
 }
@@ -126,11 +131,11 @@ export interface LanguageDetectionResult {
 // --- Text Normalization Types ---
 export interface TextNormalizationOptions {
   toLowerCase?: boolean; // Default true
-  removePunctuation?: boolean; // Default true
+  removePunctuation?: boolean; // Default false; StatisticalUtilityAI joins words, so its output never holds punctuation
   removeStopWords?: boolean; // Default false
   stem?: boolean; // Default false
   stemAlgorithm?: StemmingOptions['algorithm'];
-  expandContractions?: boolean; // Default true
+  expandContractions?: boolean; // Default false; StatisticalUtilityAI expands English contractions only
   replaceNumbersWith?: string | null; // null to remove, string to replace (e.g., "<NUM>")
   stripHtml?: boolean; // Default false
   language?: string; // BCP-47
@@ -164,16 +169,19 @@ export interface ReadabilityResult {
 export interface ParseJsonOptions<_T = any> {
   /** If true, attempts to use an LLM to fix or extract JSON if standard parsing fails. */
   attemptFixWithLLM?: boolean;
-  /** Model ID to use for LLM-based fixing. */
+  /** The model a repair calls. LLMUtilityAI: else its `jsonFixerModelId`, else its `defaultModelId`. */
   llmModelIdForFix?: string;
-  /** Provider ID for the LLM fixer. */
+  /** The provider a repair calls. LLMUtilityAI: else its `defaultProviderId`. */
   llmProviderIdForFix?: string;
   /**
-   * Optional JSON schema to validate the parsed object against.
-   * If validation fails, the method may return null or attempt to fix again.
+   * Optional JSON schema to validate the parsed object against. LLMUtilityAI sends a value that fails it for repair
+   * as it sends a text that does not parse, and answers `null` when no repair passes it.
    */
   targetSchema?: JSONSchemaObject; // Using the type from ITool.ts for consistency
-  /** Max repair attempts with LLM if schema validation fails. */
+  /**
+   * LLMUtilityAI: how many repairs to try, each on the text the last one answered, while a repair does not parse or
+   * fails `targetSchema`. 1 unless given.
+   */
   maxRepairAttempts?: number;
 }
 

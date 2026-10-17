@@ -285,9 +285,11 @@ export class RerankerService {
           continue;
         }
 
+        // A stage without a model leaves modelId unset, so rerank() takes the provider's defaultModelId from the
+        // settings, else the service's, else the provider's own.
         current = await this.rerankChunks(query, current, {
           providerId: stage.provider,
-          modelId: stage.model ?? '',
+          modelId: stage.model,
           topN: stage.topK,
         });
         stagesRun.push(stage.provider);

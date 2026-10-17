@@ -180,6 +180,9 @@ export interface RerankChainStage {
   provider: string;
   /** Max results to keep after this stage. */
   topK: number;
-  /** Optional model override for this stage. */
+  /**
+   * The model this stage asks for. Unset, the stage takes the provider's `defaultModelId` from the service's
+   * provider settings, else the service's `defaultModelId`, else the provider's own default.
+   */
   model?: string;
 }

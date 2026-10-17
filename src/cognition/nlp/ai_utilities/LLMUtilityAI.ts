@@ -56,8 +56,13 @@ export interface LLMUtilityAIConfig extends UtilityAIConfigBase {
   keywordModelId?: string;
   sentimentModelId?: string;
   languageDetectionModelId?: string;
-  jsonFixerModelId?: string; // Model good at fixing/understanding JSON
+  /**
+   * The model a direct `parseJsonSafe()` call repairs with when it names no `llmModelIdForFix`. The task methods
+   * (classifyText, analyzeSentiment and the others) repair a reply on the model and provider the call ran on.
+   */
+  jsonFixerModelId?: string;
   semanticSimilarityModelId?: string;
+  /** The model normalizeText() calls, in any language; `defaultModelId` unless given. */
   textNormalizationModelId?: string;
   readabilityEstimationModelId?: string;
 }
@@ -91,6 +96,37 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
     if (!this.isInitialized) {
       throw new GMIError(`${this.utilityId} not initialized. Call initialize() first.`, GMIErrorCode.NOT_INITIALIZED);
     }
+  }
+
+  /**
+   * The provider a task call names: its `providerId`, else `methodOptions.providerId`. Undefined leaves the choice to
+   * {@link getModelAndProvider}: `defaultProviderId`, else the part of the model id before a slash.
+   */
+  private static callProviderId(options?: { providerId?: string; methodOptions?: Record<string, any> }): string | undefined {
+    const fromMethodOptions = options?.methodOptions?.providerId;
+    return options?.providerId || (typeof fromMethodOptions === 'string' && fromMethodOptions ? fromMethodOptions : undefined);
+  }
+
+  /**
+   * Makes a task call that answers JSON and parses the reply. A reply that does not parse is sent back once for repair
+   * to the model and provider the call ran on, so the repair never lands on a provider that does not serve the model.
+   */
+  private async callForJson<T>(
+    prompt: string,
+    systemPrompt: string,
+    taskHint: string,
+    modelId: string | undefined,
+    providerId: string | undefined,
+    completionOptions: Partial<ModelCompletionOptions> & Record<string, any>,
+  ): Promise<{ responseText: string; parsed: T | null }> {
+    const target = this.getModelAndProvider(modelId, providerId);
+    const responseText = await this.makeLLMCall(prompt, systemPrompt, taskHint, target.modelId, target.providerId, completionOptions);
+    const parsed = await this.parseJsonSafe<T>(responseText, {
+      attemptFixWithLLM: true,
+      llmModelIdForFix: target.modelId,
+      llmProviderIdForFix: target.providerId,
+    });
+    return { responseText, parsed };
   }
 
   private getModelAndProvider(taskSpecificModelId?: string, taskSpecificProviderId?: string): {modelId: string, providerId: string} {
@@ -175,6 +211,7 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
   }
 
   public async summarize(textToSummarize: string, options?: SummarizationOptions): Promise<string> {
+    this.ensureInitialized();
     const method = options?.method || 'abstractive_llm';
     if (method !== 'abstractive_llm' && method !== 'key_points_llm') {
       throw new GMIError(`LLMUtilityAI only supports 'abstractive_llm' or 'key_points_llm' for summarization. Requested: ${method}`, GMIErrorCode.NOT_SUPPORTED);
@@ -196,11 +233,17 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
       systemPrompt,
       'summarization',
       options?.modelId || this.config.summarizationModelId,
-      options?.methodOptions?.providerId, // Allow provider override for summarization
+      LLMUtilityAI.callProviderId(options),
       { maxTokens: (typeof options?.desiredLength === 'number' && options.desiredLength > 100) ? Math.floor(options.desiredLength * 0.75) : 500 , ...options?.methodOptions }
     );
   }
 
+  /**
+   * `JSON.parse`, then a check against `targetSchema` with Ajv when given. With `attemptFixWithLLM`, a text that fails
+   * either is sent for repair, up to `maxRepairAttempts` times (1 unless given), each repair on the text the last one
+   * answered, on `llmModelIdForFix` (else `jsonFixerModelId`, else `defaultModelId`) and `llmProviderIdForFix` (else
+   * `defaultProviderId`). Answers `null` when no repair parses and passes the schema, or a repair call fails.
+   */
   public async parseJsonSafe<T = any>(jsonString: string, options?: ParseJsonOptions<T>): Promise<T | null> {
     this.ensureInitialized();
     try {
@@ -217,36 +260,44 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
     } catch {
       if (options?.attemptFixWithLLM) {
         console.warn(`LLMUtilityAI (${this.utilityId}): Standard JSON parsing failed for input (length ${jsonString.length}). Attempting LLM fix.`);
-        try {
-          const fixPrompt = `The following text is supposed to be a valid JSON object but failed to parse. Please correct it and return ONLY the valid JSON object. If it's unrecoverable or not JSON, return an empty JSON object {}. Text to fix:\n\n${jsonString.substring(0, 2000)}`; // Limit length of potentially broken JSON
-          const fixedJsonString = await this.makeLLMCall(
-            fixPrompt,
-            "You are an expert JSON correction assistant. Output only valid JSON.",
-            'json_fix',
-            options.llmModelIdForFix || this.config.jsonFixerModelId,
-            options.llmProviderIdForFix,
-            { temperature: 0.0, maxTokens: Math.min(4000, Math.max(500, jsonString.length * 2)) } // Give enough tokens for fixed output
-          );
+        const attempts = Math.max(1, Math.floor(Number(options.maxRepairAttempts) || 1));
+        let textToFix = jsonString;
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+          let fixedJsonString: string;
           try {
-            const reparsed = JSON.parse(fixedJsonString);
-             if (options?.targetSchema) {
-                const validate = this.ajv.compile(options.targetSchema) as AjvValidateFn;
-                if (!validate(reparsed)) {
-                  const validationErrors = Array.isArray(validate.errors) ? validate.errors : [];
-                  console.warn(`LLMUtilityAI (${this.utilityId}): LLM-fixed JSON failed schema validation.`, validationErrors);
-                  // Optionally try more repair attempts if options.maxRepairAttempts > 0
-                  return null;
-                }
-            }
-            return reparsed as T;
-          } catch {
-            console.error(`LLMUtilityAI (${this.utilityId}): Failed to parse LLM-fixed JSON string.`, { textLength: fixedJsonString.length });
+            const fixPrompt = `The following text is supposed to be a valid JSON object but failed to parse. Please correct it and return ONLY the valid JSON object. If it's unrecoverable or not JSON, return an empty JSON object {}. Text to fix:\n\n${textToFix.substring(0, 2000)}`; // Limit length of potentially broken JSON
+            fixedJsonString = await this.makeLLMCall(
+              fixPrompt,
+              "You are an expert JSON correction assistant. Output only valid JSON.",
+              'json_fix',
+              options.llmModelIdForFix || this.config.jsonFixerModelId,
+              options.llmProviderIdForFix,
+              { temperature: 0.0, maxTokens: Math.min(4000, Math.max(500, textToFix.length * 2)) } // Give enough tokens for fixed output
+            );
+          } catch (fixLlmError: any) {
+            console.error(`LLMUtilityAI (${this.utilityId}): LLM call to fix JSON failed: ${fixLlmError.message}`);
             return null;
           }
-        } catch (fixLlmError: any) {
-          console.error(`LLMUtilityAI (${this.utilityId}): LLM call to fix JSON failed: ${fixLlmError.message}`);
-          return null;
+          let reparsed: unknown;
+          try {
+            reparsed = JSON.parse(fixedJsonString);
+          } catch {
+            console.error(`LLMUtilityAI (${this.utilityId}): Failed to parse LLM-fixed JSON string.`, { textLength: fixedJsonString.length });
+            textToFix = fixedJsonString;
+            continue;
+          }
+          if (options.targetSchema) {
+            const validate = this.ajv.compile(options.targetSchema) as AjvValidateFn;
+            if (!validate(reparsed)) {
+              const validationErrors = Array.isArray(validate.errors) ? validate.errors : [];
+              console.warn(`LLMUtilityAI (${this.utilityId}): LLM-fixed JSON failed schema validation.`, validationErrors);
+              textToFix = fixedJsonString;
+              continue;
+            }
+          }
+          return reparsed as T;
         }
+        return null;
       }
       console.log(`LLMUtilityAI (${this.utilityId}): JSON parsing failed and LLM fix not attempted or failed.`, { textLength: jsonString.length });
       return null;
@@ -259,16 +310,14 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
     const systemPrompt = `Classify the following text into one or more of these classes: [${options.candidateClasses.join(', ')}].
 Respond with ONLY a JSON object with "bestClass" (string or array of strings if multiLabel=${!!options.multiLabel}), "confidence" (float 0-1, or array of floats for multiLabel), and optionally "allScores" (array of {classLabel: string, score: float}).`;
 
-    const responseText = await this.makeLLMCall(
+    const { responseText, parsed } = await this.callForJson<Partial<ClassificationResult>>(
       textToClassify,
       systemPrompt,
       'classification',
       options.modelId || this.config.classificationModelId,
-      options.methodOptions?.providerId,
+      LLMUtilityAI.callProviderId(options),
       { temperature: 0.2, responseFormat: { type: "json_object" }, ...options.methodOptions }
     );
-
-    const parsed = await this.parseJsonSafe<Partial<ClassificationResult>>(responseText, { attemptFixWithLLM: true, llmModelIdForFix: this.config.jsonFixerModelId});
     if (!parsed || !parsed.bestClass || parsed.confidence === undefined) {
       throw new GMIError("Failed to parse valid classification from LLM response.", GMIErrorCode.PARSING_ERROR, { responseText });
     }
@@ -287,23 +336,25 @@ Respond with ONLY a JSON object with "bestClass" (string or array of strings if 
   public async extractKeywords(textToAnalyze: string, options?: KeywordExtractionOptions): Promise<string[]> {
     this.ensureInitialized();
     const maxKeywords = options?.maxKeywords || 5;
+    // The json_object response format makes a provider answer an object, so the list travels under a key.
     const systemPrompt = `Extract the top ${maxKeywords} most important keywords or keyphrases (each phrase 1-4 words long) from the following text.
-Respond with ONLY a JSON array of strings, e.g., ["keyword1", "keyphrase two"].`;
+Respond with ONLY a JSON object with one key, "keywords", whose value is an array of strings, e.g., {"keywords": ["keyword1", "keyphrase two"]}.`;
 
-    const responseText = await this.makeLLMCall(
+    const { responseText, parsed } = await this.callForJson<{ keywords?: unknown } | unknown[]>(
       textToAnalyze,
       systemPrompt,
       'keyword_extraction',
       options?.modelId || this.config.keywordModelId,
-      options?.methodOptions?.providerId,
+      LLMUtilityAI.callProviderId(options),
       { temperature: 0.3, responseFormat: { type: "json_object" }, ...options?.methodOptions }
     );
-    const parsed = await this.parseJsonSafe<string[]>(responseText, { attemptFixWithLLM: true, llmModelIdForFix: this.config.jsonFixerModelId });
-    if (!parsed || !Array.isArray(parsed)) {
+    // A bare array is read too, for a provider that does not hold to the response format.
+    const list = Array.isArray(parsed) ? parsed : parsed?.keywords;
+    if (!Array.isArray(list)) {
       console.warn('LLMUtilityAI: Keyword extraction did not return a valid array, returning empty.', { textLength: responseText.length });
       return [];
     }
-    return parsed.slice(0, maxKeywords);
+    return list.filter((keyword): keyword is string => typeof keyword === 'string').slice(0, maxKeywords);
   }
 
   public async analyzeSentiment(text: string, options?: SentimentAnalysisOptions): Promise<SentimentResult> {
@@ -311,15 +362,14 @@ Respond with ONLY a JSON array of strings, e.g., ["keyword1", "keyphrase two"].`
     const systemPrompt = `Analyze the sentiment of the following text.
 Respond with ONLY a JSON object containing "score" (float, -1.0 to 1.0, where -1 is very negative, 1 is very positive), "polarity" ("positive", "negative", or "neutral"), and optionally "intensity" (float 0-1). Provide "positiveTokens" and "negativeTokens" as arrays of strings if identifiable.`;
 
-    const responseText = await this.makeLLMCall(
+    const { responseText, parsed } = await this.callForJson<Partial<SentimentResult>>(
       text,
       systemPrompt,
       'sentiment_analysis',
       options?.modelId || this.config.sentimentModelId,
-      options?.methodOptions?.providerId,
+      LLMUtilityAI.callProviderId(options),
       { temperature: 0.3, responseFormat: { type: "json_object" }, ...options?.methodOptions }
     );
-    const parsed = await this.parseJsonSafe<Partial<SentimentResult>>(responseText, { attemptFixWithLLM: true, llmModelIdForFix: this.config.jsonFixerModelId });
     if (!parsed || parsed.score === undefined || !parsed.polarity) {
         throw new GMIError("Failed to parse valid sentiment from LLM response.", GMIErrorCode.PARSING_ERROR, { responseText });
     }
@@ -337,23 +387,30 @@ Respond with ONLY a JSON object containing "score" (float, -1.0 to 1.0, where -1
   public async detectLanguage(text: string, options?: LanguageDetectionOptions): Promise<LanguageDetectionResult[]> {
     this.ensureInitialized();
     const maxCandidates = options?.maxCandidates || 1;
+    // The json_object response format makes a provider answer an object, so the list travels under a key.
     const systemPrompt = `Detect the language of the following text.
-Respond with ONLY a JSON array of objects, each with "language" (BCP-47 code like "en-US", "es", "zh-CN") and "confidence" (float 0-1), sorted by confidence. Limit to ${maxCandidates} result(s). If unsure, return an empty array or a guess with low confidence.`;
+Respond with ONLY a JSON object with one key, "languages", whose value is an array of objects, each with "language" (BCP-47 code like "en-US", "es", "zh-CN") and "confidence" (float 0-1), sorted by confidence, e.g., {"languages": [{"language": "en", "confidence": 0.98}]}. Limit to ${maxCandidates} result(s). If unsure, return an empty array or a guess with low confidence.`;
 
-    const responseText = await this.makeLLMCall(
+    const { responseText, parsed } = await this.callForJson<{ languages?: unknown } | unknown[]>(
       text.substring(0, 1000), // Send a decent sample for detection
       systemPrompt,
       'language_detection',
       options?.modelId || this.config.languageDetectionModelId,
-      options?.methodOptions?.providerId,
+      LLMUtilityAI.callProviderId(options),
       { temperature: 0.1, responseFormat: { type: "json_object" }, ...options?.methodOptions }
     );
-    const parsed = await this.parseJsonSafe<LanguageDetectionResult[]>(responseText, { attemptFixWithLLM: true, llmModelIdForFix: this.config.jsonFixerModelId });
-    if (!parsed || !Array.isArray(parsed)) {
+    // A bare array is read too, for a provider that does not hold to the response format.
+    const list = Array.isArray(parsed) ? parsed : parsed?.languages;
+    if (!Array.isArray(list)) {
         console.warn('LLMUtilityAI: Language detection did not return valid array, returning unknown.', { textLength: responseText.length });
         return [{ language: 'und', confidence: 0.1 }]; // 'und' for undetermined
     }
-    return parsed.slice(0, maxCandidates);
+    // An entry without a language code, or with a confidence that is not a number, is passed over.
+    return list
+      .map((entry) => ({ language: entry?.language, confidence: Number(entry?.confidence) }))
+      .filter((entry): entry is LanguageDetectionResult =>
+        typeof entry.language === 'string' && entry.language !== '' && Number.isFinite(entry.confidence))
+      .slice(0, maxCandidates);
   }
 
   // --- Methods typically better suited for statistical approaches or basic JS ---
@@ -403,7 +460,7 @@ Respond with ONLY a JSON array of objects, each with "language" (BCP-47 code lik
 Respond with ONLY a JSON object: {"similarityScore": float_value_between_0_and_1}.`;
     const combinedText = `Text 1: ${text1}\n\nText 2: ${text2}`;
 
-    const responseText = await this.makeLLMCall(
+    const { responseText, parsed } = await this.callForJson<{similarityScore: number}>(
         combinedText,
         systemPrompt,
         'semantic_similarity',
@@ -411,7 +468,6 @@ Respond with ONLY a JSON object: {"similarityScore": float_value_between_0_and_1
         options?.llmProviderId,
         {temperature: 0.1, responseFormat: { type: "json_object" } }
     );
-    const parsed = await this.parseJsonSafe<{similarityScore: number}>(responseText, { attemptFixWithLLM: true, llmModelIdForFix: this.config.jsonFixerModelId});
     if (parsed && typeof parsed.similarityScore === 'number') {
         return Math.max(0, Math.min(1, parsed.similarityScore)); // Clamp to 0-1
     }
@@ -436,8 +492,8 @@ Respond with ONLY a JSON object: {"similarityScore": float_value_between_0_and_1
         text,
         systemPrompt,
         'text_normalization',
-        options?.language === 'en' ? (this.config.textNormalizationModelId || this.config.defaultModelId) : options?.language ? undefined : this.config.defaultModelId, // Use general model or allow specific
-        undefined, // Provider
+        this.config.textNormalizationModelId, // Else defaultModelId, in any language
+        undefined, // Provider: defaultProviderId
         {temperature: 0.0}
     );
   }
@@ -468,7 +524,7 @@ Respond with ONLY a JSON object: {"similarityScore": float_value_between_0_and_1
 Respond with ONLY a JSON object with "score" (float, the estimated score), "interpretation" (string, a brief explanation of what the score means), and optionally "gradeLevel" (string, e.g., "Approx. Grade 8").
 Text: "${text.substring(0, 1500)}..."`; // Send a substantial sample
 
-    const responseText = await this.makeLLMCall(
+    const { responseText, parsed } = await this.callForJson<Partial<ReadabilityResult>>(
         text, // Full text for estimation
         systemPrompt,
         'readability_estimation',
@@ -476,7 +532,6 @@ Text: "${text.substring(0, 1500)}..."`; // Send a substantial sample
         undefined,
         { temperature: 0.1, responseFormat: { type: "json_object" } }
     );
-    const parsed = await this.parseJsonSafe<Partial<ReadabilityResult>>(responseText, { attemptFixWithLLM: true, llmModelIdForFix: this.config.jsonFixerModelId });
     if (parsed && parsed.score !== undefined) {
       return {
         score: Number(parsed.score),
