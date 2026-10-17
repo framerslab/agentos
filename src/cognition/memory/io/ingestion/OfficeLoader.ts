@@ -98,16 +98,22 @@ export interface OfficeLoaderOptions {
    */
   maxInflatedBytes?: number;
   /**
-   * The most XML elements read from a document's parts. A workbook's sheets
-   * are read without building elements, and their cells count toward
-   * `maxTableCells` alone. officeparser's own default when left out.
+   * The most XML elements read from a document's parts, an EPUB's chapters
+   * included. An `.xlsx` workbook's sheets are read without building
+   * elements, and their cells count toward `maxTableCells` alone; an `.ods`
+   * file's sheets are XML, and count toward both. officeparser's own default
+   * when left out.
    */
   maxXmlElements?: number;
   /**
-   * The most table cells a document may hold. officeparser allows a document
-   * one more cell for each byte of its file; the loader takes that allowance
-   * out of the limit it passes, so this is the bound itself. officeparser's
-   * own default, with its allowance, when left out.
+   * The most cells an `.xlsx` workbook's sheets, and an OpenDocument file's
+   * sheets and tables, may hold. officeparser counts no other format's
+   * cells: a `.pptx` or `.epub` table's cells are XML elements, which
+   * `maxXmlElements` bounds, and none of the loader's three bounds counts an
+   * `.rtf` file's. officeparser allows a document one more cell for each
+   * byte of its file; the loader takes that allowance out of the limit it
+   * passes, so this is the bound itself. officeparser's own default, with
+   * its allowance, when left out.
    */
   maxTableCells?: number;
   /** Pages of a scanned PDF read by OCR, from the first: a whole number; 0 refuses a PDF. Default 0. */
