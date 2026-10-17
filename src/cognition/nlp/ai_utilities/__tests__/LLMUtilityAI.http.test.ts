@@ -233,6 +233,32 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(await utility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true, targetSchema: schema })).toBeNull();
     expect(received).toHaveLength(5);
   });
+
+  it('reads a maxRepairAttempts that is not a whole number of 1 or more, Infinity included, as 1', async () => {
+    for (const maxRepairAttempts of [Number.POSITIVE_INFINITY, Number.NaN, 0, -2]) {
+      replies = ['still not json', 'still not json'];
+      expect(await utility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true, maxRepairAttempts })).toBeNull();
+    }
+    // One repair call each.
+    expect(received).toHaveLength(4);
+  });
+
+  it('names the schema, and the errors of a value that failed it, in the repair it asks for', async () => {
+    const userText = (request: ChatRequest) => request.body.messages.find((message) => message.role === 'user')?.content ?? '';
+    const schema = { type: 'object', required: ['ok'] };
+    replies = ['{"ok": true}'];
+    expect(await utility.parseJsonSafe('{"other": 1}', { attemptFixWithLLM: true, targetSchema: schema })).toEqual({ ok: true });
+    expect(received).toHaveLength(1);
+    expect(userText(received[0])).toContain('"required":["ok"]');
+    expect(userText(received[0])).toContain("must have required property 'ok'");
+
+    // A text that does not parse is sent with the schema too; with no schema, the prompt names none.
+    replies = ['{"ok": true}', '{"ok": true}'];
+    expect(await utility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true, targetSchema: schema })).toEqual({ ok: true });
+    expect(userText(received[1])).toContain('"required":["ok"]');
+    expect(await utility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true })).toEqual({ ok: true });
+    expect(userText(received[2])).not.toContain('Schema');
+  });
 });
 
 describe('LLMUtilityAI before initialize()', () => {

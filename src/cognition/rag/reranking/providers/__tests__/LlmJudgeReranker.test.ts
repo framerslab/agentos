@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { LlmJudgeReranker } from '../LlmJudgeReranker.js';
+import { RerankerService } from '../../RerankerService.js';
 import type { RerankerInput, RerankerRequestConfig } from '../../IRerankerService.js';
 
 function makeInput(n: number): RerankerInput {
@@ -115,4 +116,31 @@ describe('LlmJudgeReranker results', () => {
     // The scoring call never answered, so both passages scored 0; the ranking call answered.
     expect(ids(results)).toEqual(['doc-1', 'doc-0']);
   }, 5000);
+});
+
+describe('LlmJudgeReranker through RerankerService', () => {
+  const ids = (results: Array<{ id: string }>) => results.map((result) => result.id);
+
+  /** A judge whose scoring call never answers and whose ranking call orders doc-1 before doc-0. */
+  function stalledJudge(timeoutMs: number): LlmJudgeReranker {
+    const llmCallFn = vi.fn()
+      .mockReturnValueOnce(new Promise<string>(() => {}))
+      .mockResolvedValueOnce('["doc-1", "doc-0"]');
+    return new LlmJudgeReranker({ llmCallFn, timeoutMs });
+  }
+
+  it("waits for the judge's own timeoutMs when neither the call nor the provider's settings name one", async () => {
+    const service = new RerankerService({ config: { providers: [] } });
+    service.registerProvider(stalledJudge(50));
+    const { results } = await service.rerank(makeInput(2), { providerId: 'llm-judge' });
+    // The scoring call was given up after the judge's 50 ms, not a default of the service.
+    expect(ids(results)).toEqual(['doc-1', 'doc-0']);
+  }, 2000);
+
+  it("takes the provider settings' defaultTimeoutMs before the judge's own", async () => {
+    const service = new RerankerService({ config: { providers: [{ providerId: 'llm-judge', defaultTimeoutMs: 50 }] } });
+    service.registerProvider(stalledJudge(60_000));
+    const { results } = await service.rerank(makeInput(2), { providerId: 'llm-judge' });
+    expect(ids(results)).toEqual(['doc-1', 'doc-0']);
+  }, 2000);
 });
