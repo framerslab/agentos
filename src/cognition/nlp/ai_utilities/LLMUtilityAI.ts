@@ -55,6 +55,12 @@ function replyNumber(value: unknown): number {
   return typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN;
 }
 
+/** The fewest tokens a summary's reply is held to, and the most; `methodOptions.maxTokens` comes before both. */
+const SUMMARY_TOKENS_MIN = 500;
+const SUMMARY_TOKENS_MAX = 4000;
+/** The tokens a summary asked for as a count of sentences gets for each sentence. */
+const SUMMARY_TOKENS_PER_SENTENCE = 60;
+
 /** A number held to `min` to `max`. */
 function within(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -273,24 +279,35 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
       throw new GMIError(`LLMUtilityAI only supports 'abstractive_llm' or 'key_points_llm' for summarization. Requested: ${method}`, GMIErrorCode.NOT_SUPPORTED);
     }
 
-    let lengthInstruction = "medium length";
-    if (options?.desiredLength === 'short') lengthInstruction = "a very short, concise summary (1-2 sentences)";
-    else if (options?.desiredLength === 'long') lengthInstruction = "a detailed, longer summary (multiple paragraphs if needed)";
-    else if (typeof options?.desiredLength === 'number') {
-        if (options.desiredLength <=1 && options.desiredLength > 0) lengthInstruction = `a summary that is approximately ${Math.round(options.desiredLength * 100)}% of the original length`;
-        else if (options.desiredLength > 1) lengthInstruction = `a summary of about ${options.desiredLength} sentences`;
+    // A number above 0 up to 1 is a share of the text's length, and a larger number a count of sentences.
+    const desiredLength = options?.desiredLength;
+    let lengthInstruction = "a summary of medium length";
+    if (desiredLength === 'short') lengthInstruction = "a very short, concise summary (1-2 sentences)";
+    else if (desiredLength === 'long') lengthInstruction = "a detailed, longer summary (multiple paragraphs if needed)";
+    else if (typeof desiredLength === 'number') {
+        if (desiredLength <=1 && desiredLength > 0) lengthInstruction = `a summary about ${Math.round(desiredLength * 100)}% of the original length`;
+        else if (desiredLength > 1) lengthInstruction = `a summary of about ${desiredLength} sentences`;
     }
 
-    const styleInstruction = method === 'key_points_llm' ? "as a list of key bullet points" : "in a paragraph_format";
-    const systemPrompt = `Summarize the following text to a ${lengthInstruction}, formatted ${styleInstruction}. Focus on the main ideas and key information.`;
+    const styleInstruction = method === 'key_points_llm' ? "as a list of key bullet points" : "as prose";
+    const systemPrompt = `Summarize the following text as ${lengthInstruction}, written ${styleInstruction}. Focus on the main ideas and key information.`;
+    const textSent = textToSummarize.substring(0, options?.maxInputLength || 8000); // Limit input for safety
 
+    // Room for the length asked: SUMMARY_TOKENS_PER_SENTENCE tokens a sentence for a count, a token a character of the
+    // text sent for a share, held to SUMMARY_TOKENS_MIN to SUMMARY_TOKENS_MAX, so a longer summary never gets less room.
+    const room =
+      typeof desiredLength !== 'number' || !(desiredLength > 0)
+        ? 0
+        : desiredLength <= 1
+          ? Math.ceil(desiredLength * textSent.length)
+          : Math.ceil(desiredLength * SUMMARY_TOKENS_PER_SENTENCE);
     return this.makeLLMCall(
-      textToSummarize.substring(0, options?.maxInputLength || 8000), // Limit input for safety
+      textSent,
       systemPrompt,
       'summarization',
       options?.modelId || this.config.summarizationModelId,
       LLMUtilityAI.callProviderId(options),
-      { maxTokens: (typeof options?.desiredLength === 'number' && options.desiredLength > 100) ? Math.floor(options.desiredLength * 0.75) : 500 , ...options?.methodOptions }
+      { maxTokens: Math.min(SUMMARY_TOKENS_MAX, Math.max(SUMMARY_TOKENS_MIN, room)), ...options?.methodOptions }
     );
   }
 

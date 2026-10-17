@@ -26,7 +26,7 @@ export interface UtilityAIConfigBase {
 // --- Summarization Types ---
 /** Options for text summarization. */
 export interface SummarizationOptions {
-  desiredLength?: 'short' | 'medium' | 'long' | number; // number as % (0-1) or target sentences/tokens (>1)
+  desiredLength?: 'short' | 'medium' | 'long' | number; // A number of 1 or less is a share of the text's length, a larger one a count of sentences
   method?: 'extractive_sentence_rank' | 'first_n_sentences' | 'abstractive_llm' | 'key_points_llm' | string; // Allow custom methods
   modelId?: string; // For LLM-based methods
   providerId?: string; // For LLM-based methods
@@ -95,8 +95,12 @@ export interface SimilarityOptions {
 
 // --- Sentiment Analysis Types ---
 export interface SentimentAnalysisOptions {
+  /**
+   * Read by HybridUtilityAI alone, which sends `'llm'` to its LLM-backed class and `'lexicon_based'` to its
+   * statistical class. LLMUtilityAI asks a provider and StatisticalUtilityAI scores with a lexicon, whatever it names.
+   */
   method?: 'lexicon_based' | 'llm' | 'trained_classifier' | string;
-  modelId?: string; // For LLM or trained classifier
+  modelId?: string; // LLMUtilityAI's, else its sentimentModelId, else its defaultModelId
   /** The provider LLMUtilityAI calls: this, else `methodOptions.providerId`, else its `defaultProviderId`. */
   providerId?: string;
   /**

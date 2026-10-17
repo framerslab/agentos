@@ -2263,14 +2263,24 @@ export class GMI implements IGMI {
       // Summarization is an explicit opt-in; ingestion can be cheap even when enabled.
       const summarizationEnabled = ingestionProcessingConfig?.summarization?.enabled === true;
       if (this.utilityAI && summarizationEnabled) {
+        const configuredMethod = ingestionProcessingConfig?.summarization?.method;
         const summarizationOptions: SummarizationOptions = {
           desiredLength: ingestionProcessingConfig?.summarization?.targetLength || 'short',
-          method: ingestionProcessingConfig?.summarization?.method || 'abstractive_llm',
+          // The persona's 'extractive' is the statistical class's extractive method.
+          method: configuredMethod === 'extractive' ? 'extractive_sentence_rank' : configuredMethod || 'abstractive_llm',
           modelId: ingestionProcessingConfig?.summarization?.modelId || this.activePersona.defaultModelId || this.config.defaultLlmModelId,
           providerId: ingestionProcessingConfig?.summarization?.providerId || this.activePersona.defaultProviderId || this.config.defaultLlmProviderId,
         };
         this.addTraceEntry(ReasoningEntryType.RAG_INGESTION_DETAIL, "Summarizing turn for RAG ingestion.", { textLength: textToSummarize.length, options: summarizationOptions });
-        documentContent = await this.utilityAI.summarize(textToSummarize, summarizationOptions);
+        try {
+          documentContent = await this.utilityAI.summarize(textToSummarize, summarizationOptions);
+        } catch (summaryError: any) {
+          // The summary only shortens what is ingested: a turn whose summary fails, such as one asked of a utility class
+          // without the method, goes in as it is.
+          const reason = summaryError?.message ?? String(summaryError);
+          this.addTraceEntry(ReasoningEntryType.WARNING, "Turn summary failed; ingesting the turn as it is.", { method: summarizationOptions.method, error: reason });
+          console.warn(`GMI (ID: ${this.gmiId}): Turn summary failed (${reason}); ingesting the turn as it is.`);
+        }
       }
       
       const turnIdForMetadata = this.reasoningTrace.turnId || "unknown_turn"; // Handle undefined turnId

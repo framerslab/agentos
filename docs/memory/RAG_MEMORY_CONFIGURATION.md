@@ -431,7 +431,7 @@ Minimal example (persona JSON):
 
 ### Ingestion summarization is opt-in
 
-Turn-summary ingestion stores the raw turn text. An LLM summary replaces it only when:
+Turn-summary ingestion stores the raw turn text. A summary replaces it only when:
 
 ```json
 {
@@ -444,6 +444,8 @@ Turn-summary ingestion stores the raw turn text. An LLM summary replaces it only
   }
 }
 ```
+
+The summary is the GMI's utility class's `summarize()` with `method` (`abstractive_llm` unless given; `extractive` is `extractive_sentence_rank`, the first sentences, which `StatisticalUtilityAI` has) and `targetLength` (`short` unless given). A summary that fails, such as `abstractive_llm` asked of a `StatisticalUtilityAI`, leaves the raw turn text to be stored, with a `WARNING` in the reasoning trace.
 
 ## Manual Ingest and Retrieve
 
