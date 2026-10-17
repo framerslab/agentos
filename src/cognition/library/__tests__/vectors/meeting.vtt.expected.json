@@ -1,0 +1,21 @@
+{
+  "about": "What meeting.vtt reads into. The file is written by hand: a header after WEBVTT, a comment block, cue identifiers, times with and without hours, cue settings, voice spans with and without an end tag, a class on a voice tag, a class span, an italics span, a character reference, and one cue's text on two lines.",
+  "format": "vtt",
+  "turns": [
+    { "seq": 1, "startMs": 1000, "endMs": 4200, "text": "Good morning. Shall we start with the budget?" },
+    { "seq": 2, "startMs": 4500, "endMs": 9000, "text": "Yes. Travel is ten percent over plan." },
+    { "seq": 3, "startMs": 9400, "endMs": 13800, "text": "Can we move the offsite to May?" },
+    { "seq": 4, "startMs": 14000, "endMs": 19500, "text": "May works, and the venue holds forty people." },
+    { "seq": 5, "startMs": 20000, "endMs": 24000, "text": "Then book it. Research & design present first." },
+    { "seq": 6, "startMs": 24300, "endMs": 28900, "text": "Agreed. I will send the notes today." }
+  ],
+  "labels": [
+    { "seq": 1, "label": "Ana Silva" },
+    { "seq": 2, "label": "Leo Park" },
+    { "seq": 3, "label": "Ana Silva" },
+    { "seq": 4, "label": "Leo Park" },
+    { "seq": 5, "label": "Ana Silva" },
+    { "seq": 6, "label": "Leo Park" }
+  ],
+  "durationMs": 28900
+}

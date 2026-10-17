@@ -245,6 +245,7 @@ Provider fallback is on by default for `generateText()`, `streamText()`, `agent(
 - **[Cognitive Memory](https://docs.agentos.sh/features/cognitive-memory)**: 8 mechanisms with 30+ APA citations
 - **[RAG Configuration](https://docs.agentos.sh/features/rag-memory)**: vector stores, embeddings, sources
 - **[Document Ingestion](https://docs.agentos.sh/features/memory-document-ingestion)**: PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, HTML and Markdown read to text, with bounds on what a Word or office archive inflates to
+- **[Library Index](https://docs.agentos.sh/features/library-index)**: sources over any vector store, and a browser entry for a page's own search and records, transcript files from other notetakers (SubRip, WebVTT, Otter, Fireflies, Word) read to turns with the speakers kept apart, and the plan of an archive's entries
 - **[Text Processing & Search](https://docs.agentos.sh/text)**: tokenizers and stemming, BM25, fuzzy and hybrid search, text statistics, chunking, reranking
 - **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, fail-open and fail-closed guards
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
