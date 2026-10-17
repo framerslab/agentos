@@ -768,7 +768,8 @@ describe('GMI events from a StatisticalUtilityAI', () => {
   // GMI's SentimentTracker raises the events from that score with the default thresholds.
   async function scoreOneTurn(
     content: string,
-    languages: { utility?: string; persona?: string } = {},
+    // persona: a code names that language; null builds a persona that names none; left out keeps the base persona's 'en'.
+    languages: { utility?: string; persona?: string | null } = {},
   ): Promise<{
     events: GMIEventType[];
     trend: SentimentHistoryState['trends'][number];
@@ -779,7 +780,7 @@ describe('GMI events from a StatisticalUtilityAI', () => {
     const gmi = new GMI('test-lexicon-sentiment');
     const persona = createSentimentPersona(
       { enabled: true },
-      languages.persona ? { defaultLanguage: languages.persona } : undefined,
+      languages.persona === undefined ? undefined : { defaultLanguage: languages.persona ?? undefined },
     );
     await gmi.initialize(persona, {
       workingMemory: wm as any,
@@ -833,7 +834,7 @@ describe('GMI events from a StatisticalUtilityAI', () => {
   const spanishPraise = 'Gracias, es excelente y perfecto.';
 
   it("scores a turn in the utility class's default language when neither the user nor the persona names one", async () => {
-    const { events, trend } = await scoreOneTurn(spanishPraise, { utility: 'es' });
+    const { events, trend } = await scoreOneTurn(spanishPraise, { utility: 'es', persona: null });
     expect(trend.score).toBeGreaterThan(0.5);
     expect(events).toContain(GMIEventType.USER_SATISFIED);
   });
