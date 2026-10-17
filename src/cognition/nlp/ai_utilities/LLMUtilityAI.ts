@@ -387,16 +387,16 @@ Respond with ONLY a JSON object with "bestClass" (string or array of strings if 
       { temperature: 0.2, responseFormat: { type: "json_object" }, ...options.methodOptions }
     );
     const reply = (parsed ?? {}) as { bestClass?: unknown; confidence?: unknown; allScores?: unknown };
-    // A class is a name, or a list of names; a confidence is a number or a list of them, each held to 0 to 1.
+    // A class is a name, or a list of names that is empty when the reply names none. A confidence is a number or a
+    // list of them, each held to 0 to 1.
     const bestClass = reply.bestClass;
     const classes: unknown[] = typeof bestClass === 'string' ? [bestClass] : Array.isArray(bestClass) ? bestClass : [];
     const rawConfidence = reply.confidence;
     const confidenceList = Array.isArray(rawConfidence);
     const confidences = (Array.isArray(rawConfidence) ? rawConfidence : [rawConfidence]).map((value: unknown) => replyNumber(value));
     if (
-      classes.length === 0 ||
+      (typeof bestClass !== 'string' && !Array.isArray(bestClass)) ||
       !classes.every((name) => typeof name === 'string' && name.trim() !== '') ||
-      confidences.length === 0 ||
       !confidences.every((value) => Number.isFinite(value))
     ) {
       throw new GMIError("Failed to parse valid classification from LLM response.", GMIErrorCode.PARSING_ERROR, { responseText });
