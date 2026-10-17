@@ -257,6 +257,103 @@ describe('readTranscript', () => {
     });
   });
 
+  it('reads Otter\'s layout by its headers when a turn runs over two paragraphs, or one turn closes with Otter\'s line, so no name is read into the words', async () => {
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    const paragraphs = ['Ana Silva  0:01', 'Good morning.', 'Shall we start with the budget?', 'Leo Park  0:04', 'Yes.'];
+
+    expect(await readWordTranscript(wordFileOf(paragraphs), { extractRawText })).toEqual({
+      format: 'docx',
+      turns: [
+        { seq: 1, startMs: 1_000, endMs: null, text: 'Good morning. Shall we start with the budget?' },
+        { seq: 2, startMs: 4_000, endMs: null, text: 'Yes.' },
+      ],
+      labels: [
+        { seq: 1, label: 'Ana Silva' },
+        { seq: 2, label: 'Leo Park' },
+      ],
+      durationMs: null,
+    });
+    // The same text as a file is named Otter's.
+    const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+    expect(transcriptFormatOf('call.txt', bytes('Ana Silva  0:01\nGood morning.\nShall we start with the budget?\n\nLeo Park  0:04\nYes.\n'))).toBe('otter');
+
+    // One turn is Otter's when the text closes with Otter's line.
+    expect(transcriptFormatOf('memo.txt', bytes('Ana Silva  0:01\nA note to myself.\n\nTranscribed by https://otter.ai\n'))).toBe('otter');
+    expect(await readWordTranscript(wordFileOf(['Ana Silva  0:01', 'A note to myself.', 'Transcribed by https://otter.ai']), { extractRawText })).toMatchObject({
+      turns: [{ seq: 1, startMs: 1_000, text: 'A note to myself.' }],
+      labels: [{ seq: 1, label: 'Ana Silva' }],
+    });
+
+    // Without that line one turn is not told from other text: a caller that knows the file's source names its layout.
+    const memo = wordFileOf(['Ana Silva  0:01', 'A note to myself.']);
+    expect(await readWordTranscript(memo, { extractRawText })).toMatchObject({
+      turns: [{ text: 'Ana Silva 0:01' }, { text: 'A note to myself.' }],
+      labels: [],
+    });
+    const asOtter = { extractRawText, layout: 'otter' as const };
+    expect(await readWordTranscript(memo, asOtter)).toMatchObject({
+      turns: [{ seq: 1, startMs: 1_000, text: 'A note to myself.' }],
+      labels: [{ seq: 1, label: 'Ana Silva' }],
+    });
+    const asLines = { extractRawText, layout: 'lines' as const };
+    expect(await readWordTranscript(wordFileOf(paragraphs), asLines)).toMatchObject({ format: 'docx', labels: [] });
+  });
+
+  it('throws TranscriptReadError when the extractor throws or answers no text, and reads a Word file with no text as no turns', async () => {
+    const failure = new Error('not a Word file');
+    const thrown = await readWordTranscript(new Uint8Array([1, 2, 3]), {
+      extractRawText: async () => {
+        throw failure;
+      },
+    }).catch((error: unknown) => error);
+    expect(thrown).toBeInstanceOf(TranscriptReadError);
+    expect(thrown).toMatchObject({ format: 'docx', cause: failure });
+
+    const nothing = await readWordTranscript(new Uint8Array([1]), { extractRawText: async () => ({}) as { value: string } }).catch(
+      (error: unknown) => error,
+    );
+    expect(nothing).toBeInstanceOf(TranscriptReadError);
+    expect(nothing).toMatchObject({ format: 'docx', message: 'docx: the extractor answered no text' });
+
+    expect(await readWordTranscript(new Uint8Array([1]), { extractRawText: async () => ({ value: '' }) })).toEqual({
+      format: 'docx',
+      turns: [],
+      labels: [],
+      durationMs: null,
+    });
+  });
+
+  it('reads no time from a clock whose minutes or seconds pass 59, or whose milliseconds pass the largest safe integer', () => {
+    // A timing line with such a clock is no timing line, so its block is no cue.
+    expect(readTranscript('1\n00:00:01,000 --> 00:00:75,000\nAna Silva: One.\n', 'srt').turns).toEqual([]);
+    expect(readTranscript('WEBVTT\n\n00:61.000 --> 00:62.000\n<v Ana Silva>One.\n', 'vtt').turns).toEqual([]);
+    const huge = '9'.repeat(400);
+    expect(readTranscript(`1\n${huge}:00:00,000 --> ${huge}:00:01,000\nAna Silva: One.\n`, 'srt')).toEqual({
+      format: 'srt',
+      turns: [],
+      labels: [],
+      durationMs: null,
+    });
+
+    // Fireflies's times: a clock past 59, seconds past the largest safe integer of milliseconds, as text or as a number,
+    // give no time, and the sentence is still a turn.
+    const read = readTranscript(
+      JSON.stringify([
+        { sentence: 'One.', speaker_name: 'Ana Silva', startTime: '00:75', endTime: huge },
+        { sentence: 'Two.', speaker_name: 'Leo Park', startTime: 1e300, endTime: '01:15:32' },
+      ]),
+      'fireflies',
+    );
+    expect(read.turns).toEqual([
+      { seq: 1, startMs: null, endMs: null, text: 'One.' },
+      { seq: 2, startMs: null, endMs: 4_532_000, text: 'Two.' },
+    ]);
+    expect(read.durationMs).toBe(4_532_000);
+
+    // Otter's header with seconds past 59 is no header.
+    expect(readTranscript('Ana Silva  0:75\nOne.\n\nLeo Park  0:04\nTwo.\n', 'otter').turns).toEqual([{ seq: 1, startMs: 4_000, endMs: null, text: 'Two.' }]);
+  });
+
   it('reads cues written with no blank line before them as WebVTT\'s parser does, and SubRip\'s alike', () => {
     // A cue straight after the WEBVTT line, and the next cue straight after it.
     const vtt = readTranscript(
@@ -303,9 +400,9 @@ describe('readTranscript', () => {
 
     // Otter's text has a header before each paragraph; one line that looks like a header in other text does not make it Otter's.
     expect(transcriptFormatOf('agenda.txt', bytes('Agenda for the call\nBudget review first\nBreak  10:30\nAna Silva: hello\nLeo Park: hi'))).toBe('lines');
-    // The first bytes of a file can stop inside a line. A last line with no line feed after it is a turn's words straight
-    // after a header, so a whole short export with no line feed at its end is Otter's; after a turn's words it is not
-    // weighed, so a head cut inside a header, or inside a second line of words, is still Otter's.
+    // The first bytes of a file can stop inside a line, so a last line with no line feed after it is read as words, never
+    // as a header: a whole short export with no line feed at its end is Otter's, and so is a head cut inside a header or
+    // inside a second line of words, while a head whose second header is its cut last line holds one turn.
     const memo = 'Ana Silva  0:01\nGood morning.\n\nLeo Park  0:04\nHello.';
     expect(transcriptFormatOf('memo.txt', bytes(memo))).toBe('otter');
     expect(transcriptFormatOf('memo.txt', bytes(`${memo}\n\nAna Sil`))).toBe('otter');

@@ -125,4 +125,51 @@ describe('planEntries', () => {
     const opened = await planEntries(ENTRIES, { ...RULES, maxEntries: 9 });
     expect(opened.map((entry) => entry.reason)).toEqual([null, null, null, null, null, null, 'type', null, null, 'count', 'count', 'count', 'count', 'count']);
   });
+
+  it('skips a path on a drive, a size that is no byte count, and a nested archive past its bound without opening it', async () => {
+    const asked: string[] = [];
+    const planned = await planEntries(
+      [
+        { path: 'C:/outside.md', size: 100 },
+        { path: 'c:outside.md', size: 100 },
+        { path: 'notes/Unknown.md', size: Number.NaN },
+        { path: 'notes/Negative.md', size: -1 },
+        { path: 'notes/Endless.md', size: Number.POSITIVE_INFINITY },
+        { path: 'big.zip', size: 10 * MB + 1 },
+        { path: 'nested.zip', size: 10 * MB },
+        { path: 'notes/Kept.md', size: 100 },
+      ],
+      {
+        ...RULES,
+        openArchive: async (path) => {
+          asked.push(path);
+          return [{ path: 'Inner.md', size: 500 }];
+        },
+      },
+    );
+
+    expect(planned.map((entry) => [entry.path, entry.within, entry.becomes, entry.reason])).toEqual([
+      ['C:/outside.md', null, 'skipped', 'path'],
+      ['c:outside.md', null, 'skipped', 'path'],
+      ['notes/Unknown.md', null, 'skipped', 'size'],
+      ['notes/Negative.md', null, 'skipped', 'size'],
+      ['notes/Endless.md', null, 'skipped', 'size'],
+      // A nested archive is bounded by maxBytes('archive') before it is opened, and one within the bound is opened.
+      ['big.zip', null, 'skipped', 'size'],
+      ['Inner.md', 'nested.zip', 'document', null],
+      ['notes/Kept.md', null, 'document', null],
+    ]);
+    expect(asked).toEqual(['nested.zip']);
+  });
+
+  it('refuses a count or a bound that is not a number of 0 or more', async () => {
+    await expect(planEntries(ENTRIES, { ...RULES, maxEntries: Number.NaN })).rejects.toThrow(RangeError);
+    await expect(planEntries(ENTRIES, { ...RULES, maxEntries: -1 })).rejects.toThrow(RangeError);
+    await expect(planEntries(ENTRIES, { ...RULES, maxBytes: () => Number.NaN })).rejects.toThrow(RangeError);
+    await expect(planEntries(ENTRIES, { ...RULES, maxBytes: (kind) => (kind === 'recording' ? -1 : MB) })).rejects.toThrow(RangeError);
+    // A count of 0 plans nothing, and a bound of 0 takes empty files alone.
+    expect((await planEntries(ENTRIES, { ...RULES, maxEntries: 0 })).every((entry) => entry.reason === 'count')).toBe(true);
+    const empty = await planEntries([{ path: 'a.md', size: 0 }, { path: 'b.md', size: 1 }], { ...RULES, maxBytes: () => 0 });
+    expect(empty.map((entry) => entry.reason)).toEqual([null, 'size']);
+  });
 });
