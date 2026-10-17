@@ -18,6 +18,8 @@
  * - `health()` and a Markdown export cover the brain's own rows;
  * - a SQLite export holds the brain's own rows, and an import of a SQLite
  *   file that holds several brains is refused;
+ * - a SQLite import that merges a tag into a trace the brain holds leaves the
+ *   trace found by that tag;
  * - an Obsidian export links the brain's own knowledge-graph nodes, though
  *   node ids repeat across brains;
  * - on Postgres, a brain's full-text rebuild re-indexes its own rows;
@@ -431,6 +433,25 @@ describe.each([
     } finally {
       await file.close();
     }
+  });
+
+  it.skipIf(skip)('finds a trace by a tag a SQLite import merged into it', async () => {
+    const { a } = await open();
+    const text = 'We took the night train along the coast';
+    const held = await a.remember(text, { tags: ['travel'] });
+    // Another brain's SQLite export holds the same text, tagged 'vacation'.
+    const source = await openSqlite(path.join(newDir('agentos-brain-tags-'), 'source.sqlite'), 'brain-source');
+    await source.remember(text, { tags: ['vacation'] });
+    const file = path.join(newDir('agentos-brain-tags-export-'), 'source.sqlite');
+    await source.export(file, { format: 'sqlite' });
+
+    const result = await a.importFrom(file, { format: 'sqlite' });
+
+    // The record is a duplicate of the trace the brain holds: its tag is merged into that trace, and the
+    // full-text index covers the tags.
+    expect(result).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+    expect(await searchIds(brainOf(a), 'vacation')).toEqual([held.id]);
+    expect(await searchIds(brainOf(a), 'travel')).toEqual([held.id]);
   });
 });
 
