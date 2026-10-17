@@ -10,7 +10,7 @@
 //   - the same document read in a worker thread with loadIsolated, as for a file from someone
 //     you do not know, under a heap cap and a deadline made for that read
 //   - a read cancelled by its own signal, while the loader reads on
-//   - a document past a bound refused with DocumentTooLargeError, its cause naming the bound
+//   - a document past a bound refused with DocumentTooLargeError, its message and cause naming the bound
 //   - a PDF refused with ScannedDocumentError while OCR is off (ocrPages 0, the default)
 //
 // With no file named, it writes an OpenDocument text and an EPUB book from Markdown with
@@ -104,7 +104,7 @@ if (files.length > 0) {
     throw new Error('a document of 2,000 paragraphs was read under a bound of 1,000 XML elements');
   } catch (error) {
     if (!(error instanceof DocumentTooLargeError)) throw error;
-    console.log(`refused: ${error.code}, ${error.cause.message}`);
+    console.log(`refused: ${error.code}, ${error.message} (cause: ${error.cause.message})`);
   }
 
   console.log('\n=== a PDF while OCR is off ===\n');

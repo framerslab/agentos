@@ -35,12 +35,13 @@ export interface IsolatedLoadRequest {
 
 /**
  * What the worker posts back: the loader's answer; a loader's bound by its
- * limit, with the office loader's cause naming the bound; a scan that gave no
- * text by its message and cause; or any other error by its name and message.
+ * limit and message, with the office loader's cause naming the bound; a scan
+ * that gave no text by its message and cause; or any other error by its name
+ * and message.
  */
 export type IsolatedLoadAnswer =
   | { ok: true; document: LoadedDocument }
-  | { ok: false; tooLarge: number; cause?: string }
+  | { ok: false; tooLarge: number; message?: string; cause?: string }
   | { ok: false; scanned: string; cause?: { name: string; message: string } }
   | { ok: false; name: string; message: string };
 
@@ -120,9 +121,9 @@ function loadOptionsOf(kind: IsolatedLoadKind): LoadOptions | undefined {
 }
 
 /**
- * The answer for an error the read threw: a loader's bound by its code and
- * limit, a scan that gave no text by its code (each read by its code, so no
- * other kind loads the loader that throws it to recognise it), and any other
+ * The answer for an error the read threw: a loader's bound by its code, limit
+ * and message, a scan that gave no text by its code (each read by its code, so
+ * no other kind loads the loader that throws it to recognise it), and any other
  * error by its name and message. A bound's or a scan's cause goes with it.
  *
  * @param error - What the read threw.
@@ -131,7 +132,13 @@ function failureOf(error: unknown): IsolatedLoadAnswer {
   if (typeof error === 'object' && error !== null && 'code' in error) {
     const cause = 'cause' in error ? error.cause : undefined;
     if (error.code === 'DOCUMENT_TOO_LARGE' && 'limit' in error && typeof error.limit === 'number') {
-      return { ok: false, tooLarge: error.limit, ...(cause instanceof Error ? { cause: cause.message } : {}) };
+      return {
+        ok: false,
+        tooLarge: error.limit,
+        // The office loader's message names the bound the document reached, which may not be `limit`.
+        ...(error instanceof Error ? { message: error.message } : {}),
+        ...(cause instanceof Error ? { cause: cause.message } : {}),
+      };
     }
     if (error.code === 'SCANNED_DOCUMENT' && error instanceof Error) {
       // officeparser's report of a picture OCR could not read carries what failed, an error or its text.

@@ -214,7 +214,14 @@ function isAnswer(value: unknown): value is IsolatedLoadAnswer {
   if (value.ok === true) return 'document' in value && typeof value.document === 'object' && value.document !== null;
   if (value.ok !== false) return false;
   const cause = 'cause' in value ? value.cause : undefined;
-  if ('tooLarge' in value) return typeof value.tooLarge === 'number' && (cause === undefined || typeof cause === 'string');
+  if ('tooLarge' in value) {
+    const message = 'message' in value ? value.message : undefined;
+    return (
+      typeof value.tooLarge === 'number' &&
+      (message === undefined || typeof message === 'string') &&
+      (cause === undefined || typeof cause === 'string')
+    );
+  }
   if ('scanned' in value) {
     return (
       typeof value.scanned === 'string' &&
@@ -244,8 +251,8 @@ function loaderError(name: string, message: string): Error {
 
 /**
  * How a read ends on the worker's message: its document; a loader's bound passed through as
- * {@link DocumentTooLargeError}, its cause naming the bound when the office loader named one; a scan that gave no
- * text as {@link ScannedDocumentError}, with its cause; or the loader's own error.
+ * {@link DocumentTooLargeError} with the loader's message, its cause naming the bound when the office loader named
+ * one; a scan that gave no text as {@link ScannedDocumentError}, with its cause; or the loader's own error.
  *
  * @param value - What the worker posted.
  */
@@ -253,7 +260,7 @@ function outcomeOf(value: unknown): Outcome {
   if (!isAnswer(value)) return { ok: false, error: new Error('loadIsolated: the worker answered with no document') };
   if (value.ok) return { ok: true, document: value.document };
   if ('tooLarge' in value) {
-    const error = new DocumentTooLargeError(value.tooLarge);
+    const error = new DocumentTooLargeError(value.tooLarge, value.message);
     return { ok: false, error: value.cause === undefined ? error : Object.assign(error, { cause: new Error(value.cause) }) };
   }
   if ('scanned' in value) {
@@ -377,8 +384,8 @@ function awaitRead(
  *   `'scan'` without `ocrPages` of 1 or more, or an office loader's option that loader refuses.
  * @throws {DocumentTooComplexError} When the worker reaches its heap cap, or its external memory passes `maxExternalMb`.
  * @throws {DocumentReadTimeoutError} When the read passes `timeoutMs`.
- * @throws {DocumentTooLargeError} When a Word or office file reaches its loader's bound; from the office loader, its
- *   `cause` names the bound.
+ * @throws {DocumentTooLargeError} When a Word or office file reaches its loader's bound, with the loader's message;
+ *   from the office loader, its message and `cause` name the bound.
  * @throws {ScannedDocumentError} When a scan's pages gave no text.
  * @throws The reason of `options.signal` when the caller aborts it.
  * @throws {Error} The loader's own error, with its name and message, such as `DocxLoader: not a Word archive`; and
