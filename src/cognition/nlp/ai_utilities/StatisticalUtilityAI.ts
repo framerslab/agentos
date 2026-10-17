@@ -21,8 +21,12 @@ import {
   TextNormalizationOptions, NGramOptions, ReadabilityOptions, ReadabilityResult,
 } from './IUtilityAI';
 import * as naturalModule from 'natural';
+import Ajv from 'ajv';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 import { detectLanguageTrigram } from './trigram-language-profiles';
+
+/** An Ajv check compiled from a `targetSchema`: whether a value passes, and the errors of the last value that did not. */
+type SchemaCheck = ((data: unknown) => boolean) & { errors?: unknown[] | null };
 
 /**
  * The `natural` library's runtime members.
@@ -209,6 +213,9 @@ const DEFAULT_BAYES_MODEL_ID = 'default_bayes_classifier';
  */
 const WORD = /[\p{L}\p{N}_][\p{L}\p{M}\p{N}_]*/gu;
 
+/** A word made of decimal digits, in any script: `42`, and `٤٢` in Arabic-Indic digits. */
+const DIGITS_WORD = /^\p{Nd}+$/u;
+
 /** The words of a text by {@link WORD}, read in NFC so a letter and its accent are one either way they came. */
 function wordsOf(text: string): string[] {
   return text.normalize('NFC').match(WORD) ?? [];
@@ -321,6 +328,8 @@ export class StatisticalUtilityAI implements IUtilityAI {
   private sentimentLexicons: Map<string, SentimentLexicon>;
   /** The entries of `sentimentConfig.lexiconPath`, read by `initialize()`. */
   private customSentimentEntries: Array<[string, unknown]> = [];
+  /** Checks `parseJsonSafe()`'s `targetSchema`, with the options LLMUtilityAI checks it with. */
+  private readonly ajv = new Ajv({ allErrors: true, coerceTypes: true });
 
   private createStemmerRegistry(): Record<string, naturalModule.Stemmer> {
     const registry: Record<string, naturalModule.Stemmer> = {
@@ -977,9 +986,10 @@ export class StatisticalUtilityAI implements IUtilityAI {
       const stemmer = this.getStemmer(options.stemAlgorithm, lang);
       tokens = tokens.map(token => stemmer.stem(token));
     }
-     if (options?.replaceNumbersWith !== undefined) {
+    if (options?.replaceNumbersWith !== undefined) {
         const replacement = options.replaceNumbersWith;
-        tokens = tokens.map(token => /^\d+(\.\d+)?$/.test(token) ? (replacement === null ? "" : replacement) : token).filter(t => replacement !== null || t !== "");
+        // A word of decimal digits in any script (`42`, `٤٢`); a word never holds a point, so `3.14` is two words.
+        tokens = tokens.map(token => DIGITS_WORD.test(token) ? (replacement === null ? "" : replacement) : token).filter(t => replacement !== null || t !== "");
     }
 
     normalizedText = tokens.join(" ").replace(/\s+/g, ' ').trim(); // Consolidate spaces
@@ -1181,13 +1191,20 @@ export class StatisticalUtilityAI implements IUtilityAI {
     return dot / (Math.sqrt(magA) * Math.sqrt(magB));
   }
 
+  /**
+   * `JSON.parse`, then a check against `targetSchema` with Ajv when given, with the options LLMUtilityAI checks with.
+   * Answers `null` when the text is empty or does not parse, when the value fails the schema, and when Ajv cannot
+   * compile the schema. It repairs nothing: a HybridUtilityAI that holds an LLM-backed class sends a text this answers
+   * `null` for on to it.
+   */
   public async parseJsonSafe<T = any>(jsonString: string, options?: ParseJsonOptions<T>): Promise<T | null> {
     this.ensureInitialized();
     if (typeof jsonString !== 'string' || jsonString.trim().length === 0) {
       return null;
     }
+    let parsed: unknown;
     try {
-      return JSON.parse(jsonString) as T;
+      parsed = JSON.parse(jsonString);
     } catch (error: any) {
       console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): JSON parse failed.`, error?.message || error);
       if (options?.attemptFixWithLLM) {
@@ -1195,6 +1212,20 @@ export class StatisticalUtilityAI implements IUtilityAI {
       }
       return null;
     }
+    if (options?.targetSchema) {
+      let validate: SchemaCheck;
+      try {
+        validate = this.ajv.compile(options.targetSchema) as SchemaCheck;
+      } catch (schemaError: any) {
+        console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): targetSchema does not compile (${schemaError?.message ?? schemaError}); no text can pass it.`);
+        return null;
+      }
+      if (!validate(parsed)) {
+        console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): Parsed JSON failed schema validation.`, validate.errors ?? []);
+        return null;
+      }
+    }
+    return parsed as T;
   }
   
   public async shutdown(): Promise<void> {

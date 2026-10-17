@@ -142,7 +142,7 @@ export interface TextNormalizationOptions {
   stem?: boolean; // Default false
   stemAlgorithm?: StemmingOptions['algorithm'];
   expandContractions?: boolean; // Default false; StatisticalUtilityAI expands English contractions only
-  replaceNumbersWith?: string | null; // null to remove, string to replace (e.g., "<NUM>")
+  replaceNumbersWith?: string | null; // null to remove, string to replace (e.g., "<NUM>"); StatisticalUtilityAI: each word of digits, in any script
   stripHtml?: boolean; // Default false
   language?: string; // BCP-47
 }
@@ -180,9 +180,10 @@ export interface ParseJsonOptions<_T = any> {
   /** The provider a repair calls. LLMUtilityAI: else its `defaultProviderId`. */
   llmProviderIdForFix?: string;
   /**
-   * Optional JSON schema to validate the parsed object against. LLMUtilityAI sends a value that fails it for repair
-   * as it sends a text that does not parse, names the schema (and a parsed value's errors) in the repair request, and
-   * answers `null` when no repair passes it.
+   * Optional JSON schema to validate the parsed object against, with Ajv. StatisticalUtilityAI answers `null` for a
+   * value that fails it. LLMUtilityAI sends a value that fails it for repair as it sends a text that does not parse,
+   * names the schema (and a parsed value's errors) in the repair request, and answers `null` when no repair passes it.
+   * A schema Ajv cannot compile no value passes: both answer `null`, and LLMUtilityAI asks for no repair.
    */
   targetSchema?: JSONSchemaObject; // Using the type from ITool.ts for consistency
   /**

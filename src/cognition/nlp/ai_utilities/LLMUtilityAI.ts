@@ -317,19 +317,26 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
    * repair on the text the last one answered, on `llmModelIdForFix` (else `jsonFixerModelId`, else `defaultModelId`)
    * and `llmProviderIdForFix` (else `defaultProviderId`). A repair request names `targetSchema` when given, and the
    * schema's errors when the text parsed and failed it. Answers `null` when no repair parses and passes the schema, or
-   * a repair call fails.
+   * a repair call fails. A `targetSchema` that Ajv cannot compile no text can pass: the call answers `null` at once,
+   * with a warning, and asks for no repair.
    */
   public async parseJsonSafe<T = any>(jsonString: string, options?: ParseJsonOptions<T>): Promise<T | null> {
     this.ensureInitialized();
+    let validate: AjvValidateFn | undefined;
+    if (options?.targetSchema) {
+      try {
+        validate = this.ajv.compile(options.targetSchema) as AjvValidateFn;
+      } catch (schemaError: any) {
+        console.warn(`LLMUtilityAI (${this.utilityId}): targetSchema does not compile (${schemaError?.message ?? schemaError}); no text can pass it.`);
+        return null;
+      }
+    }
     try {
       const parsed = JSON.parse(jsonString);
-      if (options?.targetSchema) {
-        const validate = this.ajv.compile(options.targetSchema) as AjvValidateFn;
-        if (!validate(parsed)) {
-          const validationErrors = Array.isArray(validate.errors) ? validate.errors : [];
-          console.warn(`LLMUtilityAI (${this.utilityId}): Parsed JSON failed schema validation.`, validationErrors);
-          throw new GMIError("Parsed JSON failed schema validation.", GMIErrorCode.VALIDATION_ERROR, { errors: validationErrors });
-        }
+      if (validate && !validate(parsed)) {
+        const validationErrors = Array.isArray(validate.errors) ? validate.errors : [];
+        console.warn(`LLMUtilityAI (${this.utilityId}): Parsed JSON failed schema validation.`, validationErrors);
+        throw new GMIError("Parsed JSON failed schema validation.", GMIErrorCode.VALIDATION_ERROR, { errors: validationErrors });
       }
       return parsed as T;
     } catch (parseError) {
@@ -370,15 +377,12 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
             schemaErrors = [];
             continue;
           }
-          if (options.targetSchema) {
-            const validate = this.ajv.compile(options.targetSchema) as AjvValidateFn;
-            if (!validate(reparsed)) {
-              const validationErrors = Array.isArray(validate.errors) ? validate.errors : [];
-              console.warn(`LLMUtilityAI (${this.utilityId}): LLM-fixed JSON failed schema validation.`, validationErrors);
-              textToFix = fixedJsonString;
-              schemaErrors = validationErrors;
-              continue;
-            }
+          if (validate && !validate(reparsed)) {
+            const validationErrors = Array.isArray(validate.errors) ? validate.errors : [];
+            console.warn(`LLMUtilityAI (${this.utilityId}): LLM-fixed JSON failed schema validation.`, validationErrors);
+            textToFix = fixedJsonString;
+            schemaErrors = validationErrors;
+            continue;
           }
           return reparsed as T;
         }
