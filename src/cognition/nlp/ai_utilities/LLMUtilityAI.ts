@@ -285,7 +285,7 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
         // A count that is not a whole number of 1 or more, Infinity included, is read as 1, so replies that never
         // parse cannot buy repairs without end.
         const requested = Number(options.maxRepairAttempts);
-        const attempts = Number.isFinite(requested) && requested >= 1 ? Math.floor(requested) : 1;
+        const attempts = Number.isInteger(requested) && requested >= 1 ? requested : 1;
         let textToFix = jsonString;
         // The schema errors of the text being repaired, when it parsed and failed targetSchema.
         let schemaErrors: unknown[] =
@@ -437,9 +437,12 @@ Respond with ONLY a JSON object with one key, "languages", whose value is an arr
         console.warn('LLMUtilityAI: Language detection did not return valid array, returning unknown.', { textLength: responseText.length });
         return [{ language: 'und', confidence: 0.1 }]; // 'und' for undetermined
     }
-    // An entry without a language code, or with a confidence that is not a number, is passed over.
+    // An entry without a language code, or with a confidence that is not a number, is passed over. A number written
+    // as a string is read as that number; null, a boolean, an empty string or a list is no number.
+    const confidenceOf = (value: unknown): number =>
+      typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN;
     return list
-      .map((entry) => ({ language: entry?.language, confidence: Number(entry?.confidence) }))
+      .map((entry) => ({ language: entry?.language, confidence: confidenceOf(entry?.confidence) }))
       .filter((entry): entry is LanguageDetectionResult =>
         typeof entry.language === 'string' && entry.language !== '' && Number.isFinite(entry.confidence))
       .slice(0, maxCandidates);
