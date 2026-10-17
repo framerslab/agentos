@@ -1242,7 +1242,7 @@ export class Brain {
         `SELECT (SELECT count(*) FROM memory_traces) AS trace_rows,
                 (SELECT count(*) FROM memory_traces_fts_docsize) AS indexed_docs,
                 (SELECT count(*) FROM memory_traces t
-                   JOIN memory_traces_fts_docsize d ON d.id = t.rowid) AS matched`,
+                   JOIN memory_traces_fts_docsize d ON d.rowid = t.rowid) AS matched`,
       );
       if (
         !sets ||
@@ -1272,10 +1272,11 @@ export class Brain {
     }
   }
 
-  /** Log a full-text index failure, staying silent when FTS5 is absent. */
+  /** Log a full-text index failure, staying silent when the database holds no index. */
   private _warnFullTextIndexError(action: 'repair' | 'rebuild', error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
-    // SQL.js builds without FTS5 never create the index; nothing to maintain.
+    // A database the index was never created in has nothing to maintain. sql.js and the IndexedDB
+    // adapter get an FTS4 index (sql-storage-adapter 0.7.5 and later), every other SQLite adapter FTS5.
     if (message.includes('no such module: fts5') || message.includes('no such table: memory_traces_fts')) {
       return;
     }
