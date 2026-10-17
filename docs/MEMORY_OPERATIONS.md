@@ -380,8 +380,8 @@ Full-text search over memory traces using the FTS5 index with BM25 ranking.
 ```
 
 **Behaviour:**
-- Queries the `memory_traces_fts` FTS5 virtual table.
-- Results are ranked by BM25 relevance score.
+- Queries the brain's full-text index: the `memory_traces_fts` FTS5 virtual table on SQLite, the `_tsv` column of the brain's own rows on Postgres.
+- The best match comes first on both backends: by BM25 on SQLite, by `ts_rank` on Postgres.
 - Only active traces are returned (soft-deleted traces are excluded).
 - Optional `type` and `scope` filters are applied via SQL WHERE clauses on the join; a `scope` filter also matches the scope id resolved from the execution context.
 - `limit` takes 1 to 100.

@@ -64,6 +64,7 @@ import type { FolderScanner } from '../ingestion/FolderScanner.js';
 
 import { Brain } from '../../retrieval/store/Brain.js';
 import {
+  bindingsFor,
   buildNaturalLanguageFtsQuery,
   buildInitialTraceMetadata,
   parseTraceMetadata,
@@ -678,23 +679,27 @@ export class Memory {
 
       // If HNSW returned candidates, merge with FTS5 via RRF.
       if (hnswCandidates.length > 0) {
-        // Get FTS candidates. The match comes first: on Postgres the rank
-        // expression reads the query text as `$1`, the statement's first
-        // parameter.
+        // Get FTS candidates. Every placeholder is `?`: the adapter sends a
+        // statement that holds a `$n` as written, so a rank left on its
+        // default `$1` would leave the other `?` unbound on Postgres. There
+        // the rank reads the query text through its own `?`; on SQLite it
+        // reads the match and binds nothing.
         const { fts: ftsHelper } = this._brain.features;
+        const rankA = ftsHelper.rankExpression('fts', '?');
+        const rankBindingsA = bindingsFor(rankA, ftsQuery);
         const ftsSql = `
-          SELECT t.*, ${ftsHelper.rankExpression('fts')} as rank
+          SELECT t.*, ${rankA} as rank
           FROM ${ftsHelper.joinClause('memory_traces', 't', 'fts', 'memory_traces_fts')}
           WHERE ${ftsHelper.matchClause('memory_traces_fts', '?')}
           AND ${filters}
-          ORDER BY abs(${ftsHelper.rankExpression('fts')}) DESC
+          ORDER BY abs(${rankA}) DESC
           LIMIT ?
         `;
         let ftsRows: FtsJoinRow[] = [];
         try {
           ftsRows = await this._brain.all<FtsJoinRow>(
             ftsSql,
-            [ftsQuery, ...params, candidateLimit],
+            [...rankBindingsA, ftsQuery, ...params, ...rankBindingsA, candidateLimit],
           );
         } catch (error) {
           if (!isFtsUnavailableError(error)) {
@@ -763,21 +768,27 @@ export class Memory {
 
     // ── Path B: FTS-only (fallback when HNSW is inactive) ──
     // This is the original behavior — pure text search ranked by
-    // strength * abs(fts_rank). Works without any embeddings. The match comes
-    // first, as in path A, so Postgres's rank reads the query text as `$1`.
+    // strength * abs(fts_rank). Works without any embeddings. The rank binds
+    // the query text as in path A: through its own `?` on Postgres, not at
+    // all on SQLite.
     const { fts: ftsB } = this._brain.features;
+    const rankB = ftsB.rankExpression('fts', '?');
+    const rankBindingsB = bindingsFor(rankB, ftsQuery);
     const sql = `
-      SELECT t.*, ${ftsB.rankExpression('fts')} as rank
+      SELECT t.*, ${rankB} as rank
       FROM ${ftsB.joinClause('memory_traces', 't', 'fts', 'memory_traces_fts')}
       WHERE ${ftsB.matchClause('memory_traces_fts', '?')}
       AND ${filters}
-      ORDER BY (t.strength * abs(${ftsB.rankExpression('fts')})) DESC
+      ORDER BY (t.strength * abs(${rankB})) DESC
       LIMIT ?
     `;
 
     let rows: FtsJoinRow[];
     try {
-      rows = await this._brain.all<FtsJoinRow>(sql, [ftsQuery, ...params, candidateLimit]);
+      rows = await this._brain.all<FtsJoinRow>(
+        sql,
+        [...rankBindingsB, ftsQuery, ...params, ...rankBindingsB, candidateLimit],
+      );
     } catch (error) {
       if (!isFtsUnavailableError(error)) {
         throw error;

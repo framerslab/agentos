@@ -540,13 +540,13 @@ async function withTraceOperation<T>(
  * sync existed on this path before either).
  *
  * The index is secondary: a sync failure never fails the durable write. Any
- * row the index misses — and any stale posting an `INSERT OR REPLACE`
- * revival leaves behind — is repaired the next time the Brain opens (see
- * `Brain._repairFullTextIndex`). The write and the sync are separate
- * statements, so two processes reviving the SAME trace id at once could in
- * principle leave one revision's tokens under the other's row; that race
- * needs same-id revival across processes and is not caught by the open-time
- * check, which compares row sets rather than content.
+ * row the index misses — and the stale entry a revival leaves behind under
+ * its old rowid (see `moveTraceToFreshRowid`) — is repaired the next time the
+ * Brain opens (see `Brain._repairFullTextIndex`). The move, the write and the
+ * sync are separate statements, so two processes reviving the SAME trace id
+ * at once could in principle leave one revision's tokens under the other's
+ * row; that race needs same-id revival across processes and is not caught by
+ * the open-time check, which compares row sets rather than content.
  */
 async function syncTraceFullTextIndex(
   brain: import('./Brain.js').Brain,
@@ -568,6 +568,42 @@ async function syncTraceFullTextIndex(
       return;
     }
     console.warn(`[MemoryStore] full-text index sync failed for trace ${trace.id}: ${message}`);
+  }
+}
+
+/**
+ * Move a revived trace's row to a fresh rowid before its rewrite, as
+ * `INSERT OR REPLACE` did.
+ *
+ * A revival stores new content under a trace id the brain already holds. The
+ * dialect's upsert rewrites that row in place and keeps its rowid, so the
+ * entry the full-text index holds under the rowid would go on matching the
+ * old words: the external-content index holds no text of its own. Moved, the
+ * row leaves that entry pointing at no row, which a search's join drops, and
+ * the next open's repair finds the row sets apart and rebuilds; the sync after
+ * the write indexes the row under its new rowid. Nothing else keys on a
+ * trace's rowid: the HNSW sidecar maps its labels to trace ids.
+ *
+ * A move, not a delete from the index: an index delete reads the text to
+ * forget from the content row, and a row rewritten in place without a rebuild
+ * would hand it the wrong text.
+ *
+ * SQLite only, best-effort as the sync is. A row the brain does not hold yet
+ * matches nothing here.
+ */
+async function moveTraceToFreshRowid(
+  brain: import('./Brain.js').Brain,
+  traceId: string,
+): Promise<void> {
+  try {
+    await brain.run(
+      `UPDATE memory_traces SET rowid = (SELECT max(rowid) + 1 FROM memory_traces)
+        WHERE brain_id = ? AND id = ?`,
+      [brain.brainId, traceId],
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[MemoryStore] trace ${traceId} keeps its rowid through its rewrite: ${message}`);
   }
 }
 
@@ -1193,6 +1229,11 @@ export class MemoryStore {
     // failed write would look successful locally and then be fenced as a
     // provider-only document on the next durable recall.
     if (brain) {
+      // The upsert rewrites a revived row in place; moved first, the row
+      // leaves its old full-text entry behind, matched by nothing.
+      if (brain.features.dialect.name !== 'postgres') {
+        await moveTraceToFreshRowid(brain, trace.id);
+      }
       try {
         const { dialect } = brain.features;
         const insertSql = dialect.insertOrReplace(
