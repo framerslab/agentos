@@ -28,7 +28,7 @@ describe('collectCallSecrets', () => {
       },
       chair: { provider: 'gemini', apiKey: 'gem-chair-000016' },
     } as unknown as AgencyOptions;
-    // Seating listed nothing: every entry was skipped, as when each provider's breaker is open.
+    // Seating listed nothing: every entry was skipped, as when every entry's key has an open breaker.
     expect(collectCallSecrets(agency, [])).toEqual(expect.arrayContaining(['sk-pool-entry-0011', 'p:pw-pool-0012', 'sk-fixed-seat-0013', 'sk-hop-00000014', 'h:pw-hop-00015', 'gem-chair-000016']));
     expect(() => collectCallSecrets({ agents: {}, chair: false } as AgencyOptions, [])).not.toThrow();
   });

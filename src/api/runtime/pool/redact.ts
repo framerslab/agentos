@@ -30,7 +30,7 @@ const isObject = (value: unknown): value is object => typeof value === 'object' 
  * whole and, as `ApiKeyPool` splits a comma-separated key, part by part. What
  * the config writes is listed whether or not this call seats it: an agency's
  * calls overlap and share one mask, so an entry this call skips, its
- * provider's breaker open, can be the entry an earlier call is sending.
+ * key's breaker open, can be the entry an earlier call is sending.
  *
  * @param agency - The agency options.
  * @param seatingSecrets - What seating resolved for the call (`SeatedRoster.secrets`).
