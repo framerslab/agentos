@@ -284,7 +284,7 @@ restored.search('hiring', 5); // the same passage
 
 `BM25Index`, in `@framers/agentos/cognition/rag`, is a `LexicalIndex` with AgentOS's tokenizer: `tokenize` when its options give one, else its `pipeline`, else the built-in tokenizer, which reads its stop words on first use. It is saved with `toJSON()` and restored with `BM25Index.fromJSON(json, config)`, which takes `k1` and `b` from the saved index and the tokenizer from `config`. Its module reaches `node:module`, which loads `natural`, so a page imports `LexicalIndex` instead.
 
-`@framers/agentos/cognition/library/browser` is the entry a page imports. It exports `LexicalIndex`, `FuzzyIndex`, `withinOneEdit`, `lexicalTokens`, `snippetAround` and `chunkTurns`, with the types `LexicalIndexConfig`, `LexicalIndexJSON`, `LexicalSearchOptions`, `BM25Result`, `BM25Stats`, `FuzzyIndexConfig`, `FuzzyIndexJSON`, `FuzzySearchOptions`, `FuzzyDocument`, `FuzzyHit`, `FuzzyToken`, `FuzzyTokenizer`, `Marked`, `Snippet`, `ChunkTurnsOptions`, `LibraryTurn` and `TurnChunk`, and everything `@framers/agentos/core/storage/browser` exports: the page's key-value store over IndexedDB or memory, the outbox and `reconcileList` ([A Page's Own Records](../memory/CLIENT_SIDE_STORAGE.md#a-pages-own-records)). Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph, and none of it uses the DOM but for IndexedDB, which it reaches only when a page opens a store or calls `idb()`. `LibraryIndex` is not in it: it stays in `@framers/agentos/cognition/library`.
+`@framers/agentos/cognition/library/browser` is the entry a page imports. It exports `LexicalIndex`, `FuzzyIndex`, `withinOneEdit`, `lexicalTokens`, `snippetAround` and `chunkTurns`, with the types `LexicalIndexConfig`, `LexicalIndexJSON`, `LexicalSearchOptions`, `BM25Result`, `BM25Stats`, `FuzzyIndexConfig`, `FuzzyIndexJSON`, `FuzzySearchOptions`, `FuzzyDocument`, `FuzzyHit`, `FuzzyToken`, `FuzzyTokenizer`, `Marked`, `Snippet`, `ChunkTurnsOptions`, `LibraryTurn` and `TurnChunk`, and everything `@framers/agentos/core/storage/browser` exports: the page's key-value store over IndexedDB or memory, the outbox and `reconcileList` ([A Page's Own Records](../memory/CLIENT_SIDE_STORAGE.md#a-pages-own-records)). It also exports the readers of transcript files, `readTranscript`, `readWordTranscript`, `transcriptFormatOf` and `TranscriptReadError`, with the types `ReadTranscript`, `TranscriptFileTurn`, `TranscriptFileLabel`, `TranscriptFormat`, `ExtractRawText` and `ReadWordTranscriptOptions` ([Transcript files from other notetakers](#transcript-files-from-other-notetakers)), and `planEntries` and `sha256Hex`, with the types `PlanEntryInput`, `PlanRules`, `PlannedEntry`, `PlannedKind` and `PlanSkipReason` ([An archive's plan](#an-archives-plan)). Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph, and none of it uses the DOM but for IndexedDB, which it reaches only when a page opens a store or calls `idb()`. `LibraryIndex` is not in it: it stays in `@framers/agentos/cognition/library`.
 
 ## Fuzzy search on a device
 
@@ -341,3 +341,95 @@ Adding a document under an id the index holds replaces it, and it then counts as
 A search reads the words near each query word's, not every word the index holds. It keeps the index's words in two orders, by how they begin and by how they end, which the first search after a document is added brings up to date. The query word itself and the words it begins stand together in the first order. A word one edit from the query word keeps one of its halves whole, letter by letter: an edit in the second half leaves the first half as the word's start, and an edit in the first half leaves the second half as its end, but for the two letters on either side of the middle swapped, which makes one more word to look up. So a query word of `editMinLength` letters or more reads the words that begin with its first half or end with its second, and the word with its middle letters swapped; a shorter one reads only the words it begins, and one of a single letter, with an `editMinLength` of 1, reads every word. The search then reads the fields of the hits it answers again to mark them.
 
 `toJSON()` answers the index as plain JSON, version 1: its settings and each document's id and fields, in the order they were added. `FuzzyIndex.fromJSON(json, { tokenize })` restores it and reads the texts again with the tokenizer given, the word rule unless one is. A saved index of another version throws, and so does one that `toJSON()` could not have written, with an error that names what is wrong.
+
+## Transcript files from other notetakers
+
+```typescript
+import mammoth from 'mammoth';
+import { readTranscript, readWordTranscript, transcriptFormatOf } from '@framers/agentos/cognition/library/browser';
+
+// A file a person picked in a page: its name and its bytes.
+const bytes = new Uint8Array(await file.arrayBuffer());
+const format = transcriptFormatOf(file.name, bytes.subarray(0, 4096));
+
+const read =
+  format === 'docx'
+    ? await readWordTranscript(bytes, { extractRawText: mammoth.extractRawText })
+    : format === null
+      ? null
+      : readTranscript(bytes, format);
+
+// read.turns:  [{ seq: 1, startMs: 1000, endMs: 4200, text: 'Good morning. Shall we start with the budget?' }, ...]
+// read.labels: [{ seq: 1, label: 'Ana Silva' }, { seq: 2, label: 'Leo Park' }, ...]
+// read.durationMs: 28900
+```
+
+`readTranscript(input, format)` reads a transcript file's text, or its bytes, in one of five formats, and `readWordTranscript(bytes, { extractRawText })` reads a Word file. Each answers `{ format, turns, labels, durationMs }`:
+
+- `turns`: the turns in the file's order, numbered from 1, each `{ seq, startMs, endMs, text }`. Times are milliseconds from the recording's start where the file gives them, else `null`. A turn's text has its white space collapsed and no speaker's name in it. A turn with no words is left out.
+- `labels`: `{ seq, label }` for each turn whose speaker the file names, kept apart from the turns, so a page can keep the names on the device and send only the turns.
+- `durationMs`: the last turn's end, `null` when the last turn has none.
+
+Bytes are read as UTF-16 when they open with its byte order mark, in either byte order, and as UTF-8 otherwise. A leading byte order mark is dropped and CRLF line ends are read as line feeds, so a file saved on Windows reads the same. A file with no turn reads as none. The readers set no bound on a file's length: that bound is the caller's.
+
+| `format` | What is read |
+|---|---|
+| `srt` | SubRip. A cue is a timing line, `00:00:01,000 --> 00:00:04,200`, and the lines after it up to a blank line or the next timing line, so cues written with no blank line between them read as cues. A line of digits just before a timing line is that cue's number, unless it is the only line of the cue before it, and the lines of a block before its first timing line, a cue's number among them, are left out. A cue's text is its lines joined with spaces, with the `<b>`, `<i>`, `<u>` and `<font>` tags removed. Speakers by the `Name: words` rule below. |
+| `vtt` | WebVTT. The first line is `WEBVTT`, else `TranscriptReadError`. The header, the lines after the first up to a blank line or the first timing line, is left out, and so are the blocks that are no cue (`NOTE`, `STYLE`, `REGION`). A cue is a timing line and the lines after it up to a blank line or the next timing line, as [WebVTT's parser](https://www.w3.org/TR/webvtt1/#file-parsing) cuts cues, so a cue written with no blank line before it is a cue; a block's lines before its first timing line, such as a cue's identifier, are left out. Cue settings are ignored, and a time may leave out its hours. A cue's speaker is its [voice span](https://www.w3.org/TR/webvtt1/#webvtt-cue-voice-span), `<v Ana Silva>` or `<v.loud Ana Silva>`, and two voice spans in one cue are two turns with the cue's times. Every other tag (class, italics, bold, underline, ruby, language, timestamp) is removed with its words kept. `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`, `&nbsp;`, `&lrm;`, `&rlm;` and the numeric references are decoded once; any other reference stays as written. A file with no voice span anywhere, as a tool writes that puts the speaker's name into the cue text, is read by the `Name: words` rule. |
+| `otter` | Otter's text export. A turn is a header line, the speaker's name, two spaces or more and the time the turn starts (`0:01`, or `1:02:10` past the hour), then its paragraph up to the next header. The lines before the first header, a header with no words, and a closing `Transcribed by https://otter.ai` are left out. A header gives a start and no end, so `endMs` and `durationMs` are `null`. A text with no header reads as plain lines. |
+| `fireflies` | Fireflies's JSON: the `sentences` of an object, each with `text`, `speaker_name`, `start_time` and `end_time`, the fields of a [Sentence](https://docs.fireflies.ai/schema/sentence) in Fireflies's API, the times read as seconds from a number or a numeric text; or a list at the top, each entry with `sentence`, `speaker_name`, and `startTime` and `endTime` as clocks (`00:04`, `75:30`, `01:15:32`). An entry with no words, or one that is no object, is left out. A text that is not JSON throws `TranscriptReadError`; JSON of another shape has no turns. |
+| `lines` | Plain text: one turn a line, no times, speakers by the `Name: words` rule. |
+
+In both caption formats, a line that holds `-->` but not two times is a line of words.
+
+The `Name: words` rule finds a speaker at the start of a turn's text: the name before the first colon, trimmed, of at most forty characters, starting with a capital letter or a letter of a script with no case, such as Chinese. An ASCII colon is followed by white space and words, so `At 10:30 we met` names no one; the full-width colon `：` of Chinese and Japanese text is followed by words, with or without a space, so `张伟：你好` is `你好` said by `张伟`. It holds for a file only when at least four turns in five open with such a name and the names are at most twelve; otherwise no turn has a speaker and every text stays whole, so a caption that says `Note: the budget` keeps its words.
+
+`transcriptFormatOf(name, head)` names a file's format from its name's extension and its first bytes (4 KB is enough) or its text, and the bytes must be what the name claims: a `.srt` holds a timing line, a `.vtt` opens with `WEBVTT`, a `.json` opens with `{` or `[` and holds a `"sentences"` or `"speaker_name"` key, a `.docx` opens as a ZIP archive, and a `.txt` or `.md` is `otter` when it is laid out as Otter's export and `lines` otherwise. It answers `null` for anything else: a PDF under any name, a ZIP archive under a text file's name, a text with a NUL character, a file with no extension. Bytes are read as `readTranscript` reads them, so a file saved as UTF-16 with its byte order mark is named too.
+
+A text is laid out as Otter's export when, from its first header on, each line of words comes straight after a header, blank lines aside, and at least two headers have their line of words. The lines before the first header and the closing line are not weighed. So one line that looks like a header in other text, such as `Break  10:30` in an agenda, does not make the text Otter's, nor does a column of names and times with no words under them, and an export whose turns run to two lines or more reads as plain lines unless it is read with `otter`. The last line of a head is weighed only when a line feed ends it, since the first bytes of a file can stop inside a line.
+
+A Word file's text comes from the extractor the caller passes, so the browser entry imports no package. A page passes mammoth's browser build, whose `extractRawText` reads `{ arrayBuffer }`. In Node, mammoth reads `{ buffer }`: pass `({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) })`. The extractor is handed a copy of the file's own bytes. The text it answers is read by Otter's headers when it is laid out as Otter's export, each header and its paragraph a paragraph of their own, with the format `docx`; any other text is read as plain lines by the `Name: words` rule. When the extractor throws, `readWordTranscript` throws `TranscriptReadError` with what it threw as `cause`, and when it answers no text, `TranscriptReadError` too.
+
+`TranscriptReadError` has the `format` the input was read as, and its message opens with it: `vtt: the first line is not WEBVTT`. It is thrown for a WebVTT text whose first line is not `WEBVTT`, a Fireflies text that is not JSON, a Word file the extractor could not read or read into no text, and `readTranscript` called with `docx`, since a Word file is read from its bytes by `readWordTranscript`.
+
+## An archive's plan
+
+```typescript
+import { planEntries, sha256Hex } from '@framers/agentos/cognition/library/browser';
+
+const plan = await planEntries(
+  [
+    { path: 'Notes/Plan 0123456789abcdef0123456789abcdef.md', size: 2_048 },
+    { path: 'Calls/standup.vtt', size: 9_000 },
+    { path: 'Calls/voice.m4a', size: 8_000_000 },
+    { path: 'Calls/weird.xyz', size: 10 },
+    { path: 'Notes/Scan.pdf', size: 12_000_000 },
+    { path: '../outside.md', size: 100 },
+  ],
+  {
+    documentTypes: { '.md': 'text/markdown', '.pdf': 'application/pdf' },
+    transcriptExtensions: ['.srt', '.vtt'],
+    recordingExtensions: ['.m4a', '.mp3'],
+    maxBytes: (kind) => (kind === 'recording' ? 500_000_000 : 10_000_000),
+  },
+);
+// plan[0]: { path: 'Notes/Plan 0123…cdef.md', within: null, title: 'Plan', folder: 'Notes',
+//            becomes: 'document', mediaType: 'text/markdown', reason: null }
+// plan[1].becomes === 'transcript', plan[2].becomes === 'recording'
+// plan[3], plan[4], plan[5]: becomes 'skipped' with the reasons 'type', 'size' and 'path'
+
+await sha256Hex('a\n'); // '87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7'
+```
+
+`planEntries(entries, rules)` says what each entry of a ZIP archive or a folder becomes before anything is read or sent: a document of a type the caller reads, a transcript, a recording, or skipped with its reason. It holds no rule of its own about types or sizes, and reads no file: the caller passes its rules and the entries as it lists them, each `{ path, size }` with `/` between the parts of a path and the size in bytes. The rules are:
+
+- `documentTypes`: a document's extension, in lower case with its dot, to its media type.
+- `transcriptExtensions` and `recordingExtensions`: the extensions read as transcripts and as recordings.
+- `maxBytes(kind)`: the most bytes an entry of the kind `document`, `transcript` or `recording` may hold.
+- `archiveExtensions`: the extensions of an archive, `['.zip']` unless given.
+- `openArchive(path)`: lists a nested archive's entries, which the plan places where the archive stood, each with the archive's path as `within`. Without it, a nested archive is skipped with the reason `nested`, and an archive inside a nested archive is always skipped so, so the plan opens one level. What `openArchive` throws rejects the plan.
+- `maxEntries`: the most entries planned, skipped ones and a nested archive's entries included; the entries past it are skipped with the reason `count`.
+
+Each entry of the plan is `{ path, within, title, folder, becomes, mediaType, reason }`, in the order of the entries. Its title is the file's name with its extension dropped, and its folder the parts of the path before the name, `null` at the top; both drop a Notion export's trailing 32-character id, so `Notes/Plan 0123456789abcdef0123456789abcdef.md` is `Plan` in `Notes`. `mediaType` is a document's type from `documentTypes`, `null` for anything else. The checks run in this order, and the first that fails gives the reason: the count (`count`), a path that leaves its archive or folder, absolute, with a backslash, a `..` part or an empty part (`path`), an archive the plan does not open (`nested`), an extension in none of the rules (`type`), and the size (`size`). A folder's own entry, a path that ends with `/` as a ZIP archive lists one, is left out.
+
+Two copies of one text are planned alike, since the plan reads no file. `sha256Hex(input)` answers the SHA-256 of a text's UTF-8 bytes, or of bytes, in lower-case hexadecimal, by which a caller finds two copies of one text once it reads them. It uses the platform's `crypto.subtle` where there is one, and the library's own SHA-256 where there is none, as in a page outside a secure context, with the same digest.
