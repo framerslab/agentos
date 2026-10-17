@@ -210,10 +210,14 @@ function formatOf(hint: string | undefined): OfficeFormat {
  * The refusal of a document that reached a bound.
  *
  * @param limit - The loader's `maxInflatedBytes`, which the error carries whichever bound was reached.
- * @param code - officeparser's code for the bound reached, which the error's `cause` names.
+ * @param code - officeparser's code for the bound reached, which the error's message and `cause` name.
  */
 function tooLarge(limit: number, code: string): DocumentTooLargeError {
-  return Object.assign(new DocumentTooLargeError(limit), { cause: new Error(`officeparser: ${code}`) });
+  // Past the bound on inflation, the message gives it in bytes, as the Word loader's does. A document that reached
+  // another bound may inflate to far less than `limit`, so its message names that bound instead.
+  const message =
+    code === 'ZIP_SIZE_LIMIT_EXCEEDED' ? undefined : `the document reached the bound officeparser reports as ${code}`;
+  return Object.assign(new DocumentTooLargeError(limit, message), { cause: new Error(`officeparser: ${code}`) });
 }
 
 /**
@@ -350,7 +354,8 @@ export class OfficeLoader implements IDocumentLoader {
    *   a page count.
    * @throws {DocumentTooLargeError} When the document reaches a bound, one officeparser only warns of included.
    *   The error's `limit` is the loader's `maxInflatedBytes` whichever bound was reached, and its `cause` names
-   *   the bound by officeparser's code.
+   *   the bound by officeparser's code. So does its message, but past `maxInflatedBytes`, where the message
+   *   gives that bound in bytes.
    * @throws {ScannedDocumentError} For a PDF while `ocrPages` is 0, and for a scan whose pages gave no text. When
    *   officeparser reported a picture OCR could not read, the first such failure is the error's `cause`.
    * @throws The reason of `options.signal` when the caller aborts it.
