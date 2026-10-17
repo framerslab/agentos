@@ -29,11 +29,21 @@ export interface PlanRules {
   recordingExtensions: readonly string[];
   /** The extensions of an archive the plan opens. @default ['.zip'] */
   archiveExtensions?: readonly string[];
-  /** The most bytes an entry of each kind may hold. */
-  maxBytes: (becomes: PlannedKind) => number;
-  /** Lists a nested archive's entries; without it, a nested archive is skipped. What it throws rejects the plan. */
+  /**
+   * The most bytes an entry of each kind may hold, and, for `archive`, the most a nested archive may hold for the plan
+   * to open it. An entry whose size is no byte count (a finite number of 0 or more) is skipped with the reason `size`;
+   * a bound that is not a number of 0 or more rejects the plan with a `RangeError`.
+   */
+  maxBytes: (kind: PlannedKind | 'archive') => number;
+  /**
+   * Lists a nested archive's entries, once its size is within `maxBytes('archive')`; without it, a nested archive is
+   * skipped. What it throws rejects the plan.
+   */
   openArchive?: (path: string) => Promise<PlanEntryInput[]>;
-  /** The most entries planned, skipped ones included: those past it are skipped with the reason `count`. */
+  /**
+   * The most entries planned, skipped ones included: those past it are skipped with the reason `count`. A count that
+   * is not a number of 0 or more rejects the plan with a `RangeError`.
+   */
   maxEntries?: number;
 }
 
@@ -81,9 +91,17 @@ function folderOf(path: string): string | null {
   return parts.length === 0 ? null : parts.join('/');
 }
 
-/** Whether a path leaves its archive or folder: an absolute path, a backslash, a `..` part or an empty part. */
+/**
+ * Whether a path leaves its archive or folder: an absolute path, one on a drive (`C:/notes.md`, `C:notes.md`), a
+ * backslash, a `..` part or an empty part.
+ */
 function climbs(path: string): boolean {
-  return path.startsWith('/') || path.includes('\\') || path.split('/').some((part) => part === '..' || part === '');
+  return (
+    path.startsWith('/') ||
+    /^[A-Za-z]:/.test(path) ||
+    path.includes('\\') ||
+    path.split('/').some((part) => part === '..' || part === '')
+  );
 }
 
 /**
@@ -93,11 +111,21 @@ function climbs(path: string): boolean {
  *
  * @param entries - The entries of an archive or a folder.
  * @param rules - The caller's types, bounds and archive opener.
+ * @throws RangeError when `maxEntries`, or what `maxBytes` answers, is not a number of 0 or more.
  */
 export async function planEntries(entries: readonly PlanEntryInput[], rules: PlanRules): Promise<PlannedEntry[]> {
   const planned: PlannedEntry[] = [];
   const archives = rules.archiveExtensions ?? ['.zip'];
   const maxEntries = rules.maxEntries ?? Number.POSITIVE_INFINITY;
+  // A count that is no number would let every entry past it, so it is refused, as a bound that is no number is below.
+  if (!(maxEntries >= 0)) throw new RangeError(`planEntries: maxEntries must be a number of 0 or more, not ${String(maxEntries)}`);
+
+  /** Whether a size is a byte count within the caller's bound for its kind. */
+  const fits = (size: number, kind: PlannedKind | 'archive'): boolean => {
+    const bound = rules.maxBytes(kind);
+    if (!(bound >= 0)) throw new RangeError(`planEntries: maxBytes('${kind}') must answer a number of 0 or more, not ${String(bound)}`);
+    return Number.isFinite(size) && size >= 0 && size <= bound;
+  };
 
   const visit = async (entry: PlanEntryInput, within: string | null): Promise<void> => {
     if (entry.path.endsWith('/')) return;
@@ -116,6 +144,10 @@ export async function planEntries(entries: readonly PlanEntryInput[], rules: Pla
         planned.push({ ...base, becomes: 'skipped', reason: 'nested' });
         return;
       }
+      if (!fits(entry.size, 'archive')) {
+        planned.push({ ...base, becomes: 'skipped', reason: 'size' });
+        return;
+      }
       for (const inner of await rules.openArchive(entry.path)) await visit(inner, entry.path);
       return;
     }
@@ -130,7 +162,7 @@ export async function planEntries(entries: readonly PlanEntryInput[], rules: Pla
       planned.push({ ...base, becomes: 'skipped', reason: 'type' });
       return;
     }
-    if (entry.size > rules.maxBytes(becomes)) {
+    if (!fits(entry.size, becomes)) {
       planned.push({ ...base, becomes: 'skipped', reason: 'size' });
       return;
     }
