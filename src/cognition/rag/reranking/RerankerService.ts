@@ -151,7 +151,8 @@ export class RerankerService {
       modelId: config?.modelId ?? providerConfig?.defaultModelId ?? this.config.defaultModelId ?? '',
       topN: config?.topN,
       maxDocuments: config?.maxDocuments ?? 100,
-      timeoutMs: config?.timeoutMs ?? providerConfig?.defaultTimeoutMs ?? 30000,
+      // Unset when neither the call nor the provider's settings name one, so the provider's own default applies.
+      timeoutMs: config?.timeoutMs ?? providerConfig?.defaultTimeoutMs,
       params: config?.params,
     };
 
