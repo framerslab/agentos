@@ -394,6 +394,8 @@ A Word file's text comes from the extractor the caller passes, so the browser en
 
 `TranscriptReadError` has the `format` the input was read as, and its message opens with it: `vtt: the first line is not WEBVTT`. It is thrown for a WebVTT text whose first line is not `WEBVTT`, a Fireflies text that is not JSON, a Word file the extractor could not read or read into no text, and `readTranscript` called with `docx`, since a Word file is read from its bytes by `readWordTranscript`.
 
+To search a transcript on the device, give each turn an `itemId` and cut the turns into passages with `chunkTurns`, which records where each turn sits in its passage, so a hit's words lead back to their turn and its label ([On a device](#on-a-device)). [`examples/transcript-files.mjs`](../../examples/transcript-files.mjs) reads one call written as SubRip, WebVTT, Otter's text, Fireflies's JSON and plain lines into the same turns, searches its passages with `LexicalIndex` and names the speaker of a hit from the labels, plans an archive's entries and finds two copies of one text with `sha256Hex`. Name files to read those instead: `node examples/transcript-files.mjs call.vtt notes.docx`.
+
 ## An archive's plan
 
 ```typescript
