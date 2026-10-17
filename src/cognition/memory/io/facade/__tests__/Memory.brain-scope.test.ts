@@ -20,7 +20,10 @@
  *   file that holds several brains is refused;
  * - an Obsidian export links the brain's own knowledge-graph nodes, though
  *   node ids repeat across brains;
- * - on Postgres, a brain's full-text rebuild re-indexes its own rows.
+ * - on Postgres, a brain's full-text rebuild re-indexes its own rows;
+ * - on Postgres, a trace a cognitive `MemoryStore` stores, a revival of it and
+ *   a trace `Brain.importFromSqlite` writes are found by the words they hold as
+ *   soon as the write returns, and a store re-indexes its own brain's row only.
  *
  * Inside one brain, recall's filters (type, scope, scope id, strength and
  * age) bind the hybrid recall's vector candidates as they bind its full-text
@@ -42,9 +45,15 @@ import path from 'node:path';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 import { Memory, type ScoredTrace } from '../Memory.js';
 import { MemorySearchTool } from '../../tools/MemorySearchTool.js';
-import type { Brain } from '../../../retrieval/store/Brain.js';
+import { Brain } from '../../../retrieval/store/Brain.js';
+import { MemoryStore } from '../../../retrieval/store/MemoryStore.js';
 import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
+import type { IKnowledgeGraph } from '../../../retrieval/graph/knowledge/IKnowledgeGraph.js';
+import type { MemoryTrace } from '../../../core/types.js';
+import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
+import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager.js';
 import type { ToolExecutionContext } from '../../../../../core/tools/ITool.js';
+import type { VectorStoreProviderConfig } from '../../../../../core/vector-store/IVectorStore.js';
 
 vi.mock('hnswlib-node', async () => {
   const { readFileSync, writeFileSync } = await import('node:fs');
@@ -185,20 +194,22 @@ async function sqlitePair(): Promise<Pair & { file: string }> {
   return { a: await openSqlite(file, 'brain-a'), b: await openSqlite(file, 'brain-b'), file };
 }
 
+/** A memory on brain `brainId` of the Postgres test database. */
+async function openPostgres(brainId: string): Promise<Memory> {
+  const memory = await Memory.createPostgres(POSTGRES_URL!, {
+    brainId,
+    poolSize: 2,
+    graph: false,
+    selfImprove: false,
+  });
+  memories.push(memory);
+  return memory;
+}
+
 /** Two new brains in the Postgres test database. */
 async function postgresPair(): Promise<Pair> {
   const run = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const open = async (brainId: string): Promise<Memory> => {
-    const memory = await Memory.createPostgres(POSTGRES_URL!, {
-      brainId,
-      poolSize: 2,
-      graph: false,
-      selfImprove: false,
-    });
-    memories.push(memory);
-    return memory;
-  };
-  return { a: await open(`brain-scope-a-${run}`), b: await open(`brain-scope-b-${run}`) };
+  return { a: await openPostgres(`brain-scope-a-${run}`), b: await openPostgres(`brain-scope-b-${run}`) };
 }
 
 /** Rows written straight to the brain's table, each with `vector` as its embedding. */
@@ -233,6 +244,95 @@ async function linkTrace(memory: Memory, traceId: string, label: string): Promis
      VALUES (?, ?, ?, ?, ?, ?)`,
     [brain.brainId, 'ke-trace-label', 'kn-trace', 'kn-label', 'related_to', now],
   );
+}
+
+/**
+ * A cognitive `MemoryStore` that writes through `brain`, as `CognitiveMemoryManager` attaches one: its vectors in
+ * memory, embedded by `embed`, and no knowledge graph.
+ */
+async function cognitiveStore(brain: Brain): Promise<MemoryStore> {
+  const vectorStore = new InMemoryVectorStore();
+  await vectorStore.initialize({
+    id: `cognitive-${brain.brainId}`,
+    type: 'in_memory',
+    defaultEmbeddingDimension: 4,
+    similarityMetric: 'cosine',
+  } as VectorStoreProviderConfig);
+  const embeddingManager = {
+    async generateEmbeddings(input: { texts: string | string[] }) {
+      const texts = Array.isArray(input.texts) ? input.texts : [input.texts];
+      return {
+        embeddings: await Promise.all(texts.map(embed)),
+        model: 'test',
+        usage: { promptTokens: 0, totalTokens: 0 },
+      };
+    },
+  };
+  const store = new MemoryStore({
+    vectorStore,
+    embeddingManager: embeddingManager as unknown as IEmbeddingManager,
+    knowledgeGraph: { recordMemory: async () => 'noop' } as unknown as IKnowledgeGraph,
+    collectionPrefix: 'cogmem',
+  });
+  store.setBrain(brain);
+  return store;
+}
+
+/** A trace for `MemoryStore.store`, with no tags. */
+function storedTrace(id: string, content: string): MemoryTrace {
+  const now = Date.now();
+  return {
+    id,
+    type: 'semantic',
+    scope: 'user',
+    scopeId: 'u1',
+    content,
+    entities: [],
+    tags: [],
+    provenance: { sourceType: 'user_statement', sourceTimestamp: now, confidence: 1, verificationCount: 0 },
+    emotionalContext: { valence: 0, arousal: 0, dominance: 0, intensity: 0, gmiMood: '' },
+    encodingStrength: 0.5,
+    stability: 0.5,
+    retrievalCount: 0,
+    lastAccessedAt: now,
+    accessCount: 0,
+    reinforcementInterval: 0,
+    associatedTraceIds: [],
+    createdAt: now,
+    updatedAt: now,
+    isActive: true,
+  } as MemoryTrace;
+}
+
+const toolContext: ToolExecutionContext = {
+  gmiId: 'test-gmi',
+  personaId: 'test-persona',
+  userContext: { userId: 'default-user' } as ToolExecutionContext['userContext'],
+};
+
+/** The ids the `memory_search` tool returns from `brain` for `query`. */
+async function searchIds(brain: Brain, query: string): Promise<string[]> {
+  const result = await new MemorySearchTool(brain).execute({ query }, toolContext);
+  expect(result.error).toBeUndefined();
+  return ((result.output as { results?: Array<{ id: string }> } | undefined)?.results ?? []).map((row) => row.id);
+}
+
+/** A new SQLite file under brain id `brainId` holding `traces`, each an id and its text, as an export holds them. */
+async function portableFile(brainId: string, traces: Array<[id: string, content: string]>): Promise<string> {
+  const file = path.join(newDir('agentos-brain-portable-'), 'portable.sqlite');
+  const brain = await Brain.openSqlite(file, { brainId });
+  try {
+    for (const [id, content] of traces) {
+      await brain.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at)
+         VALUES (?, ?, 'semantic', 'user', ?, ?)`,
+        [brainId, id, content, Date.now()],
+      );
+    }
+  } finally {
+    await brain.close();
+  }
+  return file;
 }
 
 /** A new, empty folder under the system's temporary folder. */
@@ -554,5 +654,71 @@ describe('two brains in a Postgres database', () => {
     const ids = ((result.output as { results?: Array<{ id: string }> } | undefined)?.results ?? []).map((row) => row.id);
     // ts_rank grows with the matches it counts, so the trace that names the ferry three times leads.
     expect(ids).toEqual([thrice.id, once.id]);
+  });
+
+  it.skipIf(!POSTGRES_URL)('finds a trace a cognitive MemoryStore stores as soon as it is stored', async () => {
+    const { a } = await postgresPair();
+    const store = await cognitiveStore(brainOf(a));
+
+    await store.store(storedTrace('t-plain', 'The ferry I take is called the Vastrelle.'));
+
+    expect(await searchIds(brainOf(a), 'Vastrelle')).toEqual(['t-plain']);
+  });
+
+  it.skipIf(!POSTGRES_URL)('finds a revived trace by its new words only, before and after a reopen', async () => {
+    const { a } = await postgresPair();
+    const brain = brainOf(a);
+    const store = await cognitiveStore(brain);
+    await store.store(storedTrace('t-revived', 'The street I grew up on was Thornquay Lane.'));
+    expect(await searchIds(brain, 'Thornquay')).toEqual(['t-revived']);
+
+    // The upsert's SET list names the columns it writes; the full-text column holds the old words unless the
+    // store re-indexes the row, and an open fills only a column that is null.
+    await store.store(storedTrace('t-revived', 'My childhood parakeet was named Silverpip.'));
+
+    expect(await searchIds(brain, 'Silverpip')).toEqual(['t-revived']);
+    expect(await searchIds(brain, 'Thornquay')).toEqual([]);
+    const reopened = brainOf(await openPostgres(brain.brainId));
+    expect(await searchIds(reopened, 'Silverpip')).toEqual(['t-revived']);
+    expect(await searchIds(reopened, 'Thornquay')).toEqual([]);
+  });
+
+  it.skipIf(!POSTGRES_URL)("re-indexes the storing brain's row only when another brain holds the same trace id", async () => {
+    const { a, b } = await postgresPair();
+    const brainB = brainOf(b);
+    await (await cognitiveStore(brainB)).store(storedTrace('t-shared', 'bananas from the market'));
+    // Brain B's row carries a marker in its full-text column; a store in brain A leaves it as it is.
+    await brainB.run(`UPDATE memory_traces SET _tsv = to_tsvector('simple', 'untouched') WHERE brain_id = ? AND id = ?`, [
+      brainB.brainId,
+      't-shared',
+    ]);
+
+    await (await cognitiveStore(brainOf(a))).store(storedTrace('t-shared', 'apples from the orchard'));
+
+    expect(await searchIds(brainOf(a), 'apples')).toEqual(['t-shared']);
+    expect(await searchIds(brainB, 'apples')).toEqual([]);
+    const marked = await brainB.get<{ n: number | string }>(
+      `SELECT COUNT(*) AS n FROM memory_traces WHERE brain_id = ? AND id = ? AND _tsv = to_tsvector('simple', 'untouched')`,
+      [brainB.brainId, 't-shared'],
+    );
+    expect(Number(marked?.n)).toBe(1);
+  });
+
+  it.skipIf(!POSTGRES_URL)('finds the traces Brain.importFromSqlite writes by the words they hold, without a reopen', async () => {
+    const { a } = await postgresPair();
+    const brain = brainOf(a);
+    const held = await a.remember('The street I grew up on was Thornquay Lane.');
+    expect(await searchIds(brain, 'Thornquay')).toEqual([held.id]);
+    // The file holds the trace the brain holds, with new words, and a trace the brain does not hold.
+    const file = await portableFile('portable', [
+      [held.id, 'My childhood parakeet was named Silverpip.'],
+      ['t-new', 'The ferry I take is called the Vastrelle.'],
+    ]);
+
+    await brain.importFromSqlite(file);
+
+    expect(await searchIds(brain, 'Silverpip')).toEqual([held.id]);
+    expect(await searchIds(brain, 'Thornquay')).toEqual([]);
+    expect(await searchIds(brain, 'Vastrelle')).toEqual(['t-new']);
   });
 });
