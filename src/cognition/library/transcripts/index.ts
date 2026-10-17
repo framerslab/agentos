@@ -62,15 +62,16 @@ function isZip(head: Uint8Array): boolean {
 }
 
 /**
- * The format of a transcript file, by its name's extension and its first bytes, which must be the format the name
+ * The format of a transcript file, by its name's extension and its bytes, which must be the format the name
  * claims; `null` when it is none of them. A `.srt` holds a timing line; a `.vtt` opens with `WEBVTT`; a `.json` holds
  * Fireflies's keys; a `.docx` is a ZIP archive; a `.txt` or `.md` is text, `otter` when it is laid out as Otter's
  * export and `lines` otherwise. The bytes are read as {@link readTranscript} reads them. A PDF is no transcript,
  * whatever its name.
  *
  * @param name - The file's name or path.
- * @param head - The file's first bytes (4 KB is enough), or its text. The first bytes of a file can stop inside a line,
- * so a last line with no line feed after it is weighed for Otter's layout only where it comes straight after a header.
+ * @param head - The file's bytes or its text, whole where it can be: a Word file, SubRip and WebVTT are named from their
+ * first 4 KB, but Fireflies's JSON can hold its sentences, and Otter's export its second turn, past any head of the
+ * file. A head's last line with no line feed after it may stop short, so it is read as words, never as a header.
  */
 export function transcriptFormatOf(name: string, head: Uint8Array | string): TranscriptFormat | null {
   const dot = name.lastIndexOf('.');

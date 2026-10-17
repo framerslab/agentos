@@ -1,6 +1,7 @@
 /**
  * @fileoverview A Word transcript (`.docx`): its text taken out by an extractor the caller passes, such as mammoth's
- * `extractRawText`, then read by Otter's headers when it is laid out as Otter's export and as plain lines otherwise.
+ * `extractRawText`, then read by the layout the caller names, or by Otter's headers when it is laid out as Otter's
+ * export and as plain lines otherwise.
  * This module imports no package, so the entry that holds it stays free of one; a page passes mammoth's browser build,
  * which opens `{ arrayBuffer }`.
  * @module agentos/cognition/library/transcripts/word
@@ -18,17 +19,24 @@ export type ExtractRawText = (input: { arrayBuffer: ArrayBuffer }) => Promise<{ 
 export interface ReadWordTranscriptOptions {
   /** Takes the text out of a Word file. */
   extractRawText: ExtractRawText;
+  /**
+   * How the file's text is laid out, for a caller that knows where the file came from: `otter` reads it by Otter's
+   * headers, `lines` by the `Name: words` rule. Left out, the text is read by Otter's headers when it is laid out as
+   * Otter's export, and as plain lines otherwise.
+   */
+  layout?: 'otter' | 'lines';
 }
 
 /**
  * Reads a Word transcript. The extractor is handed a copy of the file's own bytes (a view such as a Node `Buffer` may
- * share its memory with other data). The text it answers is read by Otter's headers when it is laid out as Otter's
- * export, each header and its paragraph a paragraph of their own, and otherwise as plain lines, `Name: words` naming
- * the speakers by the shared rule.
+ * share its memory with other data). The text it answers is read by the caller's `layout`, or, without one, by Otter's
+ * headers when it is laid out as Otter's export (a header and its words in paragraphs of their own) and otherwise as
+ * plain lines, `Name: words` naming the speakers by the shared rule. A Word file with no text reads as no turns.
  *
  * @param bytes - The Word file's bytes.
- * @param options - The extractor.
- * @throws {@link TranscriptReadError} when the extractor fails, with what it threw as `cause`, or answers no text.
+ * @param options - The extractor, and the layout when the caller knows it.
+ * @throws {@link TranscriptReadError} when the extractor fails, with what it threw as `cause`, or answers something
+ * other than a text, an object with no `value` string.
  */
 export async function readWordTranscript(bytes: Uint8Array, options: ReadWordTranscriptOptions): Promise<ReadTranscript> {
   const copy = new Uint8Array(bytes);
@@ -40,5 +48,6 @@ export async function readWordTranscript(bytes: Uint8Array, options: ReadWordTra
   }
   if (typeof extracted?.value !== 'string') throw new TranscriptReadError('docx', 'the extractor answered no text');
   const text = textOf(extracted.value);
-  return isOtterLayout(text) ? readOtter(text, 'docx') : readLines(text, 'docx');
+  const otter = options.layout === undefined ? isOtterLayout(text) : options.layout === 'otter';
+  return otter ? readOtter(text, 'docx') : readLines(text, 'docx');
 }

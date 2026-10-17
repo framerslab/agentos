@@ -38,53 +38,47 @@ export function otterHeader(line: string): { label: string; startMs: number } | 
   return startMs === null || !isName(label) ? null : { label, startMs };
 }
 
-/** A text's lines without the blank lines at its end, and without the closing line where it closes the text. */
-function bodyOf(text: string): string[] {
+/**
+ * A text's lines without the blank lines at its end, and without the closing line where it closes the text; `closed`
+ * says whether it did. Every line kept stays at its place in the text.
+ */
+function bodyOf(text: string): { lines: string[]; closed: boolean } {
   const lines = text.split('\n');
   let end = lines.length;
   while (end > 0 && lines[end - 1].trim() === '') end -= 1;
-  if (end > 0 && CLOSING.test(lines[end - 1].trim())) end -= 1;
-  return lines.slice(0, end);
+  const closed = end > 0 && CLOSING.test(lines[end - 1].trim());
+  return { lines: lines.slice(0, closed ? end - 1 : end), closed };
 }
 
 /**
- * Whether a text is laid out as Otter's export, for a reader that is not told its format: from its first header on,
- * each line of words comes straight after a header, blank lines aside, and at least two headers have their line of
- * words. The lines before the first header and the closing line are not weighed. A line in other text that looks like
- * a header, such as `Break  10:30` in an agenda, does not make the text Otter's, and neither does a column of names
- * and times with no words under them.
+ * Whether a text is laid out as Otter's export, for a reader that is not told its format: at least two of its headers
+ * have words under them, or one has and the text closes with Otter's closing line. A turn's words may run over several
+ * lines, as a Word file's paragraphs do, and the lines before the first header are not weighed. One line in other text
+ * that looks like a header, such as `Break  10:30` in an agenda, does not make the text Otter's, and neither does a
+ * column of names and times with no words under them. An export of one turn with no closing line is not told apart
+ * from other text.
  *
  * @param text - The text, its line ends already line feeds.
  * @param options - `cutLastLine` when the text is a file's first bytes and its last line may stop short: that line is
- * then weighed only where it comes straight after a header, as the words of that header's turn, since a header cut
- * short reads as a line of words.
+ * then read as words, never as a header, since a header cut short is no header.
  */
 export function isOtterLayout(text: string, options: { cutLastLine?: boolean } = {}): boolean {
-  const lines = bodyOf(text);
-  // The last line's place in the text: bodyOf keeps every line's place, and leaves the last line out when it is blank
-  // or the closing line.
+  const { lines, closed } = bodyOf(text);
   const cut = options.cutLastLine === true ? text.split('\n').length - 1 : -1;
-  let headed = false;
+  // Whether the latest header has no words under it yet, and how many headers have.
   let open = false;
-  let turns = 0;
+  let worded = 0;
   for (let at = 0; at < lines.length; at += 1) {
     const line = lines[at];
     if (line.trim() === '') continue;
-    if (at === cut) {
-      if (open) turns += 1;
-      break;
-    }
-    if (otterHeader(line) !== null) {
-      headed = true;
+    if (at !== cut && otterHeader(line) !== null) {
       open = true;
-    } else if (headed) {
-      // A line of words with no header of its own: this is no Otter export.
-      if (!open) return false;
+    } else if (open) {
       open = false;
-      turns += 1;
+      worded += 1;
     }
   }
-  return turns >= 2;
+  return worded >= 2 || (worded === 1 && closed);
 }
 
 /**
@@ -97,7 +91,7 @@ export function isOtterLayout(text: string, options: { cutLastLine?: boolean } =
  * @param format - The format to answer with: `otter`, or `docx` for a Word file's text.
  */
 export function readOtter(text: string, format: TranscriptFormat = 'otter'): ReadTranscript {
-  const lines = bodyOf(text);
+  const { lines } = bodyOf(text);
   const segments: Segment[] = [];
   let current: { label: string; startMs: number; words: string[] } | null = null;
   const close = (): void => {
