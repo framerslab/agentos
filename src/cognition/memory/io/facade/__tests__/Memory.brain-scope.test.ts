@@ -41,8 +41,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 import { Memory, type ScoredTrace } from '../Memory.js';
+import { MemorySearchTool } from '../../tools/MemorySearchTool.js';
 import type { Brain } from '../../../retrieval/store/Brain.js';
 import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
+import type { ToolExecutionContext } from '../../../../../core/tools/ITool.js';
 
 vi.mock('hnswlib-node', async () => {
   const { readFileSync, writeFileSync } = await import('node:fs');
@@ -535,5 +537,22 @@ describe('two brains in a Postgres database', () => {
     );
     expect(Number(marked?.n)).toBe(1);
     expect(idsOf(await a.recall('locker blue tin'))).toHaveLength(1);
+  });
+
+  it.skipIf(!POSTGRES_URL)('searches its own brain through the search tool, the best match first', async () => {
+    const { a, b } = await postgresPair();
+    const once = await a.remember('A ferry crossed the bay');
+    const thrice = await a.remember('The ferry, the night ferry and the morning ferry');
+    await b.remember('The ferry timetable is pinned by the door');
+
+    const context: ToolExecutionContext = {
+      gmiId: 'test-gmi',
+      personaId: 'test-persona',
+      userContext: { userId: 'default-user' } as ToolExecutionContext['userContext'],
+    };
+    const result = await new MemorySearchTool(brainOf(a)).execute({ query: 'ferry' }, context);
+    const ids = ((result.output as { results?: Array<{ id: string }> } | undefined)?.results ?? []).map((row) => row.id);
+    // ts_rank grows with the matches it counts, so the trace that names the ferry three times leads.
+    expect(ids).toEqual([thrice.id, once.id]);
   });
 });

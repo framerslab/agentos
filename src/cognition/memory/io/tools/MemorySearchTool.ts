@@ -20,7 +20,7 @@ import type {
   JSONSchemaObject,
 } from '../../../../core/tools/ITool.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
-import { buildNaturalLanguageFtsQuery } from '../../retrieval/store/tracePersistence.js';
+import { bindingsFor, buildNaturalLanguageFtsQuery } from '../../retrieval/store/tracePersistence.js';
 import { resolveMemoryToolScopeId } from './scopeContext.js';
 
 // ---------------------------------------------------------------------------
@@ -224,18 +224,22 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
       const extraWhere = extraClauses.length > 0 ? `AND ${extraClauses.join(' AND ')}` : '';
 
       const { fts } = this.brain.features;
+      // The best match first on every engine: FTS5's rank is lower for a
+      // better match, Postgres's ts_rank higher. On Postgres the order reads
+      // the query text through its own `?`, bound after the filters.
+      const order = fts.relevanceOrder('fts', '?');
       const sql = `
         SELECT mt.id, mt.content, mt.type, mt.scope, mt.strength, mt.tags
         FROM ${fts.joinClause('memory_traces', 'mt', 'fts', 'memory_traces_fts')}
         WHERE ${fts.matchClause('memory_traces_fts', '?')}
           AND mt.deleted = 0
           ${extraWhere}
-        ORDER BY ${fts.rankExpression('fts')}
+        ORDER BY ${order}
         LIMIT ?
       `;
 
       const runSearch = async (query: string): Promise<SearchRow[]> => {
-        const params: unknown[] = [query, ...extraParams, limit];
+        const params: unknown[] = [query, ...extraParams, ...bindingsFor(order, query), limit];
         return await this.brain.all<SearchRow>(sql, params);
       };
 
