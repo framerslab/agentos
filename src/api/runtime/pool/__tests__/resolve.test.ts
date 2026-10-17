@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { resolveSeatCredentials, availabilityOf, agencyProviderOf } from '../resolve.js';
+import { resolveSeatCredentials, availabilityOf, agencyProviderOf, seatHealthId } from '../resolve.js';
 import { setDefaultProvider, clearDefaultProvider } from '../../global-default.js';
 import { globalLLMProviderHealth } from '../../../../core/safety/LLMProviderHealthRegistry.js';
 import type { AgencyOptions } from '../../../types.js';
@@ -59,7 +59,31 @@ describe('availabilityOf', () => {
     expect(availabilityOf({ provider: 'claude-code-cli', model: 'x' }, { binaryOnPath: () => false })).toBe('binary not found (claude)');
     expect(availabilityOf({ provider: 'gemini-cli', model: 'x' }, { binaryOnPath: () => true })).toBeUndefined();
     expect(availabilityOf({ provider: 'openai', model: 'x', apiKey: 'k' })).toBeUndefined();
-    globalLLMProviderHealth.recordFailure('openai', Object.assign(new Error('401'), { httpStatus: 401 }));
-    expect(availabilityOf({ provider: 'openai', model: 'x', apiKey: 'k' })).toBe('circuit open');
+  });
+  it("reads the breaker of the key the entry's calls send: a failure on one key stops the entries on that key only", () => {
+    vi.stubEnv('OPENAI_API_KEY', 'env-key');
+    const onEnv = { provider: 'openai', model: 'x', apiKey: 'env-key' };
+    const onOwn = { provider: 'openai', model: 'x', apiKey: 'k' };
+    const auth = () => Object.assign(new Error('401'), { httpStatus: 401 });
+    // The environment's key fails: the provider's own record opens, which an entry on that key shares.
+    globalLLMProviderHealth.recordFailure('openai', auth());
+    expect(availabilityOf(onEnv)).toBe('circuit open');
+    expect(availabilityOf(onOwn)).toBeUndefined();
+    // The entry's own key fails: its record opens, and the provider's other callers keep theirs.
+    globalLLMProviderHealth.reset();
+    globalLLMProviderHealth.recordFailure(seatHealthId(onOwn), auth());
+    expect(availabilityOf(onOwn)).toBe('circuit open');
+    expect(availabilityOf(onEnv)).toBeUndefined();
+  });
+});
+
+describe('seatHealthId', () => {
+  it("is the provider's own id for the key it has without the seat, and an id of the seat's own key and URL otherwise", () => {
+    vi.stubEnv('OPENAI_API_KEY', 'env-key');
+    expect(seatHealthId({ provider: 'openai', model: 'x', apiKey: 'env-key' })).toBe('openai');
+    const own = seatHealthId({ provider: 'openai', model: 'x', apiKey: 'k' });
+    expect(own).toMatch(/^openai@[0-9a-f]{12}$/);
+    expect(seatHealthId({ provider: 'openai', model: 'x', apiKey: 'k', baseUrl: 'https://proxy.example/v1' })).not.toBe(own);
+    expect(seatHealthId({ provider: 'openai', model: 'x', apiKey: 'k2' })).not.toBe(own);
   });
 });

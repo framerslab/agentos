@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSeatingState, seatRoster, type SeatedConfig } from '../seating.js';
-import { TEXT_PROVIDER_IDS } from '../resolve.js';
+import { TEXT_PROVIDER_IDS, seatHealthId } from '../resolve.js';
 import { providerEnvVars } from '../../../model.js';
 import { globalLLMProviderHealth } from '../../../../core/safety/LLMProviderHealthRegistry.js';
 import type { AgencyOptions, AgencySeatConfig } from '../../../types.js';
@@ -74,7 +74,8 @@ describe('policies', () => {
     const pool = { a: { ...POOL.opus, weight: 1 }, b: { ...POOL.astra, weight: 1 } };
     const s = seat({ modelPool: pool, agents: { x: { instructions: '1' } }, seating: { policy: 'round-robin', distinct: false } });
     let r = s.run(); r.commit(); expect(r.record.seats.x.entry).toBe('a');
-    globalLLMProviderHealth.recordFailure('openai', Object.assign(new Error('401'), { httpStatus: 401 }));
+    // b's calls carry its own key, so a 401 on that key opens b's record (each key has its own).
+    globalLLMProviderHealth.recordFailure(seatHealthId({ provider: 'openai', model: 'gpt-4.1', apiKey: POOL.astra.apiKey }), Object.assign(new Error('401'), { httpStatus: 401 }));
     r = s.run(); r.commit(); expect(r.record.seats.x.entry).toBe('a'); expect(r.record.skipped).toEqual([{ entry: 'b', reason: 'circuit open' }]);
     globalLLMProviderHealth.reset();
     r = s.run(); r.commit(); expect(r.record.seats.x.entry).toBe('b');

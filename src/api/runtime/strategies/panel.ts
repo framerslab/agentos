@@ -30,6 +30,7 @@ import {
 } from './shared.js';
 import type { SeatedRoster, SeatedConfig } from '../pool/seating.js';
 import { vendorOf, makerOfHostedModel, isHostProvider } from '../pool/vendor.js';
+import { seatHealthId } from '../pool/resolve.js';
 import {
   createApprovalGate,
   createApprovalSlot,
@@ -389,9 +390,15 @@ export function compilePanel(
           ? `${input}\n\n[Additional instructions]: ${decision.modifications.instructions}`
           : input;
         const cfg = isAgent(target) ? undefined : target;
-        // A call with no chain of its own cannot be answered while its
-        // provider's breaker is open. A chain walks past an open provider.
-        if (cfg?.provider && !cfg.fallbackProviders?.length && globalLLMProviderHealth.isOpen(cfg.provider)) {
+        // A call with no chain of its own cannot be answered while the
+        // breaker its key records under is open (each key has its own, so a
+        // sibling's 401 stops the seats on that key only). A chain walks past
+        // an open provider.
+        if (
+          cfg?.provider &&
+          !cfg.fallbackProviders?.length &&
+          globalLLMProviderHealth.isOpen(seatHealthId({ provider: cfg.provider, model: cfg.model ?? '', apiKey: cfg.apiKey, baseUrl: cfg.baseUrl }))
+        ) {
           return { kind: 'error', message: 'circuit open', durationMs: elapsed() };
         }
         // Every seated config passes through mergeDefaults, the chair included:

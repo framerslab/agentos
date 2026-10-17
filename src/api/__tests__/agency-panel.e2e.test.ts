@@ -54,6 +54,7 @@ import { hitl } from '../hitl.js';
 import { exportAgentConfig, importAgent } from '../agentExport.js';
 import { setDefaultProvider, clearDefaultProvider } from '../runtime/global-default.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
+import { seatHealthId } from '../runtime/pool/resolve.js';
 import { OpenAIProviderError } from '../../core/llm/providers/errors/OpenAIProviderError.js';
 import {
   AgencyConfigError, AgencyQuorumError, AgencyPanelError, AgencySeatingError,
@@ -151,6 +152,9 @@ const POOL = () => ({
   astra: { provider: 'openai', model: 'gpt-4.1', apiKey: K.oai },
   gemini: { provider: 'gemini', model: 'gemini-2.5-flash', apiKey: K.gem },
 });
+// The health record astra's calls on K.oai write. Each key has its own (providerHealthKey): with no OPENAI_API_KEY
+// of that value it is not the provider's plain 'openai' record, so a breaker check on astra reads this one.
+const astraHealth = () => seatHealthId({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai });
 const SEATS = () => ({ correctness: { instructions: 'Find logic errors.' }, security: { instructions: 'Find security defects.' }, failure: { instructions: 'Find silent failures.' } });
 const panel = (extra: Json = {}) => agency({ strategy: 'panel', modelPool: POOL(), agents: SEATS(), chair: { from: ['opus'], instructions: 'Merge.' }, ...extra } as never);
 
@@ -284,7 +288,7 @@ describe('6. deadlines (fake timers)', () => {
     const result = await pending;
     expect(result.seats.find((s) => s.entry === 'astra')).toMatchObject({ status: 'timeout' });
     expect(calls(OPENAI_CHAT)[0].init.signal?.aborted).toBe(true);
-    expect(globalLLMProviderHealth.isOpen('openai')).toBe(false);
+    expect(globalLLMProviderHealth.isOpen(astraHealth())).toBe(false);
     expect(onError).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(10);
     expect(unhandled).not.toHaveBeenCalled();
@@ -338,7 +342,7 @@ describe('6. deadlines (fake timers)', () => {
     // transient threshold); under __panelDeadline none is recorded.
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls(GEMINI).length).toBe(0);
-    expect(globalLLMProviderHealth.isOpen('openai')).toBe(false);
+    expect(globalLLMProviderHealth.isOpen(astraHealth())).toBe(false);
   });
   it('a late beforeAgent approval after the seat timed out fires no approvalDecided, guardrailResult or guardrailHitlOverride, starts no request and adds nothing to the next call trail', async () => {
     vi.useFakeTimers();
@@ -1069,12 +1073,16 @@ describe('25-26. approvals under panel and nested agencies', () => {
     expect(err).toBeInstanceOf(AgencyPanelError);
     expect(err.seats.find((s: Json) => s.seat === 'correctness').status).toBe('timeout');
   });
-  it("a seat starting after a sibling's 401 opened the provider is error with reason circuit open", async () => {
-    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiError(401, 'bad key'), openaiText('never')]], [ANTHROPIC, anthropicText('Merged')]]);
-    const r = await agency({ strategy: 'panel', modelPool: { a1: POOL().astra, a2: { ...POOL().astra, apiKey: K.second }, opus: POOL().opus }, seating: { distinct: false }, agents: { s1: { instructions: 'x', from: ['a1'] }, s2: { instructions: 'y', from: ['a2'] } }, chair: { from: ['opus'] }, panel: { concurrency: 1 }, quorum: { minAgents: 0 } } as never).generate('review').catch((e) => e);
+  it("a seat starting after a sibling's 401 opened its key's breaker is error with reason circuit open; a seat on another key runs", async () => {
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiError(401, 'bad key'), openaiText('second key')]], [ANTHROPIC, anthropicText('Merged')]]);
+    const r = await agency({ strategy: 'panel', modelPool: { a1: POOL().astra, a2: { ...POOL().astra, apiKey: K.second }, opus: POOL().opus }, seating: { distinct: false }, agents: { s1: { instructions: 'x', from: ['a1'] }, s2: { instructions: 'y', from: ['a2'] }, s3: { instructions: 'z', from: ['a1'] } }, chair: { from: ['opus'] }, panel: { concurrency: 1 }, quorum: { minAgents: 0 } } as never).generate('review').catch((e) => e);
     const seats = r instanceof Error ? (r as Json).seats : r.seats;
-    expect(seats.find((s: Json) => s.seat === 's2')).toMatchObject({ status: 'error', error: 'circuit open' });
-    expect(calls(OPENAI_CHAT, 'POST')).toHaveLength(1);
+    // Each key has its own breaker: s1's 401 opened K.oai's, so s3 on that key is stopped at its start and sends
+    // nothing, while s2 on K.second runs. The exact reason is the panel's own: a call that reached generateText's
+    // breaker check would end with "[503] Provider 'openai' circuit open; cooldown ...".
+    expect(seats.find((s: Json) => s.seat === 's3')).toMatchObject({ status: 'error', error: 'circuit open' });
+    expect(seats.find((s: Json) => s.seat === 's2')).toMatchObject({ status: 'ok', text: 'second key' });
+    expect(calls(OPENAI_CHAT, 'POST').map((c) => header(c, 'Authorization'))).toEqual([`Bearer ${K.oai}`, `Bearer ${K.second}`]);
   });
   it('nested pooled agencies and panels compose the gate and keep the deadline flag', async () => {
     const tools = searchTool();
@@ -1120,7 +1128,7 @@ describe('25-26. approvals under panel and nested agencies', () => {
     const innerPosts = calls(OPENAI_CHAT, 'POST');
     expect(innerPosts).toHaveLength(15); // five seats, three attempts each; the own seat and the chair are on Anthropic, and a seat with one candidate has no chain
     expect(innerPosts.every((c) => c.init.signal?.aborted)).toBe(true);
-    expect(globalLLMProviderHealth.isOpen('openai')).toBe(false);
+    expect(globalLLMProviderHealth.isOpen(astraHealth())).toBe(false);
     vi.useRealTimers();
     const tools = searchTool();
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('search', { q: 'x' }), openaiText('inner done')]]]);

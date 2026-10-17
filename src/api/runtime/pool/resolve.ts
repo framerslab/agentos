@@ -7,7 +7,8 @@
  */
 import { PROVIDER_DEFAULTS, isBinaryOnPathCached } from '../provider-defaults.js';
 import { getDefaultProvider } from '../global-default.js';
-import { knownProviderPrefixOf, providerEnvVars } from '../../model.js';
+import { knownProviderPrefixOf, providerEnvVars, resolveProvider } from '../../model.js';
+import { providerHealthKey, type ProviderCredentials } from '../providerHealthKey.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import type { AgencyOptions } from '../../types.js';
 
@@ -101,9 +102,34 @@ export function keyVarOf(provider: string): string {
 }
 
 /**
+ * The id the provider health registry keeps a seat's calls under, worked out
+ * as generateText and streamText work it out for a seat's call, whose key
+ * and URL resolve strictly: the provider's own id when the seat's key and URL
+ * are the ones the provider has without the seat (its environment variable
+ * or the global default), else an id of the seat's own key and URL (see
+ * `providerHealthKey`). A 401 on one key then opens the breaker for every
+ * seat on that key, and for no seat on another.
+ *
+ * @param c - Credentials from {@link resolveSeatCredentials}.
+ * @returns The registry id the seat's calls record their health under.
+ */
+export function seatHealthId(c: ResolvedCredentials): string {
+  let resolved: ProviderCredentials;
+  try {
+    resolved = resolveProvider(c.provider, c.model, { apiKey: c.apiKey, baseUrl: c.baseUrl, strict: true });
+  } catch {
+    // A call on these credentials fails before any request and records no health.
+    return c.provider;
+  }
+  const own = c.apiKey !== undefined || c.baseUrl !== undefined;
+  return providerHealthKey(resolved, own ? () => resolveProvider(c.provider, c.model) : undefined);
+}
+
+/**
  * Why resolved credentials cannot be used, or undefined when they can: a key
  * for an API provider, a base URL for Ollama, the binary on PATH for a CLI
- * provider, and a closed circuit breaker.
+ * provider, and a closed circuit breaker: the one the seat's calls record
+ * under ({@link seatHealthId}).
  *
  * @param c - Credentials from {@link resolveSeatCredentials}.
  * @param deps - Replacements for the binary probe and the breaker check.
@@ -111,10 +137,10 @@ export function keyVarOf(provider: string): string {
  */
 export function availabilityOf(
   c: ResolvedCredentials,
-  deps: { binaryOnPath?: (name: string) => boolean; breakerOpen?: (provider: string) => boolean } = {},
+  deps: { binaryOnPath?: (name: string) => boolean; breakerOpen?: (c: ResolvedCredentials) => boolean } = {},
 ): string | undefined {
   const binaryOnPath = deps.binaryOnPath ?? isBinaryOnPathCached;
-  const breakerOpen = deps.breakerOpen ?? ((p: string) => globalLLMProviderHealth.isOpen(p));
+  const breakerOpen = deps.breakerOpen ?? ((creds: ResolvedCredentials) => globalLLMProviderHealth.isOpen(seatHealthId(creds)));
   if (c.provider === 'ollama') {
     if (!c.baseUrl) return 'no base URL (OLLAMA_BASE_URL)';
   } else if (CLI_BINARY[c.provider]) {
@@ -122,6 +148,6 @@ export function availabilityOf(
   } else if (!c.apiKey) {
     return `no key (${keyVarOf(c.provider)})`;
   }
-  if (breakerOpen(c.provider)) return 'circuit open';
+  if (breakerOpen(c)) return 'circuit open';
   return undefined;
 }

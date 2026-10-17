@@ -35,8 +35,11 @@ export type SeatedConfig = AgencySeatConfig & SeatInternals;
 export interface SeatingDeps {
   /** Whether a CLI provider's binary is on PATH. Default: the cached probe. */
   binaryOnPath?: (name: string) => boolean;
-  /** Whether a provider's circuit breaker is open. Default: the process-wide health registry. */
-  breakerOpen?: (provider: string) => boolean;
+  /**
+   * Whether the circuit breaker the credentials' calls record under is open. Default: the
+   * process-wide health registry, read at the id `seatHealthId` gives (each key has its own).
+   */
+  breakerOpen?: (c: ResolvedCredentials) => boolean;
 }
 
 /** Per-instance state: policy, seed, call counter and round-robin totals. */
