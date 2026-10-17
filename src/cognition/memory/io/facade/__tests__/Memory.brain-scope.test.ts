@@ -19,7 +19,8 @@
  * - a SQLite export holds the brain's own rows, and an import of a SQLite
  *   file that holds several brains is refused;
  * - a SQLite import that merges a tag into a trace the brain holds leaves the
- *   trace found by that tag;
+ *   trace found by that tag, and an import that also inserts a trace rebuilds
+ *   the full-text index once;
  * - an Obsidian export links the brain's own knowledge-graph nodes, though
  *   node ids repeat across brains;
  * - on Postgres, a brain's full-text rebuild re-indexes its own rows;
@@ -141,6 +142,7 @@ const dirs: string[] = [];
 const memories: Memory[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   while (memories.length > 0) {
     const memory = memories.pop()!;
     const brain = brainOf(memory);
@@ -452,6 +454,28 @@ describe.each([
     expect(result).toMatchObject({ imported: 0, skipped: 1, errors: [] });
     expect(await searchIds(brainOf(a), 'vacation')).toEqual([held.id]);
     expect(await searchIds(brainOf(a), 'travel')).toEqual([held.id]);
+  });
+
+  it.skipIf(skip)('rebuilds the full-text index once for a SQLite import that inserts a trace and merges a tag', async () => {
+    const { a } = await open();
+    const text = 'We took the night train along the coast';
+    const held = await a.remember(text, { tags: ['travel'] });
+    // The export holds the same text tagged 'vacation', and a trace the brain does not hold.
+    const source = await openSqlite(path.join(newDir('agentos-brain-mixed-'), 'source.sqlite'), 'brain-source');
+    await source.remember(text, { tags: ['vacation'] });
+    const fresh = await source.remember('The ferry I take is called the Vastrelle.');
+    const file = path.join(newDir('agentos-brain-mixed-export-'), 'source.sqlite');
+    await source.export(file, { format: 'sqlite' });
+    const brain = brainOf(a);
+    const rebuild = brain.fullTextRebuild().sql;
+    const run = vi.spyOn(brain, 'run');
+
+    const result = await a.importFrom(file, { format: 'sqlite' });
+
+    expect(result).toMatchObject({ imported: 1, skipped: 1, errors: [] });
+    expect(run.mock.calls.filter(([sql]) => sql === rebuild)).toHaveLength(1);
+    expect(await searchIds(brain, 'vacation')).toEqual([held.id]);
+    expect(await searchIds(brain, 'Vastrelle')).toEqual([fresh.id]);
   });
 });
 
