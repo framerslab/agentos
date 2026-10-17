@@ -843,14 +843,7 @@
       "sharp",
       "bcrypt",
       "tesseract.js"
-    ],
-    "packageExtensions": {
-      "@framers/agentos-extensions-registry": {
-        "dependencies": {
-          "@framers/agentos": "^0.14.2"
-        }
-      }
-    }
+    ]
   },
   "sideEffects": false
 }
