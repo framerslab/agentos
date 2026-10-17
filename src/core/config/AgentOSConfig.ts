@@ -50,6 +50,8 @@ export interface EnvironmentConfig {
   ANTHROPIC_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
   REQUESTY_API_KEY?: string;
+  MINIMAX_API_KEY?: string;
+  MINIMAX_BASE_URL?: string;
   SERPER_API_KEY?: string;
   OLLAMA_BASE_URL?: string;
 
@@ -131,6 +133,8 @@ export function getEnvironmentConfig(): EnvironmentConfig {
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
     REQUESTY_API_KEY: process.env.REQUESTY_API_KEY,
+    MINIMAX_API_KEY: process.env.MINIMAX_API_KEY,
+    MINIMAX_BASE_URL: process.env.MINIMAX_BASE_URL,
     OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
     LEMONSQUEEZY_API_KEY: process.env.LEMONSQUEEZY_API_KEY,
     LEMONSQUEEZY_WEBHOOK_SECRET: process.env.LEMONSQUEEZY_WEBHOOK_SECRET,
@@ -213,6 +217,20 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
         baseURL: 'https://api.openai.com/v1',
         defaultModelId: 'gpt-4o',
         maxRetries: 3,
+        requestTimeout: 60000,
+      },
+    });
+  }
+
+  if (env.MINIMAX_API_KEY) {
+    providers.push({
+      providerId: 'minimax',
+      enabled: true,
+      isDefault: !env.OPENAI_API_KEY && !env.OPENROUTER_API_KEY && !env.REQUESTY_API_KEY,
+      config: {
+        apiKey: env.MINIMAX_API_KEY,
+        baseURL: env.MINIMAX_BASE_URL || 'https://api.minimax.io/v1',
+        defaultModelId: 'MiniMax-M3',
         requestTimeout: 60000,
       },
     });
