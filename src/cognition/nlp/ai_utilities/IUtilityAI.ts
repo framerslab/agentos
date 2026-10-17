@@ -177,12 +177,13 @@ export interface ParseJsonOptions<_T = any> {
   llmProviderIdForFix?: string;
   /**
    * Optional JSON schema to validate the parsed object against. LLMUtilityAI sends a value that fails it for repair
-   * as it sends a text that does not parse, and answers `null` when no repair passes it.
+   * as it sends a text that does not parse, names the schema (and a parsed value's errors) in the repair request, and
+   * answers `null` when no repair passes it.
    */
   targetSchema?: JSONSchemaObject; // Using the type from ITool.ts for consistency
   /**
    * LLMUtilityAI: how many repairs to try, each on the text the last one answered, while a repair does not parse or
-   * fails `targetSchema`. 1 unless given.
+   * fails `targetSchema`. 1 unless it is a whole number of 1 or more, so `Infinity` is 1 too.
    */
   maxRepairAttempts?: number;
 }

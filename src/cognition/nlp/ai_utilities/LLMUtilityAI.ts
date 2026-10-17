@@ -108,6 +108,26 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
   }
 
   /**
+   * The prompt of one JSON repair. With a `targetSchema` it names the schema and, when the text parsed and failed it,
+   * the schema's errors, so the repair can supply what the value lacks; without one it asks for valid JSON alone.
+   */
+  private static jsonRepairPrompt(
+    text: string,
+    targetSchema: ParseJsonOptions['targetSchema'],
+    schemaErrors: readonly unknown[],
+  ): string {
+    const textToFix = text.substring(0, 2000); // Limit length of potentially broken JSON
+    if (!targetSchema) {
+      return `The following text is supposed to be a valid JSON object but failed to parse. Please correct it and return ONLY the valid JSON object. If it's unrecoverable or not JSON, return an empty JSON object {}. Text to fix:\n\n${textToFix}`;
+    }
+    const failure =
+      schemaErrors.length > 0
+        ? `It parsed and failed the schema with these errors: ${JSON.stringify(schemaErrors).substring(0, 1000)}`
+        : 'It failed to parse.';
+    return `The following text is supposed to be valid JSON that satisfies this JSON Schema: ${JSON.stringify(targetSchema).substring(0, 2000)}\n${failure}\nPlease correct it and return ONLY the valid JSON. If it's unrecoverable or not JSON, return an empty JSON object {}. Text to fix:\n\n${textToFix}`;
+  }
+
+  /**
    * Makes a task call that answers JSON and parses the reply. A reply that does not parse is sent back once for repair
    * to the model and provider the call ran on, so the repair never lands on a provider that does not serve the model.
    */
@@ -240,9 +260,11 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
 
   /**
    * `JSON.parse`, then a check against `targetSchema` with Ajv when given. With `attemptFixWithLLM`, a text that fails
-   * either is sent for repair, up to `maxRepairAttempts` times (1 unless given), each repair on the text the last one
-   * answered, on `llmModelIdForFix` (else `jsonFixerModelId`, else `defaultModelId`) and `llmProviderIdForFix` (else
-   * `defaultProviderId`). Answers `null` when no repair parses and passes the schema, or a repair call fails.
+   * either is sent for repair, up to `maxRepairAttempts` times (1 unless it is a whole number of 1 or more), each
+   * repair on the text the last one answered, on `llmModelIdForFix` (else `jsonFixerModelId`, else `defaultModelId`)
+   * and `llmProviderIdForFix` (else `defaultProviderId`). A repair request names `targetSchema` when given, and the
+   * schema's errors when the text parsed and failed it. Answers `null` when no repair parses and passes the schema, or
+   * a repair call fails.
    */
   public async parseJsonSafe<T = any>(jsonString: string, options?: ParseJsonOptions<T>): Promise<T | null> {
     this.ensureInitialized();
@@ -257,15 +279,23 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
         }
       }
       return parsed as T;
-    } catch {
+    } catch (parseError) {
       if (options?.attemptFixWithLLM) {
         console.warn(`LLMUtilityAI (${this.utilityId}): Standard JSON parsing failed for input (length ${jsonString.length}). Attempting LLM fix.`);
-        const attempts = Math.max(1, Math.floor(Number(options.maxRepairAttempts) || 1));
+        // A count that is not a whole number of 1 or more, Infinity included, is read as 1, so replies that never
+        // parse cannot buy repairs without end.
+        const requested = Number(options.maxRepairAttempts);
+        const attempts = Number.isFinite(requested) && requested >= 1 ? Math.floor(requested) : 1;
         let textToFix = jsonString;
+        // The schema errors of the text being repaired, when it parsed and failed targetSchema.
+        let schemaErrors: unknown[] =
+          parseError instanceof GMIError && parseError.code === GMIErrorCode.VALIDATION_ERROR && Array.isArray(parseError.details?.errors)
+            ? parseError.details.errors
+            : [];
         for (let attempt = 1; attempt <= attempts; attempt += 1) {
           let fixedJsonString: string;
           try {
-            const fixPrompt = `The following text is supposed to be a valid JSON object but failed to parse. Please correct it and return ONLY the valid JSON object. If it's unrecoverable or not JSON, return an empty JSON object {}. Text to fix:\n\n${textToFix.substring(0, 2000)}`; // Limit length of potentially broken JSON
+            const fixPrompt = LLMUtilityAI.jsonRepairPrompt(textToFix, options.targetSchema, schemaErrors);
             fixedJsonString = await this.makeLLMCall(
               fixPrompt,
               "You are an expert JSON correction assistant. Output only valid JSON.",
@@ -284,6 +314,7 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
           } catch {
             console.error(`LLMUtilityAI (${this.utilityId}): Failed to parse LLM-fixed JSON string.`, { textLength: fixedJsonString.length });
             textToFix = fixedJsonString;
+            schemaErrors = [];
             continue;
           }
           if (options.targetSchema) {
@@ -292,6 +323,7 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
               const validationErrors = Array.isArray(validate.errors) ? validate.errors : [];
               console.warn(`LLMUtilityAI (${this.utilityId}): LLM-fixed JSON failed schema validation.`, validationErrors);
               textToFix = fixedJsonString;
+              schemaErrors = validationErrors;
               continue;
             }
           }
