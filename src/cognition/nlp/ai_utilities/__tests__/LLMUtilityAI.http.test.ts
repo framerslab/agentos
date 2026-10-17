@@ -189,6 +189,18 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(received).toHaveLength(3);
   });
 
+  it('sends a hybrid keyword call or classification that names a counting method to the statistical class', async () => {
+    const stats = new StatisticalUtilityAI('stat-for-hybrid-counts');
+    await stats.initialize({ utilityId: 'stat-for-hybrid-counts', defaultLanguage: 'en' });
+    const hybrid = new HybridUtilityAI({ llm: utility, statistical: stats });
+    // parcels and lost twice each, in that order of first appearance.
+    const keywords = await hybrid.extractKeywords('parcels delayed, parcels lost, boxes lost', { method: 'frequency_based', maxKeywords: 2 });
+    expect(keywords).toEqual(['parcels', 'lost']);
+    const matched = await hybrid.classifyText('the parcel is late', { candidateClasses: ['billing', 'parcel'], method: 'keyword_matching' });
+    expect(matched.bestClass).toBe('parcel');
+    expect(received).toHaveLength(0);
+  });
+
   it('still takes a provider from methodOptions.providerId', async () => {
     replies = ['{"bestClass": "billing", "confidence": 0.9}'];
     const result = await utility.classifyText('Where is my refund?', {
