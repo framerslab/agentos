@@ -447,6 +447,22 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(await utility.parseJsonSafe('{"ok": true}', { attemptFixWithLLM: true, targetSchema: schema })).toBeNull();
     expect(received).toHaveLength(0);
   });
+
+  it('checks targetSchema in the statistical class too, so a hybrid repairs a value that fails it', async () => {
+    const stats = new StatisticalUtilityAI('stat-for-schema');
+    await stats.initialize({ utilityId: 'stat-for-schema' });
+    const schema = { type: 'object', required: ['ok'] };
+    expect(await stats.parseJsonSafe('{"other": 1}', { targetSchema: schema })).toBeNull();
+    expect(await stats.parseJsonSafe('{"ok": true}', { targetSchema: schema })).toEqual({ ok: true });
+    expect(await stats.parseJsonSafe('{"ok": true}', { targetSchema: { type: 'nonsense' } })).toBeNull();
+    expect(received).toHaveLength(0);
+
+    // The statistical class answers null for the value that fails the schema, and the LLM-backed class repairs it.
+    const hybrid = new HybridUtilityAI({ llm: utility, statistical: stats });
+    replies = ['{"ok": true}'];
+    expect(await hybrid.parseJsonSafe('{"other": 1}', { targetSchema: schema, attemptFixWithLLM: true })).toEqual({ ok: true });
+    expect(received).toHaveLength(1);
+  });
 });
 
 describe('LLMUtilityAI before initialize()', () => {
