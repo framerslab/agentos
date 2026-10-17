@@ -147,6 +147,19 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(systemPrompt(received[3])).toContain('about 150 sentences');
   });
 
+  it('asks for a summary in plain words, at the length and in the form the call names', async () => {
+    replies = ['One.', 'Two.', 'Three.'];
+    const text = 'The refund goes back to the card that paid.';
+    await utility.summarize(text);
+    await utility.summarize(text, { desiredLength: 'short' });
+    await utility.summarize(text, { desiredLength: 0.25, method: 'key_points_llm' });
+    expect(received.map((request) => systemPrompt(request))).toEqual([
+      'Summarize the following text as a summary of medium length, written as prose. Focus on the main ideas and key information.',
+      'Summarize the following text as a very short, concise summary (1-2 sentences), written as prose. Focus on the main ideas and key information.',
+      'Summarize the following text as a summary about 25% of the original length, written as a list of key bullet points. Focus on the main ideas and key information.',
+    ]);
+  });
+
   it('sends a hybrid call whose method only one of its classes has to that class', async () => {
     const stats = new StatisticalUtilityAI('stat-for-hybrid');
     await stats.initialize({ utilityId: 'stat-for-hybrid', defaultLanguage: 'en' });
