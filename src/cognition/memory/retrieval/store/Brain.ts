@@ -47,7 +47,7 @@ import {
   DDL_ARCHIVE_ACCESS_LOG_IDX,
 } from '../../archive/SqlStorageMemoryArchive.js';
 import { MigrationRunner, MIGRATIONS, LATEST_SCHEMA_VERSION } from './migrations/index.js';
-import { ensureScopeIdColumn } from './migrations/v2-to-v3.js';
+import { ensureScopeIdColumn, postgresIndexExists } from './migrations/v2-to-v3.js';
 import { PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 
@@ -80,6 +80,27 @@ async function retryLostCreate(step: () => Promise<void>): Promise<void> {
     }
     await step();
   }
+}
+
+/** Each `CREATE INDEX IF NOT EXISTS <name> ON <table> ...;` statement of a schema script, with the index's name and its table's. */
+const CREATE_INDEX_IF_NOT_EXISTS =
+  /CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)\s+ON\s+([A-Za-z_][A-Za-z0-9_]*)\b[^;]*;?/gi;
+
+/**
+ * The script without its `CREATE INDEX IF NOT EXISTS` statements for indexes Postgres already has. Postgres takes the
+ * table's SHARE lock before it checks IF NOT EXISTS, so an open would otherwise wait for any long write transaction
+ * on the table, and while it waited, every writer queued behind its lock request would wait too. Each index is looked
+ * for in its own table's schema, where the statement would make it.
+ */
+async function withoutExistingIndexes(adapter: StorageAdapter, script: string): Promise<string> {
+  const indexes = [...script.matchAll(CREATE_INDEX_IF_NOT_EXISTS)].map((match) => ({ name: match[1]!, table: match[2]! }));
+  const present = new Set<string>();
+  for (const { name, table } of indexes) {
+    if (await postgresIndexExists(adapter, name, table)) present.add(name);
+  }
+  return present.size === 0
+    ? script
+    : script.replace(CREATE_INDEX_IF_NOT_EXISTS, (statement: string, name: string) => (present.has(name) ? '' : statement));
 }
 
 /**
@@ -1137,8 +1158,11 @@ export class Brain {
       DDL_ARCHIVE_ACCESS_LOG_IDX,
     ];
 
+    const postgres = this._features.dialect.name === 'postgres';
     for (const statement of ddlStatements) {
-      const ddl = this._normalizeDdlForDialect(statement);
+      const normalized = this._normalizeDdlForDialect(statement);
+      const ddl = postgres ? await withoutExistingIndexes(adapter, normalized) : normalized;
+      if (ddl.trim().length === 0) continue;
       await retryLostCreate(() => adapter.exec(ddl));
     }
 
