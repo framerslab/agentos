@@ -219,14 +219,17 @@ function refuseMisdirectedCredentials(opts: ModelOption, task: TaskType): void {
  *   over environment variable lookups. `strict` (set for an agency seat) admits
  *   only a `setDefaultProvider()` default that names this provider, for the key
  *   and for the URL, and turns off the Anthropic → OpenRouter fallback, so a
- *   provider with no key of its own fails.
+ *   provider with no key of its own fails. `quiet` is for a lookup that sends
+ *   no request, such as the read of the provider's shared credentials that
+ *   `providerHealthKey` compares a call's own with: it resolves the same way
+ *   and prints no notice that a request goes to OpenRouter.
  * @returns A `ResolvedProvider` ready for `createProviderManager()`.
  * @throws {Error} When no credentials can be resolved for the given provider.
  */
 export function resolveProvider(
   providerId: string,
   modelId: string,
-  overrides?: { apiKey?: string; baseUrl?: string; strict?: boolean }
+  overrides?: { apiKey?: string; baseUrl?: string; strict?: boolean; quiet?: boolean }
 ): ResolvedProvider {
   // Global-default credentials apply when their `provider` matches the
   // provider being resolved (or when no provider was pinned in the
@@ -271,10 +274,13 @@ export function resolveProvider(
       // OpenRouter exposes Anthropic models under dateless slugs (e.g. "anthropic/claude-haiku-4-5").
       // Strip a trailing -YYYYMMDD release-date suffix when remapping so the OR call resolves.
       const orModelId = modelId.replace(/-\d{8}$/, '');
-      console.warn(
-        `[AgentOS] ANTHROPIC_API_KEY not set — falling back to OpenRouter for model "${modelId}" ` +
-        `(routed as "anthropic/${orModelId}"). Set ANTHROPIC_API_KEY for direct access.`
-      );
+      // A lookup that sends no request sends none to OpenRouter.
+      if (!overrides?.quiet) {
+        console.warn(
+          `[AgentOS] ANTHROPIC_API_KEY not set — falling back to OpenRouter for model "${modelId}" ` +
+          `(routed as "anthropic/${orModelId}"). Set ANTHROPIC_API_KEY for direct access.`
+        );
+      }
       return { providerId: 'openrouter', modelId: `anthropic/${orModelId}`, apiKey: orKey };
     }
     throw new Error(`No API key for anthropic. Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY.`);

@@ -2248,8 +2248,15 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
       // A key or base URL of the call's own, when it differs from the
-      // provider's, has a health record of its own.
-      const healthId = providerHealthKey(resolved, ownCredentials ? () => resolveProvider(providerId, modelId) : undefined);
+      // provider's, has a health record of its own. So do the credentials a
+      // seat's strict resolution reaches when they differ from the provider's:
+      // a default that names no provider serves the provider's other callers
+      // and never a seat. The provider's are read quietly: that lookup sends
+      // nothing, to OpenRouter or anywhere else.
+      const healthId = providerHealthKey(
+        resolved,
+        ownCredentials || strict ? () => resolveProvider(providerId, modelId, { quiet: true }) : undefined,
+      );
       healthProviderId = healthId;
 
       // ── Provider health circuit-breaker ──────────────────────────────
@@ -3286,14 +3293,16 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // skip avoids the recursion overhead + the extra log line.
         // The breaker read is the provider the leg is sent to: an
         // `openrouter:` id under another provider goes to OpenRouter.
-        // That record speaks for a leg on the provider's own credentials
-        // only. A leg with a key or URL of its own keeps the record of
-        // that key (providerHealthKey), which the call below reads before
-        // it sends, so a failure of the provider's own key skips no leg
-        // on another key.
+        // That record speaks only for a leg that runs on the provider's
+        // shared credentials. A leg with a key or URL of its own, and every
+        // leg of a seat's call (strict, so a default that names no provider
+        // never reaches it), can keep the record of the key it sends
+        // (providerHealthKey), which the call below reads before it sends;
+        // a failure of another key skips none of them.
         const legProvider = fallbackEntrySentAs(fb).provider;
-        const legOnOwnCredentials = fb.apiKey !== undefined || fb.baseUrl !== undefined;
-        if (!legOnOwnCredentials && globalLLMProviderHealth.isOpen(legProvider)) {
+        const legOnSharedCredentials =
+          fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;
+        if (legOnSharedCredentials && globalLLMProviderHealth.isOpen(legProvider)) {
           fallbackLogger.info('provider fallback skipped (circuit open)', {
             event: 'fallback_skipped_circuit_open',
             api: 'generateText',
