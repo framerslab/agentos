@@ -233,6 +233,19 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(await utility.detectLanguage('Bonjour à tous')).toEqual([{ language: 'fr', confidence: 1 }]);
   });
 
+  it('answers an empty list of classes for a multi-label reply that names none', async () => {
+    replies = ['{"bestClass": [], "confidence": []}'];
+    const candidateClasses = ['billing', 'shipping'];
+    expect(await utility.classifyText('The weather is fine today.', { candidateClasses, multiLabel: true })).toEqual({
+      bestClass: [],
+      confidence: [],
+      allScores: [
+        { classLabel: 'billing', score: 0.1 },
+        { classLabel: 'shipping', score: 0.1 },
+      ],
+    });
+  });
+
   it('refuses a sentiment, classification or readability reply whose number or class is not one', async () => {
     replies = [
       '{"score": null, "polarity": "neutral"}',
