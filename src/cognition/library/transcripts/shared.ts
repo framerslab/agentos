@@ -1,7 +1,7 @@
 /**
- * @fileoverview What every transcript reader shares: the text of a string or of UTF-8 bytes, white space collapsed,
- * the times of a clock, the rule that finds a speaker's name at the start of a line, and the numbering of the turns.
- * Imports nothing outside this folder.
+ * @fileoverview What every transcript reader shares: the text of a string or of a file's bytes, white space
+ * collapsed, a caption file's cues and their timing lines, the times of a clock, the rule that finds a speaker's name
+ * at the start of a line, and the numbering of the turns. Imports nothing outside this folder.
  * @module agentos/cognition/library/transcripts/shared
  */
 
@@ -16,11 +16,30 @@ export interface Segment {
 }
 
 /**
- * The text of a file: bytes decoded as UTF-8, a leading byte order mark dropped, and CRLF or CR line ends read as
- * line feeds.
+ * Bytes as text: UTF-16 when they open with its byte order mark, in either byte order, and UTF-8 otherwise. UTF-16
+ * in big-endian order is read with each pair of bytes swapped, since every platform's `TextDecoder` reads
+ * little-endian UTF-16 and a Node built without ICU reads no other.
+ */
+function decode(bytes: Uint8Array): string {
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes);
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+    const swapped = new Uint8Array(bytes.length);
+    for (let at = 0; at + 1 < bytes.length; at += 2) {
+      swapped[at] = bytes[at + 1];
+      swapped[at + 1] = bytes[at];
+    }
+    if (bytes.length % 2 === 1) swapped[bytes.length - 1] = bytes[bytes.length - 1];
+    return new TextDecoder('utf-16le').decode(swapped);
+  }
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+/**
+ * The text of a file: bytes decoded as UTF-16 when they open with its byte order mark, in either byte order, and as
+ * UTF-8 otherwise; a leading byte order mark dropped; and CRLF or CR line ends read as line feeds.
  */
 export function textOf(input: string | Uint8Array): string {
-  const text = typeof input === 'string' ? input : new TextDecoder('utf-8').decode(input);
+  const text = typeof input === 'string' ? input : decode(input);
   return text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
 }
 
@@ -57,29 +76,93 @@ export function clockMs(clock: string): number | null {
   return seconds * 1000 + (fraction === undefined ? 0 : Number(fraction.padEnd(3, '0')));
 }
 
+/** A cue's timing line: a start, an arrow and an end, anything after the end (WebVTT's cue settings) ignored. */
+const TIMING = /^\s*(\S+?)\s*-->\s*(\S+)(?:\s.*)?$/;
+
+/**
+ * The start and end of a timing line, `00:00:01,000 --> 00:00:04,200` or `00:01.000 --> 00:04.200`, in milliseconds;
+ * `null` when the line is no timing line, as a line of words that holds `-->` is not.
+ *
+ * @param line - A line that may hold `start --> end`.
+ */
+export function cueTimes(line: string): { startMs: number; endMs: number } | null {
+  const match = TIMING.exec(line);
+  if (match === null) return null;
+  const startMs = clockMs(match[1]);
+  const endMs = clockMs(match[2]);
+  return startMs === null || endMs === null ? null : { startMs, endMs };
+}
+
+/** A caption file's cue: its times and the lines of its text. */
+export interface Cue {
+  startMs: number;
+  endMs: number;
+  /** The lines after the timing line. */
+  lines: string[];
+}
+
+/**
+ * A caption file's cues, cut from its blocks as WebVTT's parser cuts them: each timing line starts a cue whose text
+ * is the lines after it, up to the block's end or the next timing line, so cues written with no blank line between
+ * them read as cues. The lines before a block's first timing line, a cue's identifier or anything else, are no part of
+ * a cue, and a block with no timing line, such as WebVTT's `NOTE`, `STYLE` and `REGION` blocks, is no cue. With
+ * `numbered`, as SubRip's cues are, a line of digits just before a timing line is that cue's number, not the words of
+ * the cue before it, unless it is that cue's only line. A line that holds `-->` and is no timing line is a line of
+ * words.
+ *
+ * @param blocks - The file's blocks, as {@link blocksOf} cuts them.
+ * @param numbered - Whether a cue opens with its number.
+ */
+export function cuesOf(blocks: readonly string[][], numbered: boolean): Cue[] {
+  const cues: Cue[] = [];
+  for (const block of blocks) {
+    let cue: Cue | null = null;
+    for (const line of block) {
+      const times = cueTimes(line);
+      if (times === null) {
+        cue?.lines.push(line);
+        continue;
+      }
+      if (cue !== null) {
+        const last = cue.lines[cue.lines.length - 1];
+        if (numbered && cue.lines.length > 1 && /^\d+$/.test(last.trim())) cue.lines.pop();
+        cues.push(cue);
+      }
+      cue = { ...times, lines: [] };
+    }
+    if (cue !== null) cues.push(cue);
+  }
+  return cues;
+}
+
 /** A letter a speaker's name may start with: a capital, a title-case letter, or a letter of a script with no case. */
 const NAME_START = /^[\p{Lu}\p{Lt}\p{Lo}]/u;
 
 /** The most characters a speaker's name holds. */
 const NAME_LENGTH = 40;
 
+/** A colon that ends a speaker's name: the ASCII colon, or the full-width colon of Chinese and Japanese text. */
+const COLON = /[:：]/;
+
 /** Whether a text, already trimmed, can be a speaker's name: forty characters at most, no colon, the right start. */
 export function isName(text: string): boolean {
   // A code point is one or two UTF-16 units, so a longer text is no name and is never split into code points.
   if (text.length === 0 || text.length > 2 * NAME_LENGTH) return false;
-  return Array.from(text).length <= NAME_LENGTH && !text.includes(':') && NAME_START.test(text);
+  return Array.from(text).length <= NAME_LENGTH && !COLON.test(text) && NAME_START.test(text);
 }
 
 /**
  * A text's leading speaker, `Name: words`: the name is what comes before the first colon, trimmed, and must pass
- * {@link isName}; the colon is followed by white space and words. `null` when the text opens with no such name.
+ * {@link isName}. An ASCII colon is followed by white space and words, so a time such as `10:30` names no one; the
+ * full-width colon `：` is followed by words, with or without a space. `null` when the text opens with no such name.
  */
 export function splitLabel(text: string): { label: string; text: string } | null {
-  const colon = text.indexOf(':');
-  if (colon <= 0) return null;
-  const label = text.slice(0, colon).trim();
-  const rest = text.slice(colon + 1);
-  if (!/^\s+\S/.test(rest) || !isName(label)) return null;
+  const colon = COLON.exec(text);
+  if (colon === null || colon.index === 0) return null;
+  const label = text.slice(0, colon.index).trim();
+  const rest = text.slice(colon.index + 1);
+  const words = colon[0] === ':' ? /^\s+\S/ : /^\s*\S/;
+  if (!words.test(rest) || !isName(label)) return null;
   return { label, text: rest.trim() };
 }
 

@@ -1,12 +1,12 @@
 /**
- * @fileoverview WebVTT (`.vtt`): a `WEBVTT` first line, then blocks apart by blank lines, a cue being an optional
- * identifier line, a timing line and its text. A cue's speaker is its voice span, `<v Name>`; a file with no voice
- * span anywhere, as a tool writes that puts the name into the cue's text, is read by the shared `Name: ` rule.
+ * @fileoverview WebVTT (`.vtt`): a `WEBVTT` first line and its header, then blocks apart by blank lines, a cue being
+ * an optional identifier line, a timing line and its text. A cue's speaker is its voice span, `<v Name>`; a file with
+ * no voice span anywhere, as a tool writes that puts the name into the cue's text, is read by the shared `Name: `
+ * rule.
  * @module agentos/cognition/library/transcripts/vtt
  */
 
-import { blocksOf, finish, namedSegments, squash, type Segment } from './shared.js';
-import { cueTimes } from './srt.js';
+import { blocksOf, cueTimes, cuesOf, finish, namedSegments, squash, type Segment } from './shared.js';
 import { TranscriptReadError, type ReadTranscript } from './types.js';
 
 /** The first line: `WEBVTT`, alone or followed by a space or a tab and any text. */
@@ -82,25 +82,26 @@ function voiceParts(cueText: string): { parts: Array<{ label: string | null; tex
 }
 
 /**
- * Reads WebVTT. The header (the first block) and every block that is no cue (a `NOTE`, `STYLE` or `REGION` block) are
- * left out; a cue's settings are ignored, and its text's lines are joined with spaces. Its markup is removed and its
- * character references decoded. Two voice spans in one cue are two turns with the cue's times.
+ * Reads WebVTT. The header (the first line and the lines after it up to a blank line or the first timing line) and
+ * every block that is no cue (a `NOTE`, `STYLE` or `REGION` block) are left out. Cues are cut as WebVTT's parser cuts
+ * them, so cues written with no blank line before them read as cues. A cue's settings are ignored, and its text's lines
+ * are joined with spaces. Its markup is removed and its character references decoded. Two voice spans in one cue are
+ * two turns with the cue's times.
  *
  * @param text - The file's text, its line ends already line feeds and its byte order mark dropped.
  * @throws {@link TranscriptReadError} when the first line is not `WEBVTT`.
  */
 export function readVtt(text: string): ReadTranscript {
   if (!SIGNATURE.test(text)) throw new TranscriptReadError('vtt', 'the first line is not WEBVTT');
+  const lines = text.split('\n');
+  let start = 1;
+  while (start < lines.length && lines[start].trim() !== '' && cueTimes(lines[start]) === null) start += 1;
   const segments: Segment[] = [];
   let voiced = false;
-  for (const block of blocksOf(text).slice(1)) {
-    const at = block[0].includes('-->') ? 0 : block.length > 1 && block[1].includes('-->') ? 1 : -1;
-    if (at < 0) continue;
-    const times = cueTimes(block[at]);
-    if (times === null) continue;
-    const cue = voiceParts(block.slice(at + 1).join('\n'));
-    if (cue.voiced) voiced = true;
-    for (const part of cue.parts) segments.push({ ...times, text: part.text, label: part.label });
+  for (const cue of cuesOf(blocksOf(lines.slice(start).join('\n')), false)) {
+    const parts = voiceParts(cue.lines.join('\n'));
+    if (parts.voiced) voiced = true;
+    for (const part of parts.parts) segments.push({ startMs: cue.startMs, endMs: cue.endMs, text: part.text, label: part.label });
   }
   return finish('vtt', voiced ? segments : namedSegments(segments));
 }

@@ -7,7 +7,7 @@
 
 import { readFireflies } from './fireflies.js';
 import { readLines } from './lines.js';
-import { otterHeader, readOtter } from './otter.js';
+import { isOtterLayout, readOtter } from './otter.js';
 import { textOf } from './shared.js';
 import { readSrt } from './srt.js';
 import { TranscriptReadError, type ReadTranscript, type TranscriptFormat } from './types.js';
@@ -23,8 +23,9 @@ export {
 export { readWordTranscript, type ExtractRawText, type ReadWordTranscriptOptions } from './word.js';
 
 /**
- * Reads a transcript file's text, or its bytes as UTF-8, in the format given. A byte order mark is dropped and CRLF
- * line ends are read as line feeds. A file with no turn reads as none; a length bound is the caller's.
+ * Reads a transcript file's text, or its bytes, in the format given. Bytes are read as UTF-16 when they open with its
+ * byte order mark, in either byte order, and as UTF-8 otherwise. A byte order mark is dropped and CRLF line ends are
+ * read as line feeds. A file with no turn reads as none; a length bound is the caller's.
  *
  * @param input - The file's text, or its bytes.
  * @param format - Its format; a Word file is read from its bytes by `readWordTranscript`.
@@ -63,11 +64,13 @@ function isZip(head: Uint8Array): boolean {
 /**
  * The format of a transcript file, by its name's extension and its first bytes, which must be the format the name
  * claims; `null` when it is none of them. A `.srt` holds a timing line; a `.vtt` opens with `WEBVTT`; a `.json` holds
- * Fireflies's keys; a `.docx` is a ZIP archive; a `.txt` or `.md` is text, `otter` when it holds Otter's header lines
- * and `lines` otherwise. A PDF is no transcript, whatever its name.
+ * Fireflies's keys; a `.docx` is a ZIP archive; a `.txt` or `.md` is text, `otter` when it is laid out as Otter's
+ * export and `lines` otherwise. The bytes are read as {@link readTranscript} reads them. A PDF is no transcript,
+ * whatever its name.
  *
  * @param name - The file's name or path.
- * @param head - The file's first bytes (4 KB is enough), or its text.
+ * @param head - The file's first bytes (4 KB is enough), or its text. Its last line is weighed for Otter's layout only
+ * when a line feed ends it, since the first bytes of a file can stop inside a line.
  */
 export function transcriptFormatOf(name: string, head: Uint8Array | string): TranscriptFormat | null {
   const dot = name.lastIndexOf('.');
@@ -88,7 +91,7 @@ export function transcriptFormatOf(name: string, head: Uint8Array | string): Tra
       return /^\s*[[{]/.test(text) && /"(?:sentences|speaker_name)"\s*:/.test(text) ? 'fireflies' : null;
     case 'txt':
     case 'md':
-      return text.split('\n').some((line) => otterHeader(line) !== null) ? 'otter' : 'lines';
+      return isOtterLayout(text.slice(0, text.lastIndexOf('\n') + 1)) ? 'otter' : 'lines';
     default:
       return null;
   }
