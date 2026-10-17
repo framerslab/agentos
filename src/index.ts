@@ -264,6 +264,7 @@ export type {
   GenerateTextOptions,
   GenerateTextResult,
   FallbackProviderEntry,
+  FallbackSignal,
   HostLLMPolicy,
   GenerationHookContext,
   GenerationHookResult,
@@ -404,8 +405,22 @@ export type {
   CompiledStrategyStreamResult,
   Agency,
   SeatMetadata,
+  ModelPoolEntry,
+  SeatingConfig,
+  PanelOptions,
+  PanelSeatRecord,
+  PanelSeatStatus,
+  SeatingRecord,
+  SeatingSeatRecord,
+  PanelQuorumRecord,
+  AgencyResult,
+  PanelResult,
+  PanelLedger,
+  AgencyInstance,
+  AgencyQuorumConfig,
 } from './api/types.js';
-export { AgencyConfigError } from './api/types.js';
+export { AgencyConfigError, AgencyQuorumError, AgencyPanelError, AgencySeatingError } from './api/types.js';
+export { vendorOf } from './api/runtime/pool/vendor.js';
 export { generateImage } from './api/generateImage.js';
 export type { GenerateImageOptions, GenerateImageResult } from './api/generateImage.js';
 export { editImage } from './api/editImage.js';

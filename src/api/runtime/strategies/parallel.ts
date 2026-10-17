@@ -41,6 +41,7 @@ import {
   checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  callRecordExtras,
   enforceQuorum,
 } from './shared.js';
 
@@ -170,6 +171,7 @@ export function compileParallel(
           toolCalls: resultToolCalls,
           usage: buildAgentCallUsage(resultUsage),
           durationMs,
+          ...callRecordExtras(result),
         });
 
         totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
