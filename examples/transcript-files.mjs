@@ -5,7 +5,7 @@
 //
 // This script demonstrates, all from the browser entry @framers/agentos/cognition/library/browser,
 // which a page imports and Node runs too:
-//   - transcriptFormatOf naming a file's format from its name and its first bytes
+//   - transcriptFormatOf naming a file's format from its name and its bytes
 //   - readTranscript reading one call written as SubRip, WebVTT, Otter's text, Fireflies's JSON and
 //     plain lines into the same turns, with the speakers' names kept apart from the turns
 //   - the turns cut into passages by chunkTurns, searched with LexicalIndex, and a hit's speaker
@@ -105,9 +105,10 @@ const SAMPLES = {
   ].join('\n'),
 };
 
-/** A file's turns, read by the format its name and its first bytes give; `null` for a file that is none of them. */
+/** A file's turns, read by the format its name and its bytes give; `null` for a file that is none of them. */
 async function read(name, bytes) {
-  const format = transcriptFormatOf(name, bytes.subarray(0, 4096));
+  // The whole file: Fireflies's JSON can hold its sentences, and Otter's export its second turn, past a file's first bytes.
+  const format = transcriptFormatOf(name, bytes);
   if (format === null) return null;
   if (format === 'docx') {
     // mammoth's Node build reads { buffer }; a page passes mammoth's browser build, which reads { arrayBuffer }, as it is.
