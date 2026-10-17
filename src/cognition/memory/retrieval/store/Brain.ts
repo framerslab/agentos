@@ -1258,15 +1258,15 @@ export class Brain {
   }
 
   /**
-   * Rebuild the full-text index from the content table (SQLite only,
-   * best-effort). Used after bulk writes that bypass per-row syncing.
+   * Rebuild this brain's full-text index from its traces (best-effort), with
+   * the statement `fullTextRebuild` returns: the whole index on SQLite, the
+   * `_tsv` column of this brain's rows on Postgres. Used after bulk writes
+   * that bypass per-row syncing.
    */
   private async _rebuildFullTextIndex(): Promise<void> {
-    if (this._features.dialect.name === 'postgres') {
-      return;
-    }
     try {
-      await this._adapter.exec(this._features.fts.rebuildCommand('memory_traces_fts'));
+      const rebuild = this.fullTextRebuild();
+      await this._adapter.run(rebuild.sql, rebuild.params);
     } catch (error) {
       this._warnFullTextIndexError('rebuild', error);
     }
@@ -1606,11 +1606,15 @@ export class Brain {
     } finally {
       await source.close();
       // The bulk copy writes memory_traces without syncing the full-text
-      // index, and a 'replace' import hard-deletes rows first, so SQLite can
-      // hand the imported traces reused rowids that still carry the old
-      // postings. Rebuild so the index matches whatever the import left —
-      // including a partial import that failed midway. Best-effort: it never
-      // throws, so an import error still propagates unchanged.
+      // index. On SQLite its upsert rewrites a trace the brain holds in place,
+      // under a rowid whose postings hold the old words, and a 'replace'
+      // import hard-deletes rows first, so the imported traces can get reused
+      // rowids that still carry old postings. On Postgres the upsert's SET
+      // list leaves `_tsv` as it was: a re-imported trace keeps its old
+      // words, and a new one stays null until an open fills it. Rebuild so
+      // the index matches whatever the import left, a partial import that
+      // failed midway included. Best-effort: it never throws, so an import
+      // error still propagates unchanged.
       await this._rebuildFullTextIndex();
     }
 
