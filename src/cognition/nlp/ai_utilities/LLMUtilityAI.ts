@@ -15,6 +15,7 @@ import {
   SummarizationOptions,
   ClassificationOptions,
   ClassificationResult,
+  ClassificationScore,
   KeywordExtractionOptions,
   TokenizationOptions,
   StemmingOptions,
@@ -44,6 +45,41 @@ type AjvValidationError = {
 };
 
 type AjvValidateFn = ((data: unknown) => boolean) & { errors?: AjvValidationError[] | null };
+
+/**
+ * A number in a reply: a number, or a string that holds one (`"0.8"`); `NaN` for anything else, `null`, a boolean,
+ * an empty string and a list included, so a field the reply left out or wrote as something else never reads as 0 or 1.
+ */
+function replyNumber(value: unknown): number {
+  if (typeof value === 'number') return value;
+  return typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN;
+}
+
+/** A number held to `min` to `max`. */
+function within(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * A word list of a sentiment reply as the entries `SentimentResult` holds: a string becomes `{ token }`, an object
+ * with a string `token` keeps it and a numeric `score`, and anything else is left out. A value that is not a list
+ * holds no entry.
+ */
+function replyTokens(value: unknown): Array<{ token: string; score?: number }> {
+  if (!Array.isArray(value)) return [];
+  const entries: Array<{ token: string; score?: number }> = [];
+  for (const item of value) {
+    if (typeof item === 'string') {
+      if (item.trim() !== '') entries.push({ token: item });
+      continue;
+    }
+    const token = item && typeof item === 'object' ? (item as { token?: unknown }).token : undefined;
+    if (typeof token !== 'string' || token.trim() === '') continue;
+    const score = replyNumber((item as { score?: unknown }).score);
+    entries.push(Number.isFinite(score) ? { token, score } : { token });
+  }
+  return entries;
+}
 
 export interface LLMUtilityAIConfig extends UtilityAIConfigBase {
   llmProviderManager: AIModelProviderManager; // Must be injected
@@ -350,18 +386,46 @@ Respond with ONLY a JSON object with "bestClass" (string or array of strings if 
       LLMUtilityAI.callProviderId(options),
       { temperature: 0.2, responseFormat: { type: "json_object" }, ...options.methodOptions }
     );
-    if (!parsed || !parsed.bestClass || parsed.confidence === undefined) {
+    const reply = (parsed ?? {}) as { bestClass?: unknown; confidence?: unknown; allScores?: unknown };
+    // A class is a name, or a list of names; a confidence is a number or a list of them, each held to 0 to 1.
+    const bestClass = reply.bestClass;
+    const classes: unknown[] = typeof bestClass === 'string' ? [bestClass] : Array.isArray(bestClass) ? bestClass : [];
+    const rawConfidence = reply.confidence;
+    const confidenceList = Array.isArray(rawConfidence);
+    const confidences = (Array.isArray(rawConfidence) ? rawConfidence : [rawConfidence]).map((value: unknown) => replyNumber(value));
+    if (
+      classes.length === 0 ||
+      !classes.every((name) => typeof name === 'string' && name.trim() !== '') ||
+      confidences.length === 0 ||
+      !confidences.every((value) => Number.isFinite(value))
+    ) {
       throw new GMIError("Failed to parse valid classification from LLM response.", GMIErrorCode.PARSING_ERROR, { responseText });
     }
+    const names = classes as string[];
+    const held = confidences.map((value) => within(value, 0, 1));
+    // The reply's scores that name a class and hold a number, held to 0 to 1.
+    const allScores: ClassificationScore[] = [];
+    const replyScores: unknown[] = Array.isArray(reply.allScores) ? reply.allScores : [];
+    for (const entry of replyScores) {
+      if (!entry || typeof entry !== 'object') continue;
+      const classLabel = (entry as { classLabel?: unknown }).classLabel;
+      const score = replyNumber((entry as { score?: unknown }).score);
+      if (typeof classLabel === 'string' && classLabel.trim() !== '' && Number.isFinite(score)) {
+        allScores.push({ classLabel, score: within(score, 0, 1) });
+      }
+    }
     return {
-        bestClass: parsed.bestClass,
-        confidence: parsed.confidence,
-        allScores: parsed.allScores || options.candidateClasses.map(c => ({
-            classLabel: c,
-            score: (Array.isArray(parsed.bestClass) ? (parsed.bestClass as string[]).includes(c) : parsed.bestClass === c)
-                   ? (Array.isArray(parsed.confidence) ? (parsed.confidence as number[])[ (parsed.bestClass as string[]).indexOf(c) ] || 0.5 : parsed.confidence as number)
-                   : 0.1 // Default low score for non-selected
-        }))
+      bestClass: typeof bestClass === 'string' ? bestClass : names,
+      confidence: confidenceList ? held : held[0],
+      // Without a usable score in the reply, a chosen class scores its confidence (0.5 when a list has none for it)
+      // and every other candidate 0.1.
+      allScores:
+        allScores.length > 0
+          ? allScores
+          : options.candidateClasses.map((classLabel) => {
+              const at = names.indexOf(classLabel);
+              return { classLabel, score: at === -1 ? 0.1 : confidenceList ? (held[at] ?? 0.5) : held[0] };
+            }),
     };
   }
 
@@ -402,17 +466,37 @@ Respond with ONLY a JSON object containing "score" (float, -1.0 to 1.0, where -1
       LLMUtilityAI.callProviderId(options),
       { temperature: 0.3, responseFormat: { type: "json_object" }, ...options?.methodOptions }
     );
-    if (!parsed || parsed.score === undefined || !parsed.polarity) {
+    const reply = (parsed ?? {}) as {
+      score?: unknown;
+      polarity?: unknown;
+      comparative?: unknown;
+      intensity?: unknown;
+      positiveTokens?: unknown;
+      negativeTokens?: unknown;
+      neutralTokens?: unknown;
+    };
+    const rawScore = replyNumber(reply.score);
+    if (!Number.isFinite(rawScore)) {
         throw new GMIError("Failed to parse valid sentiment from LLM response.", GMIErrorCode.PARSING_ERROR, { responseText });
     }
+    const score = within(rawScore, -1, 1);
+    // The reply's polarity, in any letter case, when it is one of the three; otherwise the one its score gives, at the
+    // 0.05 marks StatisticalUtilityAI uses.
+    const named = typeof reply.polarity === 'string' ? reply.polarity.trim().toLowerCase() : '';
+    const polarity: SentimentResult['polarity'] =
+      named === 'positive' || named === 'negative' || named === 'neutral'
+        ? named
+        : score >= 0.05 ? 'positive' : score <= -0.05 ? 'negative' : 'neutral';
+    const comparative = replyNumber(reply.comparative);
+    const intensity = replyNumber(reply.intensity);
     return {
-      score: parsed.score,
-      polarity: parsed.polarity,
-      comparative: parsed.comparative ?? parsed.score, // Default comparative to score
-      intensity: parsed.intensity ?? Math.abs(parsed.score),
-      positiveTokens: parsed.positiveTokens || [],
-      negativeTokens: parsed.negativeTokens || [],
-      neutralTokens: parsed.neutralTokens || [],
+      score,
+      polarity,
+      comparative: Number.isFinite(comparative) ? comparative : score,
+      intensity: Number.isFinite(intensity) ? within(intensity, 0, 1) : Math.abs(score),
+      positiveTokens: replyTokens(reply.positiveTokens),
+      negativeTokens: replyTokens(reply.negativeTokens),
+      neutralTokens: replyTokens(reply.neutralTokens),
     };
   }
 
@@ -438,13 +522,13 @@ Respond with ONLY a JSON object with one key, "languages", whose value is an arr
         return [{ language: 'und', confidence: 0.1 }]; // 'und' for undetermined
     }
     // An entry without a language code, or with a confidence that is not a number, is passed over. A number written
-    // as a string is read as that number; null, a boolean, an empty string or a list is no number.
-    const confidenceOf = (value: unknown): number =>
-      typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN;
+    // as a string is read as that number; null, a boolean, an empty string or a list is no number. A confidence is
+    // held to 0 to 1.
     return list
-      .map((entry) => ({ language: entry?.language, confidence: confidenceOf(entry?.confidence) }))
+      .map((entry) => ({ language: entry?.language, confidence: replyNumber(entry?.confidence) }))
       .filter((entry): entry is LanguageDetectionResult =>
         typeof entry.language === 'string' && entry.language !== '' && Number.isFinite(entry.confidence))
+      .map((entry) => ({ language: entry.language, confidence: within(entry.confidence, 0, 1) }))
       .slice(0, maxCandidates);
   }
 
@@ -503,8 +587,10 @@ Respond with ONLY a JSON object: {"similarityScore": float_value_between_0_and_1
         options?.llmProviderId,
         {temperature: 0.1, responseFormat: { type: "json_object" } }
     );
-    if (parsed && typeof parsed.similarityScore === 'number') {
-        return Math.max(0, Math.min(1, parsed.similarityScore)); // Clamp to 0-1
+    // A number, or a string that holds one, held to 0 to 1.
+    const similarity = replyNumber(parsed?.similarityScore);
+    if (Number.isFinite(similarity)) {
+        return within(similarity, 0, 1);
     }
     throw new GMIError("Failed to parse valid similarity score from LLM.", GMIErrorCode.PARSING_ERROR, { responseText });
   }
@@ -567,9 +653,11 @@ Text: "${text.substring(0, 1500)}..."`; // Send a substantial sample
         undefined,
         { temperature: 0.1, responseFormat: { type: "json_object" } }
     );
-    if (parsed && parsed.score !== undefined) {
+    // A number, or a string that holds one; null and a boolean are no score.
+    const score = replyNumber(parsed?.score);
+    if (parsed && Number.isFinite(score)) {
       return {
-        score: Number(parsed.score),
+        score,
         interpretation: String(parsed.interpretation || "LLM-based estimation."),
         gradeLevel: parsed.gradeLevel ? String(parsed.gradeLevel) : undefined,
       };
