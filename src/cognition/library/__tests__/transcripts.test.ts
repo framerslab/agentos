@@ -303,6 +303,14 @@ describe('readTranscript', () => {
 
     // Otter's text has a header before each paragraph; one line that looks like a header in other text does not make it Otter's.
     expect(transcriptFormatOf('agenda.txt', bytes('Agenda for the call\nBudget review first\nBreak  10:30\nAna Silva: hello\nLeo Park: hi'))).toBe('lines');
+    // The first bytes of a file can stop inside a line. A last line with no line feed after it is a turn's words straight
+    // after a header, so a whole short export with no line feed at its end is Otter's; after a turn's words it is not
+    // weighed, so a head cut inside a header, or inside a second line of words, is still Otter's.
+    const memo = 'Ana Silva  0:01\nGood morning.\n\nLeo Park  0:04\nHello.';
+    expect(transcriptFormatOf('memo.txt', bytes(memo))).toBe('otter');
+    expect(transcriptFormatOf('memo.txt', bytes(`${memo}\n\nAna Sil`))).toBe('otter');
+    expect(transcriptFormatOf('memo.txt', bytes(`${memo}\nand a second line`))).toBe('otter');
+    expect(transcriptFormatOf('memo.txt', bytes('Ana Silva  0:01\nGood morning.\n\nLeo Park  0:04'))).toBe('lines');
 
     // A PDF is no transcript, by its name or by its first bytes under another name.
     expect(transcriptFormatOf('transcript.pdf', bytes('%PDF-1.7\n'))).toBeNull();
