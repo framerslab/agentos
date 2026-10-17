@@ -14,7 +14,8 @@
  *   every brain-owned table before re-populating.
  * - Export reads one consistent view: a document and its chunk stored
  *   while the export runs are wholly out of the file (SQLite and Postgres).
- * - A failed export leaves nothing at the target path, and a retry runs.
+ * - A failed export leaves nothing at the target path, and a retry runs; a
+ *   file that appears at the target while the export runs is kept.
  *
  * @module memory/retrieval/store/__tests__/Brain.export-import.test
  */
@@ -193,6 +194,20 @@ describe('Brain.exportToSqlite + importFromSqlite', () => {
     expect((await source.exportToSqlite(exportPath)).bytesWritten).toBeGreaterThan(0);
     // One self-contained file: its write-ahead log was folded in before it moved into place.
     expect(await exportFiles()).toEqual(['orphan-export.sqlite']);
+    await source.close();
+  });
+
+  it('keeps a file that appears at the target while the export runs, and fails', async () => {
+    const source = await Brain.openSqlite(path.join(tmpDir, 'race.sqlite'), { brainId: 'alice' });
+    const exportPath = path.join(tmpDir, 'race-export.sqlite');
+    await addDocument(source, 'alice', 'd1');
+    // Another export, or anything else, writes the target after this one has started.
+    writeAfterDocumentsCopy(source, () => fs.writeFile(exportPath, 'the other export'));
+
+    await expect(source.exportToSqlite(exportPath)).rejects.toThrow(/already exists/i);
+
+    expect(await fs.readFile(exportPath, 'utf8')).toBe('the other export');
+    expect((await fs.readdir(tmpDir)).filter((name) => name.startsWith('race-export')).sort()).toEqual(['race-export.sqlite']);
     await source.close();
   });
 

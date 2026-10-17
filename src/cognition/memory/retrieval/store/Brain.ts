@@ -29,7 +29,7 @@
  * @module memory/store/Brain
  */
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import type {
@@ -61,6 +61,39 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
  * Used by {@link Brain.open} when the caller does not supply an
  * explicit `brainId`.
  */
+/**
+ * Moves the finished file at `from` to `to` unless something is already at
+ * `to`, which is never replaced. A hard link fails with EEXIST when `to`
+ * exists, so the file appears there whole or not at all; where the file
+ * system has no hard links, an exclusive copy refuses an existing `to` the
+ * same way. `from` is removed once `to` holds the file.
+ *
+ * @throws {Error} Naming `to` when a file is already there.
+ */
+async function publishWithoutReplacing(from: string, to: string): Promise<void> {
+  const exists = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === 'EEXIST';
+  try {
+    await fs.link(from, to);
+  } catch (error) {
+    if (exists(error)) {
+      throw new Error(`Brain.exportToSqlite: target already exists: ${to}`);
+    }
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EXDEV' && code !== 'ENOSYS') {
+      throw error;
+    }
+    try {
+      await fs.copyFile(from, to, fsConstants.COPYFILE_EXCL);
+    } catch (copyError) {
+      if (exists(copyError)) {
+        throw new Error(`Brain.exportToSqlite: target already exists: ${to}`);
+      }
+      throw copyError;
+    }
+  }
+  await fs.rm(from, { force: true });
+}
+
 function parseBetterSqliteUri(dbPath: string): {
   body: string;
   params: URLSearchParams;
@@ -1304,7 +1337,8 @@ export class Brain {
    * `_readSnapshot`), so a write that lands while the export runs is wholly
    * in the file or wholly out of it. The file is written under a temporary
    * name beside `targetPath` and moved there once whole: a failed export
-   * leaves nothing at `targetPath`, and a retry can run.
+   * leaves nothing at `targetPath`, and a retry can run. A file that appears
+   * at `targetPath` while the export runs is kept, and the export fails.
    *
    * Forking semantics: rows are emitted with the source brainId. Importing
    * the resulting file under a different brainId produces a fork.
@@ -1355,7 +1389,7 @@ export class Brain {
       } finally {
         await target.close();
       }
-      await fs.rename(partialPath, targetPath);
+      await publishWithoutReplacing(partialPath, targetPath);
     } catch (error) {
       await Promise.all(
         ['', '-wal', '-shm', '-journal'].map((suffix) =>
