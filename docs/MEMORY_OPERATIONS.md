@@ -258,7 +258,7 @@ Update the content or tags of an existing memory trace.
 - Locates the active (not deleted) trace by ID in `memory_traces`.
 - Updates only the specified fields (content, tags, or both).
 - When the content changes, recomputes the content hash and clears the stored embedding.
-- Rebuilds the FTS5 index.
+- Rebuilds the brain's full-text index: the FTS5 table on SQLite; on Postgres, the `_tsv` column of the brain's own rows.
 - Returns `{ "updated": false }` if the trace was not found, was deleted, or neither field was given.
 
 **Example:**
@@ -334,7 +334,7 @@ Merge two or more memory traces into one surviving trace.
 - The trace with the highest retrieval count survives and takes the merged content; its embedding is cleared.
 - Tags from all source traces are unioned onto the survivor.
 - Retrieval counts are summed, and the survivor keeps the latest access time and the highest decay stability among the sources.
-- The other traces are soft-deleted, and the FTS5 index is rebuilt.
+- The other traces are soft-deleted, and the brain's full-text index is rebuilt (on Postgres, the brain's own rows).
 
 **Example:**
 
@@ -446,7 +446,7 @@ Runs the 6 consolidation steps in order:
 3. **Strengthen** --- record Hebbian co-activation edges from retrieval feedback.
 4. **Derive** --- synthesise insight traces from memory clusters (LLM-backed, skipped if no LLM).
 5. **Compact** --- promote old high-retrieval episodic traces to semantic type.
-6. **Re-index** --- rebuild FTS5 index and log run to `consolidation_log`.
+6. **Re-index** --- rebuild the brain's full-text index (on Postgres, its own rows) and log run to `consolidation_log`.
 
 If a consolidation cycle is already in progress (mutex), returns immediately with zero counts.
 
@@ -521,16 +521,17 @@ All operations are available via the `Memory` facade API.
 
 ### Export Formats
 
-### SQLite (Byte-Perfect Backup)
+### SQLite (One Brain, Every Table)
 
-The highest-fidelity export. Uses SQLite's `VACUUM INTO` to produce a clean, self-contained copy of the entire brain database including all traces, embeddings, graph edges, documents, chunks, and consolidation logs.
+The highest-fidelity export. Writes the brain's own rows of every portable table into a new SQLite file: traces with their embeddings, the knowledge graph, documents and chunks, conversations and messages, the consolidation log and the rest. It runs from a SQLite or a Postgres brain alike. A database can hold several brains, and the file holds this brain's rows only.
 
 ```ts
 await mem.export('./backup.sqlite', { format: 'sqlite' });
 ```
 
-- Produces an exact copy of the brain file.
+- Nothing may exist at the path yet.
 - Includes raw embedding BLOBs (no re-embedding needed on import).
+- The rows keep the brain's id; importing the file into a brain with another id forks it.
 - Suitable for disaster recovery, agent cloning, or migration.
 
 ### JSON (Programmatic)
@@ -617,7 +618,7 @@ for (const trace of refused) {
 }
 ```
 
-A JSON export writes the brain's traces, and a SQLite export the whole database file, into one file; their `refused` is empty.
+A JSON export writes the brain's traces, and a SQLite export the brain's rows of every portable table, into one file; their `refused` is empty.
 
 ### Obsidian (Wikilinks + Tags)
 
@@ -630,7 +631,7 @@ await mem.export('./vault', { format: 'obsidian' });
 Produces:
 
 - `#tags` in the body for every tag on the trace.
-- A **Related:** list of `[[wikilinks]]` to the labels of the knowledge-graph nodes the trace's node links to (empty when the graph has no edges for it).
+- A **Related:** list of `[[wikilinks]]` to the labels of the knowledge-graph nodes the trace's node links to in the brain's own graph (empty when the graph has no edges for it). Another brain in the same database never adds a link, though node ids repeat across brains.
 - The same YAML front-matter and `{scope}/{type}/` folders as the Markdown export, with the same rule for the names a trace's folders and file take, and the same `refused` list.
 
 Example output:
@@ -660,7 +661,7 @@ User prefers TypeScript over Python
 
 ### SQLite
 
-Merges another brain database into the current one. A source trace is not inserted when a trace in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. Knowledge nodes are matched by label and type, edges by source, target and type.
+Merges one brain's SQLite file into the current brain. The importer reads the rows of the one brain the file holds: a file whose rows carry several brain ids imports nothing, and `errors` names the ids. A SQLite export holds one brain, so export each brain and import its file. A file older than the `brain_id` column holds one brain, and every row of it is read. A source trace is not inserted when a trace of the same scope and scope id in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. Knowledge nodes are matched by label and type, edges by source, target and type.
 
 ```ts
 const result = await mem.importFrom('./backup.sqlite', { format: 'sqlite' });
@@ -725,6 +726,8 @@ content,type,tags
 "User prefers dark mode",semantic,"preference,ui"
 "Deploy with Docker Compose",procedural,"deployment,docker"
 ```
+
+A row's `metadata` cell names its scope id, so it is read before the duplicate check: a cell that is not valid JSON makes the row an error, listed in `errors` and not imported, even when a trace of the same scope already holds the row's text.
 
 
 ### SHA-256 Deduplication
@@ -797,7 +800,7 @@ All under [`src/cognition/memory/io/`](https://github.com/framerslab/agentos/tre
 | `MarkdownImporter.ts` | Markdown directory import |
 | `ObsidianExporter.ts` | Obsidian vault export (wikilinks + tags) |
 | `ObsidianImporter.ts` | Obsidian vault import (wikilinks -> graph edges) |
-| `SqliteExporter.ts` | `VACUUM INTO` byte-perfect backup |
-| `SqliteImporter.ts` | SQLite merge with smart dedup + tag union |
+| `SqliteExporter.ts` | The brain's own rows of every portable table, in a new SQLite file |
+| `SqliteImporter.ts` | Merge of one brain's SQLite file, with dedup + tag union |
 | `ChatGptImporter.ts` | ChatGPT `conversations.json` parser |
 | `CsvImporter.ts` | CSV import with required `content` column |

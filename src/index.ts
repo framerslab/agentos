@@ -317,6 +317,22 @@ export type {
   ResolvedCognition,
 } from './api/runtime/gmiCognition.js';
 export { personaFromAgentOptions } from './api/runtime/gmiPersona.js';
+// Teams a gmi() agent launches from a turn (`agencies.launch` registers `launch_agency`), and persistent gmi()
+// agents seated in an agency as themselves (`sessionSeat()`).
+export { LAUNCH_AGENCY_TOOL_NAME } from './api/runtime/agencyLaunch/types.js';
+export type {
+  AgencyLaunchOptions,
+  LaunchAgencyArgs,
+  LaunchAgencyResult,
+  LaunchRefusal,
+  LaunchRefusalCode,
+  LaunchSeatRecord,
+  LaunchSeatSpec,
+  LaunchStatus,
+  LaunchUsage,
+} from './api/runtime/agencyLaunch/types.js';
+export { sessionSeat } from './api/runtime/agencyLaunch/sessionSeat.js';
+export type { SeatHandle, SessionSeatOptions } from './api/runtime/agencyLaunch/sessionSeat.js';
 // The learning layer (docs/GMI.md, "Learning"): off unless a host sets its `learning` option.
 export { createLearningLayer } from './cognition/learning/index.js';
 export type {
@@ -388,6 +404,7 @@ export type {
   CompiledStrategy,
   CompiledStrategyStreamResult,
   Agency,
+  SeatMetadata,
   ModelPoolEntry,
   SeatingConfig,
   PanelOptions,

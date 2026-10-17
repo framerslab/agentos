@@ -1,8 +1,9 @@
 /**
  * @file types.ts
  * The types and bounds of teams a GMI launches from a turn (`launch_agency`), and of the seats such a team and
- * `sessionSeat()` build. The package root exports {@link LAUNCH_AGENCY_TOOL_NAME} and the public types; the registry,
- * the engine and the two tool factories stay internal.
+ * `sessionSeat()` build. The package root and `src/api` export {@link LAUNCH_AGENCY_TOOL_NAME}, `sessionSeat()` and
+ * the types of the `agencies` option, the tool's arguments and result and a seat; the launch registry, the engine
+ * (`runLaunch`) and the tool factory (`createGmiLaunchTool`) stay internal.
  */
 import type { AgentOptions } from '../../agent.js';
 import type { Agent, AgencyStrategy, HitlConfig } from '../../types.js';
@@ -15,7 +16,7 @@ export type { SeatMetadata } from '../../types.js';
 
 /** The tool's name on every surface. */
 export const LAUNCH_AGENCY_TOOL_NAME = 'launch_agency';
-/** The capability the tool requires: on the full runtime a persona lists and calls it only with this grant. */
+/** The capability a full-runtime persona's grant would name for the tool. No code reads it: gmi() is the one surface that registers `launch_agency`. */
 export const LAUNCH_CAPABILITY = 'agency:launch';
 /** The five self-modification tools, which a seat never gets. */
 export const SELF_MODIFICATION_TOOLS = ['forge_tool', 'create_workflow', 'manage_skills', 'self_evaluate', 'adapt_personality'] as const;
@@ -76,7 +77,7 @@ export interface AgencyLaunchOptions {
   hitl?: HitlConfig;
 }
 
-/** `agencies` on AgentOSConfig. */
+/** The bounds of a launch on the full runtime, with the route of its coordinator. AgentOSConfig takes no `agencies` option: gmi() is the one surface that registers `launch_agency`. */
 export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'members'> {
   /** The route of a launched team's manager and synthesizers (they call generateText). Default: the parent persona's provider and model, with the key and base URL of the runtime's entry for that provider. */
   coordinator?: { provider: string; model: string; apiKey?: string; baseUrl?: string };

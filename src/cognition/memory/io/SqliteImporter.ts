@@ -20,6 +20,13 @@
  * - **knowledge_edges**: deduplicated by `source_id` + `target_id` + `type`.
  *   - New edges are inserted; existing edges are left unchanged.
  *
+ * ## One brain per source
+ * A database can hold several brains: every row of a brain's tables carries
+ * the brain's id. The importer reads the rows of the one brain a source file
+ * holds (`Memory.export` with format `'sqlite'` writes one) and refuses a file
+ * whose rows carry several brain ids, naming them in `errors`. A file older
+ * than the `brain_id` column holds one brain, and every row of it is read.
+ *
  * @module memory/io/SqliteImporter
  */
 
@@ -75,6 +82,13 @@ interface EdgeRow {
   created_at: number;
 }
 
+/** The tables the importer reads. */
+const SOURCE_TABLES = ['memory_traces', 'knowledge_nodes', 'knowledge_edges'] as const;
+type SourceTable = (typeof SOURCE_TABLES)[number];
+
+/** The statement and parameters that read a source table's rows. */
+type SourceRead = (table: SourceTable) => [sql: string, params: unknown[]];
+
 // ---------------------------------------------------------------------------
 // SqliteImporter
 // ---------------------------------------------------------------------------
@@ -123,10 +137,23 @@ export class SqliteImporter {
     }
 
     try {
+      const { brainIds, scoped } = await this._sourceBrains(sourceAdapter);
+      if (brainIds.length > 1) {
+        result.errors.push(
+          `Cannot import a SQLite file that holds several brains (${brainIds.join(', ')}): ` +
+            "import one brain's export (Memory.export with format 'sqlite').",
+        );
+        return result;
+      }
+      const read: SourceRead = (table) =>
+        scoped.has(table) && brainIds.length === 1
+          ? [`SELECT * FROM ${table} WHERE brain_id = ?`, [brainIds[0]]]
+          : [`SELECT * FROM ${table}`, []];
+
       await this.brain.transaction(async (trx) => {
-        await this._mergeTraces(sourceAdapter, result, trx, options);
-        await this._mergeNodes(sourceAdapter, result, trx);
-        await this._mergeEdges(sourceAdapter, result, trx);
+        await this._mergeTraces(sourceAdapter, read, result, trx, options);
+        await this._mergeNodes(sourceAdapter, read, result, trx);
+        await this._mergeEdges(sourceAdapter, read, result, trx);
       });
     } finally {
       await sourceAdapter.close();
@@ -135,19 +162,46 @@ export class SqliteImporter {
     return result;
   }
 
+  /**
+   * The brain ids the source's rows carry, and the tables that have the
+   * `brain_id` column. A table missing from the file, or older than the
+   * column, adds no id.
+   */
+  private async _sourceBrains(src: StorageAdapter): Promise<{ brainIds: string[]; scoped: Set<SourceTable> }> {
+    const brainIds = new Set<string>();
+    const scoped = new Set<SourceTable>();
+    for (const table of SOURCE_TABLES) {
+      let rows: { brain_id: string | null }[];
+      try {
+        const columns = await src.all<{ name: string }>(`PRAGMA table_info(${table})`);
+        if (!columns.some((column) => column.name === 'brain_id')) continue;
+        rows = await src.all<{ brain_id: string | null }>(`SELECT DISTINCT brain_id FROM ${table}`);
+      } catch {
+        // An unreadable table is skipped here as its merge skips it.
+        continue;
+      }
+      scoped.add(table);
+      for (const row of rows) {
+        if (row.brain_id != null) brainIds.add(row.brain_id);
+      }
+    }
+    return { brainIds: [...brainIds].sort(), scoped };
+  }
+
   private async _sha256(s: string): Promise<string> {
     return crossSha256(s);
   }
 
   private async _mergeTraces(
     src: StorageAdapter,
+    read: SourceRead,
     result: ImportResult,
     trx: { run: Brain['run']; get: Brain['get'] },
     options?: Pick<ImportOptions, 'dedup'>,
   ): Promise<void> {
     let sourceRows: TraceRow[];
     try {
-      sourceRows = await src.all<TraceRow>('SELECT * FROM memory_traces');
+      sourceRows = await src.all<TraceRow>(...read('memory_traces'));
     } catch {
       return;
     }
@@ -227,12 +281,13 @@ export class SqliteImporter {
 
   private async _mergeNodes(
     src: StorageAdapter,
+    read: SourceRead,
     result: ImportResult,
     trx: { run: Brain['run']; get: Brain['get'] },
   ): Promise<void> {
     let sourceRows: NodeRow[];
     try {
-      sourceRows = await src.all<NodeRow>('SELECT * FROM knowledge_nodes');
+      sourceRows = await src.all<NodeRow>(...read('knowledge_nodes'));
     } catch {
       return;
     }
@@ -276,12 +331,13 @@ export class SqliteImporter {
 
   private async _mergeEdges(
     src: StorageAdapter,
+    read: SourceRead,
     result: ImportResult,
     trx: { run: Brain['run']; get: Brain['get'] },
   ): Promise<void> {
     let sourceRows: EdgeRow[];
     try {
-      sourceRows = await src.all<EdgeRow>('SELECT * FROM knowledge_edges');
+      sourceRows = await src.all<EdgeRow>(...read('knowledge_edges'));
     } catch {
       return;
     }

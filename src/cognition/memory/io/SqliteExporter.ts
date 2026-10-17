@@ -1,12 +1,12 @@
 /**
  * @fileoverview SQLite exporter for AgentOS memory brain.
  *
- * Provides a full-fidelity backup of the `Brain` SQLite file by copying
- * the database file to a specified output path.  This is the highest-fidelity
- * export format — it preserves all tables, indexes, and metadata exactly.
- *
- * Uses the `VACUUM INTO` SQL command (SQLite 3.27+) which atomically creates
- * a clean, fully checkpointed copy without any WAL sidecar file.
+ * Writes the brain to a new SQLite file through `Brain.exportToSqlite`: this
+ * brain's rows of every portable table (traces with their embeddings, the
+ * knowledge graph, documents and chunks, conversations and messages, the
+ * consolidation log and the rest of `PORTABLE_TABLES`), from a SQLite or a
+ * Postgres brain alike. A database can hold several brains; the file holds
+ * this one only, so importing it reads one brain.
  *
  * @module memory/io/SqliteExporter
  */
@@ -38,20 +38,19 @@ export class SqliteExporter {
   // -------------------------------------------------------------------------
 
   /**
-   * Copy the brain database to `outputPath`.
+   * Write this brain's rows to a new SQLite file at `outputPath`.
    *
-   * Uses `VACUUM INTO` which:
-   * - Checkpoints all WAL frames into the output file.
-   * - Creates a compact, defragmented copy (no `-wal` or `-shm` sidecar).
-   * - Is safe to run while the database is open and being written to.
+   * The rows keep this brain's id; importing the file into a brain with
+   * another id forks it. Embeddings are copied as they are, so an import
+   * needs no re-embedding.
    *
-   * The parent directory of `outputPath` must already exist.
-   *
-   * @param outputPath - Absolute path for the SQLite backup file.
-   * @param _options   - Export options (unused — SQLite export always includes
-   *   all data including embeddings).
+   * @param outputPath - Path for the SQLite file. Nothing may exist there yet,
+   *   and its parent directory must exist.
+   * @param _options   - Export options (unused: a SQLite export always
+   *   includes every portable table and the embeddings).
+   * @throws {Error} When a file already exists at `outputPath`.
    */
   async export(outputPath: string, _options?: ExportOptions): Promise<void> {
-    await this.brain.features.exporter.exportToFile(outputPath);
+    await this.brain.exportToSqlite(outputPath);
   }
 }
