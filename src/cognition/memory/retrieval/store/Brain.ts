@@ -1223,10 +1223,11 @@ export class Brain {
    * content row, with no temporary index.
    *
    * The check cannot see indexed content rewritten under an unchanged
-   * rowid set. The writers that rewrite content in place (MemoryUpdateTool,
-   * the Memory facade, ConsolidationLoop, and `MemoryStore.store()` when a
-   * revival's move fails) rebuild the index themselves, and the one writer
-   * that hard deletes traces (`importFromSqlite`) does too.
+   * rowid set. The writers that rewrite indexed text in place
+   * (MemoryUpdateTool, the Memory facade, ConsolidationLoop, SqliteImporter's
+   * tag merge, and `MemoryStore.store()` when a revival's move fails) rebuild
+   * the index themselves, and the one writer that hard deletes traces
+   * (`importFromSqlite`) does too.
    * SQLite only: on Postgres the index is a column of each row, and every
    * open fills the rows where it is null. Best-effort: nothing here may
    * block opening the brain.
