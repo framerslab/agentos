@@ -236,41 +236,63 @@ function stripTags(html: string): string {
 }
 
 /**
+ * The named entities decoded, by their names in lower case (a name matches in
+ * any case, `&AMP;` as `&amp;`): the most common subset in prose documents.
+ */
+const NAMED_ENTITIES: ReadonlyMap<string, string> = new Map([
+  ['amp', '&'],
+  ['lt', '<'],
+  ['gt', '>'],
+  ['quot', '"'],
+  ['apos', "'"],
+  ['nbsp', ' '],
+  ['mdash', '—'],
+  ['ndash', '–'],
+  ['hellip', '…'],
+  ['lsquo', '\u2018'],
+  ['rsquo', '\u2019'],
+  ['ldquo', '\u201C'],
+  ['rdquo', '\u201D'],
+  ['copy', '©'],
+  ['reg', '®'],
+  ['trade', '™'],
+]);
+
+/**
+ * The character a numeric entity names, or U+FFFD for a number that names
+ * none: 0, a surrogate, or one past U+10FFFF, which `String.fromCodePoint`
+ * throws on.  The HTML standard's numeric character reference end state reads
+ * each of these as U+FFFD, and a browser shows it so.
+ *
+ * @param code - The entity's number.
+ */
+function characterOf(code: number): string {
+  return code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)
+    ? '\uFFFD'
+    : String.fromCodePoint(code);
+}
+
+/**
  * Decode a small but common set of named and numeric HTML entities.
  *
  * Covers the most frequently encountered entities in prose documents.
  * Full entity decoding would require an external library; this subset handles
- * ~95% of real-world cases without dependencies.
+ * ~95% of real-world cases without dependencies.  Each entity is decoded once,
+ * in one pass, so `&amp;lt;` is the text `&lt;`, as a browser shows it.  A
+ * decimal (`&#8212;`) or hexadecimal (`&#x2014;`) entity that names no
+ * character reads as U+FFFD; a name outside the subset stays as written.
  *
  * @param text - Text containing HTML entity references.
  */
 function decodeEntities(text: string): string {
-  return text
-    // Named character entities (most common subset).
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&apos;/gi, "'")
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&mdash;/gi, '—')
-    .replace(/&ndash;/gi, '–')
-    .replace(/&hellip;/gi, '…')
-    .replace(/&lsquo;/gi, '\u2018')
-    .replace(/&rsquo;/gi, '\u2019')
-    .replace(/&ldquo;/gi, '\u201C')
-    .replace(/&rdquo;/gi, '\u201D')
-    .replace(/&copy;/gi, '©')
-    .replace(/&reg;/gi, '®')
-    .replace(/&trade;/gi, '™')
-    // Numeric decimal entities: &#160; &#8212; etc.
-    .replace(/&#(\d+);/g, (_, code: string) =>
-      String.fromCodePoint(parseInt(code, 10)),
-    )
-    // Numeric hexadecimal entities: &#x00A0; &#x2014; etc.
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) =>
-      String.fromCodePoint(parseInt(hex, 16)),
-    );
+  return text.replace(
+    /&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi,
+    (whole: string, decimal: string | undefined, hex: string | undefined, name: string | undefined) => {
+      if (decimal !== undefined) return characterOf(Number.parseInt(decimal, 10));
+      if (hex !== undefined) return characterOf(Number.parseInt(hex, 16));
+      return NAMED_ENTITIES.get((name ?? '').toLowerCase()) ?? whole;
+    },
+  );
 }
 
 /**

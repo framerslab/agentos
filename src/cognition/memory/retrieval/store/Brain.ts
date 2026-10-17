@@ -1212,22 +1212,25 @@ export class Brain {
    * `memory_traces_fts` is external-content with no triggers, so it only
    * covers rows a writer synced. Brains written through the cognitive
    * pipeline before `MemoryStore.store()` synced carry an EMPTY index, a
-   * failed sync leaves one row out, and an `INSERT OR REPLACE` revival
-   * leaves the old rowid's entry behind. Each makes the index's set of
-   * document ids differ from the content table's rowids. Both sets hold
-   * unique ids, so they are equal exactly when both counts equal the size of
-   * their join (|T ∩ D| = |T| = |D|); anything else triggers a rebuild from
-   * the content table. That is exact — defects cannot cancel — and costs one
-   * primary-key probe into the index's document table per content row, with
-   * no temporary index.
+   * failed sync leaves one row out, and a revival leaves the entry under its
+   * old rowid behind: the upsert rewrites the row in place, and
+   * `MemoryStore.store()` then moves it to a fresh rowid. Each makes the
+   * index's set of document ids differ from the content table's rowids. Both
+   * sets hold unique ids, so they are equal exactly when both counts equal
+   * the size of their join (|T ∩ D| = |T| = |D|); anything else triggers a
+   * rebuild from the content table. That is exact (defects cannot cancel)
+   * and costs one primary-key probe into the index's document table per
+   * content row, with no temporary index.
    *
    * The check cannot see indexed content rewritten under an unchanged
-   * rowid set. The writers that rewrite content in place (MemoryUpdateTool,
-   * the Memory facade, ConsolidationLoop) rebuild the index themselves, and
-   * the one writer that hard deletes traces (`importFromSqlite`) does too. SQLite
-   * only — a SQLite brain is its own file, while a rebuild on a shared
-   * Postgres table would re-index every brain's rows. Best-effort: nothing
-   * here may block opening the brain.
+   * rowid set. The writers that rewrite indexed text in place
+   * (MemoryUpdateTool, the Memory facade, ConsolidationLoop, SqliteImporter's
+   * tag merge, and `MemoryStore.store()` when a revival's move fails) rebuild
+   * the index themselves, and the one writer that hard deletes traces
+   * (`importFromSqlite`) does too.
+   * SQLite only: on Postgres the index is a column of each row, and every
+   * open fills the rows where it is null. Best-effort: nothing here may
+   * block opening the brain.
    */
   private async _repairFullTextIndex(): Promise<void> {
     if (this._features.dialect.name === 'postgres') {
@@ -1258,15 +1261,15 @@ export class Brain {
   }
 
   /**
-   * Rebuild the full-text index from the content table (SQLite only,
-   * best-effort). Used after bulk writes that bypass per-row syncing.
+   * Rebuild this brain's full-text index from its traces (best-effort), with
+   * the statement `fullTextRebuild` returns: the whole index on SQLite, the
+   * `_tsv` column of this brain's rows on Postgres. Used after bulk writes
+   * that bypass per-row syncing.
    */
   private async _rebuildFullTextIndex(): Promise<void> {
-    if (this._features.dialect.name === 'postgres') {
-      return;
-    }
     try {
-      await this._adapter.exec(this._features.fts.rebuildCommand('memory_traces_fts'));
+      const rebuild = this.fullTextRebuild();
+      await this._adapter.run(rebuild.sql, rebuild.params);
     } catch (error) {
       this._warnFullTextIndexError('rebuild', error);
     }
@@ -1606,11 +1609,15 @@ export class Brain {
     } finally {
       await source.close();
       // The bulk copy writes memory_traces without syncing the full-text
-      // index, and a 'replace' import hard-deletes rows first, so SQLite can
-      // hand the imported traces reused rowids that still carry the old
-      // postings. Rebuild so the index matches whatever the import left —
-      // including a partial import that failed midway. Best-effort: it never
-      // throws, so an import error still propagates unchanged.
+      // index. On SQLite its upsert rewrites a trace the brain holds in place,
+      // under a rowid whose postings hold the old words, and a 'replace'
+      // import hard-deletes rows first, so the imported traces can get reused
+      // rowids that still carry old postings. On Postgres the upsert's SET
+      // list leaves `_tsv` as it was: a re-imported trace keeps its old
+      // words, and a new one stays null until an open fills it. Rebuild so
+      // the index matches whatever the import left, a partial import that
+      // failed midway included. Best-effort: it never throws, so an import
+      // error still propagates unchanged.
       await this._rebuildFullTextIndex();
     }
 

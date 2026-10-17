@@ -366,6 +366,8 @@ const forkBrain = await Brain.openPostgres(connStr, { brainId: 'alice-fork' });
 await forkBrain.importFromSqlite('/tmp/alice-snapshot.sqlite');
 ```
 
+When the import finishes, it rebuilds the full-text column (`_tsv`) of the importing brain's rows, so `memory_search` finds each imported trace by the words it holds, a trace the brain held before and the file rewrites included.
+
 ---
 
 ## See also
