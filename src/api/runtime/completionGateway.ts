@@ -705,9 +705,10 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           : resolveProvider(parsed.providerId, parsed.modelId);
         servingProviderId = resolved.providerId;
         const ownCredentials = routeCredentials && (route.apiKey !== undefined || route.baseUrl !== undefined);
+        // The provider's shared credentials are read quietly: that lookup sends nothing.
         const hopHealthId = providerHealthKey(
           resolved,
-          ownCredentials ? () => resolveProvider(parsed.providerId, parsed.modelId) : undefined,
+          ownCredentials ? () => resolveProvider(parsed.providerId, parsed.modelId, { quiet: true }) : undefined,
         );
         healthId = hopHealthId;
         if (globalLLMProviderHealth.isOpen(hopHealthId)) throw circuitOpenError(resolved.providerId, hopHealthId);

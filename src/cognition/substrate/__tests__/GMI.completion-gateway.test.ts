@@ -212,6 +212,24 @@ describe('GMI turn through the real completion gateway', () => {
     expect(primary.seen).toHaveLength(0);
   });
 
+  it("a turn on the gateway's own Anthropic key, with only OPENROUTER_API_KEY in the environment, goes to Anthropic and reports no fallback to OpenRouter", async () => {
+    const k = key();
+    const primary = script('anthropic', k, { replies: [reply.text('From Anthropic.')] });
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENROUTER_API_KEY', key());
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { gmi } = await createScriptedGmi({
+      gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [] }),
+      persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-x' },
+    });
+    const { chunks } = await runTurn(gmi, textTurn('t1', 'Hi.'));
+    expect(of(chunks, GMIOutputChunkType.STEP_FINISHED)[0].content).toMatchObject({ text: 'From Anthropic.', providerId: 'anthropic' });
+    expect(primary.seen).toHaveLength(1);
+    // The gateway reads the provider's shared credentials to pick the turn's health record. With no Anthropic key
+    // there that read resolves to OpenRouter, and it sends nothing.
+    expect(warn.mock.calls.map((args) => args.map(String).join(' ')).filter((line) => line.includes('OpenRouter'))).toEqual([]);
+  });
+
   it('an attempt that fails before any content shows the GMI none of its chunks, only the bill it reported', async () => {
     const k = key(); const fb = key();
     const early = { promptTokens: 30, completionTokens: 0, totalTokens: 30 };

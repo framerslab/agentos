@@ -172,7 +172,8 @@ export function seatRoster(
     if (credentials) secrets.add(credentials);
   };
   // A fixed seat and a hop are kept on the availability rule alone: the breaker is not consulted for
-  // them at seating, since the walker's own check skips an open provider at call time.
+  // them at seating, since each call reads the breaker of the key it sends before it sends, and a
+  // chain walks past a hop whose breaker is open.
   const ruleOnly: SeatingDeps = { ...deps, breakerOpen: () => false };
   const effortOption = callOpts?.effort;
   const callEffort = typeof effortOption === 'string' ? effortOption : undefined;

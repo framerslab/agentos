@@ -105,10 +105,12 @@ export function keyVarOf(provider: string): string {
  * The id the provider health registry keeps a seat's calls under, worked out
  * as generateText and streamText work it out for a seat's call, whose key
  * and URL resolve strictly: the provider's own id when the seat's key and URL
- * are the ones the provider has without the seat (its environment variable
- * or the global default), else an id of the seat's own key and URL (see
- * `providerHealthKey`). A 401 on one key then opens the breaker for every
- * seat on that key, and for no seat on another.
+ * are the ones the provider's other callers reach with none of their own (a
+ * global default that names this provider or no provider, else the
+ * environment variable), else an id of the seat's key and URL (see
+ * `providerHealthKey`).
+ * A 401 on one key then opens the breaker for every seat on that key, and for
+ * no seat or caller on another.
  *
  * @param c - Credentials from {@link resolveSeatCredentials}.
  * @returns The registry id the seat's calls record their health under.
@@ -121,8 +123,11 @@ export function seatHealthId(c: ResolvedCredentials): string {
     // A call on these credentials fails before any request and records no health.
     return c.provider;
   }
-  const own = c.apiKey !== undefined || c.baseUrl !== undefined;
-  return providerHealthKey(resolved, own ? () => resolveProvider(c.provider, c.model) : undefined);
+  // A seat's call is strict, so generateText compares what it resolved with
+  // the provider's shared credentials whether or not the seat brings a key or
+  // URL of its own. Read quietly, as generateText reads them: the lookup sends
+  // nothing.
+  return providerHealthKey(resolved, () => resolveProvider(c.provider, c.model, { quiet: true }));
 }
 
 /**

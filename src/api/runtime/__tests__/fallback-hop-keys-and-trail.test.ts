@@ -3,9 +3,11 @@
  * What an agency seat's per-call internals do in both failover walkers, with
  * only the provider transport stubbed: each hop is sent with the key and URL
  * its own entry carries, never the primary's, and is sent while the
- * provider's own key has an open breaker; `__strictCredentials` reaches
- * the resolution of every hop's request; under `__panelDeadline` a timeout is left out
- * of the provider's health while any other failure still counts;
+ * provider's own key has an open breaker, as is a hop with no key of its own
+ * whose strict resolution reaches another key than the provider's shared one;
+ * `__strictCredentials` reaches the resolution of every hop's request; under
+ * `__panelDeadline` a timeout is left out of the provider's health while any
+ * other failure still counts;
  * `__maskError` masks a tool's error in the call record and in the turn the
  * next request carries, on the native tool loop and on the prompt shim; and a
  * stream's `fallback` names the run that answered, whichever way it ends.
@@ -135,18 +137,21 @@ const PRIMARY = {
   __strictCredentials: true,
   fallbackProviders: HOPS,
 };
-// Each hop's request is resolved strictly on its own entry's key and URL. A
-// hop that carries a key or URL of its own is resolved once more with no
-// overrides: the provider's shared credentials, against which
-// providerHealthKey decides whether the hop shares the provider's health
-// record or keeps one of its own. That second resolution sends nothing and
-// takes none of the hop's key.
+// Each hop's request is resolved strictly on its own entry's key and URL, and
+// then once more, quietly and with no key or URL: the provider's shared
+// credentials, against which providerHealthKey decides whether the hop shares
+// the provider's health record or keeps one of its own. A hop with no key of
+// its own is compared too: a strict resolution can reach another key than the
+// shared one (a default that names no provider serves only the shared one).
+// That second resolution sends nothing, takes none of the hop's key and prints
+// no OpenRouter notice.
 const RESOLVED = [
   ['openai', { apiKey: 'sk-primary-key-0001', baseUrl: 'https://primary.example/v1', strict: true }],
-  ['openai', undefined],
+  ['openai', { quiet: true }],
   ['anthropic', { apiKey: 'sk-hop-key-0002', baseUrl: 'https://hop.example/v1', strict: true }],
-  ['anthropic', undefined],
+  ['anthropic', { quiet: true }],
   ['gemini', { apiKey: undefined, baseUrl: undefined, strict: true }],
+  ['gemini', { quiet: true }],
 ];
 
 beforeEach(() => {
@@ -225,6 +230,65 @@ describe("a hop on a key of its own is sent while the provider's own record is o
   });
 
   it('in streamText', async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { throw status(503); })
+      .mockImplementationOnce(async function* () { yield textChunk('served'); });
+    const r = streamText(CALL);
+    await drain(r);
+    expect(await r.text).toBe('served');
+    expect(await r.fallback).toMatchObject({ fired: true, finalProvider: 'anthropic', finalModel: 'claude-x' });
+  });
+});
+
+describe("a seat's hop with no key of its own keeps the record of the key its strict resolution reaches", () => {
+  // A seat's call resolves strictly, and a default that names no provider does not reach it: here a strict
+  // resolution with no key takes the environment's key and the provider's shared resolution the default's, as
+  // resolveProvider does under setDefaultProvider({ apiKey }). The hop's key is then not the one the provider's own
+  // record speaks for.
+  const defaultResolve = hoisted.resolveProvider.getMockImplementation()!;
+  const CALL = {
+    provider: 'openai',
+    model: 'gpt-5.5',
+    prompt: 'hi',
+    apiKey: 'sk-primary-key-0001',
+    __strictCredentials: true,
+    fallbackProviders: [{ provider: 'anthropic', model: 'claude-x' }],
+  };
+  beforeEach(() => {
+    hoisted.resolveProvider.mockImplementation((providerId, modelId, overrides) => ({
+      providerId,
+      modelId,
+      apiKey: (overrides?.apiKey as string | undefined) ?? (overrides?.strict ? 'env-key' : 'nameless-default-key'),
+    }));
+  });
+  afterEach(() => {
+    hoisted.resolveProvider.mockImplementation(defaultResolve);
+  });
+
+  it("in generateText: the hop's 401 leaves the provider's record closed, and the provider's open record skips no hop", async () => {
+    hoisted.generateCompletion.mockRejectedValueOnce(status(503)).mockRejectedValueOnce(status(401));
+    await generateText(CALL).catch(() => undefined);
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
+    expect(globalLLMProviderHealth.isOpen('anthropic')).toBe(false);
+
+    globalLLMProviderHealth.reset();
+    globalLLMProviderHealth.recordFailure('anthropic', status(401));
+    hoisted.generateCompletion.mockRejectedValueOnce(status(503)).mockResolvedValueOnce(reply('served'));
+    const r = await generateText(CALL);
+    expect(r.text).toBe('served');
+    expect(r.fallback).toMatchObject({ fired: true, finalProvider: 'anthropic', finalModel: 'claude-x' });
+  });
+
+  it("in streamText: the hop's 401 leaves the provider's record closed, and the provider's open record skips no hop", async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { throw status(503); })
+      .mockImplementationOnce(async function* () { throw status(401); });
+    await drain(streamText(CALL));
+    expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(2);
+    expect(globalLLMProviderHealth.isOpen('anthropic')).toBe(false);
+
+    globalLLMProviderHealth.reset();
+    globalLLMProviderHealth.recordFailure('anthropic', status(401));
     hoisted.generateCompletionStream
       .mockImplementationOnce(async function* () { throw status(503); })
       .mockImplementationOnce(async function* () { yield textChunk('served'); });
