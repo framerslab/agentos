@@ -2,14 +2,15 @@
  * @file fallback-hop-keys-and-trail.test.ts
  * What an agency seat's per-call internals do in both failover walkers, with
  * only the provider transport stubbed: each hop is sent with the key and URL
- * its own entry carries, never the primary's; `__strictCredentials` reaches
+ * its own entry carries, never the primary's, and is sent while the
+ * provider's own key has an open breaker; `__strictCredentials` reaches
  * the resolution of every hop's request; under `__panelDeadline` a timeout is left out
  * of the provider's health while any other failure still counts;
  * `__maskError` masks a tool's error in the call record and in the turn the
  * next request carries, on the native tool loop and on the prompt shim; and a
  * stream's `fallback` names the run that answered, whichever way it ends.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => {
   const generateCompletionStream = vi.fn();
@@ -188,6 +189,49 @@ describe('a hop carries its own key and URL, and strict resolution rides every h
         { provider: 'gemini', model: 'gemini-x', ok: true },
       ],
     });
+  });
+});
+
+describe("a hop on a key of its own is sent while the provider's own record is open", () => {
+  // A 401 on the environment's Anthropic key opened the provider's own record. A hop that carries a key of its own
+  // keeps the record of that key (providerHealthKey), so the walk sends it. Here each key resolves to itself and a
+  // call with none to the environment's, as resolveProvider does.
+  const defaultResolve = hoisted.resolveProvider.getMockImplementation()!;
+  const CALL = {
+    provider: 'openai',
+    model: 'gpt-5.5',
+    prompt: 'hi',
+    apiKey: 'sk-primary-key-0001',
+    __strictCredentials: true,
+    fallbackProviders: [{ provider: 'anthropic', model: 'claude-x', apiKey: 'sk-hop-key-0002' }],
+  };
+  beforeEach(() => {
+    hoisted.resolveProvider.mockImplementation((providerId, modelId, overrides) => ({
+      providerId,
+      modelId,
+      apiKey: (overrides?.apiKey as string | undefined) ?? 'env-key',
+    }));
+    globalLLMProviderHealth.recordFailure('anthropic', status(401));
+  });
+  afterEach(() => {
+    hoisted.resolveProvider.mockImplementation(defaultResolve);
+  });
+
+  it('in generateText', async () => {
+    hoisted.generateCompletion.mockRejectedValueOnce(status(503)).mockResolvedValueOnce(reply('served'));
+    const r = await generateText(CALL);
+    expect(r.text).toBe('served');
+    expect(r.fallback).toMatchObject({ fired: true, finalProvider: 'anthropic', finalModel: 'claude-x' });
+  });
+
+  it('in streamText', async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { throw status(503); })
+      .mockImplementationOnce(async function* () { yield textChunk('served'); });
+    const r = streamText(CALL);
+    await drain(r);
+    expect(await r.text).toBe('served');
+    expect(await r.fallback).toMatchObject({ fired: true, finalProvider: 'anthropic', finalModel: 'claude-x' });
   });
 });
 

@@ -1565,8 +1565,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // recursion overhead.
           // The breaker read is the provider the leg is sent to: an
           // `openrouter:` id under another provider goes to OpenRouter.
+          // That record speaks for a leg on the provider's own credentials
+          // only. A leg with a key or URL of its own keeps the record of
+          // that key (providerHealthKey), which the call below reads before
+          // it sends, so a failure of the provider's own key skips no leg
+          // on another key.
           const legProvider = fallbackEntrySentAs(fb).provider;
-          if (globalLLMProviderHealth.isOpen(legProvider)) {
+          const legOnOwnCredentials = fb.apiKey !== undefined || fb.baseUrl !== undefined;
+          if (!legOnOwnCredentials && globalLLMProviderHealth.isOpen(legProvider)) {
             fallbackLogger.info('streaming provider fallback skipped (circuit open)', {
               event: 'fallback_skipped_circuit_open',
               api: 'streamText',
