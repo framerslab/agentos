@@ -637,7 +637,7 @@ export class StatisticalUtilityAI implements IUtilityAI {
    * model reads the text as it read its examples (the class's words in any script, lower case, `natural`'s English
    * stop words left out, each stemmed with the stemmer the model learned with; `language` is not read) and answers
    * its classes, best first. Otherwise it logs a warning and scores each candidate class by the words of its name
-   * (split at spaces) found in the lower-cased text, inside a longer word too.
+   * (split at white space) found in the lower-cased text, inside a longer word too.
    */
   public async classifyText(textToClassify: string, options: ClassificationOptions): Promise<ClassificationResult> {
     this.ensureInitialized();
@@ -684,7 +684,8 @@ export class StatisticalUtilityAI implements IUtilityAI {
 
       for (const className of options.candidateClasses) {
           let score = 0;
-          className.toLowerCase().split(' ').forEach(keyword => {
+          // Split at white space, so a doubled or trailing space adds no empty keyword, which every text holds.
+          className.toLowerCase().split(/\s+/).filter(Boolean).forEach(keyword => {
               if (textLower.includes(keyword)) score++;
           });
           allScoresRaw.push({classLabel: className, score});
@@ -947,19 +948,20 @@ export class StatisticalUtilityAI implements IUtilityAI {
       normalizedText = normalizedText.toLowerCase();
     }
     if (options?.expandContractions && StatisticalUtilityAI.languageCode(lang) === 'en') {
-      // English only. A curly apostrophe counts as a straight one; `'s` and `'d` are read as `is` and `would`.
+      // English only, in any letter case (with toLowerCase: false a text keeps its capitals). A curly apostrophe
+      // counts as a straight one; `'s` and `'d` are read as `is` and `would`.
       normalizedText = normalizedText
         .replace(/’/g, "'")
         .replace(/\bwon't\b/gi, 'will not')
         .replace(/\bcan't\b/gi, 'cannot')
         .replace(/\bain't\b/gi, 'am not')
         .replace(/n't\b/gi, ' not')
-        .replace(/\b're\b/g, ' are')
-        .replace(/\b's\b/g, ' is')
-        .replace(/\b'd\b/g, ' would')
-        .replace(/\b'll\b/g, ' will')
-        .replace(/\b've\b/g, ' have')
-        .replace(/\b'm\b/g, ' am');
+        .replace(/\b're\b/gi, ' are')
+        .replace(/\b's\b/gi, ' is')
+        .replace(/\b'd\b/gi, ' would')
+        .replace(/\b'll\b/gi, ' will')
+        .replace(/\b've\b/gi, ' have')
+        .replace(/\b'm\b/gi, ' am');
     }
     if (options?.removePunctuation) {
       normalizedText = normalizedText.replace(/[.,/#!$%^&*;:{}=\-_`~()?"]/g, " ");
