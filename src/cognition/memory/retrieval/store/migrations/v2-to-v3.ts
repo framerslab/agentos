@@ -32,6 +32,15 @@ const PAGE = 300;
 
 const isPostgres = (adapter: StorageAdapter): boolean => adapter.kind.includes('postgres');
 
+/**
+ * Whether Postgres resolves `name` to a table or index on the connection's search path. `to_regclass` reads the
+ * catalog without taking a lock on the relation.
+ */
+export async function postgresRelationExists(adapter: StorageAdapter, name: string): Promise<boolean> {
+  const row = await adapter.get<{ found: string | null }>('SELECT to_regclass(?)::text AS found', [name]);
+  return row?.found != null;
+}
+
 async function tableExists(adapter: StorageAdapter, table: string): Promise<boolean> {
   if (isPostgres(adapter)) {
     const row = await adapter.get<{ exists: boolean }>(
@@ -116,6 +125,9 @@ export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<void
     await adapter.exec(`ALTER TABLE memory_traces ADD COLUMN ${ifNotExists}scope_id TEXT NOT NULL DEFAULT ''`);
     await backfillEveryBrain(adapter);
   }
+  // Postgres takes the table's SHARE lock before it checks IF NOT EXISTS, so an existing index is skipped by name:
+  // otherwise every open would wait for a long write transaction on memory_traces and hold up the writers behind it.
+  if (isPostgres(adapter) && (await postgresRelationExists(adapter, 'idx_memory_traces_brain_scope_id'))) return;
   await adapter.exec(SCOPE_ID_INDEX_DDL);
 }
 
