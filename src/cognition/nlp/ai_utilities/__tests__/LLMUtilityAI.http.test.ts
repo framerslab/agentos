@@ -169,6 +169,25 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(await utility.detectLanguage('Bonjour à tous', { maxCandidates: 3 })).toEqual([{ language: 'fr', confidence: 0.9 }]);
   });
 
+  it('passes over a language entry whose confidence is null, a boolean, an empty string or a list', async () => {
+    replies = [
+      JSON.stringify({
+        languages: [
+          { language: 'en', confidence: null },
+          { language: 'fr', confidence: true },
+          { language: 'de', confidence: '' },
+          { language: 'es', confidence: [] },
+          { language: 'it', confidence: '0.4' },
+          { language: 'pt', confidence: 0.3 },
+        ],
+      }),
+    ];
+    expect(await utility.detectLanguage('Bom dia a todos, ciao a tutti', { maxCandidates: 6 })).toEqual([
+      { language: 'it', confidence: 0.4 },
+      { language: 'pt', confidence: 0.3 },
+    ]);
+  });
+
   it('repairs a reply that does not parse on the model and provider of the call', async () => {
     replies = ['score -0.8, polarity negative', '{"score": -0.8, "polarity": "negative"}'];
     const result = await utility.analyzeSentiment('The update broke everything.', { providerId: 'litellm', modelId: 'gpt-4o-mini' });
@@ -234,13 +253,13 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(received).toHaveLength(5);
   });
 
-  it('reads a maxRepairAttempts that is not a whole number of 1 or more, Infinity included, as 1', async () => {
-    for (const maxRepairAttempts of [Number.POSITIVE_INFINITY, Number.NaN, 0, -2]) {
+  it('reads a maxRepairAttempts that is not a whole number of 1 or more, Infinity and 2.9 included, as 1', async () => {
+    for (const maxRepairAttempts of [Number.POSITIVE_INFINITY, Number.NaN, 0, -2, 2.9]) {
       replies = ['still not json', 'still not json'];
       expect(await utility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true, maxRepairAttempts })).toBeNull();
     }
     // One repair call each.
-    expect(received).toHaveLength(4);
+    expect(received).toHaveLength(5);
   });
 
   it('names the schema, and the errors of a value that failed it, in the repair it asks for', async () => {

@@ -766,15 +766,22 @@ describe('PersonaLoader Sentiment Config Integration', () => {
 describe('GMI events from a StatisticalUtilityAI', () => {
   // The utility class gmi() gives every agent: it scores each user turn by its sentiment lexicon, and the
   // GMI's SentimentTracker raises the events from that score with the default thresholds.
-  async function scoreOneTurn(content: string): Promise<{
+  async function scoreOneTurn(
+    content: string,
+    languages: { utility?: string; persona?: string } = {},
+  ): Promise<{
     events: GMIEventType[];
     trend: SentimentHistoryState['trends'][number];
   }> {
     const wm = createMockWorkingMemory();
     const utilityAI = new StatisticalUtilityAI('gmi-lexicon');
-    await utilityAI.initialize({ defaultLanguage: 'en' });
+    await utilityAI.initialize({ defaultLanguage: languages.utility ?? 'en' });
     const gmi = new GMI('test-lexicon-sentiment');
-    await gmi.initialize(createSentimentPersona({ enabled: true }), {
+    const persona = createSentimentPersona(
+      { enabled: true },
+      languages.persona ? { defaultLanguage: languages.persona } : undefined,
+    );
+    await gmi.initialize(persona, {
       workingMemory: wm as any,
       promptEngine: mockPromptEngine,
       llmProviderManager: mockLlmProviderManager,
@@ -820,5 +827,20 @@ describe('GMI events from a StatisticalUtilityAI', () => {
     expect(trend.polarity).toBe('neutral');
     expect(events).not.toContain(GMIEventType.USER_FRUSTRATED);
     expect(events).not.toContain(GMIEventType.USER_SATISFIED);
+  });
+
+  // gracias 2, excelente 3 and perfecto 3 are in the Spanish AFINN lexicon and none of them in the English one.
+  const spanishPraise = 'Gracias, es excelente y perfecto.';
+
+  it("scores a turn in the utility class's default language when neither the user nor the persona names one", async () => {
+    const { events, trend } = await scoreOneTurn(spanishPraise, { utility: 'es' });
+    expect(trend.score).toBeGreaterThan(0.5);
+    expect(events).toContain(GMIEventType.USER_SATISFIED);
+  });
+
+  it("scores a turn in the persona's defaultLanguage when the user context names none", async () => {
+    const { events, trend } = await scoreOneTurn(spanishPraise, { persona: 'es' });
+    expect(trend.score).toBeGreaterThan(0.5);
+    expect(events).toContain(GMIEventType.USER_SATISFIED);
   });
 });
