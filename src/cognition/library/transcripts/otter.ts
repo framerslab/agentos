@@ -21,8 +21,10 @@ const CLOSING = /^Transcribed by https:\/\/otter\.ai\/?$/i;
 
 /**
  * A header line's speaker and start, or `null` when the line is no header. A header is a name, two spaces or more
- * (or tabs), a time `M:SS` or `H:MM:SS`, and nothing after it but white space. The line is read from its end with no
- * pattern that backtracks, so a line of many spaces costs one pass over it.
+ * (or tabs), a time `M:SS` or `H:MM:SS`, and nothing after it but white space. The name holds at most forty characters
+ * and no colon and starts with a letter of any case or script, since a speaker named in Otter may be typed in lower
+ * case (`john  0:01`). The line is read from its end with no pattern that backtracks, so a line of many spaces costs
+ * one pass over it.
  *
  * @param line - One line of an Otter export.
  */
@@ -35,7 +37,7 @@ export function otterHeader(line: string): { label: string; startMs: number } | 
   if (!HEADER_GAP.test(trimmed.slice(name.length, gapEnd))) return null;
   const label = name.trim();
   const startMs = clockMs(time);
-  return startMs === null || !isName(label) ? null : { label, startMs };
+  return startMs === null || !isName(label, { anyCase: true }) ? null : { label, startMs };
 }
 
 /**
