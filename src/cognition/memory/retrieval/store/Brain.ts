@@ -62,11 +62,25 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
  * explicit `brainId`.
  */
 /**
- * The advisory lock a Postgres brain holds while it sets up the tables every
- * brain in the database shares. The migrations lock `agentos_brain:<brain id>`,
- * which this name can never equal.
+ * Runs one idempotent schema step, and once more if it lost a race. Every brain
+ * in a Postgres database shares its tables, and `CREATE ... IF NOT EXISTS` is
+ * not atomic there: two connections can both find an object missing, and the
+ * second then fails on the catalog's unique index (23505, such as
+ * pg_type_typname_nsp_index) or as duplicate_table (42P07), duplicate_object
+ * (42710) or duplicate_column (42701). Run again, the step finds the object and
+ * does nothing. Each statement commits on its own, so no table lock outlives it.
  */
-const POSTGRES_SCHEMA_LOCK = 'agentos_brain_schema';
+async function retryLostCreate(step: () => Promise<void>): Promise<void> {
+  try {
+    await step();
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code !== '23505' && code !== '42P07' && code !== '42710' && code !== '42701') {
+      throw error;
+    }
+    await step();
+  }
+}
 
 /**
  * Whether anything is at `entry`: a file, a folder, or a link, dangling or
@@ -1005,22 +1019,8 @@ export class Brain {
     const fkPragma = features.dialect.pragma('foreign_keys', 'ON');
     if (fkPragma) await adapter.exec(fkPragma);
 
-    if (features.dialect.name === 'postgres') {
-      // Every brain in a Postgres database shares its tables, and two connections
-      // running CREATE TABLE IF NOT EXISTS at once can both pass the check, the
-      // second failing on pg_type_typname_nsp_index. The migrations' lock names one
-      // brain, so the schema is set up under one lock for the whole database, in one
-      // transaction on one connection: a brain opening meanwhile waits, then finds
-      // every table.
-      await adapter.transaction(async (trx) => {
-        await trx.run('SELECT pg_advisory_xact_lock(hashtext($1))', [POSTGRES_SCHEMA_LOCK]);
-        await MigrationRunner.runPending(trx, features, brainId, MIGRATIONS);
-        await brain._initSchema(trx);
-      });
-    } else {
-      await MigrationRunner.runPending(adapter, features, brainId, MIGRATIONS);
-      await brain._initSchema();
-    }
+    await MigrationRunner.runPending(adapter, features, brainId, MIGRATIONS);
+    await brain._initSchema();
     await brain._seedMeta();
     await brain._repairFullTextIndex();
 
@@ -1114,7 +1114,8 @@ export class Brain {
    * `CREATE TABLE IF NOT EXISTS` is safe to re-run, so a sequential setup path
    * is sufficient and avoids adapter-specific transaction quirks during DDL.
    */
-  private async _initSchema(adapter: StorageAdapter = this._adapter): Promise<void> {
+  private async _initSchema(): Promise<void> {
+    const adapter = this._adapter;
     const ddlStatements = [
       DDL_BRAIN_META,
       DDL_MEMORY_TRACES,
@@ -1137,11 +1138,12 @@ export class Brain {
     ];
 
     for (const statement of ddlStatements) {
-      await adapter.exec(this._normalizeDdlForDialect(statement));
+      const ddl = this._normalizeDdlForDialect(statement);
+      await retryLostCreate(() => adapter.exec(ddl));
     }
 
     // A table another path created without `scope_id` (a migration engine's copy) gains it here; a fresh table has it.
-    await ensureScopeIdColumn(adapter);
+    await retryLostCreate(() => ensureScopeIdColumn(adapter));
 
     // FTS index via feature abstraction (FTS5 on SQLite, tsvector/GIN on Postgres).
     // SQL.js builds may not include FTS5, so keep the core schema independent.
@@ -1152,7 +1154,7 @@ export class Brain {
       tokenizer: 'porter ascii',
     });
     try {
-      await adapter.exec(ftsDdl);
+      await retryLostCreate(() => adapter.exec(ftsDdl));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes('no such module: fts5')) {

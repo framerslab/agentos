@@ -155,9 +155,10 @@ describeIfPostgres('Brain.openPostgres', () => {
     ]);
     openedBrains.push(brainA, brainB);
 
-    // Both must see schema_version = '3' (latest). Both opens take the
-    // database's schema lock, so one sets the schema up and runs the
-    // migrations while the other waits, then finds them done.
+    // Both must see schema_version = '3' (latest). MigrationRunner's lock
+    // and transaction let one open run the migrations while the other waits;
+    // both run the schema step, where a create that loses the race to the
+    // other connection runs again and finds the object.
     expect(await brainA.getMeta('schema_version')).toBe('3');
     expect(await brainB.getMeta('schema_version')).toBe('3');
 
@@ -190,8 +191,8 @@ describeIfPostgres('Brain.openPostgres', () => {
     url.searchParams.set('options', `-c search_path=${schema},public`);
     const fresh: Brain[] = [];
     try {
-      // Different brains: without one lock for the database, their CREATE TABLE IF NOT EXISTS
-      // statements race and all but one fail on pg_type_typname_nsp_index.
+      // Different brains: their CREATE ... IF NOT EXISTS statements race on the shared tables, and
+      // one that loses (pg_type_typname_nsp_index) runs again and finds the object.
       fresh.push(
         ...(await Promise.all(
           Array.from({ length: 6 }, () => Brain.openPostgres(url.toString(), { brainId: uniqueBrainId() })),
