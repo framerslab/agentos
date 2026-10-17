@@ -656,9 +656,10 @@ async function moveTraceToFreshRowid(
  * row was rewritten in place under the rowid whose entry holds its old words,
  * and a sync would add the new words beside them. The open-time check
  * compares row sets, not content, so no open would clear the old ones. The
- * sync is skipped and the brain's index rebuilt from its traces instead, and
- * one line names the path taken. When the rebuild fails as well, the line
- * says so: the old words then match until a later rebuild.
+ * sync is skipped and the index rebuilt from the content table instead
+ * (`Brain.fullTextRebuild`), and one line names the path taken. When the
+ * rebuild fails as well, the line says so: the old words then match until a
+ * later rebuild.
  *
  * @param revived - Whether the brain held the row before the write (see `traceRowHeld`).
  */
