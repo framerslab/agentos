@@ -1212,22 +1212,23 @@ export class Brain {
    * `memory_traces_fts` is external-content with no triggers, so it only
    * covers rows a writer synced. Brains written through the cognitive
    * pipeline before `MemoryStore.store()` synced carry an EMPTY index, a
-   * failed sync leaves one row out, and an `INSERT OR REPLACE` revival
-   * leaves the old rowid's entry behind. Each makes the index's set of
-   * document ids differ from the content table's rowids. Both sets hold
-   * unique ids, so they are equal exactly when both counts equal the size of
-   * their join (|T ∩ D| = |T| = |D|); anything else triggers a rebuild from
-   * the content table. That is exact — defects cannot cancel — and costs one
-   * primary-key probe into the index's document table per content row, with
-   * no temporary index.
+   * failed sync leaves one row out, and a revival leaves the entry under its
+   * old rowid behind: the upsert rewrites the row in place, and
+   * `MemoryStore.store()` then moves it to a fresh rowid. Each makes the
+   * index's set of document ids differ from the content table's rowids. Both
+   * sets hold unique ids, so they are equal exactly when both counts equal
+   * the size of their join (|T ∩ D| = |T| = |D|); anything else triggers a
+   * rebuild from the content table. That is exact (defects cannot cancel)
+   * and costs one primary-key probe into the index's document table per
+   * content row, with no temporary index.
    *
    * The check cannot see indexed content rewritten under an unchanged
    * rowid set. The writers that rewrite content in place (MemoryUpdateTool,
    * the Memory facade, ConsolidationLoop) rebuild the index themselves, and
-   * the one writer that hard deletes traces (`importFromSqlite`) does too. SQLite
-   * only — a SQLite brain is its own file, while a rebuild on a shared
-   * Postgres table would re-index every brain's rows. Best-effort: nothing
-   * here may block opening the brain.
+   * the one writer that hard deletes traces (`importFromSqlite`) does too.
+   * SQLite only: on Postgres the index is a column of each row, and every
+   * open fills the rows where it is null. Best-effort: nothing here may
+   * block opening the brain.
    */
   private async _repairFullTextIndex(): Promise<void> {
     if (this._features.dialect.name === 'postgres') {

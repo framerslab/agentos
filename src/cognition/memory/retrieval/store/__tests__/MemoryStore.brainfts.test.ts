@@ -189,8 +189,9 @@ describe('MemoryStore — full-text index stays in step with durable writes', ()
 
       expect(await ftsIds(brain, 'Silverpip')).toEqual(['t-revived']);
       expect(await ftsIds(brain, 'Thornquay')).toEqual([]);
-      // INSERT OR REPLACE moved the row to a fresh rowid; the old rowid's
-      // entry is left behind until the next open repairs it.
+      // The upsert rewrote the row in place and store() then moved it to a
+      // fresh rowid; the old rowid's entry, matched by no row, is left behind
+      // until the next open repairs it.
       expect(await orphanedIndexEntries(brain)).toBeGreaterThan(0);
       await brain.close();
 

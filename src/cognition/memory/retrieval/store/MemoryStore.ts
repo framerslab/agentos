@@ -545,11 +545,11 @@ async function withTraceOperation<T>(
  * SQLite, any row the index misses, and the stale entry a revival leaves
  * behind under its old rowid (see `moveTraceToFreshRowid`), is repaired the
  * next time the Brain opens (see `Brain._repairFullTextIndex`); on Postgres,
- * every open fills a `_tsv` left null. The move, the write and the sync are
- * separate statements, so two processes reviving the SAME trace id at once
- * could in principle leave one revision's tokens under the other's row; that
- * race needs same-id revival across processes and is not caught by the
- * open-time check, which compares row sets rather than content.
+ * every open fills a `_tsv` left null. The read, the write, the move and the
+ * sync are separate statements, so two processes storing the SAME trace id
+ * at once could in principle leave one revision's tokens under the other's
+ * row; that race needs same-id writes across processes and is not caught by
+ * the open-time check, which compares row sets rather than content.
  */
 async function syncTraceFullTextIndex(
   brain: import('./Brain.js').Brain,
@@ -581,8 +581,31 @@ async function syncTraceFullTextIndex(
 }
 
 /**
- * Move a revived trace's row to a fresh rowid before its rewrite, as
- * `INSERT OR REPLACE` did.
+ * Whether the brain holds a row for `traceId`, read before `store()` writes
+ * it. Only a row the brain held is rewritten in place, under the rowid its
+ * index entry names, and has to move (see `moveTraceToFreshRowid`); a new row
+ * gets a fresh rowid from its insert. A read takes no write lock, so a new
+ * trace's store writes nothing it does not need. A failed read counts as
+ * held: moving a new row is harmless, and leaving a revived one in place
+ * would keep its old words in the index.
+ */
+async function traceRowHeld(
+  brain: import('./Brain.js').Brain,
+  traceId: string,
+): Promise<boolean> {
+  try {
+    const row = await brain.get<{ held: number }>(
+      'SELECT 1 AS held FROM memory_traces WHERE brain_id = ? AND id = ?',
+      [brain.brainId, traceId],
+    );
+    return row !== null && row !== undefined;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Move a revived trace's row to a fresh rowid once its rewrite has committed.
  *
  * A revival stores new content under a trace id the brain already holds. The
  * dialect's upsert rewrites that row in place and keeps its rowid, so the
@@ -590,15 +613,18 @@ async function syncTraceFullTextIndex(
  * old words: the external-content index holds no text of its own. Moved, the
  * row leaves that entry pointing at no row, which a search's join drops, and
  * the next open's repair finds the row sets apart and rebuilds; the sync after
- * the write indexes the row under its new rowid. Nothing else keys on a
+ * the move indexes the row under its new rowid. Nothing else keys on a
  * trace's rowid: the HNSW sidecar maps its labels to trace ids.
+ *
+ * After the write, not before it: a failed write then leaves the row and its
+ * index entry as they were, and the trace stays found by the words it holds.
  *
  * A move, not a delete from the index: an index delete reads the text to
  * forget from the content row, and a row rewritten in place without a rebuild
  * would hand it the wrong text.
  *
- * SQLite only, best-effort as the sync is. A row the brain does not hold yet
- * matches nothing here.
+ * SQLite only, and only for a row the brain held before the write (see
+ * `traceRowHeld`). Best-effort, as the sync is.
  */
 async function moveTraceToFreshRowid(
   brain: import('./Brain.js').Brain,
@@ -1238,11 +1264,10 @@ export class MemoryStore {
     // failed write would look successful locally and then be fenced as a
     // provider-only document on the next durable recall.
     if (brain) {
-      // The upsert rewrites a revived row in place; moved first, the row
-      // leaves its old full-text entry behind, matched by nothing.
-      if (brain.features.dialect.name !== 'postgres') {
-        await moveTraceToFreshRowid(brain, trace.id);
-      }
+      // The upsert rewrites a revived row in place, under the rowid its old
+      // full-text entry names. Read first whether the row exists, so that a
+      // held row alone moves, once its rewrite has committed.
+      const revived = brain.features.dialect.name !== 'postgres' && (await traceRowHeld(brain, trace.id));
       try {
         const { dialect } = brain.features;
         // On Postgres the full-text index is the row's `_tsv` column, and the
@@ -1299,6 +1324,9 @@ export class MemoryStore {
       // would deadlock on a second owner. A missed sync is repaired on the
       // next open: by the exact check in Brain on SQLite, by the fill of a
       // null `_tsv` on Postgres.
+      if (revived) {
+        await moveTraceToFreshRowid(brain, trace.id);
+      }
       await syncTraceFullTextIndex(brain, trace);
     }
 
