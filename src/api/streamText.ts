@@ -586,8 +586,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       recordedProviderId = resolved.providerId;
       recordedModelId = resolved.modelId;
       // A key or base URL of the call's own, when it differs from the
-      // provider's, has a health record of its own.
-      const healthId = providerHealthKey(resolved, ownCredentials ? () => resolveProvider(providerId, modelId) : undefined);
+      // provider's, has a health record of its own. The provider's are read
+      // quietly: that lookup sends nothing, to OpenRouter or anywhere else.
+      const healthId = providerHealthKey(
+        resolved,
+        ownCredentials ? () => resolveProvider(providerId, modelId, { quiet: true }) : undefined,
+      );
       healthProviderId = healthId;
       // Resolve the eagerly-exposed routing Promises so callers
       // logging telemetry don't have to wait for the stream to drain.

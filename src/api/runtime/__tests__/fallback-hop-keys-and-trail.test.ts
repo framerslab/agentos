@@ -136,16 +136,16 @@ const PRIMARY = {
   fallbackProviders: HOPS,
 };
 // Each hop's request is resolved strictly on its own entry's key and URL. A
-// hop that carries a key or URL of its own is resolved once more with no
-// overrides: the provider's shared credentials, against which
+// hop that carries a key or URL of its own is resolved once more, quietly and
+// with no key or URL: the provider's shared credentials, against which
 // providerHealthKey decides whether the hop shares the provider's health
-// record or keeps one of its own. That second resolution sends nothing and
-// takes none of the hop's key.
+// record or keeps one of its own. That second resolution sends nothing, takes
+// none of the hop's key and prints no OpenRouter notice.
 const RESOLVED = [
   ['openai', { apiKey: 'sk-primary-key-0001', baseUrl: 'https://primary.example/v1', strict: true }],
-  ['openai', undefined],
+  ['openai', { quiet: true }],
   ['anthropic', { apiKey: 'sk-hop-key-0002', baseUrl: 'https://hop.example/v1', strict: true }],
-  ['anthropic', undefined],
+  ['anthropic', { quiet: true }],
   ['gemini', { apiKey: undefined, baseUrl: undefined, strict: true }],
 ];
 

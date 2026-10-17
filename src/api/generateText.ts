@@ -2248,8 +2248,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
       // A key or base URL of the call's own, when it differs from the
-      // provider's, has a health record of its own.
-      const healthId = providerHealthKey(resolved, ownCredentials ? () => resolveProvider(providerId, modelId) : undefined);
+      // provider's, has a health record of its own. The provider's are read
+      // quietly: that lookup sends nothing, to OpenRouter or anywhere else.
+      const healthId = providerHealthKey(
+        resolved,
+        ownCredentials ? () => resolveProvider(providerId, modelId, { quiet: true }) : undefined,
+      );
       healthProviderId = healthId;
 
       // ── Provider health circuit-breaker ──────────────────────────────

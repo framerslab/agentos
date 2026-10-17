@@ -393,6 +393,25 @@ describe('7. keys on the first call', () => {
     expect(result.seating!.skipped).toEqual([{ entry: 'opus', reason: 'no key (ANTHROPIC_API_KEY)' }, { entry: 'blank', reason: 'no key (ANTHROPIC_API_KEY)' }]);
     expect(fetchMock.mock.calls.every(([u]) => !OPENROUTER.test(String(u)))).toBe(true);
   });
+  it("an anthropic entry's own key with only OPENROUTER_API_KEY in the environment: its calls go to Anthropic on that key, and nothing reports a fallback to OpenRouter", async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENROUTER_API_KEY', K.orEnv);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      threeProviders();
+      const result = await panel().generate('review');
+      expect(result.text).toBe('Merged findings');
+      // The opus seat and the chair, each on the entry's own key.
+      expect(calls(ANTHROPIC, 'POST').map((c) => header(c, 'x-api-key'))).toEqual([K.ant, K.ant]);
+      expect(fetchMock.mock.calls.every(([u]) => !OPENROUTER.test(String(u)))).toBe(true);
+      // Seating, the panel's start check and each call read the provider's shared credentials to pick the health
+      // record. With no Anthropic key there that read resolves to OpenRouter, and it sends nothing.
+      const notices = warn.mock.calls.map((args) => args.map(String).join(' ')).filter((line) => line.includes('OpenRouter'));
+      expect(notices).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
   it("an agency-level key and URL serve the chair only; a nameless setDefaultProvider reaches no seat and not the chair", async () => {
     setDefaultProvider({ apiKey: 'sk-nameless-default-0013', baseUrl: 'https://nameless.example/v1' });
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')], [ANTHROPIC, anthropicText('A')], [GEMINI, geminiText('C')], [/chairproxy\.example\/v1\/chat\/completions/, openaiText('Merged')], [/chairproxy\.example\/v1\/models/, openaiListing]]);

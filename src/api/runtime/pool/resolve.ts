@@ -122,7 +122,8 @@ export function seatHealthId(c: ResolvedCredentials): string {
     return c.provider;
   }
   const own = c.apiKey !== undefined || c.baseUrl !== undefined;
-  return providerHealthKey(resolved, own ? () => resolveProvider(c.provider, c.model) : undefined);
+  // Read quietly, as generateText reads them: the lookup sends nothing.
+  return providerHealthKey(resolved, own ? () => resolveProvider(c.provider, c.model, { quiet: true }) : undefined);
 }
 
 /**
