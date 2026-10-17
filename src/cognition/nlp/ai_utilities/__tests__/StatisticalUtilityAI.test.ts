@@ -61,6 +61,13 @@ describe('StatisticalUtilityAI', () => {
     expect(await statUtility.normalizeText(text, { expandContractions: true })).toBe('i do not know they will not go and she cannot stay');
   });
 
+  it('expands contractions written in capitals when toLowerCase is false', async () => {
+    const text = "YOU'RE RIGHT, I'M SURE WE'LL GO";
+    expect(await statUtility.normalizeText(text, { toLowerCase: false, expandContractions: true })).toBe(
+      'YOU are RIGHT I am SURE WE will GO',
+    );
+  });
+
   it('counts the words of any script for keywords, most frequent first', async () => {
     expect(await statUtility.extractKeywords('Café crème, café noir, café au lait.', { maxKeywords: 2 })).toEqual(['café', 'crème']);
   });
