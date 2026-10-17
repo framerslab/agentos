@@ -195,5 +195,14 @@ describe('the default model, and how a model reads texts', () => {
     await reader.initialize({});
     expect((await reader.loadTrainedModel('lancaster', 'text_classifier_naive_bayes', file)).success).toBe(true);
     expect(await reader.classifyText(ticket, { ...ask, modelId: 'lancaster' })).toEqual(before);
+
+    // A loaded model saved again keeps its stemmer: natural restores the parsed file itself, marker included.
+    const again = path.join(path.dirname(file), 'lancaster-again.nbc.json');
+    expect((await reader.saveTrainedModel('lancaster', 'text_classifier_naive_bayes', again)).success).toBe(true);
+    expect(JSON.parse(fs.readFileSync(again, 'utf8')).stemmerAlgorithm).toBe('lancaster');
+    const secondReader = new StatisticalUtilityAI('second-reader');
+    await secondReader.initialize({});
+    expect((await secondReader.loadTrainedModel('lancaster', 'text_classifier_naive_bayes', again)).success).toBe(true);
+    expect(await secondReader.classifyText(ticket, { ...ask, modelId: 'lancaster' })).toEqual(before);
   });
 });

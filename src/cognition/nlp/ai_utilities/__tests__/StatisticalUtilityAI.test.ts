@@ -68,6 +68,13 @@ describe('StatisticalUtilityAI', () => {
     );
   });
 
+  it('replaces or removes a word of digits in any script', async () => {
+    // ٤٢ is 42 in Arabic-Indic digits, a word of the class's rule like 42.
+    const text = 'Room ٤٢ and room 42';
+    expect(await statUtility.normalizeText(text, { replaceNumbersWith: '<num>' })).toBe('room <num> and room <num>');
+    expect(await statUtility.normalizeText(text, { replaceNumbersWith: null })).toBe('room and room');
+  });
+
   it('counts the words of any script for keywords, most frequent first', async () => {
     expect(await statUtility.extractKeywords('Café crème, café noir, café au lait.', { maxKeywords: 2 })).toEqual(['café', 'crème']);
   });

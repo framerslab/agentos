@@ -438,6 +438,15 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(await utility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true })).toEqual({ ok: true });
     expect(userText(received[2])).not.toContain('Schema');
   });
+
+  it('answers null for a targetSchema that does not compile, and asks for no repair', async () => {
+    // 'nonsense' is no JSON Schema type, so Ajv cannot compile the schema and no text can pass it.
+    const schema = { type: 'object', properties: { ok: { type: 'nonsense' } } };
+    replies = ['{"ok": true}', '{"ok": true}'];
+    expect(await utility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true, targetSchema: schema })).toBeNull();
+    expect(await utility.parseJsonSafe('{"ok": true}', { attemptFixWithLLM: true, targetSchema: schema })).toBeNull();
+    expect(received).toHaveLength(0);
+  });
 });
 
 describe('LLMUtilityAI before initialize()', () => {
