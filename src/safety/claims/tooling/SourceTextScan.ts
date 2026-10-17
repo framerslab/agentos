@@ -55,15 +55,28 @@ const NAMED: Readonly<Record<string, string>> = {
 };
 
 /**
- * Decodes HTML character references: the common named ones and every numeric one.
+ * The character a numeric reference names, or U+FFFD for a number that names none: 0, a surrogate, or one past
+ * U+10FFFF, which `String.fromCodePoint` throws on. The HTML standard's numeric character reference end state reads
+ * each of these as U+FFFD, and a browser shows it so.
+ *
+ * @param code - The reference's number.
+ */
+function characterOf(code: number): string {
+  return code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? '\uFFFD' : String.fromCodePoint(code);
+}
+
+/**
+ * Decodes HTML character references, each once: the common named ones and every numeric one, a number that names no
+ * character as U+FFFD. A name the table does not hold stays as written, a name every object inherits (`constructor`,
+ * `toString`) among them.
  *
  * @param text - Text with references.
  */
 export function decodeEntities(text: string): string {
   return text.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+);/g, (whole, body: string) => {
-    if (body.startsWith('#x')) return String.fromCodePoint(Number.parseInt(body.slice(2), 16));
-    if (body.startsWith('#')) return String.fromCodePoint(Number.parseInt(body.slice(1), 10));
-    return NAMED[body] ?? whole;
+    if (body.startsWith('#x')) return characterOf(Number.parseInt(body.slice(2), 16));
+    if (body.startsWith('#')) return characterOf(Number.parseInt(body.slice(1), 10));
+    return Object.prototype.hasOwnProperty.call(NAMED, body) ? NAMED[body] : whole;
   });
 }
 

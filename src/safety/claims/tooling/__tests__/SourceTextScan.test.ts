@@ -80,6 +80,21 @@ describe('source text scan', () => {
     expect(decodeEntities('&#x2019;&#8217;&rsquo;&quot;')).toBe('’’’"');
   });
 
+  it('reads a numeric reference that names no character as U+FFFD, as a browser shows it, and keeps scanning', () => {
+    // Past U+10FFFF, String.fromCodePoint throws, so one such reference stopped the whole scan; a surrogate and 0 are
+    // no characters either. The HTML standard's numeric character reference end state reads each as U+FFFD.
+    expect(decodeEntities('a&#x110000;b&#1114112;c&#xD800;d&#0;e&#99999999999999999999;f')).toBe('a\uFFFDb\uFFFDc\uFFFDd\uFFFDe\uFFFDf');
+    expect(scan('export const A = () => <p>Past the last code point &#x110000; here</p>;').map((f) => [f.site, f.text])).toEqual([
+      ['jsx-text', 'Past the last code point \uFFFD here'],
+    ]);
+    expect(htmlTemplateText('<p>A surrogate &#xD800; alone</p>')).toEqual([{ line: 1, site: 'text', text: 'A surrogate \uFFFD alone' }]);
+
+    // A name the table does not hold stays as written, a name every object inherits among them.
+    expect(decodeEntities('&constructor; &toString; &__proto__; &hasOwnProperty; &unknown;')).toBe(
+      '&constructor; &toString; &__proto__; &hasOwnProperty; &unknown;',
+    );
+  });
+
   it('reads noscript and template blocks, a button input\'s label, unquoted attributes and a bare less-than sign', () => {
     const html = '<body><noscript><p>Turn on scripts to listen.</p></noscript>\n<template><li>Copy the link</li></template><img alt=Logo src=logo.png><input type=submit value="Start listening"><input type="hidden" value="a-token">\n<p>Fewer than 3 < 5 steps</p></body>';
     expect(htmlTemplateText(html)).toEqual([
