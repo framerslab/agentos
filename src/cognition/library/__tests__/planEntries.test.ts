@@ -172,4 +172,25 @@ describe('planEntries', () => {
     const empty = await planEntries([{ path: 'a.md', size: 0 }, { path: 'b.md', size: 1 }], { ...RULES, maxBytes: () => 0 });
     expect(empty.map((entry) => entry.reason)).toEqual([null, 'size']);
   });
+
+  it('refuses a count or a bound that is no number at all, though JavaScript compares it as one', async () => {
+    // Compared as numbers, null is 0, a numeric text its number and true 1: a count of null would plan every entry, and
+    // a bound of null would skip every file that holds a byte. A caller reading its rules from JSON can pass any of them.
+    const noNumbers: unknown[] = [null, '5', true];
+    for (const value of noNumbers) {
+      const count = value as number;
+      await expect(planEntries(ENTRIES, { ...RULES, maxEntries: count })).rejects.toThrow(RangeError);
+      await expect(planEntries(ENTRIES, { ...RULES, maxBytes: () => count })).rejects.toThrow(RangeError);
+      await expect(planEntries(ENTRIES, { ...RULES, maxBytes: (kind) => (kind === 'archive' ? count : MB) })).rejects.toThrow(RangeError);
+    }
+    await expect(planEntries(ENTRIES, { ...RULES, maxEntries: null as unknown as number })).rejects.toThrow(
+      'planEntries: maxEntries must be a number of 0 or more, not null',
+    );
+    await expect(planEntries(ENTRIES, { ...RULES, maxBytes: () => '5' as unknown as number })).rejects.toThrow(
+      `planEntries: maxBytes('document') must answer a number of 0 or more, not "5"`,
+    );
+
+    // Left out, the count is Infinity, and every entry is planned.
+    expect(await planEntries(ENTRIES, { ...RULES, maxEntries: undefined })).toHaveLength(14);
+  });
 });
