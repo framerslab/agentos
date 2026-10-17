@@ -13,15 +13,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Milliseconds of seconds, or `null` past the largest safe integer of milliseconds. */
+function secondsMs(seconds: number): number | null {
+  const ms = Math.round(seconds * 1000);
+  return Number.isSafeInteger(ms) ? ms : null;
+}
+
 /**
  * Milliseconds of a time as Fireflies writes one: seconds as a number or as numeric text, or a clock `MM:SS` or
- * `HH:MM:SS`. `null` for anything else.
+ * `HH:MM:SS`. `null` for anything else, and for a time past the largest safe integer of milliseconds.
  */
 function timeMs(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? Math.round(value * 1000) : null;
+  if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? secondsMs(value) : null;
   if (typeof value !== 'string') return null;
   const text = value.trim();
-  if (/^\d+(?:\.\d+)?$/.test(text)) return Math.round(Number(text) * 1000);
+  if (/^\d+(?:\.\d+)?$/.test(text)) return secondsMs(Number(text));
   return clockMs(text);
 }
 

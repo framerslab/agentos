@@ -66,14 +66,17 @@ export function blocksOf(text: string): string[][] {
 
 /**
  * Milliseconds of a clock written `M:SS` or `H:MM:SS`, with an optional fraction of a second after a full stop or a
- * comma; the leading part may run past 59 (`75:30` is 75 minutes and 30 seconds). `null` for anything else.
+ * comma. The leading part may run past 59 (`75:30` is 75 minutes and 30 seconds); the minutes and seconds after it
+ * run to 59 at most. `null` for anything else, and for a time past the largest safe integer of milliseconds.
  */
 export function clockMs(clock: string): number | null {
   const match = /^(\d+):(\d{1,2})(?::(\d{1,2}))?(?:[.,](\d{1,3}))?$/.exec(clock.trim());
   if (match === null) return null;
   const [, first, second, third, fraction] = match;
+  if (Number(second) > 59 || (third !== undefined && Number(third) > 59)) return null;
   const seconds = third === undefined ? Number(first) * 60 + Number(second) : (Number(first) * 60 + Number(second)) * 60 + Number(third);
-  return seconds * 1000 + (fraction === undefined ? 0 : Number(fraction.padEnd(3, '0')));
+  const ms = seconds * 1000 + (fraction === undefined ? 0 : Number(fraction.padEnd(3, '0')));
+  return Number.isSafeInteger(ms) ? ms : null;
 }
 
 /** A cue's timing line: a start, an arrow and an end, anything after the end (WebVTT's cue settings) ignored. */
