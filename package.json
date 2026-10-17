@@ -843,7 +843,10 @@
       "sharp",
       "bcrypt",
       "tesseract.js"
-    ]
+    ],
+    "overrides": {
+      "@framers/agentos": "^0.14.2"
+    }
   },
   "sideEffects": false
 }
