@@ -33,12 +33,22 @@ const PAGE = 300;
 const isPostgres = (adapter: StorageAdapter): boolean => adapter.kind.includes('postgres');
 
 /**
- * Whether Postgres resolves `name` to a table or index on the connection's search path. `to_regclass` reads the
- * catalog without taking a lock on the relation.
+ * Whether Postgres has an index named `index` in the schema of `table`, the table the connection's search path
+ * resolves: the schema where `CREATE INDEX IF NOT EXISTS index ON table` makes it, and where its IF NOT EXISTS
+ * looks. An unqualified `to_regclass(index)` would also find a same-named index in a later schema on the search
+ * path (a fresh schema ahead of an initialized `public`) and skip the index the table needs. Reads the catalog
+ * without taking a lock on the table.
  */
-export async function postgresRelationExists(adapter: StorageAdapter, name: string): Promise<boolean> {
-  const row = await adapter.get<{ found: string | null }>('SELECT to_regclass(?)::text AS found', [name]);
-  return row?.found != null;
+export async function postgresIndexExists(adapter: StorageAdapter, index: string, table: string): Promise<boolean> {
+  const row = await adapter.get<{ found: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_class i
+        WHERE i.relname = ? AND i.relkind IN ('i', 'I')
+          AND i.relnamespace = (SELECT t.relnamespace FROM pg_class t WHERE t.oid = to_regclass(?))
+     ) AS found`,
+    [index, table],
+  );
+  return row?.found === true;
 }
 
 async function tableExists(adapter: StorageAdapter, table: string): Promise<boolean> {
@@ -127,7 +137,7 @@ export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<void
   }
   // Postgres takes the table's SHARE lock before it checks IF NOT EXISTS, so an existing index is skipped by name:
   // otherwise every open would wait for a long write transaction on memory_traces and hold up the writers behind it.
-  if (isPostgres(adapter) && (await postgresRelationExists(adapter, 'idx_memory_traces_brain_scope_id'))) return;
+  if (isPostgres(adapter) && (await postgresIndexExists(adapter, 'idx_memory_traces_brain_scope_id', 'memory_traces'))) return;
   await adapter.exec(SCOPE_ID_INDEX_DDL);
 }
 
