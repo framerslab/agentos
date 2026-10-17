@@ -83,6 +83,21 @@ export {
   type ResolvedCognition,
 } from './runtime/gmiCognition.js';
 export { personaFromAgentOptions } from './runtime/gmiPersona.js';
+// Teams a gmi() agent launches from a turn (`agencies.launch`), and persistent gmi() agents seated as themselves.
+export { LAUNCH_AGENCY_TOOL_NAME } from './runtime/agencyLaunch/types.js';
+export type {
+  AgencyLaunchOptions,
+  LaunchAgencyArgs,
+  LaunchAgencyResult,
+  LaunchRefusal,
+  LaunchRefusalCode,
+  LaunchSeatRecord,
+  LaunchSeatSpec,
+  LaunchStatus,
+  LaunchUsage,
+} from './runtime/agencyLaunch/types.js';
+export { sessionSeat, type SeatHandle, type SessionSeatOptions } from './runtime/agencyLaunch/sessionSeat.js';
+export type { SeatMetadata } from './types.js';
 export {
   createAgentCognitiveMemory,
   type AgentCognitiveMemory,

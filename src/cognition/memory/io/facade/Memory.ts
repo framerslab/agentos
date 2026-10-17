@@ -258,10 +258,12 @@ export class Memory {
       this._consolidationLoop = null;
     }
 
-    // HNSW sidecar index (O(log n) ANN alongside SQLite).
-    // Loads existing index from disk if present; auto-builds when trace count
-    // exceeds 1000 and embeddings are available. Falls back to FTS5-only
-    // recall if hnswlib-node is not installed or no embeddings exist.
+    // HNSW sidecar index (O(log n) ANN alongside SQLite), one per brain: a
+    // database can hold several brains, so the index file is named for this
+    // brain and holds only its vectors. Loads that index from disk if present;
+    // auto-builds when the brain holds 1000 traces and embeddings are
+    // available. Falls back to FTS5-only recall if hnswlib-node is not
+    // installed or no embeddings exist.
     this._initPromise = this._initPromise.then(async () => {
       try {
         const { HnswSidecar } = await import('../../retrieval/store/HnswSidecar.js');
@@ -269,6 +271,7 @@ export class Memory {
         this._hnswSidecar = new HnswSidecar({
           sqlitePath: this._config.path!,
           dimensions: dims,
+          brainId: this._brain.brainId,
         });
         await this._hnswSidecar.init();
       } catch {
@@ -500,8 +503,8 @@ export class Memory {
     await this._brain.run(
       `INSERT INTO memory_traces
          (brain_id, id, type, scope, content, embedding, strength, created_at,
-          last_accessed, retrieval_count, tags, emotions, metadata, deleted)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, 0)`,
+          last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, 0, ?)`,
       [
         this._brain.brainId,
         id,
@@ -514,6 +517,7 @@ export class Memory {
         JSON.stringify(tags),
         JSON.stringify({}),
         JSON.stringify(buildInitialTraceMetadata({}, { contentHash, entities, scopeId })),
+        scopeId,
       ],
     );
 
@@ -543,11 +547,13 @@ export class Memory {
 
     // Add to HNSW sidecar if embeddings exist for this trace.
     // The embedding is stored in the memory_traces table; if it's non-null,
-    // also index it in the HNSW sidecar for fast ANN recall.
+    // also index it in the HNSW sidecar for fast ANN recall. The sidecar is
+    // this brain's: its threshold counts this brain's traces and its rebuild
+    // reads this brain's embeddings.
     if (this._hnswSidecar) {
       const row = await this._brain.get<{ embedding: Buffer | null }>(
-        'SELECT embedding FROM memory_traces WHERE id = ?',
-        [id],
+        'SELECT embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
+        [this._brain.brainId, id],
       );
       if (row?.embedding && row.embedding.length > 0) {
         const { blobCodec } = this._brain.features;
@@ -557,28 +563,14 @@ export class Memory {
           ? JSON.parse(row.embedding as unknown as string) as number[]
           : blobCodec.decode(row.embedding);
         const countRow = await this._brain.get<{ c: number }>(
-          'SELECT COUNT(*) as c FROM memory_traces WHERE deleted = 0',
+          'SELECT COUNT(*) as c FROM memory_traces WHERE brain_id = ? AND deleted = 0',
+          [this._brain.brainId],
         );
         const count = countRow?.c ?? 0;
 
         if (!this._hnswSidecar.isActive && count >= 1000) {
-          // Threshold crossed — rebuild full index from all embeddings.
-          const allRows = await this._brain.all<{ id: string; embedding: Buffer }>(
-            'SELECT id, embedding FROM memory_traces WHERE deleted = 0 AND embedding IS NOT NULL',
-          );
-          const data = allRows
-            .filter(r => r.embedding && r.embedding.length > 0)
-            .map(r => {
-              const legacy = typeof r.embedding === 'string' ||
-                (r.embedding && r.embedding[0] === 0x5b);
-              return {
-                id: r.id,
-                embedding: legacy
-                  ? JSON.parse(r.embedding as unknown as string) as number[]
-                  : blobCodec.decode(r.embedding),
-              };
-            });
-          await this._hnswSidecar.rebuildFromData(data);
+          // Threshold crossed — rebuild the index from this brain's embeddings.
+          await this._hnswSidecar.rebuildFromData(await this._ownEmbeddedTraces());
         } else {
           await this._hnswSidecar.add(id, vec, count);
         }
@@ -606,12 +598,15 @@ export class Memory {
   /**
    * Search for memory traces matching a natural-language query.
    *
-   * Uses FTS5 full-text search with the Porter tokenizer. Results are ranked
-   * by `strength * abs(fts_rank)` and filtered by optional type/scope/strength
-   * criteria.
+   * Uses FTS5 full-text search with the Porter tokenizer, ranked by
+   * `strength * abs(fts_rank)`. With the HNSW index active and an embedder,
+   * the vector index's candidates and the full-text ones are fused by
+   * reciprocal rank. The filters bind both halves: a trace of another type,
+   * scope or scope id, weaker than `minStrength` or outside `after` and
+   * `before` is never returned, however near its vector.
    *
    * @param query   - Natural-language search query.
-   * @param options - Optional filters (limit, type, scope, minStrength).
+   * @param options - Optional filters (limit, type, scope, scopeId, minStrength, after, before).
    * @returns Ranked array of {@link ScoredTrace} results.
    */
   async recall(query: string, options?: RecallOptions): Promise<ScoredTrace[]> {
@@ -629,9 +624,11 @@ export class Memory {
       : limit;
     const minStrength = options?.minStrength ?? 0;
 
-    // Build WHERE clause fragments for optional filters.
-    const conditions: string[] = ['t.deleted = 0'];
-    const params: unknown[] = [];
+    // Build WHERE clause fragments: this brain's live traces, then the
+    // optional filters. A database can hold several brains and its full-text
+    // index spans all of them, so every recall query reads this brain only.
+    const conditions: string[] = ['t.brain_id = ?', 't.deleted = 0'];
+    const params: unknown[] = [this._brain.brainId];
 
     if (options?.type) {
       conditions.push('t.type = ?');
@@ -659,9 +656,7 @@ export class Memory {
       params.push(options.before);
     }
 
-    const whereClause = conditions.length > 0
-      ? `WHERE ${conditions.join(' AND ')}`
-      : '';
+    const filters = conditions.join(' AND ');
 
     // ── Path A: HNSW + FTS5 hybrid (if sidecar is active) ──
     // Uses HNSW for dense vector candidates, FTS5 for lexical candidates,
@@ -683,16 +678,15 @@ export class Memory {
 
       // If HNSW returned candidates, merge with FTS5 via RRF.
       if (hnswCandidates.length > 0) {
-        const hnswIds = new Set(hnswCandidates.map(c => c.id));
-        const hnswRank = new Map(hnswCandidates.map((c, i) => [c.id, i + 1]));
-
-        // Get FTS candidates.
+        // Get FTS candidates. The match comes first: on Postgres the rank
+        // expression reads the query text as `$1`, the statement's first
+        // parameter.
         const { fts: ftsHelper } = this._brain.features;
         const ftsSql = `
           SELECT t.*, ${ftsHelper.rankExpression('fts')} as rank
           FROM ${ftsHelper.joinClause('memory_traces', 't', 'fts', 'memory_traces_fts')}
-          ${whereClause}
-          AND ${ftsHelper.matchClause('memory_traces_fts', '?')}
+          WHERE ${ftsHelper.matchClause('memory_traces_fts', '?')}
+          AND ${filters}
           ORDER BY abs(${ftsHelper.rankExpression('fts')}) DESC
           LIMIT ?
         `;
@@ -700,7 +694,7 @@ export class Memory {
         try {
           ftsRows = await this._brain.all<FtsJoinRow>(
             ftsSql,
-            [...params, ftsQuery, candidateLimit],
+            [ftsQuery, ...params, candidateLimit],
           );
         } catch (error) {
           if (!isFtsUnavailableError(error)) {
@@ -708,15 +702,26 @@ export class Memory {
           }
         }
 
-        const ftsRank = new Map(ftsRows.map((r, i) => [r.id, i + 1]));
+        // The vector index holds every trace of this brain, whatever its type,
+        // scope, scope id, strength or age, so the candidates of both halves
+        // pass the recall's filters, this brain's id first, before they rank.
+        const candidateIds = [...new Set([...hnswCandidates.map(c => c.id), ...ftsRows.map(r => r.id)])];
+        const candidateRows = await this._brain.all<FtsJoinRow>(
+          `SELECT t.*, 0.0 as rank FROM memory_traces t
+           WHERE ${filters} AND t.id IN (${candidateIds.map(() => '?').join(',')})`,
+          [...params, ...candidateIds],
+        );
+        const rowById = new Map(candidateRows.map(r => [r.id, r]));
 
-        // Merge all candidate IDs.
-        const allIds = new Set([...hnswIds, ...ftsRows.map(r => r.id)]);
+        // Each half's ranks count the candidates that passed.
+        const hnswRank = new Map(hnswCandidates.filter(c => rowById.has(c.id)).map((c, i) => [c.id, i + 1]));
+        const ftsRank = new Map(ftsRows.filter(r => rowById.has(r.id)).map((r, i) => [r.id, i + 1]));
         const rrfK = 60; // Standard RRF constant.
 
-        // Compute RRF score for each candidate.
+        // Compute RRF score for each candidate that passed.
         const scored: { id: string; rrfScore: number }[] = [];
-        for (const id of allIds) {
+        for (const id of candidateIds) {
+          if (!rowById.has(id)) continue;
           const denseRank = hnswRank.get(id) ?? 10000;
           const lexRank = ftsRank.get(id) ?? 10000;
           const rrfScore = 1 / (rrfK + denseRank) + 1 / (rrfK + lexRank);
@@ -725,18 +730,15 @@ export class Memory {
 
         // Sort by RRF score descending, take top limit.
         scored.sort((a, b) => b.rrfScore - a.rrfScore);
-        const topIds = scored.slice(0, candidateLimit).map(s => s.id);
+        const top = scored.slice(0, candidateLimit);
 
-        // Fetch full rows for the top candidates.
-        if (topIds.length > 0) {
-          const placeholders = topIds.map(() => '?').join(',');
-          const fullRows = await this._brain.all<FtsJoinRow>(
-            `SELECT t.*, 0.0 as rank FROM memory_traces t WHERE t.id IN (${placeholders}) AND t.deleted = 0`,
-            topIds,
-          );
-
-          const updatedRows = await this._applyRecallAccessUpdates(fullRows);
-          const rrfMap = new Map(scored.map(s => [s.id, s.rrfScore]));
+        // With no candidate left, the full-text path below answers.
+        if (top.length > 0) {
+          const topRows = top
+            .map(s => rowById.get(s.id))
+            .filter((row): row is FtsJoinRow => row !== undefined);
+          const updatedRows = await this._applyRecallAccessUpdates(topRows);
+          const rrfMap = new Map(top.map(s => [s.id, s.rrfScore]));
 
           const results = updatedRows.map((row) => ({
             trace: this._buildTrace(row),
@@ -761,27 +763,26 @@ export class Memory {
 
     // ── Path B: FTS-only (fallback when HNSW is inactive) ──
     // This is the original behavior — pure text search ranked by
-    // strength * abs(fts_rank). Works without any embeddings.
+    // strength * abs(fts_rank). Works without any embeddings. The match comes
+    // first, as in path A, so Postgres's rank reads the query text as `$1`.
     const { fts: ftsB } = this._brain.features;
     const sql = `
       SELECT t.*, ${ftsB.rankExpression('fts')} as rank
       FROM ${ftsB.joinClause('memory_traces', 't', 'fts', 'memory_traces_fts')}
-      ${whereClause}
-      AND ${ftsB.matchClause('memory_traces_fts', '?')}
+      WHERE ${ftsB.matchClause('memory_traces_fts', '?')}
+      AND ${filters}
       ORDER BY (t.strength * abs(${ftsB.rankExpression('fts')})) DESC
       LIMIT ?
     `;
 
-    params.push(ftsQuery, candidateLimit);
-
     let rows: FtsJoinRow[];
     try {
-      rows = await this._brain.all<FtsJoinRow>(sql, params);
+      rows = await this._brain.all<FtsJoinRow>(sql, [ftsQuery, ...params, candidateLimit]);
     } catch (error) {
       if (!isFtsUnavailableError(error)) {
         throw error;
       }
-      rows = await this._recallWithoutFts(query, whereClause, params.slice(0, -2), candidateLimit);
+      rows = await this._recallWithoutFts(query, filters, params, candidateLimit);
     }
 
     const updatedRows = await this._applyRecallAccessUpdates(rows);
@@ -1283,8 +1284,12 @@ export class Memory {
    *
    * Format is detected from `options.format` or the file extension:
    * - `.json` -> JSON
-   * - `.sqlite` / `.db` -> SQLite file copy
+   * - `.sqlite` / `.db` -> a new SQLite file holding this brain's own rows
    * - directory path -> Markdown or Obsidian (based on `options.format`)
+   *
+   * A SQLite export writes this brain's rows of every portable table, from a
+   * SQLite or a Postgres brain; another brain in the same database is left
+   * out. Nothing may exist at `outputPath` yet.
    *
    * A Markdown or Obsidian export writes one file per trace, in folders named
    * after the trace's scope and type, and leaves out a trace whose scope, type
@@ -1337,6 +1342,9 @@ export class Memory {
    *
    * Format is detected from `options.format`, the file extension, or by
    * inspecting the content.
+   *
+   * A SQLite source is read one brain at a time: a file whose rows carry
+   * several brain ids imports nothing, and `errors` names the ids.
    *
    * @param source  - Path to the import source (file or directory).
    * @param options - Optional format hint and dedup settings.
@@ -1485,80 +1493,93 @@ export class Memory {
   // =========================================================================
 
   /**
-   * Return a health snapshot of the memory store.
+   * Return a health snapshot of this brain.
    *
-   * Queries aggregate statistics from all tables and returns a
-   * {@link MemoryHealth} report.
+   * Queries aggregate statistics from this brain's rows of every table (a
+   * database can hold several brains) and returns a {@link MemoryHealth}
+   * report. Counts are read through `Number()`: Postgres returns `COUNT(*)`
+   * and `BIGINT` columns as strings.
    */
   async health(): Promise<MemoryHealth> {
     await this._initPromise;
+    const brainId = this._brain.brainId;
 
     // Total traces (active + deleted).
-    const totalRow = await this._brain.get<{ cnt: number }>(
-      'SELECT COUNT(*) AS cnt FROM memory_traces',
+    const totalRow = await this._brain.get<{ cnt: number | string }>(
+      'SELECT COUNT(*) AS cnt FROM memory_traces WHERE brain_id = ?',
+      [brainId],
     );
-    const totalTraces = totalRow?.cnt ?? 0;
+    const totalTraces = Number(totalRow?.cnt ?? 0);
 
     // Active traces (not deleted).
-    const activeRow = await this._brain.get<{ cnt: number }>(
-      'SELECT COUNT(*) AS cnt FROM memory_traces WHERE deleted = 0',
+    const activeRow = await this._brain.get<{ cnt: number | string }>(
+      'SELECT COUNT(*) AS cnt FROM memory_traces WHERE brain_id = ? AND deleted = 0',
+      [brainId],
     );
-    const activeTraces = activeRow?.cnt ?? 0;
+    const activeTraces = Number(activeRow?.cnt ?? 0);
 
     // Average strength of active traces.
     const avgRow = await this._brain.get<{ avg_s: number | null }>(
-      'SELECT AVG(strength) AS avg_s FROM memory_traces WHERE deleted = 0',
+      'SELECT AVG(strength) AS avg_s FROM memory_traces WHERE brain_id = ? AND deleted = 0',
+      [brainId],
     );
-    const avgStrength = avgRow?.avg_s ?? 0;
+    const avgStrength = Number(avgRow?.avg_s ?? 0);
 
     // Weakest active trace.
     const weakRow = await this._brain.get<{ min_s: number | null }>(
-      'SELECT MIN(strength) AS min_s FROM memory_traces WHERE deleted = 0',
+      'SELECT MIN(strength) AS min_s FROM memory_traces WHERE brain_id = ? AND deleted = 0',
+      [brainId],
     );
-    const weakestTraceStrength = weakRow?.min_s ?? 0;
+    const weakestTraceStrength = Number(weakRow?.min_s ?? 0);
 
     // Knowledge graph counts.
-    const nodesRow = await this._brain.get<{ cnt: number }>(
-      'SELECT COUNT(*) AS cnt FROM knowledge_nodes',
+    const nodesRow = await this._brain.get<{ cnt: number | string }>(
+      'SELECT COUNT(*) AS cnt FROM knowledge_nodes WHERE brain_id = ?',
+      [brainId],
     );
-    const graphNodes = nodesRow?.cnt ?? 0;
+    const graphNodes = Number(nodesRow?.cnt ?? 0);
 
-    const edgesRow = await this._brain.get<{ cnt: number }>(
-      'SELECT COUNT(*) AS cnt FROM knowledge_edges',
+    const edgesRow = await this._brain.get<{ cnt: number | string }>(
+      'SELECT COUNT(*) AS cnt FROM knowledge_edges WHERE brain_id = ?',
+      [brainId],
     );
-    const graphEdges = edgesRow?.cnt ?? 0;
+    const graphEdges = Number(edgesRow?.cnt ?? 0);
 
     // Last consolidation timestamp.
-    const lastConsolRow = await this._brain.get<{ ran_at: number }>(
-      'SELECT ran_at FROM consolidation_log ORDER BY ran_at DESC LIMIT 1',
+    const lastConsolRow = await this._brain.get<{ ran_at: number | string }>(
+      'SELECT ran_at FROM consolidation_log WHERE brain_id = ? ORDER BY ran_at DESC LIMIT 1',
+      [brainId],
     );
     const lastConsolidation = lastConsolRow
-      ? new Date(lastConsolRow.ran_at).toISOString()
+      ? new Date(Number(lastConsolRow.ran_at)).toISOString()
       : null;
 
     // Traces per type.
-    const typeRows = await this._brain.all<{ type: string; cnt: number }>(
-      'SELECT type, COUNT(*) AS cnt FROM memory_traces WHERE deleted = 0 GROUP BY type',
+    const typeRows = await this._brain.all<{ type: string; cnt: number | string }>(
+      'SELECT type, COUNT(*) AS cnt FROM memory_traces WHERE brain_id = ? AND deleted = 0 GROUP BY type',
+      [brainId],
     );
     const tracesPerType: Record<string, number> = {};
     for (const row of typeRows) {
-      tracesPerType[row.type] = row.cnt;
+      tracesPerType[row.type] = Number(row.cnt);
     }
 
     // Traces per scope.
-    const scopeRows = await this._brain.all<{ scope: string; cnt: number }>(
-      'SELECT scope, COUNT(*) AS cnt FROM memory_traces WHERE deleted = 0 GROUP BY scope',
+    const scopeRows = await this._brain.all<{ scope: string; cnt: number | string }>(
+      'SELECT scope, COUNT(*) AS cnt FROM memory_traces WHERE brain_id = ? AND deleted = 0 GROUP BY scope',
+      [brainId],
     );
     const tracesPerScope: Record<string, number> = {};
     for (const row of scopeRows) {
-      tracesPerScope[row.scope] = row.cnt;
+      tracesPerScope[row.scope] = Number(row.cnt);
     }
 
-    // Total document chunks.
-    const docsRow = await this._brain.get<{ cnt: number }>(
-      'SELECT COUNT(*) AS cnt FROM documents',
+    // Documents ingested.
+    const docsRow = await this._brain.get<{ cnt: number | string }>(
+      'SELECT COUNT(*) AS cnt FROM documents WHERE brain_id = ?',
+      [brainId],
     );
-    const documentsIngested = docsRow?.cnt ?? 0;
+    const documentsIngested = Number(docsRow?.cnt ?? 0);
 
     return {
       totalTraces,
@@ -1648,11 +1669,12 @@ export class Memory {
   }
 
   /**
-   * Find an active trace previously stored with the same content hash.
+   * Find an active trace of this brain previously stored with the same
+   * content hash.
    *
    * Checks both the facade-native `content_hash` metadata key and the
    * importer-used `import_hash` key so dedup works across facade and import
-   * workflows.
+   * workflows. Another brain's trace of the same text is not a duplicate.
    */
   private async _findExistingTraceByHash(
     contentHash: string,
@@ -1665,7 +1687,8 @@ export class Memory {
       `SELECT id, type, scope, content, embedding, strength, created_at,
               last_accessed, retrieval_count, tags, emotions, metadata, deleted
        FROM memory_traces
-       WHERE deleted = 0
+       WHERE brain_id = ?
+         AND deleted = 0
          AND type = ?
          AND scope = ?
          AND ${dialect.ifnull(dialect.jsonExtract('metadata', '$.scopeId'), "''")} = ?
@@ -1674,7 +1697,7 @@ export class Memory {
            OR ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
          )
        LIMIT 1`,
-      [type, scope, scopeId, contentHash, contentHash],
+      [this._brain.brainId, type, scope, scopeId, contentHash, contentHash],
     );
     return row ?? undefined;
   }
@@ -1782,8 +1805,8 @@ export class Memory {
       await this._brain.run(
         `INSERT INTO memory_traces
            (brain_id, id, type, scope, content, embedding, strength, created_at,
-            last_accessed, retrieval_count, tags, emotions, metadata, deleted)
-         VALUES (?, ?, 'semantic', 'user', ?, NULL, 1.0, ?, NULL, 0, '[]', '{}', ?, 0)`,
+            last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
+         VALUES (?, ?, 'semantic', 'user', ?, NULL, 1.0, ?, NULL, 0, '[]', '{}', ?, 0, '')`,
         [
           brainId,
           traceId,
@@ -1844,16 +1867,25 @@ export class Memory {
    */
   private async _rebuildFtsIndex(): Promise<void> {
     try {
-      await this._brain.exec(this._brain.features.fts.rebuildCommand('memory_traces_fts'));
+      const rebuild = this._brain.fullTextRebuild();
+      await this._brain.run(rebuild.sql, rebuild.params);
     } catch {
       // Best-effort; imports still succeed even if the FTS rebuild is unavailable.
     }
   }
 
+  /**
+   * Recall by `LIKE` matching when the database has no full-text index (a
+   * SQLite build without FTS5).
+   *
+   * @param filters      - The recall's conditions joined with `AND`, this
+   *   brain's id first.
+   * @param filterParams - Their parameters, in order.
+   */
   private async _recallWithoutFts(
     rawQuery: string,
-    whereClause: string,
-    baseParams: unknown[],
+    filters: string,
+    filterParams: unknown[],
     limit: number,
   ): Promise<FtsJoinRow[]> {
     const terms = rawQuery
@@ -1877,15 +1909,17 @@ export class Memory {
     const sql = `
       SELECT t.*, (${scoreExpression}) as rank
       FROM memory_traces t
-      ${whereClause}
+      WHERE ${filters}
       AND (${matchExpression})
       ORDER BY (t.strength * (${scoreExpression})) DESC, t.created_at DESC
       LIMIT ?
     `;
 
+    // Parameters bind in the order their placeholders appear: the score in
+    // the select list, the filters, the match, the score in ORDER BY, the limit.
     return this._brain.all<FtsJoinRow>(
       sql,
-      [...baseParams, ...likeTerms, ...likeTerms, ...likeTerms, limit],
+      [...likeTerms, ...filterParams, ...likeTerms, ...likeTerms, limit],
     );
   }
 
@@ -1899,31 +1933,39 @@ export class Memory {
     if (!this._hnswSidecar) return;
 
     try {
-      const rows = await this._brain.all<{ id: string; embedding: Uint8Array | string | null }>(
-        'SELECT id, embedding FROM memory_traces WHERE deleted = 0 AND embedding IS NOT NULL',
-      );
-      if (rows.length === 0) return;
-
-      const { blobCodec } = this._brain.features;
-      const items = rows
-        .filter((row) => row.embedding && row.embedding.length > 0)
-        .map((row) => {
-          const embedding = row.embedding!;
-          const isLegacy = typeof embedding === 'string' || embedding[0] === 0x5b;
-          return {
-            id: row.id,
-            embedding: isLegacy
-              ? JSON.parse(embedding as unknown as string) as number[]
-              : blobCodec.decode(embedding),
-          };
-        });
-
+      const items = await this._ownEmbeddedTraces();
       if (items.length > 0) {
         await this._hnswSidecar.rebuildFromData(items);
       }
     } catch {
       // Best-effort; import should still succeed even if HNSW rebuild fails.
     }
+  }
+
+  /**
+   * This brain's live traces that carry an embedding, decoded for the HNSW
+   * sidecar. A database can hold several brains; the sidecar is this brain's,
+   * so it is built from this brain's vectors only.
+   */
+  private async _ownEmbeddedTraces(): Promise<{ id: string; embedding: number[] }[]> {
+    const rows = await this._brain.all<{ id: string; embedding: Uint8Array | string | null }>(
+      'SELECT id, embedding FROM memory_traces WHERE brain_id = ? AND deleted = 0 AND embedding IS NOT NULL',
+      [this._brain.brainId],
+    );
+
+    const { blobCodec } = this._brain.features;
+    return rows
+      .filter((row) => row.embedding && row.embedding.length > 0)
+      .map((row) => {
+        const embedding = row.embedding!;
+        const isLegacy = typeof embedding === 'string' || embedding[0] === 0x5b;
+        return {
+          id: row.id,
+          embedding: isLegacy
+            ? JSON.parse(embedding as unknown as string) as number[]
+            : blobCodec.decode(embedding),
+        };
+      });
   }
 
   /**

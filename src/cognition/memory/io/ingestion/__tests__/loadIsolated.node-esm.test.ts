@@ -325,6 +325,7 @@ describe.skipIf(!inCI && !existsSync(builtModule))('loadIsolated built for plain
       name: 'DocumentTooLargeError',
       code: 'DOCUMENT_TOO_LARGE',
       limit: ONE_MIB,
+      message: `the document inflates past ${ONE_MIB} bytes`,
       leftRunning: 0,
     });
   });

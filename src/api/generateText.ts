@@ -107,6 +107,7 @@ import type {
   MessageContent,
   MessageContentPart,
   CacheDiagnostics,
+  AttemptOutcome,
 } from '../core/llm/providers/IProvider.js';
 
 // Re-export multimodal types for downstream consumers
@@ -296,6 +297,16 @@ export interface FallbackProviderEntry {
   provider: string;
   /** Model identifier override. When omitted, the provider's default text model is used. */
   model?: string;
+  /** Key for this hop. Written by an agency's seating; omitted, the hop reads the provider's environment variable. */
+  apiKey?: string;
+  /** Base URL for this hop, written by seating; omitted, the provider's URL variable. */
+  baseUrl?: string;
+  /**
+   * Who trained this hop's model, when its id and endpoint cannot say; an
+   * agency seat's record reads it when this hop answered. Seating writes a
+   * pool entry's `vendor` here; a fixed seat's own chain may declare it.
+   */
+  vendor?: string;
   /**
    * Per-hop reasoning depth applied ONLY when THIS entry serves the call,
    * forwarded as `output_config.effort` (Anthropic) / `reasoning_effort`
@@ -437,6 +448,10 @@ export interface GenerateTextOptions {
    * only; providers without a request timeout ignore it.
    */
   requestTimeout?: number;
+  /** The most requests this call sends, a first and its retries together; the provider's configured count when left out. */
+  maxAttempts?: number;
+  /** Called after each request this call sent, so a caller can settle the attempts it paid for. */
+  onAttempt?: (outcome: AttemptOutcome) => void;
   /**
    * Ends the call when it aborts: the provider request in flight is cancelled, no further step, retry or fallback
    * hop starts, and the call rejects with the signal's reason. An abort never walks the fallback chain. The signal
@@ -802,6 +817,32 @@ export interface GenerateTextOptions {
    */
   __approvalGate?: ApprovalGateFn;
   /**
+   * Internal — set by an agency's seating on every seat and the chair. With it,
+   * provider resolution ignores a `setDefaultProvider()` default that names no
+   * provider, for the key and for the URL, and never reroutes Anthropic to
+   * OpenRouter: a provider with no key of its own fails. Rides every failover hop.
+   *
+   * @internal
+   */
+  __strictCredentials?: boolean;
+  /**
+   * Internal — set by a panel when its own deadline is the smallest bound it
+   * passes as `requestTimeout`: a timeout error then does not count against
+   * the provider's circuit breaker.
+   *
+   * @internal
+   */
+  __panelDeadline?: boolean;
+  /**
+   * Internal — set by an agency's seating on every seat and the chair: the
+   * call's error mask. The tool loops pass a tool's error through it, as one
+   * redacted string, before they write the call record, the tool turn and the
+   * `tool-result` stream part.
+   *
+   * @internal
+   */
+  __maskError?: (error: unknown) => unknown;
+  /**
    * @internal Used by generateObject and AgentSession.send (with
    * responseSchema) to forward a provider-specific response_format
    * payload to the provider. Not part of the public API.
@@ -1133,7 +1174,7 @@ export async function createPlan(
   modelId: string,
   userMessages: Array<Record<string, unknown>>,
   toolNames: string[],
-  config: (PlanningConfig & { abortSignal?: AbortSignal; customModelParams?: Record<string, unknown> }) | undefined,
+  config: (PlanningConfig & { abortSignal?: AbortSignal; customModelParams?: Record<string, unknown>; maxAttempts?: number; onAttempt?: (outcome: AttemptOutcome) => void }) | undefined,
   totalUsage: TokenUsage,
   spend?: { budget: SpendBudget; providerId: string; what: string },
 ): Promise<Plan | undefined> {
@@ -1169,6 +1210,9 @@ export async function createPlan(
     maxTokens,
     ...(requestTimeout !== undefined ? { requestTimeout } : {}),
     ...(config?.abortSignal ? { abortSignal: config.abortSignal } : {}),
+    // The call's attempt count and its report hold for the planning request too.
+    ...(config?.maxAttempts !== undefined ? { maxAttempts: config.maxAttempts } : {}),
+    ...(config?.onAttempt ? { onAttempt: config.onAttempt } : {}),
     // Inherited (or planning-specific) cache control: a cache:false root
     // call's planning sub-call must not auto-cache behind the caller's back.
     ...(config?.cache !== undefined ? { cache: config.cache } : {}),
@@ -1457,6 +1501,25 @@ const RETRYABLE_PROVIDER_ERROR_CODES = new Set([
   CONTEXT_WINDOW_EXCEEDED_CODE,
   'server_error',
 ]);
+
+/**
+ * Provider error codes for a request timeout: OpenAI's, Anthropic's and
+ * Gemini's REQUEST_TIMEOUT, Anthropic's hard and idle timeouts, and the CLI
+ * bridges' TIMEOUT. OpenRouter and Ollama raise none of their own.
+ */
+const TIMEOUT_ERROR_CODES = new Set(['REQUEST_TIMEOUT', 'REQUEST_HARD_TIMEOUT', 'STREAM_IDLE_TIMEOUT', 'TIMEOUT']);
+
+/**
+ * Whether a provider error names a request timeout by its code.
+ *
+ * @param error - The error a provider call threw or a stream reported.
+ * @returns True when the error's `code` is one of the providers' timeout codes.
+ * @internal Shared with streamText.
+ */
+export function isTimeoutError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && TIMEOUT_ERROR_CODES.has(code);
+}
 
 /**
  * Error classes a provider's stream error event names for a server failure:
@@ -2099,6 +2162,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
   // so tools see one session across providers and steps keep counting.
   const helperToolRunId = opts._continuation?.helperToolRunId ?? randomUUID();
   const stepOffset = opts._continuation?.stepOffset ?? 0;
+  // A tool's error text as the call's mask leaves it (an agency seat's), one
+  // redacted string for the call record and the tool turn alike. Declared
+  // here so the prompt shim and the native tool loop both see it.
+  const maskToolText = (text: string): string => {
+    const masked = opts.__maskError?.(text);
+    return typeof masked === 'string' ? masked : text;
+  };
 
   try {
     const successResult: GenerateTextResult = await withAgentOSSpan('agentos.api.generate_text', async (span) => {
@@ -2162,16 +2232,31 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
       const ownCredentials =
         providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
+      // An agency seat resolves strictly: no provider-less default, no reroute.
+      // A call a router moved to another provider takes none of its own key
+      // and URL there, and only a seat's call carries the strict flag.
+      const strict = opts.__strictCredentials === true;
       const resolved = resolveProvider(
         providerId,
         modelId,
-        providerId === credentialProviderId ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl } : undefined,
+        providerId === credentialProviderId
+          ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl, strict }
+          : strict
+            ? { strict }
+            : undefined,
       );
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
       // A key or base URL of the call's own, when it differs from the
-      // provider's, has a health record of its own.
-      const healthId = providerHealthKey(resolved, ownCredentials ? () => resolveProvider(providerId, modelId) : undefined);
+      // provider's, has a health record of its own. So do the credentials a
+      // seat's strict resolution reaches when they differ from the provider's:
+      // a default that names no provider serves the provider's other callers
+      // and never a seat. The provider's are read quietly: that lookup sends
+      // nothing, to OpenRouter or anywhere else.
+      const healthId = providerHealthKey(
+        resolved,
+        ownCredentials || strict ? () => resolveProvider(providerId, modelId, { quiet: true }) : undefined,
+      );
       healthProviderId = healthId;
 
       // ── Provider health circuit-breaker ──────────────────────────────
@@ -2348,6 +2433,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               : {}),
             ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
             ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+            ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
+            ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
             ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
           },
           totalUsage,
@@ -2388,6 +2475,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
+          // A seat's mask reaches the shim's tool errors too.
+          maskToolError: opts.__maskError ? maskToolText : undefined,
           // Native tool turns (session history, a failover continuation)
           // become the shim's own <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -2439,6 +2528,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // ignoring the caller's requestTimeout bound.
               ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
               ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+              // The call's attempt count and its report, as on the native step loop below.
+              ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
+              ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
             } as any);
             budget?.record(costOfUsageUSD(resolved.providerId, resolved.modelId, r.usage), r.usage?.totalTokens ?? 0, 'generate_text.shim');
             // Aggregate the COMPLETE normalized usage from every shim
@@ -2634,6 +2726,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
                 // The caller's signal cancels the request in flight.
                 ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+                // The most requests this step sends and the report of each, so a caller can settle the attempts it paid for.
+                ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
+                ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
                 ...(opts._responseFormat ? { responseFormat: opts._responseFormat }: {}),
               } as any
             );
@@ -2929,19 +3024,22 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                     tcId || undefined,
                   ),
                 );
+                // One masked string serves the record and the tool turn: the
+                // seat's next request carries no key.
+                const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
                 record.result = result.output;
-                record.error = result.success ? undefined: result.error;
+                record.error = result.success ? undefined: errorText;
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: JSON.stringify(result.output ?? result.error ?? ''),
+                  content: JSON.stringify(result.output ?? errorText ?? ''),
                 } as any);
               } catch (err: any) {
-                record.error = err?.message;
+                record.error = maskToolText(err?.message ?? String(err));
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: JSON.stringify({ error: err?.message }),
+                  content: JSON.stringify({ error: record.error }),
                 } as any);
               }
             } else {
@@ -3083,8 +3181,15 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // `opts.provider` because the model router may have resolved a
     // different provider than the caller asked for. A call the caller
     // stopped (its spend budget's refusal, a hook's stop, an abort) says
-    // nothing about the provider and is not recorded.
-    if (healthProviderId && !(error instanceof LLMProviderCircuitOpenError) && !aborted && !isCallerStop(error)) {
+    // nothing about the provider and is not recorded; neither is a timeout
+    // the panel's own deadline produced, when the deadline flag is set.
+    if (
+      healthProviderId &&
+      !(error instanceof LLMProviderCircuitOpenError) &&
+      !aborted &&
+      !isCallerStop(error) &&
+      !(opts.__panelDeadline && isTimeoutError(error))
+    ) {
       globalLLMProviderHealth.recordFailure(healthProviderId, error);
     }
     // The failed attempt is billed for its completed steps and for a step
@@ -3188,8 +3293,16 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // skip avoids the recursion overhead + the extra log line.
         // The breaker read is the provider the leg is sent to: an
         // `openrouter:` id under another provider goes to OpenRouter.
+        // That record speaks only for a leg that runs on the provider's
+        // shared credentials. A leg with a key or URL of its own, and every
+        // leg of a seat's call (strict, so a default that names no provider
+        // never reaches it), can keep the record of the key it sends
+        // (providerHealthKey), which the call below reads before it sends;
+        // a failure of another key skips none of them.
         const legProvider = fallbackEntrySentAs(fb).provider;
-        if (globalLLMProviderHealth.isOpen(legProvider)) {
+        const legOnSharedCredentials =
+          fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;
+        if (legOnSharedCredentials && globalLLMProviderHealth.isOpen(legProvider)) {
           fallbackLogger.info('provider fallback skipped (circuit open)', {
             event: 'fallback_skipped_circuit_open',
             api: 'generateText',
@@ -3265,10 +3378,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // zero cache_control (no write premium on one-shot failover
             // traffic).
             ...fallbackHopOverrides(opts, fb),
-            // Clear explicit keys/URLs so resolution uses env vars for the
-            // fallback provider rather than the primary's overrides.
-            apiKey: undefined,
-            baseUrl: undefined,
+            // The hop's own key and URL, when its entry carries them (an
+            // agency's seating writes them); otherwise the fallback
+            // provider's environment, never the primary's overrides.
+            apiKey: fb.apiKey,
+            baseUrl: fb.baseUrl,
             // Preserve the REMAINING resolved chain (entries AFTER the current
             // fb; `attempt` is 1-indexed so slice(attempt) drops fb and all
             // already-tried entries). This stops the recursion from rebuilding

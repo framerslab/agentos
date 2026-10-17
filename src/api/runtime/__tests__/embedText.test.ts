@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveModelOption } from '../model.js';
+import type { AttemptOutcome } from '../../../core/llm/providers/IProvider.js';
 
 // We don't mock the entire model.js module here because embedText uses
 // fetch directly rather than going through AIModelProviderManager.
@@ -395,5 +396,119 @@ describe('embedText request errors', () => {
 
     expect(error.message).not.toContain('ol-token');
     expect(error.message).toContain('Ollama embed request failed');
+  });
+});
+
+describe('embedText attempts', () => {
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    vi.mocked(resolveModelOption).mockReturnValue({ providerId: 'openai', modelId: 'text-embedding-3-small' });
+    // A case above sets the resolver to Ollama's answer, and restoring spies leaves a mock's own answer in place.
+    const { resolveProvider } = await import('../model.js');
+    vi.mocked(resolveProvider).mockImplementation(
+      (providerId: string, modelId: string, overrides?: { apiKey?: string; baseUrl?: string }) => ({
+        providerId,
+        modelId,
+        apiKey: overrides?.apiKey ?? 'test-key',
+        baseUrl: overrides?.baseUrl,
+      }),
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports each batch request once, as attempt 1 with its status', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify(mockOpenAIResponse(['one'])), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const outcomes: AttemptOutcome[] = [];
+
+    const result = await embedText({
+      model: 'openai:text-embedding-3-small',
+      input: ['first', 'second'],
+      apiKey: 'test-key',
+      maxInputsPerRequest: 1,
+      maxAttempts: 1,
+      onAttempt: (outcome) => outcomes.push(outcome),
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.embeddings).toHaveLength(2);
+    expect(outcomes).toEqual([
+      { attempt: 1, status: 200, ok: true },
+      { attempt: 1, status: 200, ok: true },
+    ]);
+  });
+
+  it('reports an error answer once, with its status, and sends it once', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"error": {"message": "busy"}}', { status: 503, headers: { 'Content-Type': 'application/json' } }),
+    );
+    const outcomes: AttemptOutcome[] = [];
+
+    await expect(
+      embedText({
+        model: 'openai:text-embedding-3-small',
+        input: 'x',
+        apiKey: 'test-key',
+        onAttempt: (outcome) => outcomes.push(outcome),
+      }),
+    ).rejects.toThrow(/503/);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(outcomes).toEqual([{ attempt: 1, status: 503, ok: false }]);
+  });
+
+  it('reports a request that got no answer once, with no status', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }),
+    );
+    const outcomes: AttemptOutcome[] = [];
+
+    await expect(
+      embedText({
+        model: 'openai:text-embedding-3-small',
+        input: 'x',
+        apiKey: 'test-key',
+        onAttempt: (outcome) => outcomes.push(outcome),
+      }),
+    ).rejects.toThrow('fetch failed');
+
+    expect(outcomes).toEqual([{ attempt: 1, status: null, ok: false }]);
+  });
+
+  it('keeps the call when the callback throws', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(mockOpenAIResponse(['x'])), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const result = await embedText({
+      model: 'openai:text-embedding-3-small',
+      input: 'x',
+      apiKey: 'test-key',
+      onAttempt: () => {
+        throw new Error('callback failed');
+      },
+    });
+
+    expect(result.embeddings).toHaveLength(1);
+  });
+
+  it.each([0, 1.5, Number.NaN])('refuses maxAttempts %s before anything is sent', async (maxAttempts) => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('not sent'));
+
+    await expect(
+      embedText({ model: 'openai:text-embedding-3-small', input: 'x', apiKey: 'test-key', maxAttempts }),
+    ).rejects.toBeInstanceOf(RangeError);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

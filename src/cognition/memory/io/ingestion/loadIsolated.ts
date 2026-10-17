@@ -1,7 +1,7 @@
 /**
  * @fileoverview loadIsolated: a document read with the loader of its kind in a
  * worker thread, under a heap cap, a deadline and, when asked, a bound on the
- * worker's memory outside its heap.
+ * worker's memory outside its heap and the caller's signal.
  *
  * The document loaders read on their caller's thread and heap, and a crafted
  * file can make a read take far more memory than its size: mammoth builds
@@ -11,6 +11,11 @@
  * worker whose old generation is capped with
  * `resourceLimits.maxOldGenerationSizeMb`, so a read that fills that heap ends
  * the worker while the caller's process reads on.
+ *
+ * The office kinds read with `OfficeLoader`, and the kind `'scan'` reads a
+ * scanned PDF by OCR with it. tesseract.js, which officeparser runs for OCR,
+ * throws a failure its worker reports outside the promise of the read: in the
+ * worker, that failure ends the worker, and the read rejects with it.
  *
  * The heap cap leaves out the memory outside V8's heap: Node's resource limits
  * count no `ArrayBuffer`, and the loaders hold large typed arrays (JSZip keeps
@@ -37,37 +42,21 @@
 
 import { Worker } from 'node:worker_threads';
 import type { LoadedDocument } from '../facade/types.js';
-import { DocumentTooLargeError } from './DocxLoader.js';
+import { DocumentTooLargeError } from './DocumentTooLargeError.js';
 import type { IsolatedLoadAnswer, IsolatedLoadRequest } from './isolatedLoadWorker.js';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/** The kinds `loadIsolated` reads, one loader each. */
-const KINDS: readonly IsolatedLoadKind[] = ['pdf', 'docx', 'text', 'markdown'];
-
-/** The worker's old generation when `maxHeapMb` is left out, in MiB. */
-const DEFAULT_MAX_HEAP_MB = 256;
-
-/** The deadline when `timeoutMs` is left out, in milliseconds. */
-const DEFAULT_TIMEOUT_MS = 30_000;
-
-/** The longest delay a Node timer holds: a longer one fires after 1 ms. */
-const MAX_TIMEOUT_MS = 2_147_483_647;
-
-/** How often the worker's memory outside its heap is read, in milliseconds. */
-const EXTERNAL_CHECK_MS = 20;
-
-/** Bytes in a MiB. */
-const BYTES_PER_MIB = 1_048_576;
+import { OFFICE_TYPES, OfficeLoader, ScannedDocumentError } from './OfficeLoader.js';
+import type { OfficeFormat } from './OfficeLoader.js';
 
 // ---------------------------------------------------------------------------
 // Types and errors
 // ---------------------------------------------------------------------------
 
-/** The loaders `loadIsolated` reads with: `PdfLoader`, `DocxLoader`, `TextLoader` and `MarkdownLoader`. */
-export type IsolatedLoadKind = 'pdf' | 'docx' | 'text' | 'markdown';
+/**
+ * The loaders `loadIsolated` reads with: `'pdf'` with `PdfLoader`, `'docx'` with `DocxLoader`, `'text'` with
+ * `TextLoader`, `'markdown'` with `MarkdownLoader`; each office format (`'pptx'`, `'xlsx'`, `'odt'`, `'ods'`,
+ * `'odp'`, `'rtf'`, `'epub'`) with `OfficeLoader`; and `'scan'`, a scanned PDF read by OCR, with `OfficeLoader`.
+ */
+export type IsolatedLoadKind = 'pdf' | 'docx' | 'text' | 'markdown' | Exclude<OfficeFormat, 'pdf'> | 'scan';
 
 /** Options of {@link loadIsolated}. */
 export interface IsolatedLoadOptions {
@@ -78,7 +67,10 @@ export interface IsolatedLoadOptions {
   maxHeapMb?: number;
   /** How long the read may take from the worker's start, in milliseconds, at most 2,147,483,647. Default 30,000. */
   timeoutMs?: number;
-  /** The Word loader's bound on what the archive's entries inflate to (`DocxLoaderOptions.maxInflatedBytes`); its default when left out. */
+  /**
+   * The Word or office loader's bound on what the archive's entries inflate to (`DocxLoaderOptions.maxInflatedBytes`,
+   * `OfficeLoaderOptions.maxInflatedBytes`); that loader's default when left out.
+   */
   maxInflatedBytes?: number;
   /**
    * The worker's array buffers and external strings, in MiB, past which it is ended: read every 20 ms with
@@ -86,6 +78,16 @@ export interface IsolatedLoadOptions {
    * with a `TypeError`. No check when left out.
    */
   maxExternalMb?: number;
+  /** The office loader's bound on XML elements (`OfficeLoaderOptions.maxXmlElements`): the office kinds and `'scan'` alone. */
+  maxXmlElements?: number;
+  /** The office loader's bound on table cells (`OfficeLoaderOptions.maxTableCells`): the office kinds and `'scan'` alone. */
+  maxTableCells?: number;
+  /** The pages of a scan read by OCR, from the first: a whole number of 1 or more, which `'scan'` needs and no other kind takes. */
+  ocrPages?: number;
+  /** The heap, in MB, of the process pdf.js reads a scan in (`OfficeLoaderOptions.pdfProcessMemoryMb`): `'scan'` alone. */
+  pdfProcessMemoryMb?: number;
+  /** Cancels the read: the worker is ended, and the call rejects with the signal's reason. */
+  signal?: AbortSignal;
 }
 
 /** Thrown when a document's read ends on the worker's heap cap or on its memory outside the heap. */
@@ -118,8 +120,36 @@ export class DocumentReadTimeoutError extends Error {
   }
 }
 
-/** How a read ended, before its worker is ended. */
-type Outcome = { ok: true; document: LoadedDocument } | { ok: false; error: Error };
+/** How a read ended, before its worker is ended: its document, or what it rejects with. */
+type Outcome = { ok: true; document: LoadedDocument } | { ok: false; error: unknown };
+
+/** The office loader's options of a read, handed to the worker. */
+type OfficeOptions = Pick<IsolatedLoadOptions, 'maxXmlElements' | 'maxTableCells' | 'ocrPages' | 'pdfProcessMemoryMb'>;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** The office kinds: each format `OfficeLoader` reads, but a PDF, which it reads by OCR alone. */
+const OFFICE_KINDS: readonly IsolatedLoadKind[] = Object.values(OFFICE_TYPES);
+
+/** The kinds `loadIsolated` reads, one loader each. */
+const KINDS: readonly IsolatedLoadKind[] = ['pdf', 'docx', 'text', 'markdown', ...OFFICE_KINDS, 'scan'];
+
+/** The worker's old generation when `maxHeapMb` is left out, in MiB. */
+const DEFAULT_MAX_HEAP_MB = 256;
+
+/** The deadline when `timeoutMs` is left out, in milliseconds. */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** The longest delay a Node timer holds: a longer one fires after 1 ms. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** How often the worker's memory outside its heap is read, in milliseconds. */
+const EXTERNAL_CHECK_MS = 20;
+
+/** Bytes in a MiB. */
+const BYTES_PER_MIB = 1_048_576;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -142,6 +172,39 @@ function bound(name: string, value: number, max = Number.MAX_VALUE): number {
 }
 
 /**
+ * The office loader's options of a read, checked before any worker starts as the office loader checks them when
+ * the worker builds it.
+ *
+ * @param kind - The read's kind.
+ * @param options - The read's options.
+ * @throws {TypeError} For an office loader's option given to a kind that does not take it.
+ * @throws {RangeError} For `'scan'` without `ocrPages` of 1 or more, and for a value the office loader refuses.
+ */
+function officeOptionsOf(kind: IsolatedLoadKind, options: IsolatedLoadOptions): OfficeOptions {
+  const { maxXmlElements, maxTableCells, ocrPages, pdfProcessMemoryMb } = options;
+  const scan = kind === 'scan';
+  const office = scan || OFFICE_KINDS.includes(kind);
+  const taken: Array<[string, unknown, boolean]> = [
+    ['maxXmlElements', maxXmlElements, office],
+    ['maxTableCells', maxTableCells, office],
+    ['ocrPages', ocrPages, scan],
+    ['pdfProcessMemoryMb', pdfProcessMemoryMb, scan],
+  ];
+  for (const [name, value, takes] of taken) {
+    // An option the kind's loader never reads would do nothing.
+    if (value !== undefined && !takes) throw new TypeError(`loadIsolated: the kind ${kind} takes no ${name}`);
+  }
+  if (scan && !(typeof ocrPages === 'number' && ocrPages >= 1)) {
+    throw new RangeError(`loadIsolated: the kind scan reads pages by OCR: ocrPages must be a whole number of 1 or more, got ${String(ocrPages)}`);
+  }
+  if (office) {
+    // Built for its checks alone: it throws the RangeError the worker's would.
+    void new OfficeLoader({ maxInflatedBytes: options.maxInflatedBytes, maxXmlElements, maxTableCells, ocrPages, pdfProcessMemoryMb });
+  }
+  return { maxXmlElements, maxTableCells, ocrPages, pdfProcessMemoryMb };
+}
+
+/**
  * Whether a message from the worker has the shape of its answer.
  *
  * @param value - What the worker posted.
@@ -150,7 +213,27 @@ function isAnswer(value: unknown): value is IsolatedLoadAnswer {
   if (typeof value !== 'object' || value === null || !('ok' in value)) return false;
   if (value.ok === true) return 'document' in value && typeof value.document === 'object' && value.document !== null;
   if (value.ok !== false) return false;
-  if ('tooLarge' in value) return typeof value.tooLarge === 'number';
+  const cause = 'cause' in value ? value.cause : undefined;
+  if ('tooLarge' in value) {
+    const message = 'message' in value ? value.message : undefined;
+    return (
+      typeof value.tooLarge === 'number' &&
+      (message === undefined || typeof message === 'string') &&
+      (cause === undefined || typeof cause === 'string')
+    );
+  }
+  if ('scanned' in value) {
+    return (
+      typeof value.scanned === 'string' &&
+      (cause === undefined ||
+        (typeof cause === 'object' &&
+          cause !== null &&
+          'name' in cause &&
+          typeof cause.name === 'string' &&
+          'message' in cause &&
+          typeof cause.message === 'string'))
+    );
+  }
   return 'name' in value && typeof value.name === 'string' && 'message' in value && typeof value.message === 'string';
 }
 
@@ -167,15 +250,24 @@ function loaderError(name: string, message: string): Error {
 }
 
 /**
- * How a read ends on the worker's message: its document, the Word loader's bound passed through as
- * {@link DocumentTooLargeError}, or the loader's own error.
+ * How a read ends on the worker's message: its document; a loader's bound passed through as
+ * {@link DocumentTooLargeError} with the loader's message, its cause naming the bound when the office loader named
+ * one; a scan that gave no text as {@link ScannedDocumentError}, with its cause; or the loader's own error.
  *
  * @param value - What the worker posted.
  */
 function outcomeOf(value: unknown): Outcome {
   if (!isAnswer(value)) return { ok: false, error: new Error('loadIsolated: the worker answered with no document') };
   if (value.ok) return { ok: true, document: value.document };
-  if ('tooLarge' in value) return { ok: false, error: new DocumentTooLargeError(value.tooLarge) };
+  if ('tooLarge' in value) {
+    const error = new DocumentTooLargeError(value.tooLarge, value.message);
+    return { ok: false, error: value.cause === undefined ? error : Object.assign(error, { cause: new Error(value.cause) }) };
+  }
+  if ('scanned' in value) {
+    const error = new ScannedDocumentError(value.scanned);
+    const { cause } = value;
+    return { ok: false, error: cause === undefined ? error : Object.assign(error, { cause: loaderError(cause.name, cause.message) }) };
+  }
   return { ok: false, error: loaderError(value.name, value.message) };
 }
 
@@ -189,20 +281,22 @@ function isOutOfMemory(error: Error): boolean {
 }
 
 /**
- * Settles a read on the first of the worker's answer, its error, its exit, the deadline and the bound on its
- * memory outside the heap; then clears the timers, ends the worker and waits for its exit before the promise
- * settles, so no worker outlives its read.
+ * Settles a read on the first of the worker's answer, its error, its exit, the deadline, the bound on its memory
+ * outside the heap and the caller's signal; then clears the timers, ends the worker and waits for its exit before
+ * the promise settles, so no worker outlives its read.
  *
  * @param worker - The worker reading the document.
  * @param maxHeapMb - Its heap cap, which the error at that cap names.
  * @param timeoutMs - The deadline.
  * @param maxExternalMb - The bound on its memory outside the heap, when there is one.
+ * @param signal - The caller's signal, when there is one.
  */
 function awaitRead(
   worker: Worker,
   maxHeapMb: number,
   timeoutMs: number,
   maxExternalMb: number | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<LoadedDocument> {
   return new Promise<LoadedDocument>((resolve, reject) => {
     let outcome: Outcome | undefined;
@@ -217,11 +311,16 @@ function awaitRead(
       outcome = next;
       clearTimeout(deadline);
       if (externalCheck !== undefined) clearInterval(externalCheck);
+      signal?.removeEventListener('abort', onAbort);
       // terminate() resolves on the worker's 'exit', and at once for a worker that has already stopped.
       void worker
         .terminate()
         .then(() => exited)
         .then(() => (next.ok ? resolve(next.document) : reject(next.error)));
+    }
+
+    function onAbort(): void {
+      settle({ ok: false, error: signal?.reason });
     }
 
     function checkExternal(limitMb: number): void {
@@ -257,6 +356,8 @@ function awaitRead(
     worker.on('exit', (code: number) => {
       settle({ ok: false, error: new Error(`loadIsolated: the worker exited with code ${code} before it answered`) });
     });
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 
@@ -269,19 +370,26 @@ function awaitRead(
  *
  * The bytes are copied into a buffer of the function's own, which is moved to the worker, so the caller's
  * buffer stays usable. The worker's old generation is capped at `maxHeapMb`, the read ends after `timeoutMs`,
- * and with `maxExternalMb` it ends once the worker's memory outside its heap passes that bound. On every path,
- * an answer included, the worker is ended before the returned promise settles.
+ * with `maxExternalMb` it ends once the worker's memory outside its heap passes that bound, and with `signal` it
+ * ends when the caller aborts. On every path, an answer included, the worker is ended before the returned promise
+ * settles.
  *
  * @param kind - The loader to read with.
  * @param bytes - The document, as a `Buffer` or any `Uint8Array`.
  * @param options - The read's bounds.
  * @returns What the loader answers: the document's `content`, `metadata` and `format`.
- * @throws {TypeError} For a kind outside the four, bytes that are not a `Uint8Array`, or `maxExternalMb` where `worker.getHeapStatistics()` is missing.
- * @throws {RangeError} For a bound that is not a positive, finite number, or a `timeoutMs` past 2,147,483,647.
+ * @throws {TypeError} For a kind outside the twelve, bytes that are not a `Uint8Array`, an office loader's option
+ *   given to a kind that does not take it, or `maxExternalMb` where `worker.getHeapStatistics()` is missing.
+ * @throws {RangeError} For a bound that is not a positive, finite number, a `timeoutMs` past 2,147,483,647,
+ *   `'scan'` without `ocrPages` of 1 or more, or an office loader's option that loader refuses.
  * @throws {DocumentTooComplexError} When the worker reaches its heap cap, or its external memory passes `maxExternalMb`.
  * @throws {DocumentReadTimeoutError} When the read passes `timeoutMs`.
- * @throws {DocumentTooLargeError} When a Word file's entries inflate past `maxInflatedBytes`.
- * @throws {Error} The loader's own error, with its name and message, such as `DocxLoader: not a Word archive`.
+ * @throws {DocumentTooLargeError} When a Word or office file reaches its loader's bound, with the loader's message;
+ *   from the office loader, its message and `cause` name the bound.
+ * @throws {ScannedDocumentError} When a scan's pages gave no text.
+ * @throws The reason of `options.signal` when the caller aborts it.
+ * @throws {Error} The loader's own error, with its name and message, such as `DocxLoader: not a Word archive`; and
+ *   the error the worker ended on, such as one tesseract.js threw outside officeparser's promise.
  *
  * @example A Word file from someone you do not know
  * ```ts
@@ -295,6 +403,12 @@ function awaitRead(
  *   else if (error instanceof DocumentReadTimeoutError) console.log(`not read within ${error.timeoutMs} ms`);
  *   else throw error;
  * }
+ * ```
+ *
+ * @example A spreadsheet, and a scan read by OCR over its first two pages
+ * ```ts
+ * const sheet = await loadIsolated('xlsx', upload, { maxTableCells: 200_000, signal: AbortSignal.timeout(30_000) });
+ * const scan = await loadIsolated('scan', scanned, { ocrPages: 2, timeoutMs: 120_000 });
  * ```
  */
 export async function loadIsolated(
@@ -316,12 +430,15 @@ export async function loadIsolated(
   if (maxExternalMb !== undefined && typeof Worker.prototype.getHeapStatistics !== 'function') {
     throw new TypeError('loadIsolated: maxExternalMb needs worker.getHeapStatistics(), which Node 22.16 and 24.0 add');
   }
+  const office = officeOptionsOf(kind, options);
+  // A read the caller has already cancelled starts no worker.
+  options.signal?.throwIfAborted();
 
   // A buffer of the function's own, moved to the worker: the caller's buffer stays usable whatever it views,
   // and a Buffer from Node's pool, which cannot be moved, never enters the transfer list.
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
-  const request: IsolatedLoadRequest = { kind, bytes: copy.buffer, maxInflatedBytes };
+  const request: IsolatedLoadRequest = { kind, bytes: copy.buffer, maxInflatedBytes, ...office };
   const worker = new Worker(new URL('./isolatedLoadWorker.js', import.meta.url), {
     workerData: request,
     transferList: [copy.buffer],
@@ -332,5 +449,5 @@ export async function loadIsolated(
     // (`--max-old-space-size` among them) are the whole process's, so they hold for the worker whatever this says.
     execArgv: [],
   });
-  return awaitRead(worker, maxHeapMb, timeoutMs, maxExternalMb);
+  return awaitRead(worker, maxHeapMb, timeoutMs, maxExternalMb, options.signal);
 }

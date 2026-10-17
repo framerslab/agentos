@@ -50,6 +50,13 @@ export interface SpendBudgetOptions {
    * budget and a budget already past its cap still refuse it.
    */
   unpriced?: 'refuse' | 'allow';
+  /**
+   * A budget this one draws on. Every check asks the parent first, with the same estimate, and every record and
+   * outside cost is added to the parent after this budget. A refusal by the parent, or by any budget above it, runs
+   * this budget's own `onLimitReached` function (when it is one) with the refusing budget's {@link SpendLimitInfo},
+   * after the refusing budget's own, before the error goes on.
+   */
+  parent?: SpendBudget;
 }
 
 /** Refused because the model has no price row, so the call's cost could not be counted. */
@@ -69,13 +76,17 @@ export const DEFAULT_OUTPUT_ESTIMATE_TOKENS = 4096;
 /**
  * The output tokens a call to `modelId` is estimated with: its cap, held to the model's output ceiling where one below
  * it is known (16,384 for gpt-4o), as OpenAIProvider sends it, or {@link DEFAULT_OUTPUT_ESTIMATE_TOKENS} without one.
+ * Exported for the launch's one-call floor (agencyLaunch), which counts a call as a check does.
  */
-function outputTokensOf(modelId: string, maxOutputTokens: number | undefined): number {
+export function outputEstimateTokens(modelId: string, maxOutputTokens: number | undefined): number {
   // A cap of NaN (what `Number(undefined)` gives) limits nothing: OpenAI is sent it as null. An estimate made with it
   // would be NaN, which every check lets through, since every comparison with NaN is false.
   const cap = clampMaxOutputTokens(modelId, maxOutputTokens);
   return cap === undefined || Number.isNaN(cap) ? DEFAULT_OUTPUT_ESTIMATE_TOKENS : cap;
 }
+
+/** The info of the budget that refused, by the error it threw, so a child learns of an ancestor's refusal. */
+const refusalInfo = new WeakMap<object, SpendLimitInfo>();
 
 let budgets = 0;
 
@@ -91,6 +102,7 @@ export class SpendBudget {
   /**
    * @param options - The budget's settings.
    * @throws {RangeError} When `maxCostUSD`, or a `maxTotalTokens` that is set, is not a number zero or more.
+   *   `maxCostUSD` may be `Number.POSITIVE_INFINITY` (a budget with no dollar cap).
    */
   constructor(options: SpendBudgetOptions) {
     if (!(options.maxCostUSD >= 0)) throw new RangeError('maxCostUSD must be zero or more');
@@ -129,10 +141,22 @@ export class SpendBudget {
   }
 
   /**
+   * What is left under this budget's own caps (a parent's are not counted): the dollars under `maxCostUSD` (Infinity
+   * for a budget with no dollar cap) and, when `maxTotalTokens` is set, the tokens under it. Never below zero: a record
+   * is never refused, so a run can pass a cap by its last call.
+   */
+  remaining(): { usd: number; tokens?: number } {
+    const usd = Math.max(0, this.options.maxCostUSD - this.spentUSD());
+    const max = this.options.maxTotalTokens;
+    return max === undefined ? { usd } : { usd, tokens: Math.max(0, max - this.tokens) };
+  }
+
+  /**
    * Refuses (or warns about) a call that could cost up to `estimateUSD` and use up to `estimateTokens`, when it would
    * pass what is left; `estimateUSD` undefined means the model has no price row, which `unpriced: 'allow'` checks as
    * a call that costs nothing. `model`, the call's provider and model, is named in the refusal of a model with no
-   * price row.
+   * price row. A budget with a `parent` has the parent check the call first, with the same estimate, so the refusal
+   * thrown can be the parent's, or that of a budget above it.
    *
    * @throws {CostCapExceededError} At a cap. Its `capType`, `currentCost` and `limit` are those of the cap that refused
    *   the call: the id's total for the session or the day and that cap, or, at the guard's single-operation cap, the
@@ -146,6 +170,18 @@ export class SpendBudget {
     what: string,
     model?: { providerId: string; modelId: string },
   ): void {
+    const parent = this.options.parent;
+    if (parent) {
+      try {
+        parent.assertCanSpend(estimateUSD, estimateTokens, what, model);
+      } catch (error) {
+        // An ancestor refused: this budget's own function hears of it, with that budget's info, before it goes on.
+        const info = typeof error === 'object' && error !== null ? refusalInfo.get(error) : undefined;
+        const on = this.options.onLimitReached;
+        if (info && typeof on === 'function') on(info);
+        throw error;
+      }
+    }
     if (estimateUSD === undefined && this.options.unpriced !== 'allow') {
       const reason = model ? `${model.providerId}:${model.modelId} has no price row` : 'the model has no price row';
       this.refuse({ budgetId: this.id, capType: 'unpriced', what, reason }, () => {
@@ -185,17 +221,19 @@ export class SpendBudget {
   /**
    * Records a finished call: its cost (undefined for a model with no price row, counted as nothing) and its tokens. A
    * token count the provider reported as `NaN` counts as none: added, it would make the count NaN, and a count of NaN
-   * never reaches `maxTotalTokens`, since every comparison with NaN is false.
+   * never reaches `maxTotalTokens`, since every comparison with NaN is false. A budget with a `parent` records the call
+   * there too, after itself.
    */
   record(costUSD: number | undefined, tokens: number, what: string): void {
     const counted = Math.max(0, tokens);
     this.tokens += Number.isNaN(counted) ? 0 : counted;
     if (costUSD !== undefined && costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what });
+    this.options.parent?.record(costUSD, tokens, what);
   }
 
   /**
    * Records a cost made outside AgentOS, such as speech-to-text minutes billed by the minute. A cost of zero or below
-   * records nothing.
+   * records nothing. A budget with a `parent` records the cost there too, after itself.
    *
    * @throws {RangeError} When `costUSD` is not a number, `NaN` included: a cost that could not be counted would let
    *   the run spend past its cap.
@@ -205,6 +243,7 @@ export class SpendBudget {
       throw new RangeError(`An outside cost must be a number of US dollars, not ${String(costUSD)}`);
     }
     if (costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
+    this.options.parent?.recordExternal(costUSD, kind);
   }
 
   private refuse(info: SpendLimitInfo, thrower: () => never): void {
@@ -214,7 +253,13 @@ export class SpendBudget {
       return;
     }
     if (typeof on === 'function') on(info);
-    thrower();
+    try {
+      thrower();
+    } catch (error) {
+      // The first budget to refuse names the refusal; the budgets below it read it (assertCanSpend).
+      if (typeof error === 'object' && error !== null && !refusalInfo.has(error)) refusalInfo.set(error, info);
+      throw error;
+    }
   }
 }
 
@@ -251,7 +296,7 @@ export function tokensOfChars(chars: number): number {
 export function estimateCallCostUSD(providerId: string, modelId: string, promptChars: number, maxOutputTokens: number | undefined): number | undefined {
   const price = providerId === 'openai' ? openAIModelPricing(modelId) : undefined;
   if (!price) return undefined;
-  const output = outputTokensOf(modelId, maxOutputTokens);
+  const output = outputEstimateTokens(modelId, maxOutputTokens);
   return (tokensOfChars(promptChars) / 1000) * price.input + (output / 1000) * price.output;
 }
 
@@ -272,7 +317,7 @@ export function assertCallWithinBudget(
 ): void {
   budget.assertCanSpend(
     estimateCallCostUSD(route.providerId, route.modelId, promptChars, maxOutputTokens),
-    tokensOfChars(promptChars) + outputTokensOf(route.modelId, maxOutputTokens),
+    tokensOfChars(promptChars) + outputEstimateTokens(route.modelId, maxOutputTokens),
     what,
     { providerId: route.providerId, modelId: route.modelId },
   );

@@ -15,6 +15,7 @@ import { z, type ZodType, type ZodError } from 'zod';
 
 import { generateText } from './generateText.js';
 import type { Message, SystemContentBlock, TokenUsage } from './generateText.js';
+import type { AttemptOutcome } from '../core/llm/providers/IProvider.js';
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { estimateMaxTokensForZodSchema } from './runtime/schemaTokenEstimate.js';
@@ -229,6 +230,15 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * failover for chat / narration traffic.
    */
   requestTimeout?: number;
+
+  /**
+   * The most requests each generation's call sends, a first and its retries together; the provider's configured
+   * count when left out. A validation retry (`maxRetries`) is a generation of its own, with its own count.
+   */
+  maxAttempts?: number;
+
+  /** Called after each request a generation's call sent, so a caller can settle the attempts it paid for. */
+  onAttempt?: (outcome: AttemptOutcome) => void;
 
   /**
    * Ends the call when it aborts: no further attempt or fallback hop starts, and the call rejects with the signal's
@@ -634,6 +644,9 @@ export async function generateObject<T extends ZodType>(
       // large-output structured-output callers (codegen TSX) get a longer
       // abort window than the provider default.
       requestTimeout: opts.requestTimeout,
+      // The call's attempt count and its report go with the timeout.
+      maxAttempts: opts.maxAttempts,
+      onAttempt: opts.onAttempt,
       // The caller's signal reaches this attempt's provider request.
       abortSignal: opts.abortSignal,
       // Forward reasoning effort so reasoning-capable models (gpt-5.x ->
