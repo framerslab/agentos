@@ -20,7 +20,7 @@
  * @module memory/retrieval/store/__tests__/Brain.export-import.test
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -208,6 +208,28 @@ describe('Brain.exportToSqlite + importFromSqlite', () => {
 
     expect(await fs.readFile(exportPath, 'utf8')).toBe('the other export');
     expect((await fs.readdir(tmpDir)).filter((name) => name.startsWith('race-export')).sort()).toEqual(['race-export.sqlite']);
+    await source.close();
+  });
+
+  it('publishes the whole file by rename where the file system has no hard links', async () => {
+    const source = await Brain.openSqlite(path.join(tmpDir, 'nolink.sqlite'), { brainId: 'alice' });
+    const exportPath = path.join(tmpDir, 'nolink-export.sqlite');
+    await addDocument(source, 'alice', 'd1');
+    // FAT, exFAT and some network shares refuse hard links.
+    const link = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValueOnce(Object.assign(new Error('operation not permitted'), { code: 'EPERM' }));
+    try {
+      expect((await source.exportToSqlite(exportPath)).bytesWritten).toBeGreaterThan(0);
+      expect(link).toHaveBeenCalledTimes(1);
+    } finally {
+      link.mockRestore();
+    }
+
+    expect((await fs.readdir(tmpDir)).filter((name) => name.startsWith('nolink-export'))).toEqual(['nolink-export.sqlite']);
+    const exported = await Brain.openSqlite(exportPath, { brainId: 'alice' });
+    expect(await idsIn(exported, 'document_chunks', 'alice')).toEqual(['d1-chunk']);
+    await exported.close();
     await source.close();
   });
 

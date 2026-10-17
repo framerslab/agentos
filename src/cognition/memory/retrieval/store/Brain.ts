@@ -29,7 +29,7 @@
  * @module memory/store/Brain
  */
 
-import { promises as fs, constants as fsConstants } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import type {
@@ -62,36 +62,45 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
  * explicit `brainId`.
  */
 /**
- * Moves the finished file at `from` to `to` unless something is already at
- * `to`, which is never replaced. A hard link fails with EEXIST when `to`
- * exists, so the file appears there whole or not at all; where the file
- * system has no hard links, an exclusive copy refuses an existing `to` the
- * same way. `from` is removed once `to` holds the file.
+ * Moves the finished file at `from` to `to` in one step, so `to` holds the
+ * whole file or nothing, and never replaces a file already at `to`.
+ *
+ * A hard link fails with EEXIST when `to` exists; once it succeeds the export
+ * is published, and the temporary name is removed on a best-effort basis (a
+ * file left at `from` never turns a published export into a failure). A file
+ * system without hard links (FAT and exFAT, some network shares) gets a check
+ * that `to` is free and then a rename, which is atomic but replaces: the
+ * instant between the two is the only moment a file appearing at `to` could
+ * be replaced there.
  *
  * @throws {Error} Naming `to` when a file is already there.
  */
 async function publishWithoutReplacing(from: string, to: string): Promise<void> {
-  const exists = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === 'EEXIST';
+  const taken = (): Error => new Error(`Brain.exportToSqlite: target already exists: ${to}`);
   try {
     await fs.link(from, to);
   } catch (error) {
-    if (exists(error)) {
-      throw new Error(`Brain.exportToSqlite: target already exists: ${to}`);
-    }
     const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST') {
+      throw taken();
+    }
     if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EXDEV' && code !== 'ENOSYS') {
       throw error;
     }
-    try {
-      await fs.copyFile(from, to, fsConstants.COPYFILE_EXCL);
-    } catch (copyError) {
-      if (exists(copyError)) {
-        throw new Error(`Brain.exportToSqlite: target already exists: ${to}`);
-      }
-      throw copyError;
+    const free = await fs.access(to).then(
+      () => false,
+      (accessError: NodeJS.ErrnoException) => {
+        if (accessError.code === 'ENOENT') return true;
+        throw accessError;
+      },
+    );
+    if (!free) {
+      throw taken();
     }
+    await fs.rename(from, to);
+    return;
   }
-  await fs.rm(from, { force: true });
+  await fs.rm(from, { force: true }).catch(() => undefined);
 }
 
 function parseBetterSqliteUri(dbPath: string): {
