@@ -188,6 +188,67 @@ describe('LLMUtilityAI over a provider manager', () => {
     ]);
   });
 
+  it('reads the numbers of a sentiment reply written as strings, holds them to their ranges and makes its word lists entries', async () => {
+    replies = [
+      '{"score": "-0.8", "polarity": "Negative", "intensity": "0.7", "negativeTokens": ["broke", 7, {"token": "everything", "score": -0.5}], "positiveTokens": "none"}',
+      '{"score": 4, "polarity": "mixed", "intensity": 9}',
+      '{"score": 0, "polarity": "neutral", "negativeTokens": "n/a"}',
+    ];
+    expect(await utility.analyzeSentiment('The update broke everything.')).toEqual({
+      score: -0.8,
+      polarity: 'negative',
+      comparative: -0.8,
+      intensity: 0.7,
+      positiveTokens: [],
+      negativeTokens: [{ token: 'broke' }, { token: 'everything', score: -0.5 }],
+      neutralTokens: [],
+    });
+    // A score past 1 is 1, an intensity past 1 is 1, and a polarity other than the three follows the score.
+    expect(await utility.analyzeSentiment('Best update ever.')).toMatchObject({ score: 1, polarity: 'positive', intensity: 1 });
+    // A word list that is not a list holds no words, so a neutral reply does not read as three negative words.
+    expect((await utility.analyzeSentiment('The table is next to the door.')).negativeTokens).toEqual([]);
+  });
+
+  it('reads a classification confidence written as a string, and holds confidences to 0 to 1', async () => {
+    replies = [
+      '{"bestClass": "billing", "confidence": "0.92"}',
+      '{"bestClass": ["billing", "shipping"], "confidence": [1.4, "0.3"], "allScores": [{"classLabel": "billing", "score": 3}, {"classLabel": 5, "score": 0.2}]}',
+      '{"languages": [{"language": "fr", "confidence": 97}]}',
+    ];
+    const candidateClasses = ['billing', 'shipping', 'returns'];
+    expect(await utility.classifyText('Where is my refund?', { candidateClasses })).toEqual({
+      bestClass: 'billing',
+      confidence: 0.92,
+      allScores: [
+        { classLabel: 'billing', score: 0.92 },
+        { classLabel: 'shipping', score: 0.1 },
+        { classLabel: 'returns', score: 0.1 },
+      ],
+    });
+    expect(await utility.classifyText('Charged twice and the parcel is late.', { candidateClasses, multiLabel: true })).toEqual({
+      bestClass: ['billing', 'shipping'],
+      confidence: [1, 0.3],
+      allScores: [{ classLabel: 'billing', score: 1 }],
+    });
+    expect(await utility.detectLanguage('Bonjour à tous')).toEqual([{ language: 'fr', confidence: 1 }]);
+  });
+
+  it('refuses a sentiment, classification or readability reply whose number or class is not one', async () => {
+    replies = [
+      '{"score": null, "polarity": "neutral"}',
+      '{"bestClass": "billing", "confidence": "high"}',
+      '{"bestClass": 5, "confidence": 0.9}',
+      '{"score": true, "interpretation": "Easy to read."}',
+    ];
+    const parsingError = { code: GMIErrorCode.PARSING_ERROR };
+    await expect(utility.analyzeSentiment('The table is next to the door.')).rejects.toMatchObject(parsingError);
+    const candidateClasses = ['billing', 'shipping'];
+    await expect(utility.classifyText('Where is my refund?', { candidateClasses })).rejects.toMatchObject(parsingError);
+    await expect(utility.classifyText('Where is my refund?', { candidateClasses })).rejects.toMatchObject(parsingError);
+    await expect(utility.calculateReadability('The cat sat on the mat.', { formula: 'flesch_kincaid_reading_ease' })).rejects.toMatchObject(parsingError);
+    expect(received).toHaveLength(4);
+  });
+
   it('repairs a reply that does not parse on the model and provider of the call', async () => {
     replies = ['score -0.8, polarity negative', '{"score": -0.8, "polarity": "negative"}'];
     const result = await utility.analyzeSentiment('The update broke everything.', { providerId: 'litellm', modelId: 'gpt-4o-mini' });
