@@ -2233,11 +2233,17 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       const ownCredentials =
         providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
       // An agency seat resolves strictly: no provider-less default, no reroute.
+      // A call a router moved to another provider takes none of its own key
+      // and URL there, and only a seat's call carries the strict flag.
       const strict = opts.__strictCredentials === true;
       const resolved = resolveProvider(
         providerId,
         modelId,
-        providerId === credentialProviderId ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl, strict } : { strict },
+        providerId === credentialProviderId
+          ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl, strict }
+          : strict
+            ? { strict }
+            : undefined,
       );
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
