@@ -193,4 +193,26 @@ describe('planEntries', () => {
     // Left out, the count is Infinity, and every entry is planned.
     expect(await planEntries(ENTRIES, { ...RULES, maxEntries: undefined })).toHaveLength(14);
   });
+
+  it('names a count or a bound that is no number without running its own code, so the plan rejects with a RangeError', async () => {
+    // An object becomes text through its own toString, which can throw; one made with no prototype has none to call.
+    const throwing = {
+      valueOf: (): number => 5,
+      toString: (): string => {
+        throw new Error('toString ran');
+      },
+    };
+    for (const value of [throwing, Object.create(null) as object]) {
+      const count = value as unknown as number;
+      await expect(planEntries(ENTRIES, { ...RULES, maxEntries: count })).rejects.toThrow(RangeError);
+      await expect(planEntries(ENTRIES, { ...RULES, maxEntries: count })).rejects.toThrow(
+        'planEntries: maxEntries must be a number of 0 or more, not an object',
+      );
+      await expect(planEntries(ENTRIES, { ...RULES, maxBytes: () => count })).rejects.toThrow(RangeError);
+    }
+    // A bigint reads apart from the number it holds, as a numeric text does.
+    await expect(planEntries(ENTRIES, { ...RULES, maxEntries: 5n as unknown as number })).rejects.toThrow(
+      'planEntries: maxEntries must be a number of 0 or more, not 5n',
+    );
+  });
 });
