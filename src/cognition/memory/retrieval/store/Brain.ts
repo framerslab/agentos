@@ -62,6 +62,21 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
  * explicit `brainId`.
  */
 /**
+ * Whether anything is at `entry`: a file, a folder, or a link, dangling or
+ * not. `lstat` reads the entry itself, where `access` follows a link and
+ * reports a dangling one as free.
+ */
+async function entryExists(entry: string): Promise<boolean> {
+  return fs.lstat(entry).then(
+    () => true,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    },
+  );
+}
+
+/**
  * Moves the finished file at `from` to `to` in one step, so `to` holds the
  * whole file or nothing, and never replaces a file already at `to`.
  *
@@ -87,14 +102,7 @@ async function publishWithoutReplacing(from: string, to: string): Promise<void> 
     if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EXDEV' && code !== 'ENOSYS') {
       throw error;
     }
-    const free = await fs.access(to).then(
-      () => false,
-      (accessError: NodeJS.ErrnoException) => {
-        if (accessError.code === 'ENOENT') return true;
-        throw accessError;
-      },
-    );
-    if (!free) {
+    if (await entryExists(to)) {
       throw taken();
     }
     await fs.rename(from, to);
@@ -1356,17 +1364,9 @@ export class Brain {
    * @returns Bytes written to the destination file.
    */
   async exportToSqlite(targetPath: string): Promise<{ bytesWritten: number }> {
-    // Refuse to overwrite an existing file.
-    try {
-      await fs.access(targetPath);
+    // Refuse to overwrite anything at the target, a dangling link included.
+    if (await entryExists(targetPath)) {
       throw new Error(`Brain.exportToSqlite: target already exists: ${targetPath}`);
-    } catch (err: unknown) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        // Re-throw the "already exists" error and any other access error
-        // that isn't a missing-file response.
-        throw err;
-      }
     }
 
     const partialPath = `${targetPath}.partial-${uuidv4()}`;

@@ -15,7 +15,8 @@
  * - Export reads one consistent view: a document and its chunk stored
  *   while the export runs are wholly out of the file (SQLite and Postgres).
  * - A failed export leaves nothing at the target path, and a retry runs; a
- *   file that appears at the target while the export runs is kept.
+ *   file or a dangling link at the target, before the export or appearing
+ *   while it runs, is kept, with hard links and without them.
  *
  * @module memory/retrieval/store/__tests__/Brain.export-import.test
  */
@@ -208,6 +209,32 @@ describe('Brain.exportToSqlite + importFromSqlite', () => {
 
     expect(await fs.readFile(exportPath, 'utf8')).toBe('the other export');
     expect((await fs.readdir(tmpDir)).filter((name) => name.startsWith('race-export')).sort()).toEqual(['race-export.sqlite']);
+    await source.close();
+  });
+
+  it('refuses a dangling link at the target, before the export and while it runs without hard links', async () => {
+    const source = await Brain.openSqlite(path.join(tmpDir, 'links.sqlite'), { brainId: 'alice' });
+    await addDocument(source, 'alice', 'd1');
+
+    // A link to nothing, there before the export starts.
+    const before = path.join(tmpDir, 'before-export.sqlite');
+    await fs.symlink(path.join(tmpDir, 'nowhere-1'), before);
+    await expect(source.exportToSqlite(before)).rejects.toThrow(/already exists/i);
+    expect((await fs.lstat(before)).isSymbolicLink()).toBe(true);
+
+    // A link to nothing that appears while the export runs on a file system without hard links.
+    const during = path.join(tmpDir, 'during-export.sqlite');
+    writeAfterDocumentsCopy(source, () => fs.symlink(path.join(tmpDir, 'nowhere-2'), during));
+    const link = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValue(Object.assign(new Error('operation not permitted'), { code: 'EPERM' }));
+    try {
+      await expect(source.exportToSqlite(during)).rejects.toThrow(/already exists/i);
+    } finally {
+      link.mockRestore();
+    }
+    expect((await fs.lstat(during)).isSymbolicLink()).toBe(true);
+    expect((await fs.readdir(tmpDir)).filter((name) => name.startsWith('during-export')).sort()).toEqual(['during-export.sqlite']);
     await source.close();
   });
 
