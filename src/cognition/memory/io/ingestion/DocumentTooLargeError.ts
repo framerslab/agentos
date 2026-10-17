@@ -16,10 +16,13 @@ export class DocumentTooLargeError extends Error {
   readonly code = 'DOCUMENT_TOO_LARGE';
 
   /**
-   * @param limit - The bound, in bytes, that the document passed.
+   * @param limit - The loader's bound, in bytes, on what the document's parts inflate to: the bound a Word file
+   *   passed, and the office loader's `maxInflatedBytes` whichever of its bounds the document reached.
+   * @param message - What the document reached, when that is another bound: the office loader names the bound
+   *   officeparser reported. Left out, the message says the document inflates past `limit` bytes.
    */
-  constructor(readonly limit: number) {
-    super(`the document inflates past ${limit} bytes`);
+  constructor(readonly limit: number, message = `the document inflates past ${limit} bytes`) {
+    super(message);
     this.name = 'DocumentTooLargeError';
   }
 }
