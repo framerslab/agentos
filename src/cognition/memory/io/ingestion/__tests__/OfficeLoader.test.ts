@@ -71,6 +71,7 @@ describe('OfficeLoader', () => {
     await expect(refused).rejects.toBeInstanceOf(DocumentTooLargeError);
     await expect(refused).rejects.toMatchObject({
       limit: 65_536,
+      message: 'the document inflates past 65536 bytes',
       cause: { message: 'officeparser: ZIP_SIZE_LIMIT_EXCEEDED' },
     });
   });
@@ -80,9 +81,12 @@ describe('OfficeLoader', () => {
     const refused = new OfficeLoader({ maxXmlElements: 1_000 }).load(many, { format: 'odt' });
     await expect(refused).rejects.toBeInstanceOf(DocumentTooLargeError);
     // The error carries the loader's bound on inflation, 64 MiB when left out,
-    // whichever bound was reached; its cause names that one.
+    // whichever bound was reached; its message and its cause name the one reached.
+    // The file inflates to far less than 64 MiB, so a message saying it inflates
+    // past that would be false.
     await expect(refused).rejects.toMatchObject({
       limit: 67_108_864,
+      message: 'the document reached the bound officeparser reports as XML_ELEMENT_LIMIT_EXCEEDED',
       cause: { message: 'officeparser: XML_ELEMENT_LIMIT_EXCEEDED' },
     });
   });
