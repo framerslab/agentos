@@ -1142,7 +1142,8 @@ export class OpenAIProvider implements IProvider {
   /** Where a request's key came from, for the pool's bookkeeping: an override or an OAuth token is never marked or hopped. */
   private keySourceOf(apiKeyOverride?: string): 'pool' | 'override' | 'oauth' {
     if (apiKeyOverride) return 'override';
-    if (this.config.oauthFlow) return 'oauth';
+    // `config` is optional here: the routing tests stub the request path and set no config.
+    if (this.config?.oauthFlow) return 'oauth';
     return 'pool';
   }
 
