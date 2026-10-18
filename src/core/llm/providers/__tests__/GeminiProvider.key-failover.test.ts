@@ -143,8 +143,8 @@ describe('GeminiProvider key failover', () => {
     await ask(p);
     expect(callsOf().map(keyOf)).toEqual(['key_alpha_0001', 'key_beta_0002']);
 
-    vi.advanceTimersByTime(1001);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { models: [] }));
+    vi.advanceTimersByTime(1001);
     const pool = (p as unknown as { keyPool: { recheck(): Promise<void>; snapshot(): Array<Record<string, unknown>> } }).keyPool;
     await pool.recheck();
     const probe = callsOf()[2];

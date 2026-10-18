@@ -8,6 +8,7 @@
  * {@link streamText}.
  */
 import { createHash } from 'node:crypto';
+import { keyPoolConfigFor, keyPoolDefaultsVersion } from './keyPoolDefaults.js';
 
 import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderManager.js';
 import { baseUrlCredentials } from '../core/llm/providers/url-secrets.js';
@@ -39,6 +40,11 @@ export interface ResolvedProvider {
   apiKey?: string;
   /** Base URL override forwarded to the provider SDK. */
   baseUrl?: string;
+  /**
+   * The key pool's id for a key read from the environment, `<providerId>:<ENV_VAR>`, under which the pool's state
+   * persists when a host set a store with `setKeyPoolDefaults()`; absent for an override or a global default.
+   */
+  poolId?: string;
 }
 
 const ENV_KEY_MAP: Record<string, string> = {
@@ -281,7 +287,7 @@ export function resolveProvider(
           `(routed as "anthropic/${orModelId}"). Set ANTHROPIC_API_KEY for direct access.`
         );
       }
-      return { providerId: 'openrouter', modelId: `anthropic/${orModelId}`, apiKey: orKey };
+      return { providerId: 'openrouter', modelId: `anthropic/${orModelId}`, apiKey: orKey, poolId: 'openrouter:OPENROUTER_API_KEY' };
     }
     throw new Error(`No API key for anthropic. Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY.`);
   }
@@ -291,7 +297,9 @@ export function resolveProvider(
     throw new Error(`No API key for ${providerId}. Set ${envVar} or pass apiKey.`);
   }
 
-  return { providerId, modelId, apiKey, baseUrl };
+  // A key read from the environment names its pool, so the pool's state can persist under that name.
+  const fromEnv = overrides?.apiKey === undefined && defApiKey === undefined && ENV_KEY_MAP[providerId] !== undefined;
+  return { providerId, modelId, apiKey, baseUrl, ...(fromEnv ? { poolId: `${providerId}:${ENV_KEY_MAP[providerId]}` } : {}) };
 }
 
 /**
@@ -652,7 +660,12 @@ function httpStatusOf(error: unknown): number | undefined {
 
 /** The cache key: the provider, and a digest of its key and base URL, so the map holds no key. */
 function buildCacheKey(resolved: ResolvedProvider): string {
-  const digest = createHash('sha256').update(`${resolved.apiKey ?? ''}\n${resolved.baseUrl ?? ''}`).digest('hex');
+  // The pool id and the defaults' version are part of the key: the same key string from the environment (a named,
+  // persisted pool) and from an override (no pool id) builds two managers, and a change of the key pool defaults
+  // gives later calls a manager built with them.
+  const digest = createHash('sha256')
+    .update(`${resolved.apiKey ?? ''}\n${resolved.baseUrl ?? ''}\n${resolved.poolId ?? ''}\n${keyPoolDefaultsVersion()}`)
+    .digest('hex');
   return `${resolved.providerId}::${digest}`;
 }
 
@@ -697,6 +710,9 @@ export async function createProviderManager(
       providerConfig.baseURL = resolved.baseUrl;
       providerConfig.baseUrl = resolved.baseUrl;
     }
+    // The host's key pool defaults (a store, a strategy) and the pool's id for a key from the environment.
+    const keyPool = keyPoolConfigFor(resolved.poolId);
+    if (keyPool) providerConfig.keyPool = keyPool;
 
     await manager.initialize({
       providers: [

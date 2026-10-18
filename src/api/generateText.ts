@@ -3373,6 +3373,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             fallbackProvider: fb.provider,
             fallbackModel: fb.model,
             errorType: lastErr.name,
+            errorCode: (lastErr as { code?: unknown }).code,
+            keyKinds: (lastErr as { details?: { kinds?: unknown } }).details?.kinds,
             // A seat's mask first: a provider's message can echo the key it was sent.
             errorMessage: maskToolText(lastErr.message).slice(0, 200),
             attempt,
