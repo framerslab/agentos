@@ -63,6 +63,13 @@ A new pack starts as a copy of `templates/basic-tool`. The pack's `package.json`
 
 A tool implements [`ITool`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ITool.ts): `id`, `name`, `displayName`, `description`, `inputSchema` and `execute(args, context)`, with optional `outputSchema`, `category`, `version`, `hasSideEffects` and `requiredCapabilities`. The tool's configuration comes from the pack factory, not from the execution context, which carries the GMI, persona and user identifiers, the session data and an abort signal.
 
+`ToolExecutor` checks a call's arguments against `inputSchema` before `execute` runs, and a successful result's output against `outputSchema`, with Ajv, which reads a schema as JSON Schema draft-07:
+
+- It reports every error, coerces a value to the type its schema names where it can (`"5"` to 5, the output itself included), and fills in a `default` the schema gives.
+- It checks the standard formats (`date-time`, `email`, `uri` and the others of `ajv-formats`). It passes over a keyword it does not know, as JSON Schema says to, and a format it does not know, with a warning in the log when it compiles the schema.
+- A schema compiles on the first call that reads it, once for as long as its object lives. Two tools may each hold a copy of one schema under a shared `$id`, and a tool registered again may bring a new copy.
+- A schema that does not compile fails the call with an error that names the schema's fault and `details.code` `SYS_CONFIGURATION_ERROR`. Such faults are a `type` that is no JSON Schema type, a `$schema` that names a draft other than draft-07, the draft-07 meta-schema's own `$id`, or `$async`. For an input schema the tool does not run; for an output schema the tool has run, and the result keeps its output.
+
 ```typescript
 // src/tools/webSearch.ts
 import type { ITool, ToolExecutionContext, ToolExecutionResult, JSONSchemaObject } from '@framers/agentos';
