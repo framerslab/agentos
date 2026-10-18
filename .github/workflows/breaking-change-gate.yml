@@ -9,6 +9,16 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened, labeled, unlabeled]
 
+# A newer event on a pull request (a push, an edit of its title or description, a
+# label added or removed) cancels the gate run it supersedes, and the run that survives
+# reads the pull request's title, description and labels from the API as they are now,
+# not from its own event, so the order the events arrive in cannot pass a stale label.
+# A re-run keys a group of its own, its run id, so re-running an older run never cancels
+# the newest one.
+concurrency:
+  group: breaking-change-gate-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
 permissions:
   contents: read
   pull-requests: read
@@ -22,11 +32,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
-          TITLE: ${{ github.event.pull_request.title }}
-          BODY: ${{ github.event.pull_request.body }}
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
           set -euo pipefail
+          # The gate reads the pull request as it is now, not as the event that started this run saw it. With
+          # the concurrency group above, a labeled event delivered after an unlabeled one would cancel the
+          # newer run and, read from its own payload, pass on a label that is already gone.
+          pull="$(gh api "repos/$REPO/pulls/$PR")"
+          TITLE="$(jq -r '.title' <<<"$pull")"
+          BODY="$(jq -r '.body // ""' <<<"$pull")"
+          LABELS="$(jq -r '[.labels[].name] | join(",")' <<<"$pull")"
           # The markers release.config.js reads: a type with `!` before the
           # colon, or a note keyword (BREAKING CHANGE, BREAKING CHANGES,
           # BREAKING) at the start of a line, followed by a colon or a space.

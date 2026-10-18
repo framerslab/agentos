@@ -8,6 +8,15 @@ on:
     - cron: '17 6 * * 1'
   workflow_dispatch:
 
+# A newer push to a pull request cancels the run of the commit it replaces. Every
+# other run keys a group of its own, its run id, so it never waits behind another run
+# and nothing cancels it: a push to master, the weekly schedule and a manual run. A
+# re-run keys its own group too, so re-running an older commit's run never cancels
+# the newest one.
+concurrency:
+  group: links-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
 permissions:
   contents: read
 
