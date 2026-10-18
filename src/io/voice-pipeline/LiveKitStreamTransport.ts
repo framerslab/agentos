@@ -219,8 +219,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message), {
         rtc: options.rtc, participant: () => this.linkedParticipant(),
         // A capture that never returned leaves the track unable to take audio: the path closes, as it does for a control
-        // message not sent within five seconds.
-        stalled: () => { this.emitErrorSafe(new Error('livekit output stalled')); this.close(); },
+        // message not sent within five seconds, once the messages already waiting, a cancel among them, have gone out.
+        stalled: () => { this.emitErrorSafe(new Error('livekit output stalled')); void this.controls.then(() => this.close()); },
       });
     }
     this.on('pause', () => { if (this._state === 'open') this.paused = true; });
@@ -267,7 +267,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * track that takes no frame and plays nothing out for `publisher.receiptTimeoutMs` plus `publisher.maxDurationMs`,
    * outside a pause, has stalled: what it had not played is discarded and the wait rejects with
    * `publisher drain timeout`. A capture that does not return within the same bound, whoever waits for it, makes the
-   * transport emit `livekit output stalled` and close. A listen-only transport resolves at once.
+   * transport emit `livekit output stalled` and close, once the control messages already waiting have gone out. A
+   * listen-only transport resolves at once.
    */
   async waitForPlayout(): Promise<void> { await this.publisher?.waitForPlayout(); }
   /** Discards only this physical path's queued output; a closed path must finish native cleanup. */
