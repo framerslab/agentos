@@ -1623,6 +1623,17 @@ describe('25-26. approvals under panel and nested agencies', () => {
     expect((await streamed.result).text).toBe('signed off with [redacted]');
     expect(JSON.stringify([parts, ends, await streamed.result])).not.toContain(K.ant);
   });
+  it("a beforeAgent approval's reason that quotes a listed key reaches the host's approvalDecided and the provenance trail masked in a pooled agency", async () => {
+    const decided: Json[] = [];
+    threeProviders();
+    const team = panel({ provenance: { enabled: true }, hitl: { approvals: { beforeAgent: ['correctness'] }, handler: async () => ({ approved: true, reason: `cleared, saw ${K.ant}` }) }, on: { approvalDecided: (d: Json) => decided.push(d) } });
+    const r = await team.generate('review');
+    expect(r.text).toBe('Merged findings');
+    expect(decided).toEqual([{ approved: true, reason: 'cleared, saw [redacted]' }]);
+    const records = r.provenanceTrail!.events.filter((e) => e.kind === 'approvalDecided').map((e) => e.payload);
+    expect(records).toEqual([{ approved: true, reason: 'cleared, saw [redacted]' }]);
+    expect(JSON.stringify([r, decided])).not.toContain(K.ant);
+  });
   it('the handler is asked once per tool call; a seat whose approval times out is error; the call resolves whole', async () => {
     const handler = vi.fn(async (r: ApprovalRequest) => (r.agent === 'failure' ? new Promise<ApprovalDecision>(() => {}) : { approved: true }));
     // The three seats send their first requests together, so the first three replies are the three tool calls; each approved seat's continuation then takes a text.
