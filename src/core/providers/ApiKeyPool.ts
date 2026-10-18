@@ -135,6 +135,8 @@ export class ApiKeyPool {
   private readonly configuredLogger?: ILogger;
   private readyPromise?: Promise<void>;
   private readonly inFlightProbes = new Map<string, Promise<void>>();
+  /** The interval `startRechecks()` runs, if any: one per pool. */
+  private recheckTimer: ReturnType<typeof setInterval> | undefined;
   private readonly pendingSaves = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlightSaves = new Set<Promise<void>>();
   private readonly lastLogged = new Map<string, number>();
@@ -345,14 +347,52 @@ export class ApiKeyPool {
     await Promise.all(started);
   }
 
-  /** Runs `recheck()` on an interval that never keeps the process alive; returns the function that stops it. */
+  /**
+   * Runs `recheck()` on an interval that never keeps the process alive, one
+   * interval per pool (a second call replaces the first); returns the function
+   * that stops it. The interval holds the pool weakly where the runtime has
+   * `WeakRef`: a pool nothing else holds (a provider dropped without
+   * `shutdown()`, a manager evicted from `createProviderManager()`'s cache)
+   * ends its interval on the next tick instead of being kept alive by it.
+   */
   startRechecks(intervalMs: number = this.recheckMs): () => void {
-    const timer = setInterval(() => {
-      void this.recheck().catch(() => undefined);
+    this.stopRechecks();
+    const ref = typeof WeakRef === 'function' ? new WeakRef<ApiKeyPool>(this) : undefined;
+    const strong = ref ? undefined : this;
+    const timer: ReturnType<typeof setInterval> = setInterval(() => {
+      const pool = ref ? ref.deref() : strong;
+      if (!pool) {
+        clearInterval(timer);
+        return;
+      }
+      void pool.recheck().catch(() => undefined);
     }, intervalMs);
     const maybeUnref = timer as unknown as { unref?: () => void };
     if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
-    return () => clearInterval(timer);
+    this.recheckTimer = timer;
+    return () => {
+      if (this.recheckTimer === timer) this.stopRechecks();
+      else clearInterval(timer);
+    };
+  }
+
+  /** Stops the interval `startRechecks()` started, if any. Probes already running finish. */
+  stopRechecks(): void {
+    if (this.recheckTimer === undefined) return;
+    clearInterval(this.recheckTimer);
+    this.recheckTimer = undefined;
+  }
+
+  /**
+   * Ends the pool's work for a host that is shutting down: stops the recheck
+   * interval, waits for the probes in flight (each bounded by the probe
+   * timeout), then writes every pending state change, so what a probe found
+   * during shutdown is kept. The providers' `shutdown()` calls it.
+   */
+  async close(): Promise<void> {
+    this.stopRechecks();
+    await Promise.allSettled(Array.from(this.inFlightProbes.values()));
+    await this.flush();
   }
 
   /** A copy of every key's state, for hosts and tests. */

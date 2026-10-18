@@ -176,8 +176,6 @@ export class RequestyProvider implements IProvider {
   // Corrected: Changed type of this.config to satisfy the Readonly<Required<...>> assignment by providing defaults
   private config!: Readonly<Required<Omit<RequestyProviderConfig, 'defaultModelId' | 'siteUrl' | 'appName' | 'baseURL' | 'requestTimeout' | 'streamRequestTimeout' | 'keyPool'>> & RequestyProviderConfig>;
   private keyPool: ApiKeyPool | null = null;
-  /** Stops the pool's recheck timer, set while a pool of several keys is live. */
-  private stopRechecks?: () => void;
   private client!: AxiosInstance;
   private readonly availableModelsCache: Map<string, ModelInfo> = new Map();
 
@@ -201,16 +199,14 @@ export class RequestyProvider implements IProvider {
       requestTimeout: config.requestTimeout || 60000,
       streamRequestTimeout: config.streamRequestTimeout || 180000,
     });
+    // A re-initialize replaces the pool; the old pool's recheck interval stops with it.
+    this.keyPool?.stopRechecks();
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
       ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('requesty')),
       probe: (key) => this.probeKey(key),
     });
     await this.keyPool.ready();
-    // Failed keys are probed on the pool's own clock, so a provider the health breaker holds
-    // still gets its keys back; the timer never keeps the process alive.
-    this.stopRechecks?.();
-    this.stopRechecks = this.keyPool.size > 1 ? this.keyPool.startRechecks() : undefined;
     this.defaultModelId = this.config.defaultModelId; // Store the potentially undefined value
 
     // No Authorization header here: the key is resolved per request inside
@@ -235,6 +231,9 @@ export class RequestyProvider implements IProvider {
     try {
       await this.refreshAvailableModels();
       this.isInitialized = true;
+      // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
+      // breaker holds still gets its keys back; the interval never keeps the process alive.
+      if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
       console.log(`RequestyProvider initialized. Default Model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models via Requesty.`);
     } catch (error: unknown) {
       this.isInitialized = false;
@@ -640,9 +639,8 @@ export class RequestyProvider implements IProvider {
   }
 
   public async shutdown(): Promise<void> {
-    this.stopRechecks?.();
-    this.stopRechecks = undefined;
-    await this.keyPool?.flush();
+    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    await this.keyPool?.close();
     this.isInitialized = false;
     this.availableModelsCache.clear();
     console.log('RequestyProvider shutdown: Instance marked as uninitialized and cache cleared.');

@@ -796,8 +796,6 @@ export class GeminiProvider implements IProvider {
 
   private config!: GeminiProviderConfig;
   private keyPool: ApiKeyPool | null = null;
-  /** Stops the pool's recheck timer, set while a pool of several keys is live. */
-  private stopRechecks?: () => void;
 
   constructor() {}
 
@@ -831,18 +829,19 @@ export class GeminiProvider implements IProvider {
       defaultModelId: 'gemini-2.5-flash',
       ...config,
     };
+    // A re-initialize replaces the pool; the old pool's recheck interval stops with it.
+    this.keyPool?.stopRechecks();
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
       ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('gemini')),
       probe: (key) => this.probeKey(key),
     });
     await this.keyPool.ready();
-    // Failed keys are probed on the pool's own clock, so a provider the health breaker holds
-    // still gets its keys back; the timer never keeps the process alive.
-    this.stopRechecks?.();
-    this.stopRechecks = this.keyPool.size > 1 ? this.keyPool.startRechecks() : undefined;
     this.defaultModelId = this.config.defaultModelId;
     this.isInitialized = true;
+    // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
+    // breaker holds still gets its keys back; the interval never keeps the process alive.
+    if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
 
     console.log(
       `GeminiProvider initialized. Default model: ${this.defaultModelId || 'Not set'}.`,
@@ -1306,9 +1305,8 @@ export class GeminiProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
-    this.stopRechecks?.();
-    this.stopRechecks = undefined;
-    await this.keyPool?.flush();
+    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    await this.keyPool?.close();
     this.isInitialized = false;
     console.log('GeminiProvider shutdown complete.');
   }

@@ -8,7 +8,7 @@
  * {@link streamText}.
  */
 import { createHash } from 'node:crypto';
-import { keyPoolConfigFor } from './keyPoolDefaults.js';
+import { keyPoolConfigFor, keyPoolDefaultsVersion } from './keyPoolDefaults.js';
 
 import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderManager.js';
 import { baseUrlCredentials } from '../core/llm/providers/url-secrets.js';
@@ -660,7 +660,12 @@ function httpStatusOf(error: unknown): number | undefined {
 
 /** The cache key: the provider, and a digest of its key and base URL, so the map holds no key. */
 function buildCacheKey(resolved: ResolvedProvider): string {
-  const digest = createHash('sha256').update(`${resolved.apiKey ?? ''}\n${resolved.baseUrl ?? ''}`).digest('hex');
+  // The pool id and the defaults' version are part of the key: the same key string from the environment (a named,
+  // persisted pool) and from an override (no pool id) builds two managers, and a change of the key pool defaults
+  // gives later calls a manager built with them.
+  const digest = createHash('sha256')
+    .update(`${resolved.apiKey ?? ''}\n${resolved.baseUrl ?? ''}\n${resolved.poolId ?? ''}\n${keyPoolDefaultsVersion()}`)
+    .digest('hex');
   return `${resolved.providerId}::${digest}`;
 }
 

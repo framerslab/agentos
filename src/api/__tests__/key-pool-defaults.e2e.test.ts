@@ -41,6 +41,21 @@ describe('key pool defaults on the generateText path', () => {
     expect(provider.config.keyPool?.store).toBe(store);
   });
 
+  it('builds separate managers for one key string from the environment and from an override, and a new one when the defaults change', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk_pooltest_same_0005,sk_pooltest_same_0006');
+    const configOf = (manager: Awaited<ReturnType<typeof createProviderManager>>) =>
+      (manager.getProvider('openai') as unknown as { config: { keyPool?: { id?: string; strategy?: string } } }).config;
+    const fromEnv = await createProviderManager(resolveProvider('openai', 'gpt-4o'));
+    const fromOverride = await createProviderManager(resolveProvider('openai', 'gpt-4o', { apiKey: 'sk_pooltest_same_0005,sk_pooltest_same_0006' }));
+    expect(fromOverride).not.toBe(fromEnv);
+    expect(configOf(fromEnv).keyPool?.id).toBe('openai:OPENAI_API_KEY');
+    expect(configOf(fromOverride).keyPool?.id).toBeUndefined();
+    setKeyPoolDefaults({ strategy: 'ordered' });
+    const afterChange = await createProviderManager(resolveProvider('openai', 'gpt-4o'));
+    expect(afterChange).not.toBe(fromEnv);
+    expect(configOf(afterChange).keyPool).toMatchObject({ id: 'openai:OPENAI_API_KEY', strategy: 'ordered' });
+  });
+
   it('names no pool for an override, so the store does not apply to it', () => {
     vi.stubEnv('OPENAI_API_KEY', 'sk_pooltest_env_0003');
     const resolved = resolveProvider('openai', 'gpt-4o', { apiKey: 'sk_pooltest_override_0004' });

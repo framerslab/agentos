@@ -73,6 +73,16 @@ async function provider(apiKey: string, extra: Record<string, unknown> = {}): Pr
 const ask = (p: OpenAIProvider) => p.generateCompletion('gpt-4o', [{ role: 'user', content: 'hi' }], {});
 
 describe('OpenAIProvider key failover', () => {
+  it('a multi-key initialize that fails starts no recheck interval, so a retried manager leaves none behind', async () => {
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(jsonResponse(401, invalidKey));
+    const p = new OpenAIProvider();
+    await expect(p.initialize({ apiKey: 'sk_alpha_0001,sk_beta_0002', maxRetries: 2, keyPool: { strategy: 'ordered', recheckMs: 1000 } })).rejects.toBeInstanceOf(OpenAIProviderError);
+    // Both keys answered 401 on the models list, so the provider is not up and its pool runs no interval.
+    expect(callsOf().map(keyOf)).toEqual(['sk_alpha_0001', 'sk_beta_0002']);
+    expect((p as unknown as { keyPool: { recheckTimer?: unknown } }).keyPool.recheckTimer).toBeUndefined();
+  });
+
   beforeEach(() => {
     fetchMock.mockReset();
     vi.unstubAllEnvs();

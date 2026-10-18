@@ -188,6 +188,74 @@ describe('ApiKeyPool v2', () => {
     });
   });
 
+  describe('the recheck interval and close()', () => {
+    it('keeps one interval per pool: a second start replaces the first, and either stop ends it', () => {
+      const pool = new ApiKeyPool('sk_a,sk_b', { recheckMs: 1000 });
+      const before = vi.getTimerCount();
+      pool.startRechecks();
+      const stop = pool.startRechecks();
+      expect(vi.getTimerCount()).toBe(before + 1);
+      stop();
+      expect(vi.getTimerCount()).toBe(before);
+      pool.startRechecks();
+      pool.stopRechecks();
+      expect(vi.getTimerCount()).toBe(before);
+    });
+
+    it('ends its interval on the next tick once nothing else holds the pool', () => {
+      let released = false;
+      class FakeWeakRef<T> {
+        constructor(private readonly value: T) {}
+        deref(): T | undefined {
+          return released ? undefined : this.value;
+        }
+      }
+      vi.stubGlobal('WeakRef', FakeWeakRef);
+      try {
+        const probe = vi.fn(async (): Promise<ProbeResult> => 'ok');
+        const pool = new ApiKeyPool('sk_a,sk_b', { recheckMs: 1000, probe });
+        pool.markFailed('sk_a', 'auth');
+        const before = vi.getTimerCount();
+        pool.startRechecks();
+        expect(vi.getTimerCount()).toBe(before + 1);
+        // A collected pool: the interval finds nothing behind its weak reference and clears itself.
+        released = true;
+        vi.advanceTimersByTime(1001);
+        expect(vi.getTimerCount()).toBe(before);
+        expect(probe).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('close() stops the interval, waits for a probe in flight and saves what it found', async () => {
+      const store = new InMemoryKeyPoolStateStore();
+      let answer: (result: ProbeResult) => void = () => undefined;
+      const probe = vi.fn(() => new Promise<ProbeResult>((resolve) => {
+        answer = resolve;
+      }));
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', recheckMs: 1000, probe, id: 'p:close', store });
+      await pool.ready();
+      pool.markFailed('sk_alpha_0001', 'auth');
+      pool.startRechecks();
+      vi.advanceTimersByTime(1001);
+      expect(probe).toHaveBeenCalledTimes(1);
+      let closed = false;
+      const closing = pool.close().then(() => {
+        closed = true;
+      });
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      answer('ok');
+      await closing;
+      expect((await store.load('p:close'))?.map((row) => row.status)).toEqual(['ok']);
+      // The interval is gone: time passing starts no further probe.
+      pool.markFailed('sk_alpha_0001', 'auth');
+      vi.advanceTimersByTime(5000);
+      expect(probe).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('persistence', () => {
     it('saves state changes under the pool id and a new pool over the same store starts from them', async () => {
       const store = new InMemoryKeyPoolStateStore();

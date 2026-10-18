@@ -924,8 +924,6 @@ export class OpenAIProvider implements IProvider {
 
   private config!: OpenAIProviderConfig; // Asserted as initialized by `initialize`
   private keyPool: ApiKeyPool | null = null;
-  /** Stops the pool's recheck timer, set while a pool of several keys is live. */
-  private stopRechecks?: () => void;
   private availableModelsCache: Map<string, ModelInfo> = new Map();
 
   // OpenAI's price table (USD per 1K tokens) lives in openaiPricing.ts, so a
@@ -956,22 +954,23 @@ export class OpenAIProvider implements IProvider {
       requestTimeout: 60000, // 60 seconds
       ...config, // User-provided config overrides defaults
     };
+    // A re-initialize replaces the pool; the old pool's recheck interval stops with it.
+    this.keyPool?.stopRechecks();
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
       ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openai')),
       probe: (key, kind) => this.probeKey(key, kind),
     });
     await this.keyPool.ready();
-    // Failed keys are probed on the pool's own clock, so a provider the health breaker holds
-    // still gets its keys back; the timer never keeps the process alive.
-    this.stopRechecks?.();
-    this.stopRechecks = this.keyPool.size > 1 ? this.keyPool.startRechecks() : undefined;
     this.defaultModelId = config.defaultModelId;
 
     try {
       // Attempt to list models to verify API key and connectivity.
       await this.refreshAvailableModels();
       this.isInitialized = true;
+      // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
+      // breaker holds still gets its keys back; the interval never keeps the process alive.
+      if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
       const env = typeof process !== 'undefined' ? process.env : undefined;
       const debugOn = !!env && (env.AGENTOS_DEBUG === '1' || env.AGENTOS_DEBUG === 'true' || (env.AGENTOS_LOG_LEVEL ?? '').toLowerCase() === 'debug');
       if (debugOn) {
@@ -1790,9 +1789,8 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
-    this.stopRechecks?.();
-    this.stopRechecks = undefined;
-    await this.keyPool?.flush();
+    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    await this.keyPool?.close();
     // For OpenAIProvider, using stateless HTTP requests, there might not be
     // persistent connections to close. If connection pooling or WebSockets
     // were used, they would be closed here.
