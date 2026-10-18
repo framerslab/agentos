@@ -366,6 +366,21 @@ describe('session events under a call profile', () => {
     expect(heard).toEqual(['the listener that closes']);
   });
 
+  it('takes the turn no further once a listener of the agent thinking closes the call', async () => {
+    const f = await call();
+    f.runtime.on('agent_state_changed', ({ newState }: VoiceSessionEventMap['agent_state_changed']) => {
+      if (newState === 'thinking') void f.runtime.stopSession('done');
+    });
+
+    f.turn();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+    await f.runtime.stopSession();
+
+    // The start fenced the call's first generation; the closed call fences none for a turn it did not take.
+    expect(f.profile.onGeneration).toHaveBeenCalledOnce();
+    expect(f.transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_thinking' }));
+  });
+
   it('names the transport as the source of a reply whose audio the transport refuses', async () => {
     const f = await call();
     f.transport.sendAudio = vi.fn(async () => {
