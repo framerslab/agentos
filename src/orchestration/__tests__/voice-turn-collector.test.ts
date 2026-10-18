@@ -233,6 +233,16 @@ describe("VoiceTurnCollector on a started session's own events", () => {
     expect(collector.getTranscript()).toEqual([]);
   });
 
+  it('forwards a barge-in that cut the reply, and not the pause and resume of a false interruption', () => {
+    const { session, events } = onSession();
+    session.emit('barge_in', { speechDurationMs: 100, interruptedText: 'It is', playedDurationMs: 400, action: 'pause', createdAt: 1 });
+    session.emit('barge_in', { speechDurationMs: 400, interruptedText: 'It is booked', playedDurationMs: 400, action: 'resume', createdAt: 2 });
+    expect(events).toEqual([]);
+
+    session.emit('barge_in', { speechDurationMs: 300, interruptedText: 'It is booked for', playedDurationMs: 900, action: 'cancel', createdAt: 3 });
+    expect(events).toEqual([{ type: 'voice_barge_in', nodeId: 'test-node', interruptedText: 'It is booked for', userSpeech: '' }]);
+  });
+
   it("defaults a turn's endpoint reason to unknown and a final's speaker to user, and forwards a barge-in", () => {
     const { session, events, collector } = onSession();
     session.emit('user_input_transcribed', { transcript: 'Wait.', isFinal: true, createdAt: 1 });

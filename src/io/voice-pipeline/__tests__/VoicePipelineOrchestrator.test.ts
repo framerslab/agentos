@@ -2060,6 +2060,75 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(transport.close).not.toHaveBeenCalled();
   });
 
+  it('emits no event after close when a listener stops the session while an event is under way', async () => {
+    const session = await start();
+    // The orchestrator's listener runs first and stops the session as the agent starts thinking.
+    orchestrator.on('agent_state_changed', ({ newState }: VoiceSessionEventMap['agent_state_changed']) => {
+      if (newState === 'thinking') void orchestrator.stopSession('done');
+    });
+    const log = recordSessionEvents(session);
+
+    await takeTurn();
+
+    expect(log).toEqual(['item user speech Hello there', 'close done']);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    expect(transport.sendControl).not.toHaveBeenCalledWith({ type: 'agent_thinking' });
+  });
+
+  it("hands an event to none of a session's listeners after one of them stops the session", async () => {
+    const session = await start();
+    session.on('agent_state_changed', ({ newState }) => {
+      if (newState === 'thinking') void session.close('done');
+    });
+    const states: string[] = [];
+    session.on('agent_state_changed', ({ newState }) => states.push(newState));
+    const closes: string[] = [];
+    session.on('close', ({ reason }) => closes.push(reason));
+
+    await takeTurn();
+
+    expect(states).toEqual([]);
+    expect(closes).toEqual(['done']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('hands a failure to a session that listens with errorMonitor alone, and writes no warning for it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await start();
+      const monitored: unknown[] = [];
+      session.on(EventEmitter.errorMonitor, (error: unknown) => monitored.push(error));
+      const failures: unknown[] = [];
+      orchestrator.on('error', (error: unknown) => failures.push(error));
+
+      sttSession.emit('error', new Error('what the caller said'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(monitored).toEqual(failures);
+      expect(monitored).toEqual([expect.any(Error)]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("emits session_error before close though an 'error' listener stops the session", async () => {
+    const session = await start();
+    session.on('error', () => {
+      void session.close('stopped');
+    });
+    const log = recordSessionEvents(session);
+    const closed: Array<VoiceSessionEventMap['close']> = [];
+    session.on('close', (event) => closed.push(event));
+
+    sttSession.emit('error', new Error('what the caller said'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log).toEqual(['session_error stt false', 'close stopped']);
+    expect(closed[0]!.error).toBeInstanceOf(Error);
+    expect(orchestrator.state).toBe('closed');
+  });
+
   it('keeps state_change and turn_complete beside the new events', async () => {
     const session = await start();
     const states: string[] = [];

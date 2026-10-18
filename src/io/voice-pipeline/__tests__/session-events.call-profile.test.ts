@@ -258,4 +258,50 @@ describe('session events under a call profile', () => {
       warn.mockRestore();
     }
   });
+
+  it('hands a failure to a call that listens with errorMonitor alone, and writes no warning for it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const f = await call();
+      const monitored: unknown[] = [];
+      f.session.on(EventEmitter.errorMonitor, (error: unknown) => monitored.push(error));
+
+      f.stt.emit('error', new Error('what the caller said'));
+      await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+
+      expect(monitored).toEqual([expect.any(Error)]);
+      expect((monitored[0] as Error).message).toBe('voice call failed (provider_failure)');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("emits session_error before close though an 'error' listener closes the call", async () => {
+    const f = await call();
+    f.session.on('error', () => {
+      void f.session.close('stopped');
+    });
+    const log = recordSessionEvents(f.session);
+
+    f.stt.emit('error', new Error('what the caller said'));
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+
+    expect(log).toEqual(['session_error stt false', 'close stopped']);
+  });
+
+  it('names the transport as the source of a reply whose audio the transport refuses', async () => {
+    const f = await call();
+    f.transport.sendAudio = vi.fn(async () => {
+      throw new Error('send failed');
+    });
+    const failures: Array<[string, boolean]> = [];
+    f.session.on('session_error', (event) => failures.push([event.source, event.recoverable]));
+
+    f.turn();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+
+    expect(failures).toEqual([['transport', false]]);
+    expect(f.profile.onFailure).toHaveBeenCalledWith('provider_failure');
+  });
 });
