@@ -230,7 +230,12 @@ export class LiveKitAudioPublisher {
    * cleared as it lands.
    */
   private stalls = 0;
-  /** Settles at the next change a playout wait watches: a frame captured, a hold begun or released, a clear or a close. */
+  /** Whether the track is being published and its first subscription waited for; a playout wait's clock stops meanwhile. */
+  private preparing = false;
+  /**
+   * Settles at the next change a playout wait watches: a frame captured, a hold begun or released, the track published,
+   * a clear or a close.
+   */
   private watch?: { changed: Promise<void>; notify: () => void };
   /** Ends the wait for the first subscription, so that a close does not wait it out. */
   private stopWaiting?: () => void;
@@ -291,18 +296,22 @@ export class LiveKitAudioPublisher {
     if (this.closed) return Promise.reject(new Error('publisher closed'));
     if (this.preparation) return this.preparation;
     this.preparation = (async () => {
-      const rtc = publishingRtc(this.options.rtc ?? this.binding.rtc ?? (await loadLiveKitRtc()));
-      if (this.closed) throw new Error('publisher closed'); this.rtc = rtc;
-      this.source = new rtc.AudioSource(this.options.sampleRate, 1, this.options.maxDurationMs);
-      this.track = rtc.LocalAudioTrack.createAudioTrack('voice', this.source);
-      const options = new rtc.TrackPublishOptions(); options.source = rtc.TrackSource.SOURCE_MICROPHONE;
-      const publication = await this.participant.publishTrack(this.track, options);
-      if (!publication.sid) throw new Error('publication id missing'); this.publication = publication.sid;
-      if (this.closed) throw new Error('publisher closed');
-      // A participant that subscribes after a capture misses what played before it; LiveKit's own publish-wav example
-      // waits for the subscription before its first capture too.
-      await this.subscription(publication);
-      if (this.closed) throw new Error('publisher closed');
+      // A playout wait's clock stops until the track is published and its subscription waited for (watchTrack).
+      this.preparing = true;
+      try {
+        const rtc = publishingRtc(this.options.rtc ?? this.binding.rtc ?? (await loadLiveKitRtc()));
+        if (this.closed) throw new Error('publisher closed'); this.rtc = rtc;
+        this.source = new rtc.AudioSource(this.options.sampleRate, 1, this.options.maxDurationMs);
+        this.track = rtc.LocalAudioTrack.createAudioTrack('voice', this.source);
+        const options = new rtc.TrackPublishOptions(); options.source = rtc.TrackSource.SOURCE_MICROPHONE;
+        const publication = await this.participant.publishTrack(this.track, options);
+        if (!publication.sid) throw new Error('publication id missing'); this.publication = publication.sid;
+        if (this.closed) throw new Error('publisher closed');
+        // A participant that subscribes after a capture misses what played before it; LiveKit's own publish-wav example
+        // waits for the subscription before its first capture too.
+        await this.subscription(publication);
+        if (this.closed) throw new Error('publisher closed');
+      } finally { this.preparing = false; this.moved(); }
     })(); return this.preparation;
   }
   /**
@@ -498,7 +507,8 @@ export class LiveKitAudioPublisher {
    * A clear or a close ends it at once.
    *
    * The wait is bounded: a track that takes no frame, and does not play its queue out, for `receiptTimeoutMs` plus
-   * `maxDurationMs` while no pause holds it has stalled. What it holds or has yet to take is then discarded, so none of
+   * `maxDurationMs` while no pause holds it has stalled; the clock starts once the track is published and its first
+   * subscription waited for. What it holds or has yet to take is then discarded, so none of
    * it plays later: the chunks admitted are cancelled, the native queue is cleared and a frame whose capture is under
    * way is cleared as it lands. The wait then rejects with `publisher drain timeout`; it rejects as well when the native
    * wait does.
@@ -517,9 +527,10 @@ export class LiveKitAudioPublisher {
   }
   /**
    * Waits for `work` while the track moves, and gives up once `receiptTimeoutMs` plus `maxDurationMs` pass with no
-   * frame captured; the clock stops while a pause holds the track and starts again at each frame and at the release.
-   * The track's native queue is `maxDurationMs` long, so a track that plays takes its next frame, or plays its queue
-   * out, within that time; `receiptTimeoutMs` is the slack a playback wait already allows.
+   * frame captured; the clock stops while a pause holds the track and while the track is being published and its first
+   * subscription waited for, and starts again at each frame, at the release and once the track is published. The
+   * track's native queue is `maxDurationMs` long, so a track that plays takes its next frame, or plays its queue out,
+   * within that time; `receiptTimeoutMs` is the slack a playback wait already allows.
    *
    * @param work - A step of the playout wait: the captures of the chunks admitted, or the native queue's playout.
    * @param cancellation - The clear count the wait read; a clear or a close since then ends the wait.
@@ -533,12 +544,12 @@ export class LiveKitAudioPublisher {
       const changed = this.nextChange().then(() => 'changed' as const);
       let timer: ReturnType<typeof setTimeout> | undefined;
       const stalled = new Promise<'stalled'>((resolve) => {
-        if (!this.hold) timer = setTimeout(() => resolve('stalled'), this.options.receiptTimeoutMs + this.options.maxDurationMs);
+        if (!this.hold && !this.preparing) timer = setTimeout(() => resolve('stalled'), this.options.receiptTimeoutMs + this.options.maxDurationMs);
       });
       try {
         const outcome = await Promise.race([settled, changed, stalled]);
-        // A pause that began as the bound passed stops the clock instead.
-        if (outcome === 'settled' || (outcome === 'stalled' && !this.hold)) return outcome;
+        // A pause, or a publication, that began as the bound passed stops the clock instead.
+        if (outcome === 'settled' || (outcome === 'stalled' && !this.hold && !this.preparing)) return outcome;
       } finally { clearTimeout(timer); }
     }
   }
