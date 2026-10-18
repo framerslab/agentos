@@ -65,7 +65,7 @@
  */
 
 import { compileStrategy, isAgent } from './runtime/strategies/index.js';
-import { seatMetadataOf } from './runtime/strategies/shared.js';
+import { maskedMessageOf, seatMetadataOf } from './runtime/strategies/shared.js';
 import { validatePoolOptions, hasPoolSurface } from './runtime/pool/validate.js';
 import { createSeatingState, seatRoster, type SeatingState, type SeatedRoster } from './runtime/pool/seating.js';
 import { guardPerCallOptions } from './runtime/pool/guard.js';
@@ -237,12 +237,12 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   /** A masked stand-in that never writes `error`: for an error someone else owns, a HITL handler's. */
   const maskedCopy = (error: unknown): unknown => (pooled ? maskedCopyOf(error, secretsHolder.list) : error);
   const toError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
-  /** Runs one of this agency's own callbacks: a callback that throws is logged and never fails the call. */
-  const fire = (call: () => void): void => {
+  /** Runs one of this agency's own callbacks: a callback that throws is written to the host's logger, masked, and never fails the call. */
+  const fire = (name: string, call: () => void): void => {
     try {
       call();
     } catch (err) {
-      console.warn('[AgentOS][Agency] callback threw:', err);
+      agencyLogger.warn(`${name} callback threw`, { event: 'agency_callback_threw', callback: name, error: maskedMessageOf(err, mask) });
     }
   };
 
@@ -524,7 +524,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         : {}),
     });
 
-    fire(() => opts.on?.agentEnd?.({
+    fire('agentEnd', () => opts.on?.agentEnd?.({
       agent: agencyName,
       output: (approvedResult.text as string) ?? '',
       durationMs: elapsedMs,
@@ -574,7 +574,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     const slot = createApprovalSlot();
     const callOpts = buildCallOptions(execOpts, slot);
     const errors = callErrors(slot);
-    fire(() => opts.on?.agentStart?.({
+    fire('agentStart', () => opts.on?.agentStart?.({
       agent: agencyName,
       input: prompt,
       timestamp: start,
@@ -638,7 +638,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       // The slot's error was reported by the gate that stored it; any other
       // error is reported here, masked, as the call rejects with it.
       if (!errors.isSlotError(error)) {
-        fire(() => opts.on?.error?.({
+        fire('error', () => opts.on?.error?.({
           agent: agencyName,
           error: toError(errors.maskOnce(error)),
           timestamp: Date.now(),
@@ -672,7 +672,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       const masked = errors.maskOnce(error);
       if (!errorReported) {
         errorReported = true;
-        fire(() => opts.on?.error?.({
+        fire('error', () => opts.on?.error?.({
           agent: agencyName,
           error: toError(masked),
           timestamp: Date.now(),
@@ -681,7 +681,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       return masked;
     };
 
-    fire(() => opts.on?.agentStart?.({
+    fire('agentStart', () => opts.on?.agentStart?.({
       agent: agencyName,
       input: prompt,
       timestamp: start,
@@ -953,8 +953,9 @@ export function agency(opts: AgencyOptions): AgencyInstance {
           id: sessionId,
 
           /**
-           * Sends a user message through the agency strategy and appends both
-           * turns to session history.
+           * Sends a user message through the agency strategy and appends the
+           * user turn to session history, and the assistant turn when the run
+           * answered.
            *
            * @param text - User message text.
            * @returns The aggregated strategy result.
@@ -966,7 +967,9 @@ export function agency(opts: AgencyOptions): AgencyInstance {
               undefined,
               sessionId,
             );
-            history.push({ role: 'assistant', content: (result.text as string) ?? '' });
+            // A run no seat answered is no assistant turn: the history keeps the user's message alone.
+            const answer = (result.text as string) ?? '';
+            if (answer !== '') history.push({ role: 'assistant', content: answer });
             return result;
           },
 
@@ -974,7 +977,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
            * Streams a user message through the agency strategy, feeding prior
            * conversation history into the prompt — matching the behaviour of
            * `session.send()`.  The assistant turn is appended to history once
-           * the full streamed text is resolved.
+           * the full streamed text is resolved, and not when it is empty.
            *
            * @param text - User message text.
            * @returns A streaming result compatible with `StreamTextResult`.
@@ -993,7 +996,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
 
             // Append the assistant reply to history once streaming resolves.
             streamResult.text.then((assistantText) => {
-              history.push({ role: 'assistant', content: assistantText });
+              if (assistantText !== '') history.push({ role: 'assistant', content: assistantText });
             }).catch(() => {
               // Ignore resolution failures — history will just lack this turn.
             });

@@ -26,7 +26,10 @@ import type {
   SeatMetadata,
 } from '../types.js';
 import { AgencyQuorumError } from '../types.js';
+import { lazyLogger } from '../lazyLogger.js';
 import type { SeatInternals } from '../pool/seating.js';
+
+const agencyLogger = lazyLogger('agency');
 
 /**
  * Type guard that checks whether a value is a pre-built {@link Agent} instance
@@ -112,7 +115,7 @@ export function enforceQuorum(
     `panel quorum shortfall: ${settled.length}/${rosterSize} agents succeeded ` +
     `(need ${minAgents}), ${providers.size} distinct providers (need ${minProviders})`;
   if ((quorum.onShortfall ?? 'error') === 'proceed') {
-    console.warn(`[AgentOS][Parallel] ${detail} — proceeding (onShortfall=proceed)`);
+    agencyLogger.warn(`${detail}: proceeding (onShortfall=proceed)`, { event: 'parallel_quorum_shortfall', shortfall: detail });
     return;
   }
   throw new AgencyQuorumError(detail);

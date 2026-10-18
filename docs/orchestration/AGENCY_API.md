@@ -449,7 +449,8 @@ for a roster of two or more and to 0 for a roster of one; `minProviders` counts
 distinct provider ids; `minVendors` counts distinct known vendors (an unknown
 vendor and a pre-built seat never count). Zero healthy seats always throws
 `AgencyQuorumError`, whatever `onShortfall` says; any other shortfall throws by
-default or, with `onShortfall: 'proceed'`, warns and goes on. Construction
+default or, with `onShortfall: 'proceed'`, writes `panel_quorum_shortfall`
+through the host's logger and goes on. Construction
 rejects a `minAgents` above the seat count, a `minProviders` above what the
 seats can reach (one more per pre-built seat), a `minVendors` above the vendors
 the config seats can reach, and `minVendors` with a pool entry whose vendor is
@@ -472,20 +473,25 @@ supported, `adaptive: true` is rejected, a seat named `chair` is rejected, and
 Through the host's logger factory (`setLoggerFactory`), with every message
 masked: `agency_no_seat_answered` (info; a run whose every seat was rejected
 returns `text: ''` and runs no validation retry), `parallel_seat_failed`
-(warn), and `fallback_fired` and `fallback_exhausted` from the `fallback`
-component.
+(warn), `panel_quorum_shortfall` and `parallel_quorum_shortfall` (warn; a
+shortfall the call goes on from under `onShortfall: 'proceed'`),
+`agency_callback_threw` (warn; the callback's name, its message masked), and
+`fallback_fired` and `fallback_exhausted` from the `fallback` component.
 
 ### Upgrading to 0.14
 
 - `agency()` returns `AgencyInstance`: `generate()` is `Promise<AgencyResult>`
   (`Promise<PanelResult>` under `panel`) where it was `Promise<unknown>`. A
   cast of the result to an unrelated type needs `as unknown as` first.
-- `result.text` is `''`, not missing, when every seat was rejected.
+- `result.text` is `''`, not missing, when every seat was rejected, and a
+  session adds no assistant turn for such a run: `messages()` keeps the user's
+  turn alone.
 - `stream()` carries `result`, a promise of the finalized result `generate()`
   returns.
 - A nested agency's `seating`, `seats`, `chair`, `quorum` and `provenanceTrail`
   are stripped from the parent's result.
-- A callback that throws is logged and no longer rejects the call.
+- A callback that throws is written through the host's logger as
+  `agency_callback_threw` and no longer rejects the call.
 - A run that breaches `maxTotalTokens` or `maxCostUSD` is added to the usage
   totals before the limit error is thrown.
 - `quorum` is read by `panel` as well as `parallel`; `AgencyQuorumError` takes
@@ -567,7 +573,8 @@ console.log(agentCalls.map((c) => c.agent)); // the seats that answered
   model it serves, so an `openai` seat plus a seat that failed over to
   OpenRouter's `openai/gpt-5.6-sol` leg passes `minProviders: 2` on one vendor.
 - `onShortfall`: `'error'` (default) throws [`AgencyQuorumError`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) before
-  synthesis; `'proceed'` logs a warning and synthesizes anyway. The class is
+  synthesis; `'proceed'` writes `parallel_quorum_shortfall` through the
+  host's logger and synthesizes anyway. The class is
   exported from the package entry point, with `AgencyPanelError` and
   `AgencySeatingError`.
 
@@ -998,7 +1005,7 @@ store is initialised (a `documents` list only logs guidance to use the
 runtime). Each member keeps its own session history for the duration of one
 `generate()` or `stream()` call; inside `agency().session()`, only the
 user/assistant message history and aggregate usage persist between `.send()`
-calls.
+calls, and a run no seat answered adds no assistant turn to that history.
 
 To give members memory, pass built agents as roster members: an
 [`agent()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) with a `memoryProvider` keeps its hooks when it sits in a

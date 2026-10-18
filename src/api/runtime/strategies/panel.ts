@@ -27,7 +27,9 @@ import {
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
+  maskedMessageOf,
 } from './shared.js';
+import { lazyLogger } from '../lazyLogger.js';
 import type { SeatedRoster, SeatedConfig } from '../pool/seating.js';
 import { vendorOf, makerOfHostedModel, isHostProvider } from '../pool/vendor.js';
 import { seatHealthId } from '../pool/resolve.js';
@@ -39,6 +41,8 @@ import {
   type ApprovalSlot,
 } from '../approval-gate.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+
+const agencyLogger = lazyLogger('agency');
 
 type Usage = {
   promptTokens: number;
@@ -138,7 +142,8 @@ function freshError(error: unknown, mask: (error: unknown) => unknown): Error {
 
 /**
  * The callbacks the panel and its gates fire. Each runs inside a try/catch,
- * so a callback that throws is logged and changes no status, and every
+ * so a callback that throws is written to the host's logger, masked, and
+ * changes no status, and every
  * `error` event carries a new Error built from the redacted message and stack.
  */
 function panelCallbacks(on: AgencyOptions['on'], mask: (error: unknown) => unknown): Callbacks {
@@ -151,7 +156,8 @@ function panelCallbacks(on: AgencyOptions['on'], mask: (error: unknown) => unkno
           name === 'error' && isRecord(event) ? { ...event, error: freshError(event.error, mask) } : event;
         (fn as Notify).call(on, payload);
       } catch (err) {
-        console.warn(`[AgentOS][Panel] ${name} callback threw:`, err);
+        // To the host's logger, with the message through the call's mask: a callback's error can quote what the call sent.
+        agencyLogger.warn(`${name} callback threw`, { event: 'agency_callback_threw', callback: name, error: maskedMessageOf(err, mask) });
       }
     };
   }
@@ -591,7 +597,7 @@ export function compilePanel(
       if (healthy.length === 0 || (q.onShortfall ?? 'error') === 'error') {
         throw new AgencyQuorumError(quorum.shortfall ?? 'panel quorum shortfall', ledger(quorum));
       }
-      console.warn(`[AgentOS][Panel] ${quorum.shortfall}: proceeding (onShortfall=proceed)`);
+      agencyLogger.warn(`${quorum.shortfall}: proceeding (onShortfall=proceed)`, { event: 'panel_quorum_shortfall', shortfall: quorum.shortfall });
     }
 
     // ---- chair ----
