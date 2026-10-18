@@ -1001,6 +1001,26 @@ describe('13. no credential in any record', () => {
     expect(JSON.stringify(result)).not.toContain(K.oaiEnv);
   });
 
+  it("a tool that returns a class instance holding a key: the tool-call record holds what a serializer writes of it, masked, as the provider's turn does, and a clean instance stays itself", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    class Session { user: string; token: string; constructor(user: string, token: string) { this.user = user; this.token = token; } }
+    class Profile { user: string; constructor(user: string) { this.user = user; } }
+    const clean = new Profile('ada');
+    const tools = {
+      login: { description: 'l', parameters: { type: 'object', properties: {} }, execute: async () => new Session('ada', `tok ${K.oaiEnv}`) },
+      whoami: { description: 'w', parameters: { type: 'object', properties: {} }, execute: async () => clean },
+    };
+    const team = agency({ modelPool: { astra: { provider: 'openai', model: 'gpt-4.1' } }, agents: { one: { instructions: 'x', tools } }, strategy: 'sequential' } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('login', {}, 'c1'), openaiToolCall('whoami', {}, 'c2'), openaiText('done')]]]);
+    const result = await team.generate('go');
+    expect(result.text).toBe('done');
+    const [login, whoami] = result.agentCalls[0].toolCalls;
+    expect(login.result).toEqual({ user: 'ada', token: 'tok [redacted]' });
+    expect(whoami.result).toBe(clean);
+    expect(JSON.stringify(result)).not.toContain(K.oaiEnv);
+    expect(JSON.stringify(calls(OPENAI_CHAT, 'POST').map((c) => c.body))).not.toContain(K.oaiEnv);
+  });
+
   it("under panel a seat's answer that repeats a key is redacted in its seat record and the chair's answer in the result's text", async () => {
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText(`B saw ${K.oai}`)], [ANTHROPIC, [anthropicText('A'), anthropicText(`Merged ${K.oai}`)]], [GEMINI, geminiText('C')]]);
     const result = await panel().generate('review');
@@ -1674,6 +1694,18 @@ describe('25-26. approvals under panel and nested agencies', () => {
     const records = r.provenanceTrail!.events.filter((e) => e.kind === 'approvalDecided').map((e) => e.payload);
     expect(records).toEqual([{ approved: true, reason: 'cleared, saw [redacted]' }]);
     expect(JSON.stringify([r, decided])).not.toContain(K.ant);
+  });
+  it("a decision's numbers are the approver's: a key of digits in modifications.toolArgs reaches the host's approvalDecided and the provenance trail masked in a pooled agency", async () => {
+    const digits = '12345678';
+    const decided: Json[] = [];
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')]]);
+    const team = agency({ modelPool: { astra: { provider: 'openai', model: 'gpt-4.1', apiKey: digits } }, agents: { only: { instructions: 'x' } }, strategy: 'sequential', provenance: { enabled: true }, hitl: { approvals: { beforeAgent: ['only'] }, handler: async () => ({ approved: true, modifications: { toolArgs: { pin: 12345678 } } }) }, on: { approvalDecided: (d: Json) => decided.push(d) } } as never);
+    const r = await team.generate('go');
+    expect(r.text).toBe('B');
+    expect(decided).toEqual([{ approved: true, modifications: { toolArgs: { pin: '[redacted]' } } }]);
+    const records = r.provenanceTrail!.events.filter((e) => e.kind === 'approvalDecided').map((e) => e.payload);
+    expect(records).toEqual([{ approved: true, modifications: { toolArgs: { pin: '[redacted]' } } }]);
+    expect(JSON.stringify([r.provenanceTrail, decided])).not.toContain(digits);
   });
   it("a pooled seat's token counts stay numbers under the mask: a key of digits that a count contains leaves the result's, the seat's, the call record's and the final-output part's usage and the agency's totals as numbers", async () => {
     const digits = '12345678';
