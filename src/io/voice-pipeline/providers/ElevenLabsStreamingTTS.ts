@@ -281,21 +281,26 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
 
   /**
    * Sends one segment: its text, then the end-of-stream message, on a socket of
-   * its own. A cancel or a close while the socket opens sends nothing; a socket
-   * that fails to open reaches the session's `'error'` listener and ends the
-   * segment without a boundary.
+   * its own. On the current socket, open and not yet sent an end-of-stream
+   * message, both go out within the call, so the text a caller pushes reaches
+   * the provider in the same turn; otherwise a new socket is opened first. A
+   * cancel or a close while that socket opens sends nothing; a socket that
+   * fails to open reaches the session's `'error'` listener and ends the segment
+   * without a boundary.
    */
   private async synthesize(text: string, signal: AbortSignal): Promise<void> {
-    let ws: WebSocket;
-    try {
-      ws = await this.socket();
-    } catch (err) {
-      // A cancel or a close while the socket opened is no failure.
-      if (signal.aborted || this.closed) return;
-      this._emitErrorSafe(err instanceof Error ? err : new Error(String(err)));
-      throw err;
+    let ws = this.ws;
+    if (!ws || this.spent || ws.readyState !== WebSocket.OPEN) {
+      try {
+        ws = await this.socket();
+      } catch (err) {
+        // A cancel or a close while the socket opened is no failure.
+        if (signal.aborted || this.closed) return;
+        this._emitErrorSafe(err instanceof Error ? err : new Error(String(err)));
+        throw err;
+      }
+      if (signal.aborted || this.ws !== ws) return;
     }
-    if (signal.aborted || this.ws !== ws) return;
     ws.send(JSON.stringify({ text }));
     ws.send(JSON.stringify({ text: '' }));
     this.spent = true;
