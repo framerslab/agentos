@@ -2407,4 +2407,20 @@ describe('VoicePipelineOrchestrator: the floor until playout', () => {
   it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])('refuses a maxPlayoutWaitMs of %s', (maxPlayoutWaitMs) => {
     expect(() => new VoicePipelineOrchestrator(makeConfig({ maxPlayoutWaitMs }))).toThrow(RangeError);
   });
+
+  it('adds a reply whose playout wait failed to the conversation as interrupted, with none of it known heard', async () => {
+    // A LiveKit track that stalls discards what it had not played, and its wait rejects with publisher drain timeout.
+    (transport as any).waitForPlayout = vi.fn((_signal?: AbortSignal) => Promise.reject(new Error('publisher drain timeout')));
+    const session = await start();
+    const log = recordSessionEvents(session);
+
+    await reply();
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The reply ends as before: agent_done goes out and the session listens again.
+    expect(orchestrator.state).toBe('listening');
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'Hello world', durationMs: 0 });
+    expect(log.slice(-2)).toEqual(['item assistant interrupted Hello world|', 'agent speaking>listening']);
+  });
 });
