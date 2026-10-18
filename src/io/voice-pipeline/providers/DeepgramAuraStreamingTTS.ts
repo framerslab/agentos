@@ -17,7 +17,26 @@
  * Audio arrives as raw binary (unlike ElevenLabs, which base64-encodes audio
  * inside JSON), so the message handler branches on the `ws` `isBinary` flag.
  *
+ * ## Sentence segments
+ *
+ * The session synthesizes one sentence segment at a time
+ * ({@link SegmentSynthesisQueue}): each segment goes out as one `Speak`
+ * followed by one `Flush`, and `Flushed`, which Deepgram sends once it has
+ * returned the final audio for the text sent so far, completes it. The
+ * segment's boundary ({@link TtsTextBoundary}) rides on the last frame
+ * `Flushed` proves complete; every earlier frame carries none. A segment with
+ * no `Flushed` within five seconds ends without a boundary, and the next
+ * segment waits for that late `Flushed`, or for the `Cleared` that answers a
+ * `Clear`, before it starts: a `Flushed` of a segment that timed out or was
+ * cleared must never complete the segment after it, and Deepgram's
+ * `sequence_id` is documented only as "The sequence ID of the response", so the
+ * session does not read it. Deepgram accepts at most 20 `Flush` messages in
+ * 60 seconds and answers the rest with a `Warning`; such a segment ends on its
+ * timeout.
+ *
  * @see https://developers.deepgram.com/docs/tts-websocket
+ * @see https://developers.deepgram.com/docs/tts-ws-flush
+ * @see https://developers.deepgram.com/docs/tts-ws-clear
  */
 
 import { EventEmitter } from 'node:events';
@@ -28,6 +47,7 @@ import type {
   StreamingTTSConfig,
   EncodedAudioChunk,
 } from '../types.js';
+import { SegmentSynthesisQueue } from './SegmentSynthesisQueue.js';
 import { ApiKeyPool } from '../../../core/providers/ApiKeyPool.js';
 import {
   defaultCapabilities,
@@ -41,6 +61,10 @@ const DEFAULT_VOICE = 'aura-2-thalia-en';
 const DEFAULT_SAMPLE_RATE = 24_000;
 /** How long to wait for the Deepgram WS upgrade before failing the connect. */
 const CONNECT_TIMEOUT_MS = 8_000;
+/** How long the next segment waits for the late `Flushed` of a segment that timed out. */
+const STALE_FLUSHED_MS = 5_000;
+/** How long the next segment waits for the `Cleared` that answers a `Clear`, one round trip. */
+const CLEARED_MS = 1_000;
 
 async function defaultDeepgramTtsProbe(apiKey: string) {
   const start = Date.now();
@@ -116,8 +140,13 @@ function wrapWav(pcm: Buffer, sampleRate: number): Buffer {
 class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingTTSSession {
   private ws: WebSocket | null = null;
   private closed = false;
-  private pendingFlush = false;
-  private accumulatedText = '';
+  private readonly segments: SegmentSynthesisQueue;
+  /**
+   * Set while the next segment waits for a stale response: the late `Flushed`
+   * of a segment that timed out, or the `Cleared` that answers a `Clear`. The
+   * timer bounds the wait.
+   */
+  private stale?: ReturnType<typeof setTimeout>;
   private readonly voice: string;
   private readonly encoding: string;
   private readonly container: 'wav' | 'raw';
@@ -133,6 +162,16 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     this.encoding = mapped.encoding;
     this.container = mapped.container;
     this.sampleRate = sessionConfig.sampleRate ?? DEFAULT_SAMPLE_RATE;
+    this.segments = new SegmentSynthesisQueue({
+      start: (segment) => {
+        this.send({ type: 'Speak', text: segment.text });
+        this.send({ type: 'Flush' });
+      },
+      emit: (chunk) => this.emit('audio', chunk),
+      flushed: () => this.emit('flush_complete'),
+      // The segment's Flush is still outstanding: its Flushed may yet come, and must not complete the next segment.
+      timedOut: () => this.holdFor(STALE_FLUSHED_MS),
+    });
   }
 
   /**
@@ -203,6 +242,9 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
       this.ws.on('close', () => {
         if (!settled) fail(new Error('deepgram aura ws closed before the upgrade completed'));
         this.closed = true;
+        // The segments queued and in flight end without a boundary; a flush under way resolves without flush_complete.
+        this.segments.cancel();
+        this.release();
         this.emit('close');
       });
     });
@@ -220,51 +262,69 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     }
   }
 
+  /** Feeds the text to the segmenter; each sentence it completes is queued and synthesized in turn. */
   pushTokens(tokens: string): void {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.accumulatedText += tokens;
-    this.ws.send(JSON.stringify({ type: 'Speak', text: tokens }));
+    this.segments.push(tokens);
   }
 
+  /**
+   * Queues the final, unterminated segment and resolves once every queued
+   * segment has completed or timed out; `flush_complete` goes out once, then.
+   * A cancel or a close ends the wait without `flush_complete`.
+   */
   async flush(): Promise<void> {
-    if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.pendingFlush = true;
-    this.ws.send(JSON.stringify({ type: 'Flush' }));
-
-    return new Promise<void>((resolve) => {
-      const onFlush = () => {
-        this.removeListener('_internal_flush', onFlush);
-        clearTimeout(timeout);
-        resolve();
-      };
-      // Safety timeout: resolve after 5s even if no Flushed frame arrives.
-      const timeout = setTimeout(() => {
-        this.removeListener('_internal_flush', onFlush);
-        this.pendingFlush = false;
-        this.emit('flush_complete');
-        resolve();
-      }, 5_000);
-      this.on('_internal_flush', onFlush);
-    });
+    if (this.closed) return;
+    await this.segments.flush();
   }
 
+  /**
+   * Drops the queued segments, the held frame and the segment in flight, and
+   * sends `Clear`, which discards the server's buffered text and audio without
+   * tearing down the socket. The session stays usable: when a segment was in
+   * flight, the next one waits for the `Cleared`, so that segment's late
+   * `Flushed` cannot complete it.
+   */
   cancel(): void {
-    this.pendingFlush = false;
-    this.accumulatedText = '';
+    const outstanding = this.segments.hasInFlight || this.stale !== undefined;
+    this.segments.cancel();
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      // Clear discards server-buffered audio without tearing down the socket.
       this.ws.send(JSON.stringify({ type: 'Clear' }));
     }
+    if (outstanding) this.holdFor(CLEARED_MS);
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.segments.cancel();
+    this.release();
     if (this.ws) {
       if (this.ws.readyState === WebSocket.OPEN) this.ws.close(1000, 'session closed');
       this.ws = null;
     }
     this.emit('close');
+  }
+
+  /** Sends one control message; a socket that is not open ends the segment being started without a boundary. */
+  private send(message: { type: string; text?: string }): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error('deepgram aura ws is not open');
+    this.ws.send(JSON.stringify(message));
+  }
+
+  /** Keeps the next segment from starting until a stale `Flushed` or a `Cleared` arrives, or `ms` have passed. */
+  private holdFor(ms: number): void {
+    if (this.stale !== undefined) clearTimeout(this.stale);
+    this.segments.hold();
+    this.stale = setTimeout(() => this.release(), ms);
+  }
+
+  /** The stale response arrived, or its wait ran out: the next segment may start. */
+  private release(): void {
+    if (this.stale === undefined) return;
+    clearTimeout(this.stale);
+    this.stale = undefined;
+    this.segments.release();
   }
 
   private _handleMessage(data: Buffer, isBinary: boolean): void {
@@ -285,9 +345,10 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
         container: this.container,
         sampleRate: this.sampleRate,
         durationMs,
-        text: this.accumulatedText,
+        // Legacy: the text of the segment in flight, never read as the text this frame plays.
+        text: this.segments.inFlightText,
       };
-      this.emit('audio', chunk);
+      this.segments.frame(chunk);
       return;
     }
 
@@ -299,14 +360,14 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
       return;
     }
     if (msg.type === 'Flushed') {
-      this.accumulatedText = '';
-      if (this.pendingFlush) {
-        this.pendingFlush = false;
-        this.emit('_internal_flush');
-        this.emit('flush_complete');
-      }
+      // A Flushed while the queue waits for a stale response is that response: it completes nothing.
+      if (this.stale !== undefined) this.release();
+      else this.segments.completed();
+    } else if (msg.type === 'Cleared') {
+      // Everything sent before the Clear is settled: no Flushed of a cleared segment can follow.
+      this.release();
     }
-    // Metadata / Cleared / Warning frames are ignored.
+    // Metadata / Warning frames are ignored.
   }
 }
 

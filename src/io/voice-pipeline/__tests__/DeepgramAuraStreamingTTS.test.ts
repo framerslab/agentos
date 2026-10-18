@@ -120,7 +120,7 @@ describe('DeepgramAuraStreamingTTS', () => {
   });
 
   it('always dials the streaming WS with encoding=linear16 (mp3 is REST-only and 400s)', async () => {
-    // Default session format is 'mp3' — the WIRE must still be linear16:
+    // Default session format is 'mp3'; the WIRE must still be linear16:
     // Deepgram rejects `encoding=mp3` on /v1/speak streaming upgrades with
     // HTTP 400 UNSUPPORTED_AUDIO_FORMAT (expected one of linear16|mulaw|alaw).
     const session = await tts.startSession();
@@ -179,7 +179,7 @@ describe('DeepgramAuraStreamingTTS', () => {
   });
 
   it('REJECTS startSession (never hangs) when the server refuses the upgrade, carrying the HTTP body', async () => {
-    // Regression: the old connect() ran emit('error') BEFORE reject() — with
+    // Regression: the old connect() ran emit('error') BEFORE reject(); with
     // no 'error' listener attached yet the emit threw, reject never ran, and
     // the promise never settled (silent zombie voice sessions in prod).
     MockCtl.nextBehavior = 'reject-400';
