@@ -273,7 +273,10 @@ export class LiveKitAudioPublisher {
   }
   /**
    * Fixes the playout mode when the participant is in the room, then publishes exactly once and waits for a participant
-   * to subscribe to the track, at most `receiptTimeoutMs`, before the host records connected readiness.
+   * to subscribe to the track, at most `receiptTimeoutMs`, before the host records connected readiness. The wait ends
+   * at the first subscriber (rtc-node's `LocalTrackPublication.waitForSubscription()` resolves once the first
+   * participant subscribes), so connected readiness means one participant hears the track, and a participant who
+   * subscribes later misses what played before.
    */
   ready(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('publisher closed'));
