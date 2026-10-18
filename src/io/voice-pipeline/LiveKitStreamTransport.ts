@@ -246,9 +246,13 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   }
   /**
    * Resolves once the track has played out what the transport was handed: every chunk sent so far, and any sent while
-   * it waits; what a clear or a pause discarded counts as played out. A listen-only transport resolves at once.
+   * it waits; what a clear or a pause discarded counts as played out. A listen-only transport resolves at once. An
+   * aborted `signal` rejects the wait at once (`publisher playout wait aborted`), as a session aborts it when a barge-in
+   * cuts the reply or the session closes.
+   *
+   * @param signal - Ends the wait when aborted.
    */
-  async waitForPlayout(): Promise<void> { await this.publisher?.waitForPlayout(); }
+  async waitForPlayout(signal?: AbortSignal): Promise<void> { await this.publisher?.waitForPlayout(signal); }
   /** Discards only this physical path's queued output; a closed path must finish native cleanup. */
   async clearPlayback(generation: VoiceGeneration): Promise<void> {
     if (this._state === 'closed') { await this.closing; return; }
