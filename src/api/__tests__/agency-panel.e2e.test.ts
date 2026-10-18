@@ -54,6 +54,7 @@ import { generateText } from '../generateText.js';
 import { hitl } from '../hitl.js';
 import { exportAgentConfig, importAgent } from '../agentExport.js';
 import { setDefaultProvider, clearDefaultProvider } from '../runtime/global-default.js';
+import { setLoggerFactory, resetLoggerFactory } from '../../core/logging/loggerFactory.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 import { seatHealthId } from '../runtime/pool/resolve.js';
 import { OpenAIProviderError } from '../../core/llm/providers/errors/OpenAIProviderError.js';
@@ -145,6 +146,18 @@ const header = (c: Captured, name: string): string | undefined => {
   const headers = (c.init.headers ?? {}) as Record<string, string>;
   return headers[name] ?? headers[name.toLowerCase()];
 };
+type LogLine = { level: string; message: unknown; meta: Json | undefined };
+/** Every line the host's logger (`setLoggerFactory`) is handed while `run` runs. */
+async function logLines(run: () => Promise<void>): Promise<LogLine[]> {
+  const lines: LogLine[] = [];
+  const make = (): unknown => {
+    const write = (level: string) => (message: unknown, meta?: Json) => { lines.push({ level, message, meta }); };
+    return { info: write('info'), warn: write('warn'), error: write('error'), debug: write('debug'), child: () => make() };
+  };
+  setLoggerFactory(() => make() as never);
+  try { await run(); } finally { resetLoggerFactory(); }
+  return lines;
+}
 const threeProviders = (texts = { opus: 'A finds a bug', astra: 'B finds a bug', gemini: 'C finds a bug' }, chairText = 'Merged findings') =>
   route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText(texts.astra)], [ANTHROPIC, [anthropicText(texts.opus), anthropicText(chairText)]], [GEMINI, geminiText(texts.gemini)]]);
 
@@ -554,6 +567,68 @@ describe('8. keys on a hop', () => {
     expect(calls(GEMINI, 'POST').map((c) => header(c, 'x-goog-api-key'))).toEqual([K.gemEnv]);
     expect(JSON.stringify(fetchMock.mock.calls.map(([, i]) => (i as RequestInit).headers))).not.toContain(nameless);
   });
+  it("a pooled hierarchical agency's spawned specialist resolves its keys as a seat does: its default-chain hop sends the hop provider's key, never a nameless default's", async () => {
+    vi.stubEnv('GEMINI_API_KEY', K.gemEnv);
+    // The default chain is then one Gemini hop.
+    vi.stubEnv('OPENAI_API_KEY', ''); vi.stubEnv('ANTHROPIC_API_KEY', ''); vi.stubEnv('OPENROUTER_API_KEY', '');
+    const nameless = 'sk-nameless-default-0013';
+    setDefaultProvider({ apiKey: nameless });
+    // The manager's requests carry the spawn tool; the specialist's, on the agency key, are overloaded. A transient
+    // failure leaves the breaker of that key closed for the manager's next turn, where a 401 would open it.
+    const isManager = (body: Json) => (body.tools ?? []).some((t: Json) => t.function?.name === 'spawn_specialist');
+    let managerTurn = 0;
+    route([
+      [OPENAI_LIST, openaiListing],
+      [OPENAI_CHAT, (req) => {
+        if (!isManager(req.body!)) return openaiError(529, 'overloaded')();
+        managerTurn += 1;
+        return managerTurn === 1 ? openaiToolCall('spawn_specialist', { role: 'helper', instructions: 'Help.' }, 'c1')(req)
+          : managerTurn === 2 ? openaiToolCall('delegate_to_helper', { task: 'v' }, 'c2')(req)
+          : openaiText('manager done')(req);
+      }],
+      [GEMINI, geminiText('helped')],
+    ]);
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { gemini: POOL().gemini }, agents: { worker: { instructions: 'w' } }, strategy: 'hierarchical', emergent: { enabled: true } } as never);
+    const r = await team.generate('go');
+    expect(r.text).toBe('manager done');
+    expect(calls(GEMINI, 'POST').map((c) => header(c, 'x-goog-api-key'))).toEqual([K.gemEnv]);
+    expect(JSON.stringify(fetchMock.mock.calls.map(([, i]) => (i as RequestInit).headers))).not.toContain(nameless);
+  });
+  it("a pooled hierarchical agency's emergent judge resolves its key as a seat does: a nameless setDefaultProvider key never reaches it", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const nameless = 'sk-nameless-default-0013';
+    setDefaultProvider({ apiKey: nameless });
+    let managerTurn = 0;
+    route([
+      [OPENAI_LIST, openaiListing],
+      [OPENAI_CHAT, (req) => {
+        // The judge's request carries no tools; the manager's carry the delegate and spawn tools.
+        if (!(req.body?.tools ?? []).length) return openaiText('{"approved": true, "reasoning": "fits"}')(req);
+        managerTurn += 1;
+        return managerTurn === 1 ? openaiToolCall('spawn_specialist', { role: 'helper', instructions: 'Help.' }, 'c1')(req) : openaiText('manager done')(req);
+      }],
+    ]);
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { gemini: POOL().gemini }, agents: { worker: { instructions: 'w' } }, strategy: 'hierarchical', emergent: { enabled: true, judge: true, planner: { judgeModel: 'gpt-4.1' } } } as never);
+    const r = await team.generate('go');
+    expect(r.text).toBe('manager done');
+    const judged = calls(OPENAI_CHAT, 'POST').filter((c) => !(c.body?.tools ?? []).length);
+    expect(judged).toHaveLength(1);
+    expect(header(judged[0], 'Authorization')).toBe(`Bearer ${K.oaiEnv}`);
+    expect(JSON.stringify(fetchMock.mock.calls.map(([, i]) => (i as RequestInit).headers))).not.toContain(nameless);
+  });
+  it("a pooled seat's failover reaches a logger factory the host sets after import: fallback_fired names both providers and carries the provider's message masked", async () => {
+    route([[ANTHROPIC, anthropicError(529, `overloaded ${K.ant}`)], [OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('rescued')]]);
+    // The seat takes opus, the first entry, and fails over to astra, its next candidate.
+    const team = agency({ modelPool: POOL(), agents: { one: { instructions: 'x' } }, strategy: 'sequential' } as never);
+    const lines = await logLines(async () => {
+      expect((await team.generate('go')).text).toBe('rescued');
+    });
+    const fired = lines.filter((l) => l.meta?.event === 'fallback_fired');
+    expect(fired.length).toBeGreaterThan(0);
+    expect(fired[0].meta).toMatchObject({ primaryProvider: 'anthropic', fallbackProvider: 'openai' });
+    expect(String(fired[0].meta?.errorMessage)).toContain('overloaded [redacted]');
+    expect(JSON.stringify(lines)).not.toContain(K.ant);
+  });
   it("under panel a fixed seat's own chain carries the keys the resolver wrote; a keyless hop is dropped and listed; the record carries fallback", async () => {
     vi.stubEnv('GEMINI_API_KEY', K.gemEnv);
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiError(529, 'overloaded')], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('rescued')]]);
@@ -713,6 +788,7 @@ describe('13. no credential in any record', () => {
     const r = await agency({ strategy: 'panel', modelPool: { ...POOL(), ...entry() }, agents: SEATS(), chair: { from: ['opus'] }, on: { error: (e: Json) => errors.push(e) } } as never).generate('review');
     expect(JSON.stringify(r.seats)).not.toContain(secret());
     expect(r.seats.find((s) => s.entry === 'astra')!.error).toContain('[redacted]');
+    expect(errors.length).toBeGreaterThan(0);
     for (const e of errors) expect(ownStrings((e as Json).error) + JSON.stringify(e)).not.toContain(secret());
   });
 
@@ -724,6 +800,7 @@ describe('13. no credential in any record', () => {
     expect(err).toBeInstanceOf(Error);
     for (const text of [err.message, err.stack ?? '', ownStrings(err), JSON.stringify(err.details ?? null), ownStrings(err.cause)]) expect(text).not.toContain(K.oai);
     expect(err.message).toContain('[redacted]');
+    expect(errors.length).toBeGreaterThan(0);
     for (const e of errors) expect(ownStrings((e as Json).error)).not.toContain(K.oai);
     const parts: Json[] = []; for await (const p of team.stream('go').fullStream) parts.push(p as Json);
     const errorPart = parts.find((p) => p.type === 'error');
@@ -820,6 +897,115 @@ describe('13. no credential in any record', () => {
     expect(JSON.stringify(result)).not.toContain(K.oai);
   });
 
+  it("under panel a seat's answer that repeats a key reaches the chair's request, every agentEnd event and the provenance trail masked", async () => {
+    const ends: Json[] = [];
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText(`B saw ${K.oai}`)], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
+    const result = await panel({ provenance: { enabled: true }, on: { agentEnd: (e: Json) => ends.push(e) } }).generate('review');
+    expect(result.text).toBe('Merged');
+    // The opus seat's request and the chair's: the chair is sent the healthy seats' answers.
+    const chairBody = JSON.stringify(calls(ANTHROPIC, 'POST')[1].body);
+    expect(chairBody).not.toContain(K.oai);
+    expect(chairBody).toContain('B saw [redacted]');
+    expect(ends.map((e) => e.agent)).toEqual(expect.arrayContaining(['security', 'chair', '__agency__']));
+    expect(JSON.stringify(ends)).not.toContain(K.oai);
+    expect(JSON.stringify(ends)).toContain('B saw [redacted]');
+    expect(JSON.stringify(result.provenanceTrail)).not.toContain(K.oai);
+    expect(JSON.stringify(result.provenanceTrail)).toContain('B saw [redacted]');
+  });
+
+  it("under a pooled hierarchical agency a delegate's answer that repeats a key reaches the manager's next request masked, a pooled delegate's and a pre-built one's", async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', K.antEnv);
+    route([
+      [OPENAI_LIST, openaiListing],
+      [OPENAI_CHAT, [openaiToolCall('delegate_to_worker', { task: 't' }, 'c1'), openaiToolCall('delegate_to_prebuilt', { task: 'u' }, 'c2'), openaiText('manager done')]],
+      [GEMINI, geminiText(`worker saw ${K.gem}`)],
+      [ANTHROPIC, anthropicText(`prebuilt saw ${K.antEnv}`)],
+    ]);
+    const prebuilt = agent({ provider: 'anthropic', model: 'claude-opus-5-5', fallbackProviders: [] });
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { gemini: POOL().gemini }, agents: { worker: { instructions: 'w' }, prebuilt }, strategy: 'hierarchical' } as never);
+    const r = await team.generate('go');
+    expect(r.text).toBe('manager done');
+    // Only the manager calls OpenAI: the first request drew the worker's call, the second the pre-built delegate's.
+    const bodies = calls(OPENAI_CHAT, 'POST').map((c) => JSON.stringify(c.body));
+    expect(bodies).toHaveLength(3);
+    for (const b of bodies) for (const key of [K.gem, K.antEnv]) expect(b).not.toContain(key);
+    expect(bodies[2]).toContain('worker saw [redacted]');
+    expect(bodies[2]).toContain('prebuilt saw [redacted]');
+    expect(r.agentCalls.map((c) => c.output)).toEqual(['worker saw [redacted]', 'prebuilt saw [redacted]']);
+  });
+
+  it("under a pooled sequential agency a seat's answer that repeats a key reaches the next seat's request masked, in generate() and in stream()", async () => {
+    const team = agency({ modelPool: { astra: POOL().astra, opus: POOL().opus }, agents: { first: { instructions: 'f', from: ['astra'] }, second: { instructions: 's', from: ['opus'] } }, strategy: 'sequential' } as never);
+    const script = (): void => route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText(`first saw ${K.oai}`)], [ANTHROPIC, anthropicText('second done')]]);
+    script();
+    const r = await team.generate('go');
+    expect(r.text).toBe('second done');
+    const sent = JSON.stringify(calls(ANTHROPIC, 'POST')[0].body);
+    expect(sent).not.toContain(K.oai);
+    expect(sent).toContain('first saw [redacted]');
+    expect(r.agentCalls[0].output).toBe('first saw [redacted]');
+    fetchMock.mockReset();
+    script();
+    const st = team.stream('go');
+    for await (const _part of st.fullStream) { /* drain */ }
+    await st.result;
+    const streamed = JSON.stringify(calls(ANTHROPIC, 'POST')[0].body);
+    expect(streamed).not.toContain(K.oai);
+    expect(streamed).toContain('first saw [redacted]');
+  });
+
+  it.each(['parallel', 'debate'])("a pooled %s agency sends its synthesizer, and under debate the next speaker, a seat's answer masked", async (strategy) => {
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('synth')], [ANTHROPIC, anthropicText(`A saw ${K.ant}`)], [GEMINI, geminiText('B argues')]]);
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { opus: POOL().opus, gemini: POOL().gemini }, agents: { a: { instructions: 'x', from: ['opus'] }, b: { instructions: 'y', from: ['gemini'] } }, strategy, maxRounds: 1 } as never);
+    const r = await team.generate('go');
+    expect(r.text).toBe('synth');
+    // The seats are on Anthropic and Gemini, so the one OpenAI request is the synthesizer's.
+    const synthBody = JSON.stringify(calls(OPENAI_CHAT, 'POST')[0].body);
+    expect(synthBody).not.toContain(K.ant);
+    expect(synthBody).toContain('A saw [redacted]');
+    if (strategy === 'debate') {
+      const rebuttal = JSON.stringify(calls(GEMINI, 'POST')[0].body);
+      expect(rebuttal).not.toContain(K.ant);
+      expect(rebuttal).toContain('A saw [redacted]');
+    }
+  });
+
+  it("a pooled review-loop agency sends its reviewer the producer's draft masked, and a pooled graph sends a dependent its dependency's answer masked", async () => {
+    route([[OPENAI_LIST, openaiListing], [ANTHROPIC, anthropicText(`draft with ${K.ant}`)], [GEMINI, geminiText('{"approved": true, "feedback": ""}')]]);
+    const loop = agency({ modelPool: { opus: POOL().opus, gemini: POOL().gemini }, agents: { producer: { instructions: 'p', from: ['opus'] }, reviewer: { instructions: 'r', from: ['gemini'] } }, strategy: 'review-loop', maxRounds: 1 } as never);
+    const reviewed = await loop.generate('go');
+    const review = JSON.stringify(calls(GEMINI, 'POST')[0].body);
+    expect(review).not.toContain(K.ant);
+    expect(review).toContain('draft with [redacted]');
+    expect(reviewed.text).toBe('draft with [redacted]');
+
+    fetchMock.mockReset();
+    route([[OPENAI_LIST, openaiListing], [ANTHROPIC, anthropicText(`A saw ${K.ant}`)], [GEMINI, geminiText('B done')]]);
+    const graph = agency({ modelPool: { opus: POOL().opus, gemini: POOL().gemini }, agents: { a: { instructions: 'a', from: ['opus'] }, b: { instructions: 'b', from: ['gemini'], dependsOn: ['a'] } }, strategy: 'graph' } as never);
+    const g = await graph.generate('go');
+    expect(g.text).toBe('B done');
+    const dependent = JSON.stringify(calls(GEMINI, 'POST')[0].body);
+    expect(dependent).not.toContain(K.ant);
+    expect(dependent).toContain('A saw [redacted]');
+  });
+
+  it('under a pooled sequential agency a key the seat streams across two chunks is whole in no text part, no textStream chunk and no final text', async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    // K.oaiEnv is sk-oai-env-00000006: the first chunk ends inside it.
+    const split: Handler = () => sse([oaiChunk('gpt-4.1', { role: 'assistant', content: 'the key is sk-oai-' }), oaiChunk('gpt-4.1', { content: 'env-00000006 now' }), oaiChunk('gpt-4.1', {}, 'stop'), oaiChunk('gpt-4.1', null, null, U), '[DONE]']);
+    const team = agency({ modelPool: { astra: { provider: 'openai', model: 'gpt-4.1' } }, agents: { one: { instructions: 'x' } }, strategy: 'sequential' } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, split]]);
+    const st = team.stream('go');
+    const parts: Json[] = []; for await (const p of st.fullStream) parts.push(p as Json);
+    const streamedText = parts.filter((p) => p.type === 'text').map((p) => p.text).join('');
+    expect(streamedText).not.toContain(K.oaiEnv);
+    expect(streamedText).toBe('the key is [redacted] now');
+    expect(await st.text).toBe('the key is [redacted] now');
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, split]]);
+    const chunks: string[] = []; for await (const chunk of team.stream('go').textStream) chunks.push(chunk);
+    expect(chunks.join('')).toBe('the key is [redacted] now');
+  });
+
   it("a pre-built seat's streamed error part is masked under a pooled sequential agency", async () => {
     vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
     // The seat is pre-built and never seated, so it has no __maskError of its own; agency.ts masks the error part before the consumer sees it.
@@ -908,7 +1094,8 @@ describe('13. no credential in any record', () => {
       expect(everywhere).toContain('[redacted]');
       expect(calls(OPENAI_CHAT, 'POST').length).toBeGreaterThanOrEqual(3);
       // The seated seat's loops mask before they write the tool turn, so its second and third requests carry no key.
-      // A pre-built seat's own loops carry no mask (spec section 4, Not covered): of what it returns, transcriptDelta, the top-level toolCalls and the call-record tool errors are masked, above; an answer of its that repeats the error is not.
+      // A pre-built seat's own loops carry no mask, so its requests are not checked: what it returns (its answer, its
+      // transcriptDelta, its tool calls and their errors) is masked as it leaves the seat, above.
       if (last === 'seated') for (const c of calls(OPENAI_CHAT, 'POST').slice(1)) expect(JSON.stringify(c.body)).not.toContain(K.oaiEnv);
     }
   });
@@ -1167,6 +1354,43 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       expect(r.text).toBe('');
     }
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("a run whose every seat is rejected writes one line through the host's logger, which names the agency, its strategy and its seats", async () => {
+    const lines = await logLines(async () => {
+      const r = (await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { a: { instructions: 'x' }, b: { instructions: 'y' } }, strategy: 'sequential', hitl: { approvals: { beforeAgent: ['a', 'b'] }, handler: hitl.autoReject('no') } } as never).generate('go')) as AgencyResult;
+      expect(r.text).toBe('');
+      expect(r.agentCalls).toEqual([]);
+    });
+    expect(lines.filter((l) => l.meta?.event === 'agency_no_seat_answered')).toEqual([
+      { level: 'info', message: expect.any(String), meta: { event: 'agency_no_seat_answered', agency: '__agency__', strategy: 'sequential', seats: 2 } },
+    ]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it('a run whose every seat is rejected is no reply to validate: the agency asks the approver once per seat, not again on a retry', async () => {
+    const handler = vi.fn(hitl.autoReject('no'));
+    const r = (await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { a: { instructions: 'x' }, b: { instructions: 'y' } }, strategy: 'sequential', output: z.object({ ok: z.boolean() }), hitl: { approvals: { beforeAgent: ['a', 'b'] }, handler } } as never).generate('go')) as AgencyResult;
+    expect(r.text).toBe('');
+    expect(r.parsed).toBeUndefined();
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("a pooled parallel agency logs a failed pre-built seat through the host's logger with its message masked, and writes it to no console", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('synth')], [ANTHROPIC, anthropicText('A')]]);
+      const failing = { generate: async () => { throw new Error(`upstream rejected ${K.oaiEnv}`); }, stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} } as unknown as Agent;
+      const lines = await logLines(async () => {
+        const r = await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { opus: POOL().opus }, agents: { a: { instructions: 'x' }, failing }, strategy: 'parallel' } as never).generate('go');
+        expect(r.text).toBe('synth');
+      });
+      expect(JSON.stringify(consoleError.mock.calls)).not.toContain(K.oaiEnv);
+      const failed = lines.filter((l) => l.meta?.event === 'parallel_seat_failed');
+      expect(failed).toEqual([{ level: 'warn', message: expect.any(String), meta: { event: 'parallel_seat_failed', agent: 'failing', error: 'upstream rejected [redacted]' } }]);
+      expect(JSON.stringify(lines)).not.toContain(K.oaiEnv);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
 
