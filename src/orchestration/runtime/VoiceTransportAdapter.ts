@@ -20,19 +20,24 @@
  *   and emits a `voice_audio` outbound GraphEvent.
  * - Both methods throw if called before `init()`.
  *
- * ## Lazy initialisation
+ * ## A started session
  *
- * The adapter is lazy -- it does not create a `VoicePipelineOrchestrator` until
- * `init()` is called. The pipeline reference is `any` typed to avoid a hard
- * import cycle with the voice subsystem; callers that want stronger types may cast.
+ * The adapter runs on a session the host started: `{ session, orchestrator }`,
+ * the `VoicePipelineSession` that `orchestrator.startSession()` returned and the
+ * orchestrator itself. `init()` puts the session in `state.scratch.voiceSession`,
+ * where `VoiceNodeExecutor` reads its own events, and node input and output go
+ * through the orchestrator. Given no orchestrator, the adapter builds one from its
+ * config, as before, and starts no session, so node input and output wait on a
+ * pipeline that never runs; it logs one warning saying so, through the host's
+ * logger, and keeps that behaviour until the next minor. The references are `any`
+ * typed to avoid a hard import cycle with the voice subsystem; callers that want
+ * stronger types may cast.
  *
  * @example
  * ```typescript
- * const adapter = new VoiceTransportAdapter(
- *   { stt: 'deepgram', tts: 'openai' },
- *   transport,
- *   (event) => eventBus.emit(event),
- * );
+ * const orchestrator = new VoicePipelineOrchestrator({ stt: 'deepgram', tts: 'openai' });
+ * const session = await orchestrator.startSession(transport, agentSession, overrides);
+ * const adapter = new VoiceTransportAdapter({}, transport, (event) => eventBus.emit(event), { session, orchestrator });
  *
  * await adapter.init(state);
  * const userInput = await adapter.getNodeInput('greet');
@@ -46,6 +51,59 @@
 
 import type { GraphState } from '../ir/types.js';
 import type { GraphEvent } from '../events/GraphEvent.js';
+import type { ILogger } from '../../core/logging/ILogger.js';
+
+/** What the adapter logs when it is given no orchestrator; it names no part of a session's content. */
+const NO_STARTED_SESSION_WARNING =
+  'VoiceTransportAdapter was given no orchestrator, so it builds a VoicePipelineOrchestrator from its config and ' +
+  'starts no session: node input and output wait on a pipeline that never runs. Pass { session, orchestrator } of ' +
+  'a started session.';
+
+/**
+ * Whether a value is a started `VoicePipelineSession`, as `startSession()` returns it: an emitter with its session id,
+ * its transport and `close()`. An emitter a host relays a pipeline's events onto has none of these.
+ *
+ * @param value - The session the host gave.
+ * @returns `true` for a started session.
+ */
+function isStartedVoiceSession(value: unknown): boolean {
+  const session = value as { sessionId?: unknown; close?: unknown; on?: unknown } | null | undefined;
+  return (
+    typeof session === 'object' &&
+    session !== null &&
+    typeof session.sessionId === 'string' &&
+    typeof session.close === 'function' &&
+    typeof session.on === 'function' &&
+    'transport' in session
+  );
+}
+
+/**
+ * What a host hands a {@link VoiceTransportAdapter} besides its config: the session a graph's voice nodes run on,
+ * the orchestrator that runs it, and the logger the adapter writes to.
+ */
+export interface VoiceTransportAdapterParts {
+  /**
+   * The started session: the `VoicePipelineSession` that `orchestrator.startSession()` returned. `init()` puts it in
+   * `state.scratch.voiceSession`, where `VoiceNodeExecutor` reads its own events. Given without `orchestrator`, a value
+   * that is no started session is taken as an emitter that relays the pipeline's events under the names voice nodes
+   * read before (`final_transcript`, `turn_complete` and the rest) and set as `transport._voiceSession`, which is
+   * deprecated and kept until the next minor.
+   */
+  session?: any;
+  /**
+   * The `VoicePipelineOrchestrator` that runs `session`: node input waits on its turns (`waitForUserTurn()`) and node
+   * output goes to its TTS (`pushToTTS()`).
+   */
+  orchestrator?: any;
+  /** @deprecated Pass `orchestrator`: the same orchestrator under its earlier name, kept until the next minor. */
+  pipeline?: any;
+  /**
+   * Takes the warning the adapter logs when it is given no orchestrator. When omitted, the warning goes to
+   * `createLogger('VoiceTransportAdapter')` from `@framers/agentos/logging`, which is loaded only to write it.
+   */
+  logger?: ILogger;
+}
 
 // ---------------------------------------------------------------------------
 // VoiceTransportConfig
@@ -100,11 +158,13 @@ export interface VoiceTransportConfig {
  *
  * ## Lifecycle
  *
- * 1. Construct with {@link VoiceTransportConfig}, an `IStreamTransport`, and an
- *    event sink callback.
- * 2. Call `init()` once before the graph starts running. This lazily imports
- *    `VoicePipelineOrchestrator`, creates an instance, and injects the transport
- *    into `state.scratch.voiceTransport`.
+ * 1. Construct with {@link VoiceTransportConfig}, an `IStreamTransport`, an
+ *    event sink callback, and `{ session, orchestrator }` of a started session.
+ * 2. Call `init()` once before the graph starts running. It injects the transport
+ *    into `state.scratch.voiceTransport` and the started session into
+ *    `state.scratch.voiceSession`. Given no orchestrator, it lazily imports
+ *    `VoicePipelineOrchestrator`, creates an instance from the config, which no
+ *    session runs, and logs one warning.
  * 3. Use `getNodeInput()` to obtain the user's transcribed speech for a node.
  *    Delegates to `pipeline.waitForUserTurn()` when a pipeline is available.
  * 4. Use `deliverNodeOutput()` to send the node's response to TTS via
@@ -127,25 +187,21 @@ export class VoiceTransportAdapter {
   /**
    * Creates a new VoiceTransportAdapter.
    *
-   * @param config     - Voice pipeline configuration knobs.
+   * @param config     - Voice pipeline configuration knobs, read only when no
+   *                     orchestrator is given.
    * @param transport  - Bidirectional audio/control stream transport (`IStreamTransport`).
    * @param eventSink  - Callback receiving all `GraphEvent` values emitted by
    *                     this adapter. Must not throw.
+   * @param injected   - The started session and its orchestrator, which a host
+   *                     builds with the providers, memory and chains it wants,
+   *                     and the logger the adapter writes to
+   *                     ({@link VoiceTransportAdapterParts}).
    */
   constructor(
     private readonly config: VoiceTransportConfig,
     private readonly transport: any, // IStreamTransport
     private readonly eventSink: (event: GraphEvent) => void,
-    /**
-     * Optional injection of a fully-wired, already-started pipeline + its
-     * session. When provided, `init()` uses this pipeline instead of building
-     * a bare `VoicePipelineOrchestrator` from `config`, and sets
-     * `transport._voiceSession` to `session` so `VoiceNodeExecutor` can read
-     * turn/transcript events. Lets consumers (e.g. wilds companion voice) pass
-     * an orchestrator carrying memory + custom STT/TTS provider chains rather
-     * than the bare config-built one.
-     */
-    private readonly injected: { pipeline?: any; session?: any } = {}
+    private readonly injected: VoiceTransportAdapterParts = {}
   ) {}
 
   // -------------------------------------------------------------------------
@@ -155,9 +211,14 @@ export class VoiceTransportAdapter {
   /**
    * Initialise the adapter.
    *
-   * Lazily imports `VoicePipelineOrchestrator`, creates an instance from config,
-   * injects the transport into `state.scratch.voiceTransport`, and emits a
-   * `voice_session` started event.
+   * Injects the transport into `state.scratch.voiceTransport` and the adapter
+   * into `state.scratch.voiceAdapter`. A started session goes into
+   * `state.scratch.voiceSession`, where `VoiceNodeExecutor` reads its events; an
+   * emitter of relayed events given without `orchestrator` goes onto
+   * `transport._voiceSession`, as before. With `orchestrator` (or `pipeline`) the
+   * adapter uses it; without, it lazily imports `VoicePipelineOrchestrator`,
+   * creates an instance from config that no session runs, and logs one warning.
+   * Then it emits a `voice_session` started event.
    */
   async init(state: Partial<GraphState>): Promise<void> {
     const scratch = ((state as any).scratch ??= {});
@@ -166,15 +227,25 @@ export class VoiceTransportAdapter {
     // VoiceNodeExecutor) can reach `deliverNodeOutput` without re-plumbing.
     scratch.voiceAdapter = this;
 
-    if (this.injected.pipeline) {
-      // Consumer-provided, already-started pipeline. Use it directly and wire
-      // its session onto the transport so the executor's VoiceTurnCollector
-      // reads real turn/transcript events.
-      this.pipeline = this.injected.pipeline;
-      if (this.injected.session) {
-        (this.transport as any)._voiceSession = this.injected.session;
+    const { session, orchestrator } = this.injected;
+    const pipeline = orchestrator ?? this.injected.pipeline;
+    if (session) {
+      if (orchestrator || isStartedVoiceSession(session)) {
+        // A started session: the executor's VoiceTurnCollector reads its own events.
+        scratch.voiceSession = session;
+      } else {
+        // An emitter that relays the pipeline's events under the names voice nodes read before. Deprecated, and kept
+        // until the next minor.
+        (this.transport as any)._voiceSession = session;
       }
+    }
+
+    if (pipeline) {
+      // Consumer-provided, already-started pipeline. Use it directly.
+      this.pipeline = pipeline;
     } else {
+      // A pipeline built here runs no session; the host is told once, and today's behaviour stays until the next minor.
+      await this.warn(NO_STARTED_SESSION_WARNING);
       // Lazily import to avoid hard dependency cycle with the voice subsystem
       try {
         const { VoicePipelineOrchestrator } = await import(
@@ -201,6 +272,21 @@ export class VoiceTransportAdapter {
       nodeId: '__transport__',
       action: 'started',
     });
+  }
+
+  /**
+   * Writes one warning to the host's logger, or to `createLogger('VoiceTransportAdapter')`, loaded only to write it.
+   * A logger that throws, or a logging module that does not load, leaves the adapter as it is: the warning is lost.
+   *
+   * @param message - The warning, which names no content.
+   */
+  private async warn(message: string): Promise<void> {
+    try {
+      const logger = this.injected.logger ?? (await import('../../core/logging/loggerFactory.js')).createLogger('VoiceTransportAdapter');
+      logger.warn(message);
+    } catch {
+      // Logging must not stop the adapter; nothing else can report the warning.
+    }
   }
 
   // -------------------------------------------------------------------------

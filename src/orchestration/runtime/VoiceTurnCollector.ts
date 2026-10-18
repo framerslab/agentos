@@ -1,13 +1,23 @@
 /**
  * @file VoiceTurnCollector.ts
- * @description Subscribes to voice pipeline session events and maintains a
- * running transcript buffer, turn counter, and last-speaker tracker.
+ * @description Subscribes to a voice session's events and maintains a running transcript buffer, turn counter, and
+ * last-speaker tracker.
  *
  * ## Event bridging strategy
  *
- * The collector bridges the raw EventEmitter-based voice pipeline session into
- * the typed `GraphEvent` stream consumed by the graph runtime. Four session
- * events are handled:
+ * The collector bridges a voice session's events into the typed `GraphEvent` stream consumed by the graph runtime. It
+ * reads them under one of two sets of names ({@link VoiceTurnCollectorEvents}).
+ *
+ * A started `VoicePipelineSession`'s own events (`events: 'session'`), the names of `VoiceSessionEventMap`:
+ *
+ * | Session event                              | GraphEvent emitted     | Buffered? |
+ * |--------------------------------------------|------------------------|-----------|
+ * | `user_input_transcribed`, `isFinal: false` | `voice_transcript`     | No        |
+ * | `user_input_transcribed`, `isFinal: true`  | `voice_transcript`     | Yes       |
+ * | `conversation_item_added`, a user item     | `voice_turn_complete`  | N/A       |
+ * | `barge_in`                                 | `voice_barge_in`       | N/A       |
+ *
+ * The names a host relays a pipeline's events under onto an emitter of its own (`events: 'relayed'`, the default):
  *
  * | Session event        | GraphEvent emitted       | Buffered? | Why                                                    |
  * |----------------------|--------------------------|-----------|--------------------------------------------------------|
@@ -15,6 +25,9 @@
  * | `final_transcript`   | `voice_transcript`       | Yes       | Confirmed utterances form the canonical transcript.     |
  * | `turn_complete`      | `voice_turn_complete`    | N/A       | Marks endpoint detection; advances the turn counter.    |
  * | `barge_in`           | `voice_barge_in`         | N/A       | Signals user interruption for downstream handlers.      |
+ *
+ * A started session emits `turn_complete` as well, as a deprecated alias of its user items, so a collector reads it
+ * under one set of names and never both: each turn counts once.
  *
  * ## Checkpoint restore
  *
@@ -29,6 +42,7 @@
 
 import { EventEmitter } from 'events';
 import type { GraphEvent } from '../events/GraphEvent.js';
+import type { VoiceSessionEventMap } from '../../io/voice-pipeline/types.js';
 
 // ---------------------------------------------------------------------------
 // TranscriptEntry
@@ -37,7 +51,7 @@ import type { GraphEvent } from '../events/GraphEvent.js';
 /**
  * A single confirmed (final) utterance captured from the voice pipeline.
  *
- * Only `final_transcript` events populate the transcript buffer -- interim
+ * Only final transcripts populate the transcript buffer -- interim
  * partials are discarded to keep the transcript clean and avoid duplicate
  * entries that would corrupt downstream summarisation.
  *
@@ -62,7 +76,7 @@ export interface TranscriptEntry {
 
   /**
    * Wall-clock timestamp (milliseconds since Unix epoch) recorded at the
-   * moment the `final_transcript` event was processed by the collector.
+   * moment the final transcript was processed by the collector.
    *
    * This is the collector's receive time, not the STT service's recognition
    * time, so it includes any event loop latency between STT and the collector.
@@ -71,30 +85,53 @@ export interface TranscriptEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+/**
+ * The names a {@link VoiceTurnCollector} reads its session's events under.
+ *
+ * - `'relayed'`: `interim_transcript`, `final_transcript`, `turn_complete` and `barge_in`, the names a host relays a
+ *   pipeline's events under onto an emitter of its own. The default.
+ * - `'session'`: a started `VoicePipelineSession`'s own events (`VoiceSessionEventMap`): `user_input_transcribed`,
+ *   `conversation_item_added` (its user items) and `barge_in`.
+ */
+export type VoiceTurnCollectorEvents = 'relayed' | 'session';
+
+/** Options of a {@link VoiceTurnCollector}. */
+export interface VoiceTurnCollectorOptions {
+  /** The names the session's events are read under. @defaultValue 'relayed' */
+  events?: VoiceTurnCollectorEvents;
+}
+
+// ---------------------------------------------------------------------------
 // VoiceTurnCollector
 // ---------------------------------------------------------------------------
 
 /**
- * Stateful collector that subscribes to a voice pipeline session and routes
+ * Stateful collector that subscribes to a voice session and routes
  * session events into the AgentOS `GraphEvent` stream.
  *
  * The collector is designed to be short-lived -- created at the start of a
- * voice node execution and discarded when the node completes. Its state
- * (transcript, turn count, last speaker) is captured into a
- * {@link VoiceNodeCheckpoint} by the executor before disposal.
+ * voice node execution and released with {@link dispose} when the node
+ * completes. Its state (transcript, turn count, last speaker) is captured into
+ * a {@link VoiceNodeCheckpoint} by the executor before disposal.
  *
  * @example
  * ```ts
  * const collector = new VoiceTurnCollector(
- *   session,
+ *   session, // a started VoicePipelineSession
  *   (evt) => graphEventEmitter.emit(evt),
  *   'voice-node-1',
+ *   0,
+ *   { events: 'session' },
  * );
  *
  * // After the conversation:
  * console.log(collector.getTurnCount());   // number of completed turns
  * console.log(collector.getTranscript());  // full buffered transcript
  * console.log(collector.getLastSpeaker()); // last identified speaker
+ * collector.dispose();
  * ```
  *
  * @see {@link TranscriptEntry} -- shape of each buffered transcript entry.
@@ -108,22 +145,24 @@ export class VoiceTurnCollector {
   private turnCount: number;
 
   /**
-   * Speaker identifier from the most recent `final_transcript` event.
+   * Speaker identifier from the most recent final transcript.
    * Empty string until the first final transcript arrives.
    */
   private lastSpeaker = '';
+
+  /** The listeners this collector added to its session, each with its event, for {@link dispose}. */
+  private readonly subscriptions: Array<{ event: string; listener: (...args: any[]) => void }> = [];
 
   /**
    * Creates a new VoiceTurnCollector and immediately subscribes to session events.
    *
    * Subscription is performed in the constructor (rather than a separate `init()`
-   * method) because the collector has no meaningful state before subscription and
-   * there is no cleanup/unsubscribe lifecycle -- the session EventEmitter is
-   * short-lived and garbage-collected with the collector.
+   * method) because the collector has no meaningful state before subscription;
+   * {@link dispose} removes every listener it added.
    *
-   * @param session          - The voice pipeline `EventEmitter` to subscribe to.
-   *                           Must emit `interim_transcript`, `final_transcript`,
-   *                           `turn_complete`, and `barge_in` events.
+   * @param session          - The voice session to subscribe to: a started
+   *                           `VoicePipelineSession` with `events: 'session'`,
+   *                           or an emitter of relayed events.
    * @param eventSink        - Callback invoked synchronously for every emitted
    *                           `GraphEvent`. Must not throw -- exceptions would
    *                           propagate into the session event loop.
@@ -132,15 +171,62 @@ export class VoiceTurnCollector {
    * @param initialTurnCount - Seed value for `turnCount`; pass a persisted value
    *                           to resume from a checkpoint rather than starting at
    *                           zero. Defaults to `0`.
+   * @param options          - The names the session's events are read under.
    */
   constructor(
-    session: EventEmitter,
+    private readonly session: EventEmitter,
     private readonly eventSink: (event: GraphEvent) => void,
     private readonly nodeId: string,
-    initialTurnCount = 0
+    initialTurnCount = 0,
+    options: VoiceTurnCollectorOptions = {}
   ) {
     this.turnCount = initialTurnCount;
+    if (options.events === 'session') this.subscribeSession();
+    else this.subscribeRelayed();
+  }
 
+  /**
+   * Removes every listener this collector added to its session. Safe to call more than once; the collector's state
+   * stays readable.
+   */
+  dispose(): void {
+    for (const { event, listener } of this.subscriptions.splice(0)) this.session.off(event, listener);
+  }
+
+  /**
+   * Adds a listener to the session and records it for {@link dispose}.
+   *
+   * @param event    - The session's event.
+   * @param listener - What the collector runs on it.
+   */
+  private listen(event: string, listener: (...args: any[]) => void): void {
+    this.session.on(event, listener);
+    this.subscriptions.push({ event, listener });
+  }
+
+  /** Reads a started `VoicePipelineSession`'s own events. */
+  private subscribeSession(): void {
+    // A transcript of the user's speech, interim or final.
+    this.listen('user_input_transcribed', (evt: Partial<VoiceSessionEventMap['user_input_transcribed']> | undefined) => {
+      const text = evt?.transcript ?? '';
+      const confidence = evt?.confidence ?? 0;
+      if (evt?.isFinal) this.final(text, evt.speakerId, confidence);
+      else this.interim(text, evt?.speakerId, confidence);
+    });
+
+    // A user turn joined the conversation: the turn the endpoint detector completed. An agent reply is no turn.
+    this.listen('conversation_item_added', (evt: Partial<VoiceSessionEventMap['conversation_item_added']> | undefined) => {
+      const item = evt?.item;
+      if (item?.role !== 'user') return;
+      this.turn(item.text ?? '', item.endpointReason);
+    });
+
+    // The user's speech paused, resumed or cut the reply.
+    this.listen('barge_in', (evt: { interruptedText?: string; userSpeech?: string } | undefined) => this.bargeIn(evt));
+  }
+
+  /** Reads the names a host relays a pipeline's events under. */
+  private subscribeRelayed(): void {
     // ------------------------------------------------------------------
     // interim_transcript -- partial STT result, forwarded but NOT buffered.
     //
@@ -149,16 +235,7 @@ export class VoiceTurnCollector {
     // or contradictory entries. They are forwarded as events so that UIs
     // can show live typing indicators.
     // ------------------------------------------------------------------
-    session.on('interim_transcript', (evt: any) => {
-      this.eventSink({
-        type: 'voice_transcript',
-        nodeId: this.nodeId,
-        text: evt.text ?? '',
-        isFinal: false,
-        speaker: evt.speaker,
-        confidence: evt.confidence ?? 0,
-      });
-    });
+    this.listen('interim_transcript', (evt: any) => this.interim(evt?.text ?? '', evt?.speaker, evt?.confidence ?? 0));
 
     // ------------------------------------------------------------------
     // final_transcript -- confirmed utterance, buffered AND forwarded.
@@ -167,53 +244,12 @@ export class VoiceTurnCollector {
     // confirmed utterance is appended to the transcript buffer and the
     // last-speaker tracker is updated.
     // ------------------------------------------------------------------
-    session.on('final_transcript', (evt: any) => {
-      // Default speaker to 'user' when the STT service doesn't provide
-      // diarization labels. This matches the most common single-speaker
-      // scenario where the only speaker is the human user.
-      const speaker = evt.speaker ?? 'user';
-
-      // Buffer the confirmed entry for downstream consumers (checkpoint,
-      // summarisation, analytics).
-      this.transcript.push({
-        speaker,
-        text: evt.text ?? '',
-        timestamp: Date.now(),
-      });
-
-      // Track the most recent speaker for quick access without iterating
-      // the entire buffer. Used by the executor to populate the result.
-      this.lastSpeaker = speaker;
-
-      this.eventSink({
-        type: 'voice_transcript',
-        nodeId: this.nodeId,
-        text: evt.text ?? '',
-        isFinal: true,
-        speaker,
-        confidence: evt.confidence ?? 0,
-      });
-    });
+    this.listen('final_transcript', (evt: any) => this.final(evt?.text ?? '', evt?.speaker, evt?.confidence ?? 0));
 
     // ------------------------------------------------------------------
     // turn_complete -- endpoint detection fired; advance the turn counter.
-    //
-    // The counter is incremented BEFORE emitting the event so that the
-    // turnIndex in the emitted event reflects the new (post-increment)
-    // count. This matches the semantics expected by VoiceNodeExecutor's
-    // maxTurns check, which reads getTurnCount() after the event fires.
     // ------------------------------------------------------------------
-    session.on('turn_complete', (evt: any) => {
-      this.turnCount++;
-
-      this.eventSink({
-        type: 'voice_turn_complete',
-        nodeId: this.nodeId,
-        transcript: evt.transcript ?? '',
-        turnIndex: this.turnCount,
-        endpointReason: evt.reason ?? 'unknown',
-      });
-    });
+    this.listen('turn_complete', (evt: any) => this.turn(evt?.transcript ?? '', evt?.reason));
 
     // ------------------------------------------------------------------
     // barge_in -- user interrupted agent mid-speech.
@@ -224,13 +260,81 @@ export class VoiceTurnCollector {
     // (what triggered the interruption) are forwarded for downstream
     // handlers to process.
     // ------------------------------------------------------------------
-    session.on('barge_in', (evt: any) => {
-      this.eventSink({
-        type: 'voice_barge_in',
-        nodeId: this.nodeId,
-        interruptedText: evt.interruptedText ?? '',
-        userSpeech: evt.userSpeech ?? '',
-      });
+    this.listen('barge_in', (evt: any) => this.bargeIn(evt));
+  }
+
+  /**
+   * An interim transcript: forwarded, not buffered.
+   *
+   * @param text       - The transcript's text.
+   * @param speaker    - The speaker, when the transcriber named one.
+   * @param confidence - The transcriber's confidence.
+   */
+  private interim(text: string, speaker: string | undefined, confidence: number): void {
+    this.eventSink({
+      type: 'voice_transcript',
+      nodeId: this.nodeId,
+      text,
+      isFinal: false,
+      speaker,
+      confidence,
+    });
+  }
+
+  /**
+   * A final transcript: buffered and forwarded. The speaker defaults to `'user'` when the STT service provides no
+   * diarization labels, the most common single-speaker case, where the only speaker is the human user.
+   *
+   * @param text       - The transcript's text.
+   * @param speaker    - The speaker, when the transcriber named one.
+   * @param confidence - The transcriber's confidence.
+   */
+  private final(text: string, speaker: string | undefined, confidence: number): void {
+    const who = speaker ?? 'user';
+    // Buffer the confirmed entry for downstream consumers (checkpoint, summarisation, analytics).
+    this.transcript.push({ speaker: who, text, timestamp: Date.now() });
+    // Track the most recent speaker for quick access without iterating the entire buffer.
+    this.lastSpeaker = who;
+    this.eventSink({
+      type: 'voice_transcript',
+      nodeId: this.nodeId,
+      text,
+      isFinal: true,
+      speaker: who,
+      confidence,
+    });
+  }
+
+  /**
+   * A completed user turn. The counter is incremented BEFORE emitting the event so that the turnIndex in the emitted
+   * event reflects the new (post-increment) count. This matches the semantics expected by VoiceNodeExecutor's maxTurns
+   * check, which reads getTurnCount() after the event fires.
+   *
+   * @param transcript - The turn's text.
+   * @param reason     - Why the endpoint detector ended the turn, when it said.
+   */
+  private turn(transcript: string, reason: string | undefined): void {
+    this.turnCount++;
+    this.eventSink({
+      type: 'voice_turn_complete',
+      nodeId: this.nodeId,
+      transcript,
+      turnIndex: this.turnCount,
+      endpointReason: reason ?? 'unknown',
+    });
+  }
+
+  /**
+   * A barge-in: forwarded with what the agent was saying and, from a relayed event that names it, what the user said.
+   *
+   * @param evt - The event.
+   */
+  private bargeIn(evt: { interruptedText?: string; userSpeech?: string } | undefined): void {
+    this.eventSink({
+      type: 'voice_barge_in',
+      nodeId: this.nodeId,
+      interruptedText: evt?.interruptedText ?? '',
+      userSpeech: evt?.userSpeech ?? '',
     });
   }
 
@@ -262,7 +366,7 @@ export class VoiceTurnCollector {
   }
 
   /**
-   * Returns the speaker identifier from the most recent `final_transcript` event,
+   * Returns the speaker identifier from the most recent final transcript,
    * or an empty string if no final transcript has been received yet.
    *
    * @returns The last speaker label, or `''` if none.
