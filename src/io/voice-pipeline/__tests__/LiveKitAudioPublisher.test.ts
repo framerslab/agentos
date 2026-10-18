@@ -244,6 +244,21 @@ describe('native playout', () => {
     expect(f.source().capturedSamples).toBe(960); expect(f.source().clears).toBe(2);
     await f.publisher.close();
   });
+  it('handles a rejection of a native playout wait that a close cut short', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const f = native(); await f.publisher.sendAudio(unscoped());
+      let fail!: (error: Error) => void; let closing: Promise<void> | undefined;
+      // A close lands as the native playout wait begins, and that wait rejects afterwards, as a source being disposed may.
+      f.source().waitForPlayout = () => { closing = f.publisher.close(); return new Promise<void>((_resolve, reject) => { fail = reject; }); };
+      await f.publisher.waitForPlayout();
+      fail(new Error('source disposed')); await settle();
+      expect(unhandled).toEqual([]);
+      await closing;
+    } finally { process.off('unhandledRejection', onUnhandled); }
+  });
   it('starts the playout bound once the track is published, so a first publish slower than the bound drops nothing', async () => {
     let publish!: () => void;
     const participant = { publishTrack: vi.fn(() => new Promise<{ sid: string }>((resolve) => { publish = () => resolve({ sid: 'track-a' }); })), unpublishTrack: vi.fn(async () => {}) };

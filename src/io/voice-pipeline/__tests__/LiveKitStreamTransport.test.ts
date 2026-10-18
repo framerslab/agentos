@@ -1272,7 +1272,7 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     transport.close();
   });
 
-  it('refuses a message with livekit control bound once sixty-four wait behind a cancel', async () => {
+  it('refuses a message with livekit control bound once sixty-four wait behind a cancel, and a refused pause leaves the track as it is', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
     const transport = new LiveKitStreamTransport({
@@ -1302,11 +1302,62 @@ describe('LiveKitStreamTransport speaking in the room', () => {
       );
       await settle();
       expect(outcome).toBe('livekit control bound');
+      // A pause refused the same way neither clears the track nor holds it.
+      const clears = FakeAudioSource.created[0]!.clears;
+      await expect(transport.sendControl({ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } })).rejects.toThrow(
+        'livekit control bound'
+      );
+      expect(FakeAudioSource.created[0]!.clears).toBe(clears);
       expect(sentTypes(room)).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
     transport.close();
+  });
+
+  it('closes the transport when a capture does not return within receiptTimeoutMs plus maxDurationMs, and finishes closing without it', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    const errors: string[] = [];
+    transport.on('error', (error: Error) => errors.push(error.message));
+    await transport.readyForPlayback();
+    const source = FakeAudioSource.created[0]!;
+    // The track never takes the chunk: its capture never returns.
+    source.gate = new Promise<void>(() => {});
+    void transport.sendAudio(toneChunk(1));
+    await settle();
+    let outcome: string | undefined;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      void transport.waitForPlayout().then(
+        () => {
+          outcome = 'played';
+        },
+        (error: Error) => {
+          outcome = error.message;
+        }
+      );
+      await settle();
+      // receiptTimeoutMs is 1000 and maxDurationMs 2000.
+      await vi.advanceTimersByTimeAsync(3_000);
+      await settle();
+      expect(outcome).toBe('publisher drain timeout');
+      expect(errors).toEqual(['livekit output stalled']);
+      expect(transport.state).toBe('closed');
+    } finally {
+      vi.useRealTimers();
+    }
+    // Closing does not wait for the capture that never returns: the track is unpublished and its source closed.
+    await transport.whenClosed();
+    expect(room.localParticipant.unpublishTrack).toHaveBeenCalledOnce();
+    expect(source.closed).toBe(true);
   });
 });
 
