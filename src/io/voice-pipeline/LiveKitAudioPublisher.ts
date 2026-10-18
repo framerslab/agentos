@@ -95,7 +95,8 @@ export interface LiveKitAudioPublisherOptions {
    * How playback is acknowledged ({@link LiveKitPlayout}). Unset, the publisher plays natively unless the participant
    * declares {@link LIVEKIT_PLAYOUT_ATTRIBUTE} as `'participant'` and these options carry the call identity. A SIP
    * participant is always played natively. `'participant'` requires `scopeId`, `callId` and `generation`. The mode is
-   * fixed once the participant is in the room; a chunk sent before then plays natively.
+   * fixed once the participant is in the room; a chunk sent before then plays natively, and its playback wait and its
+   * clear stay native once the mode is fixed.
    */
   playout?: LiveKitPlayout;
   /**
@@ -159,10 +160,15 @@ function publishingRtc(input: unknown): LiveKitPublishingRtc {
   return rtc as LiveKitPublishingRtc;
 }
 /**
- * A chunk native playout admitted: what its receipt reports, the clear count it was admitted under, the hold count
- * under which the track began to take it, and its capture.
+ * A chunk native playout admitted: the playout it was admitted under, what its receipt reports, the clear count it was
+ * admitted under, the hold count under which the track began to take it, and its capture.
  */
 interface NativeChunk {
+  /**
+   * The playout the chunk was admitted under, which its playback wait and its clear go through: a chunk sent before
+   * the participant was in the room stays native once a later chunk has fixed participant playout.
+   */
+  playout: 'native';
   generation?: VoiceGeneration;
   sequence: number;
   playedSamples: number;
@@ -176,6 +182,12 @@ interface NativeChunk {
   holds?: number;
   /** Settles once the chunk's frames are captured, or once the chunk was discarded. */
   captured: Promise<void>;
+}
+/** A chunk participant playout admitted: the playout it was admitted under, and what the participant's receipt reports. */
+interface ParticipantChunk {
+  /** The playout the chunk was admitted under, which its playback wait and its clear go through. */
+  playout: 'participant';
+  receipt: PlaybackReceipt;
 }
 /**
  * One published track of the agent's speech. In native playout chunks queue on the track in order, as fast as its
@@ -195,7 +207,8 @@ export class LiveKitAudioPublisher {
   private closed = false;
   private cancellation = 0;
   private clearWork?: Promise<void>;
-  private pending?: PlaybackReceipt;
+  /** Participant playout: the chunk announced last, until its playback wait settles or a clear has finished. */
+  private pending?: ParticipantChunk;
   /** The playout mode, fixed at the first readiness or admission that finds the participant in the room. */
   private mode?: LiveKitPlayout;
   /** Native playout: the end of the queue of chunks being captured, and of a clear; it never rejects. */
@@ -354,7 +367,7 @@ export class LiveKitAudioPublisher {
     // A scope, a call or a generation the chunk carries must be the publisher's, which a publisher without one lacks.
     if ((chunk.scopeId !== undefined && chunk.scopeId !== scopeId) || (chunk.callId !== undefined && chunk.callId !== callId) || (chunk.generation && (!call || !sameVoiceGeneration(chunk.generation, call))) || (chunk.sequence !== undefined && (!Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1))) throw new Error('publisher scope or generation refused');
     const pcm = this.decode(chunk);
-    const entry: NativeChunk = { generation: chunk.generation ? { ...chunk.generation } : undefined, sequence: chunk.sequence ?? this.nextSequence++, playedSamples: pcm.samples, sampleRate: pcm.sampleRate, cancellation: this.cancellation, captured: Promise.resolve() };
+    const entry: NativeChunk = { playout: 'native', generation: chunk.generation ? { ...chunk.generation } : undefined, sequence: chunk.sequence ?? this.nextSequence++, playedSamples: pcm.samples, sampleRate: pcm.sampleRate, cancellation: this.cancellation, captured: Promise.resolve() };
     const previous = this.queued;
     entry.captured = (async () => {
       await previous;
@@ -382,7 +395,7 @@ export class LiveKitAudioPublisher {
     const pcm = this.decode(chunk);
     const generation = { ...chunk.generation }; const captured = this.cancellation;
     const receipt: PlaybackReceipt = { generation, sequence: chunk.sequence, playedSamples: pcm.samples, sampleRate: pcm.sampleRate };
-    this.acks.begin(receipt); this.pending = receipt;
+    this.acks.begin(receipt); this.pending = { playout: 'participant', receipt };
     const work = (async () => {
       await this.prepare(); this.live(generation, captured); const rtc = this.rtc!;
       const { frames, publishedSamples } = this.convert(rtc, pcm);
@@ -405,13 +418,27 @@ export class LiveKitAudioPublisher {
    * and rate. A queue that a clear emptied does not count as played, nor does a chunk the track had begun to take when
    * a pause came, whether the pause came before this wait or during it. In participant playout both the native drain
    * and the participant's receipt are required; the native drain alone does not count.
+   *
+   * The wait goes through the playout the chunk was admitted under: a chunk sent natively before the participant was
+   * in the room waits for the track, also once a later chunk has fixed participant playout.
    */
   async waitForPlayback(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
-    return this.mode === 'participant' ? this.waitForReceipt(generation, sequence, signal) : this.waitForTrack(generation, sequence, signal);
+    const chunk = this.admitted(generation, sequence);
+    if (!chunk) throw new Error('missing publisher receipt');
+    return chunk.playout === 'participant' ? this.waitForReceipt(chunk, generation, sequence, signal) : this.waitForTrack(chunk, generation, sequence, signal);
   }
-  private async waitForTrack(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
+  /**
+   * The outstanding chunk with this generation and sequence, under the playout it was admitted under: the one
+   * participant playout announced last, else the last one native playout admitted.
+   */
+  private admitted(generation: VoiceGeneration, sequence: number): NativeChunk | ParticipantChunk | undefined {
+    const pending = this.pending;
+    if (pending && pending.receipt.sequence === sequence && sameVoiceGeneration(pending.receipt.generation, generation)) return pending;
     const entry = this.latest;
-    if (!entry || entry.sequence !== sequence || (entry.generation && !sameVoiceGeneration(entry.generation, generation))) throw new Error('missing publisher receipt');
+    if (entry && entry.sequence === sequence && (!entry.generation || sameVoiceGeneration(entry.generation, generation))) return entry;
+    return undefined;
+  }
+  private async waitForTrack(entry: NativeChunk, generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
     let timer: ReturnType<typeof setTimeout> | undefined; let abort: (() => void) | undefined;
     const stopped = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(new Error('publisher drain timeout')), this.options.receiptTimeoutMs);
@@ -437,9 +464,9 @@ export class LiveKitAudioPublisher {
     }
   }
   /** Participant playout: both acknowledgements are mandatory. clearQueue's local waiter release cannot count as playback. */
-  private async waitForReceipt(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
-    const pending = this.pending; const captured = this.cancellation;
-    if (!pending || !sameVoiceGeneration(pending.generation, generation) || pending.sequence !== sequence || !this.source) throw new Error('missing publisher receipt');
+  private async waitForReceipt(pending: ParticipantChunk, generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
+    const captured = this.cancellation;
+    if (!this.source) throw new Error('missing publisher receipt');
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('publisher drain timeout')), this.options.receiptTimeoutMs); });
     try {
@@ -495,7 +522,8 @@ export class LiveKitAudioPublisher {
    * flight to return and clears it again. In native playout, and before the mode is fixed, that is all, with no answer
    * asked, and without a `generation` it clears whatever the track holds; a clear of another generation than the last
    * chunk's does nothing. In participant playout it then sends `clear` and waits for the participant's `cleared`
-   * answer; it needs the `generation`.
+   * answer; it needs the `generation`. A chunk sent natively before participant playout was fixed is cleared as native
+   * playout clears it: its capture in flight is waited out before the queue is cleared again and `clear` is sent.
    */
   clearPlayback(generation?: VoiceGeneration): Promise<void> {
     if (this.closed) return this.closing ?? Promise.resolve();
@@ -510,12 +538,16 @@ export class LiveKitAudioPublisher {
     })(); this.clearWork = work; this.queued = work.catch(() => {});
     return work.finally(() => { if (this.clearWork === work) this.clearWork = undefined; });
   }
-  /** Participant playout: invalidates immediately, clears the native queue, waits out capture, clears again, then awaits remote discard. */
+  /**
+   * Participant playout: invalidates immediately, clears the native queue, waits out capture, clears again, then awaits
+   * remote discard. A chunk native playout admitted before the mode was fixed is cleared as native playout clears it:
+   * its capture in flight is waited out too, before the queue is cleared again.
+   */
   private clearForReceipt(generation: VoiceGeneration): Promise<void> {
-    if (this.pending && !sameVoiceGeneration(this.pending.generation, generation)) return Promise.resolve();
-    this.cancellation++; this.source?.clearQueue(); this.release(); const sending = this.sending;
+    if (this.pending && !sameVoiceGeneration(this.pending.receipt.generation, generation)) return Promise.resolve();
+    this.cancellation++; this.source?.clearQueue(); this.release(); const sending = this.sending; const queued = this.queued;
     const work = (async () => {
-      await sending?.catch(() => {}); this.source?.clearQueue();
+      await sending?.catch(() => {}); await queued; this.source?.clearQueue(); this.latest = undefined;
       await this.acks.clear(generation, (message) => this.send({ ...message })); this.pending = undefined;
     })(); this.clearWork = work;
     return work.finally(() => { if (this.clearWork === work) this.clearWork = undefined; });
