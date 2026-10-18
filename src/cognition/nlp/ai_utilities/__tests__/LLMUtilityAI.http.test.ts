@@ -463,6 +463,40 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(await hybrid.parseJsonSafe('{"other": 1}', { targetSchema: schema, attemptFixWithLLM: true })).toEqual({ ok: true });
     expect(received).toHaveLength(1);
   });
+
+  it('checks the standard formats a targetSchema names, and passes over a keyword or a format Ajv does not know', async () => {
+    const stats = new StatisticalUtilityAI('stat-for-formats');
+    await stats.initialize({ utilityId: 'stat-for-formats' });
+    // date-time is a standard format. `example` is no JSON Schema keyword and `ticket-code` no format: JSON Schema
+    // says to pass over both, so neither keeps the schema from compiling.
+    const schema = {
+      type: 'object',
+      required: ['at'],
+      properties: { at: { type: 'string', format: 'date-time' }, code: { type: 'string', format: 'ticket-code' } },
+      example: { at: '2026-10-18T02:00:00Z' },
+    };
+    for (const parser of [utility, stats]) {
+      expect(await parser.parseJsonSafe('{"at": "2026-10-18T02:00:00Z", "code": "A-1"}', { targetSchema: schema })).toEqual({
+        at: '2026-10-18T02:00:00Z',
+        code: 'A-1',
+      });
+      expect(await parser.parseJsonSafe('{"at": "yesterday"}', { targetSchema: schema })).toBeNull();
+    }
+    expect(received).toHaveLength(0);
+  });
+
+  it('checks a targetSchema with an $id that each call builds anew', async () => {
+    const stats = new StatisticalUtilityAI('stat-for-ids');
+    await stats.initialize({ utilityId: 'stat-for-ids' });
+    // A caller that writes its schema in the call hands over a new object every time, under the same $id.
+    const schemaFor = () => ({ $id: 'urn:example:reply', type: 'object', required: ['ok'] });
+    for (const parser of [utility, stats]) {
+      expect(await parser.parseJsonSafe('{"ok": true}', { targetSchema: schemaFor() })).toEqual({ ok: true });
+      expect(await parser.parseJsonSafe('{"ok": false}', { targetSchema: schemaFor() })).toEqual({ ok: false });
+      expect(await parser.parseJsonSafe('{"other": 1}', { targetSchema: schemaFor() })).toBeNull();
+    }
+    expect(received).toHaveLength(0);
+  });
 });
 
 describe('LLMUtilityAI before initialize()', () => {
