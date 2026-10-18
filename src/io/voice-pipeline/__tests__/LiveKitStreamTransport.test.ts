@@ -47,6 +47,7 @@ import {
   rtcFrame,
   settle,
 } from '../../hearing/__tests__/livekit-fakes.js';
+import { recordSessionEvents } from './session-event-log.js';
 
 function open(room: FakeRoom, topic?: string) {
   room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
@@ -624,7 +625,7 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     for (let i = 0; i < 3; i++) s.tts.emit('audio', pcmChunk());
     await vi.waitFor(() => expect(capturedSamples()).toBe(3 * 960));
     // The page still gets the control messages it can show; nothing per chunk.
-    expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking']);
+    expect(sentTypes(room)).toEqual(['session_started', 'agent_thinking', 'agent_speaking']);
     expect(s.errors).toEqual([]);
     await s.orchestrator.stopSession('done');
   });
@@ -867,10 +868,10 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     await settle();
     // The synthesis is complete, and the track still holds the reply.
     expect(s.orchestrator.state).toBe('speaking');
-    expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking']);
+    expect(sentTypes(room)).toEqual(['session_started', 'agent_thinking', 'agent_speaking']);
     FakeAudioSource.created[0]!.playOut();
     await vi.waitFor(() => expect(s.orchestrator.state).toBe('listening'));
-    expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking', 'agent_done']);
+    expect(sentTypes(room)).toEqual(['session_started', 'agent_thinking', 'agent_speaking', 'agent_done']);
     expect(s.errors).toEqual([]);
     await s.orchestrator.stopSession('done');
   });
@@ -893,7 +894,7 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     expect(s.tts.cancel).toHaveBeenCalledOnce();
     // The track's playout, which the clear ended, does not report the cut reply as done.
     await settle();
-    expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking', 'barge_in']);
+    expect(sentTypes(room)).toEqual(['session_started', 'agent_thinking', 'agent_speaking', 'barge_in']);
     expect(s.errors).toEqual([]);
     await s.orchestrator.stopSession('done');
   });
@@ -1019,6 +1020,54 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     expect(sentTypes(room)).toEqual(['audio']);
     transport.close();
     await transport.whenClosed();
+  });
+
+  it('holds the floor until the room source has played the reply, and adds the reply to the conversation then', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const s = await converse(room, 'user-1');
+    const log = recordSessionEvents(s.orchestrator);
+    await s.reply();
+    for (let i = 0; i < 3; i++) s.tts.emit('audio', pcmChunk());
+    await vi.waitFor(() => expect(capturedSamples()).toBe(3 * 960));
+    s.tts.emit('flush_complete');
+    await settle();
+
+    // Synthesis is complete, and the track still holds the reply: the agent still speaks.
+    expect(s.orchestrator.state).toBe('speaking');
+    expect(log).toEqual(['item user speech Hi', 'agent listening>thinking', 'speech reply false', 'agent thinking>speaking']);
+    FakeAudioSource.created[0]!.playOut();
+    await vi.waitFor(() => expect(s.orchestrator.state).toBe('listening'));
+    expect(log.slice(4)).toEqual(['item assistant played Hello|Hello', 'agent speaking>listening']);
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
+
+  it("ends a playout wait at once when its signal is aborted, though the track still holds the reply", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const s = await converse(room, 'user-1');
+    await s.reply();
+    s.tts.emit('audio', pcmChunk());
+    await vi.waitFor(() => expect(capturedSamples()).toBe(960));
+
+    const controller = new AbortController();
+    const wait = s.transport.waitForPlayout(controller.signal).then(
+      () => 'played',
+      (error: Error) => error.message
+    );
+    await settle();
+    controller.abort();
+    expect(await wait).toBe('publisher playout wait aborted');
+
+    // The session's own wait ends with the session, and no agent_done follows.
+    s.tts.emit('flush_complete');
+    await settle();
+    expect(s.orchestrator.state).toBe('speaking');
+    await s.orchestrator.stopSession('done');
+    await settle();
+    expect(sentTypes(room)).not.toContain('agent_done');
+    expect(s.errors).toEqual([]);
   });
 });
 
