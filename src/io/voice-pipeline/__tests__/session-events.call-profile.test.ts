@@ -140,7 +140,7 @@ async function call() {
   const turn = () => endpoint.emit('turn_complete', { ...identity, transcript: 'hello', confidence: 1, durationMs: 20, reason: 'manual' });
   const final = () => stt.emit('transcript', { ...identity, text: 'hello', confidence: 1, words: [], isFinal: true });
   const audio = () => transport.emit('audio', { samples: new Float32Array(320), sampleRate: 16000, channels: 1, timestamp: ++sampleSequence * 20 });
-  return { runtime, session, log, turn, final, audio, ack: () => ack(), transport, profile, endpoint, stt };
+  return { runtime, session, log, turn, final, audio, ack: () => ack(), transport, profile, endpoint, stt, agent };
 }
 
 describe('session events under a call profile', () => {
@@ -196,6 +196,92 @@ describe('session events under a call profile', () => {
     // The call's own session emits the same events from the moment it is returned.
     expect(own).toEqual(expected.slice(1));
     expect(f.profile.onFailure).not.toHaveBeenCalled();
+  });
+
+  it('a text_input while the agent speaks cancels the reply and the agent receives the text', async () => {
+    const f = await call();
+    const cut: Array<VoiceSessionEventMap['barge_in']> = [];
+    f.session.on('barge_in', (event) => cut.push(event));
+
+    // The reply's audio waits for the transport's acknowledgement when the user types.
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    expect(f.runtime.state).toBe('speaking');
+    f.transport.emit('message', { type: 'text_input', text: 'hello' });
+    // The text's reply plays to its end.
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledTimes(2));
+    f.ack();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    expect(f.log).toEqual([
+      'agent initializing>listening',
+      'item user speech hello',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+      'barge_in cancel',
+      // Which of its words were heard is not known: playedText says none rather than guess.
+      'item assistant interrupted hello|',
+      'agent speaking>listening',
+      'item user text hello',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+      'item assistant played hello|hello',
+      'agent speaking>listening',
+    ]);
+    // No speech cut the reply.
+    expect(cut).toEqual([expect.objectContaining({ speechDurationMs: 0, interruptedText: 'hello', action: 'cancel' })]);
+    expect(f.agent.sendText).toHaveBeenCalledTimes(2);
+    expect(f.agent.sendText).toHaveBeenLastCalledWith(
+      'hello',
+      expect.objectContaining({ speakers: [], endpointReason: 'manual', speechDurationMs: 0, wasInterrupted: false, transcriptConfidence: 1 })
+    );
+    expect(f.profile.onFailure).not.toHaveBeenCalled();
+    await f.runtime.stopSession();
+  });
+
+  it('a text_input while listening starts a turn', async () => {
+    const f = await call();
+    const turns = vi.fn();
+    f.runtime.on('turn_complete', turns);
+
+    f.transport.emit('message', { type: 'text_input', text: 'hello' });
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    expect(f.log).toEqual([
+      'agent initializing>listening',
+      'item user text hello',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+      'item assistant played hello|hello',
+      'agent speaking>listening',
+    ]);
+    expect(turns).not.toHaveBeenCalled();
+    expect(f.agent.sendText).toHaveBeenCalledWith(
+      'hello',
+      expect.objectContaining({ speakers: [], endpointReason: 'manual', speechDurationMs: 0, wasInterrupted: false, transcriptConfidence: 1 })
+    );
+    expect(f.profile.onFailure).not.toHaveBeenCalled();
+    await f.runtime.stopSession();
+  });
+
+  it('drops a text_input the check refuses, and the call goes on', async () => {
+    const f = await call();
+
+    f.transport.emit('message', { type: 'text_input', text: '   ' });
+    f.transport.emit('message', { type: 'text_input', text: 'x'.repeat(4_001) });
+    // The call still takes the next spoken turn.
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+
+    expect(f.log).toEqual(['agent initializing>listening', 'item user speech hello', 'agent listening>thinking', 'speech reply false', 'agent thinking>speaking']);
+    expect(f.agent.sendText).toHaveBeenCalledOnce();
+    expect(f.profile.onFailure).not.toHaveBeenCalled();
+    await f.runtime.stopSession();
   });
 
   it("reports no reply's text when speech interrupts a turn the agent has yet to answer", async () => {
