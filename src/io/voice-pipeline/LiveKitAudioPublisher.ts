@@ -95,8 +95,8 @@ export interface LiveKitAudioPublisherOptions {
    * How playback is acknowledged ({@link LiveKitPlayout}). Unset, the publisher plays natively unless the participant
    * declares {@link LIVEKIT_PLAYOUT_ATTRIBUTE} as `'participant'` and these options carry the call identity. A SIP
    * participant is always played natively. `'participant'` requires `scopeId`, `callId` and `generation`. The mode is
-   * fixed once the participant is in the room; a chunk sent before then plays natively, and its playback wait and its
-   * clear stay native once the mode is fixed.
+   * fixed once the participant is in the room; a chunk sent before then plays natively, its playback wait stays native
+   * once the mode is fixed, and a clear with the generation waits out its capture in flight (`clearPlayback()`).
    */
   playout?: LiveKitPlayout;
   /**
@@ -166,8 +166,8 @@ function publishingRtc(input: unknown): LiveKitPublishingRtc {
  */
 interface NativeChunk {
   /**
-   * The playout the chunk was admitted under, which its playback wait and its clear go through: a chunk sent before
-   * the participant was in the room stays native once a later chunk has fixed participant playout.
+   * The playout the chunk was admitted under, which its playback wait goes through: a chunk sent before the participant
+   * was in the room is waited for on the track once a later chunk has fixed participant playout.
    */
   playout: 'native';
   generation?: VoiceGeneration;
@@ -186,7 +186,7 @@ interface NativeChunk {
 }
 /** A chunk participant playout admitted: the playout it was admitted under, and what the participant's receipt reports. */
 interface ParticipantChunk {
-  /** The playout the chunk was admitted under, which its playback wait and its clear go through. */
+  /** The playout the chunk was admitted under, which its playback wait goes through. */
   playout: 'participant';
   receipt: PlaybackReceipt;
 }
@@ -280,8 +280,9 @@ export class LiveKitAudioPublisher {
    * Fixes the playout mode when the participant is in the room, then publishes exactly once and waits for a participant
    * to subscribe to the track, at most `receiptTimeoutMs`, before the host records connected readiness. The wait ends
    * at the first subscriber (rtc-node's `LocalTrackPublication.waitForSubscription()` resolves once the first
-   * participant subscribes), so connected readiness means one participant hears the track, and a participant who
-   * subscribes later misses what played before.
+   * participant subscribes), so readiness a subscription brought means one participant hears the track, and a
+   * participant who subscribes later misses what played before. Readiness also comes with nobody subscribed: once
+   * `receiptTimeoutMs` has passed, when the wait fails, and at once for a publication without the method.
    */
   ready(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('publisher closed'));
@@ -608,8 +609,9 @@ export class LiveKitAudioPublisher {
    * flight to return and clears it again. In native playout, and before the mode is fixed, that is all, with no answer
    * asked, and without a `generation` it clears whatever the track holds; a clear of another generation than the last
    * chunk's does nothing. In participant playout it then sends `clear` and waits for the participant's `cleared`
-   * answer; it needs the `generation`. A chunk sent natively before participant playout was fixed is cleared as native
-   * playout clears it: its capture in flight is waited out before the queue is cleared again and `clear` is sent.
+   * answer; it needs the `generation`, and without it does nothing. With the generation, it also waits out the capture
+   * in flight of a chunk sent natively before participant playout was fixed, and clears the queue again, before it sends
+   * `clear`.
    */
   clearPlayback(generation?: VoiceGeneration): Promise<void> {
     if (this.closed) return this.closing ?? Promise.resolve();
@@ -626,8 +628,8 @@ export class LiveKitAudioPublisher {
   }
   /**
    * Participant playout: invalidates immediately, clears the native queue, waits out capture, clears again, then awaits
-   * remote discard. A chunk native playout admitted before the mode was fixed is cleared as native playout clears it:
-   * its capture in flight is waited out too, before the queue is cleared again.
+   * remote discard. The capture in flight of a chunk native playout admitted before the mode was fixed is waited out
+   * too, before the queue is cleared again.
    */
   private clearForReceipt(generation: VoiceGeneration): Promise<void> {
     if (this.pending && !sameVoiceGeneration(this.pending.receipt.generation, generation)) return Promise.resolve();
