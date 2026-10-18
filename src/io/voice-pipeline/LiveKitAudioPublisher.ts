@@ -142,6 +142,11 @@ export interface LiveKitPublisherBinding {
    * is fixed: the mode waits for the participant.
    */
   participant?(): LiveKitPlayoutParticipant | undefined;
+  /**
+   * Called once when a playout wait gives up on a capture that did not return: the track can take no more audio, so the
+   * transport closes its path.
+   */
+  stalled?(): void;
 }
 /**
  * Loads the optional publishing peer through {@link loadLiveKitRtc}, so a missing package is named with how to install
@@ -230,6 +235,8 @@ export class LiveKitAudioPublisher {
    * cleared as it lands.
    */
   private stalls = 0;
+  /** Whether a playout wait gave up on a capture that did not return; a close then does not wait for that capture. */
+  private captureStalled = false;
   /** Whether the track is being published and its first subscription waited for; a playout wait's clock stops meanwhile. */
   private preparing = false;
   /**
@@ -512,17 +519,18 @@ export class LiveKitAudioPublisher {
    * subscription waited for. What it holds or has yet to take is then discarded, so none of
    * it plays later: the chunks admitted are cancelled, the native queue is cleared and a frame whose capture is under
    * way is cleared as it lands. The wait then rejects with `publisher drain timeout`; it rejects as well when the native
-   * wait does.
+   * wait does. A capture that did not return leaves the track unable to take audio: a close no longer waits for it, and
+   * the transport closes its path.
    */
   async waitForPlayout(): Promise<void> {
     for (;;) {
       const queued = this.queued; const sending = this.sending; const cancellation = this.cancellation;
       const captured = await this.watchTrack(Promise.all([queued, sending?.catch(() => {})]).then(() => {}), cancellation);
-      if (captured !== 'settled') return this.endWait(captured);
+      if (captured !== 'settled') return this.endWait(captured, true);
       // A chunk admitted meanwhile is waited for too.
       if (queued !== this.queued || sending !== this.sending) continue;
       const drained = this.source ? await this.watchTrack(this.source.waitForPlayout(), cancellation) : 'settled';
-      if (drained !== 'settled') return this.endWait(drained);
+      if (drained !== 'settled') return this.endWait(drained, false);
       if (queued === this.queued && sending === this.sending) return;
     }
   }
@@ -540,6 +548,8 @@ export class LiveKitAudioPublisher {
    */
   private async watchTrack(work: Promise<void>, cancellation: number): Promise<'settled' | 'cleared' | 'stalled'> {
     const settled = work.then(() => 'settled' as const);
+    // A wait a clear or a close ends before it races `work` leaves a later rejection of `work` handled.
+    settled.catch(() => {});
     for (;;) {
       if (this.closed || this.cancellation !== cancellation) return 'cleared';
       const changed = this.nextChange().then(() => 'changed' as const);
@@ -549,19 +559,26 @@ export class LiveKitAudioPublisher {
       });
       try {
         const outcome = await Promise.race([settled, changed, stalled]);
-        // A pause, or a publication, that began as the bound passed stops the clock instead.
-        if (outcome === 'settled' || (outcome === 'stalled' && !this.hold && !this.preparing)) return outcome;
+        if (outcome === 'settled') return outcome;
+        // A pause, or a publication, that began as the bound passed stops the clock instead; a clear or a close ends it.
+        if (outcome === 'stalled' && !this.hold && !this.preparing) return this.closed || this.cancellation !== cancellation ? 'cleared' : outcome;
       } finally { clearTimeout(timer); }
     }
   }
   /**
    * Ends a playout wait that a clear or a close ended, which counts as played out, or that gave up on a stalled track:
-   * what the track holds or has yet to take is discarded, so none of it plays later, and the wait rejects.
+   * what the track holds or has yet to take is discarded, so none of it plays later, and the wait rejects. A capture
+   * that did not return leaves the track unable to take audio: a close no longer waits for it, and the transport is
+   * told to close its path (`LiveKitPublisherBinding.stalled`).
+   *
+   * @param capturing - Whether the step that gave up waited for captures, rather than for the native queue's playout.
    */
-  private endWait(outcome: 'cleared' | 'stalled'): void {
+  private endWait(outcome: 'cleared' | 'stalled', capturing: boolean): void {
     if (outcome === 'cleared') return;
     this.cancellation++; this.stalls++; this.moved();
-    this.source?.clearQueue();
+    const retire = capturing && !this.captureStalled;
+    if (capturing) this.captureStalled = true;
+    try { this.source?.clearQueue(); } finally { if (retire) this.binding.stalled?.(); }
     throw new Error('publisher drain timeout');
   }
   /** The next change a playout wait watches; one promise serves every wait until it settles. */
@@ -640,14 +657,19 @@ export class LiveKitAudioPublisher {
     })(); this.clearWork = work;
     return work.finally(() => { if (this.clearWork === work) this.clearWork = undefined; });
   }
-  /** Confirms unpublication and native disposal once. Rejection is incomplete cleanup, never stop evidence. */
+  /**
+   * Confirms unpublication and native disposal once, after the work in flight has returned; a capture a playout wait
+   * gave up on is not waited for. Rejection is incomplete cleanup, never stop evidence.
+   */
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closed = true; this.cancellation++; this.moved(); this.acks.close(); this.release(); this.stopWaiting?.();
     const failures: unknown[] = [];
     try { this.source?.clearQueue(); } catch (error) { failures.push(error); }
     this.closing = (async () => {
-      await this.preparation?.catch(() => {}); await this.sending?.catch(() => {}); await this.queued; await this.clearWork?.catch(() => {});
+      await this.preparation?.catch(() => {});
+      // A capture a playout wait gave up on is not waited for: the track is unpublished and its source closed under it.
+      if (!this.captureStalled) { await this.sending?.catch(() => {}); await this.queued; await this.clearWork?.catch(() => {}); }
       try { this.source?.clearQueue(); } catch (error) { failures.push(error); }
       if (this.publication) try { await this.participant.unpublishTrack(this.publication, false); } catch (error) { failures.push(error); }
       try { await this.track?.close(false); } catch (error) { failures.push(error); }
