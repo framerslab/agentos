@@ -39,6 +39,7 @@ import type {
 import type { ToolDefinitionMap } from '../toolAdapter.js';
 import { AgencyConfigError } from '../types.js';
 import {
+  isAgent,
   seatMetadataOf,
   resolveAgent,
   checkBeforeAgentInput,
@@ -46,7 +47,9 @@ import {
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
+  ownAgentInternals,
 } from './shared.js';
+import { isCallMask } from '../pool/redact.js';
 
 type StrategyTotalUsage = {
   promptTokens: number;
@@ -168,9 +171,10 @@ function refusal(reason: string): { success: false; output: string; error: strin
  * the delegate's text, a spawn's outcome and a refusal's reason.
  *
  * With `mask` (a pooled agency's call mask), what a tool returns reaches the
- * manager's provider masked: a delegate's error, whether the delegate is a
- * roster config, a pre-built agent or a spawned specialist, and every text
- * the spawn tool returns.
+ * manager's provider masked: a delegate's answer and its error, whether the
+ * delegate is a roster config, a pre-built agent or a spawned specialist, and
+ * every text the spawn tool returns. A spawned specialist and the judge run as
+ * a seat does ({@link ownAgentInternals}).
  *
  * @internal Exported so tests can drive the spawn_specialist tool directly
  *   without spinning up a manager LLM.
@@ -187,6 +191,11 @@ export function buildHierarchicalTools(
     const masked = mask(text);
     return typeof masked === 'string' ? masked : text;
   };
+  // A delegate's answer through the mask's listed values, which leave the
+  // URLs a reply quotes as they are.
+  const answer = (text: string): string => (isCallMask(mask) ? mask.text(text) : say(text));
+  // A spawned specialist resolves its keys and masks what it answers as a seated delegate does.
+  const internals = ownAgentInternals(mask);
   const roster: Record<string, BaseAgentConfig | Agent> = { ...initialRoster };
   const tools: ToolDefinitionMap = {};
   const agentCalls: AgentCallRecord[] = [];
@@ -220,7 +229,9 @@ export function buildHierarchicalTools(
           return refusal(`Agent "${name}" execution was rejected by HITL.`);
         }
 
-        const a = resolveAgent(agentOrConfig, agencyConfig);
+        // A roster config is seated already; a specialist the forge built is
+        // given the call's strict rule and mask here.
+        const a = resolveAgent(isAgent(agentOrConfig) ? agentOrConfig : { ...agentOrConfig, ...internals }, agencyConfig);
 
         const effectiveTask = gate.input;
 
@@ -236,7 +247,8 @@ export function buildHierarchicalTools(
         }
         const durationMs = Date.now() - start;
 
-        const resultText = (result.text as string) ?? '';
+        // The answer the manager's provider is sent, and the call record keeps.
+        const resultText = answer((result.text as string) ?? '');
         const resultUsage = (result.usage as ResultUsageSnapshot) ?? {};
         const resultToolCalls =
           (result.toolCalls as Array<{
@@ -382,11 +394,14 @@ export function buildHierarchicalTools(
           const { generateText } = await import('../../generateText.js');
           const judge = new EmergentAgentJudge({
             judgeModel,
+            // In an agency with a pool, the judge's key resolves as a seat's
+            // does: never a setDefaultProvider() default that names no provider.
             generateText: async (model, prompt) => {
               const r = await generateText({
                 model,
                 provider: judgeProviderFor(judgeModel) ?? agencyConfig.provider,
                 prompt,
+                ...internals,
               });
               return r.text ?? '';
             },
@@ -444,8 +459,10 @@ export function buildHierarchicalTools(
  * @param agents - Named roster of agent configs or pre-built `Agent` instances.
  * @param agencyConfig - Agency-level configuration; must include `model` or `provider`
  *   for the manager agent.
- * @param mask - The call's error mask in a pooled agency; the delegate and
- *   spawn tools pass what they return to the manager through it.
+ * @param mask - The call's mask in a pooled agency: the delegate and spawn
+ *   tools pass what they return to the manager through it, and the manager
+ *   runs as a seat does ({@link ownAgentInternals}), so an agency-level tool's
+ *   error reaches its next request masked.
  * @returns A {@link CompiledStrategy} with `execute` and `stream` methods.
  * @throws {AgencyConfigError} When no agency-level model/provider is available
  *   for the manager agent.
@@ -508,6 +525,7 @@ export function compileHierarchical(
         // Higher maxSteps than default because the manager needs room to
         // call multiple delegation tools before synthesizing.
         maxSteps: agencyConfig.maxSteps ?? 10,
+        ...ownAgentInternals(mask),
       });
 
       const result = (await manager.generate(prompt, opts)) as unknown as Record<string, unknown>;

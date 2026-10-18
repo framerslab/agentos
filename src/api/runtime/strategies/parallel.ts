@@ -43,7 +43,13 @@ import {
   buildAgentCallUsage,
   callRecordExtras,
   enforceQuorum,
+  ownAgentInternals,
+  maskedMessageOf,
 } from './shared.js';
+import { lazyLogger } from '../lazyLogger.js';
+
+/** The agency's own lines, to the host's logger factory. */
+const agencyLogger = lazyLogger('agency');
 
 type StrategyTotalUsage = {
   promptTokens: number;
@@ -74,6 +80,9 @@ type ResultUsageSnapshot = {
  * @param agents - Named roster of agent configs or pre-built `Agent` instances.
  * @param agencyConfig - Agency-level configuration; must include `model` or `provider`
  *   for the synthesis step.
+ * @param mask - The call's mask in an agency with a pool: the synthesizer runs
+ *   as a seat does ({@link ownAgentInternals}), and a failed seat's message is
+ *   logged through it.
  * @returns A {@link CompiledStrategy} with `execute` and `stream` methods.
  * @throws {AgencyConfigError} When no agency-level model/provider is available
  *   for the synthesis step. The synthesis agent needs an LLM to combine the
@@ -91,6 +100,7 @@ type ResultUsageSnapshot = {
 export function compileParallel(
   agents: Record<string, BaseAgentConfig | Agent>,
   agencyConfig: AgencyOptions,
+  mask?: (error: unknown) => unknown,
 ): CompiledStrategy {
   if (!agencyConfig.model && !agencyConfig.provider) {
     throw new AgencyConfigError(
@@ -137,7 +147,13 @@ export function compileParallel(
         if (outcome.status === 'rejected') {
           const agentName = entries[i][0];
           const error = outcome.reason instanceof Error ? outcome.reason : new Error(String(outcome.reason));
-          console.error(`[AgentOS][Parallel] Agent "${agentName}" failed:`, error.message);
+          // To the host's logger, with the message through the call's mask: a
+          // provider's message can echo the key it was sent.
+          agencyLogger.warn(`parallel seat "${agentName}" failed`, {
+            event: 'parallel_seat_failed',
+            agent: agentName,
+            error: maskedMessageOf(error, mask),
+          });
           agencyConfig.on?.error?.({
             agent: agentName,
             error,
@@ -198,12 +214,15 @@ export function compileParallel(
 
       // Create a fresh single-step synthesizer agent. maxSteps: 1 because
       // the synthesis should be a single LLM call, not an agentic loop.
+      // In an agency with a pool, the synthesizer resolves every hop's key and
+      // masks what it answers as a seat does.
       const synthesizer = createAgent({
         model: agencyConfig.model,
         provider: agencyConfig.provider,
         apiKey: agencyConfig.apiKey,
         baseUrl: agencyConfig.baseUrl,
         maxSteps: 1,
+        ...ownAgentInternals(mask),
       });
 
       const synthesis = (await synthesizer.generate(synthPrompt, opts)) as unknown as Record<string, unknown>;

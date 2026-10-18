@@ -49,6 +49,7 @@ import {
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
+  ownAgentInternals,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -80,6 +81,8 @@ type ResultUsageSnapshot = {
  * @param agents - Named roster of agent configs or pre-built `Agent` instances.
  * @param agencyConfig - Agency-level configuration providing fallback model/provider/tools.
  *   Must include `model` or `provider` for the synthesis step.
+ * @param mask - The call's mask in an agency with a pool: the synthesizer runs
+ *   as a seat does ({@link ownAgentInternals}).
  * @returns A {@link CompiledStrategy} with `execute` and `stream` methods.
  * @throws {AgencyConfigError} When no agency-level model/provider is available
  *   for the synthesis step.
@@ -96,6 +99,7 @@ type ResultUsageSnapshot = {
 export function compileDebate(
   agents: Record<string, BaseAgentConfig | Agent>,
   agencyConfig: AgencyOptions,
+  mask?: (error: unknown) => unknown,
 ): CompiledStrategy {
   if (!agencyConfig.model && !agencyConfig.provider) {
     throw new AgencyConfigError(
@@ -225,12 +229,15 @@ export function compileDebate(
         `Be direct. Pick a winner unless the transcript is genuinely tied.${synthInstructions}`,
       ].join('\n');
 
+      // In an agency with a pool, the synthesizer resolves every hop's key and
+      // masks what it answers as a seat does.
       const synthesizer = createAgent({
         model: agencyConfig.model,
         provider: agencyConfig.provider,
         apiKey: agencyConfig.apiKey,
         baseUrl: agencyConfig.baseUrl,
         maxSteps: 1,
+        ...ownAgentInternals(mask),
       });
 
       const synthesis = (await synthesizer.generate(synthPrompt, opts)) as unknown as Record<string, unknown>;

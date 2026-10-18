@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { collectCallSecrets, maskError, redactText, createErrorMask, redactStrings } from '../redact.js';
+import { collectCallSecrets, maskError, redactText, createErrorMask, redactStrings, createChunkRedactor } from '../redact.js';
 import { setDefaultProvider, clearDefaultProvider } from '../../global-default.js';
 import { OpenAIProviderError } from '../../../../core/llm/providers/errors/OpenAIProviderError.js';
 import type { AgencyOptions } from '../../../types.js';
@@ -223,5 +223,28 @@ describe('redactText and maskError', () => {
     expect(mixed.bytes).toBe(bytes);
     expect(mixed.when).toBe(when);
     expect(mixed.list).toEqual(['a', undefined, 3]);
+  });
+});
+
+describe("createChunkRedactor and the call mask's text forms", () => {
+  const list = [K1, K2];
+  /** What each piece releases, then what the end releases. */
+  const run = (pieces: string[]): string[] => {
+    const redactor = createChunkRedactor(() => list);
+    return [...pieces.map((piece) => redactor.push(piece)), redactor.flush()];
+  };
+  it('masks a secret split across two and across three pieces whole, and releases text that starts no secret as it comes', () => {
+    expect(run(['the key is sk-sec', 'ret-one-0001 now'])).toEqual(['the key is ', '[redacted] now', '']);
+    expect(run(['a sk-', 'secret-', 'one-0001.'])).toEqual(['a ', '', '[redacted].', '']);
+    expect(run(['plain text', ' more'])).toEqual(['plain text', ' more', '']);
+  });
+  it('releases a held tail that turns out to be no secret with the next piece, and a held tail at the end', () => {
+    expect(run(['ends with sk-', 'y and more'])).toEqual(['ends with ', 'sk-y and more', '']);
+    expect(run(['ends with sk-se'])).toEqual(['ends with ', 'sk-se']);
+  });
+  it("text and strings mask the listed values alone: a URL's key parameter and the credentials an answer quotes are kept", () => {
+    const mask = createErrorMask({ list });
+    expect(mask.text(`see https://h.local/?key=abc and ssh://git@h.local with ${K1}`)).toBe('see https://h.local/?key=abc and ssh://git@h.local with [redacted]');
+    expect(mask.strings({ a: [`x ${K2}`], n: 1 })).toEqual({ a: ['x [redacted]'], n: 1 });
   });
 });

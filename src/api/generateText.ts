@@ -28,7 +28,7 @@ import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
-import { createLogger } from '../core/logging/loggerFactory.js';
+import { lazyLogger } from './runtime/lazyLogger.js';
 import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
@@ -53,7 +53,12 @@ import {
 } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
 
-const fallbackLogger = createLogger('fallback');
+/**
+ * The `fallback` component's lines, to the logger the host's factory makes when
+ * each line is written: a factory set with `setLoggerFactory` after this module
+ * was imported still receives every failover line.
+ */
+const fallbackLogger = lazyLogger('fallback');
 
 /**
  * Invoke a caller-supplied per-leg responseFormat builder without letting a

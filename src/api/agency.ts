@@ -70,6 +70,7 @@ import { validatePoolOptions, hasPoolSurface } from './runtime/pool/validate.js'
 import { createSeatingState, seatRoster, type SeatingState, type SeatedRoster } from './runtime/pool/seating.js';
 import { guardPerCallOptions } from './runtime/pool/guard.js';
 import { collectCallSecrets, createErrorMask, maskedCopyOf, redactStrings, redactText } from './runtime/pool/redact.js';
+import { lazyLogger } from './runtime/lazyLogger.js';
 import type {
   AgencyOptions,
   Agent,
@@ -110,6 +111,26 @@ import {
   type AgencyProvenanceTrail,
 } from './agency-provenance.js';
 import type { RawData, WebSocket } from 'ws';
+
+/** The agency's own lines, to the host's logger factory whenever the host set it. */
+const agencyLogger = lazyLogger('agency');
+
+/**
+ * Whether no seat answered a strategy's result: it carries no text, no call
+ * record and no tokens, as when every seat was rejected and no model was
+ * called. Such a result's text is `''`, which is no answer: it is logged, and
+ * no validation retry runs on it. A manager or a synthesizer that ran and
+ * returned no text spent tokens, and is not such a run.
+ */
+function noSeatAnswered(result: Record<string, unknown>): boolean {
+  const { text, agentCalls, usage } = result;
+  const tokens = usage && typeof usage === 'object' ? (usage as { totalTokens?: unknown }).totalTokens : undefined;
+  return (
+    (typeof text !== 'string' || text === '') &&
+    (!Array.isArray(agentCalls) || agentCalls.length === 0) &&
+    (typeof tokens !== 'number' || tokens === 0)
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Public factory
@@ -400,8 +421,16 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     const elapsedMs = Date.now() - start;
 
     // A result always carries a text: sequential and graph return none when
-    // every seat was rejected.
+    // every seat was rejected. A run no seat answered is written to the log.
     if (typeof finalized.text !== 'string') finalized.text = '';
+    if (noSeatAnswered(result)) {
+      agencyLogger.info('no seat answered; the result text is empty', {
+        event: 'agency_no_seat_answered',
+        agency: agencyName,
+        strategy: chosenStrategy,
+        seats: Object.keys(opts.agents).length,
+      });
+    }
     // The ledger describes the agency that returns it. sequential and graph
     // spread their last seat's result into their own, so a nested panel's
     // seats, chair, quorum and seating are removed from any result that is
@@ -418,8 +447,14 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     delete finalized.provenanceTrail;
     if (seated) finalized.seating = seated.record;
     if (pooled) {
+      // Every string of the result through the call's list: the text, each
+      // call record with its output and its tool calls' arguments and
+      // results, and a panel's seat and chair records. The seats' answers
+      // leave them masked; this covers what a strategy builds from them too.
+      for (const key of Object.keys(finalized)) finalized[key] = mask.strings(finalized[key]);
       // What the seats' own loops cannot mask: a pre-built seat's or a nested
-      // agency's tool errors, conversation delta and tool calls come back raw.
+      // agency's tool errors, conversation delta and tool calls come back raw,
+      // and are masked here with the URL patterns an error's text gets.
       const secrets = secretsHolder.list;
       if (Array.isArray(finalized.agentCalls)) {
         finalized.agentCalls = (finalized.agentCalls as AgentCallRecord[]).map((call) =>
@@ -575,8 +610,11 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         const finalized = await finalizeExecutionResult(result, start, sessionId, undefined, seated);
         lastFinalized = finalized;
 
-        // Success path: no validation required, OR validation produced a `parsed` value
-        if (!hasValidation || finalized.parsed !== undefined) {
+        // Success path: no validation required, OR validation produced a
+        // `parsed` value. A run no seat answered is returned as it is: its
+        // empty text is no reply to correct, and a retry would ask every
+        // approver again.
+        if (!hasValidation || finalized.parsed !== undefined || noSeatAnswered(result)) {
           slot.settled = true;
           return finalized;
         }
@@ -670,17 +708,19 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       const streamResult = await deferredStream;
 
       if (streamResult.fullStream) {
-        // A strategy's error parts (a pre-built seat's, a sequential seat's)
-        // leave masked in an agency with a pool or a panel.
+        // In an agency with a pool or a panel, a strategy's error parts (a
+        // pre-built seat's, a sequential seat's) leave masked, and every other
+        // part with its strings masked. A seat's own stream already masks a
+        // secret split between two of its pieces.
         for await (const part of streamResult.fullStream) {
-          yield part.type === 'error' && pooled ? { ...part, error: toError(errors.maskOnce(part.error)) } : part;
+          yield !pooled ? part : part.type === 'error' ? { ...part, error: toError(errors.maskOnce(part.error)) } : mask.strings(part);
         }
         return;
       }
 
       if (streamResult.textStream) {
         for await (const chunk of streamResult.textStream) {
-          yield { type: 'text', text: chunk };
+          yield { type: 'text', text: pooled ? mask.text(chunk) : chunk };
         }
         return;
       }
@@ -688,7 +728,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       if (streamResult.text) {
         const fullText = await streamResult.text;
         if (fullText) {
-          yield { type: 'text', text: fullText };
+          yield { type: 'text', text: pooled ? mask.text(fullText) : fullText };
         }
       }
     })());

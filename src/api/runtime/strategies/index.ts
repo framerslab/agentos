@@ -103,15 +103,18 @@ function compileStrategyCore(
   switch (strategy) {
     case 'sequential':
       return compileSequential(agents, agencyConfig);
+    // The call's mask reaches the synthesizer of parallel and debate, which
+    // then runs as a seat does: strict credentials and masked answers.
     case 'parallel':
-      return compileParallel(agents, agencyConfig);
+      return compileParallel(agents, agencyConfig, seating?.mask);
     case 'debate':
-      return compileDebate(agents, agencyConfig);
+      return compileDebate(agents, agencyConfig, seating?.mask);
     case 'review-loop':
       return compileReviewLoop(agents, agencyConfig);
     case 'hierarchical':
-      // The call's mask reaches the delegate and spawn tools; undefined at
-      // the construction-time compile and in an agency without a pool.
+      // The call's mask reaches the manager, the delegate and spawn tools, a
+      // spawned specialist and the judge; undefined at the construction-time
+      // compile and in an agency without a pool.
       return compileHierarchical(agents, agencyConfig, seating?.mask);
     case 'graph':
       return compileGraph(agents, agencyConfig);

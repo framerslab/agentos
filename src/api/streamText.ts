@@ -61,10 +61,15 @@ import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstructor.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
-import { createLogger } from '../core/logging/loggerFactory.js';
+import { lazyLogger } from './runtime/lazyLogger.js';
 import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 
-const fallbackLogger = createLogger('fallback');
+/**
+ * The `fallback` component's lines, to the logger the host's factory makes when
+ * each line is written: a factory set with `setLoggerFactory` after this module
+ * was imported still receives every failover line.
+ */
+const fallbackLogger = lazyLogger('fallback');
 
 async function recordAgentOSUsageLazy(
   input: Parameters<typeof import('./runtime/usageLedger.js')['recordAgentOSUsage']>[0]

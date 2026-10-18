@@ -7,7 +7,9 @@
  * be written; an object it only references is replaced, on the error's own
  * property, by a masked copy; where a string cannot be written, a plain Error
  * carries the name, code, httpStatus and the masked message and stack.
- * Masking never throws.
+ * What a seat answers (its text, its tool calls, its streamed parts) is masked
+ * by the listed values alone, so a reply that quotes a URL keeps it. Masking
+ * never throws.
  */
 import type { AgencyOptions } from '../../types.js';
 import { getDefaultProvider } from '../global-default.js';
@@ -81,6 +83,84 @@ export function collectCallSecrets(agency: AgencyOptions, seatingSecrets: readon
  */
 export function redactText(text: string, secrets: readonly string[]): string {
   return secrets.length === 0 ? text : redactUrlSecrets(text, undefined, secrets);
+}
+
+/**
+ * Replaces every listed secret in `text` with `[redacted]`, and nothing else:
+ * unlike {@link redactText}, no URL pattern is read, so an answer that quotes
+ * `https://host/?key=v` or `ssh://git@host` keeps it. For what a model or a
+ * tool returns.
+ *
+ * @param text - A seat's answer, a tool result or any other text it returns.
+ * @param secrets - The call's redaction list, longest first.
+ * @returns The text with every listed secret replaced; `text` itself when none occurs.
+ */
+export function redactSecrets(text: string, secrets: readonly string[]): string {
+  let out = text;
+  for (const secret of secrets) {
+    if (secret.length > 0 && out.includes(secret)) out = out.split(secret).join('[redacted]');
+  }
+  return out;
+}
+
+/** Masks text that arrives in pieces, as a stream delivers it. */
+export interface ChunkRedactor {
+  /**
+   * Takes the next piece and returns the masked text that can be released:
+   * a tail that could be the start of a secret is held until the next piece
+   * shows whether it is, so a secret split between two pieces is masked
+   * whole. Returns `''` while everything received is held.
+   */
+  push(chunk: string): string;
+  /** Returns the masked text still held, at the end of the stream. */
+  flush(): string;
+}
+
+/**
+ * A {@link ChunkRedactor} over the list `getSecrets` returns when a piece
+ * arrives. It holds only a tail that is the start of a listed secret, so text
+ * with no such tail is released as it comes.
+ *
+ * @param getSecrets - Reads the call's redaction list.
+ * @returns A redactor for one stream.
+ */
+export function createChunkRedactor(getSecrets: () => readonly string[]): ChunkRedactor {
+  let pending = '';
+  return {
+    push(chunk: string): string {
+      pending += chunk;
+      const secrets = getSecrets();
+      // The earliest point from which the rest of `pending` is the start of a
+      // secret the next piece could complete.
+      let hold = pending.length;
+      for (const secret of secrets) {
+        if (secret.length < 2) continue;
+        const from = Math.max(0, pending.length - secret.length + 1);
+        for (let p = pending.indexOf(secret[0], from); p !== -1 && p < hold; p = pending.indexOf(secret[0], p + 1)) {
+          if (secret.startsWith(pending.slice(p))) {
+            hold = p;
+            break;
+          }
+        }
+      }
+      // A whole secret that runs across that point is released whole.
+      let cut = hold;
+      for (const secret of secrets) {
+        if (secret.length === 0) continue;
+        for (let i = pending.indexOf(secret); i !== -1 && i < cut; i = pending.indexOf(secret, i + 1)) {
+          if (i + secret.length > cut) cut = i + secret.length;
+        }
+      }
+      const out = redactSecrets(pending.slice(0, cut), secrets);
+      pending = pending.slice(cut);
+      return out;
+    },
+    flush(): string {
+      const out = redactSecrets(pending, getSecrets());
+      pending = '';
+      return out;
+    },
+  };
 }
 
 /** Whether `text` holds one of `secrets`. */
@@ -367,14 +447,38 @@ export function maskedCopyOf(error: unknown, secrets: readonly string[]): unknow
 }
 
 /**
+ * The mask of an agency's calls: called on an error it is {@link maskError};
+ * its members mask what a seat answers by the same list, read when they run.
+ */
+export interface CallMask {
+  (error: unknown): unknown;
+  /** `text` with every listed secret replaced ({@link redactSecrets}). */
+  text(text: string): string;
+  /** A copy of a record of plain objects and arrays with every string masked as {@link CallMask.text} masks it. */
+  strings<T>(value: T): T;
+  /** A {@link ChunkRedactor} for one stream of text. */
+  chunks(): ChunkRedactor;
+}
+
+/** Whether `mask` is a {@link CallMask}, as an agency's seating writes it, and not a bare error mask. */
+export function isCallMask(mask: unknown): mask is CallMask {
+  const m = mask as Partial<CallMask> | undefined;
+  return typeof mask === 'function' && typeof m?.text === 'function' && typeof m.strings === 'function' && typeof m.chunks === 'function';
+}
+
+/**
  * A mask that reads its secret list from `holder` when it is called, so one
  * function serves every call of an agency.
  *
  * @param holder - Where the agency keeps the list of the call under way.
- * @returns A function that applies {@link maskError} with the list `holder` holds at that moment.
+ * @returns A {@link CallMask}: {@link maskError} with the list `holder` holds at that moment, and the text forms over the same list.
  */
-export function createErrorMask(holder: { list: readonly string[] }): (error: unknown) => unknown {
-  return (error) => maskError(error, holder.list);
+export function createErrorMask(holder: { list: readonly string[] }): CallMask {
+  const mask = ((error: unknown) => maskError(error, holder.list)) as CallMask;
+  mask.text = (text) => redactSecrets(text, holder.list);
+  mask.strings = (value) => maskStrings(value, holder.list);
+  mask.chunks = () => createChunkRedactor(() => holder.list);
+  return mask;
 }
 
 /**
@@ -388,11 +492,28 @@ export function createErrorMask(holder: { list: readonly string[] }): (error: un
  * @returns The redacted copy; `value` itself when the list is empty.
  */
 export function redactStrings<T>(value: T, secrets: readonly string[]): T {
-  if (secrets.length === 0) return value;
+  return secrets.length === 0 ? value : copyStrings(value, (text) => redactText(text, secrets));
+}
+
+/**
+ * {@link redactStrings} with the listed values alone ({@link redactSecrets}):
+ * for what a seat answers, its result and its tool calls, where a URL in a
+ * reply is the reply's own.
+ *
+ * @param value - A record made of plain objects, arrays and strings.
+ * @param secrets - The call's redaction list.
+ * @returns The masked copy; `value` itself when the list is empty.
+ */
+export function maskStrings<T>(value: T, secrets: readonly string[]): T {
+  return secrets.length === 0 ? value : copyStrings(value, (text) => redactSecrets(text, secrets));
+}
+
+/** A copy of `value` with every string passed through `redact`, at any depth of plain objects and arrays. */
+function copyStrings<T>(value: T, redact: (text: string) => string): T {
   const copies = new WeakMap<object, object>();
   const pending: Array<[source: object, copy: object]> = [];
   const copyOf = (item: unknown): unknown => {
-    if (typeof item === 'string') return redactText(item, secrets);
+    if (typeof item === 'string') return redact(item);
     if (!isObject(item)) return item;
     const known = copies.get(item);
     if (known) return known;

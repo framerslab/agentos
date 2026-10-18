@@ -26,6 +26,7 @@ import type {
   SeatMetadata,
 } from '../types.js';
 import { AgencyQuorumError } from '../types.js';
+import type { SeatInternals } from '../pool/seating.js';
 
 /**
  * Type guard that checks whether a value is a pre-built {@link Agent} instance
@@ -246,6 +247,36 @@ export function callRecordExtras(
   if (typeof finishReason === 'string') out.finishReason = finishReason;
   if (fallback && typeof fallback === 'object') out.fallback = fallback as AgentCallRecord['fallback'];
   return out;
+}
+
+/**
+ * What one of an agency's own agents (the parallel and debate synthesizer, the
+ * hierarchical manager, a specialist it spawns) carries in a call of an agency
+ * with a pool or a panel: the strict rule and the call's mask that seating
+ * writes onto every seat. It then resolves the key of every hop of its chain as
+ * a seat does, never from a `setDefaultProvider()` default that names no
+ * provider, and its errors and answers leave it masked.
+ *
+ * @param mask - The call's mask; undefined in an agency without a pool or a panel.
+ * @returns The fields to spread into the agent's config; none without a mask.
+ */
+export function ownAgentInternals(mask: ((error: unknown) => unknown) | undefined): Partial<SeatInternals> {
+  return mask ? { __strictCredentials: true, __maskError: mask } : {};
+}
+
+/**
+ * The message of what a seat threw, through the call's mask when there is one;
+ * the error itself is not written.
+ *
+ * @param error - What the seat threw.
+ * @param mask - The call's mask, or undefined.
+ * @returns The message as it may be logged.
+ */
+export function maskedMessageOf(error: unknown, mask: ((error: unknown) => unknown) | undefined): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!mask) return message;
+  const masked = mask(message);
+  return typeof masked === 'string' ? masked : '[redacted]';
 }
 
 /**
