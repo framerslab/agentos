@@ -79,6 +79,7 @@ import type {
   ResourceControls,
   AgentCallRecord,
   GuardrailEvent,
+  ApprovalDecision,
   RagConfig,
   AgencyStreamPart,
   AgencyStreamResult,
@@ -275,6 +276,23 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         ...on,
         error: (event: { agent: string; error: Error; timestamp: number }) =>
           on.error?.({ ...event, error: toError(maskedCopy(event.error)) }),
+      },
+    };
+  }
+
+  // 3d. A HITL handler's decision is text no seat's mask saw. In an agency
+  //     with a pool or a panel, its reason and its modifications pass the
+  //     call's list before the trail and the caller's handler read them, for
+  //     the beforeAgent, beforeTool and beforeReturn approvals alike; the
+  //     replacement a beforeReturn approval carries is masked where it is
+  //     returned, in executeCall.
+  if (pooled && opts.on?.approvalDecided) {
+    const on = opts.on;
+    opts = {
+      ...opts,
+      on: {
+        ...on,
+        approvalDecided: (decision: ApprovalDecision) => on.approvalDecided?.(mask.strings(decision)),
       },
     };
   }
