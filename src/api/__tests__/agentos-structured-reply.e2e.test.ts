@@ -4,7 +4,9 @@
  * no delta reaches the caller before the check, a matching reply returns its parsed value on the final chunk, a reply
  * that does not match is asked for again inside the turn with the issues named, an exhausted turn ends as
  * GMI_STRUCTURED_OUTPUT_INVALID or returns the last reply as invalid, a sanitizer that breaks the shape is caught after
- * the guardrails, a schemaRef resolves through the registry, and a JSON Schema checks like a Zod one.
+ * the guardrails, a schemaRef resolves through the registry, and a JSON Schema checks like a Zod one, sent anew with
+ * each request under one $id too. A JSON Schema that does not compile is refused before the provider is called, and
+ * the requests after it compile theirs.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -169,6 +171,54 @@ describe('a structured reply on processRequest', () => {
     const schema = { type: 'object', properties: { items: { type: 'array', items: { type: 'object', properties: { date: { type: 'string' }, title: { type: 'string' }, heavy: { type: 'boolean' } }, required: ['date', 'title', 'heavy'] } } }, required: ['items'] };
     provider.replies.push(reply(BAD), reply(GOOD));
     const chunks = await collect(booted, { structuredReply: { schema, name: 'week' } }, 's-json-schema');
+    expect(provider.calls).toHaveLength(2);
+    expect(String(provider.calls[1].filter((m) => m.role === 'user').at(-1)?.content)).toContain("must have required property 'heavy'");
+    expect(finalOf(chunks)?.structured).toMatchObject({ value: JSON.parse(GOOD), meta: { valid: true, attempts: 2 } });
+  });
+
+  it('takes a JSON Schema that each request sends anew under one $id, and repairs against it each time', async () => {
+    booted = await boot();
+    // A host that reads the schema from each request hands over a new object every time, under the same $id.
+    const schemaFor = () => ({
+      $id: 'urn:example:week',
+      type: 'object',
+      properties: { items: { type: 'array', items: { type: 'object', properties: { date: { type: 'string' }, title: { type: 'string' }, heavy: { type: 'boolean' } }, required: ['date', 'title', 'heavy'] } } },
+      required: ['items'],
+    });
+    for (const sessionId of ['s-anew-1', 's-anew-2']) {
+      provider.calls.length = 0;
+      provider.replies.push(reply(BAD), reply(GOOD));
+      const chunks = await collect(booted, { structuredReply: { schema: schemaFor(), name: 'week' } }, sessionId);
+      expect(errorOf(chunks)).toBeUndefined();
+      expect(provider.calls).toHaveLength(2);
+      expect(String(provider.calls[1].filter((m) => m.role === 'user').at(-1)?.content)).toContain("must have required property 'heavy'");
+      expect(finalOf(chunks)?.structured).toMatchObject({ value: JSON.parse(GOOD), meta: { valid: true, attempts: 2 } });
+    }
+  });
+
+  it("refuses a JSON Schema that does not compile before the provider is called, and compiles the next request's schema", async () => {
+    booted = await boot();
+    const items = { type: 'array', items: { type: 'object', properties: { date: { type: 'string' }, title: { type: 'string' }, heavy: { type: 'boolean' } }, required: ['date', 'title', 'heavy'] } };
+    // Each schema with the words its refusal carries: 'nonsense' is no JSON Schema type; an $async schema's check
+    // answers a promise; the draft-07 meta-schema's own $id is Ajv's; 2020-12 is a draft other than draft-07.
+    const uncompiled: Array<[Record<string, unknown>, string]> = [
+      [{ type: 'object', properties: { items: { type: 'nonsense' } } }, 'schema is invalid'],
+      [{ $async: true, type: 'object', properties: { items }, required: ['items'] }, 'marked $async'],
+      [{ $id: 'http://json-schema.org/draft-07/schema#', type: 'object', properties: { items }, required: ['items'] }, 'already exists'],
+      [{ $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { items }, required: ['items'] }, 'no schema with key or ref'],
+    ];
+    for (const [index, [schema, fault]] of uncompiled.entries()) {
+      const refused = errorOf(await collect(booted, { structuredReply: { schema, name: 'week' } }, `s-uncompiled-${index}`));
+      expect(refused?.code).toBe(GMIErrorCode.VALIDATION_ERROR);
+      expect(refused?.message).toContain('structuredReply.schema is not a valid JSON Schema');
+      expect(refused?.message).toContain(fault);
+    }
+    expect(provider.calls).toHaveLength(0);
+    // The refusals left the draft-07 meta-schema where it was: a schema that names it compiles and checks the reply.
+    provider.replies.push(reply(BAD), reply(GOOD));
+    const schema = { $schema: 'http://json-schema.org/draft-07/schema#', type: 'object', properties: { items }, required: ['items'] };
+    const chunks = await collect(booted, { structuredReply: { schema, name: 'week' } }, 's-after-uncompiled');
+    expect(errorOf(chunks)).toBeUndefined();
     expect(provider.calls).toHaveLength(2);
     expect(String(provider.calls[1].filter((m) => m.role === 'user').at(-1)?.content)).toContain("must have required property 'heavy'");
     expect(finalOf(chunks)?.structured).toMatchObject({ value: JSON.parse(GOOD), meta: { valid: true, attempts: 2 } });

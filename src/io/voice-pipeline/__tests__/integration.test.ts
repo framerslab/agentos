@@ -237,7 +237,8 @@ describe('voice pipeline -- full conversational loop integration', () => {
    * 1. Emit a final transcript with terminal punctuation.
    * 2. Emit speech_end so the HeuristicEndpointDetector fires turn_complete.
    * 3. Flush the async token loop (agent -> TTS).
-   * 4. Emit flush_complete to finish TTS and return to LISTENING.
+   * 4. Emit flush_complete to finish TTS, and let the reply's audio play: the mock transport cannot say when it has,
+   *    so the pipeline holds the floor for the audio's duration, then returns to LISTENING.
    */
   async function driveFullTurn(transcript = 'Hello.') {
     // Simulate STT producing a final transcript ending with terminal punctuation.
@@ -258,8 +259,9 @@ describe('voice pipeline -- full conversational loop integration', () => {
     // Emit an audio chunk from TTS (wired through to transport).
     ttsSession.emit('audio', makeAudioChunk());
 
-    // Emit flush_complete -> orchestrator transitions back to LISTENING.
+    // Emit flush_complete; once the chunk has played, the orchestrator transitions back to LISTENING.
     ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(makeAudioChunk().durationMs);
   }
 
   // ============================================================================

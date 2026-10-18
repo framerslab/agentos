@@ -66,8 +66,11 @@ describe('acknowledged playback', () => {
     const f = transport();
     const q = new PlaybackQueue(f.t, identity.generation, { maxBytes: 64000, maxDurationMs: 2000 });
     await expect(q.enqueue(chunk(2001))).rejects.toThrow('playback bound');
+    // A chunk refused before it reaches the transport is no failure of the transport's.
+    expect(q.transportFailed).toBe(false);
     f.t.sendAudio = vi.fn(async () => { throw new Error('socket gone'); });
     await expect(q.enqueue(chunk())).rejects.toThrow('playback failed');
+    expect(q.transportFailed).toBe(true);
     await expect(q.drain()).rejects.toThrow('playback failed');
     expect(q.stats().playedMs).toBe(0);
   });
@@ -83,8 +86,10 @@ describe('acknowledged playback', () => {
     expect(f.t.clearPlayback).toHaveBeenCalledWith(identity.generation);
     expect(q.stats().playedMs).toBe(0);
     await expect(q.enqueue(chunk())).rejects.toThrow('playback cancelled');
+    expect(q.transportFailed).toBe(false);
     const other = new PlaybackQueue(transport().t, { ...identity.generation, inferenceGeneration: 2 }, { maxBytes: 64000, maxDurationMs: 2000 });
     await expect(other.enqueue(chunk())).rejects.toThrow('stale audio');
+    expect(other.transportFailed).toBe(false);
   });
 });
 
