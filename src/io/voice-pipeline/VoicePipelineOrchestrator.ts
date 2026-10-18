@@ -193,7 +193,7 @@ class PartFailure extends Error {
 }
 
 /**
- * Runs `work`; a throw becomes a {@link PartFailure} of `source`.
+ * Runs `work`; a throw becomes a {@link PartFailure} of `source`, unless it is one already, which names its own part.
  *
  * @param source - The part `work` runs.
  * @param work - What to run.
@@ -202,13 +202,14 @@ class PartFailure extends Error {
 function inPart<T>(source: VoiceSessionErrorSource, work: () => T): T {
   try {
     return work();
-  } catch {
-    throw new PartFailure(source);
+  } catch (err) {
+    throw err instanceof PartFailure ? err : new PartFailure(source);
   }
 }
 
 /**
- * Awaits `work`; a throw or a rejection becomes a {@link PartFailure} of `source`.
+ * Awaits `work`; a throw or a rejection becomes a {@link PartFailure} of `source`, unless it is one already, which
+ * names its own part: a TTS session that hands on its sink's transport failure reports the transport.
  *
  * @param source - The part `work` runs.
  * @param work - What to run.
@@ -217,15 +218,15 @@ function inPart<T>(source: VoiceSessionErrorSource, work: () => T): T {
 async function inPartAsync<T>(source: VoiceSessionErrorSource, work: () => T | PromiseLike<T>): Promise<T> {
   try {
     return await work();
-  } catch {
-    throw new PartFailure(source);
+  } catch (err) {
+    throw err instanceof PartFailure ? err : new PartFailure(source);
   }
 }
 
 /**
  * Yields what `iterable` yields; a throw or a rejection of the iterable's own becomes a {@link PartFailure} of
- * `source`. A throw or a `break` in the loop that consumes it closes it, and the iterable with it, as a `for await`
- * over the iterable itself would.
+ * `source`, unless it is one already. A throw or a `break` in the loop that consumes it closes it, and the iterable
+ * with it, as a `for await` over the iterable itself would.
  *
  * @param source - The part the iterable comes from.
  * @param iterable - The values, such as an agent's reply tokens.
@@ -234,8 +235,24 @@ async function inPartAsync<T>(source: VoiceSessionErrorSource, work: () => T | P
 async function* fromPart<T>(source: VoiceSessionErrorSource, iterable: AsyncIterable<T>): AsyncGenerator<T> {
   try {
     for await (const value of iterable) yield value;
-  } catch {
-    throw new PartFailure(source);
+  } catch (err) {
+    throw err instanceof PartFailure ? err : new PartFailure(source);
+  }
+}
+
+/**
+ * Awaits a playback queue's `enqueue()` or `drain()`. A rejection the transport caused, a refused send or a playback
+ * acknowledgement that failed or did not match, becomes a {@link PartFailure} of `'transport'`; any other, such as a
+ * chunk the queue refused before it reached the transport, is handed on as it came, for the TTS session to report.
+ *
+ * @param queue - The reply's playback queue.
+ * @param playing - What `enqueue()` or `drain()` returned.
+ */
+async function played(queue: PlaybackQueue, playing: Promise<void>): Promise<void> {
+  try {
+    await playing;
+  } catch (err) {
+    throw queue.transportFailed ? new PartFailure('transport') : err;
   }
 }
 
@@ -2404,7 +2421,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     });
     tts.setAudioSink(async (chunk) => {
       if (!this.live(generation) || this.changing || chunk.scopeId !== identity.scopeId || chunk.callId !== identity.callId) throw new Error('stale synthesis');
-      await queue.enqueue(chunk);
+      await played(queue, queue.enqueue(chunk));
     });
     this.stateTo('speaking');
     this.replyText = '';
@@ -2431,7 +2448,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     }
     if (!this.live(generation)) return;
     await inPartAsync('tts', () => tts.flush());
-    await queue.drain();
+    await played(queue, queue.drain());
     if (!this.live(generation)) return;
     if (!flushed || !finalUsage) throw new PartFailure('tts');
     this.tts = undefined;

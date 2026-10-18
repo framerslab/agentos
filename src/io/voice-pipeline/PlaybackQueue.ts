@@ -101,6 +101,15 @@ export class PlaybackQueue {
     return this.cancelling;
   }
 
+  /**
+   * Whether a chunk's send, its playback acknowledgement or its receipt failed: the transport's failure, after which
+   * every `enqueue` and `drain` rejects. A chunk the queue refuses before it reaches the transport (stale, over the
+   * bound, sent while another is in the slot) and a cancellation leave it `false`.
+   */
+  get transportFailed(): boolean {
+    return this.failure !== undefined && !this.cancelled;
+  }
+
   /** Content-free occupancy and acknowledged duration only. */
   stats(): { bytes: number; durationMs: number; playedMs: number } {
     return { bytes: this.bytes, durationMs: this.durationMs, playedMs: this.playedMs };
