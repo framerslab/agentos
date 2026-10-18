@@ -152,6 +152,9 @@ export {
 } from './clientTranscript.js';
 // The text input message's check: a user who types sends text in place of speech.
 export { isClientTextInputMessage, MAX_TEXT_INPUT_LENGTH } from './clientTextInput.js';
+// The text a reply has proven spoken: sentence segments with exact offsets, and the acknowledged prefix.
+export { SentenceSegmenter, PlayedTextTracker, boundaryOf } from './ttsTextBoundaries.js';
+export type { TextSegment } from './ttsTextBoundaries.js';
 
 // Concrete barge-in handler implementations
 export { HardCutBargeinHandler } from './HardCutBargeinHandler.js';
