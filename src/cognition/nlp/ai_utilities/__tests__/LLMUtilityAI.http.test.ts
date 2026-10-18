@@ -496,6 +496,20 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(received).toHaveLength(0);
   });
 
+  it('keeps checking after a targetSchema that takes the $id of the draft-07 meta-schema', async () => {
+    const stats = new StatisticalUtilityAI('stat-for-meta-id');
+    await stats.initialize({ utilityId: 'stat-for-meta-id' });
+    // Ajv holds its meta-schema under this $id and refuses a second schema under it. A schema that names the draft by
+    // $schema is checked against that meta-schema, so it compiles only while Ajv still holds it.
+    const takesMetaId = () => ({ $id: 'http://json-schema.org/draft-07/schema#', type: 'object' });
+    const namesTheDraft = () => ({ $schema: 'http://json-schema.org/draft-07/schema#', type: 'object', required: ['ok'] });
+    for (const parser of [utility, stats]) {
+      expect(await parser.parseJsonSafe('{}', { targetSchema: takesMetaId() })).toBeNull();
+      expect(await parser.parseJsonSafe('{"ok": true}', { targetSchema: namesTheDraft() })).toEqual({ ok: true });
+    }
+    expect(received).toHaveLength(0);
+  });
+
   it('checks a targetSchema with an $id that each call builds anew', async () => {
     const stats = new StatisticalUtilityAI('stat-for-ids');
     await stats.initialize({ utilityId: 'stat-for-ids' });
