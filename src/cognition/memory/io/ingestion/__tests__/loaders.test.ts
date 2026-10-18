@@ -425,6 +425,18 @@ describe('HtmlLoader', () => {
     expect(doc.content).toContain('"quoted"');
   });
 
+  it('decodes each reference once, and a numeric one that names no character as U+FFFD, as a browser shows it', async () => {
+    // Past U+10FFFF, String.fromCodePoint throws, so one such reference in the text or the title failed the whole read;
+    // a surrogate and 0 are no characters either. And `&amp;lt;` is the text `&lt;`, not `<`.
+    const page =
+      '<title>Code points &#x110000;</title>' +
+      '<p>Write &amp;lt;b&amp;gt; for bold; &#1114112;, &#xD800; and &#0; name no character, &#38;amp; is one.</p>';
+    const doc = await new HtmlLoader().load(Buffer.from(page, 'utf8'));
+
+    expect(doc.content).toBe('Code points \uFFFD\nWrite &lt;b&gt; for bold; \uFFFD, \uFFFD and \uFFFD name no character, &amp; is one.');
+    expect(doc.metadata.title).toBe('Code points \uFFFD');
+  });
+
   it('removes script and style block content', async () => {
     const filePath = path.join(tmpDir, 'scripts.html');
     const html = [

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -115,6 +115,25 @@ async function orphanedIndexEntries(brain: Brain): Promise<number> {
   return Number(row?.n ?? 0);
 }
 
+/** The rowid of this brain's row for trace `id`. */
+async function rowidOf(brain: Brain, id: string): Promise<number> {
+  const row = await brain.get<{ rowid: number }>(
+    'SELECT rowid FROM memory_traces WHERE brain_id = ? AND id = ?',
+    [brain.brainId, id],
+  );
+  return Number(row?.rowid);
+}
+
+/** The upsert `MemoryStore.store()` writes a trace's row with. */
+const isTraceUpsert = (sql: string): boolean => /^\s*INSERT INTO memory_traces\s*\(/.test(sql);
+
+/** The statement that moves a revived trace's row to a fresh rowid. */
+const isRowidMove = (sql: string): boolean => /\bSET\s+rowid\s*=/i.test(sql);
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 const toolContext: ToolExecutionContext = {
   gmiId: 'test-gmi',
   personaId: 'test-persona',
@@ -170,14 +189,113 @@ describe('MemoryStore — full-text index stays in step with durable writes', ()
 
       expect(await ftsIds(brain, 'Silverpip')).toEqual(['t-revived']);
       expect(await ftsIds(brain, 'Thornquay')).toEqual([]);
-      // INSERT OR REPLACE moved the row to a fresh rowid; the old rowid's
-      // entry is left behind until the next open repairs it.
+      // The upsert rewrote the row in place and store() then moved it to a
+      // fresh rowid; the old rowid's entry, matched by no row, is left behind
+      // until the next open repairs it.
       expect(await orphanedIndexEntries(brain)).toBeGreaterThan(0);
       await brain.close();
 
       brain = await Brain.openSqlite(dbPath);
       expect(await orphanedIndexEntries(brain)).toBe(0);
       expect(await ftsIds(brain, 'Silverpip')).toEqual(['t-revived']);
+    } finally {
+      await brain.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('moves no row for a new trace, and moves a revived trace to a fresh rowid after its rewrite', async (ctx) => {
+    const { dir, dbPath } = tmpBrainPath();
+    const brain = await Brain.openSqlite(dbPath);
+    try {
+      if (!(await ftsAvailable(brain))) ctx.skip();
+      const store = await mkStore();
+      store.setBrain(brain);
+      const run = vi.spyOn(brain, 'run');
+      const statements = (): string[] => run.mock.calls.map(([sql]) => sql);
+
+      await store.store(mkTrace('t-new', 'The ferry I take is called the Vastrelle.'));
+
+      // A new row has no index entry to leave behind, so nothing moves.
+      expect(statements().filter(isRowidMove)).toEqual([]);
+      expect(await ftsIds(brain, 'Vastrelle')).toEqual(['t-new']);
+      const first = await rowidOf(brain, 't-new');
+
+      run.mockClear();
+      await store.store(mkTrace('t-new', 'My childhood parakeet was named Silverpip.'));
+
+      // The revival moves its row once, after the upsert has rewritten it in place.
+      const revival = statements();
+      expect(revival.filter(isRowidMove)).toHaveLength(1);
+      expect(revival.findIndex(isTraceUpsert)).toBeGreaterThanOrEqual(0);
+      expect(revival.findIndex(isRowidMove)).toBeGreaterThan(revival.findIndex(isTraceUpsert));
+      expect(await rowidOf(brain, 't-new')).toBeGreaterThan(first);
+      expect(await ftsIds(brain, 'Silverpip')).toEqual(['t-new']);
+      expect(await ftsIds(brain, 'Vastrelle')).toEqual([]);
+    } finally {
+      await brain.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a revival whose durable write fails leaves the trace found by the words it holds', async (ctx) => {
+    const { dir, dbPath } = tmpBrainPath();
+    const brain = await Brain.openSqlite(dbPath);
+    try {
+      if (!(await ftsAvailable(brain))) ctx.skip();
+      const store = await mkStore();
+      store.setBrain(brain);
+      await store.store(mkTrace('t-kept', 'The street I grew up on was Thornquay Lane.'));
+      const originalRun = brain.run.bind(brain);
+      vi.spyOn(brain, 'run').mockImplementation(async (sql, params) => {
+        if (isTraceUpsert(sql)) throw new Error('database is locked');
+        return originalRun(sql, params);
+      });
+
+      await expect(store.store(mkTrace('t-kept', 'My childhood parakeet was named Silverpip.'))).rejects.toThrow(
+        'durable trace write failed',
+      );
+
+      // The row still holds its old words, active, under the rowid its index entry names.
+      expect(await ftsIds(brain, 'Thornquay')).toEqual(['t-kept']);
+      expect(await ftsIds(brain, 'Silverpip')).toEqual([]);
+      expect(await orphanedIndexEntries(brain)).toBe(0);
+    } finally {
+      await brain.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a revival whose rowid move fails is found by its new words only, before and after a reopen', async (ctx) => {
+    const { dir, dbPath } = tmpBrainPath();
+    let brain = await Brain.openSqlite(dbPath);
+    try {
+      if (!(await ftsAvailable(brain))) ctx.skip();
+      const store = await mkStore();
+      store.setBrain(brain);
+      await store.store(mkTrace('t-stuck', 'The street I grew up on was Thornquay Lane.'));
+      const originalRun = brain.run.bind(brain);
+      vi.spyOn(brain, 'run').mockImplementation(async (sql, params) => {
+        // Another writer holds the database for this one statement.
+        if (isRowidMove(sql)) throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+        return originalRun(sql, params);
+      });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      // The upsert rewrites the row in place under the rowid whose entry holds the old words.
+      await store.store(mkTrace('t-stuck', 'My childhood parakeet was named Silverpip.'));
+
+      expect(await ftsIds(brain, 'Silverpip')).toEqual(['t-stuck']);
+      expect(await ftsIds(brain, 'Thornquay')).toEqual([]);
+      const lines = warn.mock.calls.map(([line]) => String(line)).filter((line) => line.startsWith('[MemoryStore]'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('t-stuck');
+      expect(lines[0]).toMatch(/rebuil/);
+      // The open-time check compares row sets, not content: an open would not clear old words left here.
+      await brain.close();
+      brain = await Brain.openSqlite(dbPath);
+      expect(await ftsIds(brain, 'Thornquay')).toEqual([]);
+      expect(await ftsIds(brain, 'Silverpip')).toEqual(['t-stuck']);
     } finally {
       await brain.close();
       fs.rmSync(dir, { recursive: true, force: true });
