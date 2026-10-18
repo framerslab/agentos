@@ -1020,6 +1020,96 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     transport.close();
     await transport.whenClosed();
   });
+
+  it('waits for the track for a chunk sent before the participant joined, once the join has fixed participant playout', async () => {
+    const room = new FakeRoom();
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...receipts, ...speaking, rtc: fakePublishingRtc() },
+    });
+    // Nobody is in the room: the first chunk plays natively.
+    await transport.sendAudio(scopedChunk(1));
+    // The page joins, and its first chunk fixes participant playout.
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    await transport.sendAudio(scopedChunk(2));
+    expect(transport.playout).toBe('participant');
+    // The first chunk keeps the playout it was admitted under: its wait is for the track, and no receipt is asked for it.
+    let outcome: unknown;
+    void transport.waitForPlayback(firstGeneration, 1, new AbortController().signal).then(
+      (receipt) => {
+        outcome = receipt;
+      },
+      (error: Error) => {
+        outcome = error.message;
+      }
+    );
+    await settle();
+    expect(outcome).toBeUndefined();
+    FakeAudioSource.created[0]!.playOut();
+    await settle();
+    expect(outcome).toEqual({ generation: firstGeneration, sequence: 1, playedSamples: 320, sampleRate: 16_000 });
+    expect(sentTypes(room)).toEqual(['audio']);
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it('clears a chunk sent before the participant joined as native playout clears it, once the join has fixed participant playout', async () => {
+    const room = new FakeRoom();
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...receipts, ...speaking, rtc: fakePublishingRtc() },
+    });
+    // Published while nobody is in the room, so the mode waits.
+    await transport.readyForPlayback();
+    const source = FakeAudioSource.created[0]!;
+    // What reaches the track and what clears it, in order.
+    const events: string[] = [];
+    const capture = source.captureFrame.bind(source);
+    source.captureFrame = async (frame) => {
+      await capture(frame);
+      events.push('captured');
+    };
+    const clearQueue = source.clearQueue.bind(source);
+    source.clearQueue = () => {
+      events.push('cleared');
+      clearQueue();
+    };
+    let land!: () => void;
+    source.gate = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    // The first chunk plays natively, and its capture waits for room in the queue.
+    const first = transport.sendAudio(scopedChunk(1));
+    await settle();
+    source.gate = undefined;
+    // The page joins, and its first chunk fixes participant playout.
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    await transport.sendAudio(scopedChunk(2));
+    expect(transport.playout).toBe('participant');
+    const clearing = transport.clearPlayback(firstGeneration);
+    land();
+    await first;
+    // The page is asked to discard the generation, and answers.
+    await vi.waitFor(() => expect(sentTypes(room)).toContain('clear'));
+    const ask = room.localParticipant.sendText.mock.calls
+      .map(([text]) => JSON.parse(text) as { type: string; generation: VoiceGeneration; clearId: number })
+      .find((message) => message.type === 'clear')!;
+    room.textHandlers.get('agentos.voice')!(
+      textStream(JSON.stringify({ type: 'cleared', generation: ask.generation, clearId: ask.clearId })),
+      { identity: 'user-1' }
+    );
+    await clearing;
+    // The first chunk's frame landed after the clear began, and the queue was cleared again after it.
+    expect(events.slice(events.lastIndexOf('captured'))).toContain('cleared');
+    transport.close();
+    await transport.whenClosed();
+  });
 });
 
 /**
