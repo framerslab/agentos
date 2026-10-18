@@ -225,6 +225,42 @@ describeIfPostgres('Brain.openPostgres', () => {
     }
   });
 
+  it('gives a fresh schema the indexes of every table it makes there, though a schema later on the search path holds them', async () => {
+    // One open alone, so no other open makes a table before this one looks for that table's indexes. public, later on
+    // the search path and set up by the admin brain's open, holds tables and indexes of the same names.
+    const schema = `agentos_fresh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    await admin.exec(`CREATE SCHEMA ${schema}`);
+    const url = new URL(POSTGRES_URL!);
+    url.searchParams.set('options', `-c search_path=${schema},public`);
+    let fresh: Brain | undefined;
+    try {
+      fresh = await Brain.openPostgres(url.toString(), { brainId: uniqueBrainId() });
+      const indexes = await admin.all<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE schemaname = $1`, [schema]);
+      expect(indexes.map((row) => row.indexname)).toEqual(
+        expect.arrayContaining([
+          'idx_memory_traces_brain_type',
+          'idx_memory_traces_brain_scope',
+          'idx_memory_traces_brain_scope_id',
+          'idx_knowledge_nodes_brain_type',
+          'idx_knowledge_edges_brain_source',
+          'idx_knowledge_edges_brain_target',
+          'idx_document_chunks_brain_document',
+          'idx_consolidation_log_brain_time',
+          'idx_retrieval_feedback_brain_trace',
+          'idx_messages_brain_conversation',
+          'idx_archived_traces_brain_time',
+          'idx_archived_traces_brain_reason',
+          'idx_archive_access_recency',
+        ]),
+      );
+    } finally {
+      await fresh?.close().catch(() => undefined);
+      await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
   it('opens while another connection holds a write transaction on the shared tables', async () => {
     const writer = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
     openedBrains.push(writer);
