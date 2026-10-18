@@ -449,4 +449,164 @@ describe('session events under a call profile', () => {
     expect(failures).toEqual([['transport', false]]);
     expect(f.profile.onFailure).toHaveBeenCalledWith('provider_failure');
   });
+
+  it("reports the acknowledged prefix as the interrupted reply's played text", async () => {
+    const f = await callWithBoundaries();
+
+    // The reply has two sentence segments, one chunk each; the transport acknowledges the first.
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledTimes(2));
+    // Six 20 ms frames of speech cut the reply while its second segment waits to be heard.
+    for (let i = 0; i < 6; i++) {
+      f.audio();
+      await vi.waitFor(() => expect(f.endpoint.pushAudio).toHaveBeenCalledTimes(i + 1));
+    }
+    await vi.waitFor(() => expect(f.log).toContain('barge_in cancel'));
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    // The first segment's last frame was acknowledged and the second's was not: the played text is the first
+    // segment, exactly, and nothing of the second.
+    expect(f.log.filter((line) => line.startsWith('item assistant'))).toEqual([
+      'item assistant interrupted Hello there. How are you|Hello there.',
+    ]);
+    expect(f.profile.onFailure).not.toHaveBeenCalled();
+    await f.runtime.stopSession();
+  });
+
+  /**
+   * A call over the same fake parts as `call()`, whose agent answers in two sentence segments and whose TTS session
+   * ends each segment with one chunk that carries the segment's boundary, as the streaming adapters do.
+   */
+  async function callWithBoundaries() {
+    const initial: AudioIdentity = {
+      scopeId: 'scope-a',
+      callId: 'call-a',
+      turnId: 'turn-a',
+      generation: { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 },
+    };
+    let identity = initial;
+    let sampleSequence = 0;
+    let ack!: () => void;
+    const transport: IPlaybackTransport = Object.assign(new EventEmitter(), {
+      id: 'transport-b',
+      state: 'open' as const,
+      sendAudio: vi.fn(async () => {}),
+      sendControl: vi.fn(async () => {}),
+      close: vi.fn(),
+      waitForPlayback: vi.fn(
+        async (generation: AudioIdentity['generation'], sequence: number, signal: AbortSignal) =>
+          new Promise<{ generation: AudioIdentity['generation']; sequence: number; playedSamples: number; sampleRate: number }>((resolve, reject) => {
+            ack = () => resolve({ generation, sequence, playedSamples: 320, sampleRate: 16000 });
+            if (signal.aborted) reject(new Error('aborted'));
+            else signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          })
+      ),
+      clearPlayback: vi.fn(async () => {}),
+    });
+    const stt: ScopedStreamingSTTSession = Object.assign(new EventEmitter(), {
+      pushAudio() {},
+      pushAudioScoped: vi.fn(async () => {}),
+      reset: vi.fn(async (next: AudioIdentity) => {
+        identity = next;
+      }),
+      flush: async () => {},
+      close: vi.fn(),
+    });
+    // Every frame is speech, so six 20 ms frames reach the profile's 120 ms and interrupt the agent.
+    const vad: IVadSession = Object.assign(new EventEmitter(), {
+      pushAudio: async (frame: ScopedAudioFrame) => {
+        vad.emit('vad', { ...frame, source: 'vad', type: 'speech_start', speech: true, durationMs: frame.samples.length / 16 });
+      },
+      reset: vi.fn(async () => {}),
+      flush: async () => {},
+      dispose: vi.fn(async () => {}),
+    });
+    const endpoint: IAudioEndpointDetector = Object.assign(new EventEmitter(), {
+      mode: 'semantic' as const,
+      pushAudio: vi.fn(async () => {}),
+      pushVadEvent: vi.fn(async () => {}),
+      pushTranscript: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    });
+    const agent = {
+      sendText: vi.fn(async function* () {
+        yield 'Hello there.';
+        yield ' How are you';
+      }),
+      abort: vi.fn(),
+    };
+    const profile: CallPipelineProfile = {
+      identity: initial,
+      vadSession: vad,
+      audioEndpointDetector: endpoint,
+      maxInputFrames: 32,
+      maxInputSamples: 10240,
+      playback: { maxBytes: 64000, maxDurationMs: 2000 },
+      minSpeechMs: 120,
+      maxTextCharacters: 4096,
+      maxSynthesisRequests: 64,
+      onGeneration: vi.fn(async () => {}),
+      onInterrupted: vi.fn(),
+      onFailure: vi.fn(),
+      fenceInference: vi.fn(async () => {}),
+    };
+    const runtime = new VoicePipelineOrchestrator({ stt: 'fake', tts: 'fake' });
+    const log = recordSessionEvents(runtime);
+    const session = await runtime.startSession(transport, agent, {
+      streamingSTT: { providerId: 'fake', isStreaming: true, startSession: async () => stt },
+      streamingTTS: {
+        providerId: 'fake',
+        startSession: async (config?: StreamingTTSConfig) => {
+          let sink: ((chunk: EncodedAudioChunk) => Promise<void>) | undefined;
+          let offset = 0;
+          let segments = 0;
+          const t: StreamingTTSSession = Object.assign(new EventEmitter(), {
+            pushTokens() {},
+            setAudioSink(fn: (chunk: EncodedAudioChunk) => Promise<void>) {
+              sink = fn;
+            },
+            // Each token is one segment: its one chunk is the segment's last frame and carries its boundary.
+            async writeTokens(tokens: string) {
+              const scoped = config!.call!;
+              const textBoundary: NonNullable<EncodedAudioChunk['textBoundary']> = {
+                segmentId: `seg-${++segments}`,
+                start: offset,
+                end: offset + tokens.length,
+                text: tokens,
+                final: true,
+              };
+              offset += tokens.length;
+              t.emit('usage', { ...scoped, providerId: 'fake', acceptedCharacters: tokens.length, generatedSamples: 320 * segments, sampleRate: 16000, status: 'running', final: false });
+              await sink!({
+                scopeId: scoped.scopeId,
+                callId: scoped.callId,
+                audio: Buffer.alloc(640),
+                format: 'pcm',
+                container: 'raw',
+                sampleRate: 16000,
+                durationMs: 20,
+                text: tokens,
+                generation: { ...scoped.generation },
+                textBoundary,
+              });
+            },
+            async flush() {
+              t.emit('usage', { ...config!.call!, providerId: 'fake', acceptedCharacters: offset, generatedSamples: 320 * segments, sampleRate: 16000, status: 'completed', final: true });
+              t.emit('flush_complete');
+            },
+            cancel: vi.fn(),
+            close: vi.fn(),
+          });
+          return t;
+        },
+      },
+      callProfile: profile,
+    });
+    const turn = () => endpoint.emit('turn_complete', { ...identity, transcript: 'hello', confidence: 1, durationMs: 20, reason: 'manual' });
+    const audio = () => transport.emit('audio', { samples: new Float32Array(320), sampleRate: 16000, channels: 1, timestamp: ++sampleSequence * 20 });
+    return { runtime, session, log, turn, audio, ack: () => ack(), transport, profile, endpoint };
+  }
 });
