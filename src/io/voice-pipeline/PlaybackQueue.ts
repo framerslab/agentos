@@ -7,13 +7,17 @@
  * producer waits before producing the next chunk, and a second concurrent
  * `enqueue` is refused instead of queued. The byte and duration ceilings cover
  * the whole slot, including the native send and the acknowledgement. Played
- * duration counts acknowledged samples alone, never bytes merely sent.
- * Cancellation invalidates the queue synchronously, clears the publisher and
+ * duration counts acknowledged samples alone, never bytes merely sent, and so
+ * does the played text: the contiguous prefix of the sentence segments whose
+ * last frame, marked with its boundary ({@link TtsTextBoundary}), the
+ * transport acknowledged. Cancellation invalidates the queue synchronously,
+ * clears the publisher, forgets the chunks sent and not yet acknowledged, and
  * waits for the outstanding send and acknowledgement to settle; each
  * inference generation gets a new queue.
  */
 
 import { inspectPcm16 } from './audioFormat.js';
+import { PlayedTextTracker } from './ttsTextBoundaries.js';
 import { sameVoiceGeneration, type EncodedAudioChunk, type IPlaybackTransport, type VoiceGeneration } from './types.js';
 
 /** Capacity includes the one chunk awaiting send or playback completion. */
@@ -28,6 +32,7 @@ export interface PlaybackQueueLimits {
 export class PlaybackQueue {
   private readonly generation: VoiceGeneration;
   private readonly abort = new AbortController();
+  private readonly tracker = new PlayedTextTracker();
   private sequence = 0;
   private bytes = 0;
   private durationMs = 0;
@@ -61,6 +66,8 @@ export class PlaybackQueue {
     this.bytes = pcm.pcm.length;
     this.durationMs = pcm.durationMs;
     const sequence = ++this.sequence;
+    // A chunk that ends a segment is recorded under its sequence before it is sent; its receipt makes the segment heard.
+    this.tracker.sent(sequence, chunk.textBoundary);
     const work = (async () => {
       // The producer owns the bytes until this promise settles and must not mutate them meanwhile.
       await this.transport.sendAudio({ ...chunk, sequence, generation: { ...this.generation } });
@@ -68,6 +75,7 @@ export class PlaybackQueue {
       const receipt = await this.transport.waitForPlayback(this.generation, sequence, this.abort.signal);
       if (this.cancelled || !sameVoiceGeneration(receipt.generation, this.generation) || receipt.sequence !== sequence || receipt.sampleRate !== pcm.sampleRate || receipt.playedSamples !== pcm.samples) throw new Error('invalid playback receipt');
       this.playedMs += receipt.playedSamples / receipt.sampleRate * 1000;
+      this.tracker.acknowledged(sequence);
     })();
     this.pending = work;
     try {
@@ -94,6 +102,8 @@ export class PlaybackQueue {
     if (this.cancelling) return this.cancelling;
     this.cancelled = true;
     this.abort.abort();
+    // A receipt that comes for a discarded chunk proves nothing.
+    this.tracker.cleared();
     this.cancelling = (async () => {
       const results = await Promise.allSettled([this.transport.clearPlayback(this.generation), this.pending ?? Promise.resolve()]);
       if (results[0]!.status === 'rejected') throw new Error('playback clear incomplete');
@@ -110,8 +120,12 @@ export class PlaybackQueue {
     return this.failure !== undefined && !this.cancelled;
   }
 
-  /** Content-free occupancy and acknowledged duration only. */
-  stats(): { bytes: number; durationMs: number; playedMs: number } {
-    return { bytes: this.bytes, durationMs: this.durationMs, playedMs: this.playedMs };
+  /**
+   * Occupancy, acknowledged duration, and the text proven played: the contiguous prefix of the segments whose last
+   * frame the transport acknowledged, exactly as submitted, empty while none is. The numbers are content-free; the
+   * text is the reply's and belongs in its conversation item, never in a log line.
+   */
+  stats(): { bytes: number; durationMs: number; playedMs: number; playedText: string } {
+    return { bytes: this.bytes, durationMs: this.durationMs, playedMs: this.playedMs, playedText: this.tracker.playedText };
   }
 }
