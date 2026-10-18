@@ -125,3 +125,5 @@ export {
   isClientTranscriptMessage,
   transcriptEventFromClient,
 } from './clientTranscript.js';
+// The text input message's check: a user who types sends text in place of speech.
+export { isClientTextInputMessage, MAX_TEXT_INPUT_LENGTH } from './clientTextInput.js';

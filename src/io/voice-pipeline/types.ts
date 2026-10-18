@@ -103,6 +103,34 @@ export interface AudioFrame {
 }
 
 /**
+ * The text a TTS chunk proves spoken: the submitted text of one reply, from
+ * `start` to `end`, exclusive of `end`, as the TTS session received it, with
+ * every character and every space kept. A streaming TTS adapter cuts the text
+ * it is given into immutable sentence segments, synthesizes each through its
+ * provider's completion boundary (Deepgram Aura's `Flushed`, ElevenLabs'
+ * `isFinal`) and attaches the segment's boundary to the last audio frame of
+ * that segment alone, so a frame that carries one ends a whole segment; the
+ * frames before it carry none, and a flush that ends on a timeout attaches
+ * none. A consumer counts the text as heard only once the transport has
+ * acknowledged that frame as played, and only the contiguous prefix of
+ * acknowledged segments; a cleared or stale frame advances nothing. The legacy
+ * `EncodedAudioChunk.text` is never read as a played fragment: current
+ * providers fill it with every token accumulated so far.
+ */
+export interface TtsTextBoundary {
+  /** The segment's id, unique within the reply. */
+  segmentId: string;
+  /** Offset of the segment's first character in the reply's submitted text. */
+  start: number;
+  /** Offset past the segment's last character in the reply's submitted text. */
+  end: number;
+  /** The segment's text, `submitted.slice(start, end)`, kept exactly. */
+  text: string;
+  /** Always `true`: the frame is the last of a segment the provider reported complete. */
+  final: true;
+}
+
+/**
  * A compressed audio chunk ready for transmission over the wire (e.g. to a
  * TTS websocket or a playback buffer). Contains the rendered text to allow
  * barge-in handlers to track interrupted utterance state.
@@ -169,6 +197,13 @@ export interface EncodedAudioChunk {
 
   /** Monotonic playback chunk sequence within the inference generation. */
   sequence?: number;
+
+  /**
+   * The text this chunk completes ({@link TtsTextBoundary}), on the last frame
+   * of a sentence segment the provider reported complete; absent on every
+   * other frame.
+   */
+  textBoundary?: TtsTextBoundary;
 }
 
 // ============================================================================
@@ -2098,10 +2133,27 @@ export interface ClientTranscriptMessage {
 }
 
 /**
+ * Text the user typed, sent in place of speech: a user turn that interrupts
+ * the agent's speech when it is speaking, as LiveKit Agents' text input does
+ * (https://docs.livekit.io/agents/build/text/). `LiveKitStreamTransport` sends
+ * one for each `lk.chat` text stream of its linked participant; a WebSocket
+ * client sends one as JSON. `isClientTextInputMessage()` checks one on the
+ * server: `text` holds at least one character besides whitespace and at most
+ * 4,000 characters.
+ */
+export interface ClientTextInputMessage {
+  /** Discriminator of the client message. */
+  type: 'text_input';
+  /** The user's text, from 1 to 4,000 characters, not whitespace alone. */
+  text: string;
+}
+
+/**
  * Messages sent from the client (browser/app) to the server over the transport.
  * All messages are JSON-serialised.
  * A client that transcribes on its own device sends
- * {@link ClientTranscriptMessage}s in place of audio.
+ * {@link ClientTranscriptMessage}s in place of audio, and a client whose user
+ * types sends {@link ClientTextInputMessage}s.
  *
  * @see {@link ServerTextMessage} for the server-to-client counterpart.
  *
@@ -2131,7 +2183,8 @@ export type ClientTextMessage =
       /** The control action to perform. */
       action: TransportControlMessage;
     }
-  | ClientTranscriptMessage;
+  | ClientTranscriptMessage
+  | ClientTextInputMessage;
 
 // ============================================================================
 // Section 11 -- Wire protocol: server -> client messages
