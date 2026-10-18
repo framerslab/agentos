@@ -5,9 +5,8 @@
  * against a Zod or a JSON schema, the repair message a failed attempt is answered with, and the check again after
  * the output guardrails. `generateObject` shares the parsers here.
  */
-import Ajv from 'ajv';
-import addFormats from 'ajv-formats';
 import type { ZodError, ZodType } from 'zod';
+import { SchemaChecks, type SchemaCheck } from '../../core/utils/schemaChecks.js';
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
 
 // ---------------------------------------------------------------------------
@@ -105,14 +104,14 @@ export interface ResolvedStructuredReply {
   checkValue(value: unknown): StructuredCheck;
 }
 
-let sharedAjv: InstanceType<typeof Ajv> | undefined;
-function ajvInstance(): InstanceType<typeof Ajv> {
-  if (!sharedAjv) {
-    sharedAjv = new Ajv({ allErrors: true, strict: false });
-    addFormats(sharedAjv);
-  }
-  return sharedAjv;
-}
+/**
+ * The checks of the JSON Schemas requests name. Ajv reads a schema as JSON Schema draft-07, reports every error of a
+ * value, checks the standard formats (`date-time`, `email`, `uri` and the others of `ajv-formats`), and passes over a
+ * keyword it does not know, as JSON Schema says to, and a format it does not know (strict mode is off). A host may
+ * send its schema anew with each request, under one `$id` too: each compile lets go of the `$id`s it registered, and
+ * an Ajv instance compiles at most `SCHEMAS_PER_INSTANCE` schemas.
+ */
+const structuredSchemaChecks = new SchemaChecks({ allErrors: true, strict: false });
 
 /** Builds what a structured turn needs from the spec, or null when the request carries none. Throws on a spec without a usable schema. */
 export function resolveStructuredReply(spec: StructuredReplySpec | undefined | null): ResolvedStructuredReply | null {
@@ -136,9 +135,9 @@ export function resolveStructuredReply(spec: StructuredReplySpec | undefined | n
       checkValue: (value) => checkWithZod(value, schema),
     };
   }
-  let validate: ((data: unknown) => boolean) & { errors?: Array<{ instancePath?: string; message?: string }> | null };
+  let validate: SchemaCheck;
   try {
-    validate = ajvInstance().compile(schema) as typeof validate;
+    validate = structuredSchemaChecks.check(schema);
   } catch (e) {
     throw new StructuredReplyConfigError(`structuredReply.schema is not a valid JSON Schema: ${e instanceof Error ? e.message : String(e)}`);
   }

@@ -11,9 +11,8 @@
  * @see @framers/agentos/utils/errors.ts for GMIError, GMIErrorCode, createGMIErrorFromError.
  */
 
-import Ajv from 'ajv';
-import addFormats from 'ajv-formats';
 import { uuidv4 } from '../utils/uuid.js';
+import { SchemaChecks, checkValue, type SchemaCheck } from '../utils/schemaChecks.js';
 
 import { ITool, JSONSchemaObject, ToolExecutionResult, ToolExecutionContext } from './ITool';
 import { ToolCallRequest, UserContext } from '../../cognition/substrate/IGMI';
@@ -21,15 +20,6 @@ import type { IAuthService, ISubscriptionService } from '../types/auth';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../utils/errors.js';
 import { ExtensionRegistry, EXTENSION_KIND_TOOL, ToolDescriptor } from '../../extensions';
 import type { CallerTurnContext } from '../../api/runtime/agencyLaunch/types.js';
-
-type AjvValidationError = {
-  instancePath?: string;
-  schemaPath?: string;
-  message?: string;
-  params?: Record<string, unknown>;
-};
-
-type AjvValidateFn = ((data: unknown) => boolean) & { errors?: AjvValidationError[] | null };
 
 /**
  * @interface ToolExecutionRequestDetails
@@ -93,15 +83,15 @@ export class ToolExecutor {
   private readonly authService?: IAuthService;
   private readonly subscriptionService?: ISubscriptionService;
   /**
-   * Instance of Ajv for JSON schema validation.
-   * Note: The TS2709 error "Cannot use namespace 'Ajv' as a type" might indicate
-   * an issue with TypeScript configuration (e.g., esModuleInterop) or Ajv's type
-   * definitions version mismatch if it persists. The `import Ajv from 'ajv';`
-   * and `ajv: Ajv` usage with `new Ajv()` is standard for Ajv v8+.
+   * The checks of the tools' input and output schemas. Ajv reads a schema as JSON Schema draft-07, reports every
+   * error of a value, coerces a value to the type its schema names where it can, fills in a `default` the schema
+   * gives, checks the standard formats (`date-time`, `email`, `uri` and the others of `ajv-formats`), and passes over a
+   * keyword it does not know, as JSON Schema says to, and a format it does not know (strict mode is off). A schema
+   * compiles once for as long as its object lives. Two tools may each hold a copy of one schema under a shared `$id`,
+   * and a tool registered again may bring a new copy: each compile lets go of the `$id`s it registered.
    * @private
-   * @type {InstanceType<typeof Ajv>}
    */
-  private readonly ajv: InstanceType<typeof Ajv>;
+  private readonly schemaChecks = new SchemaChecks({ allErrors: true, coerceTypes: true, useDefaults: true, strict: false });
   /**
    * Whether the console lines of `executeTool` carry a tool's arguments, its output and the details of a failure.
    * Off, the lines name the tool, the duration and the error only: a tool that reads a person's record must not put
@@ -112,7 +102,7 @@ export class ToolExecutor {
 
   /**
   * Creates an instance of ToolExecutor.
-  * Initializes an empty tool registry and configures an Ajv instance for JSON schema validation.
+  * Initializes an empty tool registry. A tool's schemas are compiled on its first call that reads them.
   * Default tools can be registered via `registerDefaultTools` or explicitly.
   *
   * @constructor
@@ -136,9 +126,6 @@ export class ToolExecutor {
     this.directRegistrations = new Set<string>();
     this.authService = authService;
     this.subscriptionService = subscriptionService;
-
-    this.ajv = new Ajv({ allErrors: true, coerceTypes: true, useDefaults: true });
-    addFormats(this.ajv); // Adds support for standard formats like "date-time", "email", "uri", etc.
 
     this.registerDefaultTools();
     console.log(
@@ -344,8 +331,18 @@ export class ToolExecutor {
     }
     
     if (tool.inputSchema) {
-      const validate = this.ajv.compile(tool.inputSchema) as AjvValidateFn;
-      if (!validate(parsedArgs)) {
+      let validate: SchemaCheck;
+      try {
+        validate = this.schemaChecks.check(tool.inputSchema);
+      } catch (schemaError: any) {
+        // The schema is the tool's own, so its error names nothing from the arguments. Nothing runs.
+        const errorMsg = `The input schema of tool '${tool.name}' does not compile: ${schemaError?.message ?? String(schemaError)}`;
+        console.error(`${logContext}: ${errorMsg}`);
+        return { success: false, error: errorMsg, details: { toolName: tool.name, code: GMIErrorCode.CONFIGURATION_ERROR } };
+      }
+      const checkedArgs = checkValue(validate, parsedArgs);
+      parsedArgs = checkedArgs.value as Record<string, any>;
+      if (!checkedArgs.valid) {
         const errorMsg = `Invalid arguments for tool '${tool.name}'. Validation failed against input schema.`;
         const validationErrors = Array.isArray(validate.errors)
           ? validate.errors.map(err => ({
@@ -392,8 +389,23 @@ export class ToolExecutor {
       }
       
       if (tool.outputSchema && result.success && result.output !== undefined) {
-        const validateOutput = this.ajv.compile(tool.outputSchema) as AjvValidateFn;
-        if (!validateOutput(result.output)) {
+        let validateOutput: SchemaCheck;
+        try {
+          validateOutput = this.schemaChecks.check(tool.outputSchema);
+        } catch (schemaError: any) {
+          // The tool has run, and its output cannot be checked: the call fails. Its result keeps the output, as a failed
+          // output check's does; ToolOrchestrator answers a failed call with `output: null`, the error and the details.
+          const schemaErrorMsg = `The output schema of tool '${tool.name}' does not compile: ${schemaError?.message ?? String(schemaError)}`;
+          console.error(`${logContext}: ${schemaErrorMsg}`);
+          return {
+            ...result,
+            success: false,
+            error: schemaErrorMsg,
+            details: { ...(result.details || {}), code: GMIErrorCode.CONFIGURATION_ERROR },
+          };
+        }
+        const checkedOutput = checkValue(validateOutput, result.output);
+        if (!checkedOutput.valid) {
           const outputErrorMsg = `Tool '${tool.name}' produced output that failed its defined output schema validation.`;
           const outputValidationErrors = Array.isArray(validateOutput.errors)
             ? validateOutput.errors.map(err => ({
@@ -414,6 +426,8 @@ export class ToolExecutor {
             },
           };
         }
+        // Ajv coerces a value inside the output in place; a coercion of the output itself comes back from the holder.
+        if (checkedOutput.value !== result.output) return { ...result, output: checkedOutput.value };
       }
       return result;
 
