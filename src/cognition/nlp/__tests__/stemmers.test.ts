@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { NoOpStemmer } from '../stemmers/NoOpStemmer';
 import { PorterStemmer } from '../stemmers/PorterStemmer';
 import { NoOpLemmatizer } from '../lemmatizers/NoOpLemmatizer';
+import { WordNetLemmatizer } from '../lemmatizers/WordNetLemmatizer';
+import { getNaturalModule } from '../naturalInterop';
 import { StopWordFilter, ENGLISH_STOP_WORDS, CODE_STOP_WORDS, getNaturalStopWords } from '../filters/StopWordFilter';
 import { LowercaseNormalizer } from '../normalizers/LowercaseNormalizer';
 import { AccentStripper } from '../normalizers/AccentStripper';
@@ -35,6 +37,20 @@ describe('NoOpLemmatizer', () => {
     const tokens = makeTokens(['ran', 'better', 'mice']);
     const result = lemmatizer.process(tokens);
     expect(result.map(t => t.text)).toEqual(['ran', 'better', 'mice']);
+  });
+});
+
+describe('WordNetLemmatizer', () => {
+  it('sets the lemma, and the text, to the Lancaster stem: it looks nothing up in WordNet', () => {
+    const lancaster = getNaturalModule()?.LancasterStemmer;
+    expect(lancaster).toBeDefined();
+    const words = ['mice', 'better', 'running'];
+    const result = new WordNetLemmatizer().process(makeTokens(words));
+    expect(result.map((t) => t.lemma)).toEqual(words.map((word) => lancaster!.stem(word)));
+    expect(result.map((t) => t.text)).toEqual(result.map((t) => t.lemma));
+    // A dictionary lemmatizer would answer mouse and good.
+    expect(result.map((t) => t.lemma)).not.toContain('mouse');
+    expect(result.map((t) => t.lemma)).not.toContain('good');
   });
 });
 

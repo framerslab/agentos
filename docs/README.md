@@ -63,7 +63,7 @@
 
 - [**Text Processing & Search**](./text/TEXT_OVERVIEW.md): the section's map, what loads in a browser, and the runnable examples
 - [**Text Processing Pipeline**](./text/TEXT_PROCESSING.md): tokenizers for prose and code, stop words, Porter stemming and the three preset pipelines
-- [**Text Statistics and Classification**](./text/TEXT_STATISTICS.md): `StatisticalUtilityAI`, `LLMUtilityAI` and `HybridUtilityAI` for sentences, n-grams, keywords, readability, similarity, language, summaries and classification
+- [**Text Statistics and Classification**](./text/TEXT_STATISTICS.md): `StatisticalUtilityAI`, `LLMUtilityAI` and `HybridUtilityAI` for sentences, n-grams, keywords, readability, similarity, language, summaries, sentiment and classification
 - [**Lexical and Hybrid Search**](./text/LEXICAL_AND_HYBRID_SEARCH.md): `LexicalIndex`, `BM25Index`, `FuzzyIndex`, `HybridSearcher` and reciprocal rank fusion
 - [**Chunking and Snippets**](./text/CHUNKING_AND_SNIPPETS.md): `SemanticChunker`, `chunkTurns`, `ChunkingEngine` and `snippetAround`
 - [**Reranking**](./text/RERANKING.md): `RerankerService` and the local, Cohere and LLM-judge rerankers

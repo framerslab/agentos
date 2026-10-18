@@ -287,7 +287,10 @@ export interface RagRetrievalOptions {
     topN?: number;
     /** Max documents to send to reranker (limits cost/latency). Default: 100 */
     maxDocuments?: number;
-    /** Request timeout in ms. Default: 30000 */
+    /**
+     * Request timeout in ms. Unset, the reranker provider settings' `defaultTimeoutMs` applies, else the provider's
+     * own default: 30000 for Cohere.
+     */
     timeoutMs?: number;
     /** Provider-specific parameters */
     params?: Record<string, any>;
