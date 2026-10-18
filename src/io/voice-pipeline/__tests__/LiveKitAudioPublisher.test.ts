@@ -211,6 +211,39 @@ describe('native playout', () => {
     await expect(f.publisher.waitForPlayback(generation, 1, new AbortController().signal)).rejects.toThrow('publisher drain timeout');
     await f.publisher.close();
   });
+  it('ends a playout wait at once on a clear or a close, though the track never reports its playout', async () => {
+    const f = native(); await f.publisher.sendAudio(unscoped());
+    f.source().waitForPlayout = () => new Promise<void>(() => {});
+    let ended = 0;
+    void f.publisher.waitForPlayout().then(() => { ended++; });
+    await settle(); expect(ended).toBe(0);
+    await f.publisher.clearPlayback(generation); await settle(); expect(ended).toBe(1);
+    await f.publisher.sendAudio(unscoped());
+    void f.publisher.waitForPlayout().then(() => { ended++; });
+    await settle(); expect(ended).toBe(1);
+    await f.publisher.close(); await settle(); expect(ended).toBe(2);
+  });
+  it('gives a playout wait up when a capture stalls for receiptTimeoutMs plus maxDurationMs, and clears the stalled frame as it lands', async () => {
+    const f = native(); await f.publisher.ready();
+    let land!: () => void; f.source().gate = new Promise<void>((resolve) => { land = resolve; });
+    // The first chunk's capture does not return while the gate holds, and the second waits behind it.
+    const first = f.publisher.sendAudio(unscoped()); const second = f.publisher.sendAudio(unscoped());
+    await settle();
+    let outcome: string | undefined;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      void f.publisher.waitForPlayout().then(() => { outcome = 'played'; }, (error: Error) => { outcome = error.message; });
+      await settle();
+      // receiptTimeoutMs is 1000 and maxDurationMs 2000.
+      await vi.advanceTimersByTimeAsync(2_999); await settle(); expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1); await settle(); expect(outcome).toBe('publisher drain timeout');
+      expect(f.source().clears).toBe(1);
+    } finally { vi.useRealTimers(); }
+    // The stalled frame lands later and is cleared as it lands; the chunk queued behind it is never captured.
+    f.source().gate = undefined; land(); await first; await second;
+    expect(f.source().capturedSamples).toBe(960); expect(f.source().clears).toBe(2);
+    await f.publisher.close();
+  });
   it('holds the track on a pause: clears its queue, captures nothing until the resume, then the held chunks in order', async () => {
     const f = native(); await f.publisher.ready();
     let free!: () => void; f.source().gate = new Promise<void>((resolve) => { free = resolve; });

@@ -875,6 +875,49 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     await s.orchestrator.stopSession('done');
   });
 
+  it('ends a reply whose track never reports its playout once receiptTimeoutMs plus maxDurationMs pass, and takes the next words as a new turn', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const bargeinHandler: IBargeinHandler = { mode: 'hard-cut', handleBargein: vi.fn(() => ({ type: 'cancel' as const })) };
+    const s = await converse(room, 'user-1', { bargeinHandler });
+    await s.reply();
+    for (let i = 0; i < 3; i++) s.tts.emit('audio', pcmChunk());
+    await vi.waitFor(() => expect(capturedSamples()).toBe(3 * 960));
+    const source = FakeAudioSource.created[0]!;
+    // The track has taken the reply and never reports that it played out.
+    source.waitForPlayout = () => new Promise<void>(() => {});
+    const clears = source.clears;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      s.tts.emit('flush_complete');
+      await settle();
+      // receiptTimeoutMs is 1000 and maxDurationMs 2000: a millisecond before the bound the reply is still speaking.
+      await vi.advanceTimersByTimeAsync(2_999);
+      await settle();
+      expect(s.orchestrator.state).toBe('speaking');
+      expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking']);
+      await vi.advanceTimersByTimeAsync(1);
+      await settle();
+      expect(s.orchestrator.state).toBe('listening');
+      expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking', 'agent_done']);
+      // What the track had not played is cleared, so none of the stalled reply plays later.
+      expect(source.clears).toBe(clears + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+    // The caller's next words are a new turn, not a barge-in.
+    s.stt.emit('speech_start');
+    await settle();
+    expect(bargeinHandler.handleBargein).not.toHaveBeenCalled();
+    expect(s.tts.cancel).not.toHaveBeenCalled();
+    await s.reply();
+    await vi.waitFor(() =>
+      expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking', 'agent_done', 'agent_thinking', 'agent_speaking'])
+    );
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
+
   it('takes speech over the rest of the reply, after its synthesis completed, as a barge-in that clears the track', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
