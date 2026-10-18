@@ -1506,6 +1506,23 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       consoleWarn.mockRestore();
     }
   });
+  it("an agentStart callback that throws on a pooled agency's first call, before the call is seated, is written through the host's logger masked: the mask holds the configured keys from construction", async () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      threeProviders();
+      const lines = await logLines(async () => {
+        // The agency's own agentStart fires before seatForCall lists the call's keys; the pool's keys are written in the config.
+        const r = await panel({ on: { agentStart: () => { throw new Error(`callback saw ${K.ant}`); } } }).generate('review');
+        expect(r.text).toBe('Merged findings');
+      });
+      const threw = lines.filter((l) => l.meta?.event === 'agency_callback_threw' && l.meta?.callback === 'agentStart');
+      expect(threw.length).toBeGreaterThanOrEqual(1);
+      for (const line of threw) expect(line.meta).toEqual({ event: 'agency_callback_threw', callback: 'agentStart', error: 'callback saw [redacted]' });
+      expect(JSON.stringify(lines)).not.toContain(K.ant);
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
   it("a callback that throws is written through the host's logger as agency_callback_threw with its message masked, and to no console", async () => {
     const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
