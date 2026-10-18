@@ -243,15 +243,24 @@ async function* fromPart<T>(source: VoiceSessionErrorSource, iterable: AsyncIter
  * Hands an event to each of `target`'s listeners for it, in order, as `emit()` would, except that a listener that
  * throws or rejects goes to `report` and the listeners after it still run. `emit()` stops at a throw, which would skip
  * the listeners after it (`waitForUserTurn()`'s among them) and throw into the code that raised the event: an endpoint
- * detector's handler, or a stop that has not yet closed the session's parts.
+ * detector's handler, or a stop that has not yet closed the session's parts. Once `stopped` answers `true`, as it does
+ * after a listener has closed the session, the listeners after it get nothing.
  *
  * @param target - The emitter whose listeners get the event.
  * @param event - The event.
  * @param args - What each listener is handed.
  * @param report - Takes a listener's throw or rejection, and what failed.
+ * @param stopped - Whether the event is to go no further.
  */
-function emitEach(target: EventEmitter, event: string, args: unknown[], report: (err: unknown, what: string) => void): void {
+function emitEach(
+  target: EventEmitter,
+  event: string,
+  args: unknown[],
+  report: (err: unknown, what: string) => void,
+  stopped: () => boolean = () => false
+): void {
   for (const listener of target.rawListeners(event)) {
+    if (stopped()) return;
     try {
       const result: unknown = (listener as (...values: unknown[]) => unknown).apply(target, args);
       // Promise.resolve() also takes a promise of another realm or library, and leaves any other value alone.
@@ -340,7 +349,8 @@ class SessionEvents {
   private closed = false;
 
   /**
-   * @param targets - The emitters each event goes to, in order: the orchestrator, then the session.
+   * @param targets - The emitters each event goes to, in order: the orchestrator, then the session (under a call
+   *   profile, the call's own).
    * @param report - Takes a listener's throw or rejection, what failed, and the event it was handed.
    * @param awayAfterMs - `VoicePipelineConfig.userAwayTimeoutMs`; undefined, the user is never away.
    */
@@ -351,14 +361,25 @@ class SessionEvents {
   ) {}
 
   /**
-   * Hands an event to every target's listeners, unless the session has closed.
+   * Whether the session has closed: no event goes out from then on. A runtime that hands an event to listeners itself,
+   * as each does the deprecated `state_change`, stops there too.
+   */
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
+  /**
+   * Hands an event to every target's listeners, unless the session has closed. A listener that closes the session
+   * ends the event there: no listener after it, of that target or the next, gets it after `close`.
    *
    * @param event - The event.
    * @param payload - Its payload.
    */
   emit<K extends keyof VoiceSessionEventMap>(event: K, payload: VoiceSessionEventMap[K]): void {
-    if (this.closed) return;
-    for (const target of this.targets()) emitEach(target, event, [payload], (err, what) => this.report(err, what, event));
+    for (const target of this.targets()) {
+      if (this.closed) return;
+      emitEach(target, event, [payload], (err, what) => this.report(err, what, event), () => this.closed);
+    }
   }
 
   /**
@@ -406,6 +427,14 @@ class SessionEvents {
     clearTimeout(this.away);
     this.away = undefined;
   }
+}
+
+/** A failure a session ends on whose `session_error` has yet to go out. */
+interface FailureEvent {
+  /** The failure: the `Error` its `'error'` listeners were handed. */
+  error: Error;
+  /** The part it came from. */
+  source: VoiceSessionErrorSource;
 }
 
 /** What the user's speech does, from the STT session's events or a client's transcript lines. */
@@ -629,6 +658,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   private playoutWait?: AbortController;
   /** The failure a session without a call profile ended on, for its `close` event. */
   private failure?: Error;
+  /**
+   * The failures whose `session_error` has yet to go out, each with the part it came from, in order
+   * (`_sendFailureEvents`): a failure whose `'error'` listener stops the session has its `session_error` before `close`.
+   */
+  private readonly failureEvents: FailureEvent[] = [];
   /** The language of the current turn's last final transcript, for the user's conversation item. */
   private turnLanguage?: string;
   /**
@@ -711,7 +745,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   /**
    * Moves the pipeline to `to`. Without a call profile the agent's state follows (`agent_state_changed`): listening
    * as the pipeline listens and thinking as it processes a turn; a reply speaks from its first word (the reply's token
-   * loop), an interruption keeps the state it came from, and a close is reported as `close`.
+   * loop), an interruption keeps the state it came from, and a close is reported as `close`. A listener that moves the
+   * pipeline on, as a stop does, ends the change there: the session's `state_change` listeners after it, and the
+   * agent's state, hear nothing of a state the pipeline has left.
    *
    * @param to - The new state.
    */
@@ -720,9 +756,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (from === to) return;
     this.current = to;
     this.emit('state_changed', { from, to });
-    if (this.publicSession) this._emitEach(this.publicSession, 'state_change', to);
+    if (this.current !== to) return;
+    const session = this.publicSession;
+    if (session) {
+      emitEach(session, 'state_change', [to], (err, what) => this._listenerFailed(err, what, 'state_change'), () => this.events.isClosed || this.current !== to);
+    }
     // A call profile's runtime reports its own agent states, which the orchestrator emits as they come.
-    if (this.call) return;
+    if (this.call || this.current !== to) return;
     if (to === 'listening') this.events.agentTo('listening');
     else if (to === 'processing') this.events.agentTo('thinking');
   }
@@ -730,22 +770,35 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   /**
    * Ends a session without a profile on a failure of one of its parts. The report is content-free: a provider's or
    * an agent's error can carry what was said, so its text reaches neither a listener nor the console. The session's
-   * `'error'` listeners get it as before; `session_error` carries the same `Error` with the part it came from, before
-   * `close`.
+   * `errorMonitor` listeners get the `Error` first, whether or not the session has an `'error'` listener, then its
+   * `'error'` listeners, then the orchestrator's (`_reportError`); `session_error` carries the same `Error` with the
+   * part it came from, before `close`, though one of those listeners stops the session (`_sendFailureEvents`).
    *
    * @param source - The part that failed.
    */
   private reportFailure(source: VoiceSessionErrorSource = 'session'): void {
     if (this.current === 'closed') return;
     const error = new Error('voice pipeline failed');
-    this.failure = error;
+    this.failure ??= error;
+    this.failureEvents.push({ error, source });
+    // The session's listeners get it before the orchestrator's, so a host on the session hears it before any stop an
+    // orchestrator listener makes. The orchestrator's report writes the console warning when nothing listens there for
+    // 'error', so the session's writes none.
+    if (this.publicSession) this._reportError(error, 'the session ended on a failure', this.publicSession, false);
     this._reportError(error, 'the session ended on a failure');
-    const session = this.publicSession;
-    if (session && session.listenerCount('error') > 0) this._reportError(error, 'the session ended on a failure', session);
-    this._sessionError(error, false, source);
+    this._sendFailureEvents();
     void this.stopSession('provider_failure').catch(() => {
       this.emit('cleanup_incomplete');
     });
+  }
+
+  /**
+   * Emits the `session_error` of each failure the session ends on that has not had one yet, in order: as the failure is
+   * reported (`reportFailure`), or as a stop closes the session before that, when one of the failure's `'error'`
+   * listeners stops it.
+   */
+  private _sendFailureEvents(): void {
+    for (const { error, source } of this.failureEvents.splice(0)) this._sessionError(error, false, source);
   }
 
   /**
@@ -1272,7 +1325,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (!overrides.streamingSTT) throw new Error('streamingSTT is required');
     if (!overrides.streamingTTS) throw new Error('streamingTTS is required');
     if (overrides.callProfile) {
-      const call = new CallPipelineRuntime(this.config, transport, agent, overrides.streamingSTT, overrides.streamingTTS, overrides.callProfile, (err, what, target) => this._reportError(err, what, target));
+      const call = new CallPipelineRuntime(this.config, transport, agent, overrides.streamingSTT, overrides.streamingTTS, overrides.callProfile, (err, what, target, warnUnheard) => this._reportError(err, what, target, warnUnheard));
       this.call = call;
       this.transport = transport;
       call.on('state_change', (state: PipelineState) => this.stateTo(state));
@@ -1418,6 +1471,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       });
       if ((this.current as PipelineState) !== 'listening') return;
       this.stateTo('processing');
+      // A listener of the change may have stopped the session: the client hears no thinking from a closed one.
+      if ((this.current as PipelineState) !== 'processing') return;
       if (this.watchdog) clearTimeout(this.watchdog);
       // Sends are not waited for: a send that rejects is reported and ends neither the turn nor the session.
       this._watchSend(() => transport.sendControl({ type: 'agent_thinking' }));
@@ -1714,9 +1769,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    *   object without a prototype, a revoked proxy) is named by its type, where building the report would throw.
    * @param what - What failed, for the console warning.
    * @param target - Whose listeners get the failure: the orchestrator, or the session it returned.
+   * @param warnUnheard - Whether a failure that nothing listens for as `'error'` is written as a console warning; a
+   *   report that another report writes the warning for passes `false`, and its `errorMonitor` listeners still get it.
    * @returns The `Error` the listeners were handed, for `session_error`.
    */
-  private _reportError(err: unknown, what: string, target: EventEmitter = this): Error {
+  private _reportError(err: unknown, what: string, target: EventEmitter = this, warnUnheard = true): Error {
     const error = isError(err) ? err : new Error(describeReason(err));
     const warnListenerFailed = (thrown: unknown): void => {
       console.warn(
@@ -1738,7 +1795,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     };
     handToListeners(EventEmitter.errorMonitor);
     if (target.listenerCount('error') === 0) {
-      console.warn(`[voice-pipeline-orchestrator] ${what}:`, describeReason(error));
+      if (warnUnheard) console.warn(`[voice-pipeline-orchestrator] ${what}:`, describeReason(error));
       return error;
     }
     handToListeners('error');
@@ -1821,6 +1878,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     // An interruption's timers go with the session, and nothing it holds is sent or told.
     if (this.interruption) this._closeInterruption(this.interruption);
     this._stopPlayoutWait();
+    // A failure whose 'error' listener stopped the session has its session_error before close.
+    this._sendFailureEvents();
     // The session's events end here: the away timer stops, and nothing is emitted after close.
     this.events.close();
     const closed: VoiceSessionEventMap['close'] = { reason: reason ?? 'closed', ...(this.failure ? { error: this.failure } : {}), createdAt: Date.now() };
@@ -1993,12 +2052,17 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   private replying = false;
   /** The first failure the call ended on, for its `close` event. */
   private failure?: Error;
+  /**
+   * The failures whose `session_error` has yet to go out, each with the part it came from, in order
+   * (`sendFailureEvents`): a failure whose `'error'` listener closes the call has its `session_error` before `close`.
+   */
+  private readonly failureEvents: FailureEvent[] = [];
 
   /**
    * @param report - Reports a failure to the listeners of `target`, the orchestrator's by default, as the orchestrator
    *   reports its own (`'error'`, or a console warning with no listener), and gives the `Error` it handed them.
    */
-  constructor(private readonly config: VoicePipelineConfig, readonly transport: IStreamTransport, private readonly agent: IVoicePipelineAgentSession, private readonly sttProvider: IStreamingSTT, private readonly ttsProvider: IStreamingTTS, private readonly profile: CallPipelineProfile, private readonly report: (err: unknown, what: string, target?: EventEmitter) => Error) {
+  constructor(private readonly config: VoicePipelineConfig, readonly transport: IStreamTransport, private readonly agent: IVoicePipelineAgentSession, private readonly sttProvider: IStreamingSTT, private readonly ttsProvider: IStreamingTTS, private readonly profile: CallPipelineProfile, private readonly report: (err: unknown, what: string, target?: EventEmitter, warnUnheard?: boolean) => Error) {
     super();
     this.events = new SessionEvents(() => [this], (err, what, event) => this.listenerFailed(err, what, event), config.userAwayTimeoutMs);
     this.identity = copyAudioIdentity(profile.identity);
@@ -2023,7 +2087,9 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   private stateTo(state: PipelineState): void {
     if (state === this.current) return;
     this.current = state;
-    this.emitEach('state_change', state);
+    // A listener that moves the call on, as a close does, ends the change there, as in the orchestrator's stateTo().
+    emitEach(this, 'state_change', [state], (err, what) => this.listenerFailed(err, what, 'state_change'), () => this.events.isClosed || this.current !== state);
+    if (this.current !== state) return;
     if (state === 'listening') this.events.agentTo('listening');
     else if (state === 'processing') this.events.agentTo('thinking');
   }
@@ -2063,6 +2129,14 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.events.emit('session_error', { error, recoverable, source, createdAt: Date.now() });
   }
 
+  /**
+   * Emits the `session_error` of each failure the call ends on that has not had one yet, in order: as the failure is
+   * reported (`fail`), or as a close that one of the failure's `'error'` listeners makes ends the call before that.
+   */
+  private sendFailureEvents(): void {
+    for (const { error, source } of this.failureEvents.splice(0)) this.sessionError(error, false, source);
+  }
+
   private matches(event: AudioIdentity): boolean {
     return event?.scopeId === this.identity.scopeId && event.callId === this.identity.callId && event.turnId === this.identity.turnId && !!event.generation && sameVoiceGeneration(event.generation, this.identity.generation);
   }
@@ -2072,9 +2146,11 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   }
 
   /**
-   * The call fails: `onFailure` and `failure` with the content-free code, as before; the session's `'error'`
-   * listeners, when it has any, and its `errorMonitor` ones get the content-free `Error('voice call failed (<code>)')`,
-   * and `session_error` the same object with the part it came from, before the call closes (unless `managerOwned`).
+   * The call fails: `onFailure` and `failure` with the content-free code, as before; the session's `errorMonitor`
+   * listeners get the content-free `Error('voice call failed (<code>)')`, whether or not it has an `'error'` listener,
+   * then its `'error'` listeners, when it has any, and nothing is written when it has none; `session_error` carries
+   * the same object with the part it came from, before the call closes (unless `managerOwned`), though one of those
+   * listeners closes the call (`sendFailureEvents`).
    *
    * @param code - The content-free failure code.
    * @param source - The part that failed.
@@ -2085,8 +2161,9 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.emit('failure', { scopeId: this.identity.scopeId, callId: this.identity.callId, code });
     const error = new Error(`voice call failed (${code})`);
     this.failure ??= error;
-    if (this.listenerCount('error') > 0) this.report(error, 'the call failed', this);
-    this.sessionError(error, false, source);
+    this.failureEvents.push({ error, source });
+    this.report(error, 'the call failed', this, false);
+    this.sendFailureEvents();
     if (!this.profile.managerOwned) void this.close(code).catch(() => { this.profile.onFailure('cleanup_incomplete'); });
   }
 
@@ -2511,6 +2588,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     const old = { ...this.identity.generation };
     this.stateTo('closed');
     this.detached = true;
+    // A failure whose 'error' listener closed the call has its session_error before close.
+    this.sendFailureEvents();
     // The call's events end here: the away timer stops, and nothing is emitted after close.
     this.events.close();
     this.emitEach('close', { reason: reason ?? 'closed', ...(this.failure ? { error: this.failure } : {}), createdAt: Date.now() });
