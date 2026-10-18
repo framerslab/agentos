@@ -1110,6 +1110,44 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     transport.close();
     await transport.whenClosed();
   });
+
+  it('sends barge-in controls to the participant in the order they were asked, though a cancel waits for its clear', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    await transport.readyForPlayback();
+    const source = FakeAudioSource.created[0]!;
+    let land!: () => void;
+    source.gate = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    // A reply's chunk waits for room in the track's queue.
+    const sent = transport.sendAudio(toneChunk(1));
+    await settle();
+    // The reply is cut: the cancel clears the track at once, and its clear waits for the capture in flight.
+    const cancel = transport.sendControl({ type: 'barge_in', action: { type: 'cancel' } });
+    expect(source.clears).toBe(1);
+    // The next reply is paused and resumed meanwhile: each acts on the track at once.
+    const pause = transport.sendControl({ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } });
+    expect(source.clears).toBe(2);
+    const resume = transport.sendControl({ type: 'barge_in', action: { type: 'resume' } });
+    await settle();
+    // Nothing reaches the participant before the cancel: the pause and the resume wait for it.
+    expect(sentTypes(room)).toEqual([]);
+    source.gate = undefined;
+    land();
+    await Promise.all([sent, cancel, pause, resume]);
+    const actions = room.localParticipant.sendText.mock.calls.map(([text]) => (JSON.parse(text) as { action?: { type: string } }).action?.type);
+    expect(actions).toEqual(['cancel', 'pause', 'resume']);
+    transport.close();
+    await transport.whenClosed();
+  });
 });
 
 /**
