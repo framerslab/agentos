@@ -130,7 +130,11 @@ export async function runEmulatedToolLoop(
             args: call.arguments,
             ...(result.success === false && typeof result.error === 'string' ? { error: result.error } : {}),
           });
-          return formatToolResponse(call.name, result);
+          // The whole response passes the mask, a successful output included:
+          // a tool that returns a credential of the call would otherwise send
+          // it to the seat's provider.
+          const response = formatToolResponse(call.name, result);
+          return opts.maskToolError ? opts.maskToolError(response) : response;
         } catch (err) {
           const error = opts.maskToolError ? opts.maskToolError(String(err)) : String(err);
           toolCalls.push({ name: call.name, args: call.arguments, error });

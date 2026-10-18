@@ -3030,17 +3030,18 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                   ),
                 );
                 // One masked string serves the record and the tool turn: the
-                // seat's next request carries no key. A failed tool's turn
-                // carries its output when it has one, which can repeat its
-                // error (a refusal's does), so that turn passes the mask whole.
+                // seat's next request carries no key. The whole turn passes
+                // the mask, a successful output included: a tool that returns
+                // a credential of the call (a config read, an echo of the
+                // environment) would otherwise send it to the seat's provider,
+                // and the call's list holds no value a model is meant to read.
                 const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
                 record.result = result.output;
                 record.error = result.success ? undefined: errorText;
-                const turn = JSON.stringify(result.output ?? errorText ?? '');
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: result.success ? turn : maskToolText(turn),
+                  content: maskToolText(JSON.stringify(result.output ?? errorText ?? '')),
                 } as any);
               } catch (err: any) {
                 record.error = maskToolText(err?.message ?? String(err));

@@ -1381,18 +1381,17 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ),
             );
             // One masked string serves the record, the tool-result part and
-            // the tool turn: the seat's next request carries no key. A failed
-            // tool's part and turn carry its output when it has one, which
-            // can repeat its error (a refusal's does): under a seat's mask the
-            // turn passes the mask whole, and the part is read back from it.
+            // the tool turn: the seat's next request carries no key. The whole
+            // turn passes the mask, a successful output included: a tool that
+            // returns a credential of the call would otherwise send it to the
+            // seat's provider. The part is read back from a turn the mask changed.
             const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
             toolCallRecord.result = result.output;
             toolCallRecord.error = result.success ? undefined: errorText;
             const turn = JSON.stringify(result.output ?? { error: errorText ?? 'Tool execution failed.' });
-            const maskedFailure = !result.success && result.output !== undefined && opts.__maskError !== undefined;
-            const sentTurn = maskedFailure ? maskToolText(turn) : turn;
+            const sentTurn = maskToolText(turn);
             let partResult: unknown = result.output ?? { error: errorText };
-            if (maskedFailure) {
+            if (sentTurn !== turn) {
               try {
                 partResult = JSON.parse(sentTurn);
               } catch {
