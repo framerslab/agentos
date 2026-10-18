@@ -1191,8 +1191,9 @@ export class StatisticalUtilityAI implements IUtilityAI {
    * `JSON.parse`, then a check against `targetSchema` with Ajv when given, as LLMUtilityAI checks it: the standard
    * formats checked, a keyword or a format Ajv does not know passed over, and a value coerced to the type its schema
    * names where it can (`targetSchemaChecks`). Answers `null` when the text is empty or does not parse, when the value
-   * fails the schema, and when Ajv cannot compile the schema. It repairs nothing: a HybridUtilityAI that holds an
-   * LLM-backed class sends a text this answers `null` for on to it.
+   * fails the schema, and when Ajv cannot compile the schema, the schema takes the draft-07 meta-schema's `$id` or it
+   * is marked `$async`. It repairs nothing: a HybridUtilityAI that holds an LLM-backed class sends a text this answers
+   * `null` for on to it.
    */
   public async parseJsonSafe<T = any>(jsonString: string, options?: ParseJsonOptions<T>): Promise<T | null> {
     this.ensureInitialized();

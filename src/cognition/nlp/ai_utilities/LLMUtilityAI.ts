@@ -309,8 +309,9 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
    * last one answered, on `llmModelIdForFix` (else `jsonFixerModelId`, else `defaultModelId`) and
    * `llmProviderIdForFix` (else `defaultProviderId`). A repair request names `targetSchema` when given, and the
    * schema's errors when the text parsed and failed it. Answers `null` when no repair parses and passes the schema, or
-   * a repair call fails. A `targetSchema` that Ajv cannot compile no text can pass: the call answers `null` at once,
-   * with a warning, and asks for no repair.
+   * a repair call fails. No text can pass a `targetSchema` that Ajv cannot compile, that takes the draft-07
+   * meta-schema's `$id` or that is marked `$async`: the call answers `null` at once, with a warning, and asks for no
+   * repair.
    */
   public async parseJsonSafe<T = any>(jsonString: string, options?: ParseJsonOptions<T>): Promise<T | null> {
     this.ensureInitialized();
