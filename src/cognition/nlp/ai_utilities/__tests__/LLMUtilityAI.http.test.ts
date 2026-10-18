@@ -522,6 +522,32 @@ describe('LLMUtilityAI over a provider manager', () => {
     }
     expect(received).toHaveLength(0);
   });
+
+  it('checks a targetSchema under an $id that an earlier schema gave a part of itself', async () => {
+    const stats = new StatisticalUtilityAI('stat-for-inner-id');
+    await stats.initialize({ utilityId: 'stat-for-inner-id' });
+    // An $id inside a schema names that part of it. Once that schema is checked, the $id names nothing Ajv holds, so a
+    // schema of its own may take it.
+    const withItem = () => ({ type: 'object', properties: { item: { $id: 'urn:example:item', type: 'string' } } });
+    const item = () => ({ $id: 'urn:example:item', type: 'string' });
+    for (const parser of [utility, stats]) {
+      expect(await parser.parseJsonSafe('{"item": "a"}', { targetSchema: withItem() })).toEqual({ item: 'a' });
+      expect(await parser.parseJsonSafe('"b"', { targetSchema: item() })).toBe('b');
+    }
+    expect(received).toHaveLength(0);
+  });
+
+  it('answers null for a targetSchema marked $async, and asks for no repair', async () => {
+    const stats = new StatisticalUtilityAI('stat-for-async');
+    await stats.initialize({ utilityId: 'stat-for-async' });
+    // Ajv compiles a schema marked $async to a check that answers a promise, which settles after the call has read it.
+    const schema = { $async: true, type: 'number' };
+    for (const parser of [utility, stats]) {
+      expect(await parser.parseJsonSafe('"five"', { targetSchema: schema })).toBeNull();
+    }
+    expect(await utility.parseJsonSafe('"five"', { targetSchema: schema, attemptFixWithLLM: true })).toBeNull();
+    expect(received).toHaveLength(0);
+  });
 });
 
 describe('LLMUtilityAI before initialize()', () => {
