@@ -37,7 +37,9 @@
  *   every participant subscribed to the track hears it, chunks queue on the
  *   track in order, `waitForPlayback()` resolves once the track has played
  *   the chunk out, `waitForPlayout()` once it has played out every chunk
- *   sent, `clearPlayback()` needs no answer, and a `barge_in` message acts
+ *   sent, or rejects once a stalled track has taken nothing for
+ *   `receiptTimeoutMs` plus `maxDurationMs` and what it had not played is
+ *   discarded, `clearPlayback()` needs no answer, and a `barge_in` message acts
  *   on the track as it is sent: a cancel clears it, a pause holds it, and a
  *   resume releases it, each at once, while the messages themselves reach
  *   the participant in the order they were sent, a cancel once its clear
@@ -252,7 +254,10 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   }
   /**
    * Resolves once the track has played out what the transport was handed: every chunk sent so far, and any sent while
-   * it waits; what a clear or a pause discarded counts as played out. A listen-only transport resolves at once.
+   * it waits; what a clear or a pause discarded counts as played out, and a clear or a close ends the wait at once. A
+   * track that takes no frame and plays nothing out for `publisher.receiptTimeoutMs` plus `publisher.maxDurationMs`,
+   * outside a pause, has stalled: what it had not played is discarded and the wait rejects with
+   * `publisher drain timeout`. A listen-only transport resolves at once.
    */
   async waitForPlayout(): Promise<void> { await this.publisher?.waitForPlayout(); }
   /** Discards only this physical path's queued output; a closed path must finish native cleanup. */
