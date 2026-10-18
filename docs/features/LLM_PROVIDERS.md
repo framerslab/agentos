@@ -174,7 +174,7 @@ OPENROUTER_API_KEY=sk-or-...
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list that its requests draw their key from. [API Key Rotation](../KEY_ROTATION.md) lists those providers, the ones that rest a key after a quota error, and the ones that need a single key.
+For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list: a key pool. The LLM providers move a request to the next usable key when one is revoked, unpaid or throttled, probe a failed key before it returns, and persist the keys' standing when given a store; `AGENTOS_KEY_POOL_STRATEGY=ordered` uses the keys in the order given (credited keys first, the paid key last). [API Key Rotation](../KEY_ROTATION.md) has the strategies, the failure kinds, and the providers that need a single key.
 
 ### Per-Agent Override
 
@@ -429,7 +429,7 @@ When Claude declines a request (`stop_reason: "refusal"`), the provider throws a
 export GEMINI_API_KEY=AIza...
 ```
 
-The key travels in the `x-goog-api-key` header, never in the request URL, so proxy and access logs do not record it. A comma-separated list of keys rotates per request, and a key that answers HTTP 429 rests while the next request uses another one.
+The key travels in the `x-goog-api-key` header, never in the request URL, so proxy and access logs do not record it. A comma-separated list of keys is a key pool: a key that answers HTTP 429, or the 400 that names an invalid key, is taken out and the request moves to the next usable key at once; a streaming request marks the key and the next request draws another.
 
 | Model | Context | Vision | Tool Calling | Notes |
 |-------|---------|--------|-------------|-------|
@@ -725,7 +725,7 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 - [Cost Optimization](../safety/COST_OPTIMIZATION.md) — Budget management and routing
 - [Architecture](../architecture/ARCHITECTURE.md) — System architecture overview
 - [Structured Output](../orchestration/STRUCTURED_OUTPUT.md) — JSON schema enforcement per provider
-- [API Key Rotation](../KEY_ROTATION.md): comma-separated key lists, and which providers rotate and rest keys
+- [API Key Rotation](../KEY_ROTATION.md): comma-separated key lists as a pool, the strategies, failover and probes, and which providers need a single key
 - [CLI Error Codes](./CLI_ERROR_CODES.md): the errors the Claude Code and Gemini CLI providers raise
 
 ## Prompt caching

@@ -37,9 +37,14 @@
  *   every participant subscribed to the track hears it, chunks queue on the
  *   track in order, `waitForPlayback()` resolves once the track has played
  *   the chunk out, `waitForPlayout()` once it has played out every chunk
- *   sent, `clearPlayback()` needs no answer, and a `barge_in` message acts
+ *   sent, or rejects once a stalled track has taken nothing for
+ *   `receiptTimeoutMs` plus `maxDurationMs` and what it had not played is
+ *   discarded, a capture that never returns closing the transport,
+ *   `clearPlayback()` needs no answer, and a `barge_in` message acts
  *   on the track as it is sent: a cancel clears it, a pause holds it, and a
- *   resume releases it.
+ *   resume releases it, each at once, while the messages themselves reach
+ *   the participant in the order they were sent, a cancel once its clear
+ *   has finished or `receiptTimeoutMs` plus `maxDurationMs` have passed.
  * - Participant playout, when `publisher.playout` is `'participant'` or the
  *   participant's `agentos.playout` attribute is: one chunk at a time,
  *   announced to the participant, and `waitForPlayback()` resolves only after
@@ -143,14 +148,14 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * | `'audio'`   | `AudioFrame`              | The participant's audio, mono Float32.        |
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
  * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. |
- * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting or, with a publisher, the participant leaving or a refused message. |
- * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message. |
+ * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting or, with a publisher, the participant leaving, a refused message or a capture that never returned. |
+ * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. |
  *
  * Without a publisher, an error that nothing listens for is written as a
  * console warning instead, since an `'error'` that nothing listens for would
  * throw. With a publisher, errors carry fixed messages (`livekit input
- * failed`, `livekit control refused`, `livekit cleanup incomplete`), and one
- * that nothing listens for is dropped. A room or selected participant loss
+ * failed`, `livekit control refused`, `livekit output stalled`, `livekit
+ * cleanup incomplete`), and one that nothing listens for is dropped. A room or selected participant loss
  * closes this physical path; `CallTransportBinding` interprets it as a detach.
  *
  * @example
@@ -181,6 +186,13 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private readonly readers = new Set<LiveKitTextStreamReaderLike>();
   private closing: Promise<void> = Promise.resolve();
   private sendingControls = 0;
+  /**
+   * Settles once the last control message that had to wait has gone out or failed: a cancel waiting for its clear, or a
+   * message asked for while one waits. It never rejects.
+   */
+  private controls: Promise<void> = Promise.resolve();
+  /** How many control messages wait to go out, behind a cancel's clear or behind a message that waits. */
+  private waitingControls = 0;
   private readonly inputPump: Promise<void>;
 
   /**
@@ -204,7 +216,12 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       sampleRate: options.sampleRate, frameSizeMs: options.frameSizeMs, rtc: options.rtc, strictMono: !!options.publisher });
     if (options.publisher) {
       this.playbackFormat = 'pcm';
-      this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message), { rtc: options.rtc, participant: () => this.linkedParticipant() });
+      this.publisher = new LiveKitAudioPublisher(options.publisher, options.room.localParticipant, (message) => this.sendWire(message), {
+        rtc: options.rtc, participant: () => this.linkedParticipant(),
+        // A capture that never returned leaves the track unable to take audio: the path closes, as it does for a control
+        // message not sent within five seconds, once the messages already waiting, a cancel among them, have gone out.
+        stalled: () => { this.emitErrorSafe(new Error('livekit output stalled')); void this.controls.then(() => this.close()); },
+      });
     }
     this.on('pause', () => { if (this._state === 'open') this.paused = true; });
     this.on('resume', () => {
@@ -246,9 +263,13 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   }
   /**
    * Resolves once the track has played out what the transport was handed: every chunk sent so far, and any sent while
-   * it waits; what a clear or a pause discarded counts as played out. A listen-only transport resolves at once. An
-   * aborted `signal` rejects the wait at once (`publisher playout wait aborted`), as a session aborts it when a barge-in
-   * cuts the reply or the session closes.
+   * it waits; what a clear or a pause discarded counts as played out, and a clear or a close ends the wait at once. A
+   * track that takes no frame and plays nothing out for `publisher.receiptTimeoutMs` plus `publisher.maxDurationMs`,
+   * outside a pause, has stalled: what it had not played is discarded and the wait rejects with
+   * `publisher drain timeout`. A capture that does not return within the same bound, whoever waits for it, makes the
+   * transport emit `livekit output stalled` and close, once the control messages already waiting have gone out. A
+   * listen-only transport resolves at once. An aborted `signal` rejects the wait at once
+   * (`publisher playout wait aborted`), as a session aborts it when a barge-in cuts the reply or the session closes.
    *
    * @param signal - Ends the wait when aborted.
    */
@@ -279,19 +300,59 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * wire representation; call-profile messages carry their captured scope and generation. A SIP participant reads no
    * text streams, so nothing is sent to one and the send resolves. Outside participant playout a `barge_in` message
    * first acts on the track, as a page acts on the audio it plays: a `cancel` clears what the track holds, a `pause`
-   * holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases it.
+   * holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases it, each at once. Messages go out in the
+   * order they were asked for. A `cancel` goes out once its clear has finished, or once the publisher's
+   * `receiptTimeoutMs` plus `maxDurationMs` have passed, so a capture that never returns does not hold it; a message
+   * asked for while it waits, a `resume` for the next reply among them, waits behind it, and they go out one at a time
+   * once it has; at most 64 messages wait, the `cancel` included (`livekit control bound` beyond). A message with nothing waiting ahead
+   * of it goes out within the call, beside any still going out.
    *
-   * @throws {Error} When the transport is not open or the room has no local participant.
+   * @throws {Error} When the transport is not open or the room has no local participant, and `livekit control bound`
+   *   when 64 messages wait already.
    */
   async sendControl(message: ServerTextMessage): Promise<void> {
     if (this._state !== 'open') throw new Error('LiveKitStreamTransport: cannot send while ' + this._state);
-    if (message.type === 'barge_in' && this.publisher && this.publisher.playout !== 'participant') {
-      if (message.action.type === 'cancel') await this.publisher.clearPlayback();
-      else if (message.action.type === 'pause') this.publisher.pause();
-      else if (message.action.type === 'resume') this.publisher.resume();
+    // The barge-in action the track takes, outside participant playout.
+    const action = message.type === 'barge_in' && this.publisher && this.publisher.playout !== 'participant' ? message.action : undefined;
+    const previous = this.waitingControls > 0 ? this.controls : undefined;
+    // A message that would wait is refused, before it acts on the track, once 64 wait already.
+    if ((previous || action?.type === 'cancel') && this.waitingControls >= 64) throw new Error('livekit control bound');
+    let cleared: Promise<void> | undefined;
+    if (action?.type === 'cancel') {
+      cleared = this.publisher!.clearPlayback();
+      // Handled here as well, so a clear that fails while an earlier message is still going out is no unhandled rejection.
+      cleared.catch(() => {});
+    } else if (action?.type === 'pause') this.publisher!.pause();
+    else if (action?.type === 'resume') this.publisher!.resume();
+    if (!previous && !cleared) {
+      if (isLiveKitSipParticipant(this.linkedParticipant())) return;
+      return this.sendWire(message);
     }
-    if (isLiveKitSipParticipant(this.linkedParticipant())) return;
-    await this.sendWire(message);
+    this.waitingControls++;
+    const sent = (async () => {
+      try {
+        // The messages that wait go out one at a time, each once the one ahead of it has gone out or failed.
+        if (previous) await previous;
+        if (cleared) await this.clearOrDeadline(cleared);
+      } finally { this.waitingControls--; }
+      if (isLiveKitSipParticipant(this.linkedParticipant())) return;
+      await this.sendWire(message);
+    })();
+    // A failed message is its caller's to report; the messages behind it still go out.
+    this.controls = sent.catch(() => {});
+    return sent;
+  }
+  /**
+   * Waits for a cancel's clear, at most the publisher's `receiptTimeoutMs` plus `maxDurationMs`, the bound of its playout
+   * wait: a clear whose capture never returns does not hold the cancel and the messages behind it. A clear that fails
+   * rejects.
+   */
+  private async clearOrDeadline(cleared: Promise<void>): Promise<void> {
+    const { receiptTimeoutMs, maxDurationMs } = this.options.publisher!;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([cleared, new Promise<void>((resolve) => { timer = setTimeout(resolve, receiptTimeoutMs + maxDurationMs); })]);
+    } finally { clearTimeout(timer); }
   }
   /** The participant the transport hears and answers, while it is in the room. */
   private linkedParticipant(): LiveKitParticipantLike | undefined { return this.options.room.remoteParticipants.get(this.options.participantIdentity); }

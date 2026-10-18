@@ -193,6 +193,19 @@ describe('LiveKitStreamTransport', () => {
     transport.close();
   });
 
+  it('sends each message without waiting for one the room has not finished sending', async () => {
+    const room = new FakeRoom();
+    const { transport } = open(room);
+    // The room never finishes sending the first message.
+    room.localParticipant.sendText.mockImplementationOnce(() => new Promise<{}>(() => {}));
+    void transport.sendControl({ type: 'agent_thinking' });
+    const done = transport.sendControl({ type: 'agent_done', text: 'Hello', durationMs: 20 });
+    await settle();
+    expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_done']);
+    await done;
+    transport.close();
+  });
+
   it('uses the topic it is given, for both directions', async () => {
     const room = new FakeRoom();
     const { transport } = open(room, 'voice.control');
@@ -876,6 +889,49 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     await s.orchestrator.stopSession('done');
   });
 
+  it('ends a reply whose track never reports its playout once receiptTimeoutMs plus maxDurationMs pass, and takes the next words as a new turn', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const bargeinHandler: IBargeinHandler = { mode: 'hard-cut', handleBargein: vi.fn(() => ({ type: 'cancel' as const })) };
+    const s = await converse(room, 'user-1', { bargeinHandler });
+    await s.reply();
+    for (let i = 0; i < 3; i++) s.tts.emit('audio', pcmChunk());
+    await vi.waitFor(() => expect(capturedSamples()).toBe(3 * 960));
+    const source = FakeAudioSource.created[0]!;
+    // The track has taken the reply and never reports that it played out.
+    source.waitForPlayout = () => new Promise<void>(() => {});
+    const clears = source.clears;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      s.tts.emit('flush_complete');
+      await settle();
+      // receiptTimeoutMs is 1000 and maxDurationMs 2000: a millisecond before the bound the reply is still speaking.
+      await vi.advanceTimersByTimeAsync(2_999);
+      await settle();
+      expect(s.orchestrator.state).toBe('speaking');
+      expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking']);
+      await vi.advanceTimersByTimeAsync(1);
+      await settle();
+      expect(s.orchestrator.state).toBe('listening');
+      expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking', 'agent_done']);
+      // What the track had not played is cleared, so none of the stalled reply plays later.
+      expect(source.clears).toBe(clears + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+    // The caller's next words are a new turn, not a barge-in.
+    s.stt.emit('speech_start');
+    await settle();
+    expect(bargeinHandler.handleBargein).not.toHaveBeenCalled();
+    expect(s.tts.cancel).not.toHaveBeenCalled();
+    await s.reply();
+    await vi.waitFor(() =>
+      expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking', 'agent_done', 'agent_thinking', 'agent_speaking'])
+    );
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
+
   it('takes speech over the rest of the reply, after its synthesis completed, as a barge-in that clears the track', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
@@ -1068,6 +1124,393 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     await settle();
     expect(sentTypes(room)).not.toContain('agent_done');
     expect(s.errors).toEqual([]);
+  });
+
+  it('waits for the track for a chunk sent before the participant joined, once the join has fixed participant playout', async () => {
+    const room = new FakeRoom();
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...receipts, ...speaking, rtc: fakePublishingRtc() },
+    });
+    // Nobody is in the room: the first chunk plays natively.
+    await transport.sendAudio(scopedChunk(1));
+    // The page joins, and its first chunk fixes participant playout.
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    await transport.sendAudio(scopedChunk(2));
+    expect(transport.playout).toBe('participant');
+    // The first chunk keeps the playout it was admitted under: its wait is for the track, and no receipt is asked for it.
+    let outcome: unknown;
+    void transport.waitForPlayback(firstGeneration, 1, new AbortController().signal).then(
+      (receipt) => {
+        outcome = receipt;
+      },
+      (error: Error) => {
+        outcome = error.message;
+      }
+    );
+    await settle();
+    expect(outcome).toBeUndefined();
+    FakeAudioSource.created[0]!.playOut();
+    await settle();
+    expect(outcome).toEqual({ generation: firstGeneration, sequence: 1, playedSamples: 320, sampleRate: 16_000 });
+    expect(sentTypes(room)).toEqual(['audio']);
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it('clears a chunk sent before the participant joined as native playout clears it, once the join has fixed participant playout', async () => {
+    const room = new FakeRoom();
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...receipts, ...speaking, rtc: fakePublishingRtc() },
+    });
+    // Published while nobody is in the room, so the mode waits.
+    await transport.readyForPlayback();
+    const source = FakeAudioSource.created[0]!;
+    // What reaches the track and what clears it, in order.
+    const events: string[] = [];
+    const capture = source.captureFrame.bind(source);
+    source.captureFrame = async (frame) => {
+      await capture(frame);
+      events.push('captured');
+    };
+    const clearQueue = source.clearQueue.bind(source);
+    source.clearQueue = () => {
+      events.push('cleared');
+      clearQueue();
+    };
+    let land!: () => void;
+    source.gate = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    // The first chunk plays natively, and its capture waits for room in the queue.
+    const first = transport.sendAudio(scopedChunk(1));
+    await settle();
+    source.gate = undefined;
+    // The page joins, and its first chunk fixes participant playout.
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    await transport.sendAudio(scopedChunk(2));
+    expect(transport.playout).toBe('participant');
+    const clearing = transport.clearPlayback(firstGeneration);
+    land();
+    await first;
+    // The page is asked to discard the generation, and answers.
+    await vi.waitFor(() => expect(sentTypes(room)).toContain('clear'));
+    const ask = room.localParticipant.sendText.mock.calls
+      .map(([text]) => JSON.parse(text) as { type: string; generation: VoiceGeneration; clearId: number })
+      .find((message) => message.type === 'clear')!;
+    room.textHandlers.get('agentos.voice')!(
+      textStream(JSON.stringify({ type: 'cleared', generation: ask.generation, clearId: ask.clearId })),
+      { identity: 'user-1' }
+    );
+    await clearing;
+    // The first chunk's frame landed after the clear began, and the queue was cleared again after it.
+    expect(events.slice(events.lastIndexOf('captured'))).toContain('cleared');
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it('sends barge-in controls to the participant in the order they were asked, though a cancel waits for its clear', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    await transport.readyForPlayback();
+    const source = FakeAudioSource.created[0]!;
+    let land!: () => void;
+    source.gate = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    // A reply's chunk waits for room in the track's queue.
+    const sent = transport.sendAudio(toneChunk(1));
+    await settle();
+    // The reply is cut: the cancel clears the track at once, and its clear waits for the capture in flight.
+    const cancel = transport.sendControl({ type: 'barge_in', action: { type: 'cancel' } });
+    expect(source.clears).toBe(1);
+    // The next reply is paused and resumed meanwhile: each acts on the track at once.
+    const pause = transport.sendControl({ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } });
+    expect(source.clears).toBe(2);
+    const resume = transport.sendControl({ type: 'barge_in', action: { type: 'resume' } });
+    await settle();
+    // Nothing reaches the participant before the cancel: the pause and the resume wait for it.
+    expect(sentTypes(room)).toEqual([]);
+    source.gate = undefined;
+    land();
+    await Promise.all([sent, cancel, pause, resume]);
+    const actions = room.localParticipant.sendText.mock.calls.map(([text]) => (JSON.parse(text) as { action?: { type: string } }).action?.type);
+    expect(actions).toEqual(['cancel', 'pause', 'resume']);
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it('sends a cancel whose clear waits on a capture that never returns, and the messages behind it, before the stalled track closes the transport', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    await transport.readyForPlayback();
+    // The track never takes the chunk: its capture never returns, so the cancel's clear waits for it.
+    FakeAudioSource.created[0]!.gate = new Promise<void>(() => {});
+    // The capture's own bound starts before the cancel's, so it is the first to pass.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      void transport.sendAudio(toneChunk(1));
+      await settle();
+      void transport.sendControl({ type: 'barge_in', action: { type: 'cancel' } });
+      void transport.sendControl({ type: 'agent_thinking' });
+      await settle();
+      expect(sentTypes(room)).toEqual([]);
+      // receiptTimeoutMs is 1000 and maxDurationMs 2000.
+      await vi.advanceTimersByTimeAsync(2_999);
+      await settle();
+      expect(sentTypes(room)).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await settle();
+      // The capture is given up and the track retired: the messages already waiting go out, then the transport closes.
+      expect(sentTypes(room)).toEqual(['barge_in', 'agent_thinking']);
+      expect(transport.state).toBe('closed');
+    } finally {
+      vi.useRealTimers();
+    }
+    await transport.whenClosed();
+  });
+
+  it('refuses a fifth message in flight with livekit control bound', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      // The room takes each message and finishes none.
+      room.localParticipant.sendText.mockImplementation(() => new Promise<{}>(() => {}));
+      for (let i = 0; i < 4; i++) void transport.sendControl({ type: 'agent_thinking' });
+      let outcome: string | undefined;
+      void transport.sendControl({ type: 'agent_thinking' }).then(
+        () => {
+          outcome = 'sent';
+        },
+        (error: Error) => {
+          outcome = error.message;
+        }
+      );
+      await settle();
+      expect(outcome).toBe('livekit control bound');
+      expect(room.localParticipant.sendText).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+    transport.close();
+  });
+
+  it('refuses a message with livekit control bound once sixty-four wait, a cancel among them, and a refused pause leaves the track as it is', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    await transport.readyForPlayback();
+    // The cancel's clear waits for a capture that never returns.
+    FakeAudioSource.created[0]!.gate = new Promise<void>(() => {});
+    void transport.sendAudio(toneChunk(1));
+    await settle();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      void transport.sendControl({ type: 'barge_in', action: { type: 'cancel' } });
+      for (let i = 0; i < 63; i++) void transport.sendControl({ type: 'agent_thinking' });
+      let outcome: string | undefined;
+      void transport.sendControl({ type: 'agent_thinking' }).then(
+        () => {
+          outcome = 'sent';
+        },
+        (error: Error) => {
+          outcome = error.message;
+        }
+      );
+      await settle();
+      expect(outcome).toBe('livekit control bound');
+      // A pause refused the same way neither clears the track nor holds it.
+      const clears = FakeAudioSource.created[0]!.clears;
+      await expect(transport.sendControl({ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } })).rejects.toThrow(
+        'livekit control bound'
+      );
+      expect(FakeAudioSource.created[0]!.clears).toBe(clears);
+      expect(sentTypes(room)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+    transport.close();
+  });
+
+  it('closes the transport when a capture does not return within receiptTimeoutMs plus maxDurationMs, and finishes closing without it', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    const errors: string[] = [];
+    transport.on('error', (error: Error) => errors.push(error.message));
+    await transport.readyForPlayback();
+    const source = FakeAudioSource.created[0]!;
+    // The track never takes the chunk: its capture never returns.
+    source.gate = new Promise<void>(() => {});
+    let outcome: string | undefined;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      void transport.sendAudio(toneChunk(1));
+      await settle();
+      void transport.waitForPlayout().then(
+        () => {
+          outcome = 'played';
+        },
+        (error: Error) => {
+          outcome = error.message;
+        }
+      );
+      await settle();
+      // receiptTimeoutMs is 1000 and maxDurationMs 2000.
+      await vi.advanceTimersByTimeAsync(3_000);
+      await settle();
+      expect(outcome).toBe('publisher drain timeout');
+      expect(errors).toEqual(['livekit output stalled']);
+      expect(transport.state).toBe('closed');
+    } finally {
+      vi.useRealTimers();
+    }
+    // Closing does not wait for the capture that never returns: the track is unpublished and its source closed.
+    await transport.whenClosed();
+    expect(room.localParticipant.unpublishTrack).toHaveBeenCalledOnce();
+    expect(source.closed).toBe(true);
+  });
+
+  it('gives up a capture that never returns after receiptTimeoutMs plus maxDurationMs though only a playback wait waits for it, and the clear and the close then finish', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    const errors: string[] = [];
+    transport.on('error', (error: Error) => errors.push(error.message));
+    await transport.readyForPlayback();
+    // The track never takes the chunk: its capture never returns.
+    FakeAudioSource.created[0]!.gate = new Promise<void>(() => {});
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      let sent: string | undefined;
+      let played: string | undefined;
+      void transport.sendAudio(scopedChunk(1)).then(
+        () => {
+          sent = 'sent';
+        },
+        (error: Error) => {
+          sent = error.message;
+        }
+      );
+      void transport.waitForPlayback(firstGeneration, 1, new AbortController().signal).then(
+        () => {
+          played = 'played';
+        },
+        (error: Error) => {
+          played = error.message;
+        }
+      );
+      await settle();
+      // The playback wait gives up at receiptTimeoutMs, 1000; the capture is given up at that plus maxDurationMs, 2000.
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle();
+      expect(played).toBe('publisher drain timeout');
+      expect(transport.state).toBe('open');
+      await vi.advanceTimersByTimeAsync(2_000);
+      await settle();
+      expect(sent).toBe('publisher capture stalled');
+      expect(errors).toEqual(['livekit output stalled']);
+      expect(transport.state).toBe('closed');
+      let cleared = false;
+      void transport.clearPlayback(firstGeneration).then(() => {
+        cleared = true;
+      });
+      await settle();
+      expect(cleared).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    await transport.whenClosed();
+    expect(room.localParticipant.unpublishTrack).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the transport open when a playout wait gives up on an audio announcement that never went out, no capture having begun', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...receipts, ...speaking, rtc: fakePublishingRtc() },
+    });
+    const errors: string[] = [];
+    transport.on('error', (error: Error) => errors.push(error.message));
+    await transport.readyForPlayback();
+    expect(transport.playout).toBe('participant');
+    // The room never finishes sending the chunk's audio announcement, so its capture never begins.
+    room.localParticipant.sendText.mockImplementation(() => new Promise<{}>(() => {}));
+    let outcome: string | undefined;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      void transport.sendAudio(scopedChunk(1));
+      void transport.waitForPlayout().then(
+        () => {
+          outcome = 'played';
+        },
+        (error: Error) => {
+          outcome = error.message;
+        }
+      );
+      await settle();
+      // receiptTimeoutMs plus maxDurationMs, 3000, is below the five seconds a control message gets.
+      await vi.advanceTimersByTimeAsync(3_000);
+      await settle();
+      expect(outcome).toBe('publisher drain timeout');
+      expect(errors).toEqual([]);
+      expect(transport.state).toBe('open');
+      expect(FakeAudioSource.created[0]!.captured).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+    transport.close();
   });
 });
 

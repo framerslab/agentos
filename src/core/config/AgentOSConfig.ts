@@ -293,11 +293,15 @@ function _createLemonSqueezyService(_env: EnvironmentConfig) {
 }
 
 /**
- * Creates a utility AI service instance if enabled.
- * This is a placeholder - implement based on your UtilityAI implementation.
+ * Creates the utility service when `ENABLE_UTILITY_AI` is `'true'`: a StatisticalUtilityAI, initialized here in
+ * English, because AgentOS uses `utilityAIService` as given and never initializes it. It has no
+ * `summarizeConversationHistory()` or `summarizeRAGContext()`: AgentOS logs a warning when it starts, and the
+ * prompt engine, whose summary call then fails into a `HISTORY_SUMMARIZATION_FAILED` or `RAG_SUMMARIZATION_FAILED`
+ * warning, cuts history and retrieved context to fit instead. Otherwise, or when the class fails to load or
+ * initialize (logged), answers undefined and AgentOS builds an LLMUtilityAI.
  *
  * @param env - Environment configuration
- * @returns UtilityAI service or undefined
+ * @returns The initialized utility service, or undefined
  */
 async function createUtilityAIService(
   env: EnvironmentConfig
@@ -305,10 +309,15 @@ async function createUtilityAIService(
   if (env.ENABLE_UTILITY_AI === 'true') {
     try {
       const { StatisticalUtilityAI } = await import('../../cognition/nlp/ai_utilities/StatisticalUtilityAI.js');
-      const utilityAI = new StatisticalUtilityAI();
+      const utilityAI = new StatisticalUtilityAI('agentos-statistical-utility');
+      await utilityAI.initialize({ utilityId: utilityAI.utilityId, defaultLanguage: 'en' });
       return utilityAI as unknown as IUtilityAI & IPromptEngineUtilityAI;
-    } catch {
-      console.warn('[AgentOS] ENABLE_UTILITY_AI=true but StatisticalUtilityAI failed to load');
+    } catch (error) {
+      console.warn(
+        `[AgentOS] ENABLE_UTILITY_AI=true but StatisticalUtilityAI failed to load or initialize: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
   return undefined;

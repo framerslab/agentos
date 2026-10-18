@@ -63,7 +63,7 @@ IDF(t)   = ln((N - n(t) + 0.5) / (n(t) + 0.5) + 1)
 
 The index keeps no text: a hit carries its id, score and metadata, and the caller keeps the texts and places a snippet with [`snippetAround`](./CHUNKING_AND_SNIPPETS.md#snippets).
 
-`toJSON()` answers version 1 of the format: `{ v: 1, k1, b, documents, terms }`, with each document as `[id, length]` or `[id, length, metadata]` and each term as `[term, postings]`, a posting being `[the document's position in documents, the term's count in it]`. It holds terms, not texts, so `fromJSON` is given the tokenizer the index was made with. A saved index of another version throws, and so does one with any of these faults: `k1` or `b` not a finite number, a part out of shape, a document id or a term given twice, a document position given twice in one term's postings, a position that is not a document's, a length that is not a whole number of 0 or more, or a count that is not a whole number of 1 or more. The error names what is wrong. The restore does not check for an empty document id or a term with no postings, neither of which `addDocument()` produces. Metadata is saved as given, so keep it to values JSON can hold.
+`toJSON()` answers version 1 of the format: `{ v: 1, k1, b, documents, terms }`, with each document as `[id, length]` or `[id, length, metadata]` and each term as `[term, postings]`, a posting being `[the document's position in documents, the term's count in it]`. It holds terms, not texts, so `fromJSON` is given the tokenizer the index was made with. A saved index of another version throws, and so does one that `toJSON()` could not have written: `k1` or `b` not a finite number, a part out of shape or an entry with more parts than `toJSON()` writes, an empty document id, a document id or a term given twice, a term with no postings, a document position given twice in one term's postings, a position that is not a document's, a length that is not a whole number of 0 or more, a count that is not a whole number of 1 or more, or a document whose counts over all terms do not add up to its length. The error names what is wrong. A term's text and a document's metadata are taken as given, since a tokenizer can answer any string; keep metadata to values JSON can hold.
 
 ### In a browser
 
@@ -98,7 +98,7 @@ index.search('refund')[0].passages;
 // [{ text: 'A refund goes back to the card that paid.', marks: [{ start: 2, end: 8 }] }]
 ```
 
-A query word matches a stored word that is the same (it counts 1), a word it begins (0.75), or a word one edit away (0.5): a letter added, dropped or changed, or two letters side by side swapped, where both words have `editMinLength` letters or more. A document's score is, for each query word, its best match's count times the weight of the field that match is in, summed over the query's words. The score does not weigh a word by how rare it is, as BM25 does.
+A query word matches a stored word that is the same (it counts 1), a word it begins (0.75), or a word one edit away (0.5): a letter added, dropped or changed, or two letters side by side swapped, where both words have `editMinLength` letters or more. A document's score is, for each query word, its best match's count times the weight of the field that match is in, summed over the query's words. A word the query repeats counts once, in any case and with or without its accents, where BM25 adds it each time. The score does not weigh a word by how rare it is, as BM25 does.
 
 | Member | What it does |
 |---|---|
@@ -177,10 +177,10 @@ fuseRanked([notes, call], { idOf: (item) => item.id, weights: [1, 0.8], groupOf:
 
 | Function | What it does |
 |---|---|
-| `normalizeUrl(url)` | Drops the `http://` or `https://`, a leading `www.`, the slashes the URL ends with, and each `utm_*`, `ref`, `source`, `fbclid` and `gclid` parameter with the `?` or `&` before it, then a `?` left at the end. |
+| `normalizeUrl(url)` | Drops the `http://` or `https://`, a leading `www.`, the slashes the path ends with and each `utm_*`, `ref`, `source`, `fbclid` and `gclid` parameter. The parameters that stay keep their order behind one `?`, and a fragment stays: `https://www.example.com/a/?utm_source=x&id=5#top` is `example.com/a?id=5#top`. |
 | `computeRRF(candidates, k = 60)` | Sets each candidate's `rrfScore` to the sum of `1 / (k + rank)` over its `providerRanks`, and sorts the array best first. |
 | `computeWeightedRRF(candidates, weights, k = 60)` | The same, with each term multiplied by `weights[provider]`, 1 for a provider not in `weights`. |
-| `semanticDedup(candidates, threshold = 0.85)` | Merges candidates whose normalized URLs are equal, then those whose snippets' term-frequency vectors have a cosine of at least `threshold`. A merged candidate keeps every provider's rank, the first one's text, the other's `content` when it had none, and the higher `relevanceScore`. |
+| `semanticDedup(candidates, threshold = 0.85)` | Merges candidates whose normalized URLs are equal, then those whose snippets' term-frequency vectors have a cosine of at least `threshold`; the vectors carry no inverse document frequency, so words every snippet holds count fully. The first candidate of a group stays and gains, with their ranks, the providers only a later one holds; it keeps its own text, takes a later one's `content` when it has none, and the higher `relevanceScore`. The candidates it is given are left as they were. |
 | `buildVocabulary(texts)`, `buildTfVector(text, vocabulary)` | The vocabulary and the vectors `semanticDedup` compares: lower-cased words split at every character other than an ASCII letter, digit or underscore (so `café` gives `caf`), each count divided by the text's word count. |
 
 `WebSearchService` records each provider's ranks from 0 and weighs each provider by its `weight`, so a provider's first result adds `weight / 60`.
