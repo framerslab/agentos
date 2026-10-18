@@ -36,7 +36,7 @@ import {
 import { stripForeignVendorParams } from '../openrouter-only-params';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, retryAfterMs, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { resolveThinkingOff, resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import {
@@ -803,6 +803,8 @@ export class AnthropicProvider implements IProvider {
 
   private config!: AnthropicProviderConfig;
   private keyPool: ApiKeyPool | null = null;
+  /** Stops the pool's recheck timer, set while a pool of several keys is live. */
+  private stopRechecks?: () => void;
 
   constructor() {}
 
@@ -856,10 +858,14 @@ export class AnthropicProvider implements IProvider {
     };
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('anthropic')),
       probe: (key, kind) => this.probeKey(key, kind),
     });
     await this.keyPool.ready();
+    // Failed keys are probed on the pool's own clock, so a provider the health breaker holds
+    // still gets its keys back; the timer never keeps the process alive.
+    this.stopRechecks?.();
+    this.stopRechecks = this.keyPool.size > 1 ? this.keyPool.startRechecks() : undefined;
     this.defaultModelId = config.defaultModelId;
     this.isInitialized = true;
 
@@ -1749,6 +1755,8 @@ export class AnthropicProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
+    this.stopRechecks?.();
+    this.stopRechecks = undefined;
     await this.keyPool?.flush();
     this.isInitialized = false;
     console.log('AnthropicProvider shutdown complete.');
@@ -2943,7 +2951,7 @@ export class AnthropicProvider implements IProvider {
     return new AnthropicProviderError(
       message ?? `Every Anthropic API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
       'ALL_KEYS_FAILED',
-      httpStatus,
+      httpStatus ?? statusOfKinds(kinds),
       errorType,
       { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
     );

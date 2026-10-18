@@ -92,12 +92,18 @@ export function keyFingerprint(key: string): string {
 
 /**
  * The pool strategy the environment asks for when a provider's config names
- * none: `AGENTOS_KEY_POOL_STRATEGY=ordered` prefers the earliest usable key
- * (a cost order: credited keys first, the paid key last).
+ * none: `AGENTOS_KEY_POOL_STRATEGY_<PROVIDER>` (ANTHROPIC, OPENAI, GEMINI,
+ * OPENROUTER, REQUESTY) for one provider, else `AGENTOS_KEY_POOL_STRATEGY` for
+ * every provider; `ordered` prefers the earliest usable key (a cost order:
+ * credited keys first, the paid key last), `round-robin` spreads load.
  */
-export function keyPoolStrategyFromEnv(): Pick<ApiKeyPoolConfig, 'strategy'> {
-  const value = typeof process !== 'undefined' ? process.env.AGENTOS_KEY_POOL_STRATEGY : undefined;
-  return value === 'ordered' ? { strategy: 'ordered' } : {};
+export function keyPoolStrategyFromEnv(providerId?: string): Pick<ApiKeyPoolConfig, 'strategy'> {
+  if (typeof process === 'undefined') return {};
+  const own = providerId ? process.env[`AGENTOS_KEY_POOL_STRATEGY_${providerId.replace(/[^a-z0-9]+/gi, '_').toUpperCase()}`] : undefined;
+  const value = own || process.env.AGENTOS_KEY_POOL_STRATEGY;
+  if (value === 'ordered') return { strategy: 'ordered' };
+  if (value === 'round-robin') return { strategy: 'round-robin' };
+  return {};
 }
 
 function parseKeys(keys: string | string[]): string[] {
@@ -262,15 +268,17 @@ export class ApiKeyPool {
     const at = detail?.at ?? now;
     const { state } = entry;
     if (at < (state.lastOkAt ?? 0) || at < (state.lastFailAt ?? 0)) return;
+    const usableBefore = this.usable();
 
     const previous = state.status;
     state.lastFailAt = at;
     state.kind = kind;
     if (kind === 'quota') {
       // A Retry-After of zero (or none) rests the key for the cooldown: the
-      // point of the rest is that the next draw prefers another key.
+      // point of the rest is that the next draw prefers another key. The bound
+      // applies to what the server asked, never to the configured cooldown.
       const asked = detail?.retryAfterMs;
-      const rest = Math.min(asked !== undefined && asked > 0 ? asked : this.cooldownMs, this.maxRetryAfterMs);
+      const rest = asked !== undefined && asked > 0 ? Math.min(asked, this.maxRetryAfterMs) : this.cooldownMs;
       state.status = 'resting';
       state.until = now + rest;
       state.nextRecheckAt = undefined;
@@ -289,7 +297,9 @@ export class ApiKeyPool {
       failures: state.failures,
       nextRecheckAt: state.nextRecheckAt,
     });
-    if (this.usable() === 0) {
+    // One line when the last usable key goes out, never for a single-key pool
+    // (which keeps sending its key) and never again while the pool stays out.
+    if (this.entries.length > 1 && usableBefore > 0 && this.usable() === 0) {
       this.log('warn', 'key_pool.all_keys_failed', undefined, true, { kinds: this.kindsSeen(), retryAfterMs: this.soonestReturnMs(now) });
     }
     this.scheduleSave(entry);

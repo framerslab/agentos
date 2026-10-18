@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiKeyPool, keyFingerprint, type ProbeResult } from '../ApiKeyPool.js';
+import { ApiKeyPool, keyFingerprint, keyPoolStrategyFromEnv, type ProbeResult } from '../ApiKeyPool.js';
 import { InMemoryKeyPoolStateStore } from '../KeyPoolStateStore.js';
 import type { ILogger } from '../../logging/index.js';
 
@@ -88,6 +88,10 @@ describe('ApiKeyPool v2', () => {
       expect(pool.snapshot()[1].until).toBe(Date.now() + 120_000);
       vi.advanceTimersByTime(5001);
       expect(pool.next()).toBe('sk_a');
+      // The bound applies to what the server asked, never to the cooldown: a two-hour cooldown stays two hours.
+      const long = new ApiKeyPool('sk_e,sk_f', { strategy: 'ordered', cooldownMs: 2 * 60 * 60_000 });
+      long.markFailed('sk_e', 'quota');
+      expect(long.snapshot()[0].until).toBe(Date.now() + 2 * 60 * 60_000);
       // A Retry-After of zero counts as none: the key rests for the cooldown, so the next draw prefers another key.
       const zero = new ApiKeyPool('sk_c,sk_d', { strategy: 'ordered', cooldownMs: 60_000 });
       zero.markFailed('sk_c', 'quota', { retryAfterMs: 0 });
@@ -249,6 +253,22 @@ describe('ApiKeyPool v2', () => {
     });
   });
 
+  describe('the strategy from the environment', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('takes the provider\'s own variable over the shared one, and names round-robin too', () => {
+      vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY', 'ordered');
+      expect(keyPoolStrategyFromEnv('anthropic')).toEqual({ strategy: 'ordered' });
+      vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY_OPENAI', 'round-robin');
+      expect(keyPoolStrategyFromEnv('openai')).toEqual({ strategy: 'round-robin' });
+      expect(keyPoolStrategyFromEnv('gemini')).toEqual({ strategy: 'ordered' });
+      vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY', 'nonsense');
+      expect(keyPoolStrategyFromEnv('gemini')).toEqual({});
+    });
+  });
+
   describe('logging', () => {
     it('logs every transition, throttles repeats, and never writes a key', () => {
       const { logger, lines } = recordingLogger();
@@ -264,6 +284,16 @@ describe('ApiKeyPool v2', () => {
       expect(lines.filter((l) => l.event === 'key_pool.key_failed')).toHaveLength(2);
       pool.markFailed('sk_secret_b', 'billing');
       expect(lines.filter((l) => l.event === 'key_pool.all_keys_failed')).toHaveLength(1);
+      // The all-keys line is written once, when the last usable key goes out, not on every repeat.
+      pool.markFailed('sk_secret_b', 'billing');
+      pool.markFailed('sk_secret_a', 'auth');
+      expect(lines.filter((l) => l.event === 'key_pool.all_keys_failed')).toHaveLength(1);
+      // A single-key pool keeps sending its key and writes no all-keys line.
+      const single = recordingLogger();
+      const one = new ApiKeyPool('sk_secret_only', { cooldownMs: 60_000, logger: single.logger });
+      one.markExhausted('sk_secret_only');
+      one.markExhausted('sk_secret_only');
+      expect(single.lines.filter((l) => l.event === 'key_pool.all_keys_failed')).toHaveLength(0);
       expect(JSON.stringify(lines)).not.toContain('sk_secret');
       expect(JSON.stringify(lines)).toContain('k0et_a');
     });

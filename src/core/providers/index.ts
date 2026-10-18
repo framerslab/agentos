@@ -9,4 +9,4 @@ export {
   type KeyState,
   type SqlKeyPoolStateStoreOptions,
 } from './KeyPoolStateStore.js';
-export { classifyKeyFailure, isQuotaError, retryAfterMs, DEFAULT_MAX_RETRY_AFTER_MS, type KeyFailureKind } from './quotaErrors.js';
+export { classifyKeyFailure, isQuotaError, retryAfterMs, statusOfKinds, DEFAULT_MAX_RETRY_AFTER_MS, type KeyFailureKind } from './quotaErrors.js';

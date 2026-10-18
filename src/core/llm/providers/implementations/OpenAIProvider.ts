@@ -37,7 +37,7 @@ import { stripForeignVendorParams } from '../openrouter-only-params';
 import { resolveOpenAiCacheRetentionParams, resolvePromptCacheKey } from '../openai-cache-params';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, retryAfterMs, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { toOpenAiResponseFormat, toOpenAiResponsesTextFormat } from './openai-response-format-guard';
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
@@ -924,6 +924,8 @@ export class OpenAIProvider implements IProvider {
 
   private config!: OpenAIProviderConfig; // Asserted as initialized by `initialize`
   private keyPool: ApiKeyPool | null = null;
+  /** Stops the pool's recheck timer, set while a pool of several keys is live. */
+  private stopRechecks?: () => void;
   private availableModelsCache: Map<string, ModelInfo> = new Map();
 
   // OpenAI's price table (USD per 1K tokens) lives in openaiPricing.ts, so a
@@ -956,10 +958,14 @@ export class OpenAIProvider implements IProvider {
     };
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openai')),
       probe: (key, kind) => this.probeKey(key, kind),
     });
     await this.keyPool.ready();
+    // Failed keys are probed on the pool's own clock, so a provider the health breaker holds
+    // still gets its keys back; the timer never keeps the process alive.
+    this.stopRechecks?.();
+    this.stopRechecks = this.keyPool.size > 1 ? this.keyPool.startRechecks() : undefined;
     this.defaultModelId = config.defaultModelId;
 
     try {
@@ -1207,7 +1213,7 @@ export class OpenAIProvider implements IProvider {
       'ALL_KEYS_FAILED',
       errorCode,
       errorType,
-      status,
+      status ?? statusOfKinds(kinds),
       { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
     );
   }
@@ -1784,6 +1790,8 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
+    this.stopRechecks?.();
+    this.stopRechecks = undefined;
     await this.keyPool?.flush();
     // For OpenAIProvider, using stateless HTTP requests, there might not be
     // persistent connections to close. If connection pooling or WebSockets

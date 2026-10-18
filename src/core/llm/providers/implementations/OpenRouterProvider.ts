@@ -22,7 +22,7 @@ import {
 } from '../IProvider';
 import { OpenRouterProviderError } from '../errors/OpenRouterProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
@@ -428,6 +428,8 @@ export class OpenRouterProvider implements IProvider {
   // Corrected: Changed type of this.config to satisfy the Readonly<Required<...>> assignment by providing defaults
   private config!: Readonly<Required<Omit<OpenRouterProviderConfig, 'defaultModelId' | 'siteUrl' | 'appName' | 'baseURL' | 'requestTimeout' | 'streamRequestTimeout' | 'keyPool'>> & OpenRouterProviderConfig>;
   private keyPool: ApiKeyPool | null = null;
+  /** Stops the pool's recheck timer, set while a pool of several keys is live. */
+  private stopRechecks?: () => void;
   private client!: AxiosInstance;
   private readonly availableModelsCache: Map<string, ModelInfo> = new Map();
 
@@ -453,10 +455,14 @@ export class OpenRouterProvider implements IProvider {
     });
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openrouter')),
       probe: (key) => this.probeKey(key),
     });
     await this.keyPool.ready();
+    // Failed keys are probed on the pool's own clock, so a provider the health breaker holds
+    // still gets its keys back; the timer never keeps the process alive.
+    this.stopRechecks?.();
+    this.stopRechecks = this.keyPool.size > 1 ? this.keyPool.startRechecks() : undefined;
     this.defaultModelId = this.config.defaultModelId; // Store the potentially undefined value
 
     // NOTE: no Authorization header here — the key is drawn from the pool
@@ -1327,6 +1333,8 @@ export class OpenRouterProvider implements IProvider {
   }
 
   public async shutdown(): Promise<void> {
+    this.stopRechecks?.();
+    this.stopRechecks = undefined;
     await this.keyPool?.flush();
     this.isInitialized = false;
     this.availableModelsCache.clear();
@@ -1699,7 +1707,7 @@ export class OpenRouterProvider implements IProvider {
     return new OpenRouterProviderError(
       message ?? `Every OpenRouter API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
       'ALL_KEYS_FAILED',
-      status,
+      status ?? statusOfKinds(kinds),
       errorType,
       { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
     );

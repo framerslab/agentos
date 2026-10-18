@@ -149,8 +149,8 @@ describe('OpenAIProvider key failover', () => {
     await ask(p);
     expect(callsOf().map(keyOf)).toEqual(['sk_alpha_0001', 'sk_beta_0002']);
 
-    vi.advanceTimersByTime(1001);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, modelList));
+    vi.advanceTimersByTime(1001);
     const pool = (p as unknown as { keyPool: { recheck(): Promise<void>; snapshot(): Array<Record<string, unknown>> } }).keyPool;
     await pool.recheck();
     const probe = callsOf()[2];
@@ -170,8 +170,8 @@ describe('OpenAIProvider key failover', () => {
     const p = await provider('sk_alpha_0001,sk_beta_0002', { keyPool: { strategy: 'ordered', recheckMs: 1000 } });
     fetchMock.mockResolvedValueOnce(jsonResponse(429, insufficientQuota)).mockResolvedValueOnce(jsonResponse(200, okChat));
     await ask(p);
-    vi.advanceTimersByTime(1001);
     fetchMock.mockResolvedValueOnce(jsonResponse(429, insufficientQuota));
+    vi.advanceTimersByTime(1001);
     const pool = (p as unknown as { keyPool: { recheck(): Promise<void>; snapshot(): Array<Record<string, unknown>> } }).keyPool;
     await pool.recheck();
     const probe = callsOf()[2];

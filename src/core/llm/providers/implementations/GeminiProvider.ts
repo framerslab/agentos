@@ -36,7 +36,7 @@ import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
 import { redactUrlSecrets } from '../url-secrets';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, retryAfterMs, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
@@ -796,6 +796,8 @@ export class GeminiProvider implements IProvider {
 
   private config!: GeminiProviderConfig;
   private keyPool: ApiKeyPool | null = null;
+  /** Stops the pool's recheck timer, set while a pool of several keys is live. */
+  private stopRechecks?: () => void;
 
   constructor() {}
 
@@ -831,10 +833,14 @@ export class GeminiProvider implements IProvider {
     };
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('gemini')),
       probe: (key) => this.probeKey(key),
     });
     await this.keyPool.ready();
+    // Failed keys are probed on the pool's own clock, so a provider the health breaker holds
+    // still gets its keys back; the timer never keeps the process alive.
+    this.stopRechecks?.();
+    this.stopRechecks = this.keyPool.size > 1 ? this.keyPool.startRechecks() : undefined;
     this.defaultModelId = this.config.defaultModelId;
     this.isInitialized = true;
 
@@ -1300,6 +1306,8 @@ export class GeminiProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
+    this.stopRechecks?.();
+    this.stopRechecks = undefined;
     await this.keyPool?.flush();
     this.isInitialized = false;
     console.log('GeminiProvider shutdown complete.');
@@ -1936,7 +1944,7 @@ export class GeminiProvider implements IProvider {
     return new GeminiProviderError(
       message ?? `Every Gemini API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
       'ALL_KEYS_FAILED',
-      status,
+      status ?? statusOfKinds(kinds),
       errorStatus,
       { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
     );
