@@ -85,6 +85,13 @@
  *   `LiveKitStreamTransport` does), once the audio it was sent has played
  *   out (`_finishReply`). Until then the pipeline stays `speaking`, so speech
  *   over the rest of the reply interrupts it, and `agent_done` waits.
+ * - Both runtimes emit the session events of `VoiceSessionEventMap` on the
+ *   session `startSession()` returns, and the orchestrator emits them too,
+ *   but `error` and `state_change` (`SessionEvents`): each through
+ *   `emitEach()`, so a listener that throws is reported and the listeners
+ *   after it still run. Without a call profile the session sends its client
+ *   `session_started` as it opens and `session_ended` as a stop closes a
+ *   transport that is still open.
  */
 
 import { EventEmitter } from 'node:events';
@@ -117,16 +124,21 @@ import {
   type ScopedStreamingSTTSession,
   type StreamingTTSSession,
   type TranscriptEvent,
+  type TranscriptWord,
   type ScopedTranscriptEvent,
   type TurnCompleteEvent,
   type ScopedTurnCompleteEvent,
   type VadEvent,
   type VadFrameEvent,
   type StreamingTTSUsageEvent,
+  type VoiceAgentState,
   type VoiceGeneration,
   type VoicePipelineConfig,
   type VoicePipelineSession,
+  type VoiceSessionErrorSource,
+  type VoiceSessionEventMap,
   type VoiceTurnMetadata,
+  type VoiceUserState,
   type ServerTextMessage,
 } from './types.js';
 import { isClientTranscriptMessage, transcriptEventFromClient } from './clientTranscript.js';
@@ -158,6 +170,235 @@ const BARGEIN_ASK_INTERVAL_MS = 100;
  */
 const DEFAULT_FALSE_INTERRUPTION_MS = 1_500;
 
+/** The longest delay `setTimeout()` keeps; a longer one would fire at once. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * A failure of one part of a session, naming the part for `session_error`. It carries no text of the failure it
+ * stands for, which can hold what was said; the session reports it content-free.
+ */
+class PartFailure extends Error {
+  constructor(readonly source: VoiceSessionErrorSource) {
+    super('voice pipeline part failed');
+  }
+}
+
+/**
+ * Runs `work`; a throw becomes a {@link PartFailure} of `source`.
+ *
+ * @param source - The part `work` runs.
+ * @param work - What to run.
+ * @returns What `work` returns.
+ */
+function inPart<T>(source: VoiceSessionErrorSource, work: () => T): T {
+  try {
+    return work();
+  } catch {
+    throw new PartFailure(source);
+  }
+}
+
+/**
+ * Awaits `work`; a throw or a rejection becomes a {@link PartFailure} of `source`.
+ *
+ * @param source - The part `work` runs.
+ * @param work - What to run.
+ * @returns What `work` resolves with.
+ */
+async function inPartAsync<T>(source: VoiceSessionErrorSource, work: () => T | PromiseLike<T>): Promise<T> {
+  try {
+    return await work();
+  } catch {
+    throw new PartFailure(source);
+  }
+}
+
+/**
+ * Yields what `iterable` yields; a throw or a rejection of the iterable's own becomes a {@link PartFailure} of
+ * `source`. A throw or a `break` in the loop that consumes it closes it, and the iterable with it, as a `for await`
+ * over the iterable itself would.
+ *
+ * @param source - The part the iterable comes from.
+ * @param iterable - The values, such as an agent's reply tokens.
+ * @returns The same values.
+ */
+async function* fromPart<T>(source: VoiceSessionErrorSource, iterable: AsyncIterable<T>): AsyncGenerator<T> {
+  try {
+    for await (const value of iterable) yield value;
+  } catch {
+    throw new PartFailure(source);
+  }
+}
+
+/**
+ * Hands an event to each of `target`'s listeners for it, in order, as `emit()` would, except that a listener that
+ * throws or rejects goes to `report` and the listeners after it still run. `emit()` stops at a throw, which would skip
+ * the listeners after it (`waitForUserTurn()`'s among them) and throw into the code that raised the event: an endpoint
+ * detector's handler, or a stop that has not yet closed the session's parts.
+ *
+ * @param target - The emitter whose listeners get the event.
+ * @param event - The event.
+ * @param args - What each listener is handed.
+ * @param report - Takes a listener's throw or rejection, and what failed.
+ */
+function emitEach(target: EventEmitter, event: string, args: unknown[], report: (err: unknown, what: string) => void): void {
+  for (const listener of target.rawListeners(event)) {
+    try {
+      const result: unknown = (listener as (...values: unknown[]) => unknown).apply(target, args);
+      // Promise.resolve() also takes a promise of another realm or library, and leaves any other value alone.
+      Promise.resolve(result).catch((err: unknown) => report(err, `a ${event} listener failed`));
+    } catch (err) {
+      report(err, `a ${event} listener failed`);
+    }
+  }
+}
+
+/**
+ * The one speaker a transcript's words name, when every word that names a speaker names the same one.
+ *
+ * @param words - The transcript's words.
+ * @returns The speaker, or `undefined` when no word names one or two words name different ones.
+ */
+function speakerOf(words: readonly TranscriptWord[] | undefined): string | undefined {
+  let speaker: string | undefined;
+  for (const word of words ?? []) {
+    if (word.speaker === undefined) continue;
+    if (speaker !== undefined && word.speaker !== speaker) return undefined;
+    speaker = word.speaker;
+  }
+  return speaker;
+}
+
+/** A transcript of the user's speech, from an STT session or a client's line, as `user_input_transcribed` reports it. */
+interface HeardTranscript {
+  /** The transcript's text. */
+  text: string;
+  /** Whether it is final. */
+  isFinal: boolean;
+  /** The transcriber's confidence, when it reported one. */
+  confidence?: number;
+  /** Its language, when the transcriber reported one. */
+  language?: string;
+  /** The transcriber's or the client's key for the utterance. */
+  itemId?: string;
+  /** The one speaker its words name. */
+  speakerId?: string;
+}
+
+/**
+ * The `user_input_transcribed` payload of a transcript: its text and finality, and each of its confidence, language,
+ * speaker and key that it has.
+ *
+ * @param heard - The transcript.
+ * @returns The payload.
+ */
+function transcribedEvent(heard: HeardTranscript): VoiceSessionEventMap['user_input_transcribed'] {
+  return {
+    transcript: heard.text,
+    isFinal: heard.isFinal,
+    ...(typeof heard.confidence === 'number' && Number.isFinite(heard.confidence) ? { confidence: heard.confidence } : {}),
+    ...(heard.language ? { language: heard.language } : {}),
+    ...(heard.speakerId ? { speakerId: heard.speakerId } : {}),
+    ...(heard.itemId ? { itemId: heard.itemId } : {}),
+    createdAt: Date.now(),
+  };
+}
+
+/**
+ * The configuration a session's `session_started` message carries: the session's own, without the provider options,
+ * which can hold what a host keeps from its client.
+ *
+ * @param config - The session's configuration.
+ * @returns A copy without `sttOptions` and `ttsOptions`.
+ */
+function clientConfig(config: VoicePipelineConfig): VoicePipelineConfig {
+  const { sttOptions: _sttOptions, ttsOptions: _ttsOptions, ...rest } = config;
+  return rest;
+}
+
+/**
+ * The session events of one runtime ({@link VoiceSessionEventMap}): the agent's and the user's states, the timer that
+ * reports the user `'away'`, and every event handed to the runtime's targets through {@link emitEach}. Once closed it
+ * emits nothing more; the runtime emits `close` itself.
+ */
+class SessionEvents {
+  /** What the agent is doing now. */
+  agent: VoiceAgentState = 'initializing';
+  /** What the user is doing now. */
+  user: VoiceUserState = 'listening';
+  /** Reports the user `'away'` once the user and the agent have both listened for `awayAfterMs`. */
+  private away?: ReturnType<typeof setTimeout>;
+  private closed = false;
+
+  /**
+   * @param targets - The emitters each event goes to, in order: the orchestrator, then the session.
+   * @param report - Takes a listener's throw or rejection, what failed, and the event it was handed.
+   * @param awayAfterMs - `VoicePipelineConfig.userAwayTimeoutMs`; undefined, the user is never away.
+   */
+  constructor(
+    private readonly targets: () => readonly EventEmitter[],
+    private readonly report: (err: unknown, what: string, event: string) => void,
+    private readonly awayAfterMs: number | undefined
+  ) {}
+
+  /**
+   * Hands an event to every target's listeners, unless the session has closed.
+   *
+   * @param event - The event.
+   * @param payload - Its payload.
+   */
+  emit<K extends keyof VoiceSessionEventMap>(event: K, payload: VoiceSessionEventMap[K]): void {
+    if (this.closed) return;
+    for (const target of this.targets()) emitEach(target, event, [payload], (err, what) => this.report(err, what, event));
+  }
+
+  /**
+   * Moves the agent to `state`, emitting `agent_state_changed` when it changes.
+   *
+   * @param state - What the agent does now.
+   */
+  agentTo(state: VoiceAgentState): void {
+    if (this.closed || state === this.agent) return;
+    const oldState = this.agent;
+    this.agent = state;
+    this.emit('agent_state_changed', { oldState, newState: state, createdAt: Date.now() });
+    this.watchAway();
+  }
+
+  /**
+   * Moves the user to `state`, emitting `user_state_changed` when it changes.
+   *
+   * @param state - What the user does now.
+   */
+  userTo(state: VoiceUserState): void {
+    if (this.closed || state === this.user) return;
+    const oldState = this.user;
+    this.user = state;
+    this.emit('user_state_changed', { oldState, newState: state, createdAt: Date.now() });
+    this.watchAway();
+  }
+
+  /** Starts the away timer while the user and the agent both listen, and stops it otherwise. */
+  private watchAway(): void {
+    if (this.closed || this.awayAfterMs === undefined || this.agent !== 'listening' || this.user !== 'listening') {
+      clearTimeout(this.away);
+      this.away = undefined;
+      return;
+    }
+    this.away ??= setTimeout(() => {
+      this.away = undefined;
+      this.userTo('away');
+    }, Math.min(this.awayAfterMs, MAX_TIMER_MS));
+  }
+
+  /** The session has closed: the timer stops and no event is emitted any more. */
+  close(): void {
+    this.closed = true;
+    clearTimeout(this.away);
+    this.away = undefined;
+  }
+}
+
 /** What the user's speech does, from the STT session's events or a client's transcript lines. */
 interface SpeechEdges {
   /** Speech began: a synthetic VAD event, and, while the agent speaks, an interruption of the reply. */
@@ -174,6 +415,14 @@ interface SpeechEdges {
    * decided, in the order it came (`Interruption.told`).
    */
   tell(work: () => void): void;
+}
+
+/** What a session without a call profile keeps of the reply being spoken. */
+interface ReplyRecord {
+  /** Whether a refused chunk of the reply has been reported; the rest of its refusals are not. */
+  audioRefusalReported: boolean;
+  /** Whether the reply has its first word, from which the agent speaks (`agent_state_changed`). */
+  started: boolean;
 }
 
 /** The parts of a session without a call profile that its replies and their interruptions act on. */
@@ -332,8 +581,9 @@ export interface VoicePipelineOverrides {
  * |------------------------|----------------------------------------------|
  * | `'state_changed'`      | `{ from: PipelineState, to: PipelineState }`  |
  * | `'turn_complete'`      | {@link TurnCompleteEvent}; a {@link ScopedTurnCompleteEvent} under a call profile |
- * | `'close'`              | *(none)*: the session moved to `closed`       |
- * | `'error'`              | `Error`: a `turn_complete` or `close` listener threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); speech came from a second source and was dropped (the session's first drop only); a TTS chunk came in another format than the transport's `playbackFormat` and was dropped (the session's first only, naming the provider); or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
+ * | `'close'`              | `{ reason, error?, createdAt }`: the session moved to `closed` |
+ * | `'agent_state_changed'`, `'user_state_changed'`, `'user_input_transcribed'`, `'conversation_item_added'`, `'speech_created'`, `'barge_in'`, `'session_error'` | the session's events ({@link VoiceSessionEventMap}), emitted here as on the session, from the moment `startSession()` is called |
+ * | `'error'`              | `Error`: a listener of the session's events threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); speech came from a second source and was dropped (the session's first drop only); a TTS chunk came in another format than the transport's `playbackFormat` and was dropped (the session's first only, naming the provider); or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
  * | `'cleanup_incomplete'` | *(none)*: the stop that followed such a failure could not close every part |
  * | `'transcript'`, `'gap'`, `'generation'`, `'interrupted'`, `'usage'`, `'failure'`, `'detached'`, `'reattached'` | re-emitted from a call profile's session |
  *
@@ -357,8 +607,14 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * The reply being spoken: replaced as each reply starts to speak (PROCESSING -> SPEAKING). The send of each audio
    * chunk holds the reply it belongs to, so that each reply's first refused chunk is reported and the rest are not.
    */
-  private _currentReply = { audioRefusalReported: false };
+  private _currentReply: ReplyRecord = { audioRefusalReported: false, started: false };
   private publicSession?: VoicePipelineSession;
+  /** The session events of a session without a call profile; a call profile's runtime has its own. */
+  private readonly events: SessionEvents;
+  /** The failure a session without a call profile ended on, for its `close` event. */
+  private failure?: Error;
+  /** The language of the current turn's last final transcript, for the user's conversation item. */
+  private turnLanguage?: string;
   /**
    * Clears the client's open transcript lines and the timer of each (`_wireClientTranscripts`), so that none fires
    * after a stop; set when a session without a call profile starts.
@@ -392,7 +648,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * to wire up components and transition to `'listening'`.
    *
    * @param config - Top-level pipeline configuration specifying providers and options.
-   * @throws {RangeError} When `config.falseInterruptionMs` is given and is not a finite number of zero or more.
+   * @throws {RangeError} When `config.falseInterruptionMs` is given and is not a finite number of zero or more, or
+   *   `config.userAwayTimeoutMs` is given and is not a finite number greater than zero.
    */
   constructor(private readonly config: VoicePipelineConfig) {
     super();
@@ -404,6 +661,17 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       );
     }
     this.falseInterruptionMs = falseInterruptionMs;
+    const awayMs = config.userAwayTimeoutMs;
+    if (awayMs !== undefined && (!Number.isFinite(awayMs) || awayMs <= 0)) {
+      throw new RangeError(
+        `VoicePipelineOrchestrator: userAwayTimeoutMs must be a finite number greater than zero, got ${String(awayMs)}`
+      );
+    }
+    this.events = new SessionEvents(
+      () => (this.publicSession ? [this, this.publicSession] : [this]),
+      (err, what, event) => this._listenerFailed(err, what, event),
+      awayMs
+    );
   }
 
   /** Current pipeline state (read-only); a call profile moves through the same states. */
@@ -411,41 +679,94 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     return this.current;
   }
 
+  /**
+   * Moves the pipeline to `to`. Without a call profile the agent's state follows (`agent_state_changed`): listening
+   * as the pipeline listens and thinking as it processes a turn; a reply speaks from its first word (the reply's token
+   * loop), an interruption keeps the state it came from, and a close is reported as `close`.
+   *
+   * @param to - The new state.
+   */
   private stateTo(to: PipelineState): void {
     const from = this.current;
     if (from === to) return;
     this.current = to;
     this.emit('state_changed', { from, to });
-    this.publicSession?.emit('state_change', to);
+    if (this.publicSession) this._emitEach(this.publicSession, 'state_change', to);
+    // A call profile's runtime reports its own agent states, which the orchestrator emits as they come.
+    if (this.call) return;
+    if (to === 'listening') this.events.agentTo('listening');
+    else if (to === 'processing') this.events.agentTo('thinking');
   }
 
   /**
    * Ends a session without a profile on a failure of one of its parts. The report is content-free: a provider's or
-   * an agent's error can carry what was said, so its text reaches neither a listener nor the console.
+   * an agent's error can carry what was said, so its text reaches neither a listener nor the console. The session's
+   * `'error'` listeners get it as before; `session_error` carries the same `Error` with the part it came from, before
+   * `close`.
+   *
+   * @param source - The part that failed.
    */
-  private reportFailure(): void {
+  private reportFailure(source: VoiceSessionErrorSource = 'session'): void {
     if (this.current === 'closed') return;
     const error = new Error('voice pipeline failed');
+    this.failure = error;
     this._reportError(error, 'the session ended on a failure');
     const session = this.publicSession;
     if (session && session.listenerCount('error') > 0) this._reportError(error, 'the session ended on a failure', session);
+    this._sessionError(error, false, source);
     void this.stopSession('provider_failure').catch(() => {
       this.emit('cleanup_incomplete');
     });
   }
 
-  /** Runs one step of the session; a throw or a rejection ends the session through `reportFailure()`. */
-  private supervise(work: () => unknown): void {
+  /**
+   * Runs one step of the session; a throw or a rejection ends the session through `reportFailure()`.
+   *
+   * @param work - The step.
+   * @param source - The part the step runs, for a failure that does not name its own ({@link PartFailure}).
+   */
+  private supervise(work: () => unknown, source: VoiceSessionErrorSource = 'session'): void {
+    const failed = (err: unknown): void => this.reportFailure(err instanceof PartFailure ? err.source : source);
     try {
-      void Promise.resolve(work()).catch(() => this.reportFailure());
-    } catch {
-      this.reportFailure();
+      void Promise.resolve(work()).catch(failed);
+    } catch (err) {
+      failed(err);
     }
   }
 
-  /** An unlistened `'error'` would throw into the emitter: each part's error ends this session instead. */
-  private watch(source: EventEmitter): void {
-    source.on('error', () => this.reportFailure());
+  /**
+   * An unlistened `'error'` would throw into the emitter: each part's error ends this session instead.
+   *
+   * @param emitter - The part.
+   * @param source - Which part it is.
+   */
+  private watch(emitter: EventEmitter, source: VoiceSessionErrorSource): void {
+    emitter.on('error', () => this.reportFailure(source));
+  }
+
+  /**
+   * Emits `session_error`: on the session and the orchestrator, or, under a call profile, through the call's runtime.
+   *
+   * @param error - The failure, the same object `'error'` reports.
+   * @param recoverable - `true` when the session goes on.
+   * @param source - The part it came from.
+   */
+  private _sessionError(error: Error, recoverable: boolean, source: VoiceSessionErrorSource): void {
+    if (this.call) this.call.sessionError(error, recoverable, source);
+    else this.events.emit('session_error', { error, recoverable, source, createdAt: Date.now() });
+  }
+
+  /**
+   * A listener of one of the session's events threw or rejected: it is reported as `'error'` (`_reportError`) and as a
+   * recoverable `session_error`, except that a `session_error` listener's own failure raises no `session_error`.
+   *
+   * @param err - What the listener threw or rejected with.
+   * @param what - What failed, for the console warning.
+   * @param event - The event the listener was handed.
+   */
+  private _listenerFailed(err: unknown, what: string, event: string): void {
+    const error = this._reportError(err, what);
+    if (event !== 'session_error') this._sessionError(error, true, 'session');
   }
 
   /**
@@ -607,6 +928,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
           open.paused = true;
           open.holding = true;
           this._watchSend(() => parts.transport.sendControl({ type: 'barge_in', action }));
+          this._bargedIn(open, action);
         }
       } while (open.again);
     } finally {
@@ -657,7 +979,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     parts.tts.cancel();
     parts.agent.abort?.();
     this._watchSend(() => parts.transport.sendControl({ type: 'barge_in', action }));
+    // A listener of barge_in may have stopped the session.
+    this._bargedIn(open, action);
     if (this.current === 'closed') return;
+    // The cut reply joins the conversation as interrupted; which of its words were heard is not known here.
+    if (this.text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text: this.text, playedText: '', interrupted: true }, createdAt: Date.now() });
+    // Cast needed because TypeScript keeps `this.current` narrowed by the check above; a listener may have stopped it.
+    if ((this.current as PipelineState) === 'closed') return;
     parts.endpoint.reset();
     this._replyEnded(parts.endpoint);
     this.stateTo('listening');
@@ -698,8 +1026,26 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (!open.holding) return;
     open.holding = false;
     this._watchSend(() => parts.transport.sendControl({ type: 'barge_in', action: { type: 'resume' } }));
+    this._bargedIn(open, { type: 'resume' });
+    if (this.current !== 'speaking') return;
     for (const chunk of open.audio.splice(0)) this._sendReplyAudio(parts.transport, chunk);
     if (open.synthesized) this._finishReply(parts);
+  }
+
+  /**
+   * Emits `barge_in`: the user's speech paused, resumed or cut the reply, as the transport was just sent.
+   *
+   * @param open - The interruption whose speech it was.
+   * @param action - What the speech did to the reply.
+   */
+  private _bargedIn(open: Interruption, action: BargeinAction): void {
+    this.events.emit('barge_in', {
+      speechDurationMs: this._spokenMs(open),
+      interruptedText: this.text,
+      playedDurationMs: this.playedMs,
+      action: action.type,
+      createdAt: Date.now(),
+    });
   }
 
   /**
@@ -736,7 +1082,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   private _replay(open: Interruption): void {
     for (const work of open.told.splice(0)) {
       if (this.current === 'closed') return;
-      this.supervise(work);
+      this.supervise(work, 'endpoint');
     }
   }
 
@@ -802,18 +1148,22 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   }
 
   /**
-   * Ends the reply once its audio has played (`_finishReply`): the pipeline returns to `listening`, the transport is
-   * sent `agent_done`, the endpoint detector is reset and told the user holds the floor, and the watchdog starts.
+   * Ends the reply once its audio has played (`_finishReply`): the transport is sent `agent_done`, the reply joins the
+   * conversation as played (`conversation_item_added`), the pipeline returns to `listening`, the endpoint detector is
+   * reset and told the user holds the floor, and the watchdog starts.
    *
    * @param parts - The session's parts.
    */
   private _replyDone(parts: ReplyParts): void {
-    this.stateTo('listening');
     this._watchSend(() => parts.transport.sendControl({ type: 'agent_done', text: this.text, durationMs: this.playedMs }));
+    if (this.text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text: this.text, playedText: this.text, interrupted: false }, createdAt: Date.now() });
+    // A listener may have stopped the session.
+    if (this.current !== 'speaking') return;
+    this.stateTo('listening');
     this.supervise(() => {
       parts.endpoint.reset();
       this._replyEnded(parts.endpoint);
-    });
+    }, 'endpoint');
     this.resetWatchdog();
   }
 
@@ -827,7 +1177,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   private resetWatchdog(): void {
     if (this.watchdog) clearTimeout(this.watchdog);
     this.watchdog = setTimeout(() => {
-      if (this.current === 'listening') this.supervise(() => this.endpoint?.pushVadEvent({ type: 'speech_end', timestamp: Date.now(), source: 'vad' }));
+      if (this.current === 'listening') this.supervise(() => this.endpoint?.pushVadEvent({ type: 'speech_end', timestamp: Date.now(), source: 'vad' }), 'endpoint');
     }, this.config.maxTurnDurationMs ?? 30000);
   }
 
@@ -864,16 +1214,20 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (!overrides.streamingSTT) throw new Error('streamingSTT is required');
     if (!overrides.streamingTTS) throw new Error('streamingTTS is required');
     if (overrides.callProfile) {
-      const call = new CallPipelineRuntime(this.config, transport, agent, overrides.streamingSTT, overrides.streamingTTS, overrides.callProfile);
+      const call = new CallPipelineRuntime(this.config, transport, agent, overrides.streamingSTT, overrides.streamingTTS, overrides.callProfile, (err, what, target) => this._reportError(err, what, target));
       this.call = call;
       this.transport = transport;
       call.on('state_change', (state: PipelineState) => this.stateTo(state));
       // As without a profile, a listener that throws is reported and the listeners after it still run.
       call.on('turn_complete', (event: TurnCompleteEvent) => this._emitEach(this, 'turn_complete', event));
-      call.on('close', () => {
+      call.on('close', (closed: VoiceSessionEventMap['close']) => {
         this.stateTo('closed');
-        this._emitEach(this, 'close');
+        this._emitEach(this, 'close', closed);
       });
+      // The call's session events, from its start: a host that listens here before startSession() hears it open.
+      for (const name of ['agent_state_changed', 'user_state_changed', 'user_input_transcribed', 'conversation_item_added', 'speech_created', 'barge_in', 'session_error'] as const) {
+        call.on(name, (payload: unknown) => this._emitEach(this, name, payload));
+      }
       for (const name of ['gap', 'generation', 'interrupted', 'usage', 'failure', 'detached', 'reattached', 'transcript'] as const) call.on(name, (event: unknown) => this.emit(name, event));
       await call.start();
       return call;
@@ -890,9 +1244,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this.transport = transport;
     this.agent = agent;
     this.endpoint = overrides.endpointDetector;
-    this.watch(transport);
+    this.watch(transport, 'transport');
     // As watch() does for the other parts, and recorded: the detector is the host's and outlives the session.
-    this._onEndpoint(this.endpoint, 'error', () => this.reportFailure());
+    this._onEndpoint(this.endpoint, 'error', () => this.reportFailure('endpoint'));
     // A track published as the session starts has its subscriber before the first reply plays. Not waited for: a
     // failure fails the first reply's send, which reports it.
     const playback = transport as Partial<IPlaybackTransport>;
@@ -905,9 +1259,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     }
     try {
       this.stt = await overrides.streamingSTT.startSession({ language: this.config.language, providerOptions: this.config.sttOptions });
-      this.watch(this.stt);
+      this.watch(this.stt, 'stt');
       this.tts = await overrides.streamingTTS.startSession({ voice: this.config.voice, format: transport.playbackFormat ?? this.config.format, providerOptions: this.config.ttsOptions, expressiveness: this.config.ttsExpressiveness });
-      this.watch(this.tts);
+      this.watch(this.tts, 'tts');
       if ((this.current as PipelineState) === 'closed') {
         this.stt.close();
         this.tts.close();
@@ -922,12 +1276,15 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     const endpoint = this.endpoint;
     const parts: ReplyParts = { transport, agent, tts, endpoint, bargein: overrides.bargeinHandler };
     // The user's speech: the STT session's speech_start, speech_end and transcripts, or a client's transcript lines
-    // (_wireClientTranscripts). Each edge goes to the endpoint detector as a synthetic VAD event, and a start while the
-    // agent speaks interrupts the reply until the floor is decided (`_interrupt`): the barge-in handler is asked as the
-    // speech grows, and what the detector is told of the speech waits for the decision.
+    // (_wireClientTranscripts). Each edge moves the user's state (`user_state_changed`) and goes to the endpoint
+    // detector as a synthetic VAD event, and a start while the agent speaks interrupts the reply until the floor is
+    // decided (`_interrupt`): the barge-in handler is asked as the speech grows, and what the detector is told of the
+    // speech waits for the decision.
     const speech: SpeechEdges = {
       start: async () => {
         if (this.current === 'closed') return;
+        this.events.userTo('speaking');
+        if ((this.current as PipelineState) === 'closed') return;
         const event: VadEvent = { type: 'speech_start', timestamp: Date.now(), source: 'stt' };
         const open = this.interruption;
         if (open) {
@@ -942,6 +1299,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       },
       end: () => {
         if (this.current === 'closed') return;
+        if (this.events.user === 'speaking') this.events.userTo('listening');
+        if ((this.current as PipelineState) === 'closed') return;
         const event: VadEvent = { type: 'speech_end', timestamp: Date.now(), source: 'stt' };
         speech.tell(() => endpoint.pushVadEvent(event));
         const open = this.interruption;
@@ -965,23 +1324,40 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       },
     };
     transport.on('audio', (frame: AudioFrame) => {
-      if (this.current !== 'closed' && this._takesSpeechFrom('audio')) this.supervise(() => stt.pushAudio(frame));
+      if (this.current !== 'closed' && this._takesSpeechFrom('audio')) this.supervise(() => stt.pushAudio(frame), 'stt');
     });
     transport.on('close', () => {
       this.supervise(() => this.stopSession('transport_closed'));
     });
     stt.on('transcript', (event: TranscriptEvent) => {
       if (this.current === 'closed') return;
-      this.supervise(() => speech.tell(() => endpoint.pushTranscript(event)));
+      this._transcribed({ text: event.text, isFinal: event.isFinal, confidence: event.confidence, language: event.language, itemId: event.itemId, speakerId: speakerOf(event.words) });
+      if ((this.current as PipelineState) === 'closed') return;
+      this.supervise(() => speech.tell(() => endpoint.pushTranscript(event)), 'endpoint');
       this._watchSend(() => transport.sendControl({ type: 'transcript', text: event.text, isFinal: event.isFinal, confidence: event.confidence }));
       this.supervise(() => speech.heard(event.text, event.isFinal));
     });
     this._onEndpoint(endpoint, 'turn_complete', (event: TurnCompleteEvent) => {
+      // The language of this turn's finals goes with this turn, taken or not.
+      const language = this.turnLanguage;
+      this.turnLanguage = undefined;
       if (this.current !== 'listening') return;
       // Re-emitted for waitForUserTurn() and for hosts that listen on the orchestrator or on the session.
       this._emitEach(this, 'turn_complete', event);
       if (this.publicSession) this._emitEach(this.publicSession, 'turn_complete', event);
       // A listener may have stopped the session: only a session still listening takes the turn.
+      if ((this.current as PipelineState) !== 'listening') return;
+      // The turn joins the conversation as the agent takes it.
+      this.events.emit('conversation_item_added', {
+        item: {
+          role: 'user',
+          text: event.transcript,
+          ...(language ? { language } : {}),
+          source: this.speechSource === 'client' ? 'client' : 'speech',
+          endpointReason: event.reason,
+        },
+        createdAt: Date.now(),
+      });
       if ((this.current as PipelineState) !== 'listening') return;
       this.stateTo('processing');
       if (this.watchdog) clearTimeout(this.watchdog);
@@ -991,20 +1367,28 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         if (this.current === 'closed') return;
         // The agent holds the floor from the moment the user's turn completes, before its reply has a word: the
         // detector drops a backchannel such as "uh huh" until the reply ends or a barge-in cuts it.
-        endpoint.setAgentContext?.({ speaking: true });
-        const tokens = agent.sendText(event.transcript, { speakers: [], endpointReason: event.reason, speechDurationMs: event.durationMs, wasInterrupted: false, transcriptConfidence: event.confidence });
+        inPart('endpoint', () => endpoint.setAgentContext?.({ speaking: true }));
+        const tokens = inPart('agent', () => agent.sendText(event.transcript, { speakers: [], endpointReason: event.reason, speechDurationMs: event.durationMs, wasInterrupted: false, transcriptConfidence: event.confidence }));
         // The reply gets its record before its audio is sent.
-        this._currentReply = { audioRefusalReported: false };
+        const reply: ReplyRecord = { audioRefusalReported: false, started: false };
+        this._currentReply = reply;
         this.stateTo('speaking');
         this.text = '';
         this.playedMs = 0;
         this._watchSend(() => transport.sendControl({ type: 'agent_speaking', text: '' }));
-        for await (const token of tokens) {
+        for await (const token of fromPart('agent', tokens)) {
           if (this.current !== 'speaking') break;
+          if (!reply.started) {
+            // The reply has its first word: the agent's speech is created, and the agent speaks.
+            reply.started = true;
+            this.events.emit('speech_created', { source: 'reply', userInitiated: false, createdAt: Date.now() });
+            this.events.agentTo('speaking');
+            if ((this.current as PipelineState) !== 'speaking') break;
+          }
           this.text += token;
-          tts.pushTokens(token);
+          inPart('tts', () => tts.pushTokens(token));
         }
-        if (this.current === 'speaking') await tts.flush();
+        if (this.current === 'speaking') await inPartAsync('tts', () => tts.flush());
       });
     });
     const playbackFormat = transport.playbackFormat;
@@ -1016,7 +1400,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       if (playbackFormat && chunk.format !== playbackFormat) {
         if (!formatRefusalReported) {
           formatRefusalReported = true;
-          this._reportError(new Error(`the TTS provider '${ttsProvider}' sent ${chunk.format} audio, and the transport plays ${playbackFormat} only`), 'a TTS chunk the transport cannot play');
+          const error = this._reportError(new Error(`the TTS provider '${ttsProvider}' sent ${chunk.format} audio, and the transport plays ${playbackFormat} only`), 'a TTS chunk the transport cannot play');
+          this._sessionError(error, true, 'tts');
         }
         return;
       }
@@ -1045,8 +1430,24 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     Object.defineProperty(publicSession, 'state', { get: () => this.current });
     this.publicSession = publicSession as VoicePipelineSession;
     this.stateTo('listening');
+    // A listener of the session's first state may have stopped it.
+    if ((this.current as PipelineState) === 'closed') return this.publicSession;
+    // The client hears that the session is open, under its id, with the configuration it runs.
+    this._watchSend(() => transport.sendControl({ type: 'session_started', sessionId: publicSession.sessionId, config: clientConfig(this.config) }));
     this.resetWatchdog();
     return this.publicSession;
+  }
+
+  /**
+   * Emits `user_input_transcribed` for a transcript with words, from the STT session or a client, and keeps the
+   * language of a final for the turn it belongs to.
+   *
+   * @param heard - The transcript.
+   */
+  private _transcribed(heard: HeardTranscript): void {
+    if (!heard.text.trim()) return;
+    if (heard.isFinal && heard.language) this.turnLanguage = heard.language;
+    this.events.emit('user_input_transcribed', transcribedEvent(heard));
   }
 
   /**
@@ -1118,7 +1519,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // As supervise() does for the STT session's events, a failure ends the session through reportFailure().
       handled = handled
         .then(() => this._onClientTranscript(message, lines, handle, endpoint, speech))
-        .catch(() => this.reportFailure());
+        .catch((err: unknown) => this.reportFailure(err instanceof PartFailure ? err.source : 'session'));
     };
     transport.on('message', (message: ClientTextMessage) => {
       if (isClientTranscriptMessage(message) && this.current !== 'closed' && this._takesSpeechFrom('client')) handle(message);
@@ -1140,7 +1541,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (this.speechSource === source) return true;
     if (!this.speechSourceDropReported) {
       this.speechSourceDropReported = true;
-      this._reportError(
+      const error = this._reportError(
         new Error(
           source === 'audio'
             ? 'audio was dropped: this session takes its speech from client transcripts, which it received first'
@@ -1148,6 +1549,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         ),
         'a second speech source'
       );
+      this._sessionError(error, true, 'session');
     }
     return false;
   }
@@ -1196,6 +1598,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       if ((this.current as PipelineState) === 'closed') return;
     }
     if (text) {
+      // The line's own text, as the client transcribed it; the detector below is told the turn's.
+      this._transcribed({ text, isFinal: message.isFinal, confidence: message.confidence, language: message.language, itemId });
+      if ((this.current as PipelineState) === 'closed') return;
       const event = transcriptEventFromClient(message);
       // Joined as the detector is told it: during an interruption, once the floor is decided, so a final that cut the
       // reply starts the user's turn.
@@ -1225,25 +1630,15 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   }
 
   /**
-   * Hands an event to each of `target`'s listeners for it, in order, as `emit()` would, except that a listener that
-   * throws or rejects is reported and the listeners after it still run. `emit()` stops at a throw, which would skip
-   * the listeners after it (`waitForUserTurn()`'s among them) and throw into the code that raised the event: an
-   * endpoint detector's handler, or a stop that has not yet closed the session's parts.
+   * Hands an event to each of `target`'s listeners for it, in order, through {@link emitEach}: a listener that throws
+   * or rejects is reported (`_listenerFailed`) and the listeners after it still run.
    *
    * @param target - The orchestrator or the session it returned.
    * @param event - The event to hand on.
    * @param args - What each listener is handed.
    */
-  private _emitEach(target: EventEmitter, event: 'turn_complete' | 'close', ...args: unknown[]): void {
-    for (const listener of target.rawListeners(event)) {
-      try {
-        const result: unknown = (listener as (...values: unknown[]) => unknown).apply(target, args);
-        // Promise.resolve() also takes a promise of another realm or library, and leaves any other value alone.
-        Promise.resolve(result).catch((err: unknown) => this._reportError(err, `a ${event} listener failed`));
-      } catch (err) {
-        this._reportError(err, `a ${event} listener failed`);
-      }
-    }
+  private _emitEach(target: EventEmitter, event: string, ...args: unknown[]): void {
+    emitEach(target, event, args, (err, what) => this._listenerFailed(err, what, event));
   }
 
   /**
@@ -1260,8 +1655,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    *   object without a prototype, a revoked proxy) is named by its type, where building the report would throw.
    * @param what - What failed, for the console warning.
    * @param target - Whose listeners get the failure: the orchestrator, or the session it returned.
+   * @returns The `Error` the listeners were handed, for `session_error`.
    */
-  private _reportError(err: unknown, what: string, target: EventEmitter = this): void {
+  private _reportError(err: unknown, what: string, target: EventEmitter = this): Error {
     const error = isError(err) ? err : new Error(describeReason(err));
     const warnListenerFailed = (thrown: unknown): void => {
       console.warn(
@@ -1284,9 +1680,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     handToListeners(EventEmitter.errorMonitor);
     if (target.listenerCount('error') === 0) {
       console.warn(`[voice-pipeline-orchestrator] ${what}:`, describeReason(error));
-      return;
+      return error;
     }
     handToListeners('error');
+    return error;
   }
 
   /**
@@ -1302,7 +1699,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * @param send - Calls `sendControl()` or `sendAudio()`; it is called at once.
    * @param reply - For an audio chunk, the reply it belongs to (`_currentReply` when it was sent).
    */
-  private _watchSend(send: () => Promise<void>, reply?: { audioRefusalReported: boolean }): void {
+  private _watchSend(send: () => Promise<void>, reply?: ReplyRecord): void {
     let sent: Promise<void>;
     try {
       // Promise.resolve() also takes a transport whose send returns no promise, as a plain JavaScript one may.
@@ -1317,7 +1714,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         if (reply.audioRefusalReported) return;
         reply.audioRefusalReported = true;
       }
-      this._reportError(err, 'a transport send failed');
+      this._sessionError(this._reportError(err, 'a transport send failed'), true, 'transport');
     });
   }
 
@@ -1345,13 +1742,15 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   /**
    * Terminal stop. Call-profile cleanup rejects if its native fence or disposal is incomplete.
    *
-   * Without a call profile the session moves to `'closed'` and emits `'close'` at once, then aborts the agent's
-   * request, closes the STT and TTS sessions, resets the endpoint detector and removes the listeners the session added
-   * to it, and closes the transport, unless the transport has closed itself. The promise rejects when one of those
+   * Without a call profile the session moves to `'closed'` and emits `'close'` at once, with the reason and, after a
+   * failure, the failure's `Error`; then it aborts the agent's request, closes the STT and TTS sessions, resets the
+   * endpoint detector and removes the listeners the session added to it, and closes the transport, unless the transport
+   * has closed itself: a transport still open is sent `session_ended` first. The promise rejects when one of those
    * throws. An interruption of the reply under way ends with the session: its timers stop, and the audio and speech
-   * it holds are neither sent nor told. Safe to call more than once: a later call returns the first one's outcome.
+   * it holds are neither sent nor told. No session event is emitted after `'close'`. Safe to call more than once: a
+   * later call returns the first one's outcome.
    *
-   * @param reason - Optional human-readable reason for diagnostics.
+   * @param reason - Optional human-readable reason for diagnostics; `'closed'` in the `close` event when omitted.
    */
   stopSession(reason?: string): Promise<void> {
     if (this.call) return this.call.close(reason);
@@ -1362,8 +1761,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this.endClientLines?.();
     // An interruption's timers go with the session, and nothing it holds is sent or told.
     if (this.interruption) this._closeInterruption(this.interruption);
-    this._emitEach(this, 'close');
-    if (this.publicSession) this._emitEach(this.publicSession, 'close');
+    // The session's events end here: the away timer stops, and nothing is emitted after close.
+    this.events.close();
+    const closed: VoiceSessionEventMap['close'] = { reason: reason ?? 'closed', ...(this.failure ? { error: this.failure } : {}), createdAt: Date.now() };
+    this._emitEach(this, 'close', closed);
+    if (this.publicSession) this._emitEach(this.publicSession, 'close', closed);
     const failures: unknown[] = [];
     const transport = this.transport;
     for (const close of [
@@ -1374,7 +1776,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       () => this._releaseEndpoint(),
       // A transport that closed itself is not closed again; the WebSocket transport would read 'closing' ever after.
       () => {
-        if (transport && transport.state !== 'closed') transport.close(1000, reason);
+        if (!transport || transport.state === 'closed') return;
+        // A session that opened tells its client why it ends, before the transport closes.
+        if (this.publicSession && transport.state === 'open') {
+          this._watchSend(() => transport.sendControl(reason === undefined ? { type: 'session_ended' } : { type: 'session_ended', reason }));
+        }
+        transport.close(1000, reason);
       },
     ]) {
       try {
@@ -1516,9 +1923,24 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   private stopping = false;
   private draining = false;
   private recognitionDrained = false;
+  /** The call's session events ({@link VoiceSessionEventMap}), which the orchestrator emits as well. */
+  private readonly events: SessionEvents;
+  /** The language of the current turn's last final transcript, for the user's conversation item. */
+  private turnLanguage?: string;
+  /** The text of the reply or prompt being spoken, for `barge_in` and an interrupted conversation item. */
+  private replyText = '';
+  /** Whether a reply or a prompt is being spoken: an interruption cuts it. */
+  private replying = false;
+  /** The first failure the call ended on, for its `close` event. */
+  private failure?: Error;
 
-  constructor(private readonly config: VoicePipelineConfig, readonly transport: IStreamTransport, private readonly agent: IVoicePipelineAgentSession, private readonly sttProvider: IStreamingSTT, private readonly ttsProvider: IStreamingTTS, private readonly profile: CallPipelineProfile) {
+  /**
+   * @param report - Reports a failure to the listeners of `target`, the orchestrator's by default, as the orchestrator
+   *   reports its own (`'error'`, or a console warning with no listener), and gives the `Error` it handed them.
+   */
+  constructor(private readonly config: VoicePipelineConfig, readonly transport: IStreamTransport, private readonly agent: IVoicePipelineAgentSession, private readonly sttProvider: IStreamingSTT, private readonly ttsProvider: IStreamingTTS, private readonly profile: CallPipelineProfile, private readonly report: (err: unknown, what: string, target?: EventEmitter) => Error) {
     super();
+    this.events = new SessionEvents(() => [this], (err, what, event) => this.listenerFailed(err, what, event), config.userAwayTimeoutMs);
     this.identity = copyAudioIdentity(profile.identity);
     this.meter = new TtsUsageMeter(this.identity.scopeId, this.identity.callId, profile.maxSynthesisRequests);
     if (config.diarization) throw new Error('call-profile diarization unavailable');
@@ -1531,11 +1953,54 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     return this.current;
   }
 
+  /**
+   * Moves the call to `state`; the agent's state follows as without a call profile: listening as the call listens,
+   * thinking as it processes a turn, speaking from the first word of a reply or a prompt (`synthesize`), an
+   * interruption keeping the state it came from.
+   *
+   * @param state - The new state.
+   */
   private stateTo(state: PipelineState): void {
-    if (state !== this.current) {
-      this.current = state;
-      this.emit('state_change', state);
-    }
+    if (state === this.current) return;
+    this.current = state;
+    this.emitEach('state_change', state);
+    if (state === 'listening') this.events.agentTo('listening');
+    else if (state === 'processing') this.events.agentTo('thinking');
+  }
+
+  /**
+   * Hands an event to this session's listeners through {@link emitEach}: a listener that throws or rejects is
+   * reported, and the listeners after it still run.
+   *
+   * @param event - The event.
+   * @param args - What each listener is handed.
+   */
+  private emitEach(event: string, ...args: unknown[]): void {
+    emitEach(this, event, args, (err, what) => this.listenerFailed(err, what, event));
+  }
+
+  /**
+   * A listener of one of the call's events threw or rejected: it is reported as the orchestrator's `'error'` and as a
+   * recoverable `session_error`, except that a `session_error` listener's own failure raises no `session_error`.
+   *
+   * @param err - What the listener threw or rejected with.
+   * @param what - What failed.
+   * @param event - The event the listener was handed.
+   */
+  private listenerFailed(err: unknown, what: string, event: string): void {
+    const error = this.report(err, what);
+    if (event !== 'session_error') this.sessionError(error, true, 'session');
+  }
+
+  /**
+   * Emits `session_error` on this session, which the orchestrator emits as well.
+   *
+   * @param error - The failure.
+   * @param recoverable - `true` when the call goes on.
+   * @param source - The part it came from.
+   */
+  sessionError(error: Error, recoverable: boolean, source: VoiceSessionErrorSource): void {
+    this.events.emit('session_error', { error, recoverable, source, createdAt: Date.now() });
   }
 
   private matches(event: AudioIdentity): boolean {
@@ -1546,15 +2011,27 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     return !this.stopping && this.current !== 'closed' && !this.detached && sameVoiceGeneration(generation, this.identity.generation);
   }
 
-  private fail(code: 'provider_failure' | 'transport_failure' | 'budget_exhausted'): void {
+  /**
+   * The call fails: `onFailure` and `failure` with the content-free code, as before; the session's `'error'`
+   * listeners, when it has any, and its `errorMonitor` ones get the content-free `Error('voice call failed (<code>)')`,
+   * and `session_error` the same object with the part it came from, before the call closes (unless `managerOwned`).
+   *
+   * @param code - The content-free failure code.
+   * @param source - The part that failed.
+   */
+  private fail(code: 'provider_failure' | 'transport_failure' | 'budget_exhausted', source: VoiceSessionErrorSource = 'session'): void {
     if (this.current === 'closed') return;
     this.profile.onFailure(code);
     this.emit('failure', { scopeId: this.identity.scopeId, callId: this.identity.callId, code });
+    const error = new Error(`voice call failed (${code})`);
+    this.failure ??= error;
+    if (this.listenerCount('error') > 0) this.report(error, 'the call failed', this);
+    this.sessionError(error, false, source);
     if (!this.profile.managerOwned) void this.close(code).catch(() => { this.profile.onFailure('cleanup_incomplete'); });
   }
 
-  private watch(source: EventEmitter): void {
-    source.on('error', () => this.fail('provider_failure'));
+  private watch(emitter: EventEmitter, source: VoiceSessionErrorSource): void {
+    emitter.on('error', () => this.fail('provider_failure', source));
   }
 
   /** Advances the inference generation and the recognition turn; nothing of the previous generation can speak. */
@@ -1575,17 +2052,17 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
 
   /** Opens the scoped STT session, wires the call and fences its first generation; a failure closes the call. */
   async start(): Promise<void> {
-    this.watch(this.profile.vadSession);
-    this.watch(this.profile.audioEndpointDetector);
-    this.transport.on('error', () => this.fail('transport_failure'));
+    this.watch(this.profile.vadSession, 'vad');
+    this.watch(this.profile.audioEndpointDetector, 'endpoint');
+    this.transport.on('error', () => this.fail('transport_failure', 'transport'));
     this.transport.on('close', () => {
       if (this.current === 'closed') return;
-      if (this.profile.managerOwned) this.fail('transport_failure');
+      if (this.profile.managerOwned) this.fail('transport_failure', 'transport');
       else void this.close('transport_closed').catch(() => this.profile.onFailure('cleanup_incomplete'));
     });
     try {
       const stt = await this.sttProvider.startSession({ language: this.config.language, providerOptions: this.config.sttOptions, call: this.identity });
-      this.watch(stt);
+      this.watch(stt, 'stt');
       const scoped = stt as Partial<ScopedStreamingSTTSession>;
       if (!scoped.pushAudioScoped || !scoped.reset) {
         stt.close();
@@ -1618,35 +2095,38 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
         if (!this.matches(event) || this.current === 'closed' || (this.stopping ? !this.draining || !event.isFinal : this.detached || this.changing)) return;
         if (++this.transcriptPending > 32) {
           this.transcriptPending--;
-          this.fail('provider_failure');
+          this.fail('provider_failure', 'stt');
           return;
         }
         this.transcriptWork = this.transcriptWork.then(async () => {
           if (!this.matches(event) || this.current === 'closed' || (this.stopping ? !this.draining || !event.isFinal : this.detached || this.changing)) return;
           this.emit('transcript', event);
+          this.transcribed(event);
           if (!this.stopping) await this.profile.audioEndpointDetector.pushTranscript(event);
           if (this.matches(event) && (this.current as PipelineState) !== 'closed') await this.send({ type: 'transcript', text: event.text, isFinal: event.isFinal, confidence: event.confidence }, event.generation);
         }).catch(() => this.fail('provider_failure')).finally(() => { this.transcriptPending--; });
       });
       stt.on('stt:gap', (event: { lostMs: number }) => this.fan?.gap('provider', event.lostMs));
       stt.on('close', () => {
-        if (!this.changing && this.current !== 'closed') this.fail('provider_failure');
+        if (!this.changing && this.current !== 'closed') this.fail('provider_failure', 'stt');
       });
       this.profile.vadSession.on('vad', (event: VadFrameEvent) => {
         if (!this.matches(event) || this.detached || this.changing || this.current === 'closed' || event.sequence <= this.vadSequence) return;
         // One VAD event per admitted frame, for that frame, with the frame's own duration.
         if (this.vadBusy || event.sequence !== this.inputSequence || event.durationMs !== this.inputDurationMs || event.source !== 'vad' || !Number.isFinite(event.durationMs) || event.durationMs <= 0 || event.durationMs > this.profile.maxInputSamples / 16) {
-          this.fail('provider_failure');
+          this.fail('provider_failure', 'vad');
           return;
         }
         this.vadSequence = event.sequence;
         this.speechMs = event.speech ? this.speechMs + this.inputDurationMs : 0;
+        // The user speaks from as much successive speech as interrupts the agent, until a frame of silence.
+        if (event.speech ? this.speechMs >= this.profile.minSpeechMs : this.events.user === 'speaking') this.events.userTo(event.speech ? 'speaking' : 'listening');
         this.vadBusy = true;
         this.vadWork = this.profile.audioEndpointDetector.pushVadEvent(event).then(() => {
           if (this.matches(event) && this.speechMs >= this.profile.minSpeechMs && ['processing', 'speaking'].includes(this.current)) {
-            void this.interrupt().catch(() => this.fail('provider_failure'));
+            void this.interrupt('speech').catch(() => this.fail('provider_failure'));
           }
-        }).catch(() => this.fail('provider_failure')).finally(() => { this.vadBusy = false; });
+        }).catch(() => this.fail('provider_failure', 'endpoint')).finally(() => { this.vadBusy = false; });
       });
       this.profile.audioEndpointDetector.on('turn_complete', (event: ScopedTurnCompleteEvent) => this.acceptTurn(event));
       this.transport.on('audio', (frame: AudioFrame) => {
@@ -1665,7 +2145,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
       // Client control is an allowlist: mute, unmute and stop. Anything else ends the call.
       this.transport.on('message', (message: { type?: string; action?: { type?: string } }) => {
         if (message?.type !== 'control' || !['mute', 'unmute', 'stop'].includes(message.action?.type ?? '')) {
-          this.fail('transport_failure');
+          this.fail('transport_failure', 'transport');
           return;
         }
         if (message.action!.type === 'stop') {
@@ -1691,9 +2171,31 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     await this.transport.sendControl(Object.assign({}, message, { scopeId: this.identity.scopeId, callId: this.identity.callId, generation: { ...generation } }));
   }
 
+  /**
+   * Emits `user_input_transcribed` for a transcript with words, and keeps the language of a final for its turn.
+   *
+   * @param event - The scoped transcript.
+   */
+  private transcribed(event: ScopedTranscriptEvent): void {
+    if (!event.text.trim()) return;
+    if (event.isFinal && event.language) this.turnLanguage = event.language;
+    this.events.emit(
+      'user_input_transcribed',
+      transcribedEvent({ text: event.text, isFinal: event.isFinal, confidence: event.confidence, language: event.language, itemId: event.itemId, speakerId: speakerOf(event.words) })
+    );
+  }
+
   private acceptTurn(event: ScopedTurnCompleteEvent): void {
     if (this.stopping || !this.matches(event) || this.detached || this.changing || this.current !== 'listening') return;
-    this.emit('turn_complete', event);
+    const language = this.turnLanguage;
+    this.turnLanguage = undefined;
+    this.emitEach('turn_complete', event);
+    if ((this.current as PipelineState) !== 'listening' || this.detached || this.changing) return;
+    // The turn joins the conversation as the agent takes it.
+    this.events.emit('conversation_item_added', {
+      item: { role: 'user', text: event.transcript, ...(language ? { language } : {}), source: 'speech', endpointReason: event.reason },
+      createdAt: Date.now(),
+    });
     if ((this.current as PipelineState) !== 'listening' || this.detached || this.changing) return;
     this.stateTo('processing');
     this.changing = true;
@@ -1707,26 +2209,28 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
       await this.send({ type: 'agent_thinking' }, generation);
       if (!this.live(generation)) return;
       const metadata: VoiceTurnMetadata = { speakers: [], endpointReason: event.reason, speechDurationMs: event.durationMs, wasInterrupted: false, transcriptConfidence: event.confidence, identity: outputIdentity };
-      await this.synthesize(this.agent.sendText(event.transcript, metadata), outputIdentity);
-    })().catch(() => {
-      if (this.live(generation)) this.fail('provider_failure');
+      await this.synthesize(inPart('agent', () => this.agent.sendText(event.transcript, metadata)), outputIdentity, 'reply');
+    })().catch((err: unknown) => {
+      if (this.live(generation)) this.fail('provider_failure', err instanceof PartFailure ? err.source : 'session');
     });
   }
 
   /**
    * Speaks one reply of `identity`'s generation through a new pull-contract TTS session and acknowledged playback;
    * `agent_done` goes out only once synthesis is complete, its final usage is reported and playback is acknowledged.
+   * Its first word is `speech_created` (`source`) and makes the agent speak; once acknowledged, it joins the
+   * conversation as played.
    */
-  private async synthesize(tokens: AsyncIterable<string>, identity: AudioIdentity): Promise<void> {
+  private async synthesize(tokens: AsyncIterable<string>, identity: AudioIdentity, source: 'reply' | 'say'): Promise<void> {
     const generation = identity.generation;
     if (++this.synthesisRequests > this.profile.maxSynthesisRequests) {
       this.fail('budget_exhausted');
       throw new Error('synthesis request bound');
     }
     const requestId = randomUUID();
-    const tts = await this.ttsProvider.startSession({ voice: this.config.voice, format: this.transport.playbackFormat ?? this.config.format, providerOptions: this.config.ttsOptions, expressiveness: this.config.ttsExpressiveness, call: { ...identity, requestId } });
+    const tts = await inPartAsync('tts', () => this.ttsProvider.startSession({ voice: this.config.voice, format: this.transport.playbackFormat ?? this.config.format, providerOptions: this.config.ttsOptions, expressiveness: this.config.ttsExpressiveness, call: { ...identity, requestId } }));
     tts.on('error', () => {
-      if (this.live(generation)) this.fail('provider_failure');
+      if (this.live(generation)) this.fail('provider_failure', 'tts');
     });
     if (!this.live(generation)) {
       tts.cancel();
@@ -1748,43 +2252,58 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
         if (event.final && event.status === 'completed') finalUsage = true;
         this.emit('usage', event);
       } catch {
-        this.fail('provider_failure');
+        this.fail('provider_failure', 'tts');
       }
     });
     // A pull-contract producer hands every chunk to its sink; one emitted as audio breaks the contract.
     tts.on('audio', () => {
-      if (this.live(generation)) this.fail('provider_failure');
+      if (this.live(generation)) this.fail('provider_failure', 'tts');
     });
     tts.on('flush_complete', () => {
       if (this.live(generation)) flushed = true;
     });
     tts.on('close', () => {
-      if (this.tts === tts && this.live(generation) && !flushed) this.fail('provider_failure');
+      if (this.tts === tts && this.live(generation) && !flushed) this.fail('provider_failure', 'tts');
     });
     tts.setAudioSink(async (chunk) => {
       if (!this.live(generation) || this.changing || chunk.scopeId !== identity.scopeId || chunk.callId !== identity.callId) throw new Error('stale synthesis');
       await queue.enqueue(chunk);
     });
     this.stateTo('speaking');
+    this.replyText = '';
+    this.replying = true;
     await this.send({ type: 'agent_speaking', text: '' }, generation);
-    for await (const token of tokens) {
+    let started = false;
+    for await (const token of fromPart('agent', tokens)) {
       if (!this.live(generation)) return;
+      if (!started) {
+        // The first word: the speech is created, and the agent speaks.
+        started = true;
+        this.events.emit('speech_created', { source, userInitiated: source === 'say', createdAt: Date.now() });
+        this.events.agentTo('speaking');
+        if (!this.live(generation)) return;
+      }
       text += token;
+      this.replyText = text;
       if (text.length > this.profile.maxTextCharacters) {
         this.fail('budget_exhausted');
         throw new Error('text admission bound');
       }
-      await tts.writeTokens(token);
+      await inPartAsync('tts', () => tts.writeTokens(token));
     }
     if (!this.live(generation)) return;
-    await tts.flush();
+    await inPartAsync('tts', () => tts.flush());
     await queue.drain();
     if (!this.live(generation)) return;
-    if (!flushed || !finalUsage) throw new Error('incomplete synthesis completion');
+    if (!flushed || !finalUsage) throw new PartFailure('tts');
     this.tts = undefined;
     tts.close();
     this.queue = undefined;
     await this.send({ type: 'agent_done', text, durationMs: queue.stats().playedMs }, generation);
+    if (!this.live(generation)) return;
+    // The reply played to its end: it joins the conversation as heard.
+    this.replying = false;
+    if (text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text, playedText: text, interrupted: false }, createdAt: Date.now() });
     if (!this.live(generation)) return;
     this.changing = true;
     await this.resetInput();
@@ -1804,27 +2323,40 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
       await this.profile.onGeneration(generation);
       await this.resetInput();
       this.changing = false;
-      if (this.live(generation)) await this.synthesize(tokens, identity);
+      if (this.live(generation)) await this.synthesize(tokens, identity, 'say');
     })();
-    this.response = work.catch(() => {
-      if (this.live(generation)) this.fail('provider_failure');
+    this.response = work.catch((err: unknown) => {
+      if (this.live(generation)) this.fail('provider_failure', err instanceof PartFailure ? err.source : 'session');
     });
     await work;
   }
 
   /**
    * Advances the generation synchronously, then aborts the agent, cancels synthesis, clears playback, waits for the
-   * old generation's inference fence and resets input before the call listens again.
+   * old generation's inference fence and resets input before the call listens again. A reply or a prompt being spoken
+   * joins the conversation as interrupted; when the user's speech interrupted it, `barge_in` says so first.
+   *
+   * @param cause - `'speech'` when the user's speech interrupts the agent; `'other'` for a mute, a gap or a detach.
    */
-  private interrupt(): Promise<void> {
+  private interrupt(cause: 'speech' | 'other' = 'other'): Promise<void> {
     if (this.current === 'closed' || this.changing) return this.transition;
     const interrupted = copyAudioIdentity(this.identity);
     const old = { ...this.identity.generation };
+    // advance() clears the measure of the speech that interrupts.
+    const speechDurationMs = this.speechMs;
     this.changing = true;
     const generation = this.advance();
     this.stateTo('interrupting');
     this.profile.onInterrupted(interrupted);
     this.emit('interrupted', interrupted);
+    if (cause === 'speech') {
+      this.events.emit('barge_in', { speechDurationMs, interruptedText: this.replyText, playedDurationMs: this.queue?.stats().playedMs ?? 0, action: 'cancel', createdAt: Date.now() });
+    }
+    if (this.replying) {
+      this.replying = false;
+      // Which of its words were heard is not known here.
+      if (this.replyText) this.events.emit('conversation_item_added', { item: { role: 'assistant', text: this.replyText, playedText: '', interrupted: true }, createdAt: Date.now() });
+    }
     this.agent.abort?.();
     const tts = this.tts;
     this.tts = undefined;
@@ -1911,14 +2443,16 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   }
 
   /** Purge callers omit drain; disposal fences every generation after content acceptance is closed. */
-  close(_reason?: string): Promise<void> {
+  close(reason?: string): Promise<void> {
     if (this.closing) return this.closing;
     this.stopping = true;
     this.draining = false;
     const old = { ...this.identity.generation };
     this.stateTo('closed');
     this.detached = true;
-    this.emit('close');
+    // The call's events end here: the away timer stops, and nothing is emitted after close.
+    this.events.close();
+    this.emitEach('close', { reason: reason ?? 'closed', ...(this.failure ? { error: this.failure } : {}), createdAt: Date.now() });
     this.closing = (async () => {
       await this.cancelSynthesis();
       await this.clearPlayback();
