@@ -285,7 +285,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   //     call's list before the trail and the caller's handler read them, for
   //     the beforeAgent, beforeTool and beforeReturn approvals alike; the
   //     replacement a beforeReturn approval carries is masked where it is
-  //     returned, in executeCall.
+  //     returned, in finalizeExecutionResult.
   if (pooled && opts.on?.approvalDecided) {
     const on = opts.on;
     opts = {
