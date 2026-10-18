@@ -512,6 +512,14 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         : undefined,
     );
 
+    // A replacement the approval carried is the handler's text, which no
+    // seat's mask saw: in a pooled agency it passes the call's list as the
+    // strategy's text did, before the final-output part, agentEnd and the
+    // provenance record read it.
+    if (pooled && approvedResult !== finalized && typeof approvedResult.text === 'string') {
+      approvedResult.text = mask.text(approvedResult.text);
+    }
+
     streamPartBuffer?.push({
       type: 'final-output',
       text: (approvedResult.text as string) ?? '',
