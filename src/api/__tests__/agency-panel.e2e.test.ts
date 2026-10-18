@@ -289,6 +289,21 @@ describe('5. no chair', () => {
 });
 
 describe('6. deadlines (fake timers)', () => {
+  it('a panel of one: the floor is zero, so its one answer meets the quorum, and its one failure throws AgencyQuorumError with no healthy seat', async () => {
+    const one = () => agency({ strategy: 'panel', modelPool: { astra: POOL().astra }, agents: { only: { instructions: 'x' } }, chair: false } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('A')]]);
+    const result = await one().generate('review');
+    expect(result.quorum).toEqual({ met: true, healthy: 1, providers: ['openai'], vendors: ['openai'] });
+    expect(result.seats.map((s) => [s.seat, s.status])).toEqual([['only', 'ok']]);
+    expect(result.text).toBe('--- only ---\nA');
+    fetchMock.mockReset();
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiError(500, 'down')]]);
+    const err = await one().generate('review').catch((e) => e);
+    expect(err).toBeInstanceOf(AgencyQuorumError);
+    expect(err.message).toContain('no seat returned text (0/1 healthy)');
+    expect(err.quorum).toMatchObject({ met: false, healthy: 0 });
+    expect(err.seats.map((s: Json) => [s.seat, s.status])).toEqual([['only', 'error']]);
+  });
   it('a seat that never answers is timeout; its request was aborted; the breaker stays closed; a late rejection is swallowed', async () => {
     vi.useFakeTimers();
     const unhandled = vi.fn(); process.on('unhandledRejection', unhandled);
@@ -1075,14 +1090,16 @@ describe('13. no credential in any record', () => {
   it.each<[string, Record<string, unknown>]>([
     ['native', {}],
     ['prompt-tool', { toolMode: 'prompt' }],
-  ])('a tool error echoing the key, thrown and returned, is masked in the transcript, the top-level toolCalls and the next request under a seated and under a pre-built last seat (%s)', async (_mode, callOpts) => {
+  ])('a tool error echoing the key, thrown and returned, and a tool result that returns it are masked in the transcript, the top-level toolCalls and the next request under a seated and under a pre-built last seat (%s)', async (_mode, callOpts) => {
     vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
     const tools = {
       boom: { description: 'throws', parameters: { type: 'object', properties: {} }, execute: async () => { throw new Error(`tool saw ${K.oaiEnv}`); } },
       soft: { description: 'returns failure', parameters: { type: 'object', properties: {} }, execute: async () => ({ success: false, error: `soft ${K.oaiEnv}` }) },
+      // A successful result that holds the key: its turn reaches the seat's next request masked, as the error turns do.
+      peek: { description: 'returns the key', parameters: { type: 'object', properties: {} }, execute: async () => ({ key: K.oaiEnv }) },
     };
-    const native = () => [openaiToolCall('boom', {}, 'c1'), openaiToolCall('soft', {}, 'c2'), openaiText('done')];
-    const prompt = () => [openaiText('<tool_call>{"name":"boom","arguments":{}}</tool_call>'), openaiText('<tool_call>{"name":"soft","arguments":{}}</tool_call>'), openaiText('done')];
+    const native = () => [openaiToolCall('boom', {}, 'c1'), openaiToolCall('soft', {}, 'c2'), openaiToolCall('peek', {}, 'c3'), openaiText('done')];
+    const prompt = () => [openaiText('<tool_call>{"name":"boom","arguments":{}}</tool_call>'), openaiText('<tool_call>{"name":"soft","arguments":{}}</tool_call>'), openaiText('<tool_call>{"name":"peek","arguments":{}}</tool_call>'), openaiText('done')];
     const script = () => (callOpts.toolMode === 'prompt' ? prompt() : native());
     for (const last of ['seated', 'prebuilt'] as const) {
       route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, script()]]);
@@ -1092,7 +1109,7 @@ describe('13. no credential in any record', () => {
       const everywhere = JSON.stringify([r.transcriptDelta, r.toolCalls, r.agentCalls.map((c) => c.toolCalls)]);
       expect(everywhere).not.toContain(K.oaiEnv);
       expect(everywhere).toContain('[redacted]');
-      expect(calls(OPENAI_CHAT, 'POST').length).toBeGreaterThanOrEqual(3);
+      expect(calls(OPENAI_CHAT, 'POST').length).toBeGreaterThanOrEqual(4);
       // The seated seat's loops mask before they write the tool turn, so its second and third requests carry no key.
       // A pre-built seat's own loops carry no mask, so its requests are not checked: what it returns (its answer, its
       // transcriptDelta, its tool calls and their errors) is masked as it leaves the seat, above.
