@@ -22,8 +22,26 @@ export interface SchemaCheckError {
   params?: Record<string, unknown>;
 }
 
+/** Where a checked value is held: Ajv writes a coercion of the value itself there. */
+export interface SchemaCheckContext {
+  parentData?: Record<string | number, unknown>;
+  parentDataProperty?: string | number;
+}
+
 /** A compiled schema: whether a value passes, and the errors of the last value that did not. */
-export type SchemaCheck = ((data: unknown) => boolean) & { errors?: SchemaCheckError[] | null };
+export type SchemaCheck = ((data: unknown, context?: SchemaCheckContext) => boolean) & { errors?: SchemaCheckError[] | null };
+
+/**
+ * Runs a check and answers whether the value passed, with the value as the check left it. Ajv changes a value inside
+ * an object or a list in place, coercing it or filling in a default; a coercion of the value itself, such as `"5"`
+ * read as 5 under `{ type: 'number' }`, it can only write into a holder, since a caller's own variable is out of its
+ * reach, so the value comes back from that holder.
+ */
+export function checkValue(check: SchemaCheck, value: unknown): { valid: boolean; value: unknown } {
+  const holder: Record<string, unknown> = { value };
+  const valid = check(value, { parentData: holder, parentDataProperty: 'value' });
+  return { valid, value: holder.value };
+}
 
 /** Compiles JSON Schemas with one Ajv instance of the options given, plus the standard formats of `ajv-formats`. */
 export class SchemaChecks {
@@ -49,13 +67,29 @@ export class SchemaChecks {
       addFormats(this.ajv);
     }
     const ajv = this.ajv;
+    if (isObject && SchemaChecks.holdsId(ajv, schema.$id)) {
+      // Ajv refuses a second schema under an `$id` it holds, its meta-schema's for one, and letting go of that schema
+      // by its `$id` would remove what Ajv holds: it is refused here, before Ajv keeps any of it.
+      throw new Error(`schema with key or id "${schema.$id}" already exists`);
+    }
     try {
-      const compiledCheck = ajv.compile(schema) as SchemaCheck;
+      const compiledCheck = ajv.compile(schema) as unknown as SchemaCheck;
       if (isObject) this.compiled.set(schema, compiledCheck);
       return compiledCheck;
     } finally {
       // Ajv kept the schema, and its `$id` when it has one, even when the compile threw.
       if (isObject) ajv.removeSchema(schema);
+    }
+  }
+
+  /** Whether Ajv holds a schema under an `$id`. A check compiles and lets go of its own, so these are Ajv's own. */
+  private static holdsId(ajv: InstanceType<typeof Ajv>, id: unknown): boolean {
+    // An `$id` that is a fragment (`#name`) names a place in its schema, never a schema Ajv holds.
+    if (typeof id !== 'string' || id === '' || id.startsWith('#')) return false;
+    try {
+      return ajv.getSchema(id) !== undefined;
+    } catch {
+      return true;
     }
   }
 }

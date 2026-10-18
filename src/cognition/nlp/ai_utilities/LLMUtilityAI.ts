@@ -35,7 +35,7 @@ import { IPromptEngineUtilityAI, ModelTargetInfo } from '../../../core/llm/IProm
 import { ConversationMessage as Message, MessageRole } from '../../../core/conversation/ConversationMessage';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 import { uuidv4 } from '../../../core/utils/uuid';
-import type { SchemaCheck } from '../../../core/utils/schemaChecks';
+import { checkValue, type SchemaCheck } from '../../../core/utils/schemaChecks';
 import { targetSchemaChecks } from './targetSchemaChecks';
 
 /**
@@ -325,12 +325,14 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
     }
     try {
       const parsed = JSON.parse(jsonString);
-      if (validate && !validate(parsed)) {
+      if (!validate) return parsed as T;
+      const checked = checkValue(validate, parsed);
+      if (!checked.valid) {
         const validationErrors = Array.isArray(validate.errors) ? validate.errors : [];
         console.warn(`LLMUtilityAI (${this.utilityId}): Parsed JSON failed schema validation.`, validationErrors);
         throw new GMIError("Parsed JSON failed schema validation.", GMIErrorCode.VALIDATION_ERROR, { errors: validationErrors });
       }
-      return parsed as T;
+      return checked.value as T;
     } catch (parseError) {
       if (options?.attemptFixWithLLM) {
         console.warn(`LLMUtilityAI (${this.utilityId}): Standard JSON parsing failed for input (length ${jsonString.length}). Attempting LLM fix.`);
@@ -369,14 +371,16 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
             schemaErrors = [];
             continue;
           }
-          if (validate && !validate(reparsed)) {
+          if (!validate) return reparsed as T;
+          const checked = checkValue(validate, reparsed);
+          if (!checked.valid) {
             const validationErrors = Array.isArray(validate.errors) ? validate.errors : [];
             console.warn(`LLMUtilityAI (${this.utilityId}): LLM-fixed JSON failed schema validation.`, validationErrors);
             textToFix = fixedJsonString;
             schemaErrors = validationErrors;
             continue;
           }
-          return reparsed as T;
+          return checked.value as T;
         }
         return null;
       }

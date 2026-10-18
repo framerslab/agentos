@@ -22,7 +22,7 @@ import {
 } from './IUtilityAI';
 import * as naturalModule from 'natural';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
-import type { SchemaCheck } from '../../../core/utils/schemaChecks';
+import { checkValue, type SchemaCheck } from '../../../core/utils/schemaChecks';
 import { detectLanguageTrigram } from './trigram-language-profiles';
 import { targetSchemaChecks } from './targetSchemaChecks';
 
@@ -1217,10 +1217,12 @@ export class StatisticalUtilityAI implements IUtilityAI {
         console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): targetSchema does not compile (${schemaError?.message ?? schemaError}); no text can pass it.`);
         return null;
       }
-      if (!validate(parsed)) {
+      const checked = checkValue(validate, parsed);
+      if (!checked.valid) {
         console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): Parsed JSON failed schema validation.`, validate.errors ?? []);
         return null;
       }
+      return checked.value as T;
     }
     return parsed as T;
   }
