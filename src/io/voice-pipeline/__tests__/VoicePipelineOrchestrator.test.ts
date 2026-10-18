@@ -2213,6 +2213,24 @@ describe('VoicePipelineOrchestrator session events', () => {
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])('refuses a userAwayTimeoutMs of %s', (userAwayTimeoutMs) => {
     expect(() => new VoicePipelineOrchestrator(makeConfig({ userAwayTimeoutMs }))).toThrow(RangeError);
   });
+
+  it('closes the transport at once when its session_ended send throws', async () => {
+    await start();
+    const failures: unknown[] = [];
+    orchestrator.on('error', (error: unknown) => failures.push(error));
+    const gone = new Error('the socket is gone');
+    vi.mocked(transport.sendControl).mockImplementationOnce(() => {
+      throw gone;
+    });
+
+    const stopping = orchestrator.stopSession('done');
+    // The send has failed already: nothing is left to wait for, and no timer is left behind.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.close).toHaveBeenCalledWith(1000, 'done');
+    await stopping;
+    expect(failures).toEqual([gone]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 // ============================================================================
