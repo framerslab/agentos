@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
+import { PostgresAdapter } from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
 import { PORTABLE_TABLES } from '../portable-tables.js';
 
@@ -258,6 +259,37 @@ describeIfPostgres('Brain.openPostgres', () => {
     } finally {
       await fresh?.close().catch(() => undefined);
       await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
+  it("indexes a session's temporary table that shadows a brain table, where each CREATE INDEX of the open lands", async () => {
+    // A session's temporary table is searched before every schema on the search path, so the open's unqualified
+    // CREATE INDEX ... ON knowledge_nodes indexes it, though public, set up by the admin brain's open, holds the index.
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    const pool = new PostgresAdapter(POSTGRES_URL!);
+    await pool.open();
+    try {
+      await pool.withConnection(async (session) => {
+        await session.exec('CREATE TEMP TABLE knowledge_nodes (LIKE public.knowledge_nodes)');
+        let brain: Brain | undefined;
+        try {
+          brain = await Brain.openWithAdapter(session, { brainId: uniqueBrainId() });
+          const indexes = await session.all<{ indexname: string }>(
+            `SELECT c.relname AS indexname FROM pg_index x JOIN pg_class c ON c.oid = x.indexrelid
+              WHERE x.indrelid = 'pg_temp.knowledge_nodes'::regclass`,
+          );
+          expect(indexes.map((row) => row.indexname)).toEqual(expect.arrayContaining(['idx_knowledge_nodes_brain_type']));
+        } finally {
+          await session.exec('DROP TABLE IF EXISTS pg_temp.knowledge_nodes');
+          if (brain) {
+            await cleanup(brain);
+            await brain.close();
+          }
+        }
+      });
+    } finally {
+      await pool.close();
     }
   });
 

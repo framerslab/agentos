@@ -190,8 +190,8 @@ describe('HTTP error responses', () => {
     expect(request).toHaveBeenCalledTimes(1);
     // No key was cooled: every pool entry's cooldown is still unset. (The pool is a
     // weighted round-robin, so the next key drawn is not a usable signal.)
-    const pool = (provider as unknown as { keyPool: { keys: Array<{ key: string; exhaustedUntil: number }> } }).keyPool;
-    expect(pool.keys.map((k) => k.exhaustedUntil)).toEqual([0, 0]);
+    const pool = (provider as unknown as { keyPool: { snapshot(): Array<{ status: string }> } }).keyPool;
+    expect(pool.snapshot().map((k) => k.status)).toEqual(['ok', 'ok']);
   });
 
   it('a decline body on a throttled status is thrown before the key cooldown and the retry', async () => {
@@ -207,8 +207,8 @@ describe('HTTP error responses', () => {
     expect(err.code).toBe('content_filter');
     expect((err.details as { httpStatus?: number }).httpStatus).toBe(429);
     expect(request).toHaveBeenCalledTimes(1);
-    const pool = (provider as unknown as { keyPool: { keys: Array<{ exhaustedUntil: number }> } }).keyPool;
-    expect(pool.keys.map((k) => k.exhaustedUntil)).toEqual([0, 0]);
+    const pool = (provider as unknown as { keyPool: { snapshot(): Array<{ status: string }> } }).keyPool;
+    expect(pool.snapshot().map((k) => k.status)).toEqual(['ok', 'ok']);
   });
 
   it('an HTTP error that is not a decline takes its error type from metadata.error_type', async () => {
