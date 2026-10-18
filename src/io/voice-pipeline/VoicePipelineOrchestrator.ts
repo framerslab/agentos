@@ -1940,7 +1940,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     // The transport closes once the client has its session_ended, or after SESSION_ENDED_SEND_MS when the send hangs: a
     // WebSocket's send resolves when its callback fires, and a transport closed before that can drop the message.
     const closeTransport = async (): Promise<void> => {
-      if (ended) {
+      // A transport that reported its own close has no client left to wait for: it is closed at once, as before.
+      if (ended && reason !== 'transport_closed') {
         const sent = ended;
         // The bound's timer goes when the send settles, so a stopped session leaves no timer behind.
         await new Promise<void>((resolve) => {
