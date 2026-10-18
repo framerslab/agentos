@@ -401,9 +401,12 @@ export function buildHierarchicalTools(
             // provider, as the manager carries them, else a default that names
             // the provider, else its variable. In an agency with a pool the
             // call is strict too: never a default that names no provider.
+            // Without a pool the variables are left to generateText, whose
+            // usual order reads a nameless default ahead of them, as the
+            // manager's and the specialists' calls do.
             generateText: async (model, prompt) => {
               const provider = judgeProviderFor(judgeModel) ?? agencyConfig.provider;
-              const resolved = resolveSeatCredentials({ provider, model, inherits: true }, agencyConfig);
+              const resolved = resolveSeatCredentials({ provider, model, inherits: true, variables: internals.__strictCredentials === true }, agencyConfig);
               const r = await generateText({
                 ...(resolved.ok
                   ? { provider: resolved.value.provider, model: resolved.value.model, apiKey: resolved.value.apiKey, baseUrl: resolved.value.baseUrl }

@@ -51,6 +51,15 @@ export interface ResolveInput {
   baseUrl?: string;
   /** A fixed seat or the chair: may take the agency-level key and URL when it runs on the agency-level provider. */
   inherits: boolean;
+  /**
+   * Whether the provider's variables are the last source (the default). A
+   * call that is not strict, the emergent judge's in an agency without a
+   * pool, passes false: a key or URL it would read there is left to
+   * generateText, whose usual order reads a `setDefaultProvider()` default
+   * that names no provider ahead of the variables, as the agency's other
+   * calls do.
+   */
+  variables?: boolean;
 }
 
 /** The provider, model, key and URL a seat's calls use. */
@@ -67,7 +76,7 @@ export type ResolveOutcome = { ok: true; value: ResolvedCredentials } | { ok: fa
  * default text model. Key and URL: the first non-empty of its own, the agency
  * level's (only with `inherits` and on the agency-level provider), a
  * `setDefaultProvider()` default that names this provider, the provider's
- * environment variable.
+ * environment variable (left out when `variables` is false).
  *
  * @param input - The seat's own provider, model, key and URL, and whether it may inherit.
  * @param agency - The agency options.
@@ -92,12 +101,12 @@ export function resolveSeatCredentials(input: ResolveInput, agency: AgencyOption
     nonEmpty(input.apiKey) ??
     (onAgencyProvider ? nonEmpty(agency.apiKey) : undefined) ??
     (defNamesProvider ? nonEmpty(def?.apiKey) : undefined) ??
-    (env.key ? nonEmpty(process.env[env.key]) : undefined);
+    (env.key && input.variables !== false ? nonEmpty(process.env[env.key]) : undefined);
   const baseUrl =
     nonEmpty(input.baseUrl) ??
     (onAgencyProvider ? nonEmpty(agency.baseUrl) : undefined) ??
     (defNamesProvider ? nonEmpty(def?.baseUrl) : undefined) ??
-    (env.url ? nonEmpty(process.env[env.url]) : undefined);
+    (env.url && input.variables !== false ? nonEmpty(process.env[env.url]) : undefined);
   return { ok: true, value: { provider, model, apiKey, baseUrl } };
 }
 
