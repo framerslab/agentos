@@ -295,6 +295,43 @@ describe('6. deadlines (fake timers)', () => {
     expect(unhandled).not.toHaveBeenCalled();
     process.off('unhandledRejection', unhandled);
   });
+  it('a seat stopped by its deadline sends no further request: the tool call it was running when it timed out leads to no second step', async () => {
+    vi.useFakeTimers();
+    // The tool takes 2 s, past the 1 s deadline; its result would start the seat's second step.
+    const search = vi.fn(async () => { await new Promise((resolve) => setTimeout(resolve, 2_000)); return { hits: 1 }; });
+    const tools = { search: { description: 's', parameters: { type: 'object' as const, properties: { q: { type: 'string' } } }, execute: search } };
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('search', { q: 'x' }), openaiText('late answer')]], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
+    const pending = panel({ panel: { seatDeadlineMs: 1_000 }, tools }).generate('review');
+    await vi.advanceTimersByTimeAsync(1_001);
+    const result = await pending;
+    expect(result.seats.find((s) => s.entry === 'astra')).toMatchObject({ status: 'timeout' });
+    expect(result.text).toBe('Merged');
+    expect(search).toHaveBeenCalledTimes(1);
+    // The tool returns after the panel did. The seat's call was stopped at its deadline, so its loop starts no
+    // second step: the one OpenAI request is the tool call's.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(calls(OPENAI_CHAT, 'POST')).toHaveLength(1);
+  });
+  it("a caller's abort settles a seat waiting on its beforeAgent approval, and a seat that takes its slot after it asks no approval and sends nothing", async () => {
+    // The handler never answers, and the panel sets no deadline: before the abort the first seat waits on it.
+    const handler = vi.fn(() => new Promise<ApprovalDecision>(() => {}));
+    threeProviders();
+    const controller = new AbortController();
+    const team = panel({ panel: { concurrency: 1 }, hitl: { approvals: { beforeAgent: ['correctness', 'security', 'failure'] }, handler, guardrailOverride: false } });
+    const pending = team.generate('review', { abortSignal: controller.signal }).catch((e) => e);
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+    controller.abort(new Error('caller stopped'));
+    const err = await pending;
+    // Every seat ended on the abort: zero healthy seats, and the ledger names each.
+    expect(err).toBeInstanceOf(AgencyQuorumError);
+    expect(err.seats.map((s: Json) => [s.seat, s.status, s.error])).toEqual([
+      ['correctness', 'error', 'caller stopped'],
+      ['security', 'error', 'caller stopped'],
+      ['failure', 'error', 'caller stopped'],
+    ]);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  }, 10_000);
   it('concurrency 1 starts the next seat when the first times out', async () => {
     vi.useFakeTimers();
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, never], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
@@ -339,10 +376,12 @@ describe('6. deadlines (fake timers)', () => {
     expect(result).toBeInstanceOf(AgencyQuorumError);
     expect(result.seats.find((s: Json) => s.seat === 'security').status).toBe('timeout');
     expect(result.seats.filter((s: Json) => s.status === 'timeout')).toHaveLength(6);
-    // Each aborted request surfaces REQUEST_TIMEOUT once the provider's own retries end (five of them, the breaker's
-    // transient threshold); under __panelDeadline none is recorded.
+    // Five seats timed out on astra (the breaker's transient threshold). Each was stopped at its deadline: its request
+    // ends as an abort, which the provider does not retry and no breaker records, so after ten more seconds each seat
+    // sent one request and the breaker is closed.
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls(GEMINI).length).toBe(0);
+    expect(calls(OPENAI_CHAT, 'POST')).toHaveLength(5);
     expect(globalLLMProviderHealth.isOpen(astraHealth())).toBe(false);
   });
   it('a late beforeAgent approval after the seat timed out fires no approvalDecided, guardrailResult or guardrailHitlOverride, starts no request and adds nothing to the next call trail', async () => {
@@ -500,6 +539,20 @@ describe('8. keys on a hop', () => {
     const team = agency({ modelPool: { gemini: POOL().gemini }, agents: { fixed: { provider: 'openai', model: 'gpt-4.1', instructions: 'x', fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-5-5' }] } }, strategy: 'sequential' } as never);
     await expect(team.generate('go')).rejects.toThrow();
     expect(fetchMock.mock.calls.every(([u]) => !OPENROUTER.test(String(u)) && !ANTHROPIC.test(String(u)))).toBe(true);
+  });
+  it.each(['parallel', 'debate', 'hierarchical'])("a pooled %s agency's own agent (the synthesizer, the manager) resolves its keys as a seat does: its default-chain hop sends the hop provider's key, never a nameless default's", async (strategy) => {
+    vi.stubEnv('GEMINI_API_KEY', K.gemEnv);
+    // The default chain is then one Gemini hop.
+    vi.stubEnv('OPENAI_API_KEY', ''); vi.stubEnv('ANTHROPIC_API_KEY', ''); vi.stubEnv('OPENROUTER_API_KEY', '');
+    const nameless = 'sk-nameless-default-0013';
+    setDefaultProvider({ apiKey: nameless });
+    // The agency's own agent runs on OpenAI with the agency key, which OpenAI refuses; the seats sit on opus.
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiError(401, 'bad key')], [ANTHROPIC, anthropicText('A')], [GEMINI, geminiText('rescued')]]);
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { opus: POOL().opus }, agents: { a: { instructions: 'x' }, b: { instructions: 'y' } }, strategy, maxRounds: 1 } as never);
+    const result = await team.generate('go');
+    expect(result.text).toBe('rescued');
+    expect(calls(GEMINI, 'POST').map((c) => header(c, 'x-goog-api-key'))).toEqual([K.gemEnv]);
+    expect(JSON.stringify(fetchMock.mock.calls.map(([, i]) => (i as RequestInit).headers))).not.toContain(nameless);
   });
   it("under panel a fixed seat's own chain carries the keys the resolver wrote; a keyless hop is dropped and listed; the record carries fallback", async () => {
     vi.stubEnv('GEMINI_API_KEY', K.gemEnv);
@@ -719,6 +772,52 @@ describe('13. no credential in any record', () => {
     expect(managerBodies.length).toBeGreaterThanOrEqual(5);
     for (const b of managerBodies) for (const key of [K.gem, K.antEnv, K.chair, K.oaiEnv]) expect(b).not.toContain(key);
     expect(managerBodies[managerBodies.length - 1]).toContain('[redacted]');
+  });
+
+  it("under a pooled hierarchical agency an agency-level tool's error that echoes a key reaches the manager's next request masked", async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', K.antEnv);
+    const tools = { lookup: { description: 'l', parameters: { type: 'object', properties: {} }, execute: async () => { throw new Error(`lookup saw ${K.antEnv}`); } } };
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('lookup', {}, 'c1'), openaiText('manager done')]], [GEMINI, geminiText('unused')]]);
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { gemini: POOL().gemini }, agents: { worker: { instructions: 'w' } }, strategy: 'hierarchical', tools } as never);
+    const result = await team.generate('go');
+    expect(result.text).toBe('manager done');
+    // The manager's two requests: the one that drew the tool call, and the one carrying the tool's error.
+    const bodies = calls(OPENAI_CHAT, 'POST').map((c) => JSON.stringify(c.body));
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).not.toContain(K.antEnv);
+    expect(bodies[1]).toContain('lookup saw [redacted]');
+  });
+
+  it("a seat's answer and a tool result that repeat a key reach no record: the result's text, agentCalls, toolCalls, the trail, agentEnd and every stream part", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const tools = { readConfig: { description: 'r', parameters: { type: 'object', properties: {} }, execute: async () => ({ key: K.oaiEnv }) } };
+    const script = () => [openaiToolCall('readConfig', {}), openaiText(`the key is ${K.oaiEnv}`)];
+    const ends: Json[] = [];
+    const team = agency({ modelPool: { astra: { provider: 'openai', model: 'gpt-4.1' } }, agents: { one: { instructions: 'x', tools } }, strategy: 'sequential', provenance: { enabled: true }, on: { agentEnd: (e: Json) => ends.push(e) } } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, script()]]);
+    const result = await team.generate('go');
+    expect(result.text).toBe('the key is [redacted]');
+    expect(result.agentCalls[0].output).toBe('the key is [redacted]');
+    expect(result.agentCalls[0].toolCalls[0].result).toEqual({ key: '[redacted]' });
+    expect(JSON.stringify(result)).not.toContain(K.oaiEnv);
+    expect(JSON.stringify(result.provenanceTrail)).toContain('the key is [redacted]');
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, script()]]);
+    const streamed = team.stream('go');
+    const parts: Json[] = []; for await (const part of streamed.fullStream) parts.push(part as Json);
+    expect(JSON.stringify(parts)).not.toContain(K.oaiEnv);
+    expect(parts.find((part) => part.type === 'final-output')).toMatchObject({ text: 'the key is [redacted]' });
+    expect((await streamed.result).text).toBe('the key is [redacted]');
+    expect(ends).toHaveLength(2);
+    expect(JSON.stringify(ends)).not.toContain(K.oaiEnv);
+  });
+
+  it("under panel a seat's answer that repeats a key is redacted in its seat record and the chair's answer in the result's text", async () => {
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText(`B saw ${K.oai}`)], [ANTHROPIC, [anthropicText('A'), anthropicText(`Merged ${K.oai}`)]], [GEMINI, geminiText('C')]]);
+    const result = await panel().generate('review');
+    expect(result.seats.find((s) => s.entry === 'astra')).toMatchObject({ status: 'ok', text: 'B saw [redacted]' });
+    expect(result.text).toBe('Merged [redacted]');
+    expect(result.chair).toMatchObject({ text: 'Merged [redacted]' });
+    expect(JSON.stringify(result)).not.toContain(K.oai);
   });
 
   it("a pre-built seat's streamed error part is masked under a pooled sequential agency", async () => {
@@ -1168,9 +1267,11 @@ describe('25-26. approvals under panel and nested agencies', () => {
     expect(handler).not.toHaveBeenCalled();
     expect(tools.search.execute).toHaveBeenCalledTimes(0);
   });
-  it("a panel nested in a panel keeps __panelDeadline; a parent-deadline timeout in a child seat leaves the breaker closed; the parent's gate holds on nested tools and a parent handler error fills the parent's slot", async () => {
+  it("a panel nested in a panel is stopped at the parent's deadline: each child seat sends one request, none is retried after it, and the breaker stays closed; the parent's gate holds on nested tools and a parent handler error fills the parent's slot", async () => {
     vi.useFakeTimers();
-    // The OpenAI stub rejects on abort, so each inner seat's request becomes a REQUEST_TIMEOUT error when the parent's deadline, passed down as requestTimeout with __panelDeadline, fires. Five such errors on one provider would open its breaker (transient threshold 5) if the flag were lost.
+    // The OpenAI stub rejects on abort. The parent's deadline is passed down as requestTimeout, and when it fires the
+    // parent stops its seat, which aborts each inner seat's call. Five failures on one provider would open its breaker
+    // (transient threshold 5); an abort is not recorded.
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, ({ init }) => new Promise<Response>((_, reject) => { init.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))); })], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]]]);
     const inner = agency({ strategy: 'panel', modelPool: { astra: POOL().astra }, seating: { distinct: false }, agents: { p1: { instructions: 'a' }, p2: { instructions: 'b' }, p3: { instructions: 'c' }, p4: { instructions: 'd' }, p5: { instructions: 'e' } }, chair: false, quorum: { minAgents: 0 } } as never);
     const outer = agency({ strategy: 'panel', modelPool: { opus: POOL().opus }, agents: { innerSeat: inner, own: { instructions: 'o' } }, chair: { from: ['opus'] }, panel: { seatDeadlineMs: 500 }, quorum: { minAgents: 1 } } as never);
@@ -1178,10 +1279,11 @@ describe('25-26. approvals under panel and nested agencies', () => {
     await vi.advanceTimersByTimeAsync(600);
     const r = await pending;
     expect(r.seats.find((s) => s.seat === 'innerSeat')).toMatchObject({ status: 'timeout' });
-    // Each inner seat's call makes the provider's three attempts, each aborted by the 500 ms requestTimeout the parent's deadline passed down, with the provider's backoff between them (500 to 1,000 ms, then 1,000 to 2,000 ms): the last attempt ends within 4,500 ms of the start, and only then does the call reach the recordFailure site __panelDeadline guards. The breaker is read after that point; with the flag lost, the five REQUEST_TIMEOUT failures would have opened it.
+    // Without the stop, each inner seat's call would make the provider's three attempts, the last ending within 4,500 ms
+    // of the start. The breaker is read after that point.
     await vi.advanceTimersByTimeAsync(10_000);
     const innerPosts = calls(OPENAI_CHAT, 'POST');
-    expect(innerPosts).toHaveLength(15); // five seats, three attempts each; the own seat and the chair are on Anthropic, and a seat with one candidate has no chain
+    expect(innerPosts).toHaveLength(5); // five seats, one attempt each; the own seat and the chair are on Anthropic, and a seat with one candidate has no chain
     expect(innerPosts.every((c) => c.init.signal?.aborted)).toBe(true);
     expect(globalLLMProviderHealth.isOpen(astraHealth())).toBe(false);
     vi.useRealTimers();

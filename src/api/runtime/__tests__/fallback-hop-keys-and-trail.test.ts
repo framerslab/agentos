@@ -116,6 +116,8 @@ const SOFT = tool('soft', async () => ({ success: false, error: `soft saw ${SECR
 const BOOM = tool('boom', async () => {
   throw new Error(`boom saw ${SECRET}`);
 });
+/** Returns a failure with an output beside its error, as a refusal of hierarchical's delegate tools does: both hold the key. */
+const SOFT_OUT = tool('softOut', async () => ({ success: false, output: `out saw ${SECRET}`, error: `soft saw ${SECRET}` }));
 
 type Part = { type: string; [key: string]: unknown };
 async function drain(r: ReturnType<typeof streamText>): Promise<Part[]> {
@@ -377,6 +379,27 @@ describe("a seat's mask reaches a tool's error before the next request carries i
     expect(await shim.text).toBe('done');
     expect((await shim.toolCalls).map((c) => c.error)).toEqual(['soft saw [redacted]', 'Error: boom saw [redacted]']);
     for (const sent of hoisted.generateCompletion.mock.calls.slice(1)) expect(JSON.stringify(sent)).not.toContain(SECRET);
+  });
+
+  it("in both native loops, a failed tool's output, which the tool turn carries in place of its error, is masked too", async () => {
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['softOut'])).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [SOFT_OUT] as never, maxSteps: 3, __maskError: mask });
+    expect(generated.text).toBe('done');
+    const generatedTurn = JSON.stringify(hoisted.generateCompletion.mock.calls[1]);
+    expect(generatedTurn).not.toContain(SECRET);
+    expect(generatedTurn).toContain('out saw [redacted]');
+
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['softOut']); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [SOFT_OUT] as never, maxSteps: 3, __maskError: mask });
+    const parts = await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect(JSON.stringify(parts)).not.toContain(SECRET);
+    expect(parts.find((p) => p.type === 'tool-result')).toMatchObject({ toolName: 'softOut', result: 'out saw [redacted]' });
+    const streamedTurn = JSON.stringify(hoisted.generateCompletionStream.mock.calls[1]);
+    expect(streamedTurn).not.toContain(SECRET);
+    expect(streamedTurn).toContain('out saw [redacted]');
   });
 });
 
