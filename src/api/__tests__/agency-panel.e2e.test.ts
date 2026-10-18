@@ -385,6 +385,25 @@ describe('6. deadlines (fake timers)', () => {
     expect(handler).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   }, 10_000);
+  it("a caller's abort that lands as a seat's approval resolves starts nothing: a pre-built seat that ignores the signal is not invoked, and the seat ends on the abort", async () => {
+    // The approval resolves and the caller aborts in one tick: the seat reads the abort when the approval returns, not a
+    // flag the abort's own chain sets a few microtasks later, which the approval's shorter chain would outrun.
+    let approve!: (decision: ApprovalDecision) => void;
+    const handler = vi.fn(() => new Promise<ApprovalDecision>((resolve) => { approve = resolve; }));
+    const ignoring = { generate: vi.fn(async () => ({ text: 'ran anyway' })), stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} } as unknown as Agent;
+    threeProviders();
+    const controller = new AbortController();
+    const team = agency({ strategy: 'panel', modelPool: { opus: POOL().opus }, agents: { pre: ignoring, pooled: { instructions: 'p' } }, chair: false, panel: { concurrency: 1 }, hitl: { approvals: { beforeAgent: ['pre'] }, handler, guardrailOverride: false } } as never);
+    const pending = team.generate('review', { abortSignal: controller.signal }).catch((e) => e);
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+    approve({ approved: true });
+    controller.abort(new Error('caller stopped'));
+    const err = await pending;
+    expect(err).toBeInstanceOf(AgencyQuorumError);
+    expect(err.seats.map((s: Json) => [s.seat, s.status, s.error])).toEqual([['pre', 'error', 'caller stopped'], ['pooled', 'error', 'caller stopped']]);
+    expect(ignoring.generate).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  }, 10_000);
   it("a seat's deadline stops its request in flight when the caller's signal is a polyfill's: the seat is timeout, its request was aborted, and the panel returns", async () => {
     vi.useFakeTimers();
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, abortable], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
