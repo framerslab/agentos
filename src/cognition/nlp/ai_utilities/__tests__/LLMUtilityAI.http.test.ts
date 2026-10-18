@@ -485,6 +485,17 @@ describe('LLMUtilityAI over a provider manager', () => {
     expect(received).toHaveLength(0);
   });
 
+  it('answers a value as its targetSchema coerces it, the value itself too', async () => {
+    const stats = new StatisticalUtilityAI('stat-for-coercion');
+    await stats.initialize({ utilityId: 'stat-for-coercion' });
+    for (const parser of [utility, stats]) {
+      // Under type number Ajv reads "5" as 5: inside an object it changes the object, and the value itself the answer.
+      expect(await parser.parseJsonSafe('"5"', { targetSchema: { type: 'number' } })).toBe(5);
+      expect(await parser.parseJsonSafe('{"n": "5"}', { targetSchema: { type: 'object', properties: { n: { type: 'number' } } } })).toEqual({ n: 5 });
+    }
+    expect(received).toHaveLength(0);
+  });
+
   it('checks a targetSchema with an $id that each call builds anew', async () => {
     const stats = new StatisticalUtilityAI('stat-for-ids');
     await stats.initialize({ utilityId: 'stat-for-ids' });
