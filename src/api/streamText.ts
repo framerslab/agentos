@@ -199,9 +199,9 @@ export function normalizeStreamFinishReason(
 /**
  * The object returned immediately by {@link streamText}.
  *
- * Consumers may iterate `textStream` for raw token deltas, `fullStream` for
- * all event types, or simply `await` the promise properties for aggregated
- * results once the stream has drained.
+ * Consumers iterate `textStream` for raw token deltas or `fullStream` for
+ * all event types; the promise properties settle once that iteration has
+ * drained the stream, and awaiting one of them alone starts no request.
  */
 export interface StreamTextResult {
   /** Citation verdicts after text completes, when enabled on a default-runtime session. */
@@ -333,8 +333,12 @@ function formatPlanForPrompt(plan: Plan): string {
  * Stateless streaming text generation with optional multi-step tool calling.
  *
  * Returns a {@link StreamTextResult} immediately; the underlying provider call
- * begins lazily when a consumer starts iterating `textStream` or `fullStream`.
- * Awaiting `text`, `usage`, or `toolCalls` will also drain the stream.
+ * begins when a consumer starts iterating `textStream` or `fullStream`, and
+ * `text`, `usage`, `toolCalls` and the other promises settle once that
+ * iteration has run the stream to its end or the consumer stopped reading.
+ * Awaiting a promise alone starts no request and never settles it: a caller
+ * that wants only the assembled text calls {@link generateText}, or reads the
+ * stream to its end first.
  *
  * @param opts - Generation options (same shape as {@link generateText}).
  * @returns A {@link StreamTextResult} with async iterables and awaitable promises.
