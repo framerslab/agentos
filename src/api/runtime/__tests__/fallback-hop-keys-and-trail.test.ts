@@ -518,15 +518,26 @@ describe("a seat's mask reaches a tool's error before the next request carries i
     expect(shim.text).toBe('done');
     expect(sentText(hoisted.generateCompletion.mock.calls[1])).toContain('"output":{"id":"[redacted]","note":"n"}');
 
-    // A class instance is not copied by the value mask; what its toJSON writes is masked as text, and a turn that is then no JSON is sent as a JSON string.
+    // A class instance is masked as what its toJSON writes: the number becomes the string [redacted], the turn is that
+    // string's JSON, and the record holds the masked form, not the instance, whose toJSON would write the key again.
     class Counter { toJSON(): number { return 20240001; } }
     const CLASS_OUT = tool('classy', async () => ({ success: true, output: new Counter() }));
     hoisted.generateCompletion.mockReset();
     hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['classy'])).mockResolvedValueOnce(reply('done'));
-    await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [CLASS_OUT] as never, maxSteps: 3, __maskError: callMask });
+    const classy = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [CLASS_OUT] as never, maxSteps: 3, __maskError: callMask });
     const classTurn = toolTurn(hoisted.generateCompletion.mock.calls[1]);
     expect(classTurn).not.toContain(DIGITS);
     expect(JSON.parse(classTurn)).toBe('[redacted]');
+    expect(classy.toolCalls[0].result).toBe('[redacted]');
+
+    // So is a plain object with a toJSON of its own: the turn stays JSON and the record holds what toJSON wrote, masked.
+    const PLAIN_OUT = tool('plainy', async () => ({ success: true, output: { toJSON: () => ({ id: 20240001 }) } }));
+    hoisted.generateCompletion.mockReset();
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['plainy'])).mockResolvedValueOnce(reply('done'));
+    const plainy = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [PLAIN_OUT] as never, maxSteps: 3, __maskError: callMask });
+    expect(JSON.parse(toolTurn(hoisted.generateCompletion.mock.calls[1]))).toEqual({ id: '[redacted]' });
+    expect(plainy.toolCalls[0].result).toEqual({ id: '[redacted]' });
+    expect(JSON.stringify(plainy.toolCalls)).not.toContain(DIGITS);
   });
 });
 
