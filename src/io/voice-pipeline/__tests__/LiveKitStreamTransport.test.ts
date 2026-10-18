@@ -1275,7 +1275,7 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     transport.close();
   });
 
-  it('refuses a message with livekit control bound once sixty-four wait behind a cancel, and a refused pause leaves the track as it is', async () => {
+  it('refuses a message with livekit control bound once sixty-four wait, a cancel among them, and a refused pause leaves the track as it is', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
     const transport = new LiveKitStreamTransport({

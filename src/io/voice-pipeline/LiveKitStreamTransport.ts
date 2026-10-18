@@ -300,8 +300,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases it, each at once. Messages go out in the
    * order they were asked for. A `cancel` goes out once its clear has finished, or once the publisher's
    * `receiptTimeoutMs` plus `maxDurationMs` have passed, so a capture that never returns does not hold it; a message
-   * asked for while it waits, a `resume` for the next reply among them, waits behind it, at most 64 of them
-   * (`livekit control bound` beyond), and they go out one at a time once it has. A message with nothing waiting ahead
+   * asked for while it waits, a `resume` for the next reply among them, waits behind it, and they go out one at a time
+   * once it has; at most 64 messages wait, the `cancel` included (`livekit control bound` beyond). A message with nothing waiting ahead
    * of it goes out within the call, beside any still going out.
    *
    * @throws {Error} When the transport is not open or the room has no local participant, and `livekit control bound`
