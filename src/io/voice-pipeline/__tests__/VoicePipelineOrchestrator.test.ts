@@ -2050,6 +2050,45 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(transport.close).toHaveBeenCalledWith(1000, 'done');
   });
 
+  it('closes the transport once the client has its session_ended, when the send settles late', async () => {
+    await start();
+    let settle!: () => void;
+    vi.mocked(transport.sendControl).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        })
+    );
+    const stopping = orchestrator.stopSession('done');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'session_ended', reason: 'done' });
+    expect(transport.close).not.toHaveBeenCalled();
+    settle();
+    await stopping;
+    expect(transport.close).toHaveBeenCalledWith(1000, 'done');
+  });
+
+  it('closes the transport after half a second when the session_ended send never settles', async () => {
+    await start();
+    vi.mocked(transport.sendControl).mockImplementationOnce(() => new Promise<void>(() => undefined));
+    const stopping = orchestrator.stopSession('done');
+    await vi.advanceTimersByTimeAsync(499);
+    expect(transport.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await stopping;
+    expect(transport.close).toHaveBeenCalledWith(1000, 'done');
+  });
+
+  it("creates the speech a host says through pushToTTS, with source 'say', without a call profile", async () => {
+    await start();
+    const created: { source: string; userInitiated: boolean }[] = [];
+    orchestrator.on('speech_created', (event) => created.push({ source: event.source, userInitiated: event.userInitiated }));
+    await orchestrator.pushToTTS('Thanks for calling.');
+    expect(ttsSession.pushTokens).toHaveBeenCalledWith('Thanks for calling.');
+    expect(ttsSession.flush).toHaveBeenCalledOnce();
+    expect(created).toEqual([{ source: 'say', userInitiated: true }]);
+  });
+
   it('sends no session_ended to a transport that closed itself', async () => {
     await start();
     (transport as any).state = 'closed';

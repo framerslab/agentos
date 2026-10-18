@@ -649,6 +649,9 @@ export interface VoicePipelineOverrides {
  *
  * @see {@link VoicePipelineSession} for the public session interface returned by `startSession()`.
  */
+/** How long a stop waits for the client to have its `session_ended` before the transport closes, in milliseconds. */
+const SESSION_ENDED_SEND_MS = 500;
+
 export class VoicePipelineOrchestrator extends EventEmitter {
   private current: PipelineState = 'idle';
   private call?: CallPipelineRuntime;
@@ -1883,7 +1886,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Without a call profile the session moves to `'closed'` and emits `'close'` at once, with the reason and, after a
    * failure, the failure's `Error`; then it aborts the agent's request, closes the STT and TTS sessions, resets the
    * endpoint detector and removes the listeners the session added to it, and closes the transport, unless the transport
-   * has closed itself: a transport still open is sent `session_ended` first. The promise rejects when one of those
+   * has closed itself: a transport still open is sent `session_ended` first and closed once that send has settled, or
+   * after half a second when it hangs, since a transport closed with a send in flight can drop it. The promise rejects when one of those
    * throws. An interruption of the reply under way ends with the session: its timers stop, and the audio and speech
    * it holds are neither sent nor told; so does a reply's wait for its audio to play out. No session event is emitted
    * after `'close'`. Safe to call more than once: a later call returns the first one's outcome.
@@ -1909,6 +1913,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (this.publicSession) this._emitEach(this.publicSession, 'close', closed);
     const failures: unknown[] = [];
     const transport = this.transport;
+    let ended: Promise<void> | undefined;
     for (const close of [
       () => this.agent?.abort?.(),
       () => this.stt?.close(),
@@ -1918,11 +1923,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // A transport that closed itself is not closed again; the WebSocket transport would read 'closing' ever after.
       () => {
         if (!transport || transport.state === 'closed') return;
-        // A session that opened tells its client why it ends, before the transport closes.
+        // A session that opened tells its client why it ends; the transport closes below, once that send has settled.
         if (this.publicSession && transport.state === 'open') {
-          this._watchSend(() => transport.sendControl(reason === undefined ? { type: 'session_ended' } : { type: 'session_ended', reason }));
+          ended = new Promise<void>((resolve) => {
+            this._watchSend(() => Promise.resolve(transport.sendControl(reason === undefined ? { type: 'session_ended' } : { type: 'session_ended', reason })).finally(resolve));
+          });
         }
-        transport.close(1000, reason);
       },
     ]) {
       try {
@@ -1931,7 +1937,28 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         failures.push(error);
       }
     }
-    this.stopping = failures.length ? Promise.reject(new Error('cleanup incomplete')) : Promise.resolve();
+    // The transport closes once the client has its session_ended, or after SESSION_ENDED_SEND_MS when the send hangs: a
+    // WebSocket's send resolves when its callback fires, and a transport closed before that can drop the message.
+    const closeTransport = async (): Promise<void> => {
+      if (ended) {
+        await Promise.race([
+          ended,
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, SESSION_ENDED_SEND_MS);
+            (timer as { unref?: () => void }).unref?.();
+          }),
+        ]);
+      }
+      if (!transport || transport.state === 'closed') return;
+      try {
+        transport.close(1000, reason);
+      } catch (error) {
+        failures.push(error);
+      }
+    };
+    this.stopping = closeTransport().then(() => {
+      if (failures.length) throw new Error('cleanup incomplete');
+    });
     return this.stopping;
   }
 
@@ -1995,8 +2022,22 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   async pushToTTS(text: string | AsyncIterable<string>): Promise<void> {
     if (this.call) return this.call.speak(text);
     if (!this.tts || this.current === 'closed') throw new Error('No active TTS session');
-    if (typeof text === 'string') this.tts.pushTokens(text);
-    else for await (const token of text) this.tts.pushTokens(token);
+    // The host's own speech is created at its first word, with source 'say', as the call runtime's speak() creates it.
+    let created = false;
+    const create = (): void => {
+      if (created) return;
+      created = true;
+      this.events.emit('speech_created', { source: 'say', userInitiated: true, createdAt: Date.now() });
+    };
+    if (typeof text === 'string') {
+      create();
+      this.tts.pushTokens(text);
+    } else {
+      for await (const token of text) {
+        create();
+        this.tts.pushTokens(token);
+      }
+    }
     await this.tts.flush();
   }
 
