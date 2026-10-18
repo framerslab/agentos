@@ -28,6 +28,13 @@ const GMI_SEAT_REASON =
   "runtime 'gmi' is not available in an agency with a pool or a panel: a GMI seat's calls skip the strict credentials " +
   "and the error mask seating gives every seat. Use runtime: 'legacy', or place a gmi() agent in the roster as a pre-built seat";
 const isNonNegInt = (v: unknown): boolean => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+/**
+ * Whether `customModelParams` holds `model` or `models` as its own key: the
+ * providers spread it onto the request, which copies own keys only, so an
+ * inherited one never reaches the wire.
+ */
+const namesWireModel = (cmp: Record<string, unknown>): boolean =>
+  Object.prototype.hasOwnProperty.call(cmp, 'model') || Object.prototype.hasOwnProperty.call(cmp, 'models');
 
 /** A config seat that names neither a provider nor a model. */
 export type PooledSeatConfig = AgencySeatConfig & { provider?: undefined; model?: undefined };
@@ -143,7 +150,7 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       }
       if (seat.runtime === 'gmi') fail(`seat "${name}": ${GMI_SEAT_REASON}`);
       const cmp = seat.customModelParams;
-      if ((pooled || isPanel) && cmp && ('model' in cmp || 'models' in cmp)) fail(`seat "${name}": customModelParams.model and .models change the model on the wire behind the seating record`);
+      if ((pooled || isPanel) && cmp && namesWireModel(cmp)) fail(`seat "${name}": customModelParams.model and .models change the model on the wire behind the seating record`);
     }
     if (pooledSurface && !pooled) {
       const resolved = resolveSeatCredentials({ provider: seat.provider, model: seat.model, apiKey: seat.apiKey, baseUrl: seat.baseUrl, inherits: true }, opts);
@@ -152,6 +159,13 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       const v = vendorOf(resolved.value.provider, resolved.value.model, { vendor: seat.vendor, baseUrl: resolved.value.baseUrl });
       if (v) reachableVendors.add(v);
       else if (opts.quorum?.minVendors !== undefined) fail(`seat "${name}": its vendor is unknown; declare vendor on the seat or drop quorum.minVendors`);
+      // A hop of the seat's own chain can answer for it, and the record then names the hop's provider and vendor.
+      for (const hop of Array.isArray(seat.fallbackProviders) ? seat.fallbackProviders : []) {
+        if (!hop || typeof hop.provider !== 'string') continue;
+        reachableProviders.add(hop.provider);
+        const hopVendor = vendorOf(hop.provider, hop.model ?? '', { vendor: hop.vendor, baseUrl: hop.baseUrl });
+        if (hopVendor) reachableVendors.add(hopVendor);
+      }
     } else if (pooled) {
       const candidates = seat.from ?? Object.keys(pool!);
       for (const c of candidates) {
@@ -168,7 +182,7 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       const c = (chair ?? {}) as AgencySeatConfig;
       for (const k of ['router', 'routerParams', 'hostPolicy'] as const) if ((c as Record<string, unknown>)[k] !== undefined) fail(`chair: ${k} is not allowed`);
       if (c.runtime === 'gmi') fail(`chair: ${GMI_SEAT_REASON}`);
-      if (c.customModelParams && ('model' in c.customModelParams || 'models' in c.customModelParams)) fail('chair: customModelParams.model and .models are not allowed');
+      if (c.customModelParams && namesWireModel(c.customModelParams)) fail('chair: customModelParams.model and .models are not allowed');
       if (c.from !== undefined) {
         if (!pool) fail('chair.from requires modelPool');
         if (!Array.isArray(c.from) || c.from.length === 0) fail('chair.from must name at least one pool entry');
@@ -187,9 +201,10 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
     }
   }
   // A pre-built seat's result names one provider, so each can add at most one to the run's count; the run's count stays the check.
+  // A panel is checked with or without a pool: its fixed seats' providers are counted above either way.
   const prebuiltSeats = seats.length - configSeats.length;
   const minProviders = opts.quorum?.minProviders;
-  if ((isPanel || strategy === 'parallel') && pool && minProviders !== undefined && minProviders > reachableProviders.size + prebuiltSeats) {
+  if ((isPanel || (strategy === 'parallel' && pool)) && minProviders !== undefined && minProviders > reachableProviders.size + prebuiltSeats) {
     fail(`quorum.minProviders (${minProviders}) is above the ${reachableProviders.size} distinct provider(s) the config seats can reach plus the ${prebuiltSeats} pre-built seat(s)`);
   }
   if (pool && strategy === 'hierarchical' && !opts.model && !opts.provider) fail('Hierarchical strategy requires an agency-level model or provider for the manager agent.');

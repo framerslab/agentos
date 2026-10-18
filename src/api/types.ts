@@ -1958,7 +1958,7 @@ export class AgencyQuorumError extends Error implements PanelLedger {
 
 /** One model a seat can sit on. The record key is the entry's name. */
 export interface ModelPoolEntry {
-  /** One of the eleven text provider ids the provider manager builds, checked against its list and never against `PROVIDER_DEFAULTS`, which also holds media providers. */
+  /** One of the twelve text provider ids the provider manager builds and the resolver can resolve by name (every one but `litellm`), checked against that list and never against `PROVIDER_DEFAULTS`, which also holds media providers. */
   provider: string;
   /** A plain model id for that provider. A known `provider:` prefix is rejected. */
   model: string;

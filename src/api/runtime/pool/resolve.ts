@@ -12,9 +12,14 @@ import { providerHealthKey, type ProviderCredentials } from '../providerHealthKe
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import type { AgencyOptions } from '../../types.js';
 
-/** The text providers the provider manager builds (`AIModelProviderManager.ts`, its provider switch). */
+/**
+ * The text providers the provider manager builds (`AIModelProviderManager.ts`,
+ * its provider switch) that resolve by name: each has a default text model and
+ * a key or URL variable, or a CLI binary. `litellm`, which the manager also
+ * builds, has neither a default model nor a key variable, and is left out.
+ */
 export const TEXT_PROVIDER_IDS: ReadonlySet<string> = new Set([
-  'openai', 'openrouter', 'ollama', 'anthropic', 'groq', 'together', 'mistral', 'xai', 'gemini', 'claude-code-cli', 'gemini-cli',
+  'openai', 'openrouter', 'requesty', 'ollama', 'anthropic', 'groq', 'together', 'mistral', 'xai', 'gemini', 'claude-code-cli', 'gemini-cli',
 ]);
 const CLI_BINARY: Record<string, string> = { 'claude-code-cli': 'claude', 'gemini-cli': 'gemini' };
 const nonEmpty = (v: string | undefined): string | undefined => (v && v.length > 0 ? v : undefined);
