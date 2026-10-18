@@ -606,6 +606,8 @@ describe('8. keys on a hop', () => {
     const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { gemini: POOL().gemini }, agents: { worker: { instructions: 'w' } }, strategy: 'hierarchical', emergent: { enabled: true } } as never);
     const r = await team.generate('go');
     expect(r.text).toBe('manager done');
+    // The specialist's answer is the tool turn the manager's last request carries.
+    expect(JSON.stringify(calls(OPENAI_CHAT, 'POST').at(-1)!.body!.messages)).toContain('helped');
     expect(calls(GEMINI, 'POST').map((c) => header(c, 'x-goog-api-key'))).toEqual([K.gemEnv]);
     expect(JSON.stringify(fetchMock.mock.calls.map(([, i]) => (i as RequestInit).headers))).not.toContain(nameless);
   });
@@ -1537,5 +1539,48 @@ describe('25-26. approvals under panel and nested agencies', () => {
     expect(childHandler).not.toHaveBeenCalled();
     expect(tools.search.execute).not.toHaveBeenCalled();
     expect(((await child.usage()) as { totalTokens: number }).totalTokens).toBe(30);
+  });
+});
+
+describe('24. a tool table that grows mid-call', () => {
+  const toolNames = (c: Captured): string[] => ((c.body?.tools ?? []) as Json[]).map((t) => t.function?.name as string);
+  it.each(['generate', 'stream'] as const)("a tool that a tool's execute adds to the table is in the next step's request and runs when the model calls it, in %s()", async (api) => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const ran: string[] = [];
+    const table: Record<string, unknown> = {
+      add_tool: { description: 'adds second', parameters: { type: 'object', properties: {} }, execute: async () => {
+        table.second = { description: 'second', parameters: { type: 'object', properties: {} }, execute: async () => { ran.push('second'); return 'second ran'; } };
+        return 'added';
+      } },
+    };
+    let turn = 0;
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, (req) => { turn += 1; return turn === 1 ? openaiToolCall('add_tool', {}, 'c1')(req) : turn === 2 ? openaiToolCall('second', {}, 'c2')(req) : openaiText('done')(req); }]]);
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', instructions: 'x', tools: table as never, maxSteps: 5 });
+    const text = api === 'generate' ? (await a.generate('go')).text : await a.stream('go').text;
+    expect(text).toBe('done');
+    expect(ran).toEqual(['second']);
+    expect(calls(OPENAI_CHAT, 'POST').map(toolNames)).toEqual([['add_tool'], ['add_tool', 'second'], ['add_tool', 'second']]);
+  });
+  it("a specialist spawn_specialist adds mid-run is in the manager's next request and runs when the manager calls it", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const isManager = (body: Json | undefined) => ((body?.tools ?? []) as Json[]).some((t) => t.function?.name === 'spawn_specialist');
+    let managerTurn = 0;
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, (req) => {
+      if (!isManager(req.body)) return openaiText('helped')(req);
+      managerTurn += 1;
+      return managerTurn === 1 ? openaiToolCall('spawn_specialist', { role: 'helper', instructions: 'Help.' }, 'c1')(req)
+        : managerTurn === 2 ? openaiToolCall('delegate_to_helper', { task: 'v' }, 'c2')(req)
+        : openaiText('manager done')(req);
+    }]]);
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', agents: { worker: { instructions: 'w' } }, strategy: 'hierarchical', emergent: { enabled: true } } as never);
+    const r = await team.generate('go');
+    expect(r.text).toBe('manager done');
+    const managerRequests = calls(OPENAI_CHAT, 'POST').filter((c) => isManager(c.body));
+    // The spawned specialist's delegate tool is in the manager's next request, and its answer, not a "not found", is the
+    // tool turn the request after it carries.
+    expect(managerRequests.map((c) => toolNames(c).includes('delegate_to_helper'))).toEqual([false, true, true]);
+    expect(JSON.stringify(managerRequests[2].body!.messages)).toContain('helped');
+    expect(JSON.stringify(managerRequests[2].body!.messages)).not.toContain('not found');
+    expect(r.agentCalls.map((c) => [c.agent, c.output])).toEqual([['helper', 'helped']]);
   });
 });
