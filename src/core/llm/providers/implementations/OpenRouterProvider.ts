@@ -426,7 +426,7 @@ export class OpenRouterProvider implements IProvider {
   public defaultModelId?: string;
 
   // Corrected: Changed type of this.config to satisfy the Readonly<Required<...>> assignment by providing defaults
-  private config!: Readonly<Required<Omit<OpenRouterProviderConfig, 'defaultModelId' | 'siteUrl' | 'appName' | 'baseURL' | 'requestTimeout' | 'streamRequestTimeout'>> & OpenRouterProviderConfig>;
+  private config!: Readonly<Required<Omit<OpenRouterProviderConfig, 'defaultModelId' | 'siteUrl' | 'appName' | 'baseURL' | 'requestTimeout' | 'streamRequestTimeout' | 'keyPool'>> & OpenRouterProviderConfig>;
   private keyPool: ApiKeyPool | null = null;
   private client!: AxiosInstance;
   private readonly availableModelsCache: Map<string, ModelInfo> = new Map();

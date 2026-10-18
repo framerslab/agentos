@@ -275,7 +275,8 @@ export class ApiKeyPool {
       state.nextRecheckAt = now + this.recheckDelay(state.failures);
     }
     state.updatedAt = now;
-    this.log('warn', 'key_pool.key_failed', entry, previous !== state.status || previous === 'ok', {
+    // A transition: the status changed (a key that was ok always changes here).
+    this.log('warn', 'key_pool.key_failed', entry, previous !== state.status, {
       kind,
       status: detail?.status,
       retryAfterMs: kind === 'quota' ? (state.until ?? now) - now : undefined,
