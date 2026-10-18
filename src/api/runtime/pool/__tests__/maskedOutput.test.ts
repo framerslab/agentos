@@ -92,6 +92,71 @@ describe('maskedPrebuilt', () => {
     expect(parts[3]).toEqual({ type: 'text', text: 'sk-unit-', agent: 'b', note: 'm [redacted]' });
     expect(JSON.stringify(parts)).not.toContain(SECRET);
   });
+
+  it("its stream() masks a secret split around a tool call and its result whole: the parts that waited behind the held tail come out before the masked text, and another agent's text passes meanwhile", async () => {
+    // 'sk-unit-' could start the secret, so it is held when the tool parts arrive; the next text piece of the same agent completes it.
+    const tooled = {
+      ...seat,
+      stream: () => ({
+        fullStream: pieces(
+          { type: 'text', text: 'the key is sk-unit-', agent: 'a' },
+          { type: 'tool-call', toolName: 't', args: {}, agent: 'a' },
+          { type: 'tool-result', toolName: 't', result: { ok: true }, agent: 'a' },
+          { type: 'text', text: 'hello', agent: 'b' },
+          { type: 'text', text: 'secret-0001 now', agent: 'a' },
+        ),
+      }),
+    } as unknown as Agent;
+    const parts = await drain((maskedPrebuilt(tooled, mask).stream('go') as unknown as Streamed).fullStream);
+    expect(parts.filter((p) => p.type === 'text' && p.agent === 'a').map((p) => p.text).join('')).toBe('the key is [redacted] now');
+    expect(JSON.stringify(parts)).not.toContain(SECRET);
+    expect(parts.map((p) => [p.type, p.agent, p.text])).toEqual([
+      ['text', 'a', 'the key is '],
+      ['text', 'b', 'hello'],
+      ['tool-call', 'a', undefined],
+      ['tool-result', 'a', undefined],
+      ['text', 'a', '[redacted] now'],
+    ]);
+  });
+
+  it('a held tail that turns out to be no secret comes out before the parts that waited behind it, and a tail held at the end before them too; a stream error releases both and is thrown masked', async () => {
+    const benign = {
+      ...seat,
+      stream: () => ({
+        fullStream: pieces(
+          { type: 'text', text: 'ends with sk-', agent: 'a' },
+          { type: 'tool-call', toolName: 't', args: {}, agent: 'a' },
+          { type: 'text', text: 'y more', agent: 'a' },
+          { type: 'text', text: 'then sk-unit-', agent: 'a' },
+          { type: 'tool-result', toolName: 't', result: 'late', agent: 'a' },
+        ),
+      }),
+    } as unknown as Agent;
+    expect(await drain((maskedPrebuilt(benign, mask).stream('go') as unknown as Streamed).fullStream)).toEqual([
+      { type: 'text', text: 'ends with ', agent: 'a' },
+      { type: 'text', text: 'sk-', agent: 'a' },
+      { type: 'tool-call', toolName: 't', args: {}, agent: 'a' },
+      { type: 'text', text: 'y more', agent: 'a' },
+      { type: 'text', text: 'then ', agent: 'a' },
+      { type: 'text', text: 'sk-unit-', agent: 'a' },
+      { type: 'tool-result', toolName: 't', result: 'late', agent: 'a' },
+    ]);
+    async function* failing(): AsyncGenerator<unknown> {
+      yield { type: 'text', text: 'held sk-unit-' };
+      yield { type: 'tool-call', toolName: 't', args: {} };
+      throw new Error(`stream died ${SECRET}`);
+    }
+    const dying = { ...seat, stream: () => ({ fullStream: failing() }) } as unknown as Agent;
+    const seen: Record<string, unknown>[] = [];
+    let thrown: Error | undefined;
+    try {
+      for await (const part of (maskedPrebuilt(dying, mask).stream('go') as unknown as Streamed).fullStream) seen.push(part);
+    } catch (error) {
+      thrown = error as Error;
+    }
+    expect(seen).toEqual([{ type: 'text', text: 'held ' }, { type: 'text', text: 'sk-unit-' }, { type: 'tool-call', toolName: 't', args: {} }]);
+    expect(thrown?.message).toBe('stream died [redacted]');
+  });
 });
 
 describe('maskStreamMembers', () => {

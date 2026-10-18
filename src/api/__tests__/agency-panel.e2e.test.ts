@@ -123,6 +123,12 @@ const geminiError = (status: number, message: string, gstatus = 'INTERNAL') => (
 const never = () => new Promise<Response>(() => {});
 /** Hangs until the request's signal aborts, then rejects as fetch does; a `never` ignores the abort and the provider never sees a timeout. */
 const abortable: Handler = ({ init }) => new Promise<Response>((_, reject) => { init.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))); });
+/** An abort controller as a polyfill or another realm builds it: its signal fires `abort`, reads `aborted` and `reason`, and is no instance of this realm's AbortSignal. */
+function foreignAbortController(): { signal: { aborted: boolean; reason: unknown; addEventListener: EventTarget['addEventListener']; removeEventListener: EventTarget['removeEventListener'] }; abort(reason: unknown): void } {
+  const target = new EventTarget();
+  const signal = { aborted: false, reason: undefined as unknown, addEventListener: target.addEventListener.bind(target), removeEventListener: target.removeEventListener.bind(target) };
+  return { signal, abort(reason) { if (signal.aborted) return; signal.aborted = true; signal.reason = reason; target.dispatchEvent(new Event('abort')); } };
+}
 
 // ---- routing with per-pattern queues (the last handler repeats) ----
 function route(table: Array<[RegExp, Handler | Handler[]]>): void {
@@ -360,6 +366,36 @@ describe('6. deadlines (fake timers)', () => {
     expect(handler).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   }, 10_000);
+  it("a caller's abort through a signal this realm's AbortSignal does not recognize, a polyfill's or another realm's, settles a seat waiting on its approval the same way, and no request is sent", async () => {
+    const handler = vi.fn(() => new Promise<ApprovalDecision>(() => {}));
+    threeProviders();
+    const foreign = foreignAbortController();
+    expect(foreign.signal).not.toBeInstanceOf(AbortSignal);
+    const team = panel({ panel: { concurrency: 1 }, hitl: { approvals: { beforeAgent: ['correctness', 'security', 'failure'] }, handler, guardrailOverride: false } });
+    const pending = team.generate('review', { abortSignal: foreign.signal as unknown as AbortSignal }).catch((e) => e);
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+    foreign.abort(new Error('caller stopped'));
+    const err = await pending;
+    expect(err).toBeInstanceOf(AgencyQuorumError);
+    expect(err.seats.map((s: Json) => [s.seat, s.status, s.error])).toEqual([
+      ['correctness', 'error', 'caller stopped'],
+      ['security', 'error', 'caller stopped'],
+      ['failure', 'error', 'caller stopped'],
+    ]);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  }, 10_000);
+  it("a seat's deadline stops its request in flight when the caller's signal is a polyfill's: the seat is timeout, its request was aborted, and the panel returns", async () => {
+    vi.useFakeTimers();
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, abortable], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
+    const foreign = foreignAbortController();
+    const pending = panel({ panel: { seatDeadlineMs: 1_000 } }).generate('review', { abortSignal: foreign.signal as unknown as AbortSignal });
+    await vi.advanceTimersByTimeAsync(1_001);
+    const result = await pending;
+    expect(result.seats.find((s) => s.entry === 'astra')).toMatchObject({ status: 'timeout' });
+    expect(calls(OPENAI_CHAT)[0].init.signal?.aborted).toBe(true);
+    expect(result.text).toBe('Merged');
+  });
   it('concurrency 1 starts the next seat when the first times out', async () => {
     vi.useFakeTimers();
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, never], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
@@ -911,6 +947,19 @@ describe('13. no credential in any record', () => {
     expect(JSON.stringify(ends)).not.toContain(K.oaiEnv);
   });
 
+  it("a tool that returns an Error as its output: the key in its message reaches the tool-call record masked, and the record keeps an Error", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const tools = { readConfig: { description: 'r', parameters: { type: 'object', properties: {} }, execute: async () => new Error(`config holds ${K.oaiEnv}`) } };
+    const team = agency({ modelPool: { astra: { provider: 'openai', model: 'gpt-4.1' } }, agents: { one: { instructions: 'x', tools } }, strategy: 'sequential' } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('readConfig', {}), openaiText('done')]]]);
+    const result = await team.generate('go');
+    const recorded = result.agentCalls[0].toolCalls[0].result as Error;
+    expect(recorded).toBeInstanceOf(Error);
+    expect(recorded.message).toBe('config holds [redacted]');
+    expect(ownStrings(recorded)).not.toContain(K.oaiEnv);
+    expect(JSON.stringify(result)).not.toContain(K.oaiEnv);
+  });
+
   it("under panel a seat's answer that repeats a key is redacted in its seat record and the chair's answer in the result's text", async () => {
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText(`B saw ${K.oai}`)], [ANTHROPIC, [anthropicText('A'), anthropicText(`Merged ${K.oai}`)]], [GEMINI, geminiText('C')]]);
     const result = await panel().generate('review');
@@ -1027,6 +1076,29 @@ describe('13. no credential in any record', () => {
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, split]]);
     const chunks: string[] = []; for await (const chunk of team.stream('go').textStream) chunks.push(chunk);
     expect(chunks.join('')).toBe('the key is [redacted] now');
+  });
+
+  it('under a pooled sequential agency a key the seat streams around a tool call, half before it and half after its result, is whole in no text part and no final text', async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const tools = { lookup: { description: 'l', parameters: { type: 'object', properties: {} }, execute: async () => ({ ok: true }) } };
+    // The first step's text ends inside K.oaiEnv and the step ends on a tool call; the second step's text finishes the key.
+    const firstStep: Handler = () => sse([
+      oaiChunk('gpt-4.1', { role: 'assistant', content: 'the key is sk-oai-' }),
+      oaiChunk('gpt-4.1', { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '' } }] }),
+      oaiChunk('gpt-4.1', { tool_calls: [{ index: 0, function: { arguments: '{}' } }] }),
+      oaiChunk('gpt-4.1', {}, 'tool_calls'),
+      oaiChunk('gpt-4.1', null, null, U),
+      '[DONE]',
+    ]);
+    const team = agency({ modelPool: { astra: { provider: 'openai', model: 'gpt-4.1' } }, agents: { one: { instructions: 'x', tools } }, strategy: 'sequential' } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [firstStep, openaiText('env-00000006 now')]]]);
+    const st = team.stream('go');
+    const parts: Json[] = []; for await (const p of st.fullStream) parts.push(p as Json);
+    const streamedText = parts.filter((p) => p.type === 'text').map((p) => p.text).join('');
+    expect(streamedText).toBe('the key is [redacted] now');
+    expect(JSON.stringify(parts)).not.toContain(K.oaiEnv);
+    expect(await st.text).toBe('the key is [redacted] now');
+    expect(calls(OPENAI_CHAT, 'POST')).toHaveLength(2);
   });
 
   it("a pre-built seat's streamed error part is masked under a pooled sequential agency", async () => {

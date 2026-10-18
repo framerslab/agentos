@@ -240,6 +240,29 @@ describe('redactText and maskError', () => {
     expect(mixed.when).toBe(when);
     expect(mixed.list).toEqual(['a', undefined, 3]);
   });
+  it('redactStrings and the call mask replace an Error that holds a secret, at any depth of a result, by its masked stand-in, and keep a clean Error as it is', () => {
+    const leaked = new Error(`token ${K1}`);
+    const clean = new Error('fine');
+    const out = redactStrings({ output: leaked, list: [clean, { nested: leaked }] }, [K1]);
+    expect(out.output).toBeInstanceOf(Error);
+    expect(out.output).not.toBe(leaked);
+    expect(out.output.message).toBe('token [redacted]');
+    expect(out.output.stack ?? '').not.toContain(K1);
+    expect(out.list[0]).toBe(clean);
+    expect((out.list[1] as { nested: Error }).nested.message).toBe('token [redacted]');
+    expect(leaked.message).toBe(`token ${K1}`);
+    class Upstream extends Error {
+      constructor(message: string, readonly httpStatus: number) {
+        super(message);
+        this.name = 'Upstream';
+      }
+    }
+    const masked = createErrorMask({ list: [K1] }).strings({ output: new Upstream(`rejected ${K1}`, 401) }).output;
+    expect(masked.message).toBe('rejected [redacted]');
+    expect(masked.name).toBe('Upstream');
+    expect((masked as { httpStatus?: number }).httpStatus).toBe(401);
+    expect(JSON.stringify(Object.getOwnPropertyNames(masked).map((k) => (masked as unknown as Record<string, unknown>)[k]))).not.toContain(K1);
+  });
 });
 
 describe("createChunkRedactor and the call mask's text forms", () => {
@@ -257,6 +280,18 @@ describe("createChunkRedactor and the call mask's text forms", () => {
   it('releases a held tail that turns out to be no secret with the next piece, and a held tail at the end', () => {
     expect(run(['ends with sk-', 'y and more'])).toEqual(['ends with ', 'sk-y and more', '']);
     expect(run(['ends with sk-se'])).toEqual(['ends with ', 'sk-se']);
+  });
+  it('held() is the tail still held, as it came, and empty once a piece settles it or the end releases it', () => {
+    const redactor = createChunkRedactor(() => list);
+    expect(redactor.held()).toBe('');
+    redactor.push('ends with sk-se');
+    expect(redactor.held()).toBe('sk-se');
+    redactor.push('x');
+    expect(redactor.held()).toBe('');
+    redactor.push('again sk-');
+    expect(redactor.held()).toBe('sk-');
+    redactor.flush();
+    expect(redactor.held()).toBe('');
   });
   it("text and strings mask the listed values alone: a URL's key parameter and the credentials an answer quotes are kept", () => {
     const mask = createErrorMask({ list });
