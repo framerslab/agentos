@@ -33,6 +33,21 @@
  * message that is not JSON, or a text stream that fails while it is read,
  * emits `'error'` while the transport stays open.
  *
+ * Text input, on by default with `participant` (the `textInput` option),
+ * reads the text streams the linked participant sends on `'lk.chat'`, the
+ * topic a LiveKit frontend's chat sends on and LiveKit Agents' sessions read,
+ * on a handler of its own beside the control topic's. Each stream is read
+ * with bounds when its reader has an async iterator (12000 bytes, enough for
+ * every text the check accepts, and five seconds), else whole, and emitted as
+ * a `text_input` message once `isClientTextInputMessage()` accepts it. A text
+ * it refuses (empty, whitespace alone, over 4,000 characters), or a stream
+ * that fails or passes the bounds, emits `'error'` with
+ * `livekit text input refused`, which names no text, and the transport stays
+ * open, with a publisher too. Another sender's stream, and every stream while
+ * nobody is linked, is closed unread. A room that already handles the topic
+ * keeps its handler: text input is off, and one warning line says so, through
+ * `logger` when one is given.
+ *
  * ## Audio (outbound)
  * Without the `publisher` option the transport publishes nothing:
  * `sendAudio()` and `waitForPlayback()` reject, and the rejection of
@@ -94,6 +109,7 @@ import type { AudioFrame, IPlaybackTransport, EncodedAudioChunk, ClientTextMessa
 import { LiveKitAudioPublisher, isLiveKitSipParticipant, type LiveKitAudioPublisherOptions, type LiveKitPlayout } from './LiveKitAudioPublisher.js';
 import { PlaybackAcknowledgementSchema } from './PlaybackAcknowledgements.js';
 import { isClientTranscriptMessage } from './clientTranscript.js';
+import { isClientTextInputMessage, MAX_TEXT_INPUT_LENGTH } from './clientTextInput.js';
 import { LiveKitRoomAudioSource, type LiveKitParticipantLike, type LiveKitRoomLike, type LiveKitRtcModule, type LiveKitTextStreamReaderLike } from '../hearing/LiveKitRoomAudioSource.js';
 
 /** The text stream topic of the control messages when none is configured. */
@@ -110,6 +126,12 @@ const KIND_STANDARD = 0;
 
 /** The text stream topic text input reads unless `textInput` names another: LiveKit's chat topic. */
 const TEXT_INPUT_TOPIC = 'lk.chat';
+
+/**
+ * The most a text-input stream is read to, in UTF-8 bytes: three a UTF-16 code unit, so every text
+ * `isClientTextInputMessage()` accepts fits whole, in any script.
+ */
+const TEXT_INPUT_MAX_BYTES = MAX_TEXT_INPUT_LENGTH * 3;
 
 /** A frame's length in milliseconds. */
 const frameMs = (frame: AudioFrame): number => (frame.samples.length / frame.sampleRate) * 1000;
@@ -155,8 +177,10 @@ export interface LiveKitStreamTransportOptions {
   closeOnDisconnect?: boolean;
   /**
    * Read the text streams the linked participant sends on `topic` (`'lk.chat'` unless given) as `text_input` messages.
-   * Default `true` with `participant`, `false` with `participantIdentity`. A room that already handles the topic keeps
-   * it: text input is off, and one warning line says so.
+   * Default `true` with `participant`, `false` with `participantIdentity`. A stream is read with bounds (12000 bytes,
+   * five seconds) when its reader has an async iterator, and a text `isClientTextInputMessage()` refuses emits
+   * `livekit text input refused` while the transport stays open. A room that already handles the topic keeps it:
+   * text input is off, and one warning line says so.
    */
   textInput?: boolean | { topic?: string };
   /**
@@ -224,9 +248,9 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * |-------------|---------------------------|-----------------------------------------------|
  * | `'audio'`   | `AudioFrame`              | The participant's audio, mono Float32.        |
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
- * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. |
+ * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. With text input, also a `text_input` message for each text the linked participant sends on the text-input topic. |
  * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting, the linked participant leaving while `closeOnDisconnect` is on or, with a publisher, a refused message or a capture that never returned. |
- * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. |
+ * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), a text input refused (`livekit text input refused`, which leaves the transport open), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. |
  *
  * Without a publisher, an error that nothing listens for is written as a
  * console warning instead, since an `'error'` that nothing listens for would
@@ -261,6 +285,11 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private droppedMs = 0;
   /** The participant's text streams being read; {@link close} closes them. */
   private readonly readers = new Set<LiveKitTextStreamReaderLike>();
+  /**
+   * The linked participant's text-input streams being read, apart from the control topic's, so a chat in flight never
+   * counts against the four control streams a speaking transport reads at once; {@link close} closes them too.
+   */
+  private readonly textInputReaders = new Set<LiveKitTextStreamReaderLike>();
   private closing: Promise<void> = Promise.resolve();
   private sendingControls = 0;
   /**
@@ -514,7 +543,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     this.stopWaitingForFirst();
     // what a pause held goes with the transport: a resume after the close emits none of it, and no gap
     this.source.close(); this.held.length = 0; this.heldMs = 0; this.droppedMs = 0;
-    const readers = [...this.readers]; this.readers.clear();
+    const readers = [...this.readers, ...this.textInputReaders]; this.readers.clear(); this.textInputReaders.clear();
     this.closing = (async () => {
       const results = await Promise.allSettled([this.source.whenClosed(), this.inputPump, this.publisher?.close() ?? Promise.resolve(), ...readers.map((reader) => reader.close?.() ?? Promise.resolve())]);
       if (results.some((r) => r.status === 'rejected')) throw new Error('livekit cleanup incomplete');
@@ -539,15 +568,15 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     } catch (error) { this.emitErrorSafe(this.publisher ? new Error('livekit input failed') : error instanceof Error ? error : new Error(String(error))); }
     finally { if (this._state === 'open') this.close(); }
   }
-  /** Reads one text stream through its async iterator: at most 4096 bytes within five seconds, then closes it. */
-  private async readBounded(reader: LiveKitTextStreamReaderLike): Promise<string> {
+  /** Reads one text stream through its async iterator: at most `maxBytes` bytes within five seconds, then closes it. */
+  private async readBounded(reader: LiveKitTextStreamReaderLike, maxBytes = 4096): Promise<string> {
     if (!reader[Symbol.asyncIterator]) throw new Error('bounded text reader required');
     let total = 0; let text = ''; let timer: ReturnType<typeof setTimeout> | undefined;
     const work = (async () => {
       const iterator = reader[Symbol.asyncIterator]!();
       try {
         for (;;) { const next = await iterator.next(); if (next.done) return text;
-          total += Buffer.byteLength(next.value); if (total > 4096) throw new Error('text bound'); text += next.value;
+          total += Buffer.byteLength(next.value); if (total > maxBytes) throw new Error('text bound'); text += next.value;
         }
       } finally { await reader.close?.(); }
     })();
@@ -575,8 +604,27 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       if (this.publisher) this.close();
     }).finally(() => { this.readers.delete(reader); });
   };
-  /** Holds the text-input topic: every stream that arrives on it is closed unread. */
-  private readonly onTextInput = (reader: LiveKitTextStreamReaderLike): void => { closeTextReader(reader); };
+  /**
+   * Takes a stream on the text-input topic. The linked participant's, while the transport is open, is read, with bounds
+   * when its reader has an async iterator and whole otherwise, and emitted as a `text_input` message once
+   * `isClientTextInputMessage()` accepts it; a text it refuses, or a stream that fails or passes the bounds, emits
+   * `livekit text input refused` and the transport stays open. Any other stream is closed unread.
+   */
+  private readonly onTextInput = (reader: LiveKitTextStreamReaderLike, participant: { identity: string }): void => {
+    if (participant.identity !== this.linked || this._state !== 'open') { closeTextReader(reader); return; }
+    this.textInputReaders.add(reader);
+    const read = reader[Symbol.asyncIterator] ? this.readBounded(reader, TEXT_INPUT_MAX_BYTES) : reader.readAll();
+    // The error names the refusal, never the text.
+    const refused = (): void => { if (this._state === 'open') this.emitErrorSafe(new Error('livekit text input refused')); };
+    void read.then((text) => {
+      if (this._state !== 'open') return;
+      const message = { type: 'text_input' as const, text };
+      if (isClientTextInputMessage(message)) this.emit('message', message); else refused();
+    }, refused)
+      // A 'message' listener that throws is reported as the transport's error, as the control topic reports one.
+      .catch((error: unknown) => { if (this._state === 'open') this.emitErrorSafe(error instanceof Error ? error : new Error(String(error))); })
+      .finally(() => { this.textInputReaders.delete(reader); });
+  };
   /**
    * Emit `'error'` only when a listener exists: an unlistened EventEmitter
    * `'error'` throws and takes the whole process down.
