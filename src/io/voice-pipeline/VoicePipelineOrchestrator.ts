@@ -2349,7 +2349,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
         this.fail('budget_exhausted');
         throw new Error('text admission bound');
       }
-      await inPartAsync('tts', () => tts.writeTokens(token));
+      // Checked above: a session without writeTokens() never reaches the loop.
+      await inPartAsync('tts', () => tts.writeTokens!(token));
     }
     if (!this.live(generation)) return;
     await inPartAsync('tts', () => tts.flush());
