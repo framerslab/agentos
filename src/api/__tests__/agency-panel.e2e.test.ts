@@ -1411,6 +1411,63 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       consoleError.mockRestore();
     }
   });
+  it("a panel shortfall under onShortfall: 'proceed' is written through the host's logger as panel_quorum_shortfall, and to no console", async () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiError(500, 'down')], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiError(500, 'down')]]);
+      const lines = await logLines(async () => {
+        const r = await panel({ quorum: { onShortfall: 'proceed' } }).generate('review');
+        expect(r.quorum.met).toBe(false);
+        expect(r.text).toBe('Merged');
+      });
+      expect(lines.filter((l) => l.meta?.event === 'panel_quorum_shortfall')).toEqual([
+        { level: 'warn', message: expect.stringContaining('proceeding'), meta: { event: 'panel_quorum_shortfall', shortfall: 'panel quorum shortfall: 1/3 seats healthy (need 2)' } },
+      ]);
+      expect(consoleWarn.mock.calls.filter(([first]) => String(first).includes('[AgentOS][Panel]'))).toEqual([]);
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+  it("a callback that throws is written through the host's logger as agency_callback_threw with its message masked, and to no console", async () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      threeProviders();
+      const lines = await logLines(async () => {
+        const r = await panel({ on: { agentEnd: () => { throw new Error(`callback saw ${K.ant}`); } } }).generate('review');
+        expect(r.text).toBe('Merged findings');
+      });
+      // The seats' and the chair's agentEnd through the panel's callbacks, and the agency's own through its runner.
+      const threw = lines.filter((l) => l.meta?.event === 'agency_callback_threw');
+      expect(threw.length).toBeGreaterThanOrEqual(2);
+      for (const line of threw) expect(line).toEqual({ level: 'warn', message: expect.any(String), meta: { event: 'agency_callback_threw', callback: 'agentEnd', error: 'callback saw [redacted]' } });
+      expect(JSON.stringify(lines)).not.toContain(K.ant);
+      expect(JSON.stringify(consoleWarn.mock.calls)).not.toContain(K.ant);
+      expect(consoleWarn.mock.calls.filter(([first]) => /callback threw/.test(String(first)))).toEqual([]);
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+  it('a run no seat answered adds no assistant turn to its session: messages() keeps the user turn alone, in send() and in stream(), and the next prompt carries no empty answer', async () => {
+    let decide: (r: ApprovalRequest) => Promise<ApprovalDecision> = hitl.autoReject('no');
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')]]);
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { a: { instructions: 'x' } }, strategy: 'sequential', hitl: { approvals: { beforeAgent: ['a'] }, handler: (r: ApprovalRequest) => decide(r) } } as never);
+    const session = team.session('s') as { send: (t: string) => Promise<AgencyResult>; stream: (t: string) => { textStream: AsyncIterable<string>; text: Promise<string> }; messages: () => Array<{ role: string; content: string }> };
+    expect((await session.send('first')).text).toBe('');
+    expect(session.messages()).toEqual([{ role: 'user', content: 'first' }]);
+    const streamed = session.stream('second');
+    for await (const chunk of streamed.textStream) void chunk;
+    expect(await streamed.text).toBe('');
+    expect(session.messages()).toEqual([{ role: 'user', content: 'first' }, { role: 'user', content: 'second' }]);
+    expect(fetchMock).not.toHaveBeenCalled();
+    decide = hitl.autoApprove();
+    expect((await session.send('third')).text).toBe('B');
+    const sent = calls(OPENAI_CHAT, 'POST');
+    expect(sent).toHaveLength(1);
+    const content = (sent[0].body!.messages as Json[]).filter((m) => m.role === 'user').at(-1)?.content;
+    const userText = Array.isArray(content) ? content.map((p: Json) => String(p.text ?? '')).join('') : String(content ?? '');
+    expect(userText).toBe('User: first\nUser: second\nUser: third');
+    expect(session.messages()).toEqual([{ role: 'user', content: 'first' }, { role: 'user', content: 'second' }, { role: 'user', content: 'third' }, { role: 'assistant', content: 'B' }]);
+  });
 });
 
 describe('25-26. approvals under panel and nested agencies', () => {
