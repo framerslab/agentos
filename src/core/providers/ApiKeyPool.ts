@@ -106,6 +106,19 @@ export function keyPoolStrategyFromEnv(providerId?: string): Pick<ApiKeyPoolConf
   return {};
 }
 
+/**
+ * A timing option as a positive, finite number of milliseconds, or the default when it is not given. Anything else
+ * is refused: a zero or negative recheck makes every failed key due at once and an interval of zero fires without
+ * pause, so a probe would follow a probe; a zero probe timeout makes every probe unknown.
+ */
+function positiveMs(name: string, value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`ApiKeyPool: ${name} must be a positive number of milliseconds (got ${String(value)})`);
+  }
+  return value;
+}
+
 function parseKeys(keys: string | string[]): string[] {
   const list = Array.isArray(keys) ? keys.map((k) => k.trim()) : keys.split(',').map((k) => k.trim());
   const seen = new Set<string>();
@@ -145,10 +158,10 @@ export class ApiKeyPool {
   constructor(keys: string | string[], config?: ApiKeyPoolConfig) {
     this.cooldownMs = config?.cooldownMs ?? DEFAULT_COOLDOWN_MS;
     this.strategy = config?.strategy ?? 'round-robin';
-    this.recheckMs = config?.recheckMs ?? DEFAULT_RECHECK_MS;
-    this.maxRecheckMs = config?.maxRecheckMs ?? DEFAULT_MAX_RECHECK_MS;
+    this.recheckMs = positiveMs('recheckMs', config?.recheckMs, DEFAULT_RECHECK_MS);
+    this.maxRecheckMs = positiveMs('maxRecheckMs', config?.maxRecheckMs, DEFAULT_MAX_RECHECK_MS);
     this.maxRetryAfterMs = config?.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
-    this.probeTimeoutMs = config?.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+    this.probeTimeoutMs = positiveMs('probeTimeoutMs', config?.probeTimeoutMs, DEFAULT_PROBE_TIMEOUT_MS);
     this.probe = config?.probe;
     this.id = config?.id ?? '';
     this.store = config?.id ? config?.store : undefined;
@@ -356,6 +369,7 @@ export class ApiKeyPool {
    * ends its interval on the next tick instead of being kept alive by it.
    */
   startRechecks(intervalMs: number = this.recheckMs): () => void {
+    const every = positiveMs('the recheck interval', intervalMs, this.recheckMs);
     this.stopRechecks();
     const ref = typeof WeakRef === 'function' ? new WeakRef<ApiKeyPool>(this) : undefined;
     const strong = ref ? undefined : this;
@@ -366,7 +380,7 @@ export class ApiKeyPool {
         return;
       }
       void pool.recheck().catch(() => undefined);
-    }, intervalMs);
+    }, every);
     const maybeUnref = timer as unknown as { unref?: () => void };
     if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
     this.recheckTimer = timer;

@@ -434,6 +434,10 @@ export class OpenRouterProvider implements IProvider {
   constructor() {}
 
   public async initialize(config: OpenRouterProviderConfig): Promise<void> {
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     if (!config.apiKey) {
       throw new OpenRouterProviderError(
         'OpenRouter API key (apiKey) is required for initialization.',
@@ -451,8 +455,6 @@ export class OpenRouterProvider implements IProvider {
       requestTimeout: config.requestTimeout || 60000,
       streamRequestTimeout: config.streamRequestTimeout || 180000,
     });
-    // A re-initialize replaces the pool; the old pool's recheck interval stops with it.
-    this.keyPool?.stopRechecks();
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
       ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openrouter')),

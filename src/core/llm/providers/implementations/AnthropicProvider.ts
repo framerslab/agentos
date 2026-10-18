@@ -823,6 +823,10 @@ export class AnthropicProvider implements IProvider {
    * @throws {AnthropicProviderError} If the API key is missing.
    */
   public async initialize(config: AnthropicProviderConfig): Promise<void> {
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     if (!config.apiKey) {
       throw new AnthropicProviderError(
         'API key is required for AnthropicProvider initialization. Set ANTHROPIC_API_KEY.',
@@ -854,8 +858,6 @@ export class AnthropicProvider implements IProvider {
       defaultMaxTokens: 16000,
       ...config,
     };
-    // A re-initialize replaces the pool; the old pool's recheck interval stops with it.
-    this.keyPool?.stopRechecks();
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
       ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('anthropic')),

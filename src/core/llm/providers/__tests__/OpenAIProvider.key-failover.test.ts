@@ -5,6 +5,7 @@ vi.stubGlobal('fetch', fetchMock);
 
 import { OpenAIProvider } from '../implementations/OpenAIProvider';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
+import { InMemoryKeyPoolStateStore } from '../../../providers/KeyPoolStateStore';
 
 /**
  * Several OpenAI keys in one provider (the key pool v2 design): a key that
@@ -172,6 +173,35 @@ describe('OpenAIProvider key failover', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, okChat));
     await ask(p);
     expect(keyOf(callsOf()[3])).toBe('sk_alpha_0001');
+  });
+
+  it('a re-initialize waits for the old pool\'s probe and writes its result before the new pool reads the store', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const store = new InMemoryKeyPoolStateStore();
+    const keyPool = { strategy: 'ordered' as const, recheckMs: 1000, id: 'openai:reinit', store };
+    const p = await provider('sk_alpha_0001,sk_beta_0002', { keyPool });
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, invalidKey)).mockResolvedValueOnce(jsonResponse(200, okChat));
+    await ask(p);
+    const old = (p as unknown as { keyPool: { flush(): Promise<void> } }).keyPool;
+    await old.flush();
+    expect((await store.load('openai:reinit'))?.map((row) => row.status)).toEqual(['failed']);
+    // The interval probes the failed key and its answer comes late, after the re-initialize has begun.
+    let answer: (response: Response) => void = () => undefined;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => {
+      answer = resolve;
+    }));
+    vi.advanceTimersByTime(1001);
+    expect(keyOf(callsOf()[2])).toBe('sk_alpha_0001');
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, modelList));
+    const again = p.initialize({ apiKey: 'sk_alpha_0001,sk_beta_0002', maxRetries: 2, defaultModelId: 'gpt-4o', keyPool });
+    answer(jsonResponse(200, modelList));
+    await again;
+    // The probe's result reached the store before the new pool loaded it, so the new pool holds the key as usable.
+    const fresh = (p as unknown as { keyPool: { snapshot(): Array<Record<string, unknown>> } }).keyPool;
+    expect(fresh).not.toBe(old);
+    expect(fresh.snapshot()[0]).toMatchObject({ status: 'ok' });
+    expect((await store.load('openai:reinit'))?.map((row) => row.status)).toEqual(['ok']);
   });
 
   it('probes a billing failure with a one-token completion on the default model, never a models list', async () => {

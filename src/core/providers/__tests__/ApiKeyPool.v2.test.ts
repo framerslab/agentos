@@ -189,6 +189,19 @@ describe('ApiKeyPool v2', () => {
   });
 
   describe('the recheck interval and close()', () => {
+    it('refuses a zero, negative or non-finite recheck, maximum recheck or probe timeout, and a non-positive interval', () => {
+      for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => new ApiKeyPool('sk_a,sk_b', { recheckMs: bad })).toThrow(RangeError);
+        expect(() => new ApiKeyPool('sk_a,sk_b', { maxRecheckMs: bad })).toThrow(RangeError);
+        expect(() => new ApiKeyPool('sk_a,sk_b', { probeTimeoutMs: bad })).toThrow(RangeError);
+      }
+      const pool = new ApiKeyPool('sk_a,sk_b', { recheckMs: 1000 });
+      const before = vi.getTimerCount();
+      expect(() => pool.startRechecks(0)).toThrow(RangeError);
+      expect(() => pool.startRechecks(-5)).toThrow(RangeError);
+      expect(vi.getTimerCount()).toBe(before);
+    });
+
     it('keeps one interval per pool: a second start replaces the first, and either stop ends it', () => {
       const pool = new ApiKeyPool('sk_a,sk_b', { recheckMs: 1000 });
       const before = vi.getTimerCount();

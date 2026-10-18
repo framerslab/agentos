@@ -815,6 +815,10 @@ export class GeminiProvider implements IProvider {
    * @throws {GeminiProviderError} If the API key is missing.
    */
   public async initialize(config: GeminiProviderConfig): Promise<void> {
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     if (!config.apiKey) {
       throw new GeminiProviderError(
         'API key is required for GeminiProvider initialization. Set GEMINI_API_KEY.',
@@ -829,8 +833,6 @@ export class GeminiProvider implements IProvider {
       defaultModelId: 'gemini-2.5-flash',
       ...config,
     };
-    // A re-initialize replaces the pool; the old pool's recheck interval stops with it.
-    this.keyPool?.stopRechecks();
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
       ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('gemini')),
