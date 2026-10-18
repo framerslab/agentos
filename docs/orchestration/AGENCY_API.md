@@ -464,11 +464,13 @@ vendor and a pre-built seat never count). Zero healthy seats always throws
 `AgencyQuorumError`, whatever `onShortfall` says; any other shortfall throws by
 default or, with `onShortfall: 'proceed'`, writes `panel_quorum_shortfall`
 through the host's logger and goes on. Construction
-rejects a `minAgents` above the seat count, a `minProviders` above the distinct
-providers the seats can answer with at once (at most one per seat; a fixed
-seat's hops count when their key, URL or binary is present at construction; one
-more per pre-built seat), a `minVendors` above the vendors the config seats can
-reach, and `minVendors` with a pool entry whose vendor is unknown.
+rejects a `minAgents` above the seat count, a `minProviders` above the most
+distinct providers one assignment of the seats can answer with (each seat one
+provider of its own reach, so a seat that reaches three providers beside two
+seats on one makes two, not three; a fixed seat's hops count when their key,
+URL or binary is present at construction; one more per pre-built seat), a
+`minVendors` above the vendors the config seats can answer with the same way,
+and `minVendors` with a pool entry whose vendor is unknown.
 
 The chair is seated from its `from` list with the preferred rule, or as a fixed
 seat from its own config or the agency level. It gets the task and the healthy

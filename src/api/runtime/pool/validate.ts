@@ -130,6 +130,9 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       for (const [name, v] of entryVendor) if (!v) fail(`modelPool entry "${name}": its vendor is unknown; declare vendor on the entry or drop quorum.minVendors`);
     }
   }
+  // Each config seat's providers and vendors within reach: a seat answers once, with one of each.
+  const seatProviders: Array<Set<string>> = [];
+  const seatVendors: Array<Set<string>> = [];
   for (const [name, seat] of configSeats) {
     const pooled = isPooledSeat(seat, opts);
     if (seat.from !== undefined) {
@@ -155,9 +158,11 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
     if (pooledSurface && !pooled) {
       const resolved = resolveSeatCredentials({ provider: seat.provider, model: seat.model, apiKey: seat.apiKey, baseUrl: seat.baseUrl, inherits: true }, opts);
       if (!resolved.ok) fail(`seat "${name}": ${resolved.reason}`);
+      const providers = new Set<string>([resolved.value.provider]);
+      const vendors = new Set<string>();
       reachableProviders.add(resolved.value.provider);
       const v = vendorOf(resolved.value.provider, resolved.value.model, { vendor: seat.vendor, baseUrl: resolved.value.baseUrl });
-      if (v) reachableVendors.add(v);
+      if (v) vendors.add(v);
       else if (opts.quorum?.minVendors !== undefined) fail(`seat "${name}": its vendor is unknown; declare vendor on the seat or drop quorum.minVendors`);
       // A hop of the seat's own chain can answer for it, and the record then names the hop's provider and vendor.
       // Only a hop seating keeps counts: one whose key, URL or binary is unmet is dropped for the call and answers nothing.
@@ -165,18 +170,28 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
         if (!hop || typeof hop.provider !== 'string') continue;
         const hopResolved = resolveSeatCredentials({ provider: hop.provider, model: hop.model, apiKey: hop.apiKey, baseUrl: hop.baseUrl, inherits: false }, opts);
         if (!hopResolved.ok || availabilityOf(hopResolved.value, { breakerOpen: () => false })) continue;
+        providers.add(hopResolved.value.provider);
         reachableProviders.add(hopResolved.value.provider);
         const hopVendor = vendorOf(hopResolved.value.provider, hopResolved.value.model, { vendor: hop.vendor, baseUrl: hopResolved.value.baseUrl });
-        if (hopVendor) reachableVendors.add(hopVendor);
+        if (hopVendor) vendors.add(hopVendor);
       }
+      vendors.forEach((vendor) => reachableVendors.add(vendor));
+      seatProviders.push(providers);
+      seatVendors.push(vendors);
     } else if (pooled) {
       const candidates = seat.from ?? Object.keys(pool!);
+      const providers = new Set<string>();
+      const vendors = new Set<string>();
       for (const c of candidates) {
+        providers.add(pool![c].provider);
         reachableProviders.add(pool![c].provider);
         const v = entryVendor.get(c);
-        if (v) reachableVendors.add(v);
+        if (v) vendors.add(v);
         else if (opts.quorum?.minVendors !== undefined) fail(`modelPool entry "${c}": its vendor is unknown; declare vendor on the entry or drop quorum.minVendors`);
       }
+      vendors.forEach((vendor) => reachableVendors.add(vendor));
+      seatProviders.push(providers);
+      seatVendors.push(vendors);
     }
   }
   if (isPanel) {
@@ -200,15 +215,20 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
     if (q.minAgents !== undefined && q.minAgents > seats.length) fail(`quorum.minAgents (${q.minAgents}) is above the number of seats (${seats.length})`);
     if (q.minVendors !== undefined) {
       if (q.minVendors > configSeats.length) fail(`quorum.minVendors (${q.minVendors}) is above the number of config seats (${configSeats.length})`);
-      if (q.minVendors > reachableVendors.size) fail(`quorum.minVendors (${q.minVendors}) is above the ${reachableVendors.size} distinct vendor(s) the seats can reach`);
+      // A pre-built seat's vendor is unknown and never counts, so the config seats alone answer the vendor quorum.
+      const vendorsAtOnce = distinctAtOnce(seatVendors);
+      if (q.minVendors > vendorsAtOnce) {
+        fail(`quorum.minVendors (${q.minVendors}) is above the ${vendorsAtOnce} distinct vendor(s) the seats can answer with at once (${reachableVendors.size} vendor(s) within the config seats' reach, one per seat)`);
+      }
     }
   }
-  // Each seat answers once, so a run counts at most one provider per seat: the bound is the smaller of the seat count and
-  // the distinct providers within reach, one more per pre-built seat, whose result names one provider the agency cannot
-  // see. A panel is checked with or without a pool: its fixed seats' providers are counted above either way.
+  // Each seat answers once, with one provider of its own reach: the bound is the most distinct providers one assignment of
+  // the config seats can answer with (a seat that reaches three providers beside two seats on one makes two, not three),
+  // one more per pre-built seat, whose result names one provider the agency cannot see. A panel is checked with or
+  // without a pool: its fixed seats' providers are counted above either way.
   const prebuiltSeats = seats.length - configSeats.length;
   const minProviders = opts.quorum?.minProviders;
-  const providersAtOnce = Math.min(seats.length, reachableProviders.size + prebuiltSeats);
+  const providersAtOnce = distinctAtOnce(seatProviders) + prebuiltSeats;
   if ((isPanel || (strategy === 'parallel' && pool)) && minProviders !== undefined && minProviders > providersAtOnce) {
     fail(
       `quorum.minProviders (${minProviders}) is above the ${providersAtOnce} distinct provider(s) the seats can answer with at once ` +
@@ -216,4 +236,32 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
     );
   }
   if (pool && strategy === 'hierarchical' && !opts.model && !opts.provider) fail('Hierarchical strategy requires an agency-level model or provider for the manager agent.');
+}
+
+/**
+ * The most distinct values one assignment of the seats can answer with, each
+ * seat taking one value of its own set: a maximum bipartite matching of seats
+ * to values, found by augmenting paths. Seats and providers are few, so the
+ * plain search is enough.
+ *
+ * @param options - For each seat, the values it can answer with.
+ * @returns How many seats can be given distinct values at once.
+ */
+function distinctAtOnce(options: ReadonlyArray<ReadonlySet<string>>): number {
+  const holder = new Map<string, number>();
+  const assign = (seat: number, tried: Set<string>): boolean => {
+    for (const value of options[seat]) {
+      if (tried.has(value)) continue;
+      tried.add(value);
+      const current = holder.get(value);
+      if (current === undefined || assign(current, tried)) {
+        holder.set(value, seat);
+        return true;
+      }
+    }
+    return false;
+  };
+  let matched = 0;
+  for (let seat = 0; seat < options.length; seat += 1) if (assign(seat, new Set())) matched += 1;
+  return matched;
 }
