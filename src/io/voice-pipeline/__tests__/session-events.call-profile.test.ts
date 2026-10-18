@@ -198,6 +198,42 @@ describe('session events under a call profile', () => {
     expect(f.profile.onFailure).not.toHaveBeenCalled();
   });
 
+  it("reports no reply's text when speech interrupts a turn the agent has yet to answer", async () => {
+    const f = await call();
+    const cut: string[] = [];
+    f.session.on('barge_in', (event) => cut.push(event.interruptedText));
+
+    // One turn, whose reply plays to its end.
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    // The next turn holds at its agent_thinking, before its reply has a word, and six 20 ms frames of speech cut it.
+    let thinking!: () => void;
+    vi.mocked(f.transport.sendControl).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          thinking = resolve;
+        })
+    );
+    f.turn();
+    await vi.waitFor(() => expect(thinking).toBeDefined());
+    expect(f.runtime.state).toBe('processing');
+    for (let i = 0; i < 6; i++) {
+      f.audio();
+      await vi.waitFor(() => expect(f.endpoint.pushAudio).toHaveBeenCalledTimes(i + 1));
+    }
+    await vi.waitFor(() => expect(f.log).toContain('barge_in cancel'));
+    thinking();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    // The speech cut no words: the reply that played before it is not reported as interrupted.
+    expect(cut).toEqual(['']);
+    expect(f.log.filter((line) => line.startsWith('item assistant'))).toEqual(['item assistant played hello|hello']);
+    await f.runtime.stopSession();
+  });
+
   it('speaks a prompt as speech the host created', async () => {
     const f = await call();
     const prompt = f.runtime.pushToTTS('Thanks for calling.');

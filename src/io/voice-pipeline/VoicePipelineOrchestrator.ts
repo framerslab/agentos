@@ -2068,7 +2068,10 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   private readonly events: SessionEvents;
   /** The language of the current turn's last final transcript, for the user's conversation item. */
   private turnLanguage?: string;
-  /** The text of the reply or prompt being spoken, for `barge_in` and an interrupted conversation item. */
+  /**
+   * The text of the reply or prompt being spoken, for `barge_in` and an interrupted conversation item; empty while
+   * none is, as while the call processes a turn.
+   */
   private replyText = '';
   /** Whether a reply or a prompt is being spoken: an interruption cuts it. */
   private replying = false;
@@ -2461,8 +2464,9 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.queue = undefined;
     await this.send({ type: 'agent_done', text, durationMs: queue.stats().playedMs }, generation);
     if (!this.live(generation)) return;
-    // The reply played to its end: it joins the conversation as heard.
+    // The reply played to its end: it joins the conversation as heard, and no later barge-in reports its text.
     this.replying = false;
+    this.replyText = '';
     if (text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text, playedText: text, interrupted: false }, createdAt: Date.now() });
     if (!this.live(generation)) return;
     this.changing = true;
@@ -2510,12 +2514,15 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.profile.onInterrupted(interrupted);
     this.emit('interrupted', interrupted);
     if (cause === 'speech') {
-      this.events.emit('barge_in', { speechDurationMs, interruptedText: this.replyText, playedDurationMs: this.queue?.stats().playedMs ?? 0, action: 'cancel', createdAt: Date.now() });
+      // Speech while the call processes a turn cuts no reply: the text of the last one, which played, is not reported.
+      this.events.emit('barge_in', { speechDurationMs, interruptedText: this.replying ? this.replyText : '', playedDurationMs: this.queue?.stats().playedMs ?? 0, action: 'cancel', createdAt: Date.now() });
     }
     if (this.replying) {
       this.replying = false;
+      const text = this.replyText;
+      this.replyText = '';
       // Which of its words were heard is not known here.
-      if (this.replyText) this.events.emit('conversation_item_added', { item: { role: 'assistant', text: this.replyText, playedText: '', interrupted: true }, createdAt: Date.now() });
+      if (text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text, playedText: '', interrupted: true }, createdAt: Date.now() });
     }
     this.agent.abort?.();
     const tts = this.tts;
