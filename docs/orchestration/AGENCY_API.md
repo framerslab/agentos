@@ -401,7 +401,10 @@ emergent judge resolve their keys the same way. A fixed seat's own
 unmet is dropped for the call and listed in `seating.skipped`. A seat with
 `runtime: 'gmi'` is rejected in such an agency; put a `gmi()` agent in the
 roster as a pre-built seat instead. Agencies without these options keep the
-rules of the previous section.
+rules of the previous section; their emergent judge takes the agency-level key
+on the agency's provider, else a default that names its provider, and leaves
+the provider's variables to the usual order, as the manager's and the
+specialists' calls do.
 
 Every credential of eight characters or more that the call can send (from the
 config, a default or the environment; a comma-separated key pool part by part;
@@ -410,7 +413,8 @@ and chair included) is replaced with `[redacted]` in the result's text,
 `agentCalls` (outputs, tool arguments and results, an Error a tool returned
 as its output included), `toolCalls`, `transcriptDelta`, seat records, thrown
 errors (message, stack, cause and details), `on.error` and `agentEnd`
-payloads, the provenance trail, stream parts (a secret split between two text
+payloads, the provenance trail (an approval decision's reason and
+modifications included), stream parts (a secret split between two text
 chunks, or around a tool call and its result between two steps, is masked
 whole; every other string of a part too), tool errors and tool turns (a tool result that holds a
 credential reaches the seat's next request masked; a successful result is
@@ -419,7 +423,8 @@ credentials as the tool gave them, while a failed tool's text also loses any
 URL credentials and `key=` value; the output is masked as a value before it is
 serialized, so a listed value with a quote or a backslash, which JSON escaping
 would change, is masked whole, a number whose digits hold a listed value
-becomes the string `[redacted]`, the call record and the tool-result part hold
+becomes the string `[redacted]` (in a tool's output alone: the library's own
+counts, durations and timestamps stay numbers), the call record and the tool-result part hold
 the masked output, and the turn the next request carries stays JSON), `onFallback` and the `fallback_fired` and
 `fallback_exhausted` log lines. What a seat answers reaches the next seat, a
 synthesizer, a manager or the chair masked. A pre-built seat's answers and
