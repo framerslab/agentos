@@ -349,6 +349,23 @@ describe('session events under a call profile', () => {
     await f.runtime.stopSession();
   });
 
+  it('hands the deprecated turn_complete to no listener after one of them closes the call', async () => {
+    const f = await call();
+    const heard: string[] = [];
+    f.runtime.on('turn_complete', () => {
+      heard.push('the listener that closes');
+      void f.runtime.stopSession('bye');
+    });
+    f.runtime.on('turn_complete', () => heard.push('a later orchestrator listener'));
+    f.session.on('turn_complete', () => heard.push('a call listener'));
+
+    f.turn();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+    await f.runtime.stopSession();
+
+    expect(heard).toEqual(['the listener that closes']);
+  });
+
   it('names the transport as the source of a reply whose audio the transport refuses', async () => {
     const f = await call();
     f.transport.sendAudio = vi.fn(async () => {

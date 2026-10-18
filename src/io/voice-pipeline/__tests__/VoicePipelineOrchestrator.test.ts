@@ -2231,6 +2231,23 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(failures).toEqual([gone]);
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('hands the deprecated turn_complete to no listener after one of them stops the session', async () => {
+    const session = await start();
+    const heard: string[] = [];
+    orchestrator.on('turn_complete', () => {
+      heard.push('the listener that stops');
+      void orchestrator.stopSession('bye');
+    });
+    orchestrator.on('turn_complete', () => heard.push('a later orchestrator listener'));
+    session.on('turn_complete', () => heard.push('a session listener'));
+    session.on('close', () => heard.push('close'));
+
+    await takeTurn();
+
+    expect(heard).toEqual(['the listener that stops', 'close']);
+    expect(orchestrator.state).toBe('closed');
+  });
 });
 
 // ============================================================================
