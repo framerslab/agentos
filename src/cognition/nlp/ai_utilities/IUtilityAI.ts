@@ -180,10 +180,14 @@ export interface ParseJsonOptions<_T = any> {
   /** The provider a repair calls. LLMUtilityAI: else its `defaultProviderId`. */
   llmProviderIdForFix?: string;
   /**
-   * Optional JSON schema to validate the parsed object against, with Ajv. StatisticalUtilityAI answers `null` for a
-   * value that fails it. LLMUtilityAI sends a value that fails it for repair as it sends a text that does not parse,
-   * names the schema (and a parsed value's errors) in the repair request, and answers `null` when no repair passes it.
-   * A schema Ajv cannot compile no value passes: both answer `null`, and LLMUtilityAI asks for no repair.
+   * Optional JSON schema (draft-07) to validate the parsed object against, with Ajv. The standard formats are checked
+   * (`date-time`, `email`, `uri` and the others of `ajv-formats`), a keyword or a format Ajv does not know is passed
+   * over, as JSON Schema says, and a value is coerced to the type its schema names where it can (`"5"` to 5) in the
+   * value answered. The schema may be built anew for every call, under the same `$id` too. StatisticalUtilityAI
+   * answers `null` for a value that fails it. LLMUtilityAI sends a value that fails it for repair as it sends a text
+   * that does not parse, names the schema (and a parsed value's errors) in the repair request, and answers `null` when
+   * no repair passes it. A schema Ajv cannot compile no value passes: both answer `null`, and LLMUtilityAI asks for no
+   * repair.
    */
   targetSchema?: JSONSchemaObject; // Using the type from ITool.ts for consistency
   /**

@@ -21,12 +21,10 @@ import {
   TextNormalizationOptions, NGramOptions, ReadabilityOptions, ReadabilityResult,
 } from './IUtilityAI';
 import * as naturalModule from 'natural';
-import Ajv from 'ajv';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
+import type { SchemaCheck } from '../../../core/utils/schemaChecks';
 import { detectLanguageTrigram } from './trigram-language-profiles';
-
-/** An Ajv check compiled from a `targetSchema`: whether a value passes, and the errors of the last value that did not. */
-type SchemaCheck = ((data: unknown) => boolean) & { errors?: unknown[] | null };
+import { targetSchemaChecks } from './targetSchemaChecks';
 
 /**
  * The `natural` library's runtime members.
@@ -328,8 +326,6 @@ export class StatisticalUtilityAI implements IUtilityAI {
   private sentimentLexicons: Map<string, SentimentLexicon>;
   /** The entries of `sentimentConfig.lexiconPath`, read by `initialize()`. */
   private customSentimentEntries: Array<[string, unknown]> = [];
-  /** Checks `parseJsonSafe()`'s `targetSchema`, with the options LLMUtilityAI checks it with. */
-  private readonly ajv = new Ajv({ allErrors: true, coerceTypes: true });
 
   private createStemmerRegistry(): Record<string, naturalModule.Stemmer> {
     const registry: Record<string, naturalModule.Stemmer> = {
@@ -1192,10 +1188,11 @@ export class StatisticalUtilityAI implements IUtilityAI {
   }
 
   /**
-   * `JSON.parse`, then a check against `targetSchema` with Ajv when given, with the options LLMUtilityAI checks with.
-   * Answers `null` when the text is empty or does not parse, when the value fails the schema, and when Ajv cannot
-   * compile the schema. It repairs nothing: a HybridUtilityAI that holds an LLM-backed class sends a text this answers
-   * `null` for on to it.
+   * `JSON.parse`, then a check against `targetSchema` with Ajv when given, as LLMUtilityAI checks it: the standard
+   * formats checked, a keyword or a format Ajv does not know passed over, and a value coerced to the type its schema
+   * names where it can (`targetSchemaChecks`). Answers `null` when the text is empty or does not parse, when the value
+   * fails the schema, and when Ajv cannot compile the schema. It repairs nothing: a HybridUtilityAI that holds an
+   * LLM-backed class sends a text this answers `null` for on to it.
    */
   public async parseJsonSafe<T = any>(jsonString: string, options?: ParseJsonOptions<T>): Promise<T | null> {
     this.ensureInitialized();
@@ -1215,7 +1212,7 @@ export class StatisticalUtilityAI implements IUtilityAI {
     if (options?.targetSchema) {
       let validate: SchemaCheck;
       try {
-        validate = this.ajv.compile(options.targetSchema) as SchemaCheck;
+        validate = targetSchemaChecks.check(options.targetSchema);
       } catch (schemaError: any) {
         console.warn(`StatisticalUtilityAI (ID: ${this.utilityId}): targetSchema does not compile (${schemaError?.message ?? schemaError}); no text can pass it.`);
         return null;

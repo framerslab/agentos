@@ -35,16 +35,8 @@ import { IPromptEngineUtilityAI, ModelTargetInfo } from '../../../core/llm/IProm
 import { ConversationMessage as Message, MessageRole } from '../../../core/conversation/ConversationMessage';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 import { uuidv4 } from '../../../core/utils/uuid';
-import Ajv from 'ajv';
-
-type AjvValidationError = {
-  instancePath?: string;
-  schemaPath?: string;
-  message?: string;
-  params?: Record<string, unknown>;
-};
-
-type AjvValidateFn = ((data: unknown) => boolean) & { errors?: AjvValidationError[] | null };
+import type { SchemaCheck } from '../../../core/utils/schemaChecks';
+import { targetSchemaChecks } from './targetSchemaChecks';
 
 /**
  * A number in a reply: a number, or a string that holds one (`"0.8"`); `NaN` for anything else, `null`, a boolean,
@@ -114,11 +106,9 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
   private config!: LLMUtilityAIConfig;
   private llmProviderManager!: AIModelProviderManager;
   private isInitialized: boolean = false;
-  private ajv: Ajv;
 
   constructor(utilityId?: string) {
     this.utilityId = utilityId || `llm-utility-${uuidv4()}`;
-    this.ajv = new Ajv({allErrors: true, coerceTypes: true});
   }
 
   public async initialize(config: LLMUtilityAIConfig): Promise<void> { // Config type is now specific
@@ -312,20 +302,22 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
   }
 
   /**
-   * `JSON.parse`, then a check against `targetSchema` with Ajv when given. With `attemptFixWithLLM`, a text that fails
-   * either is sent for repair, up to `maxRepairAttempts` times (1 unless it is a whole number of 1 or more), each
-   * repair on the text the last one answered, on `llmModelIdForFix` (else `jsonFixerModelId`, else `defaultModelId`)
-   * and `llmProviderIdForFix` (else `defaultProviderId`). A repair request names `targetSchema` when given, and the
+   * `JSON.parse`, then a check against `targetSchema` with Ajv when given, as StatisticalUtilityAI checks it: the
+   * standard formats checked, a keyword or a format Ajv does not know passed over, and a value coerced to the type its
+   * schema names where it can (`targetSchemaChecks`). With `attemptFixWithLLM`, a text that fails either is sent for
+   * repair, up to `maxRepairAttempts` times (1 unless it is a whole number of 1 or more), each repair on the text the
+   * last one answered, on `llmModelIdForFix` (else `jsonFixerModelId`, else `defaultModelId`) and
+   * `llmProviderIdForFix` (else `defaultProviderId`). A repair request names `targetSchema` when given, and the
    * schema's errors when the text parsed and failed it. Answers `null` when no repair parses and passes the schema, or
    * a repair call fails. A `targetSchema` that Ajv cannot compile no text can pass: the call answers `null` at once,
    * with a warning, and asks for no repair.
    */
   public async parseJsonSafe<T = any>(jsonString: string, options?: ParseJsonOptions<T>): Promise<T | null> {
     this.ensureInitialized();
-    let validate: AjvValidateFn | undefined;
+    let validate: SchemaCheck | undefined;
     if (options?.targetSchema) {
       try {
-        validate = this.ajv.compile(options.targetSchema) as AjvValidateFn;
+        validate = targetSchemaChecks.check(options.targetSchema);
       } catch (schemaError: any) {
         console.warn(`LLMUtilityAI (${this.utilityId}): targetSchema does not compile (${schemaError?.message ?? schemaError}); no text can pass it.`);
         return null;
