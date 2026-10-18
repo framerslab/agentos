@@ -35,7 +35,8 @@ import {
 import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
 import { redactUrlSecrets } from '../url-secrets';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
-import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
+import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
+import { classifyKeyFailure, retryAfterMs, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
@@ -61,6 +62,13 @@ export interface GeminiProviderConfig {
    * stays out of proxy and access logs.
    */
   apiKey: string;
+  /**
+   * The key pool behind a comma-separated `apiKey`: `ordered` prefers the
+   * earliest usable key (a cost order), `round-robin` spreads load (the
+   * default; `AGENTOS_KEY_POOL_STRATEGY=ordered` changes it when this is
+   * absent); `store` and `id` persist the keys' standing across restarts.
+   */
+  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'store' | 'id'>;
   /**
    * Base URL for the Gemini API.
    * @default "https://generativelanguage.googleapis.com/v1beta"
@@ -821,7 +829,12 @@ export class GeminiProvider implements IProvider {
       defaultModelId: 'gemini-2.5-flash',
       ...config,
     };
-    this.keyPool = new ApiKeyPool(config.apiKey);
+    this.keyPool = new ApiKeyPool(config.apiKey, {
+      ...(config.keyPool ?? {}),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      probe: (key) => this.probeKey(key),
+    });
+    await this.keyPool.ready();
     this.defaultModelId = this.config.defaultModelId;
     this.isInitialized = true;
 
@@ -1897,6 +1910,37 @@ export class GeminiProvider implements IProvider {
     return this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
   }
 
+  /** Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. */
+  private async probeKey(apiKey: string): Promise<ProbeResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const response = await fetch(`${this.config.baseURL}/models?pageSize=1`, { method: 'GET', headers: this.requestHeaders(apiKey), signal: controller.signal });
+      if (response.ok) return 'ok';
+      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
+      return classifyKeyFailure(response.status, text) ?? 'unknown';
+    } catch {
+      return 'unknown';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */
+  private allKeysFailedError(message?: string, status?: number, errorStatus?: string): GeminiProviderError {
+    const kinds = Array.from(
+      new Set((this.keyPool?.snapshot() ?? []).map((state) => state.kind).filter((kind): kind is KeyFailureKind => kind !== undefined)),
+    );
+    const retryAfter = this.keyPool?.soonestReturnMs();
+    return new GeminiProviderError(
+      message ?? `Every Gemini API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
+      'ALL_KEYS_FAILED',
+      status,
+      errorStatus,
+      { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
+    );
+  }
+
   /**
    * Request headers for one call. The key travels in `x-goog-api-key`, which
    * Gemini accepts on every endpoint this provider calls.
@@ -1947,11 +1991,17 @@ export class GeminiProvider implements IProvider {
         ? requestTimeoutOverride
         : this.config.requestTimeout;
 
+    // Key hops this request has made: a key-scoped failure moves to the next
+    // usable key at once (at most one hop per key) without spending a
+    // transient attempt.
+    let keyHops = 0;
     for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
       if (abortSignal?.aborted) {
         throw new GeminiProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
       }
       const apiKey = this.nextApiKey();
+      if (apiKey === '') throw this.allKeysFailedError();
+      const attemptStartedAt = Date.now();
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
 
@@ -1970,6 +2020,27 @@ export class GeminiProvider implements IProvider {
           const errorMessage = errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`;
           const errorStatus = errorData.error?.status;
 
+          // A key-scoped failure (a bad or revoked key, an unpaid account, a
+          // throttle) takes this key out of rotation and moves to the next
+          // usable key at once; the hop spends no transient attempt.
+          const keyFailure = classifyKeyFailure(response.status, JSON.stringify(errorData));
+          const serverRetryAfterMs = retryAfterMs(response.headers.get('retry-after'), undefined, this.config.keyPool?.maxRetryAfterMs);
+          if (keyFailure && this.keyPool && this.keyPool.size > 1) {
+            this.keyPool.markFailed(apiKey, keyFailure, {
+              status: response.status,
+              at: attemptStartedAt,
+              ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
+            });
+            lastError = new GeminiProviderError(errorMessage, keyFailure === 'quota' ? 'RATE_LIMIT_EXCEEDED' : 'API_CLIENT_ERROR', response.status, errorStatus, errorData);
+            if (this.keyPool.usable() > 0 && ++keyHops < this.keyPool.size) {
+              attempt -= 1;
+              continue;
+            }
+            if (this.keyPool.usable() === 0 && keyFailure !== 'quota') {
+              throw this.allKeysFailedError(errorMessage, response.status, errorStatus);
+            }
+          }
+
           // Non-retryable client errors (auth, bad request, not found)
           if (response.status === 400 || response.status === 401 || response.status === 403 || response.status === 404) {
             throw new GeminiProviderError(
@@ -1981,7 +2052,7 @@ export class GeminiProvider implements IProvider {
             );
           }
 
-          // Rate limit — respect Retry-After header
+          // Rate limit: the key rests, then respect Retry-After
           if (response.status === 429) {
             lastError = new GeminiProviderError(
               errorMessage,
@@ -1990,13 +2061,11 @@ export class GeminiProvider implements IProvider {
               errorStatus,
               errorData,
             );
-            // The key's quota is spent: the pool rests it, and the next
-            // attempt draws another key when one is configured.
-            this.keyPool?.markExhausted(apiKey);
-            const retryAfter = response.headers.get('retry-after');
+            // A single key rests here; a pool of several was marked above.
+            if (!(this.keyPool && this.keyPool.size > 1)) this.keyPool?.markExhausted(apiKey);
             // Retry-After is authoritative when present; otherwise jittered backoff.
-            const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : computeRetryBackoffMs(attempt);
-            await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+            const waitMs = serverRetryAfterMs ?? computeRetryBackoffMs(attempt);
+            await new Promise(resolve => setTimeout(resolve, waitMs));
             continue;
           }
 
@@ -2096,8 +2165,12 @@ export class GeminiProvider implements IProvider {
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({})) as Partial<GeminiAPIError>;
         const errorMessage = errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`;
-        // A key whose quota is spent rests, so the next request draws another.
-        if (response.status === 429) this.keyPool?.markExhausted(apiKey);
+        // A key-scoped failure takes the key out, so the next request draws another.
+        const streamKeyFailure = classifyKeyFailure(response.status, JSON.stringify(errorData));
+        if (streamKeyFailure) {
+          const serverRetryAfterMs = retryAfterMs(response.headers.get('retry-after'), undefined, this.config.keyPool?.maxRetryAfterMs);
+          this.keyPool?.markFailed(apiKey, streamKeyFailure, { status: response.status, ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}) });
+        }
         throw new GeminiProviderError(
           errorMessage,
           'STREAM_CONNECTION_FAILED',

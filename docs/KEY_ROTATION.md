@@ -1,40 +1,98 @@
 # API Key Rotation
 
-AgentOS rotates API keys for the providers listed under [Supported Providers](#supported-providers). Set the provider's API key environment variable (or the `apiKey` you pass) to a comma-separated list and each provider instance rotates through it.
+AgentOS runs several API keys per provider from one key string. Set the provider's API key environment variable (or the `apiKey` you pass) to a comma-separated list and the provider instance builds a key pool from it: a strategy picks the key for each request, a key-scoped failure takes a key out of rotation and moves the request to the next usable key, a probe brings a failed key back only when it works again, and a host can persist the keys' standing across restarts.
 
 ## Usage
 
 ```bash
 # Single key:
-ELEVENLABS_API_KEY=sk_primary
+ANTHROPIC_API_KEY=sk-ant-primary
 
-# Multiple keys with automatic rotation:
-ELEVENLABS_API_KEY=sk_primary,sk_backup,sk_overflow
-
-# LLM providers that rotate:
+# Several keys, round-robin (the default):
 OPENAI_API_KEY=sk-key1,sk-key2
-ANTHROPIC_API_KEY=sk-ant-key1,sk-ant-key2
+
+# Several keys in cost order: the first usable key is used until it fails.
+# Credited keys first, the paid key last.
+ANTHROPIC_API_KEY=sk-ant-credited-1,sk-ant-credited-2,sk-ant-paid
+AGENTOS_KEY_POOL_STRATEGY=ordered
+```
+
+The same `apiKey` string works through the TypeScript API:
+
+```ts
+import { AnthropicProvider } from '@framers/agentos';
+
+const provider = new AnthropicProvider();
+await provider.initialize({
+  apiKey: process.env.ANTHROPIC_API_KEY!,
+  keyPool: { strategy: 'ordered', recheckMs: 30 * 60_000 },
+});
 ```
 
 ## How It Works
 
-**Weighted round-robin:** Each provider instance builds its own [`ApiKeyPool`](https://github.com/framerslab/agentos/blob/master/src/core/providers/ApiKeyPool.ts) from its key string. The first key fills two rotation slots and every other key one, so in a 3-key pool the selection frequency is 50% / 25% / 25%. A single key is used as given.
+**Strategies.** `round-robin` (the default) is weighted: the first key fills two rotation slots and every other key one, so in a 3-key pool the selection frequency is 50% / 25% / 25%. `ordered` prefers the earliest usable key in the configured order, so a working key keeps being used until it fails. The strategy comes from the provider's `keyPool.strategy`, else from `AGENTOS_KEY_POOL_STRATEGY` (`ordered` or `round-robin`), else round-robin. A single key is used as given, whatever the strategy.
 
-**Resting a key:** A key marked exhausted leaves rotation for 15 minutes; when every key is resting, the pool returns the one whose rest ends first. Which failures mark a key depends on the provider:
+**Failure kinds.** `classifyKeyFailure()` in [`quotaErrors.ts`](https://github.com/framerslab/agentos/blob/master/src/core/providers/quotaErrors.ts) names what an HTTP answer says about the key, by the status first and by the parsed error envelope second, never by a search of the raw body, so a request that was itself invalid never takes a working key out:
 
-| Provider | Marks the key on | Then |
+| Kind | The answers that mean it | What the pool does |
 |---|---|---|
-| Anthropic, Gemini (LLM) | HTTP 429 | The next attempt or request draws another key. |
-| OpenRouter (LLM) | HTTP 402 or 429 | The next attempt or request draws another key. |
-| ElevenLabs TTS and SFX, Deepgram TTS, and the voice pipeline's batch TTS for OpenAI, ElevenLabs, Cartesia, Hume and Deepgram Aura | An error `isQuotaError()` recognizes, when the pool holds more than one key | The request is retried once on the next key. |
+| `quota` | HTTP 429 (a throttle, a spent rate limit) and 456 | Rests the key for the Retry-After when the server sent one (at most `maxRetryAfterMs`, one hour), else for `cooldownMs` (15 minutes), then puts it back. |
+| `auth` | HTTP 401; a 403 whose envelope names the key (Anthropic's `permission_error` and `authentication_error`, OpenAI's `invalid_api_key` and `insufficient_permissions`, Requesty's "Invalid authorization token"); Google's HTTP 400 with reason `API_KEY_INVALID` | Takes the key out until a probe passes. |
+| `billing` | HTTP 402; a 429 whose envelope says `insufficient_quota` (OpenAI); Anthropic's HTTP 400 "Your credit balance is too low" | Takes the key out until a probe passes. |
 
-Every other provider in the list below rotates its keys but never marks one exhausted.
+Every other answer (a bad request, a missing model, a server error, a 403 for a disallowed model or region) is the request's or the server's fault and leaves the key alone.
 
-`isQuotaError()` recognizes HTTP 429, 402 and 456, and response bodies that contain `quota_exceeded`, `rate_limit_exceeded`, `insufficient_quota`, `overloaded_error`, `resource_exhausted` or `rate_limit` (case-insensitive).
+**Hops.** When a request's key fails in one of these kinds and the pool has another usable key, the provider takes the key out and re-sends the same request with the next usable key at once. A hop spends none of the provider's retry attempts (those still bound the 429 waits, the 5xx retries and the network retries), and a pool of N keys hops at most N-1 times for one request. When every key is out, the provider throws an error with code `ALL_KEYS_FAILED`, whose `details` carry the `kinds` seen and `retryAfterMs`, the soonest a key may come back; no credential is sent again until one returns. `generateText()` treats `ALL_KEYS_FAILED` like a provider outage and moves to the next provider in its order.
 
-**Pools are per instance:** two providers that read the same environment variable keep separate pools, so a key one of them rests stays in the other's rotation. `getKeyPool()` in `ApiKeyPoolRegistry.ts` returns one shared pool per environment variable; no built-in provider calls it.
+| Provider | Hops on a key failure | Streaming |
+|---|---|---|
+| Anthropic | Yes, inside the request | Hops before the first event reaches the caller; an in-stream error event that names the key marks it. |
+| OpenAI (and Groq, Mistral, Together, xAI and LiteLLM, which send through an `OpenAIProvider`) | Yes, inside the attempt, so the attempt budget is untouched | Hops before the first event, as the same request path serves both. |
+| Gemini | Yes, inside the request | A streaming request marks the key; the next request draws another. |
+| OpenRouter | Yes, inside the request | The same. |
+| Requesty | No: a single-shot request path marks the key, and the next request draws another | The same. |
+| ElevenLabs TTS and SFX, Deepgram TTS, and the voice pipeline's batch TTS for OpenAI, ElevenLabs, Cartesia, Hume and Deepgram Aura | An error `isQuotaError()` recognizes rests the key, and the request is retried once on the next key | n/a |
 
-**Health checks:** `checkHealth()` on the OpenAI, Anthropic, Gemini, OpenRouter and Requesty providers sends a key drawn from the pool, as a request does. Groq, Mistral, Together, xAI and LiteLLM pass their health check to an `OpenAIProvider`, so theirs draws from that instance's pool. An `OpenAIProvider` set up with an OAuth flow sends the flow's token, as its requests do.
+Every other provider in the list below rotates its keys and never marks one.
+
+`isQuotaError()` is the broad test those speech providers use: HTTP 429, 402 and 456, and response bodies that contain `quota_exceeded`, `rate_limit_exceeded`, `insufficient_quota`, `overloaded_error`, `resource_exhausted` or `rate_limit` (case-insensitive).
+
+**Probes.** A key out for `auth` or `billing` is probed off the request path, first after `recheckMs` (30 minutes), then at double the delay on each failed probe up to `maxRecheckMs` (6 hours), with the probe bounded by `probeTimeoutMs` (10 seconds). The probe is the provider's lightest authenticated request: the models list for OpenAI, Anthropic (`GET /v1/models`), Gemini and Requesty, OpenRouter's `GET /auth/key`. A billing failure on Anthropic and OpenAI is probed with a one-token completion instead, since a models list can answer 200 with no credit left. A probe that passes re-admits the key; one that fails pushes the next probe out; one that times out or errors counts as unknown and does the same. A request's own answer after the probe began wins over the probe. Without a probe (a pool built directly from `new ApiKeyPool(keys)` with no `probe`), a failed key returns by time, when its recheck is due.
+
+A pool's `startRechecks()` runs the probes on an interval that never keeps the process alive; the providers also start the due probes when a request draws a key, so a host needs no timer of its own.
+
+**Persisted state.** With a `store` and an `id`, the pool saves each key's standing (status, kind, failures, timestamps; the key itself only as a 12-hex-character fingerprint and a label made of its index and its last four characters) a quarter of a second after it changes, and loads it in `initialize()` before the first request, so a restart does not send a revoked or unpaid key again. `SqlKeyPoolStateStore` in [`KeyPoolStateStore.ts`](https://github.com/framerslab/agentos/blob/master/src/core/providers/KeyPoolStateStore.ts) keeps it in one table (`<prefix>_key_pool_state`, DDL from `keyPoolStateDdl(prefix)`) through a `@framers/sql-storage-adapter` adapter, so the same code runs on SQLite, Postgres and the browser; `InMemoryKeyPoolStateStore` serves tests. A store that fails leaves a fresh state and logs one warning a minute.
+
+```ts
+import { createDatabase } from '@framers/sql-storage-adapter';
+import { AnthropicProvider, SqlKeyPoolStateStore } from '@framers/agentos';
+
+const db = await createDatabase({ filePath: './agentos.sqlite' });
+// The store creates its table on first use; pass `ensureSchema: false` and run
+// `keyPoolStateDdl('agentos')` in the host's migrations to own the schema.
+const store = new SqlKeyPoolStateStore({ db, tablePrefix: 'agentos' });
+const provider = new AnthropicProvider();
+await provider.initialize({
+  apiKey: process.env.ANTHROPIC_API_KEY!,
+  keyPool: { strategy: 'ordered', store, id: 'anthropic:main' },
+});
+```
+
+**Logging.** The pool writes one line per state transition through the library's `key-pool` logger, never a key: `key_pool.key_failed` (with the kind, the HTTP status, the rest or the next probe time), `key_pool.all_keys_failed`, `key_pool.key_recovered` (by a success or by a probe), `key_pool.probe_failed`, `key_pool.state_saved`, `key_pool.state_loaded` and `key_pool.store_failed`. A repeat of the same event for the same key without a transition is written once per cooldown.
+
+**Pools are per instance.** Two providers that read the same environment variable keep separate pools, so a key one of them takes out stays in the other's rotation until that instance sees the failure too; a shared `store` and `id` make them agree across restarts. `getKeyPool()` in `ApiKeyPoolRegistry.ts` returns one shared pool per environment variable; no built-in provider calls it.
+
+**Health checks.** `checkHealth()` on the OpenAI, Anthropic, Gemini, OpenRouter and Requesty providers sends a key drawn from the pool, as a request does. Groq, Mistral, Together, xAI and LiteLLM pass their health check to an `OpenAIProvider`, so theirs draws from that instance's pool. An `OpenAIProvider` set up with an OAuth flow sends the flow's token, as its requests do; the pool never holds a per-request override or an OAuth token, so those are never marked.
+
+## Several Subscriptions, One Product
+
+The case the pool is built for: an organization holds several Claude Max subscriptions, each with its own Console organization and monthly API credits, plus one paid organization. The product gets every credited key first and the paid key last, in order, so the credits are spent before a dollar is billed, and an exhausted key (Anthropic answers HTTP 400 "Your credit balance is too low") drops out until its probe passes:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-max-1,sk-ant-max-2,sk-ant-max-3,sk-ant-paid
+AGENTOS_KEY_POOL_STRATEGY=ordered
+```
 
 ## Supported Providers
 
@@ -54,6 +112,9 @@ A provider that is not on this list sends the key it is configured with as given
 
 The key pool is implemented in [`src/core/providers/`](https://github.com/framerslab/agentos/tree/master/src/core/providers):
 
-- `ApiKeyPool.ts`: weighted round-robin with exhaustion cooldown
+- `ApiKeyPool.ts`: the strategies, `markFailed()` / `markSuccess()`, the probes and rechecks, the persisted state and the log lines; `keyPoolStrategyFromEnv()` reads `AGENTOS_KEY_POOL_STRATEGY`
+- `KeyPoolStateStore.ts`: `KeyState`, `KeyPoolStateStore`, `InMemoryKeyPoolStateStore`, `SqlKeyPoolStateStore` and the table's DDL
+- `quotaErrors.ts`: `classifyKeyFailure()` (the kinds above), `retryAfterMs()` (a Retry-After header as bounded milliseconds) and `isQuotaError()` (the broad rotation test)
 - `ApiKeyPoolRegistry.ts`: one shared pool per environment variable (`getKeyPool()`), not used by the built-in providers
-- `quotaErrors.ts`: cross-provider quota error detection (`isQuotaError()`)
+
+The first version's `markExhausted()` and `isQuotaError()` keep their behaviour; a pool built with one key, or with several keys and no `keyPool` config, behaves as before except that a 401, 402 or credit-balance 400 on one key of several now moves the request to the next key instead of failing it.

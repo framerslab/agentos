@@ -35,7 +35,8 @@ import {
 } from '../IProvider';
 import { stripForeignVendorParams } from '../openrouter-only-params';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
-import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
+import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
+import { classifyKeyFailure, retryAfterMs, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { resolveThinkingOff, resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import {
@@ -124,6 +125,31 @@ export interface AnthropicProviderConfig {
    * @default 4096
    */
   defaultMaxTokens?: number;
+  /**
+   * The key pool behind a comma-separated `apiKey`: `ordered` prefers the
+   * earliest usable key (a cost order: credited keys first, the paid key
+   * last), `round-robin` spreads load (the default; the environment's
+   * `AGENTOS_KEY_POOL_STRATEGY=ordered` changes it when this is absent);
+   * `store` and `id` persist the keys' standing across restarts. A key the
+   * pool took out is probed off the request path before it returns.
+   */
+  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'store' | 'id'>;
+}
+
+/** The kind of key failure an in-stream `error` event names, or null when it is not the key's fault. */
+function keyFailureOfStreamError(type: string | undefined, message: string): KeyFailureKind | null {
+  if (type === 'authentication_error' || type === 'permission_error') return 'auth';
+  if (type === 'rate_limit_error') return 'quota';
+  if (type === 'invalid_request_error' && message.toLowerCase().startsWith('your credit balance is too low')) return 'billing';
+  return null;
+}
+
+/** What a stream request's error carries about the key it used, for the retry loops' key hops. */
+interface KeyFailureDetails {
+  keyFailure?: KeyFailureKind;
+  keyUsable?: number;
+  keyCount?: number;
+  retryAfterSec?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -828,7 +854,12 @@ export class AnthropicProvider implements IProvider {
       defaultMaxTokens: 16000,
       ...config,
     };
-    this.keyPool = new ApiKeyPool(config.apiKey);
+    this.keyPool = new ApiKeyPool(config.apiKey, {
+      ...(config.keyPool ?? {}),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      probe: (key, kind) => this.probeKey(key, kind),
+    });
+    await this.keyPool.ready();
     this.defaultModelId = config.defaultModelId;
     this.isInitialized = true;
 
@@ -982,13 +1013,20 @@ export class AnthropicProvider implements IProvider {
     );
 
     const attempts = Math.max(1, this.config.maxRetries ?? 1);
+    // Key hops this request has made: a key-scoped failure hops to the next
+    // usable key at once without spending a transient attempt, at most once
+    // per key of the pool.
+    let keyHops = 0;
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (abortSignal?.aborted) {
         throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
       }
+      const attemptInfo: { apiKey?: string; startedAt?: number } = {};
       try {
-        const stream = await this.makeStreamRequest('/v1/messages', payload, requestTimeoutOverride, abortSignal);
-        return await this.accumulateMessagesStream(stream);
+        const stream = await this.makeStreamRequest('/v1/messages', payload, requestTimeoutOverride, abortSignal, attemptInfo);
+        const accumulated = await this.accumulateMessagesStream(stream);
+        if (attemptInfo.apiKey) this.keyPool?.markSuccess(attemptInfo.apiKey, attemptInfo.startedAt);
+        return accumulated;
       } catch (error: unknown) {
         // A caller abort ends the request here; it is not a failure to retry.
         if (abortSignal?.aborted) {
@@ -1001,6 +1039,31 @@ export class AnthropicProvider implements IProvider {
                 error instanceof Error ? error.message : 'Streaming completion failed.',
                 'STREAM_PROCESSING_ERROR',
               );
+        // An in-stream error event that names the key (a revoked key, an
+        // unpaid account, a throttle) marks it: nothing has reached the
+        // caller yet on this path, so the next key may take the request.
+        if (lastError.code === 'STREAM_ERROR_EVENT' && attemptInfo.apiKey && this.keyPool) {
+          const kind = keyFailureOfStreamError(lastError.anthropicErrorType, lastError.message);
+          if (kind) {
+            this.keyPool.markFailed(attemptInfo.apiKey, kind, { at: attemptInfo.startedAt });
+            lastError = new AnthropicProviderError(lastError.message, lastError.code, lastError.httpStatus, lastError.anthropicErrorType, {
+              ...(typeof lastError.details === 'object' && lastError.details !== null ? (lastError.details as Record<string, unknown>) : {}),
+              keyFailure: kind,
+              keyUsable: this.keyPool.usable(),
+              keyCount: this.keyPool.size,
+            });
+          }
+        }
+        const keyDetails = lastError.details as KeyFailureDetails | undefined;
+        if (keyDetails?.keyFailure && (keyDetails.keyCount ?? 1) > 1) {
+          if ((keyDetails.keyUsable ?? 0) > 0 && ++keyHops < (keyDetails.keyCount ?? 1)) {
+            attempt -= 1;
+            continue;
+          }
+          if ((keyDetails.keyUsable ?? 0) === 0 && keyDetails.keyFailure !== 'quota') {
+            throw this.allKeysFailedError(lastError.message, lastError.httpStatus, lastError.anthropicErrorType);
+          }
+        }
         if (!this.isRetryableStreamError(lastError) || attempt === attempts - 1) {
           throw lastError;
         }
@@ -1269,7 +1332,28 @@ export class AnthropicProvider implements IProvider {
       return;
     }
 
-    const stream = await this.makeStreamRequest('/v1/messages', payload);
+    // A key-scoped connection failure, before any event has reached the
+    // caller, moves to the next usable key; after content has streamed an
+    // error surfaces as before and the key stays marked for the next request.
+    const streamAttempt: { apiKey?: string; startedAt?: number } = {};
+    let keyHops = 0;
+    let stream: ReadableStream<Uint8Array> | undefined;
+    while (stream === undefined) {
+      try {
+        stream = await this.makeStreamRequest('/v1/messages', payload, undefined, undefined, streamAttempt);
+      } catch (error: unknown) {
+        if (error instanceof AnthropicProviderError) {
+          const keyDetails = error.details as KeyFailureDetails | undefined;
+          if (keyDetails?.keyFailure && (keyDetails.keyCount ?? 1) > 1) {
+            if ((keyDetails.keyUsable ?? 0) > 0 && ++keyHops < (keyDetails.keyCount ?? 1)) continue;
+            if ((keyDetails.keyUsable ?? 0) === 0 && keyDetails.keyFailure !== 'quota') {
+              throw this.allKeysFailedError(error.message, error.httpStatus, error.anthropicErrorType);
+            }
+          }
+        }
+        throw error;
+      }
+    }
 
     // State accumulators across SSE events
     let responseId = `anthropic-${modelId}-${Date.now()}`;
@@ -2807,6 +2891,56 @@ export class AnthropicProvider implements IProvider {
   }
 
   // -------------------------------------------------------------------------
+  // Key pool: probes and the all-keys-failed error
+  // -------------------------------------------------------------------------
+
+  /**
+   * Probes a key the pool took out of rotation (the pool calls this off the
+   * request path): an auth failure with the cheapest authenticated read, a
+   * billing failure with the smallest billable request, since a models list
+   * can answer 200 with no credit left. The answer goes through the same
+   * classifier as a request's.
+   */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const headers = { ...this.buildHeaders(apiKey), 'Content-Type': 'application/json' };
+      const response =
+        kind === 'billing'
+          ? await fetch(`${this.config.baseURL}/v1/messages`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({ model: 'claude-haiku-5-5', max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
+              signal: controller.signal,
+            })
+          : await fetch(`${this.config.baseURL}/v1/models?limit=1`, { method: 'GET', headers, signal: controller.signal });
+      if (response.ok) return 'ok';
+      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
+      return classifyKeyFailure(response.status, text) ?? 'unknown';
+    } catch {
+      return 'unknown';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */
+  private allKeysFailedError(message?: string, httpStatus?: number, errorType?: string): AnthropicProviderError {
+    const kinds = Array.from(
+      new Set((this.keyPool?.snapshot() ?? []).map((state) => state.kind).filter((kind): kind is KeyFailureKind => kind !== undefined)),
+    );
+    const retryAfter = this.keyPool?.soonestReturnMs();
+    return new AnthropicProviderError(
+      message ?? `Every Anthropic API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
+      'ALL_KEYS_FAILED',
+      httpStatus,
+      errorType,
+      { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // HTTP transport
   // -------------------------------------------------------------------------
 
@@ -2851,6 +2985,10 @@ export class AnthropicProvider implements IProvider {
       'MAX_RETRIES_REACHED',
     );
 
+    // Key hops this request has made: a key-scoped failure moves to the next
+    // usable key at once (at most one hop per key) without spending a transient
+    // attempt; the attempt counter bounds the 429, 5xx and network retries.
+    let keyHops = 0;
     for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
       if (abortSignal?.aborted) {
         throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
@@ -2858,6 +2996,8 @@ export class AnthropicProvider implements IProvider {
       // Rotate the key per attempt so a retry after a 429 fails over to a
       // different key from the pool instead of hammering the throttled one.
       const apiKey = this.nextApiKey();
+      if (apiKey === '') throw this.allKeysFailedError();
+      const attemptStartedAt = Date.now();
       const headers = this.buildHeaders(apiKey);
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), effRequestTimeout);
@@ -2896,20 +3036,40 @@ export class AnthropicProvider implements IProvider {
           const errorType = errorData.error?.type;
           this.logStrictSchemaRejection(body, response.status, errorMessage);
 
+          // A key-scoped failure (a bad or revoked key, an unpaid account, a
+          // throttle) takes this key out of rotation and moves to the next
+          // usable key at once; the hop spends no transient attempt.
+          const keyFailure = classifyKeyFailure(response.status, JSON.stringify(errorData));
+          const serverRetryAfterMs = retryAfterMs(response.headers.get('retry-after'), undefined, this.config.keyPool?.maxRetryAfterMs);
+          if (keyFailure && this.keyPool && this.keyPool.size > 1) {
+            this.keyPool.markFailed(apiKey, keyFailure, {
+              status: response.status,
+              at: attemptStartedAt,
+              ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
+            });
+            lastError = new AnthropicProviderError(errorMessage, keyFailure === 'quota' ? 'RATE_LIMIT_EXCEEDED' : 'API_CLIENT_ERROR', response.status, errorType, errorData);
+            if (this.keyPool.usable() > 0 && ++keyHops < this.keyPool.size) {
+              attempt -= 1;
+              continue;
+            }
+            if (this.keyPool.usable() === 0 && keyFailure !== 'quota') {
+              throw this.allKeysFailedError(errorMessage, response.status, errorType);
+            }
+          }
+
           // Non-retryable client errors
           if (response.status === 401 || response.status === 403 || response.status === 400 || response.status === 404) {
             throw new AnthropicProviderError(errorMessage, 'API_CLIENT_ERROR', response.status, errorType, errorData);
           }
 
-          // Rate limit — take this key out of rotation (quota cooldown) so the
-          // next attempt fails over to a different key, then respect Retry-After.
+          // Rate limit: the key rests (quota cooldown) so the next attempt
+          // draws another when one is usable, then respect Retry-After.
           if (response.status === 429) {
             lastError = new AnthropicProviderError(errorMessage, 'RATE_LIMIT_EXCEEDED', 429, errorType, errorData);
-            this.keyPool?.markExhausted(apiKey);
-            const retryAfter = response.headers.get('retry-after');
+            if (!(this.keyPool && this.keyPool.size > 1)) this.keyPool?.markExhausted(apiKey);
             // Retry-After is authoritative when present; otherwise jittered backoff.
-            const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : computeRetryBackoffMs(attempt);
-            await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+            const waitMs = serverRetryAfterMs ?? computeRetryBackoffMs(attempt);
+            await new Promise(resolve => setTimeout(resolve, waitMs));
             continue;
           }
 
@@ -2922,6 +3082,8 @@ export class AnthropicProvider implements IProvider {
 
           throw new AnthropicProviderError(errorMessage, 'API_REQUEST_FAILED', response.status, errorType, errorData);
         }
+
+        this.keyPool?.markSuccess(apiKey, attemptStartedAt);
 
         // The race above bounds only the connection + response headers; the
         // body then streams in via `response.json()`. With no bound here, a
@@ -3005,9 +3167,16 @@ export class AnthropicProvider implements IProvider {
     body: Record<string, unknown>,
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
+    attemptOut?: { apiKey?: string; startedAt?: number },
   ): Promise<ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
     const apiKey = this.nextApiKey();
+    if (apiKey === '') throw this.allKeysFailedError();
+    const startedAt = Date.now();
+    if (attemptOut) {
+      attemptOut.apiKey = apiKey;
+      attemptOut.startedAt = startedAt;
+    }
     const headers = this.buildHeaders(apiKey);
 
     // Bounds the CONNECTION phase only (request + response headers) — it is
@@ -3058,26 +3227,30 @@ export class AnthropicProvider implements IProvider {
         const errorData = await response.json().catch(() => ({})) as Partial<AnthropicAPIError>;
         const errorMessage = errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`;
         this.logStrictSchemaRejection(body, response.status, errorMessage);
-        // A throttled key should not be reused by the next stream/request —
-        // mark it for cooldown so the pool fails over.
-        if (response.status === 429) {
-          this.keyPool?.markExhausted(apiKey);
+        // A key-scoped failure takes this key out so the next stream or
+        // request draws another; the retry loops read `keyFailure` on the
+        // error to hop keys at once. The server's Retry-After rides on the
+        // error (in seconds) so the stream retry loop can honor it.
+        const serverRetryAfterMs = retryAfterMs(response.headers.get('retry-after'), undefined, this.config.keyPool?.maxRetryAfterMs);
+        const keyFailure = classifyKeyFailure(response.status, JSON.stringify(errorData));
+        if (keyFailure) {
+          this.keyPool?.markFailed(apiKey, keyFailure, {
+            status: response.status,
+            at: startedAt,
+            ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
+          });
         }
-        // Carry the server's Retry-After (seconds) on the error so the
-        // stream retry loop (streamMessagesToResponse) can honor it — the
-        // non-stream path already does; without this the stream path
-        // re-hit a throttled endpoint on computed backoff and burned an
-        // attempt the server told us was doomed.
-        const retryAfterHeader = response.headers.get('retry-after');
-        const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+        const retryAfterSec = serverRetryAfterMs !== null ? Math.ceil(serverRetryAfterMs / 1000) : NaN;
+        const keyDetails: KeyFailureDetails = {
+          ...(Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? { retryAfterSec } : {}),
+          ...(keyFailure ? { keyFailure, keyUsable: this.keyPool ? this.keyPool.usable() : 1, keyCount: this.keyPool?.size ?? 1 } : {}),
+        };
         throw new AnthropicProviderError(
           errorMessage,
           'STREAM_CONNECTION_FAILED',
           response.status,
           errorData.error?.type,
-          Number.isFinite(retryAfterSec) && retryAfterSec > 0
-            ? { ...errorData, retryAfterSec }
-            : errorData,
+          { ...errorData, ...keyDetails },
         );
       }
 

@@ -21,7 +21,8 @@ import {
   ModelCompletionChoice,
 } from '../IProvider';
 import { OpenRouterProviderError } from '../errors/OpenRouterProviderError';
-import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
+import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
+import { classifyKeyFailure, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
@@ -41,6 +42,13 @@ export interface OpenRouterProviderConfig {
   appName?: string;
   requestTimeout?: number;
   streamRequestTimeout?: number;
+  /**
+   * The key pool behind a comma-separated `apiKey`: `ordered` prefers the
+   * earliest usable key (a cost order), `round-robin` spreads load (the
+   * default; `AGENTOS_KEY_POOL_STRATEGY=ordered` changes it when this is
+   * absent); `store` and `id` persist the keys' standing across restarts.
+   */
+  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'store' | 'id'>;
 }
 
 /**
@@ -443,7 +451,12 @@ export class OpenRouterProvider implements IProvider {
       requestTimeout: config.requestTimeout || 60000,
       streamRequestTimeout: config.streamRequestTimeout || 180000,
     });
-    this.keyPool = new ApiKeyPool(config.apiKey);
+    this.keyPool = new ApiKeyPool(config.apiKey, {
+      ...(config.keyPool ?? {}),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      probe: (key) => this.probeKey(key),
+    });
+    await this.keyPool.ready();
     this.defaultModelId = this.config.defaultModelId; // Store the potentially undefined value
 
     // NOTE: no Authorization header here — the key is drawn from the pool
@@ -1516,8 +1529,14 @@ export class OpenRouterProvider implements IProvider {
   ): Promise<T> {
     let lastError: OpenRouterProviderError | null = null;
 
+    // Key hops this request has made: a key-scoped failure moves to the next
+    // usable key at once (at most one hop per key) without spending a
+    // transient attempt.
+    let keyHops = 0;
     for (let attempt = 0; attempt < OpenRouterProvider.MAX_REQUEST_ATTEMPTS; attempt++) {
       const apiKey = this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
+      if (apiKey === '') throw this.allKeysFailedError();
+      const attemptStartedAt = Date.now();
       try {
         const response = await this.client.request<T>({
           url: endpoint,
@@ -1527,6 +1546,7 @@ export class OpenRouterProvider implements IProvider {
           headers: { Authorization: `Bearer ${apiKey}` },
           responseType: expectStream ? 'stream' as ResponseType : 'json' as ResponseType,
         });
+        if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, attemptStartedAt);
         return response.data;
       } catch (error: unknown) {
         let statusCode: number | undefined;
@@ -1581,10 +1601,25 @@ export class OpenRouterProvider implements IProvider {
           });
         }
 
-        // A throttled (429) or credit-exhausted (402) key must not be
-        // reused by the next attempt/request — cool it down in the pool.
-        if ((statusCode === 402 || statusCode === 429) && this.keyPool?.hasKeys) {
-          this.keyPool.markExhausted(apiKey);
+        // A key-scoped failure (a bad or revoked key, an unpaid account, a
+        // throttle) takes this key out of rotation; with another usable key
+        // the request moves to it at once, outside the attempt count.
+        const keyFailure = typeof statusCode === 'number' ? classifyKeyFailure(statusCode, typeof errorData === 'string' ? errorData : JSON.stringify(errorData ?? {})) : null;
+        if (keyFailure && this.keyPool?.has(apiKey)) {
+          this.keyPool.markFailed(apiKey, keyFailure, {
+            status: statusCode,
+            at: attemptStartedAt,
+            ...(retryAfterSec !== undefined ? { retryAfterMs: retryAfterSec * 1000 } : {}),
+          });
+          if (this.keyPool.size > 1) {
+            if (this.keyPool.usable() > 0 && ++keyHops < this.keyPool.size) {
+              attempt -= 1;
+              continue;
+            }
+            if (this.keyPool.usable() === 0 && keyFailure !== 'quota') {
+              throw this.allKeysFailedError(errorMessage, statusCode, errorType);
+            }
+          }
         }
 
         // Prefix the status code into the message so downstream retry/fallback
@@ -1636,6 +1671,37 @@ export class OpenRouterProvider implements IProvider {
     // Unreachable in practice (the loop either returns or throws), but keeps
     // the compiler + any future refactor honest.
     throw lastError ?? new OpenRouterProviderError('OpenRouter request failed.', 'API_REQUEST_FAILED');
+  }
+
+  /** Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. */
+  private async probeKey(apiKey: string): Promise<ProbeResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const response = await fetch(`${this.config.baseURL}/auth/key`, { method: 'GET', headers: { Authorization: `Bearer ${apiKey}` }, signal: controller.signal });
+      if (response.ok) return 'ok';
+      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
+      return classifyKeyFailure(response.status, text) ?? 'unknown';
+    } catch {
+      return 'unknown';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */
+  private allKeysFailedError(message?: string, status?: number, errorType?: string): OpenRouterProviderError {
+    const kinds = Array.from(
+      new Set((this.keyPool?.snapshot() ?? []).map((state) => state.kind).filter((kind): kind is KeyFailureKind => kind !== undefined)),
+    );
+    const retryAfter = this.keyPool?.soonestReturnMs();
+    return new OpenRouterProviderError(
+      message ?? `Every OpenRouter API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
+      'ALL_KEYS_FAILED',
+      status,
+      errorType,
+      { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
+    );
   }
 
   /**

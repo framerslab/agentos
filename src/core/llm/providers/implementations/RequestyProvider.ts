@@ -21,7 +21,8 @@ import {
   ModelCompletionChoice,
 } from '../IProvider';
 import { RequestyProviderError } from '../errors/RequestyProviderError';
-import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
+import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
+import { classifyKeyFailure, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
@@ -37,6 +38,13 @@ export interface RequestyProviderConfig {
   appName?: string;
   requestTimeout?: number;
   streamRequestTimeout?: number;
+  /**
+   * The key pool behind a comma-separated `apiKey`: `ordered` prefers the
+   * earliest usable key (a cost order), `round-robin` spreads load (the
+   * default; `AGENTOS_KEY_POOL_STRATEGY=ordered` changes it when this is
+   * absent); `store` and `id` persist the keys' standing across restarts.
+   */
+  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'store' | 'id'>;
 }
 
 interface RequestyChatChoice {
@@ -191,7 +199,12 @@ export class RequestyProvider implements IProvider {
       requestTimeout: config.requestTimeout || 60000,
       streamRequestTimeout: config.streamRequestTimeout || 180000,
     });
-    this.keyPool = new ApiKeyPool(config.apiKey);
+    this.keyPool = new ApiKeyPool(config.apiKey, {
+      ...(config.keyPool ?? {}),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      probe: (key) => this.probeKey(key),
+    });
+    await this.keyPool.ready();
     this.defaultModelId = this.config.defaultModelId; // Store the potentially undefined value
 
     // No Authorization header here: the key is resolved per request inside
@@ -811,7 +824,43 @@ export class RequestyProvider implements IProvider {
    */
   private resolveApiKey(apiKeyOverride?: string): string {
     if (apiKeyOverride) return apiKeyOverride;
-    return this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
+    if (this.keyPool?.hasKeys) {
+      const key = this.keyPool.next();
+      if (key === '') throw this.allKeysFailedError();
+      return key;
+    }
+    return this.config.apiKey;
+  }
+
+  /** Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. */
+  private async probeKey(apiKey: string): Promise<ProbeResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const response = await fetch(`${this.config.baseURL}/models`, { method: 'GET', headers: { Authorization: `Bearer ${apiKey}` }, signal: controller.signal });
+      if (response.ok) return 'ok';
+      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
+      return classifyKeyFailure(response.status, text) ?? 'unknown';
+    } catch {
+      return 'unknown';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */
+  private allKeysFailedError(message?: string, status?: number, errorType?: string): RequestyProviderError {
+    const kinds = Array.from(
+      new Set((this.keyPool?.snapshot() ?? []).map((state) => state.kind).filter((kind): kind is KeyFailureKind => kind !== undefined)),
+    );
+    const retryAfter = this.keyPool?.soonestReturnMs();
+    return new RequestyProviderError(
+      message ?? `Every Requesty API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
+      'ALL_KEYS_FAILED',
+      status,
+      errorType,
+      { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
+    );
   }
 
   /**
@@ -839,18 +888,21 @@ export class RequestyProvider implements IProvider {
     expectStream: boolean = false,
     perRequest?: { apiKeyOverride?: string; signal?: AbortSignal }
   ): Promise<T> {
+    const apiKey = this.resolveApiKey(perRequest?.apiKeyOverride);
+    const attemptStartedAt = Date.now();
     try {
       const response = await this.client.request<T>({
         url: endpoint,
         method,
         data: body,
         timeout: timeout,
-        headers: { Authorization: `Bearer ${this.resolveApiKey(perRequest?.apiKeyOverride)}` },
+        headers: { Authorization: `Bearer ${apiKey}` },
         // Forward the caller's AbortSignal so an abort settles the request
         // while Axios is still waiting for headers or the next body chunk.
         ...(perRequest?.signal ? { signal: perRequest.signal } : {}),
         responseType: expectStream ? 'stream' as ResponseType : 'json' as ResponseType,
       });
+      if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, attemptStartedAt);
       return response.data;
     } catch (error: unknown) {
       let statusCode: number | undefined;
@@ -871,6 +923,14 @@ export class RequestyProvider implements IProvider {
         }
       } else if (error instanceof Error) {
         errorMessage = error.message;
+      }
+
+      // A key-scoped failure (a bad or revoked key, an unpaid account, a
+      // throttle) takes this key out of rotation, so the next request draws
+      // another; this single-shot path does not re-send.
+      const keyFailure = typeof statusCode === 'number' ? classifyKeyFailure(statusCode, typeof errorData === 'string' ? errorData : JSON.stringify(errorData ?? {})) : null;
+      if (keyFailure && this.keyPool?.has(apiKey)) {
+        this.keyPool.markFailed(apiKey, keyFailure, { status: statusCode, at: attemptStartedAt });
       }
 
       // Prefix the status code into the message so downstream retry/fallback

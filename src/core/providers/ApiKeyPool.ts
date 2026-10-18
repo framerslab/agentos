@@ -1,66 +1,167 @@
 /**
  * @module core/providers/ApiKeyPool
  *
- * Weighted round-robin API key pool with quota-exhaustion cooldown.
+ * A pool of API keys for one provider: several keys, a strategy that picks
+ * one for each attempt, failure kinds that take a key out of rotation and
+ * the rules that bring it back, probes that re-admit a failed key only when
+ * it works again, and state that a host may persist across restarts.
  *
- * Accepts a single key or comma-separated keys. The first key gets
- * higher rotation weight (configurable). Exhausted keys are temporarily
- * removed from rotation and re-enter after a cooldown period.
+ * Accepts a single key or comma-separated keys. The default strategy is the
+ * weighted round-robin of the first version (the first key gets higher
+ * rotation weight, configurable); `ordered` prefers the earliest usable key
+ * in the configured order, so a list is a cost order (credited keys first,
+ * the paid key last) and a working key keeps being used until it fails.
  *
- * This is a core AgentOS primitive -- every provider that accepts an
- * API key can use it for automatic multi-key rotation and failover.
+ * This is a core AgentOS primitive -- every provider that accepts an API key
+ * uses it for multi-key rotation and failover.
  *
  * @example
  * ```ts
- * // Single key — zero rotation overhead:
+ * // Single key, zero rotation overhead:
  * const pool = new ApiKeyPool('sk_abc');
  * pool.next(); // 'sk_abc'
  *
- * // Multiple keys with round-robin + first-key priority:
+ * // Several keys, round-robin with first-key priority (the default):
  * const pool = new ApiKeyPool('sk_primary,sk_backup,sk_overflow');
  * pool.next(); // weighted rotation, primary selected ~2x more
  *
- * // Mark exhausted on quota error:
- * pool.markExhausted(key); // skipped for 15min cooldown
- * pool.next(); // returns next available key
+ * // Several keys in cost order, failing over on any key failure:
+ * const pool = new ApiKeyPool('sk_credited,sk_paid', { strategy: 'ordered', probe });
+ * pool.markFailed('sk_credited', 'billing'); // out until the probe passes
+ * pool.next(); // 'sk_paid'
  * ```
  */
 
+import { createLogger, type ILogger } from '../logging/index.js';
+import type { KeyPoolStateStore, KeyState } from './KeyPoolStateStore.js';
+import type { KeyFailureKind } from './quotaErrors.js';
+
+/** What a probe of a failed key answers: it works, it still fails in a kind, or the probe itself failed. */
+export type ProbeResult = 'ok' | KeyFailureKind | 'unknown';
+
 /** Configuration for an ApiKeyPool instance. */
 export interface ApiKeyPoolConfig {
-  /** Cooldown before retrying an exhausted key. Default: 15 minutes. */
+  /** Cooldown before retrying a quota-exhausted key. Default: 15 minutes. */
   cooldownMs?: number;
-  /** Weight multiplier for the first key. Default: 2. Set to 1 for equal weighting. */
+  /** Weight multiplier for the first key under round-robin. Default: 2. Set to 1 for equal weighting. */
   primaryWeight?: number;
+  /** `round-robin` (default, the first version's behaviour) or `ordered` (the earliest usable key in the configured order). */
+  strategy?: 'round-robin' | 'ordered';
+  /** The first recheck delay of a key failed for auth or billing; doubles on each failed return. Default: 30 minutes. */
+  recheckMs?: number;
+  /** The recheck delay's ceiling. Default: 6 hours. */
+  maxRecheckMs?: number;
+  /** The longest rest a Retry-After may ask for. Default: 1 hour. */
+  maxRetryAfterMs?: number;
+  /** How long a probe may run before it counts as `unknown`. Default: 10 seconds. */
+  probeTimeoutMs?: number;
+  /** Probes a failed key off the request path, told the kind of its last failure; without one, failed keys return by time. */
+  probe?: (key: string, kind: KeyFailureKind | undefined) => Promise<ProbeResult>;
+  /** Persists the pool's state; used only with `id`. */
+  store?: KeyPoolStateStore;
+  /** The pool's identity for its store and its log lines. */
+  id?: string;
+  /** The logger the pool writes its state changes to. Default: the library's `key-pool` logger. */
+  logger?: ILogger;
 }
 
-interface KeyState {
+interface Entry {
   key: string;
-  exhaustedUntil: number;
+  state: KeyState;
 }
 
 const DEFAULT_COOLDOWN_MS = 15 * 60_000;
 const DEFAULT_PRIMARY_WEIGHT = 2;
+const DEFAULT_RECHECK_MS = 30 * 60_000;
+const DEFAULT_MAX_RECHECK_MS = 6 * 60 * 60_000;
+const DEFAULT_MAX_RETRY_AFTER_MS = 60 * 60_000;
+const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
+const SAVE_DEBOUNCE_MS = 250;
+const STORE_FAILURE_LOG_INTERVAL_MS = 60_000;
+
+/** A short non-reversible digest of a key (FNV-1a, 64 bits, 12 hex characters), an identity that holds no secret. */
+export function keyFingerprint(key: string): string {
+  let hash = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  for (let i = 0; i < key.length; i++) {
+    hash ^= BigInt(key.charCodeAt(i));
+    hash = (hash * prime) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, '0').slice(0, 12);
+}
+
+/**
+ * The pool strategy the environment asks for when a provider's config names
+ * none: `AGENTOS_KEY_POOL_STRATEGY=ordered` prefers the earliest usable key
+ * (a cost order: credited keys first, the paid key last).
+ */
+export function keyPoolStrategyFromEnv(): Pick<ApiKeyPoolConfig, 'strategy'> {
+  const value = typeof process !== 'undefined' ? process.env.AGENTOS_KEY_POOL_STRATEGY : undefined;
+  return value === 'ordered' ? { strategy: 'ordered' } : {};
+}
+
+function parseKeys(keys: string | string[]): string[] {
+  const list = Array.isArray(keys) ? keys.map((k) => k.trim()) : keys.split(',').map((k) => k.trim());
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const key of list) {
+    if (key.length === 0 || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+}
 
 export class ApiKeyPool {
-  private readonly keys: KeyState[];
+  private readonly entries: Entry[];
   private readonly weightedSlots: number[];
   private slotIndex = 0;
   private readonly cooldownMs: number;
+  private readonly strategy: 'round-robin' | 'ordered';
+  private readonly recheckMs: number;
+  private readonly maxRecheckMs: number;
+  private readonly maxRetryAfterMs: number;
+  private readonly probeTimeoutMs: number;
+  private readonly probe?: (key: string, kind: KeyFailureKind | undefined) => Promise<ProbeResult>;
+  private readonly store?: KeyPoolStateStore;
+  private readonly id: string;
+  private loggerInstance?: ILogger;
+  private readonly configuredLogger?: ILogger;
+  private readyPromise?: Promise<void>;
+  private readonly inFlightProbes = new Map<string, Promise<void>>();
+  private readonly pendingSaves = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly lastLogged = new Map<string, number>();
+  private lastStoreFailureLog = 0;
 
   constructor(keys: string | string[], config?: ApiKeyPoolConfig) {
     this.cooldownMs = config?.cooldownMs ?? DEFAULT_COOLDOWN_MS;
+    this.strategy = config?.strategy ?? 'round-robin';
+    this.recheckMs = config?.recheckMs ?? DEFAULT_RECHECK_MS;
+    this.maxRecheckMs = config?.maxRecheckMs ?? DEFAULT_MAX_RECHECK_MS;
+    this.maxRetryAfterMs = config?.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
+    this.probeTimeoutMs = config?.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+    this.probe = config?.probe;
+    this.id = config?.id ?? '';
+    this.store = config?.id ? config?.store : undefined;
+    this.configuredLogger = config?.logger;
     const primaryWeight = config?.primaryWeight ?? DEFAULT_PRIMARY_WEIGHT;
 
-    const keyList = Array.isArray(keys)
-      ? keys
-      : keys.split(',').map((k) => k.trim()).filter((k) => k.length > 0);
-
-    this.keys = keyList.map((key) => ({ key, exhaustedUntil: 0 }));
+    const now = Date.now();
+    this.entries = parseKeys(keys).map((key, index) => ({
+      key,
+      state: {
+        fingerprint: keyFingerprint(key),
+        label: `k${index}${key.length >= 4 ? key.slice(-4) : ''}`,
+        status: 'ok',
+        failures: 0,
+        updatedAt: now,
+        version: 1,
+      },
+    }));
 
     // Build weighted slot array: first key appears `primaryWeight` times, rest once each.
     this.weightedSlots = [];
-    for (let i = 0; i < this.keys.length; i++) {
+    for (let i = 0; i < this.entries.length; i++) {
       const times = i === 0 ? primaryWeight : 1;
       for (let t = 0; t < times; t++) {
         this.weightedSlots.push(i);
@@ -68,50 +169,350 @@ export class ApiKeyPool {
     }
   }
 
-  /** Number of keys in the pool (including temporarily exhausted ones). */
+  /** Number of keys in the pool (including resting and failed ones). */
   get size(): number {
-    return this.keys.length;
+    return this.entries.length;
   }
 
   /** Whether any key exists at all. */
   get hasKeys(): boolean {
-    return this.keys.length > 0;
+    return this.entries.length > 0;
+  }
+
+  /** Whether this key is one of the pool's (a per-request override or an OAuth token is not). */
+  has(key: string): boolean {
+    return this.entries.some((entry) => entry.key === key);
   }
 
   /**
-   * Get the next available key via weighted round-robin.
-   * Skips keys currently in cooldown. Returns empty string if pool is empty.
+   * Loads the persisted state once, when the pool has a store and an id; the
+   * providers await it in `initialize()` before the first `next()`. Resolves
+   * at once without a store. A load that throws leaves a fresh state and
+   * logs one warning.
+   */
+  ready(): Promise<void> {
+    this.readyPromise ??= this.loadState();
+    return this.readyPromise;
+  }
+
+  /**
+   * The next key by the strategy. A single-key pool returns its key. With
+   * several keys: a usable key, or, when every unusable key is only resting,
+   * the one whose rest ends first (a request still goes out and its answer
+   * updates the state); `''` when a failed key exists and none is usable,
+   * which the provider turns into its all-keys-failed error. A failed key
+   * whose recheck is due has a probe scheduled here, off the request path.
    */
   next(): string {
-    if (this.keys.length === 0) return '';
-    if (this.keys.length === 1) return this.keys[0].key;
+    if (this.entries.length === 0) return '';
+    if (this.entries.length === 1) return this.entries[0].key;
 
     const now = Date.now();
-    const totalSlots = this.weightedSlots.length;
+    this.scheduleDueRechecks(now);
 
-    for (let i = 0; i < totalSlots; i++) {
-      const slotIdx = (this.slotIndex + i) % totalSlots;
-      const keyIdx = this.weightedSlots[slotIdx];
-      const state = this.keys[keyIdx];
-      if (state.exhaustedUntil <= now) {
-        this.slotIndex = (slotIdx + 1) % totalSlots;
-        return state.key;
+    if (this.strategy === 'ordered') {
+      for (const entry of this.entries) {
+        if (this.isUsable(entry, now)) return entry.key;
+      }
+    } else {
+      const totalSlots = this.weightedSlots.length;
+      for (let i = 0; i < totalSlots; i++) {
+        const slotIdx = (this.slotIndex + i) % totalSlots;
+        const entry = this.entries[this.weightedSlots[slotIdx]];
+        if (this.isUsable(entry, now)) {
+          this.slotIndex = (slotIdx + 1) % totalSlots;
+          return entry.key;
+        }
       }
     }
 
-    // All keys exhausted -- return the one whose cooldown expires soonest.
-    const sorted = [...this.keys].sort((a, b) => a.exhaustedUntil - b.exhaustedUntil);
-    return sorted[0].key;
+    // None usable. Resting keys only: the one whose rest ends soonest (the
+    // first version's behaviour). Any failed key: nothing, so the provider
+    // throws instead of sending a revoked or unpaid credential again.
+    if (this.entries.some((entry) => entry.state.status === 'failed' && !this.isUsable(entry, now))) return '';
+    const soonest = [...this.entries].sort((a, b) => (a.state.until ?? 0) - (b.state.until ?? 0));
+    return soonest[0].key;
+  }
+
+  /** How many keys `next()` may hand out now. */
+  usable(): number {
+    const now = Date.now();
+    return this.entries.filter((entry) => this.isUsable(entry, now)).length;
+  }
+
+  /** Marks a key quota-exhausted: it rests for the cooldown, then re-enters rotation. */
+  markExhausted(key: string): void {
+    this.markFailed(key, 'quota');
   }
 
   /**
-   * Mark a key as quota-exhausted. It will be skipped during
-   * rotation until the cooldown expires.
+   * Records a key-scoped failure. `quota` rests the key (Retry-After when
+   * given, else the cooldown); `auth` and `billing` take it out until a probe
+   * passes, or until the recheck delay has run when there is no probe. A
+   * result whose `at` is older than the key's last recorded result is
+   * ignored, so an old answer never undoes a newer one.
    */
-  markExhausted(key: string): void {
-    const state = this.keys.find((k) => k.key === key);
-    if (state) {
-      state.exhaustedUntil = Date.now() + this.cooldownMs;
+  markFailed(key: string, kind: KeyFailureKind, detail?: { retryAfterMs?: number; status?: number; at?: number }): void {
+    const entry = this.entries.find((e) => e.key === key);
+    if (!entry) return;
+    const now = Date.now();
+    const at = detail?.at ?? now;
+    const { state } = entry;
+    if (at < (state.lastOkAt ?? 0) || at < (state.lastFailAt ?? 0)) return;
+
+    const previous = state.status;
+    state.lastFailAt = at;
+    state.kind = kind;
+    if (kind === 'quota') {
+      const rest = Math.min(detail?.retryAfterMs ?? this.cooldownMs, this.maxRetryAfterMs);
+      state.status = 'resting';
+      state.until = now + rest;
+      state.nextRecheckAt = undefined;
+    } else {
+      state.failures += 1;
+      state.status = 'failed';
+      state.until = undefined;
+      state.nextRecheckAt = now + this.recheckDelay(state.failures);
     }
+    state.updatedAt = now;
+    this.log('warn', 'key_pool.key_failed', entry, previous !== state.status || previous === 'ok', {
+      kind,
+      status: detail?.status,
+      retryAfterMs: kind === 'quota' ? (state.until ?? now) - now : undefined,
+      failures: state.failures,
+      nextRecheckAt: state.nextRecheckAt,
+    });
+    if (this.usable() === 0) {
+      this.log('warn', 'key_pool.all_keys_failed', undefined, true, { kinds: this.kindsSeen(), retryAfterMs: this.soonestReturnMs(now) });
+    }
+    this.scheduleSave(entry);
+  }
+
+  /** Records a success: the key is usable, its failure count cleared, its last-good time kept. */
+  markSuccess(key: string, at?: number): void {
+    const entry = this.entries.find((e) => e.key === key);
+    if (!entry) return;
+    const now = Date.now();
+    const when = at ?? now;
+    const { state } = entry;
+    if (when < (state.lastFailAt ?? 0)) return;
+    const previous = state.status;
+    state.lastOkAt = when;
+    if (state.status !== 'ok' || state.failures !== 0) {
+      state.status = 'ok';
+      state.failures = 0;
+      state.kind = undefined;
+      state.until = undefined;
+      state.nextRecheckAt = undefined;
+      state.updatedAt = now;
+      if (previous !== 'ok') this.log('info', 'key_pool.key_recovered', entry, true, { by: 'success' });
+      this.scheduleSave(entry);
+    }
+  }
+
+  /**
+   * Probes every failed key whose recheck is due (one probe per key at a
+   * time, each under the probe timeout) and applies the answers. Settles when
+   * the probes this call started have settled. Without a probe, does nothing:
+   * failed keys then return by time.
+   */
+  async recheck(): Promise<void> {
+    if (!this.probe) return;
+    const now = Date.now();
+    const started: Promise<void>[] = [];
+    for (const entry of this.entries) {
+      if (entry.state.status !== 'failed') continue;
+      if ((entry.state.nextRecheckAt ?? 0) > now) continue;
+      started.push(this.probeEntry(entry));
+    }
+    await Promise.all(started);
+  }
+
+  /** Runs `recheck()` on an interval that never keeps the process alive; returns the function that stops it. */
+  startRechecks(intervalMs: number = this.recheckMs): () => void {
+    const timer = setInterval(() => {
+      void this.recheck().catch(() => undefined);
+    }, intervalMs);
+    const maybeUnref = timer as unknown as { unref?: () => void };
+    if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
+    return () => clearInterval(timer);
+  }
+
+  /** A copy of every key's state, for hosts and tests. */
+  snapshot(): KeyState[] {
+    return this.entries.map((entry) => ({ ...entry.state }));
+  }
+
+  // ---------------------------------------------------------------------------
+
+  private isUsable(entry: Entry, now: number): boolean {
+    const { state } = entry;
+    if (state.status === 'ok') return true;
+    if (state.status === 'resting') return (state.until ?? 0) <= now;
+    // failed: with a probe, only a passed probe re-admits; without one, time does.
+    if (this.probe) return false;
+    return (state.nextRecheckAt ?? 0) <= now;
+  }
+
+  private recheckDelay(failures: number): number {
+    const doublings = Math.max(0, Math.min(failures - 1, 20));
+    return Math.min(this.recheckMs * 2 ** doublings, this.maxRecheckMs);
+  }
+
+  private kindsSeen(): KeyFailureKind[] {
+    const kinds = new Set<KeyFailureKind>();
+    for (const entry of this.entries) if (entry.state.kind) kinds.add(entry.state.kind);
+    return Array.from(kinds);
+  }
+
+  /** The soonest a key may come back, in ms from `now`, for an all-keys-failed error. */
+  soonestReturnMs(now: number = Date.now()): number | undefined {
+    let soonest: number | undefined;
+    for (const entry of this.entries) {
+      const { state } = entry;
+      const at = state.status === 'resting' ? state.until : state.status === 'failed' ? state.nextRecheckAt : undefined;
+      if (at === undefined) continue;
+      const ms = Math.max(0, at - now);
+      if (soonest === undefined || ms < soonest) soonest = ms;
+    }
+    return soonest;
+  }
+
+  private scheduleDueRechecks(now: number): void {
+    if (!this.probe) return;
+    for (const entry of this.entries) {
+      if (entry.state.status !== 'failed') continue;
+      if ((entry.state.nextRecheckAt ?? 0) > now) continue;
+      if (this.inFlightProbes.has(entry.key)) continue;
+      void this.probeEntry(entry).catch(() => undefined);
+    }
+  }
+
+  private probeEntry(entry: Entry): Promise<void> {
+    const inFlight = this.inFlightProbes.get(entry.key);
+    if (inFlight) return inFlight;
+    const run = this.runProbe(entry).finally(() => {
+      this.inFlightProbes.delete(entry.key);
+    });
+    this.inFlightProbes.set(entry.key, run);
+    return run;
+  }
+
+  private async runProbe(entry: Entry): Promise<void> {
+    if (!this.probe) return;
+    const startedAt = Date.now();
+    let result: ProbeResult = 'unknown';
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      result = await Promise.race([
+        this.probe(entry.key, entry.state.kind),
+        new Promise<ProbeResult>((resolve) => {
+          timer = setTimeout(() => resolve('unknown'), this.probeTimeoutMs);
+        }),
+      ]);
+    } catch {
+      result = 'unknown';
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    const { state } = entry;
+    // A newer result (a request's success or failure after the probe began) wins over the probe.
+    if (startedAt < (state.lastFailAt ?? 0) || startedAt < (state.lastOkAt ?? 0)) return;
+    const now = Date.now();
+    if (result === 'ok') {
+      state.status = 'ok';
+      state.failures = 0;
+      state.kind = undefined;
+      state.until = undefined;
+      state.nextRecheckAt = undefined;
+      state.lastOkAt = startedAt;
+      state.updatedAt = now;
+      this.log('info', 'key_pool.key_recovered', entry, true, { by: 'probe' });
+      this.scheduleSave(entry);
+      return;
+    }
+    if (result === 'quota') {
+      state.status = 'resting';
+      state.kind = 'quota';
+      state.until = now + this.cooldownMs;
+      state.nextRecheckAt = undefined;
+      state.updatedAt = now;
+      this.log('warn', 'key_pool.probe_failed', entry, true, { result });
+      this.scheduleSave(entry);
+      return;
+    }
+    // auth, billing or unknown: still out; the next recheck waits longer.
+    state.failures += 1;
+    if (result !== 'unknown') state.kind = result;
+    state.nextRecheckAt = now + this.recheckDelay(state.failures);
+    state.updatedAt = now;
+    this.log('warn', 'key_pool.probe_failed', entry, false, { result, failures: state.failures, nextRecheckAt: state.nextRecheckAt });
+    this.scheduleSave(entry);
+  }
+
+  private async loadState(): Promise<void> {
+    if (!this.store || !this.id || this.entries.length === 0) return;
+    let rows: KeyState[] | null = null;
+    try {
+      rows = await this.store.load(this.id);
+    } catch (error) {
+      this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'load', error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    if (!rows) return;
+    let applied = 0;
+    for (const row of rows) {
+      if (row.version !== 1) continue;
+      const entry = this.entries.find((e) => e.state.fingerprint === row.fingerprint);
+      if (!entry) continue;
+      if (row.updatedAt <= entry.state.updatedAt && entry.state.status !== 'ok') continue;
+      entry.state = { ...row, label: entry.state.label };
+      applied += 1;
+    }
+    this.logger().debug?.('key_pool.state_loaded', { poolId: this.id, rows: rows.length, applied });
+  }
+
+  private scheduleSave(entry: Entry): void {
+    const store = this.store;
+    if (!store || !this.id) return;
+    const pending = this.pendingSaves.get(entry.key);
+    if (pending) clearTimeout(pending);
+    const timer = setTimeout(() => {
+      this.pendingSaves.delete(entry.key);
+      const snapshot = { ...entry.state };
+      store.save(this.id, snapshot)
+        .then(() => this.logger().debug?.('key_pool.state_saved', { poolId: this.id, label: snapshot.label, status: snapshot.status }))
+        .catch((error: unknown) => {
+          const now = Date.now();
+          if (now - this.lastStoreFailureLog < STORE_FAILURE_LOG_INTERVAL_MS) return;
+          this.lastStoreFailureLog = now;
+          this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'save', error: error instanceof Error ? error.message : String(error) });
+        });
+    }, SAVE_DEBOUNCE_MS);
+    const maybeUnref = timer as unknown as { unref?: () => void };
+    if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
+    this.pendingSaves.set(entry.key, timer);
+  }
+
+  private logger(): ILogger {
+    this.loggerInstance ??= this.configuredLogger ?? createLogger('key-pool');
+    return this.loggerInstance;
+  }
+
+  /**
+   * One line per state transition; a repeat of the same event for the same
+   * key without a transition is throttled to once per cooldown.
+   */
+  private log(level: 'info' | 'warn', event: string, entry: Entry | undefined, transition: boolean, meta: Record<string, unknown>): void {
+    const throttleKey = `${event}:${entry?.state.fingerprint ?? '*'}`;
+    const now = Date.now();
+    if (!transition) {
+      const last = this.lastLogged.get(throttleKey) ?? 0;
+      if (now - last < this.cooldownMs) return;
+    }
+    this.lastLogged.set(throttleKey, now);
+    const fields: Record<string, unknown> = { poolId: this.id || undefined, label: entry?.state.label, keyStatus: entry?.state.status };
+    for (const [k, v] of Object.entries(meta)) if (v !== undefined) fields[k] = v;
+    this.logger()[level](event, fields);
   }
 }

@@ -1500,6 +1500,9 @@ const RETRYABLE_PROVIDER_ERROR_CODES = new Set([
   'MAX_RETRIES_REACHED',
   CONTEXT_WINDOW_EXCEEDED_CODE,
   'server_error',
+  // Every key of the provider's pool is out (revoked, unpaid or throttled);
+  // the next provider in the chain may still answer.
+  'ALL_KEYS_FAILED',
 ]);
 
 /**
