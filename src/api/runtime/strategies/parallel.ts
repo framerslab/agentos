@@ -21,7 +21,8 @@
  * Each agent is gated by {@link checkBeforeAgentInput} before invocation.
  * Rejected agents, and agents whose input the post-approval check blocks (the
  * approver's instructions included), return `null` and are filtered out
- * before synthesis.
+ * before synthesis. When every agent was rejected, blocked or failed, no
+ * synthesis runs and the text is `''`.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileSequential} -- the simpler alternative for ordered pipelines.
@@ -171,6 +172,14 @@ export function compileParallel(
       // collapsed to a single provider — must not synthesize a false
       // consensus. Throws AgencyQuorumError before any synthesis spend.
       enforceQuorum(agencyConfig.quorum, settled, entries.length);
+
+      // No agent is left (each was rejected, blocked or failed): there is
+      // nothing to synthesize, and a synthesizer sent no answer would make one
+      // up. The run returns no text, no call record and no usage, which the
+      // agency logs as a run no seat answered and runs no validation retry on.
+      if (settled.length === 0) {
+        return { text: '', agentCalls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } };
+      }
 
       // Collect agent call records and aggregate usage.
       const agentCalls: AgentCallRecord[] = [];

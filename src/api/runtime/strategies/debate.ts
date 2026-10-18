@@ -29,7 +29,8 @@
  * agent is sent the input the check read. The post-approval check also reads
  * the motion and each argument so far on its own. An agent the handler
  * rejects, or whose input the post-approval check blocks, sits that turn out;
- * the synthesizer still rules on the arguments that were made.
+ * the synthesizer still rules on the arguments that were made. When none was
+ * made, no synthesizer runs and the text is `''`.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileReviewLoop} -- an alternative iterative strategy with explicit approval.
@@ -195,6 +196,14 @@ export function compileDebate(
           totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
           accumulateExtraUsage(totalUsage, resultUsage);
         }
+      }
+
+      // No argument was made (every turn was rejected or blocked): there is
+      // nothing to rule on, and a judge sent an empty transcript would make a
+      // verdict up. The run returns no text, no call record and no usage,
+      // which the agency logs as a run no seat answered.
+      if (agentCalls.length === 0) {
+        return { text: '', agentCalls, usage: totalUsage };
       }
 
       // Synthesize all arguments into a JUDGE'S VERDICT, not a balanced

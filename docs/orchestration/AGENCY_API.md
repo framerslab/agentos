@@ -504,7 +504,8 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
 - `agency()` returns `AgencyInstance`: `generate()` is `Promise<AgencyResult>`
   (`Promise<PanelResult>` under `panel`) where it was `Promise<unknown>`. A
   cast of the result to an unrelated type needs `as unknown as` first.
-- `result.text` is `''`, not missing, when every seat was rejected. A session
+- `result.text` is `''`, not missing, when every seat was rejected; under
+  `parallel` and `debate` no synthesizer runs then. A session
   adds no assistant turn for an empty answer, such a run's or a seat's reply
   with no text: `messages()` keeps the user's turn alone, and the next prompt
   carries no empty `Assistant:` line.
@@ -555,7 +556,8 @@ console.log(agentCalls.length); // 3 — one record per agent
 
 All agents run concurrently on the same prompt.  A synthesis step merges their
 outputs using the agency-level `model` and `provider` (the chair).  Requires
-`model` or `provider` at the agency level.
+`model` or `provider` at the agency level.  When every seat was rejected,
+blocked or failed, no synthesis runs and the text is `''`.
 
 Each seat can run on its own provider, model and key, so one question can be
 put to several vendors at once and the chair reads every answer:
@@ -596,7 +598,7 @@ console.log(agentCalls.map((c) => c.agent)); // the seats that answered
   OpenRouter's `openai/gpt-5.6-sol` leg passes `minProviders: 2` on one vendor.
 - `onShortfall`: `'error'` (default) throws [`AgencyQuorumError`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) before
   synthesis; `'proceed'` writes `parallel_quorum_shortfall` through the
-  host's logger and synthesizes anyway. The class is
+  host's logger and synthesizes anyway, unless no seat is left. The class is
   exported from the package entry point, with `AgencyPanelError` and
   `AgencySeatingError`.
 
@@ -615,8 +617,9 @@ statement.  Every later turn gets the motion plus the transcript of all earlier
 turns, including the current round's, and must quote the strongest opposing
 claim, attack it and add one new point in about 150 words.  After the last
 round a judge built from the agency-level `model` or `provider` writes the
-verdict, so one of the two is required.  Putting the two sides on different
-vendors keeps one model from arguing with itself:
+verdict, so one of the two is required.  A turn the approver rejects is sat
+out; when every turn is, no verdict is written and the text is `''`.  Putting
+the two sides on different vendors keeps one model from arguing with itself:
 
 ```typescript
 const debaters = agency({
