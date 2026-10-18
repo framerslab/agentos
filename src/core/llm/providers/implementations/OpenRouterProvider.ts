@@ -1327,6 +1327,7 @@ export class OpenRouterProvider implements IProvider {
   }
 
   public async shutdown(): Promise<void> {
+    await this.keyPool?.flush();
     this.isInitialized = false;
     this.availableModelsCache.clear();
     console.log('OpenRouterProvider shutdown: Instance marked as uninitialized and cache cleared.');
@@ -1617,7 +1618,7 @@ export class OpenRouterProvider implements IProvider {
               continue;
             }
             if (this.keyPool.usable() === 0 && keyFailure !== 'quota') {
-              throw this.allKeysFailedError(errorMessage, statusCode, errorType);
+              throw this.allKeysFailedError(this.redactSecrets(statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage), statusCode, errorType);
             }
           }
         }

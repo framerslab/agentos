@@ -1300,6 +1300,7 @@ export class GeminiProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
+    await this.keyPool?.flush();
     this.isInitialized = false;
     console.log('GeminiProvider shutdown complete.');
   }
@@ -2091,6 +2092,7 @@ export class GeminiProvider implements IProvider {
           );
         }
 
+        if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, attemptStartedAt);
         return (await response.json()) as T;
       } catch (error: unknown) {
         clearTimeout(timeoutId);
@@ -2099,7 +2101,7 @@ export class GeminiProvider implements IProvider {
           throw new GeminiProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
         }
         if (error instanceof GeminiProviderError) {
-          if (error.code === 'API_CLIENT_ERROR') throw error;
+          if (error.code === 'API_CLIENT_ERROR' || error.code === 'ALL_KEYS_FAILED') throw error;
           lastError = error;
         } else if (error instanceof Error && error.name === 'AbortError') {
           lastError = new GeminiProviderError(
@@ -2142,6 +2144,8 @@ export class GeminiProvider implements IProvider {
     requestTimeoutOverride?: number,
   ): Promise<ReadableStream<Uint8Array>> {
     const apiKey = this.nextApiKey();
+    if (apiKey === '') throw this.allKeysFailedError();
+    const startedAt = Date.now();
     const url = `${this.config.baseURL}${endpoint}?alt=sse`;
     const headers = this.requestHeaders(apiKey);
 
@@ -2169,7 +2173,7 @@ export class GeminiProvider implements IProvider {
         const streamKeyFailure = classifyKeyFailure(response.status, JSON.stringify(errorData));
         if (streamKeyFailure) {
           const serverRetryAfterMs = retryAfterMs(response.headers.get('retry-after'), undefined, this.config.keyPool?.maxRetryAfterMs);
-          this.keyPool?.markFailed(apiKey, streamKeyFailure, { status: response.status, ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}) });
+          this.keyPool?.markFailed(apiKey, streamKeyFailure, { status: response.status, at: startedAt, ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}) });
         }
         throw new GeminiProviderError(
           errorMessage,
@@ -2187,6 +2191,7 @@ export class GeminiProvider implements IProvider {
         );
       }
 
+      if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, startedAt);
       return response.body;
     } catch (error: unknown) {
       clearTimeout(timeoutId);

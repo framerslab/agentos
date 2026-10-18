@@ -22,7 +22,7 @@ import {
 } from '../IProvider';
 import { RequestyProviderError } from '../errors/RequestyProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, retryAfterMs, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
@@ -634,6 +634,7 @@ export class RequestyProvider implements IProvider {
   }
 
   public async shutdown(): Promise<void> {
+    await this.keyPool?.flush();
     this.isInitialized = false;
     this.availableModelsCache.clear();
     console.log('RequestyProvider shutdown: Instance marked as uninitialized and cache cleared.');
@@ -909,10 +910,12 @@ export class RequestyProvider implements IProvider {
       let errorData: any;
       let errorMessage = 'Unknown Requesty API error';
       let errorType = 'UNKNOWN_API_ERROR';
+      let retryAfterHeader: unknown;
 
       if (axios.isAxiosError(error)) {
         statusCode = error.response?.status;
         errorData = error.response?.data;
+        retryAfterHeader = error.response?.headers?.['retry-after'];
         if (errorData?.error && typeof errorData.error === 'object') {
           errorMessage = errorData.error.message || errorMessage;
           errorType = errorData.error.type || errorType;
@@ -930,7 +933,12 @@ export class RequestyProvider implements IProvider {
       // another; this single-shot path does not re-send.
       const keyFailure = typeof statusCode === 'number' ? classifyKeyFailure(statusCode, typeof errorData === 'string' ? errorData : JSON.stringify(errorData ?? {})) : null;
       if (keyFailure && this.keyPool?.has(apiKey)) {
-        this.keyPool.markFailed(apiKey, keyFailure, { status: statusCode, at: attemptStartedAt });
+        const serverRetryAfterMs = retryAfterMs(typeof retryAfterHeader === 'string' ? retryAfterHeader : null, undefined, this.config.keyPool?.maxRetryAfterMs);
+        this.keyPool.markFailed(apiKey, keyFailure, {
+          status: statusCode,
+          at: attemptStartedAt,
+          ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
+        });
       }
 
       // Prefix the status code into the message so downstream retry/fallback

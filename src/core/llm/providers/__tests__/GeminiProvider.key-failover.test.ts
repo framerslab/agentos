@@ -119,6 +119,22 @@ describe('GeminiProvider key failover', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('opens no stream either once every key is out', async () => {
+    const p = await provider('key_alpha_0001,key_beta_0002');
+    fetchMock.mockResolvedValueOnce(jsonResponse(400, invalidKey)).mockResolvedValueOnce(jsonResponse(400, invalidKey));
+    await ask(p).catch(() => undefined);
+    await expect(p.generateCompletionStream('gemini-2.5-flash', [{ role: 'user', content: 'hi' }], {}).next()).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('records a success, so an older failure cannot take a working key out', async () => {
+    const p = await provider('key_alpha_0001,key_beta_0002');
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, okContent));
+    await ask(p);
+    const pool = (p as unknown as { keyPool: { snapshot(): Array<Record<string, unknown>> } }).keyPool;
+    expect(typeof pool.snapshot()[0].lastOkAt).toBe('number');
+  });
+
   it('re-admits a failed key when the models-list probe passes, and prefers it again in order', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));

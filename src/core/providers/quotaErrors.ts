@@ -77,10 +77,12 @@ function envelopeOf(body: string): ErrorEnvelope | null {
  * the key's fault (a bad request, a missing model, a server error, a 403 for
  * a disallowed model or region).
  *
- * - 401: `auth`. 403: `auth` only for an envelope type `permission_error` or
- *   `authentication_error` (Anthropic), a code `invalid_api_key` or
- *   `insufficient_permissions` (OpenAI), or a message starting "Invalid
- *   authorization token" (Requesty's answer to a bad key, read 17 Oct 2026).
+ * - 401: `auth`. 403: `auth` only for an envelope type `authentication_error`
+ *   (Anthropic), a code `invalid_api_key` (OpenAI), or a message starting
+ *   "Invalid authorization token" (Requesty's answer to a bad key, read 17 Oct
+ *   2026). A `permission_error` or `insufficient_permissions` is a denial of a
+ *   resource the key may not use (a model, a feature, a region), not a revoked
+ *   key, and leaves the key in rotation.
  * - 402: `billing`. 429: `billing` when the envelope's type or code is
  *   `insufficient_quota` (OpenAI bills that way), else `quota`. 456: `quota`.
  * - 400: `billing` for Anthropic's credit-balance envelope (type
@@ -101,13 +103,9 @@ export function classifyKeyFailure(status: number, body: string): KeyFailureKind
     case 401:
       return 'auth';
     case 403:
-      return type === 'permission_error' ||
-        type === 'authentication_error' ||
-        code === 'invalid_api_key' ||
-        code === 'insufficient_permissions' ||
-        message.startsWith('invalid authorization token')
-        ? 'auth'
-        : null;
+      // A permission_error or insufficient_permissions names a resource the
+      // key may not use (a model, a feature), not a revoked key: left alone.
+      return type === 'authentication_error' || code === 'invalid_api_key' || message.startsWith('invalid authorization token') ? 'auth' : null;
     case 402:
       return 'billing';
     case 429:

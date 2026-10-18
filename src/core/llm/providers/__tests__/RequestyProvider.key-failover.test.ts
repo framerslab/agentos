@@ -88,6 +88,22 @@ describe('RequestyProvider key failover', () => {
     expect(client.request).toHaveBeenCalledTimes(2);
   });
 
+  it("rests a throttled key for the server's Retry-After", async () => {
+    const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002');
+    client.request.mockRejectedValueOnce({
+      isAxiosError: true,
+      message: 'Request failed with status code 429',
+      response: { status: 429, data: { error: { message: 'Too many requests' } }, headers: { 'retry-after': '7' } },
+    });
+    const before = Date.now();
+    await expect(ask(provider)).rejects.toMatchObject({ code: 'API_REQUEST_FAILED', httpStatus: 429 });
+    const pool = (provider as unknown as { keyPool: { snapshot(): Array<Record<string, unknown>> } }).keyPool;
+    const [a] = pool.snapshot();
+    expect(a).toMatchObject({ status: 'resting', kind: 'quota' });
+    expect((a.until as number) - before).toBeGreaterThan(6000);
+    expect((a.until as number) - before).toBeLessThanOrEqual(7100);
+  });
+
   it("keeps a 400 as the request's fault: no mark", async () => {
     const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002');
     client.request.mockRejectedValueOnce(axiosError(400, { error: { message: 'temperature must be at most 2' } }));

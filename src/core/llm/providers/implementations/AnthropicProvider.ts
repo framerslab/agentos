@@ -1091,6 +1091,7 @@ export class AnthropicProvider implements IProvider {
    * @private
    */
   private isRetryableStreamError(error: AnthropicProviderError): boolean {
+    if (error.code === 'ALL_KEYS_FAILED') return false;
     if (
       typeof error.httpStatus === 'number' &&
       error.httpStatus >= 400 &&
@@ -1616,7 +1617,14 @@ export class AnthropicProvider implements IProvider {
           }
 
           case 'error': {
-            // Stream-level error from Anthropic
+            // Stream-level error from Anthropic. One that names the key (a
+            // revoked key, an unpaid account, a throttle) takes the key out
+            // for the next request; this request has streamed content, so
+            // the error surfaces as before.
+            const keyKind = keyFailureOfStreamError(event.error.type, event.error.message);
+            if (keyKind && streamAttempt.apiKey && this.keyPool) {
+              this.keyPool.markFailed(streamAttempt.apiKey, keyKind, { at: streamAttempt.startedAt });
+            }
             yield {
               id: responseId,
               object: 'chat.completion.chunk',
@@ -1741,6 +1749,7 @@ export class AnthropicProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
+    await this.keyPool?.flush();
     this.isInitialized = false;
     console.log('AnthropicProvider shutdown complete.');
   }
@@ -2911,7 +2920,7 @@ export class AnthropicProvider implements IProvider {
           ? await fetch(`${this.config.baseURL}/v1/messages`, {
               method: 'POST',
               headers,
-              body: JSON.stringify({ model: 'claude-haiku-5-5', max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
+              body: JSON.stringify({ model: this.defaultModelId || 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
               signal: controller.signal,
             })
           : await fetch(`${this.config.baseURL}/v1/models?limit=1`, { method: 'GET', headers, signal: controller.signal });
@@ -3120,7 +3129,7 @@ export class AnthropicProvider implements IProvider {
           throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
         }
         if (error instanceof AnthropicProviderError) {
-          if (error.code === 'API_CLIENT_ERROR') throw error;
+          if (error.code === 'API_CLIENT_ERROR' || error.code === 'ALL_KEYS_FAILED') throw error;
           lastError = error;
         } else if (error instanceof Error && error.name === 'AbortError') {
           lastError = new AnthropicProviderError(

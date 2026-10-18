@@ -1139,11 +1139,20 @@ export class OpenAIProvider implements IProvider {
     );
   }
 
+  /** Where a request's key came from, for the pool's bookkeeping: an override or an OAuth token is never marked or hopped. */
+  private keySourceOf(apiKeyOverride?: string): 'pool' | 'override' | 'oauth' {
+    if (apiKeyOverride) return 'override';
+    if (this.config.oauthFlow) return 'oauth';
+    return 'pool';
+  }
+
   /**
    * Probes a key the pool took out of rotation (off the request path): an
    * auth failure with the models list; a billing failure with a one-token
-   * completion on the default model, since a models list can answer 200
-   * with no credit left (the models list when no default model is set).
+   * completion, since a models list can answer 200 with no credit left. The
+   * completion goes to the default model, else to the first chat model the
+   * account lists; with no model to send, the probe has no verdict and the
+   * key stays out. The reasoning families take `max_completion_tokens`.
    */
   private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
     const controller = new AbortController();
@@ -1151,23 +1160,39 @@ export class OpenAIProvider implements IProvider {
     try {
       const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
       if (this.config.organizationId) headers['OpenAI-Organization'] = this.config.organizationId;
-      const response =
-        kind === 'billing' && this.defaultModelId
-          ? await fetch(`${this.config.baseURL}/chat/completions`, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({ model: this.defaultModelId, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
-              signal: controller.signal,
-            })
-          : await fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
-      if (response.ok) return 'ok';
-      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
-      return classifyKeyFailure(response.status, text) ?? 'unknown';
+      const listModels = () => fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
+      if (kind !== 'billing') return await this.probeVerdict(await listModels());
+      let model = this.defaultModelId;
+      if (!model) {
+        const listed = await listModels();
+        if (!listed.ok) return await this.probeVerdict(listed);
+        const body = (await listed.json().catch(() => ({}))) as Partial<OpenAIAPITypes.ListModelsResponse>;
+        model = (body.data ?? []).map((m) => m.id).find((id) => /^gpt-/.test(id) && !/embedding|realtime|audio|tts|transcribe|image|search/.test(id));
+        if (!model) return 'unknown';
+      }
+      const response = await fetch(`${this.config.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model,
+          ...(modelRequiresMaxCompletionTokens(model) ? { max_completion_tokens: 16 } : { max_tokens: 1 }),
+          messages: [{ role: 'user', content: 'ping' }],
+        }),
+        signal: controller.signal,
+      });
+      return await this.probeVerdict(response);
     } catch {
       return 'unknown';
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** A probe's verdict from its answer: ok, the failure kind it still shows, or unknown. */
+  private async probeVerdict(response: Response): Promise<ProbeResult> {
+    if (response.ok) return 'ok';
+    const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
+    return classifyKeyFailure(response.status, text) ?? 'unknown';
   }
 
   /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */
@@ -1210,6 +1235,7 @@ export class OpenAIProvider implements IProvider {
         options.requestTimeout,
         options.abortSignal,
         { max: options.maxAttempts, onAttempt: options.onAttempt },
+        this.keySourceOf(options.apiKeyOverride),
       );
       return this.mapResponsesToCompletionResponse(responsesApiResponse, modelId);
     }
@@ -1225,6 +1251,7 @@ export class OpenAIProvider implements IProvider {
       options.requestTimeout,
       options.abortSignal,
       { max: options.maxAttempts, onAttempt: options.onAttempt },
+      this.keySourceOf(options.apiKeyOverride),
     );
 
     return this.mapApiToCompletionResponse(apiResponse);
@@ -1265,6 +1292,7 @@ export class OpenAIProvider implements IProvider {
         options.requestTimeout,
         abortSignal,
         { max: options.maxAttempts, onAttempt: options.onAttempt },
+        this.keySourceOf(options.apiKeyOverride),
       );
     } catch (error: unknown) {
       // An abort during the request surfaces as the abort chunk, not a throw.
@@ -1691,7 +1719,12 @@ export class OpenAIProvider implements IProvider {
       '/embeddings',
       'POST',
       apiKey,
-      payload
+      payload,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      this.keySourceOf(options?.apiKeyOverride),
     );
 
     return this.mapApiToEmbeddingResponse(apiResponse);
@@ -1750,6 +1783,7 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
+    await this.keyPool?.flush();
     // For OpenAIProvider, using stateless HTTP requests, there might not be
     // persistent connections to close. If connection pooling or WebSockets
     // were used, they would be closed here.
@@ -2589,6 +2623,7 @@ export class OpenAIProvider implements IProvider {
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
     attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void },
+    keySource?: 'pool' | 'override' | 'oauth',
   ): Promise<T>;
   private async makeApiRequest(
     endpoint: string,
@@ -2599,6 +2634,7 @@ export class OpenAIProvider implements IProvider {
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
     attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void },
+    keySource?: 'pool' | 'override' | 'oauth',
   ): Promise<ReadableStream<Uint8Array>>;
   private async makeApiRequest<T = unknown>(
     endpoint: string,
@@ -2609,12 +2645,17 @@ export class OpenAIProvider implements IProvider {
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
     attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void },
+    keySource?: 'pool' | 'override' | 'oauth',
   ): Promise<T | ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
     // The key this request sends; a key-scoped failure swaps it for the next
     // usable key of the pool (never a per-request override or an OAuth
     // token, which the pool does not hold).
     let currentKey = apiKey;
+    // Only a key the pool handed out is marked or hopped: a per-request
+    // override (even one equal to a pool key) and an OAuth token are the
+    // caller's choice. Without the origin, membership decides.
+    const fromPool = keySource === undefined ? (this.keyPool?.has(apiKey) ?? false) : keySource === 'pool';
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${currentKey}`,
       'User-Agent': 'AgentOS/1.0 (OpenAIProvider)',
@@ -2678,7 +2719,7 @@ export class OpenAIProvider implements IProvider {
       try {
         const requestOptions: RequestInit = {
           method,
-          headers,
+          headers: { ...headers },
           body: body ? JSON.stringify(body) : undefined,
           signal: controller.signal,
         };
@@ -2693,7 +2734,7 @@ export class OpenAIProvider implements IProvider {
         // per key.
         let keyErrorData: OpenAIAPITypes.APIErrorResponse | undefined;
         let keyHops = 0;
-        while (!response.ok && this.keyPool && this.keyPool.size > 1 && this.keyPool.has(currentKey)) {
+        while (!response.ok && fromPool && this.keyPool && this.keyPool.size > 1 && this.keyPool.has(currentKey)) {
           keyErrorData = await response.json().catch(() => ({}));
           const kind = classifyKeyFailure(response.status, JSON.stringify(keyErrorData));
           if (!kind) break;
@@ -2716,7 +2757,7 @@ export class OpenAIProvider implements IProvider {
           headers['Authorization'] = `Bearer ${currentKey}`;
           attemptStartedAt = Date.now();
           keyErrorData = undefined;
-          response = await fetch(url, { ...requestOptions, headers });
+          response = await fetch(url, { ...requestOptions, headers: { ...headers } });
         }
         clearTimeout(timeoutId);
         report(attempt, response.status, response.ok);
@@ -2752,7 +2793,7 @@ export class OpenAIProvider implements IProvider {
           throw lastError; // If not explicitly handled for retry, throw
         }
 
-        if (this.keyPool?.has(currentKey)) this.keyPool.markSuccess(currentKey, attemptStartedAt);
+        if (fromPool && this.keyPool?.has(currentKey)) this.keyPool.markSuccess(currentKey, attemptStartedAt);
         if (expectStream) {
           if (!response.body) {
             throw new OpenAIProviderError('Expected a stream response but body was null.', 'STREAM_BODY_NULL');
@@ -2771,7 +2812,7 @@ export class OpenAIProvider implements IProvider {
           throw new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
         }
         if (error instanceof OpenAIProviderError) { // If already our custom error, re-throw if not retryable
-             if (error.code === 'API_CLIENT_ERROR') throw error;
+             if (error.code === 'API_CLIENT_ERROR' || error.code === 'ALL_KEYS_FAILED') throw error;
              lastError = error;
         } else if (error instanceof Error && error.name === 'AbortError') {
           lastError = new OpenAIProviderError(`Request timed out after ${effectiveTimeout}ms.`, 'REQUEST_TIMEOUT', undefined, undefined, undefined, error);

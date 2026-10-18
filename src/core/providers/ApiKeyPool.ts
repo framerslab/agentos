@@ -130,6 +130,7 @@ export class ApiKeyPool {
   private readyPromise?: Promise<void>;
   private readonly inFlightProbes = new Map<string, Promise<void>>();
   private readonly pendingSaves = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly inFlightSaves = new Set<Promise<void>>();
   private readonly lastLogged = new Map<string, number>();
   private lastStoreFailureLog = 0;
 
@@ -197,11 +198,11 @@ export class ApiKeyPool {
 
   /**
    * The next key by the strategy. A single-key pool returns its key. With
-   * several keys: a usable key, or, when every unusable key is only resting,
-   * the one whose rest ends first (a request still goes out and its answer
-   * updates the state); `''` when a failed key exists and none is usable,
-   * which the provider turns into its all-keys-failed error. A failed key
-   * whose recheck is due has a probe scheduled here, off the request path.
+   * several keys: a usable key, or, when none is usable, the resting key
+   * whose rest ends first (a throttled key still goes out and its answer
+   * updates the state; a failed key never does); `''` when every key is
+   * failed, which the provider turns into its all-keys-failed error. A failed
+   * key whose recheck is due has a probe scheduled here, off the request path.
    */
   next(): string {
     if (this.entries.length === 0) return '';
@@ -226,12 +227,14 @@ export class ApiKeyPool {
       }
     }
 
-    // None usable. Resting keys only: the one whose rest ends soonest (the
-    // first version's behaviour). Any failed key: nothing, so the provider
-    // throws instead of sending a revoked or unpaid credential again.
-    if (this.entries.some((entry) => entry.state.status === 'failed' && !this.isUsable(entry, now))) return '';
-    const soonest = [...this.entries].sort((a, b) => (a.state.until ?? 0) - (b.state.until ?? 0));
-    return soonest[0].key;
+    // None usable. A resting key is merely throttled: the one whose rest ends
+    // soonest goes out (the first version's behaviour), never a failed key (a
+    // revoked or unpaid credential). Every key failed: nothing, so the
+    // provider throws instead of sending such a credential again.
+    const resting = this.entries.filter((entry) => entry.state.status === 'resting');
+    if (resting.length === 0) return '';
+    resting.sort((a, b) => (a.state.until ?? 0) - (b.state.until ?? 0));
+    return resting[0].key;
   }
 
   /** How many keys `next()` may hand out now. */
@@ -264,7 +267,10 @@ export class ApiKeyPool {
     state.lastFailAt = at;
     state.kind = kind;
     if (kind === 'quota') {
-      const rest = Math.min(detail?.retryAfterMs ?? this.cooldownMs, this.maxRetryAfterMs);
+      // A Retry-After of zero (or none) rests the key for the cooldown: the
+      // point of the rest is that the next draw prefers another key.
+      const asked = detail?.retryAfterMs;
+      const rest = Math.min(asked !== undefined && asked > 0 ? asked : this.cooldownMs, this.maxRetryAfterMs);
       state.status = 'resting';
       state.until = now + rest;
       state.nextRecheckAt = undefined;
@@ -342,6 +348,22 @@ export class ApiKeyPool {
   /** A copy of every key's state, for hosts and tests. */
   snapshot(): KeyState[] {
     return this.entries.map((entry) => ({ ...entry.state }));
+  }
+
+  /**
+   * Writes every pending state change now and waits for the writes in
+   * flight, so a host that is shutting down keeps the keys' standing; the
+   * providers' `shutdown()` calls it. Resolves at once without a store.
+   */
+  async flush(): Promise<void> {
+    const pending = Array.from(this.pendingSaves.keys());
+    for (const timer of this.pendingSaves.values()) clearTimeout(timer);
+    this.pendingSaves.clear();
+    for (const key of pending) {
+      const entry = this.entries.find((e) => e.key === key);
+      if (entry) void this.saveNow(entry);
+    }
+    await Promise.all(Array.from(this.inFlightSaves));
   }
 
   // ---------------------------------------------------------------------------
@@ -474,25 +496,36 @@ export class ApiKeyPool {
   }
 
   private scheduleSave(entry: Entry): void {
-    const store = this.store;
-    if (!store || !this.id) return;
+    if (!this.store || !this.id) return;
     const pending = this.pendingSaves.get(entry.key);
     if (pending) clearTimeout(pending);
     const timer = setTimeout(() => {
       this.pendingSaves.delete(entry.key);
-      const snapshot = { ...entry.state };
-      store.save(this.id, snapshot)
-        .then(() => this.logger().debug?.('key_pool.state_saved', { poolId: this.id, label: snapshot.label, status: snapshot.status }))
-        .catch((error: unknown) => {
-          const now = Date.now();
-          if (now - this.lastStoreFailureLog < STORE_FAILURE_LOG_INTERVAL_MS) return;
-          this.lastStoreFailureLog = now;
-          this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'save', error: error instanceof Error ? error.message : String(error) });
-        });
+      void this.saveNow(entry);
     }, SAVE_DEBOUNCE_MS);
     const maybeUnref = timer as unknown as { unref?: () => void };
     if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
     this.pendingSaves.set(entry.key, timer);
+  }
+
+  /** Writes one key's state to the store now; the write is tracked so `flush()` can wait for it. */
+  private saveNow(entry: Entry): Promise<void> {
+    const store = this.store;
+    if (!store || !this.id) return Promise.resolve();
+    const snapshot = { ...entry.state };
+    const write: Promise<void> = store.save(this.id, snapshot)
+      .then(() => this.logger().debug?.('key_pool.state_saved', { poolId: this.id, label: snapshot.label, status: snapshot.status }))
+      .catch((error: unknown) => {
+        const now = Date.now();
+        if (now - this.lastStoreFailureLog < STORE_FAILURE_LOG_INTERVAL_MS) return;
+        this.lastStoreFailureLog = now;
+        this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'save', error: error instanceof Error ? error.message : String(error) });
+      })
+      .finally(() => {
+        this.inFlightSaves.delete(write);
+      });
+    this.inFlightSaves.add(write);
+    return write;
   }
 
   private logger(): ILogger {

@@ -57,16 +57,19 @@ describe('ApiKeyPool v2', () => {
       expect(pool.next()).toBe('sk_a');
     });
 
-    it('returns nothing when a failed key exists and none is usable, and the soonest rest when all are only resting', () => {
-      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', cooldownMs: 10_000 });
+    it('sends the soonest-returning resting key when none is usable, never a failed key, and nothing when every key is failed', () => {
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', cooldownMs: 10_000, recheckMs: 60_000 });
       pool.markFailed('sk_a', 'quota');
       vi.advanceTimersByTime(2000);
       pool.markFailed('sk_b', 'quota');
       expect(pool.next()).toBe('sk_a');
+      // A revoked key beside a throttled one: the throttled one still goes out.
       pool.markFailed('sk_a', 'auth');
+      expect(pool.next()).toBe('sk_b');
+      pool.markFailed('sk_b', 'billing');
       expect(pool.next()).toBe('');
       expect(pool.usable()).toBe(0);
-      expect(pool.soonestReturnMs()).toBe(10_000);
+      expect(pool.soonestReturnMs()).toBe(60_000);
     });
 
     it('a single-key pool keeps returning its key whatever happened to it', () => {
@@ -85,6 +88,11 @@ describe('ApiKeyPool v2', () => {
       expect(pool.snapshot()[1].until).toBe(Date.now() + 120_000);
       vi.advanceTimersByTime(5001);
       expect(pool.next()).toBe('sk_a');
+      // A Retry-After of zero counts as none: the key rests for the cooldown, so the next draw prefers another key.
+      const zero = new ApiKeyPool('sk_c,sk_d', { strategy: 'ordered', cooldownMs: 60_000 });
+      zero.markFailed('sk_c', 'quota', { retryAfterMs: 0 });
+      expect(zero.snapshot()[0].until).toBe(Date.now() + 60_000);
+      expect(zero.next()).toBe('sk_d');
     });
 
     it('takes an auth or billing failure out until the recheck delay has run when there is no probe, doubling each time', () => {
@@ -193,6 +201,17 @@ describe('ApiKeyPool v2', () => {
       await again.ready();
       expect(again.snapshot()[0]).toMatchObject({ status: 'failed', kind: 'billing', label: 'k00001' });
       expect(again.next()).toBe('sk_beta_0002');
+    });
+
+    it('flush() writes the pending changes at once and waits for them', async () => {
+      const store = new InMemoryKeyPoolStateStore();
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:flush', store });
+      await pool.ready();
+      pool.markFailed('sk_alpha_0001', 'auth');
+      expect((await store.load('p:flush')) ?? []).toHaveLength(0);
+      await pool.flush();
+      expect((await store.load('p:flush'))?.map((row) => row.status)).toEqual(['failed']);
+      await pool.flush();
     });
 
     it('ignores rows whose fingerprint matches no configured key, and does nothing without an id', async () => {

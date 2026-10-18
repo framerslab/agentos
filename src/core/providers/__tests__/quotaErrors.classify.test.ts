@@ -12,10 +12,11 @@ describe('classifyKeyFailure', () => {
   });
 
   it('reads 403 as auth only for a key-scoped envelope', () => {
-    expect(classifyKeyFailure(403, anthropic('permission_error'))).toBe('auth');
     expect(classifyKeyFailure(403, anthropic('authentication_error'))).toBe('auth');
     expect(classifyKeyFailure(403, openai('invalid_request_error', 'invalid_api_key'))).toBe('auth');
-    expect(classifyKeyFailure(403, openai('invalid_request_error', 'insufficient_permissions'))).toBe('auth');
+    // A resource-scoped denial (a model or a feature the key may not use) is not the key's fault.
+    expect(classifyKeyFailure(403, anthropic('permission_error', 'Your API key does not have permission to use the specified resource.'))).toBeNull();
+    expect(classifyKeyFailure(403, openai('invalid_request_error', 'insufficient_permissions'))).toBeNull();
     expect(classifyKeyFailure(403, anthropic('invalid_request_error', 'model not available in your region'))).toBeNull();
     expect(classifyKeyFailure(403, '')).toBeNull();
   });

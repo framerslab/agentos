@@ -182,6 +182,16 @@ describe('OpenAIProvider key failover', () => {
     expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', kind: 'billing', failures: 2 });
   });
 
+  it('never marks or hops a per-request override, even one equal to a pool key', async () => {
+    const p = await provider('sk_alpha_0001,sk_beta_0002');
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, invalidKey));
+    await expect(p.generateCompletion('gpt-4o', [{ role: 'user', content: 'hi' }], { apiKeyOverride: 'sk_alpha_0001' })).rejects.toMatchObject({ code: 'API_CLIENT_ERROR', httpStatus: 401 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(keyOf(callsOf()[0])).toBe('sk_alpha_0001');
+    const pool = (p as unknown as { keyPool: { snapshot(): Array<Record<string, unknown>> } }).keyPool;
+    expect(pool.snapshot().map((s) => s.status)).toEqual(['ok', 'ok']);
+  });
+
   it("keeps the first version's behaviour for a single key: a 401 throws at once as a client error", async () => {
     const p = await provider('sk_only_0001');
     fetchMock.mockResolvedValueOnce(jsonResponse(401, invalidKey));

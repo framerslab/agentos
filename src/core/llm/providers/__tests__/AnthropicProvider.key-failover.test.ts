@@ -201,7 +201,8 @@ describe('AnthropicProvider key failover', () => {
     const probe = callsOf()[2];
     expect(probe.url).toContain('/v1/messages');
     expect(probe.init.method).toBe('POST');
-    expect(JSON.parse(String(probe.init.body))).toMatchObject({ max_tokens: 1 });
+    // The model the probe sends is one the catalog knows (the health check's), never a guessed id.
+    expect(JSON.parse(String(probe.init.body))).toMatchObject({ model: 'claude-haiku-4-5-20251001', max_tokens: 1 });
     expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', kind: 'billing', failures: 2 });
   });
 
