@@ -467,8 +467,8 @@ describe('LLMUtilityAI over a provider manager', () => {
   it('checks the standard formats a targetSchema names, and passes over a keyword or a format Ajv does not know', async () => {
     const stats = new StatisticalUtilityAI('stat-for-formats');
     await stats.initialize({ utilityId: 'stat-for-formats' });
-    // date-time is a standard format. `example` is no JSON Schema keyword and `ticket-code` no format: JSON Schema
-    // says to pass over both, so neither keeps the schema from compiling.
+    // date-time is a standard format. `example` is no JSON Schema keyword, which JSON Schema says to pass over, and
+    // `ticket-code` is no format Ajv knows: neither keeps the schema from compiling.
     const schema = {
       type: 'object',
       required: ['at'],
