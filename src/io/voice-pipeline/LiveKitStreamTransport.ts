@@ -67,12 +67,16 @@
  * bytes, five seconds, four at once) and only a playback or clear receipt, a
  * `transcript` message (as `isClientTranscriptMessage()` checks it) or a
  * `control` message with `mute`, `unmute` or `stop` is taken; anything else
- * is reported as `'error'` and closes the transport. The participant leaving
- * the room closes it too. Outbound text is bounded as well: 16384 bytes a
- * message, four in flight, and a send not done within five seconds closes the
- * transport.
+ * is reported as `'error'` and closes the transport. Outbound text is bounded
+ * as well: 16384 bytes a message, four in flight, and a send not done within
+ * five seconds closes the transport.
  *
  * ## Lifetime
+ * The linked participant leaving the room closes the transport while
+ * `closeOnDisconnect` is on: by default with `participant`, listen-only or
+ * speaking, and with `participantIdentity` only with a publisher. With it off
+ * the transport stays open, and the participant rejoining under the same
+ * identity is heard again. Another participant leaving changes nothing.
  * `close()` stops reading audio, drops the frames a pause held, unregisters
  * the topic, closes the text streams still arriving and emits `'close'` at
  * once; the room stays connected, because it belongs to the caller.
@@ -144,8 +148,9 @@ export interface LiveKitStreamTransportOptions {
    */
   participantKinds?: readonly number[];
   /**
-   * Close when the linked participant leaves the room. Default `true` with `participant`; with `participantIdentity`,
-   * a transport with `publisher` closes and a listen-only one stays open.
+   * Close when the linked participant leaves the room, listen-only or speaking. Default `true` with `participant`;
+   * with `participantIdentity`, a transport with `publisher` closes and a listen-only one stays open. `false` keeps
+   * the transport open, and the participant rejoining under the same identity is heard again.
    */
   closeOnDisconnect?: boolean;
   /**
@@ -220,7 +225,7 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * | `'audio'`   | `AudioFrame`              | The participant's audio, mono Float32.        |
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
  * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. |
- * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting or, with a publisher, the participant leaving, a refused message or a capture that never returned. |
+ * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting, the linked participant leaving while `closeOnDisconnect` is on or, with a publisher, a refused message or a capture that never returned. |
  * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. |
  *
  * Without a publisher, an error that nothing listens for is written as a
@@ -274,6 +279,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private waitingForFirst = false;
   /** The topic text input holds, or `undefined` while text input is off. */
   private readonly textInputTopic: string | undefined;
+  /** Whether the linked participant leaving the room closes the transport: `closeOnDisconnect`, or its default. */
+  private readonly closeOnDeparture: boolean;
 
   /**
    * @throws {Error} `invalid livekit input bound` when `bufferMs` is not a
@@ -332,7 +339,9 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       catch { this.warn(`LiveKitStreamTransport: text input is off, the room already handles the ${textInputTopic} topic`); textInputTopic = undefined; }
     }
     this.textInputTopic = textInputTopic;
-    if (options.publisher) options.room.on('participantDisconnected', this.participantDisconnected);
+    // With `participantIdentity` and no `closeOnDisconnect`, only a speaking transport closes when the participant leaves.
+    this.closeOnDeparture = options.closeOnDisconnect ?? (conventions || !!options.publisher);
+    if (this.closeOnDeparture) options.room.on('participantDisconnected', this.participantDisconnected);
     // 'first' with nobody of a linked kind in the room links the first of them to join.
     if (options.participant === FIRST && this.linked === undefined) { this.waitingForFirst = true; options.room.on('participantConnected', this.participantConnected); }
     this.inputPump = this.pump();
@@ -501,7 +510,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     this.options.room.unregisterTextStreamHandler(this.topic);
     // Only a topic the transport holds is let go: a room that already handled the text-input topic keeps its handler.
     if (this.textInputTopic !== undefined) this.options.room.unregisterTextStreamHandler(this.textInputTopic);
-    if (this.options.publisher) this.options.room.off('participantDisconnected', this.participantDisconnected);
+    if (this.closeOnDeparture) this.options.room.off('participantDisconnected', this.participantDisconnected);
     this.stopWaitingForFirst();
     // what a pause held goes with the transport: a resume after the close emits none of it, and no gap
     this.source.close(); this.held.length = 0; this.heldMs = 0; this.droppedMs = 0;
