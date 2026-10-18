@@ -79,12 +79,15 @@
  *   on listening for it until the reply ends: a final with words that comes
  *   then still cuts the reply. The endpoint detector hears the speech once
  *   the floor is decided, so the speech that cuts a reply is the user's turn.
- * - Without a call profile, a reply ends when its TTS session reports
- *   `flush_complete`, or, on a transport that reports its playout
+ * - Without a call profile, a reply ends once its TTS session has reported
+ *   `flush_complete` and the audio it was sent has played out
+ *   (`_finishReply`): on a transport that reports its playout
  *   (`IStreamTransport.waitForPlayout()`, as a speaking
- *   `LiveKitStreamTransport` does), once the audio it was sent has played
- *   out (`_finishReply`). Until then the pipeline stays `speaking`, so speech
- *   over the rest of the reply interrupts it, and `agent_done` waits.
+ *   `LiveKitStreamTransport` does), when that says so, and on any other one
+ *   when the audio's own duration has passed, each chunk counted from when it
+ *   was sent at the earliest (`VoicePipelineConfig.maxPlayoutWaitMs`). Until
+ *   then the pipeline stays `speaking`, so speech over the rest of the reply
+ *   interrupts it, and `agent_done` waits.
  * - Both runtimes emit the session events of `VoiceSessionEventMap` on the
  *   session `startSession()` returns, and the orchestrator emits them too,
  *   but `error` and `state_change` (`SessionEvents`): each through
@@ -169,6 +172,12 @@ const BARGEIN_ASK_INTERVAL_MS = 100;
  * resumes, by default (`VoicePipelineConfig.falseInterruptionMs`).
  */
 const DEFAULT_FALSE_INTERRUPTION_MS = 1_500;
+
+/**
+ * The longest a reply stays `speaking` after its synthesis completes on a transport that cannot report its playout,
+ * by default (`VoicePipelineConfig.maxPlayoutWaitMs`).
+ */
+const DEFAULT_MAX_PLAYOUT_WAIT_MS = 30_000;
 
 /** The longest delay `setTimeout()` keeps; a longer one would fire at once. */
 const MAX_TIMER_MS = 2_147_483_647;
@@ -421,6 +430,11 @@ interface SpeechEdges {
 interface ReplyRecord {
   /** Whether a refused chunk of the reply has been reported; the rest of its refusals are not. */
   audioRefusalReported: boolean;
+  /**
+   * When the audio sent so far will have played, on `Date.now()`'s clock, as a transport that cannot report its
+   * playout plays it: each chunk after the one before it, from the moment it was sent at the earliest.
+   */
+  playsUntil: number;
   /** Whether the reply has its first word, from which the agent speaks (`agent_state_changed`). */
   started: boolean;
 }
@@ -607,10 +621,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * The reply being spoken: replaced as each reply starts to speak (PROCESSING -> SPEAKING). The send of each audio
    * chunk holds the reply it belongs to, so that each reply's first refused chunk is reported and the rest are not.
    */
-  private _currentReply: ReplyRecord = { audioRefusalReported: false, started: false };
+  private _currentReply: ReplyRecord = { audioRefusalReported: false, playsUntil: 0, started: false };
   private publicSession?: VoicePipelineSession;
   /** The session events of a session without a call profile; a call profile's runtime has its own. */
   private readonly events: SessionEvents;
+  /** Ends the wait of a reply whose synthesis completed for its audio to play out (`_finishReply`). */
+  private playoutWait?: AbortController;
   /** The failure a session without a call profile ended on, for its `close` event. */
   private failure?: Error;
   /** The language of the current turn's last final transcript, for the user's conversation item. */
@@ -640,6 +656,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * (`VoicePipelineConfig.falseInterruptionMs`).
    */
   private readonly falseInterruptionMs: number;
+  /**
+   * The longest a reply stays `speaking` after its synthesis completes on a transport that cannot report its playout
+   * (`VoicePipelineConfig.maxPlayoutWaitMs`).
+   */
+  private readonly maxPlayoutWaitMs: number;
 
   /**
    * Create a new orchestrator with the given pipeline configuration.
@@ -648,8 +669,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * to wire up components and transition to `'listening'`.
    *
    * @param config - Top-level pipeline configuration specifying providers and options.
-   * @throws {RangeError} When `config.falseInterruptionMs` is given and is not a finite number of zero or more, or
-   *   `config.userAwayTimeoutMs` is given and is not a finite number greater than zero.
+   * @throws {RangeError} When `config.falseInterruptionMs` or `config.maxPlayoutWaitMs` is given and is not a finite
+   *   number of zero or more, or `config.userAwayTimeoutMs` is given and is not a finite number greater than zero.
    */
   constructor(private readonly config: VoicePipelineConfig) {
     super();
@@ -661,6 +682,14 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       );
     }
     this.falseInterruptionMs = falseInterruptionMs;
+    const maxPlayoutWaitMs = config.maxPlayoutWaitMs ?? DEFAULT_MAX_PLAYOUT_WAIT_MS;
+    // Zero ends a reply as its synthesis completes, as on a transport whose audio has already played.
+    if (!Number.isFinite(maxPlayoutWaitMs) || maxPlayoutWaitMs < 0) {
+      throw new RangeError(
+        `VoicePipelineOrchestrator: maxPlayoutWaitMs must be a finite number of zero or more, got ${String(maxPlayoutWaitMs)}`
+      );
+    }
+    this.maxPlayoutWaitMs = maxPlayoutWaitMs;
     const awayMs = config.userAwayTimeoutMs;
     if (awayMs !== undefined && (!Number.isFinite(awayMs) || awayMs <= 0)) {
       throw new RangeError(
@@ -975,6 +1004,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    */
   private _cutReply(open: Interruption, action: BargeinAction, parts: ReplyParts): void {
     this._closeInterruption(open);
+    // A reply waiting for its audio to play out waits no more: what is left of it is cut.
+    this._stopPlayoutWait();
     this.stateTo('interrupting');
     parts.tts.cancel();
     parts.agent.abort?.();
@@ -1094,35 +1125,62 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    */
   private _sendReplyAudio(transport: IStreamTransport, chunk: EncodedAudioChunk): void {
     this.playedMs += chunk.durationMs;
-    this._watchSend(() => transport.sendAudio(chunk), this._currentReply);
+    const reply = this._currentReply;
+    // A transport that cannot report its playout plays each chunk after the one before it, from when it was sent at the
+    // earliest; a duration that is no number of milliseconds plays for none.
+    const durationMs = Number.isFinite(chunk.durationMs) && chunk.durationMs > 0 ? chunk.durationMs : 0;
+    reply.playsUntil = Math.max(reply.playsUntil, Date.now()) + durationMs;
+    this._watchSend(() => transport.sendAudio(chunk), reply);
   }
 
   /**
-   * Ends the reply once its audio has played. A transport that reports its playout (`waitForPlayout()`, as a speaking
-   * `LiveKitStreamTransport` does) keeps the reply `speaking` until the audio it was sent has played out, so speech
-   * over the rest of the reply interrupts it as over any part of it; a wait that rejects ends the reply as one that
-   * resolves, and one that settles after the reply was cut or replaced changes nothing. Without it, the reply ends at
-   * once (`_settleReply`).
+   * Ends the reply once its audio has played: the pipeline stays `speaking` until then, so speech over the rest of the
+   * reply interrupts it as over any part of it, and the agent holds the floor. A transport that reports its playout
+   * (`waitForPlayout()`, as a speaking `LiveKitStreamTransport` does) says when the audio it was sent has played out; a
+   * wait that rejects ends the reply as one that resolves. On any other transport the reply waits for the audio's own
+   * duration (`ReplyRecord.playsUntil`), at most `maxPlayoutWaitMs`, and ends at once when that has passed. A barge-in
+   * that cuts the reply, a stop and a later wait abort the wait (`_stopPlayoutWait`), and a wait that settles after the
+   * reply was cut or replaced changes nothing. Then the reply ends (`_settleReply`).
    *
    * @param parts - The session's parts.
    */
   private _finishReply(parts: ReplyParts): void {
     const reply = this._currentReply;
+    this._stopPlayoutWait();
+    const wait = new AbortController();
+    this.playoutWait = wait;
+    const settle = (): void => {
+      if (wait.signal.aborted) return;
+      this.playoutWait = undefined;
+      if (this._currentReply === reply && this.current === 'speaking') this.supervise(() => this._settleReply(parts));
+    };
     let playout: Promise<void> | undefined;
     try {
-      playout = parts.transport.waitForPlayout?.();
+      playout = parts.transport.waitForPlayout?.(wait.signal);
     } catch (err) {
       playout = Promise.reject(err);
     }
-    if (!playout) {
+    if (playout) {
+      // As in _watchSend(), Promise.resolve() also takes a promise of another realm or library.
+      Promise.resolve(playout).then(settle, settle);
+      return;
+    }
+    // The transport cannot say when its audio has played: the audio it was sent plays for its own duration.
+    const leftMs = Math.min(this.maxPlayoutWaitMs, reply.playsUntil - Date.now());
+    if (!(leftMs > 0)) {
+      this.playoutWait = undefined;
       this._settleReply(parts);
       return;
     }
-    const settle = (): void => {
-      if (this._currentReply === reply && this.current === 'speaking') this.supervise(() => this._settleReply(parts));
-    };
-    // As in _watchSend(), Promise.resolve() also takes a promise of another realm or library.
-    Promise.resolve(playout).then(settle, settle);
+    const timer = setTimeout(settle, Math.min(leftMs, MAX_TIMER_MS));
+    wait.signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
+  }
+
+  /** Ends the wait of a reply for its audio to play out, if one is under way (`_finishReply`). */
+  private _stopPlayoutWait(): void {
+    const wait = this.playoutWait;
+    this.playoutWait = undefined;
+    wait?.abort();
   }
 
   /**
@@ -1370,7 +1428,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         inPart('endpoint', () => endpoint.setAgentContext?.({ speaking: true }));
         const tokens = inPart('agent', () => agent.sendText(event.transcript, { speakers: [], endpointReason: event.reason, speechDurationMs: event.durationMs, wasInterrupted: false, transcriptConfidence: event.confidence }));
         // The reply gets its record before its audio is sent.
-        const reply: ReplyRecord = { audioRefusalReported: false, started: false };
+        this._stopPlayoutWait();
+        const reply: ReplyRecord = { audioRefusalReported: false, playsUntil: 0, started: false };
         this._currentReply = reply;
         this.stateTo('speaking');
         this.text = '';
@@ -1747,8 +1806,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * endpoint detector and removes the listeners the session added to it, and closes the transport, unless the transport
    * has closed itself: a transport still open is sent `session_ended` first. The promise rejects when one of those
    * throws. An interruption of the reply under way ends with the session: its timers stop, and the audio and speech
-   * it holds are neither sent nor told. No session event is emitted after `'close'`. Safe to call more than once: a
-   * later call returns the first one's outcome.
+   * it holds are neither sent nor told; so does a reply's wait for its audio to play out. No session event is emitted
+   * after `'close'`. Safe to call more than once: a later call returns the first one's outcome.
    *
    * @param reason - Optional human-readable reason for diagnostics; `'closed'` in the `close` event when omitted.
    */
@@ -1761,6 +1820,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this.endClientLines?.();
     // An interruption's timers go with the session, and nothing it holds is sent or told.
     if (this.interruption) this._closeInterruption(this.interruption);
+    this._stopPlayoutWait();
     // The session's events end here: the away timer stops, and nothing is emitted after close.
     this.events.close();
     const closed: VoiceSessionEventMap['close'] = { reason: reason ?? 'closed', ...(this.failure ? { error: this.failure } : {}), createdAt: Date.now() };
