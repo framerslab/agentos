@@ -1512,6 +1512,25 @@ describe('22-23. rotation, copies, retries, empty text', () => {
     expect(handler).toHaveBeenCalledTimes(2);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+  it("parallel and debate call no synthesizer when every seat is rejected: text is '', the run is logged once, and an output schema asks the approver once per seat turn", async () => {
+    for (const strategy of ['parallel', 'debate']) {
+      fetchMock.mockClear();
+      // A synthesizer that ran over no answer would be answered, and its text would be the result's.
+      route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('a synthesis of no answer')]]);
+      const handler = vi.fn(hitl.autoReject('no'));
+      const lines = await logLines(async () => {
+        const r = (await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { a: { instructions: 'x' }, b: { instructions: 'y' } }, strategy, maxRounds: 1, output: z.object({ ok: z.boolean() }), hitl: { approvals: { beforeAgent: ['a', 'b'] }, handler } } as never).generate('go')) as AgencyResult;
+        expect(r.text).toBe('');
+        expect(r.agentCalls).toEqual([]);
+        expect(r.parsed).toBeUndefined();
+      });
+      expect(lines.filter((l) => l.meta?.event === 'agency_no_seat_answered')).toEqual([
+        { level: 'info', message: expect.any(String), meta: { event: 'agency_no_seat_answered', agency: '__agency__', strategy, seats: 2 } },
+      ]);
+      expect(handler).toHaveBeenCalledTimes(2);
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  });
   it("a pooled parallel agency logs a failed pre-built seat through the host's logger with its message masked, and writes it to no console", async () => {
     vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
