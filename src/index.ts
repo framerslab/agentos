@@ -540,3 +540,26 @@ export {
 } from './api/observers.js';
 export type { LlmUsageEvent, LlmUsageObserver } from './api/observers.js';
 // CI retrigger
+// API key pools: several keys per provider from one comma-separated string,
+// failover to the next usable key when one is revoked, unpaid or throttled,
+// probes before a failed key returns, and state a host may persist.
+export {
+  ApiKeyPool,
+  keyFingerprint,
+  keyPoolStrategyFromEnv,
+  InMemoryKeyPoolStateStore,
+  SqlKeyPoolStateStore,
+  keyPoolStateDdl,
+  KEY_POOL_STATE_DDL,
+  classifyKeyFailure,
+  isQuotaError,
+  retryAfterMs as retryAfterHeaderMs,
+} from './core/providers/index.js';
+export type {
+  ApiKeyPoolConfig,
+  ProbeResult as KeyProbeResult,
+  KeyPoolStateStore,
+  KeyState,
+  SqlKeyPoolStateStoreOptions,
+  KeyFailureKind,
+} from './core/providers/index.js';
