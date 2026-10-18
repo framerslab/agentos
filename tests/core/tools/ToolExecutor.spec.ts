@@ -108,6 +108,56 @@ describe('ToolExecutor', () => {
     expect(String(result.error)).toContain('Invalid arguments');
   });
 
+  const callOf = (executor: ToolExecutor) => (name: string, args: Record<string, any> = { text: 'hi' }) =>
+    executor.executeTool({ toolCallRequest: makeRequest(name, args), gmiId: 'gmi-1', personaId: 'persona-1', personaCapabilities: [], userContext });
+
+  it('checks the arguments of a tool registered again with a new copy of its schema under the same $id', async () => {
+    // A tool rebuilt from its schema file brings a new copy of the schema, under the same $id.
+    const schemaFor = () => ({ $id: 'urn:example:text-args', type: 'object', properties: { text: { type: 'string' } }, required: ['text'] });
+    const executor = new ToolExecutor();
+    const call = callOf(executor);
+    for (let registration = 1; registration <= 2; registration += 1) {
+      await executor.registerTool(makeTool({ inputSchema: schemaFor() }));
+      expect((await call('echo', { text: 'hi' })).output).toEqual({ text: 'hi' });
+      expect(String((await call('echo', {})).error)).toContain('Invalid arguments');
+    }
+  });
+
+  it('passes over a keyword Ajv does not know in an input schema, and answers a failed result for one that does not compile', async () => {
+    const executor = new ToolExecutor();
+    // `example` is no JSON Schema keyword, which JSON Schema says to pass over; 'nonsense' is no JSON Schema type.
+    await executor.registerTool(
+      makeTool({ id: 'noted-tool', name: 'noted', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], example: { text: 'hi' } } }),
+    );
+    const execute = vi.fn(async (): Promise<ToolExecutionResult> => ({ success: true, output: {} }));
+    await executor.registerTool(makeTool({ id: 'broken-tool', name: 'broken', inputSchema: { type: 'object', properties: { text: { type: 'nonsense' } } }, execute }));
+    const call = callOf(executor);
+    expect((await call('noted')).output).toEqual({ text: 'hi' });
+    expect(String((await call('noted', {})).error)).toContain('Invalid arguments');
+    const broken = await call('broken');
+    expect(broken.success).toBe(false);
+    expect(String(broken.error)).toContain("The input schema of tool 'broken' does not compile");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('answers an output its output schema coerced, the output itself as well as a value inside it', async () => {
+    const executor = new ToolExecutor();
+    await executor.registerTool(makeTool({ id: 'tally-tool', name: 'tally', outputSchema: { type: 'object', properties: { n: { type: 'integer' } } }, execute: async () => ({ success: true, output: { n: '7' } }) }));
+    await executor.registerTool(makeTool({ id: 'count-tool', name: 'count', outputSchema: { type: 'integer' }, execute: async () => ({ success: true, output: '7' }) }));
+    const call = callOf(executor);
+    expect((await call('tally')).output).toEqual({ n: 7 });
+    expect((await call('count')).output).toBe(7);
+  });
+
+  it('answers a failed result naming the error of an output schema that does not compile, with the output the tool gave', async () => {
+    const executor = new ToolExecutor();
+    await executor.registerTool(makeTool({ id: 'odd-tool', name: 'odd', outputSchema: { type: 'nonsense' }, execute: async () => ({ success: true, output: { text: 'hi' } }) }));
+    const result = await callOf(executor)('odd');
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain("The output schema of tool 'odd' does not compile");
+    expect(result.output).toEqual({ text: 'hi' });
+  });
+
   it('forwards sessionData into the tool execution context', async () => {
     let observedContext: ToolExecutionContext | undefined;
     const executor = new ToolExecutor();
