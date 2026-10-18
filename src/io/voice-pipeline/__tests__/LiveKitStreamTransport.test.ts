@@ -1359,6 +1359,65 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     expect(room.localParticipant.unpublishTrack).toHaveBeenCalledOnce();
     expect(source.closed).toBe(true);
   });
+
+  it('gives up a capture that never returns after receiptTimeoutMs plus maxDurationMs though only a playback wait waits for it, and the clear and the close then finish', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    const errors: string[] = [];
+    transport.on('error', (error: Error) => errors.push(error.message));
+    await transport.readyForPlayback();
+    // The track never takes the chunk: its capture never returns.
+    FakeAudioSource.created[0]!.gate = new Promise<void>(() => {});
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      let sent: string | undefined;
+      let played: string | undefined;
+      void transport.sendAudio(scopedChunk(1)).then(
+        () => {
+          sent = 'sent';
+        },
+        (error: Error) => {
+          sent = error.message;
+        }
+      );
+      void transport.waitForPlayback(firstGeneration, 1, new AbortController().signal).then(
+        () => {
+          played = 'played';
+        },
+        (error: Error) => {
+          played = error.message;
+        }
+      );
+      await settle();
+      // The playback wait gives up at receiptTimeoutMs, 1000; the capture is given up at that plus maxDurationMs, 2000.
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle();
+      expect(played).toBe('publisher drain timeout');
+      expect(transport.state).toBe('open');
+      await vi.advanceTimersByTimeAsync(2_000);
+      await settle();
+      expect(sent).toBe('publisher capture stalled');
+      expect(errors).toEqual(['livekit output stalled']);
+      expect(transport.state).toBe('closed');
+      let cleared = false;
+      void transport.clearPlayback(firstGeneration).then(() => {
+        cleared = true;
+      });
+      await settle();
+      expect(cleared).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    await transport.whenClosed();
+    expect(room.localParticipant.unpublishTrack).toHaveBeenCalledOnce();
+  });
 });
 
 /**
