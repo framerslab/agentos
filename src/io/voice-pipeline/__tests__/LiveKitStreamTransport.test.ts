@@ -1205,7 +1205,7 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     await transport.whenClosed();
   });
 
-  it('sends a cancel whose clear never finishes, and the messages behind it, once receiptTimeoutMs plus maxDurationMs have passed', async () => {
+  it('sends a cancel whose clear waits on a capture that never returns, and the messages behind it, before the stalled track closes the transport', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
     const transport = new LiveKitStreamTransport({
@@ -1216,12 +1216,13 @@ describe('LiveKitStreamTransport speaking in the room', () => {
       publisher: { ...speaking, rtc: fakePublishingRtc() },
     });
     await transport.readyForPlayback();
-    // The track never takes the chunk: its capture never returns, so the cancel's clear never finishes.
+    // The track never takes the chunk: its capture never returns, so the cancel's clear waits for it.
     FakeAudioSource.created[0]!.gate = new Promise<void>(() => {});
-    void transport.sendAudio(toneChunk(1));
-    await settle();
+    // The capture's own bound starts before the cancel's, so it is the first to pass.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
+      void transport.sendAudio(toneChunk(1));
+      await settle();
       void transport.sendControl({ type: 'barge_in', action: { type: 'cancel' } });
       void transport.sendControl({ type: 'agent_thinking' });
       await settle();
@@ -1232,11 +1233,13 @@ describe('LiveKitStreamTransport speaking in the room', () => {
       expect(sentTypes(room)).toEqual([]);
       await vi.advanceTimersByTimeAsync(1);
       await settle();
+      // The capture is given up and the track retired: the messages already waiting go out, then the transport closes.
       expect(sentTypes(room)).toEqual(['barge_in', 'agent_thinking']);
+      expect(transport.state).toBe('closed');
     } finally {
       vi.useRealTimers();
     }
-    transport.close();
+    await transport.whenClosed();
   });
 
   it('refuses a fifth message in flight with livekit control bound', async () => {
