@@ -438,12 +438,15 @@ describe("a seat's mask reaches a tool's error before the next request carries i
     expect(shimTurn).not.toContain(SECRET);
   });
 
+  /** The messages a provider call carries: the provider takes (modelId, messages, options). */
+  const sentMessages = (call: unknown[]): Array<{ role?: string; content?: unknown }> =>
+    (call[1] as Array<{ role?: string; content?: unknown }> | undefined) ?? [];
   /** Every message content a provider call carries, as text: a tool turn's JSON, the shim's <tool_response> block. */
   const sentText = (call: unknown[]): string =>
-    ((call[0] as { messages?: Array<{ content?: unknown }> }).messages ?? []).map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+    sentMessages(call).map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
   /** The last tool turn a provider call carries, as the text it was sent. */
   const toolTurn = (call: unknown[]): string => {
-    const turn = ((call[0] as { messages?: Array<{ role?: string; content?: unknown }> }).messages ?? []).filter((m) => m.role === 'tool').pop();
+    const turn = sentMessages(call).filter((m) => m.role === 'tool').pop();
     return typeof turn?.content === 'string' ? turn.content : JSON.stringify(turn?.content);
   };
 
@@ -531,7 +534,9 @@ describe('a tool table given as a single-use iterable is read once', () => {
   it('a generator of tools, which one read exhausts, keeps its tools on the second step of generateText and of streamText', async () => {
     const ran: string[] = [];
     const PING = tool('ping', async () => { ran.push('ping'); return { success: true, output: 'pong' }; });
-    const toolsOf = (call: unknown[]): string[] => (((call[0] as { tools?: Array<{ function?: { name?: string } }> }).tools) ?? []).map((t) => t.function?.name ?? '');
+    // The schemas ride in the provider call's options, its third argument.
+    const toolsOf = (call: unknown[]): string[] =>
+      ((call[2] as { tools?: Array<{ function?: { name?: string } }> } | undefined)?.tools ?? []).map((t) => t.function?.name ?? '');
     hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['ping'])).mockResolvedValueOnce(toolCallsReply(['ping'])).mockResolvedValueOnce(reply('done'));
     const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: (function* () { yield PING; })() as never, maxSteps: 5 });
     expect(generated.text).toBe('done');
