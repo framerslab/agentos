@@ -1331,11 +1331,11 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     const source = FakeAudioSource.created[0]!;
     // The track never takes the chunk: its capture never returns.
     source.gate = new Promise<void>(() => {});
-    void transport.sendAudio(toneChunk(1));
-    await settle();
     let outcome: string | undefined;
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
+      void transport.sendAudio(toneChunk(1));
+      await settle();
       void transport.waitForPlayout().then(
         () => {
           outcome = 'played';

@@ -266,8 +266,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * it waits; what a clear or a pause discarded counts as played out, and a clear or a close ends the wait at once. A
    * track that takes no frame and plays nothing out for `publisher.receiptTimeoutMs` plus `publisher.maxDurationMs`,
    * outside a pause, has stalled: what it had not played is discarded and the wait rejects with
-   * `publisher drain timeout`. When it stalled on a capture that never returned, the transport emits
-   * `livekit output stalled` and closes. A listen-only transport resolves at once.
+   * `publisher drain timeout`. A capture that does not return within the same bound, whoever waits for it, makes the
+   * transport emit `livekit output stalled` and close. A listen-only transport resolves at once.
    */
   async waitForPlayout(): Promise<void> { await this.publisher?.waitForPlayout(); }
   /** Discards only this physical path's queued output; a closed path must finish native cleanup. */
