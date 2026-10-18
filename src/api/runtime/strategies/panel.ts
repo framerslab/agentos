@@ -169,24 +169,47 @@ function droppedOnceSettled(on: Callbacks, settled: () => boolean): Callbacks {
   return out as Callbacks;
 }
 
-/** Races `work` against a deadline; with none, waits for it. A late settlement is swallowed. */
-async function withDeadline<T>(
-  work: Promise<T>,
-  ms: number | undefined,
-): Promise<{ timedOut: true } | { timedOut: false; value: T } | { timedOut: false; error: unknown }> {
+/** How {@link withDeadline} ended: the deadline, the signal, or the work's own settlement. */
+type Raced<T> =
+  | { timedOut: true }
+  | { timedOut: false; aborted: true; reason: unknown }
+  | { timedOut: false; value: T }
+  | { timedOut: false; error: unknown };
+
+/**
+ * Races `work` against a deadline and an abort signal; with neither, waits for
+ * it. A signal that has already aborted ends the race at once. A late
+ * settlement is swallowed.
+ */
+async function withDeadline<T>(work: Promise<T>, ms: number | undefined, signal?: AbortSignal): Promise<Raced<T>> {
   const settled = work.then(
-    (value) => ({ timedOut: false as const, value }),
-    (error: unknown) => ({ timedOut: false as const, error }),
+    (value): Raced<T> => ({ timedOut: false, value }),
+    (error: unknown): Raced<T> => ({ timedOut: false, error }),
   );
-  if (ms === undefined) return settled;
+  if (ms === undefined && !signal) return settled;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<{ timedOut: true }>((resolve) => {
-    timer = setTimeout(() => resolve({ timedOut: true }), Math.max(0, ms));
-  });
+  let onAbort: (() => void) | undefined;
+  const racers: Array<Promise<Raced<T>>> = [settled];
+  if (ms !== undefined) {
+    racers.push(new Promise<Raced<T>>((resolve) => {
+      timer = setTimeout(() => resolve({ timedOut: true }), Math.max(0, ms));
+    }));
+  }
+  if (signal) {
+    racers.push(new Promise<Raced<T>>((resolve) => {
+      const aborted = (): void => resolve({ timedOut: false, aborted: true, reason: signal.reason });
+      if (signal.aborted) aborted();
+      else {
+        onAbort = aborted;
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    }));
+  }
   try {
-    return await Promise.race([settled, deadline]);
+    return await Promise.race(racers);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
   }
 }
 
@@ -333,6 +356,10 @@ export function compilePanel(
     delete callOpts.__approvalGate;
     const requested = callOpts.requestTimeout;
     const callTimeout = typeof requested === 'number' ? requested : undefined;
+    // The caller's abort signal, which every seat's own stop is linked to. A value
+    // that is no AbortSignal cannot be linked: it rides on to the seats as given.
+    const callerSignal = callOpts.abortSignal;
+    const linkable = callerSignal === undefined || callerSignal instanceof AbortSignal;
     const sem = semaphore(panelOpts.concurrency ?? Number.POSITIVE_INFINITY);
     const seatNames = Object.keys(agencyConfig.agents);
     const records = new Map<string, PanelSeatRecord>();
@@ -362,7 +389,13 @@ export function compilePanel(
         ? createApprovalGate({ hitl: agencyConfig.hitl, agentName: owner, on: ownerOn, slot, received })
         : received;
 
-    /** Runs one seat or the chair: its `beforeAgent` gate, then its model call, under its deadline. */
+    /**
+     * Runs one seat or the chair: its `beforeAgent` gate, then its model call,
+     * under its deadline. The call carries the seat's own stop, which its
+     * deadline aborts, so a call that outlives the seat starts no further
+     * step, retry or fallback hop; the caller's abort reaches it through the
+     * same signal, and settles the seat at once, a pending approval included.
+     */
     const runAgent = async (
       owner: string,
       target: SeatedConfig | Agent,
@@ -376,9 +409,17 @@ export function compilePanel(
         deadlineMs === undefined ? undefined : Math.max(0, deadlineMs - elapsed());
       // Once this seat has settled, the notifications of its gates are dropped.
       const ownerOn = droppedOnceSettled(on, () => slot.settled);
+      const stop = new AbortController();
+      const signal = !linkable
+        ? undefined
+        : callerSignal instanceof AbortSignal
+          ? AbortSignal.any([callerSignal, stop.signal])
+          : stop.signal;
       // An async boundary of its own: a generate that throws synchronously
       // rejects this promise, and cannot escape the seat or keep its slot.
       const work = (async (): Promise<Outcome> => {
+        // A seat that takes its slot after the caller's abort asks no approval and sends nothing.
+        if (signal?.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
         const decision = await checkBeforeAgent(owner, input, agentCalls.slice(), { ...agencyConfig, on: ownerOn });
         if (decision && !decision.approved) {
           return { kind: 'rejected', reason: decision.reason ?? 'rejected by HITL', durationMs: elapsed() };
@@ -411,6 +452,7 @@ export function compilePanel(
         const gate = gateFor(owner, slot, ownerOn);
         if (gate) agentOpts.__approvalGate = gate;
         if (requestTimeout !== undefined) agentOpts.requestTimeout = requestTimeout;
+        if (signal) agentOpts.abortSignal = signal;
         // Our deadline is the smallest bound: a timeout then says nothing about
         // the provider, and the flag keeps it off the breaker. A received flag
         // rides on only with the received requestTimeout it was set for.
@@ -421,11 +463,17 @@ export function compilePanel(
         return { kind: 'returned', result: isRecord(result) ? result : {}, durationMs: elapsed() };
       })();
       work.catch(() => undefined);
-      const raced = await withDeadline(work, remaining());
+      const raced = await withDeadline(work, remaining(), signal);
       if (raced.timedOut) {
         // Settled first: from here on the seat's gates drop their notifications and skip every tool.
         slot.settled = true;
+        // Then stopped: the call in flight ends, and nothing it would send next is sent.
+        stop.abort(new DOMException(`${owner} timed out after ${deadlineMs}ms`, 'TimeoutError'));
         return { kind: 'timeout', durationMs: elapsed() };
+      }
+      if ('aborted' in raced) {
+        slot.settled = true;
+        return { kind: 'threw', error: raced.reason, durationMs: elapsed() };
       }
       if ('error' in raced) return { kind: 'threw', error: raced.error, durationMs: elapsed() };
       return raced.value;
