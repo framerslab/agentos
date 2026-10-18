@@ -32,11 +32,12 @@ CI runs the commands below, and its result decides. Run any of them locally to c
 CI runs (job "Test & Lint" in [`.github/workflows/ci.yml`](https://github.com/framerslab/agentos/blob/master/.github/workflows/ci.yml)), in order:
 
 1. `pnpm install`
-2. `pnpm run build` (cleans `dist`, compiles, then rewrites path aliases and import specifiers in `dist`)
-3. `pnpm run verify:exports` (checks that every non-wildcard `exports` target exists in the build; on GitHub Actions it then installs the packed package into an empty project, where the meeting channel, safety runtime and checked egress entries compile and import with network access refused, and the release's `prepublishOnly` runs that same candidate check again before publishing; a CI run dispatched by hand on a release tag checks the published package of that version instead, after matching its tarball to the registry's integrity. Run locally, the command checks the `exports` map alone: the install checks are skipped off GitHub Actions)
-4. `pnpm run lint`
-5. `pnpm run typecheck`
-6. `pnpm run test -- --coverage` (Postgres-backed tests run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI provides a Postgres service. The Moonshine browser provider's integration test runs only when `AGENTOS_TEST_MOONSHINE_DIR` is set, and is skipped with a note naming the file when the folder it names lacks one of the model's files or the clip, or holds one empty; CI fetches them before this step)
+2. `node --test scripts/curated-extensions-peer.test.mjs` (checks that the lockfile and the install resolve the AgentOS peer of the extensions registry and of every curated extension to this checkout; see Conventions)
+3. `pnpm run build` (cleans `dist`, compiles, then rewrites path aliases and import specifiers in `dist`)
+4. `pnpm run verify:exports` (checks that every non-wildcard `exports` target exists in the build; on GitHub Actions it then installs the packed package into an empty project, where the meeting channel, safety runtime and checked egress entries compile and import with network access refused, and the release's `prepublishOnly` runs that same candidate check again before publishing; a CI run dispatched by hand on a release tag checks the published package of that version instead, after matching its tarball to the registry's integrity. Run locally, the command checks the `exports` map alone: the install checks are skipped off GitHub Actions)
+5. `pnpm run lint`
+6. `pnpm run typecheck`
+7. `pnpm run test -- --coverage` (Postgres-backed tests run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI provides a Postgres service. The Moonshine browser provider's integration test runs only when `AGENTOS_TEST_MOONSHINE_DIR` is set, and is skipped with a note naming the file when the folder it names lacks one of the model's files or the clip, or holds one empty; CI fetches them before this step)
 
 A second job, "Batch-1 gated tests", builds and runs a fixed list of test files with `pnpm vitest run`.
 
@@ -53,6 +54,7 @@ Available scripts that CI does not run: `pnpm run build:knowledge`, `pnpm run do
 - Benchmarks live in [agentos-bench](https://github.com/framerslab/agentos-bench), not here.
 - Tests exercise the real path: an integration test for any behavior with an observable surface, unit tests for pure logic and regression pins, no filler tests.
 - A bug in a first-party package this repository uses, such as `@framers/agentos-extensions-registry` (a dev dependency), is fixed in that package's repository and released. Do not patch `node_modules` or copy a workaround into this repository.
+- `package.json` gives the repository a dev dependency on itself, `"@framers/agentos": "link:."`. The extensions registry installs the curated `@framers/agentos-ext-*` packages, and the registry and each extension declare `@framers/agentos` as a peer; the link resolves every one of those peers to this checkout, so a test that loads the registry or an extension runs it against this tree (its `dist` build). Keep the link: `scripts/curated-extensions-peer.test.mjs` fails in CI when the lockfile or the install gives them a published AgentOS, or when the install lacks a curated package the lockfile lists and pnpm did not skip as incompatible with the machine.
 
 ## Commits and pull requests
 

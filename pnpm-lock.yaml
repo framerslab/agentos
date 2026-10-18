@@ -102,9 +102,12 @@ importers:
       '@eslint/js':
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.12.0)
+      '@framers/agentos':
+        specifier: link:.
+        version: 'link:'
       '@framers/agentos-extensions-registry':
         specifier: ^0.18.12
-        version: 0.18.12(7c7b36dd301958aec55c7fd774db719d)
+        version: 0.18.12(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.7.2(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)
       '@jitl/quickjs-wasmfile-release-sync':
         specifier: 0.32.0
         version: 0.32.0
@@ -1321,43 +1324,6 @@ packages:
 
   '@framers/agentos-skills@0.10.2':
     resolution: {integrity: sha512-YVYU/5RSOBcasaXEfnZC9OjnC23jnNn9dUZDUuCDelzV14Ty2L0glzRX56Mxr5QvnGScCsJ6nU0UY7X5iwNovA==}
-
-  '@framers/agentos@0.13.49':
-    resolution: {integrity: sha512-guZvLfRoLpE0nHufDLdL+HVDD0+eXan3gLNyEfv75h5ZCQRMdU1561L41so19z3dcpV440+utwKRG+0x7XewCQ==}
-    engines: {node: '>=22'}
-    peerDependencies:
-      '@jitl/quickjs-wasmfile-release-sync': 0.32.0
-      graphology: '>=0.25.0'
-      graphology-communities-louvain: '>=2.0.0'
-      graphology-types: '>=0.24.0'
-      hnswlib-node: '>=3.0.0'
-      mediabunny: ^1.61.3
-      neo4j-driver: '>=5.0.0'
-      ppu-paddle-ocr: '>=3.0.0'
-      quickjs-emscripten-core: 0.32.0
-      tesseract.js: '>=5.0.0'
-      typescript: '>=5.0.0'
-    peerDependenciesMeta:
-      '@jitl/quickjs-wasmfile-release-sync':
-        optional: true
-      graphology:
-        optional: true
-      graphology-communities-louvain:
-        optional: true
-      graphology-types:
-        optional: true
-      hnswlib-node:
-        optional: true
-      mediabunny:
-        optional: true
-      neo4j-driver:
-        optional: true
-      ppu-paddle-ocr:
-        optional: true
-      quickjs-emscripten-core:
-        optional: true
-      tesseract.js:
-        optional: true
 
   '@framers/sql-storage-adapter@0.6.9':
     resolution: {integrity: sha512-eUcRV/XIEXVDzJtbsC6qpOoBh/4zlixGQNm6nPCXXGPgcEXoJUgIF/zWsuzNE5JY+h1EjJ5SCgcjOBjpuPxYkw==}
@@ -8495,10 +8461,10 @@ snapshots:
       lodash.uniq: 4.5.0
     optional: true
 
-  '@framers/agentos-ext-account-sources@0.7.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(better-sqlite3@13.0.3)(pg@8.23.1)':
+  '@framers/agentos-ext-account-sources@0.7.2(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
-      '@framers/agentos-ext-public-sources': 0.2.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
+      '@framers/agentos': 'link:'
+      '@framers/agentos-ext-public-sources': 0.2.0(@framers/agentos@)
       '@framers/sql-storage-adapter': 0.6.9(better-sqlite3@13.0.3)(pg@8.23.1)
     transitivePeerDependencies:
       - '@aws-sdk/client-s3'
@@ -8508,20 +8474,20 @@ snapshots:
       - pg
     optional: true
 
-  '@framers/agentos-ext-agent-delegation@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-agent-delegation@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-amazon-polly@0.2.3(@aws-sdk/client-polly@3.1045.0)(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-amazon-polly@0.2.3(@aws-sdk/client-polly@3.1045.0)(@framers/agentos@)':
     dependencies:
       '@aws-sdk/client-polly': 3.1045.0
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-auth@1.2.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-auth@1.2.1(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       bcrypt: 5.1.1
       jsonwebtoken: 9.0.3
     transitivePeerDependencies:
@@ -8529,9 +8495,9 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-browser-automation@0.3.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-browser-automation@0.3.0(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       playwright: 1.63.0
     optionalDependencies:
       2captcha-ts: 1.3.1
@@ -8539,67 +8505,67 @@ snapshots:
       - encoding
     optional: true
 
-  '@framers/agentos-ext-calendar-google@0.1.6(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-calendar-google@0.1.6(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       googleapis: 183.0.0
     transitivePeerDependencies:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-blog-publisher@0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-blog-publisher@0.1.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-bluesky@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-bluesky@0.1.3(@framers/agentos@)':
     dependencies:
       '@atproto/api': 0.13.35
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-discord@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-discord@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       discord.js: 14.27.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-email@0.4.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-email@0.4.3(@framers/agentos@)':
     dependencies:
       imapflow: 1.7.8
       nodemailer: 10.1.1
     optionalDependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-facebook@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-facebook@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-farcaster@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-farcaster@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-feishu@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-feishu@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       '@larksuiteoapi/node-sdk': 1.74.0
     transitivePeerDependencies:
       - bufferutil
@@ -8608,101 +8574,101 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-google-business@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-google-business@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-google-chat@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-google-chat@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       google-auth-library: 9.15.1
     transitivePeerDependencies:
       - encoding
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-imessage@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-imessage@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-instagram@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-instagram@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-irc@0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-irc@0.1.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-lemmy@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-lemmy@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-line@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-line@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       '@line/bot-sdk': 10.6.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-linkedin@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-linkedin@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-mastodon@0.2.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-mastodon@0.2.0(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       masto: 8.0.0
     optional: true
 
-  '@framers/agentos-ext-channel-matrix@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-matrix@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       '@vector-im/matrix-bot-sdk': 0.8.0-element.3
     transitivePeerDependencies:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-mattermost@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-mattermost@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       ws: 8.22.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-nextcloud@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-nextcloud@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-nostr@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(typescript@5.9.3)':
+  '@framers/agentos-ext-channel-nostr@0.1.5(@framers/agentos@)(typescript@5.9.3)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       nostr-tools: 2.23.1(typescript@5.9.3)
       ws: 8.22.0
     transitivePeerDependencies:
@@ -8711,32 +8677,32 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-pinterest@0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-pinterest@0.1.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-reddit@0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-reddit@0.1.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       snoowrap: 1.23.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-signal@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-signal@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-slack@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-slack@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       '@slack/bolt': 3.22.0
     transitivePeerDependencies:
       - bufferutil
@@ -8745,18 +8711,18 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-sms@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-sms@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       twilio: 5.13.1
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-teams@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-teams@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       botbuilder: 4.23.3
     transitivePeerDependencies:
       - bufferutil
@@ -8766,42 +8732,42 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-telegram@0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-telegram@0.1.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       grammy: 1.46.0
     transitivePeerDependencies:
       - encoding
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-threads@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-threads@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-tiktok@0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-tiktok@0.1.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-tlon@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-tlon@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       '@urbit/aura': 3.0.0
     optional: true
 
-  '@framers/agentos-ext-channel-twitch@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-twitch@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       '@types/tmi.js': 1.8.6
       tmi.js: 1.8.5
     transitivePeerDependencies:
@@ -8810,143 +8776,143 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-twitter@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-twitter@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       twitter-api-v2: 1.29.1
     optional: true
 
-  '@framers/agentos-ext-channel-webchat@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-webchat@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-whatsapp@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))':
+  '@framers/agentos-ext-channel-whatsapp@0.1.3(@framers/agentos@)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       '@whiskeysockets/baileys': 6.7.21(sharp@0.34.5)
     optional: true
 
-  '@framers/agentos-ext-channel-youtube@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-youtube@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       googleapis: 183.0.0
     transitivePeerDependencies:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-zalo@0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-zalo@0.1.5(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-zalouser@0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-channel-zalouser@0.1.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-clearbit@1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-clearbit@1.1.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cli-executor@1.3.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-cli-executor@1.3.1(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       docx: 9.8.1
       mammoth: 1.13.0
       pdf-parse: 1.1.4
       xlsx: 0.18.5
     optional: true
 
-  '@framers/agentos-ext-cloud-aws@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-cloud-aws@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-cloudflare-pages@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-cloud-cloudflare-pages@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-digitalocean@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-cloud-digitalocean@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-flyio@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-cloud-flyio@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-heroku@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-cloud-heroku@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-linode@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-cloud-linode@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-netlify@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-cloud-netlify@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-railway@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-cloud-railway@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-vercel@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-cloud-vercel@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-code-safety@0.2.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-code-safety@0.2.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-content-extraction@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-content-extraction@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-content-policy-rewriter@0.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-content-policy-rewriter@0.1.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-credential-vault@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-credential-vault@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-deep-research@0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-deep-research@0.2.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-diarization@0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(onnxruntime-node@1.21.0)':
+  '@framers/agentos-ext-diarization@0.2.3(@framers/agentos@)(onnxruntime-node@1.21.0)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optionalDependencies:
       onnxruntime-node: 1.21.0
     optional: true
 
-  '@framers/agentos-ext-document-export@0.2.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-document-export@0.2.1(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       csv-stringify: 6.9.0
       docx: 9.8.1
       exceljs: 4.4.0
@@ -8955,121 +8921,121 @@ snapshots:
       pptxgenjs: 4.0.1
     optional: true
 
-  '@framers/agentos-ext-domain-cloudflare-registrar@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-domain-cloudflare-registrar@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-domain-godaddy@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-domain-godaddy@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-domain-namecheap@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-domain-namecheap@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-domain-porkbun@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-domain-porkbun@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-email-gmail@0.1.6(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-email-gmail@0.1.6(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       googleapis: 183.0.0
     transitivePeerDependencies:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-endpoint-semantic@0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-endpoint-semantic@0.2.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-giphy@1.1.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-giphy@1.1.1(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-github@0.3.1(bb54a7719b30ad773fe67503c07e9ca5)':
+  '@framers/agentos-ext-github@0.3.1(@framers/agentos-ext-account-sources@0.7.2(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
-      '@framers/agentos-ext-account-sources': 0.7.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(better-sqlite3@13.0.3)(pg@8.23.1)
+      '@framers/agentos': 'link:'
+      '@framers/agentos-ext-account-sources': 0.7.2(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1)
       '@octokit/rest': 22.0.1
     optional: true
 
-  '@framers/agentos-ext-google-cloud-stt@0.3.6(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(@google-cloud/speech@6.7.1)':
+  '@framers/agentos-ext-google-cloud-stt@0.3.6(@framers/agentos@)(@google-cloud/speech@6.7.1)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       '@google-cloud/speech': 6.7.1
     optional: true
 
-  '@framers/agentos-ext-google-cloud-tts@0.3.6(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(@google-cloud/text-to-speech@5.8.1)':
+  '@framers/agentos-ext-google-cloud-tts@0.3.6(@framers/agentos@)(@google-cloud/text-to-speech@5.8.1)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       '@google-cloud/text-to-speech': 5.8.1
     optional: true
 
-  '@framers/agentos-ext-grounding-guard@0.7.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-grounding-guard@0.7.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optionalDependencies:
       '@huggingface/transformers': 3.8.1
     optional: true
 
-  '@framers/agentos-ext-hacker-news@1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-hacker-news@1.1.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-image-generation@2.1.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-image-generation@2.1.0(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-image-search@1.1.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-image-search@1.1.1(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-letterboxd@1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-letterboxd@1.1.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-ml-classifiers@0.3.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-ml-classifiers@0.3.1(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optionalDependencies:
       '@huggingface/transformers': 3.8.1
     optional: true
 
-  '@framers/agentos-ext-news-search@1.1.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-news-search@1.1.1(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-notifications@0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-notifications@0.1.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-omdb@1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-omdb@1.1.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-openwakeword@0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(onnxruntime-node@1.21.0)':
+  '@framers/agentos-ext-openwakeword@0.2.3(@framers/agentos@)(onnxruntime-node@1.21.0)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       onnxruntime-node: 1.21.0
     optional: true
 
-  '@framers/agentos-ext-pii-redaction@0.3.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(express@4.22.3)(mammoth@1.13.0)(pdf-parse@1.1.4)(react@19.3.0)(tesseract.js@7.0.0)':
+  '@framers/agentos-ext-pii-redaction@0.3.1(@framers/agentos@)(express@4.22.3)(mammoth@1.13.0)(pdf-parse@1.1.4)(react@19.3.0)(tesseract.js@7.0.0)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optionalDependencies:
       '@huggingface/transformers': 3.8.1
       compromise: 14.17.0
@@ -9082,26 +9048,26 @@ snapshots:
       - tesseract.js
     optional: true
 
-  '@framers/agentos-ext-piper@0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-piper@0.2.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-porcupine@0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(@picovoice/porcupine-node@3.0.6)':
+  '@framers/agentos-ext-porcupine@0.2.3(@framers/agentos@)(@picovoice/porcupine-node@3.0.6)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       '@picovoice/porcupine-node': 3.0.6
     optional: true
 
-  '@framers/agentos-ext-public-sources@0.2.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-public-sources@0.2.0(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       htmlparser2: 12.0.0
     optional: true
 
-  '@framers/agentos-ext-stealth-browser@1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-stealth-browser@1.1.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       cheerio: 1.2.0
       puppeteer-core: 22.15.0
       puppeteer-extra: 3.3.6(puppeteer-core@22.15.0)
@@ -9118,37 +9084,37 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-streaming-stt-deepgram@0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-streaming-stt-deepgram@0.2.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       ws: 8.22.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-streaming-stt-whisper@0.2.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-streaming-stt-whisper@0.2.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-streaming-tts-elevenlabs@0.2.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-streaming-tts-elevenlabs@0.2.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       ws: 8.22.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-streaming-tts-openai@0.2.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-streaming-tts-openai@0.2.4(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-telegram@1.2.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(request@2.88.2)':
+  '@framers/agentos-ext-telegram@1.2.1(@framers/agentos@)(request@2.88.2)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       dotenv: 16.6.1
       node-telegram-bot-api: 0.64.0(request@2.88.2)
       telegraf: 4.16.3
@@ -9158,66 +9124,66 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-tool-multi-channel-post@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-tool-multi-channel-post@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-tool-site-deploy@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-tool-site-deploy@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-topicality@0.2.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-topicality@0.2.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optionalDependencies:
       '@huggingface/transformers': 3.8.1
     optional: true
 
-  '@framers/agentos-ext-voice-plivo@0.2.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-voice-plivo@0.2.0(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       plivo: 4.79.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-voice-synthesis@3.1.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-voice-synthesis@3.1.0(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-voice-telnyx@0.2.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-voice-telnyx@0.2.0(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       telnyx: 2.1.1
     optional: true
 
-  '@framers/agentos-ext-voice-twilio@0.2.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-voice-twilio@0.2.0(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       twilio: 5.13.1
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-vosk@0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(vosk@0.3.39)':
+  '@framers/agentos-ext-vosk@0.2.3(@framers/agentos@)(vosk@0.3.39)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       vosk: 0.3.39
     optional: true
 
-  '@framers/agentos-ext-weather@1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-weather@1.1.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-web-browser@1.3.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-web-browser@1.3.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       cheerio: 1.2.0
       puppeteer-core: 22.15.0
     transitivePeerDependencies:
@@ -9229,131 +9195,131 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-web-scraper@0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-web-scraper@0.1.3(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       yaml: 2.9.1
     optional: true
 
-  '@framers/agentos-ext-web-search@1.3.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-web-search@1.3.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-widget-generator@1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))':
+  '@framers/agentos-ext-widget-generator@1.1.2(@framers/agentos@)':
     dependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
+      '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-extensions-registry@0.18.12(7c7b36dd301958aec55c7fd774db719d)':
+  '@framers/agentos-extensions-registry@0.18.12(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.7.2(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)':
     optionalDependencies:
-      '@framers/agentos': 0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)
-      '@framers/agentos-ext-agent-delegation': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-amazon-polly': 0.2.3(@aws-sdk/client-polly@3.1045.0)(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-auth': 1.2.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-browser-automation': 0.3.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-calendar-google': 0.1.6(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-blog-publisher': 0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-bluesky': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-discord': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-email': 0.4.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-facebook': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-farcaster': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-feishu': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-google-business': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-google-chat': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-imessage': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-instagram': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-irc': 0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-lemmy': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-line': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-linkedin': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-mastodon': 0.2.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-matrix': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-mattermost': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-nextcloud': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-nostr': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(typescript@5.9.3)
-      '@framers/agentos-ext-channel-pinterest': 0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-reddit': 0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-signal': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-slack': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-sms': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-teams': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-telegram': 0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-threads': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-tiktok': 0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-tlon': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-twitch': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-twitter': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-webchat': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-whatsapp': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))
-      '@framers/agentos-ext-channel-youtube': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-zalo': 0.1.5(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-channel-zalouser': 0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-clearbit': 1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-cli-executor': 1.3.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-cloud-aws': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-cloud-cloudflare-pages': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-cloud-digitalocean': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-cloud-flyio': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-cloud-heroku': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-cloud-linode': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-cloud-netlify': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-cloud-railway': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-cloud-vercel': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-code-safety': 0.2.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-content-extraction': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-content-policy-rewriter': 0.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-credential-vault': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-deep-research': 0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-diarization': 0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(onnxruntime-node@1.21.0)
-      '@framers/agentos-ext-document-export': 0.2.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-domain-cloudflare-registrar': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-domain-godaddy': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-domain-namecheap': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-domain-porkbun': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-email-gmail': 0.1.6(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-endpoint-semantic': 0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-giphy': 1.1.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-github': 0.3.1(bb54a7719b30ad773fe67503c07e9ca5)
-      '@framers/agentos-ext-google-cloud-stt': 0.3.6(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(@google-cloud/speech@6.7.1)
-      '@framers/agentos-ext-google-cloud-tts': 0.3.6(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(@google-cloud/text-to-speech@5.8.1)
-      '@framers/agentos-ext-grounding-guard': 0.7.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-hacker-news': 1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-image-generation': 2.1.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-image-search': 1.1.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-letterboxd': 1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-ml-classifiers': 0.3.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-news-search': 1.1.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-notifications': 0.1.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-omdb': 1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-openwakeword': 0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(onnxruntime-node@1.21.0)
-      '@framers/agentos-ext-pii-redaction': 0.3.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(express@4.22.3)(mammoth@1.13.0)(pdf-parse@1.1.4)(react@19.3.0)(tesseract.js@7.0.0)
-      '@framers/agentos-ext-piper': 0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-porcupine': 0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(@picovoice/porcupine-node@3.0.6)
-      '@framers/agentos-ext-stealth-browser': 1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-streaming-stt-deepgram': 0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-streaming-stt-whisper': 0.2.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-streaming-tts-elevenlabs': 0.2.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-streaming-tts-openai': 0.2.4(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-telegram': 1.2.1(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(request@2.88.2)
-      '@framers/agentos-ext-tool-multi-channel-post': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-tool-site-deploy': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-topicality': 0.2.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-voice-plivo': 0.2.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-voice-synthesis': 3.1.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-voice-telnyx': 0.2.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-voice-twilio': 0.2.0(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-vosk': 0.2.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))(vosk@0.3.39)
-      '@framers/agentos-ext-weather': 1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-web-browser': 1.3.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-web-scraper': 0.1.3(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-web-search': 1.3.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
-      '@framers/agentos-ext-widget-generator': 1.1.2(@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3))
+      '@framers/agentos': 'link:'
+      '@framers/agentos-ext-agent-delegation': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-amazon-polly': 0.2.3(@aws-sdk/client-polly@3.1045.0)(@framers/agentos@)
+      '@framers/agentos-ext-auth': 1.2.1(@framers/agentos@)
+      '@framers/agentos-ext-browser-automation': 0.3.0(@framers/agentos@)
+      '@framers/agentos-ext-calendar-google': 0.1.6(@framers/agentos@)
+      '@framers/agentos-ext-channel-blog-publisher': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-channel-bluesky': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-discord': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-email': 0.4.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-facebook': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-farcaster': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-feishu': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-google-business': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-google-chat': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-imessage': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-instagram': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-irc': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-channel-lemmy': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-line': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-linkedin': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-mastodon': 0.2.0(@framers/agentos@)
+      '@framers/agentos-ext-channel-matrix': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-mattermost': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-nextcloud': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-nostr': 0.1.5(@framers/agentos@)(typescript@5.9.3)
+      '@framers/agentos-ext-channel-pinterest': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-channel-reddit': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-channel-signal': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-slack': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-sms': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-teams': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-telegram': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-channel-threads': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-tiktok': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-channel-tlon': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-twitch': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-twitter': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-webchat': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-whatsapp': 0.1.3(@framers/agentos@)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))
+      '@framers/agentos-ext-channel-youtube': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-zalo': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-zalouser': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-clearbit': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-cli-executor': 1.3.1(@framers/agentos@)
+      '@framers/agentos-ext-cloud-aws': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-cloud-cloudflare-pages': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-cloud-digitalocean': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-cloud-flyio': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-cloud-heroku': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-cloud-linode': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-cloud-netlify': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-cloud-railway': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-cloud-vercel': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-code-safety': 0.2.2(@framers/agentos@)
+      '@framers/agentos-ext-content-extraction': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-content-policy-rewriter': 0.1.2(@framers/agentos@)
+      '@framers/agentos-ext-credential-vault': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-deep-research': 0.2.3(@framers/agentos@)
+      '@framers/agentos-ext-diarization': 0.2.3(@framers/agentos@)(onnxruntime-node@1.21.0)
+      '@framers/agentos-ext-document-export': 0.2.1(@framers/agentos@)
+      '@framers/agentos-ext-domain-cloudflare-registrar': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-domain-godaddy': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-domain-namecheap': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-domain-porkbun': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-email-gmail': 0.1.6(@framers/agentos@)
+      '@framers/agentos-ext-endpoint-semantic': 0.2.3(@framers/agentos@)
+      '@framers/agentos-ext-giphy': 1.1.1(@framers/agentos@)
+      '@framers/agentos-ext-github': 0.3.1(@framers/agentos-ext-account-sources@0.7.2(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)
+      '@framers/agentos-ext-google-cloud-stt': 0.3.6(@framers/agentos@)(@google-cloud/speech@6.7.1)
+      '@framers/agentos-ext-google-cloud-tts': 0.3.6(@framers/agentos@)(@google-cloud/text-to-speech@5.8.1)
+      '@framers/agentos-ext-grounding-guard': 0.7.2(@framers/agentos@)
+      '@framers/agentos-ext-hacker-news': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-image-generation': 2.1.0(@framers/agentos@)
+      '@framers/agentos-ext-image-search': 1.1.1(@framers/agentos@)
+      '@framers/agentos-ext-letterboxd': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-ml-classifiers': 0.3.1(@framers/agentos@)
+      '@framers/agentos-ext-news-search': 1.1.1(@framers/agentos@)
+      '@framers/agentos-ext-notifications': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-omdb': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-openwakeword': 0.2.3(@framers/agentos@)(onnxruntime-node@1.21.0)
+      '@framers/agentos-ext-pii-redaction': 0.3.1(@framers/agentos@)(express@4.22.3)(mammoth@1.13.0)(pdf-parse@1.1.4)(react@19.3.0)(tesseract.js@7.0.0)
+      '@framers/agentos-ext-piper': 0.2.3(@framers/agentos@)
+      '@framers/agentos-ext-porcupine': 0.2.3(@framers/agentos@)(@picovoice/porcupine-node@3.0.6)
+      '@framers/agentos-ext-stealth-browser': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-streaming-stt-deepgram': 0.2.3(@framers/agentos@)
+      '@framers/agentos-ext-streaming-stt-whisper': 0.2.4(@framers/agentos@)
+      '@framers/agentos-ext-streaming-tts-elevenlabs': 0.2.4(@framers/agentos@)
+      '@framers/agentos-ext-streaming-tts-openai': 0.2.4(@framers/agentos@)
+      '@framers/agentos-ext-telegram': 1.2.1(@framers/agentos@)(request@2.88.2)
+      '@framers/agentos-ext-tool-multi-channel-post': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-tool-site-deploy': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-topicality': 0.2.2(@framers/agentos@)
+      '@framers/agentos-ext-voice-plivo': 0.2.0(@framers/agentos@)
+      '@framers/agentos-ext-voice-synthesis': 3.1.0(@framers/agentos@)
+      '@framers/agentos-ext-voice-telnyx': 0.2.0(@framers/agentos@)
+      '@framers/agentos-ext-voice-twilio': 0.2.0(@framers/agentos@)
+      '@framers/agentos-ext-vosk': 0.2.3(@framers/agentos@)(vosk@0.3.39)
+      '@framers/agentos-ext-weather': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-web-browser': 1.3.2(@framers/agentos@)
+      '@framers/agentos-ext-web-scraper': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-web-search': 1.3.2(@framers/agentos@)
+      '@framers/agentos-ext-widget-generator': 1.1.2(@framers/agentos@)
       '@framers/agentos-skills': 0.10.2
     transitivePeerDependencies:
       - '@aws-sdk/client-polly'
@@ -9384,66 +9350,6 @@ snapshots:
       - vosk
 
   '@framers/agentos-skills@0.10.2':
-    optional: true
-
-  '@framers/agentos@0.13.49(@jitl/quickjs-wasmfile-release-sync@0.32.0)(@napi-rs/canvas@1.0.10)(better-sqlite3@13.0.3)(express@4.22.3)(graphology-communities-louvain@2.0.2(graphology-types@0.24.8))(graphology-types@0.24.8)(graphology@0.26.0(graphology-types@0.24.8))(hnswlib-node@3.0.0)(mediabunny@1.61.3)(neo4j-driver@6.2.0)(pdf-parse@1.1.4)(ppu-paddle-ocr@6.6.0(onnxruntime-node@1.21.0))(quickjs-emscripten-core@0.32.0)(react@19.3.0)(socks@2.8.10)(tesseract.js@7.0.0)(typescript@5.9.3)':
-    dependencies:
-      '@framers/sql-storage-adapter': 0.6.9(better-sqlite3@13.0.3)(pg@8.23.1)
-      '@opentelemetry/api': 1.9.1
-      '@opentelemetry/api-logs': 0.201.1
-      ajv: 8.20.0
-      ajv-formats: 3.0.1(ajv@8.20.0)
-      axios: 1.20.0
-      execa: 10.0.1
-      gray-matter: 4.0.3
-      lru-cache: 11.5.3
-      mammoth: 1.13.0
-      minimatch: 10.2.6
-      natural: 6.12.0(socks@2.8.10)
-      openredaction: 1.1.5(express@4.22.3)(mammoth@1.13.0)(pdf-parse@1.1.4)(react@19.3.0)(tesseract.js@7.0.0)
-      pg: 8.23.1
-      pino: 10.4.0
-      typescript: 5.9.3
-      unpdf: 1.8.1(@napi-rs/canvas@1.0.10)
-      uuid: 14.0.2
-      ws: 8.22.0
-      yaml: 2.9.1
-      zod: 4.6.5
-      zod-to-json-schema: 3.25.2(zod@4.6.5)
-    optionalDependencies:
-      '@huggingface/transformers': 3.8.1
-      '@jitl/quickjs-wasmfile-release-sync': 0.32.0
-      compromise: 14.17.0
-      graphology: 0.26.0(graphology-types@0.24.8)
-      graphology-communities-louvain: 2.0.2(graphology-types@0.24.8)
-      graphology-types: 0.24.8
-      hnswlib-node: 3.0.0
-      mediabunny: 1.61.3
-      neo4j-driver: 6.2.0
-      ppu-paddle-ocr: 6.6.0(onnxruntime-node@1.21.0)
-      quickjs-emscripten-core: 0.32.0
-      tesseract.js: 7.0.0
-    transitivePeerDependencies:
-      - '@aws-sdk/client-s3'
-      - '@aws-sdk/credential-providers'
-      - '@capacitor-community/sqlite'
-      - '@mongodb-js/zstd'
-      - '@napi-rs/canvas'
-      - better-sqlite3
-      - bufferutil
-      - debug
-      - electron
-      - express
-      - gcp-metadata
-      - kerberos
-      - mongodb-client-encryption
-      - pdf-parse
-      - pg-native
-      - react
-      - snappy
-      - socks
-      - supports-color
-      - utf-8-validate
     optional: true
 
   '@framers/sql-storage-adapter@0.6.9(better-sqlite3@13.0.3)(pg@8.23.1)':
