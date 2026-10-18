@@ -1587,6 +1587,26 @@ describe('22-23. rotation, copies, retries, empty text', () => {
 describe('25-26. approvals under panel and nested agencies', () => {
   const searchTool = () => ({ search: { description: 's', parameters: { type: 'object' as const, properties: { q: { type: 'string' } } }, execute: vi.fn(async () => ({ hits: 1 })) } });
   const toolThenText = (text: string) => [openaiToolCall('search', { q: 'x' }), openaiText(text)];
+  it("a beforeReturn approval's replacement that holds a listed key leaves a pooled agency masked: the result's text, the final-output part, agentEnd and the provenance trail, in generate() and in stream()", async () => {
+    const ends: Json[] = [];
+    const handler = async () => ({ approved: true, modifications: { output: `signed off with ${K.ant}` } });
+    threeProviders();
+    const team = panel({ provenance: { enabled: true }, hitl: { approvals: { beforeReturn: true }, handler, guardrailOverride: false }, on: { agentEnd: (e: Json) => ends.push(e) } });
+    const r = await team.generate('review');
+    expect(r.text).toBe('signed off with [redacted]');
+    expect(JSON.stringify(r.provenanceTrail)).toContain('signed off with [redacted]');
+    expect(ends.find((e) => e.agent === 'panel' || e.agent === 'agency')?.output ?? ends.at(-1)?.output).toBe('signed off with [redacted]');
+    expect(JSON.stringify([r, ends])).not.toContain(K.ant);
+    threeProviders();
+    ends.length = 0;
+    const streamed = team.stream('review');
+    const parts: Json[] = [];
+    for await (const part of streamed.fullStream) parts.push(part as unknown as Json);
+    const final = parts.find((p) => p.type === 'final-output');
+    expect(final?.text).toBe('signed off with [redacted]');
+    expect((await streamed.result).text).toBe('signed off with [redacted]');
+    expect(JSON.stringify([parts, ends, await streamed.result])).not.toContain(K.ant);
+  });
   it('the handler is asked once per tool call; a seat whose approval times out is error; the call resolves whole', async () => {
     const handler = vi.fn(async (r: ApprovalRequest) => (r.agent === 'failure' ? new Promise<ApprovalDecision>(() => {}) : { approved: true }));
     // The three seats send their first requests together, so the first three replies are the three tool calls; each approved seat's continuation then takes a text.
