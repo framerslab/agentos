@@ -86,30 +86,28 @@ async function retryLostCreate(step: () => Promise<void>): Promise<void> {
 const CREATE_INDEX_IF_NOT_EXISTS =
   /CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)\s+ON\s+([A-Za-z_][A-Za-z0-9_]*)\b[^;]*;?/gi;
 
-/** Each `CREATE TABLE IF NOT EXISTS <name> (` statement of a schema script, with the table's name. */
-const CREATE_TABLE_IF_NOT_EXISTS = /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/gi;
-
 /**
- * The script without its `CREATE INDEX IF NOT EXISTS` statements for indexes Postgres already has. Postgres takes the
- * table's SHARE lock before it checks IF NOT EXISTS, so an open would otherwise wait for any long write transaction
- * on the table, and while it waited, every writer queued behind its lock request would wait too. Each index is looked
- * for where its statement makes it. The script is read before it runs, so an index on a table the script itself
- * creates is looked for in the first schema on the search path, where `CREATE TABLE IF NOT EXISTS` makes the table
- * even while a later schema on the path holds one of the same name: through the search path, the table could still be
- * that later schema's, and its indexes would leave the new table without its own. An index on any other table is
- * looked for in that table's schema.
+ * Runs a schema script on Postgres: its other statements first (the script's `CREATE TABLE IF NOT EXISTS`), then each
+ * of its `CREATE INDEX IF NOT EXISTS` statements whose index Postgres does not have. Postgres takes the table's SHARE
+ * lock before it checks IF NOT EXISTS, so an open would otherwise wait for any long write transaction on the table,
+ * and while it waited, every writer queued behind its lock request would wait too. Each index is looked for once its
+ * table exists, on the table the statement's name resolves to then, which is the table the statement indexes: one the
+ * script has just made in the first schema on the search path, though a later schema holds a table of that name, or
+ * a session's temporary table of that name where the search path reaches it first (a path that does not name
+ * `pg_temp` searches the session's temporary schema before any other).
  */
-async function withoutExistingIndexes(adapter: StorageAdapter, script: string): Promise<string> {
-  const created = new Set([...script.matchAll(CREATE_TABLE_IF_NOT_EXISTS)].map((match) => match[1]!.toLowerCase()));
-  const indexes = [...script.matchAll(CREATE_INDEX_IF_NOT_EXISTS)].map((match) => ({ name: match[1]!, table: match[2]! }));
-  const present = new Set<string>();
-  for (const { name, table } of indexes) {
-    const inFirstSchema = created.has(table.toLowerCase());
-    if (await postgresIndexExists(adapter, name, table, { inFirstSchema })) present.add(name);
+async function execSchemaScriptOnPostgres(adapter: StorageAdapter, script: string): Promise<void> {
+  const indexes = [...script.matchAll(CREATE_INDEX_IF_NOT_EXISTS)].map((match) => ({
+    statement: match[0],
+    name: match[1]!,
+    table: match[2]!,
+  }));
+  const rest = script.replace(CREATE_INDEX_IF_NOT_EXISTS, '');
+  if (rest.trim().length > 0) await retryLostCreate(() => adapter.exec(rest));
+  for (const { statement, name, table } of indexes) {
+    if (await postgresIndexExists(adapter, name, table)) continue;
+    await retryLostCreate(() => adapter.exec(statement));
   }
-  return present.size === 0
-    ? script
-    : script.replace(CREATE_INDEX_IF_NOT_EXISTS, (statement: string, name: string) => (present.has(name) ? '' : statement));
 }
 
 /**
@@ -1170,9 +1168,8 @@ export class Brain {
     const postgres = this._features.dialect.name === 'postgres';
     for (const statement of ddlStatements) {
       const normalized = this._normalizeDdlForDialect(statement);
-      const ddl = postgres ? await withoutExistingIndexes(adapter, normalized) : normalized;
-      if (ddl.trim().length === 0) continue;
-      await retryLostCreate(() => adapter.exec(ddl));
+      if (postgres) await execSchemaScriptOnPostgres(adapter, normalized);
+      else await retryLostCreate(() => adapter.exec(normalized));
     }
 
     // A table another path created without `scope_id` (a migration engine's copy) gains it here; a fresh table has it.
