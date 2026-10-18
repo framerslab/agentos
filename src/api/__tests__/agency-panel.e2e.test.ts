@@ -1671,13 +1671,14 @@ describe('25-26. approvals under panel and nested agencies', () => {
     expect(r.agentCalls[0]?.usage).toMatchObject({ promptTokens: 12345678, totalTokens: 12345683 });
     expect(r.seats[0]?.usage).toMatchObject({ promptTokens: 12345678, totalTokens: 12345683 });
     expect(await team.usage()).toMatchObject({ promptTokens: 12345678, totalTokens: 12345683 });
-    expect((await team.session('s').send('again')).usage.promptTokens).toBe(12345678);
+    const session = team.session('s') as { send: (t: string) => Promise<AgencyResult> };
+    expect((await session.send('again')).usage.promptTokens).toBe(12345678);
     const streamed = team.stream('review');
     const parts: Json[] = [];
     for await (const part of streamed.fullStream) parts.push(part as unknown as Json);
     expect(parts.find((p) => p.type === 'final-output')?.usage).toMatchObject({ promptTokens: 12345678, totalTokens: 12345683 });
     expect((await streamed.result).usage.promptTokens).toBe(12345678);
-    expect((await team.usage()).promptTokens).toBe(12345678 * 3);
+    expect(((await team.usage()) as { promptTokens: number }).promptTokens).toBe(12345678 * 3);
   });
   it('the handler is asked once per tool call; a seat whose approval times out is error; the call resolves whole', async () => {
     const handler = vi.fn(async (r: ApprovalRequest) => (r.agent === 'failure' ? new Promise<ApprovalDecision>(() => {}) : { approved: true }));
