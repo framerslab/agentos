@@ -10,9 +10,11 @@
  * ```
  * IDLE -----> startSession() ---------> LISTENING
  * LISTENING -> turn_complete ----------> PROCESSING
+ * LISTENING -> typed text -------------> PROCESSING
  * PROCESSING -> LLM tokens start -----> SPEAKING
  * SPEAKING --> TTS flush_complete -----> LISTENING (once played out, on a transport that reports it)
  * SPEAKING --> barge-in (cancel) ------> INTERRUPTING -> LISTENING
+ * SPEAKING --> typed text -------------> INTERRUPTING -> LISTENING -> PROCESSING
  * ANY ------> transport disconnect ----> CLOSED
  * ANY ------> a part of it fails ------> CLOSED
  * ANY ------> stopSession() -----------> CLOSED
@@ -50,7 +52,16 @@
  *   speech from the first source it receives, audio or transcript messages,
  *   and drops what arrives from the other, reporting the first drop as
  *   `'error'` (`_takesSpeechFrom`). A call profile ends the call on a
- *   transcript message, as on any client message but its controls.
+ *   transcript message, as on any client message but its controls and
+ *   typed text.
+ * - Both runtimes take the user's typed text, a `text_input` message that `isClientTextInputMessage()` accepts, as a
+ *   user turn of its own, whatever the session takes its speech from: `conversation_item_added` with
+ *   `source: 'text'` and `endpointReason: 'manual'`, with no `turn_complete` and no `user_input_transcribed`, and the
+ *   speech heard so far is dropped. A text that comes while the session is `speaking` cuts the reply as a `cancel`
+ *   barge-in does, with `speechDurationMs: 0`; one that comes while it is `processing` aborts the agent's request,
+ *   with no `barge_in`. Without a call profile the text's turn starts once the agent's request for the cut reply has
+ *   ended, since an agent answers one request at a time (`_onClientText`); a call profile cuts through `interrupt()`
+ *   and its generation fence (`takeText`). A `text_input` message the check refuses is dropped.
  * - A transport that plays one audio format alone (`IStreamTransport.playbackFormat`, `'pcm'` for
  *   `LiveKitStreamTransport` with a publisher) gets it: the TTS session is asked for that format, and a chunk in
  *   another one is reported once, naming the TTS provider, and not sent.
@@ -112,6 +123,7 @@ import {
   type ClientTextMessage,
   type ClientTranscriptMessage,
   type EncodedAudioChunk,
+  type EndpointReason,
   type IBargeinHandler,
   type IDiarizationEngine,
   type IEndpointDetector,
@@ -145,6 +157,7 @@ import {
   type ServerTextMessage,
 } from './types.js';
 import { isClientTranscriptMessage, transcriptEventFromClient } from './clientTranscript.js';
+import { isClientTextInputMessage } from './clientTextInput.js';
 import { describeReason, isError } from './describeReason.js';
 import type { VoiceEventListener } from './VoiceEventEmitter.js';
 
@@ -500,6 +513,28 @@ interface ReplyParts {
 }
 
 /**
+ * A user turn a session takes, in either runtime: what joins the conversation as the user's item, and what the agent
+ * receives with its `VoiceTurnMetadata`.
+ */
+interface UserTurn {
+  /** The turn's text, as the agent receives it. */
+  text: string;
+  /**
+   * Where it came from: the session's STT (`'speech'`), a client's transcript messages (`'client'`), or the user's
+   * typed text (`'text'`).
+   */
+  source: 'speech' | 'client' | 'text';
+  /** Why the turn ended: the endpoint detector's reason, or `'manual'` for typed text. */
+  reason: EndpointReason;
+  /** The user's speech in the turn, in milliseconds; 0 for typed text. */
+  durationMs: number;
+  /** The confidence in its text, in [0, 1]; 1 for typed text. */
+  confidence: number;
+  /** The language of the turn's last final transcript, when its transcriber reported one. */
+  language?: string;
+}
+
+/**
  * The user's speech over the agent's reply, in a session without a call profile: from a speech start while the
  * pipeline is `speaking` until the floor is decided (`_interrupt`). The barge-in handler's `cancel` cuts the reply
  * (`_cutReply`); otherwise the speech's end decides (`_settleInterruption`): speech that never paused the reply ends
@@ -640,7 +675,7 @@ export interface VoicePipelineOverrides {
  * | Event                  | Payload                                      |
  * |------------------------|----------------------------------------------|
  * | `'state_changed'`      | `{ from: PipelineState, to: PipelineState }`  |
- * | `'turn_complete'`      | {@link TurnCompleteEvent}; a {@link ScopedTurnCompleteEvent} under a call profile |
+ * | `'turn_complete'`      | {@link TurnCompleteEvent}; a {@link ScopedTurnCompleteEvent} under a call profile; none for a turn of typed text |
  * | `'close'`              | `{ reason, error?, createdAt }`: the session moved to `closed` |
  * | `'agent_state_changed'`, `'user_state_changed'`, `'user_input_transcribed'`, `'conversation_item_added'`, `'speech_created'`, `'barge_in'`, `'session_error'` | the session's events ({@link VoiceSessionEventMap}), emitted here as on the session, from the moment `startSession()` is called |
  * | `'error'`              | `Error`: a listener of the session's events threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); speech came from a second source and was dropped (the session's first drop only); a TTS chunk came in another format than the transport's `playbackFormat` and was dropped (the session's first only, naming the provider); or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
@@ -671,6 +706,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * chunk holds the reply it belongs to, so that each reply's first refused chunk is reported and the rest are not.
    */
   private _currentReply: ReplyRecord = { audioRefusalReported: false, playsUntil: 0, started: false };
+  /**
+   * The agent's request for the latest reply: it settles once the reply's token loop has ended and the agent's stream
+   * has unwound with it (`_takeTurn`). Typed text that cuts a reply asks the agent only then (`_onClientText`): an
+   * agent answers one request at a time, and `AgentSessionVoiceAdapter` refuses a request while another is active.
+   */
+  private agentRequest: Promise<void> = Promise.resolve();
   private publicSession?: VoicePipelineSession;
   /** The session events of a session without a call profile; a call profile's runtime has its own. */
   private readonly events: SessionEvents;
@@ -1065,10 +1106,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   }
 
   /**
-   * Cuts the reply: the pipeline goes `interrupting`, the TTS session is cancelled, the agent's request aborted and the
-   * transport sent `barge_in` with `action`; the audio a pause held is never sent. Then the endpoint detector is reset
-   * and told the user holds the floor, the pipeline returns to `listening`, and the detector is told the speech that
-   * cut the reply, in the order it came, as the user's turn.
+   * Cuts the reply with the speech of an interruption (`_cancelReply`); the audio a pause held is never sent. Then the
+   * endpoint detector, reset and told the user holds the floor, is told the speech that cut the reply, in the order it
+   * came, as the user's turn.
    *
    * @param open - The interruption that cuts the reply.
    * @param action - The `cancel` the transport is sent: the handler's, or `{ type: 'cancel' }` when a final with words
@@ -1076,7 +1116,26 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * @param parts - The session's parts.
    */
   private _cutReply(open: Interruption, action: BargeinAction, parts: ReplyParts): void {
-    this._closeInterruption(open);
+    this._cancelReply(parts, action, open);
+    this._replay(open);
+  }
+
+  /**
+   * Cancels the reply being spoken. The interruption whose speech cuts it, or one still open when typed text cuts it,
+   * ends first: its timers stop and the audio a pause held is never sent, and what it holds for the endpoint detector
+   * is the caller's to tell or drop. Then the reply's wait for its audio to play out ends, the pipeline goes
+   * `interrupting`, the TTS session is cancelled, the agent's request aborted and the transport sent `barge_in` with
+   * `action`, and `barge_in` is emitted with the speech of `open`, or none. The reply joins the conversation as
+   * interrupted; then the endpoint detector is reset and told the user holds the floor, the pipeline returns to
+   * `listening`, and the watchdog starts. A listener that stops the session ends the cut there.
+   *
+   * @param parts - The session's parts.
+   * @param action - The `cancel` the transport is sent.
+   * @param open - The interruption whose speech cuts the reply; none for typed text, which has no speech.
+   */
+  private _cancelReply(parts: ReplyParts, action: BargeinAction, open?: Interruption): void {
+    const ending = open ?? this.interruption;
+    if (ending) this._closeInterruption(ending);
     // A reply waiting for its audio to play out waits no more: what is left of it is cut.
     this._stopPlayoutWait();
     this.stateTo('interrupting');
@@ -1094,7 +1153,6 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this._replyEnded(parts.endpoint);
     this.stateTo('listening');
     this.resetWatchdog();
-    this._replay(open);
   }
 
   /**
@@ -1137,14 +1195,15 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   }
 
   /**
-   * Emits `barge_in`: the user's speech paused, resumed or cut the reply, as the transport was just sent.
+   * Emits `barge_in`: the user's speech paused, resumed or cut the reply, or typed text cut it, as the transport was
+   * just sent.
    *
-   * @param open - The interruption whose speech it was.
-   * @param action - What the speech did to the reply.
+   * @param open - The interruption whose speech it was; none for typed text, whose `speechDurationMs` is 0.
+   * @param action - What the speech or the text did to the reply.
    */
-  private _bargedIn(open: Interruption, action: BargeinAction): void {
+  private _bargedIn(open: Interruption | undefined, action: BargeinAction): void {
     this.events.emit('barge_in', {
-      speechDurationMs: this._spokenMs(open),
+      speechDurationMs: open ? this._spokenMs(open) : 0,
       interruptedText: this.text,
       playedDurationMs: this.playedMs,
       action: action.type,
@@ -1483,51 +1542,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       if (this.publicSession) this._emitEach(this.publicSession, 'turn_complete', event);
       // A listener may have stopped the session: only a session still listening takes the turn.
       if ((this.current as PipelineState) !== 'listening') return;
-      // The turn joins the conversation as the agent takes it.
-      this.events.emit('conversation_item_added', {
-        item: {
-          role: 'user',
-          text: event.transcript,
-          ...(language ? { language } : {}),
-          source: this.speechSource === 'client' ? 'client' : 'speech',
-          endpointReason: event.reason,
-        },
-        createdAt: Date.now(),
-      });
-      if ((this.current as PipelineState) !== 'listening') return;
-      this.stateTo('processing');
-      // A listener of the change may have stopped the session: the client hears no thinking from a closed one.
-      if ((this.current as PipelineState) !== 'processing') return;
-      if (this.watchdog) clearTimeout(this.watchdog);
-      // Sends are not waited for: a send that rejects is reported and ends neither the turn nor the session.
-      this._watchSend(() => transport.sendControl({ type: 'agent_thinking' }));
-      this.supervise(async () => {
-        if (this.current === 'closed') return;
-        // The agent holds the floor from the moment the user's turn completes, before its reply has a word: the
-        // detector drops a backchannel such as "uh huh" until the reply ends or a barge-in cuts it.
-        inPart('endpoint', () => endpoint.setAgentContext?.({ speaking: true }));
-        const tokens = inPart('agent', () => agent.sendText(event.transcript, { speakers: [], endpointReason: event.reason, speechDurationMs: event.durationMs, wasInterrupted: false, transcriptConfidence: event.confidence }));
-        // The reply gets its record before its audio is sent.
-        this._stopPlayoutWait();
-        const reply: ReplyRecord = { audioRefusalReported: false, playsUntil: 0, started: false };
-        this._currentReply = reply;
-        this.stateTo('speaking');
-        this.text = '';
-        this.playedMs = 0;
-        this._watchSend(() => transport.sendControl({ type: 'agent_speaking', text: '' }));
-        for await (const token of fromPart('agent', tokens)) {
-          if (this.current !== 'speaking') break;
-          if (!reply.started) {
-            // The reply has its first word: the agent's speech is created, and the agent speaks.
-            reply.started = true;
-            this.events.emit('speech_created', { source: 'reply', userInitiated: false, createdAt: Date.now() });
-            this.events.agentTo('speaking');
-            if ((this.current as PipelineState) !== 'speaking') break;
-          }
-          this.text += token;
-          inPart('tts', () => tts.pushTokens(token));
-        }
-        if (this.current === 'speaking') await inPartAsync('tts', () => tts.flush());
+      this._takeTurn(parts, {
+        text: event.transcript,
+        source: this.speechSource === 'client' ? 'client' : 'speech',
+        reason: event.reason,
+        durationMs: event.durationMs,
+        confidence: event.confidence,
+        ...(language ? { language } : {}),
       });
     });
     const playbackFormat = transport.playbackFormat;
@@ -1563,7 +1584,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     });
     stt.on('speech_start', () => this.supervise(() => speech.start()));
     stt.on('speech_end', () => this.supervise(() => speech.end()));
-    this._wireClientTranscripts(transport, endpoint, speech);
+    this._wireClientTranscripts(transport, endpoint, speech, parts);
     const publicSession = Object.assign(new EventEmitter(), { sessionId: randomUUID(), transport, close: (reason?: string) => this.stopSession(reason) });
     // A getter, so the session reads the state of the moment rather than a copy taken here.
     Object.defineProperty(publicSession, 'state', { get: () => this.current });
@@ -1575,6 +1596,77 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this._watchSend(() => transport.sendControl({ type: 'session_started', sessionId: publicSession.sessionId, config: clientConfig(this.config) }));
     this.resetWatchdog();
     return this.publicSession;
+  }
+
+  /**
+   * Takes the user's turn while the session listens: a turn of speech the endpoint detector completed, or the user's
+   * typed text (`_onClientText`). The turn joins the conversation as the user's item, the pipeline moves to
+   * `processing` and the client is sent `agent_thinking`; then the endpoint detector hears that the agent holds the
+   * floor, the agent is asked with the turn's `VoiceTurnMetadata`, and its reply speaks: each token goes to the TTS
+   * session, which is flushed once the tokens end. A listener that stops the session ends the turn there.
+   * `agentRequest` settles once the reply's token loop has ended.
+   *
+   * @param parts - The session's parts.
+   * @param turn - The turn.
+   */
+  private _takeTurn(parts: ReplyParts, turn: UserTurn): void {
+    const { transport, agent, tts, endpoint } = parts;
+    // The turn joins the conversation as the agent takes it.
+    this.events.emit('conversation_item_added', {
+      item: {
+        role: 'user',
+        text: turn.text,
+        ...(turn.language ? { language: turn.language } : {}),
+        source: turn.source,
+        endpointReason: turn.reason,
+      },
+      createdAt: Date.now(),
+    });
+    if ((this.current as PipelineState) !== 'listening') return;
+    this.stateTo('processing');
+    // A listener of the change may have stopped the session: the client hears no thinking from a closed one.
+    if ((this.current as PipelineState) !== 'processing') return;
+    if (this.watchdog) clearTimeout(this.watchdog);
+    // Sends are not waited for: a send that rejects is reported and ends neither the turn nor the session.
+    this._watchSend(() => transport.sendControl({ type: 'agent_thinking' }));
+    this.supervise(async () => {
+      if (this.current === 'closed') return;
+      // The agent holds the floor from the moment the user's turn completes, before its reply has a word: the
+      // detector drops a backchannel such as "uh huh" until the reply ends or a barge-in cuts it.
+      inPart('endpoint', () => endpoint.setAgentContext?.({ speaking: true }));
+      const tokens = inPart('agent', () => agent.sendText(turn.text, { speakers: [], endpointReason: turn.reason, speechDurationMs: turn.durationMs, wasInterrupted: false, transcriptConfidence: turn.confidence }));
+      // The reply gets its record before its audio is sent.
+      this._stopPlayoutWait();
+      const reply: ReplyRecord = { audioRefusalReported: false, playsUntil: 0, started: false };
+      this._currentReply = reply;
+      this.stateTo('speaking');
+      this.text = '';
+      this.playedMs = 0;
+      this._watchSend(() => transport.sendControl({ type: 'agent_speaking', text: '' }));
+      // The agent's request is under way until the loop ends: leaving it, by its end, a break or a throw, unwinds the
+      // agent's stream.
+      let requestEnded!: () => void;
+      this.agentRequest = new Promise<void>((resolve) => {
+        requestEnded = resolve;
+      });
+      try {
+        for await (const token of fromPart('agent', tokens)) {
+          if (this.current !== 'speaking') break;
+          if (!reply.started) {
+            // The reply has its first word: the agent's speech is created, and the agent speaks.
+            reply.started = true;
+            this.events.emit('speech_created', { source: 'reply', userInitiated: false, createdAt: Date.now() });
+            this.events.agentTo('speaking');
+            if ((this.current as PipelineState) !== 'speaking') break;
+          }
+          this.text += token;
+          inPart('tts', () => tts.pushTokens(token));
+        }
+      } finally {
+        requestEnded();
+      }
+      if (this.current === 'speaking') await inPartAsync('tts', () => tts.flush());
+    });
   }
 
   /**
@@ -1590,7 +1682,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   }
 
   /**
-   * Client transcripts -> Endpoint Detector, for a session without a call profile.
+   * Client transcripts -> Endpoint Detector, and typed text -> a user turn, for a session without a call profile.
    *
    * A client that transcribes on its own device sends its transcripts as
    * `transcript` messages ({@link ClientTranscriptMessage}) in place of
@@ -1633,14 +1725,18 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Messages are handled one at a time, in the order they arrive, and one
    * that fails ends the session as a failure of the STT session's events
    * does. Nothing is relayed back, since the client shows its own text, and
-   * once the session is closed a message is ignored. Other client messages
-   * are not this segment's.
+   * once the session is closed a message is ignored. A `text_input` message
+   * that `isClientTextInputMessage()` accepts, the user's typed text, is
+   * handled in the same order (`_onClientText`), whatever the session takes
+   * its speech from: typed text is no speech. Other client messages are not
+   * this segment's.
    *
    * @param transport - The transport the client's messages arrive on.
    * @param endpoint - The detector whose turns the client's finals are joined within.
    * @param speech - What speech starting and ending does, as for the STT session's events.
+   * @param parts - The session's parts, for a turn of typed text.
    */
-  private _wireClientTranscripts(transport: IStreamTransport, endpoint: IEndpointDetector, speech: SpeechEdges): void {
+  private _wireClientTranscripts(transport: IStreamTransport, endpoint: IEndpointDetector, speech: SpeechEdges, parts: ReplyParts): void {
     const lines = { open: new Map<string, ReturnType<typeof setTimeout>>(), finals: [] as string[] };
     this.endClientLines = () => {
       for (const timer of lines.open.values()) clearTimeout(timer);
@@ -1654,14 +1750,17 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       if (change.to === 'listening') lines.finals = [];
     });
     let handled: Promise<void> = Promise.resolve();
-    const handle = (message: ClientTranscriptMessage): void => {
+    const chain = (work: () => Promise<void>): void => {
       // As supervise() does for the STT session's events, a failure ends the session through reportFailure().
-      handled = handled
-        .then(() => this._onClientTranscript(message, lines, handle, endpoint, speech))
-        .catch((err: unknown) => this.reportFailure(err instanceof PartFailure ? err.source : 'session'));
+      handled = handled.then(work).catch((err: unknown) => this.reportFailure(err instanceof PartFailure ? err.source : 'session'));
+    };
+    const handle = (message: ClientTranscriptMessage): void => {
+      chain(() => this._onClientTranscript(message, lines, handle, endpoint, speech));
     };
     transport.on('message', (message: ClientTextMessage) => {
-      if (isClientTranscriptMessage(message) && this.current !== 'closed' && this._takesSpeechFrom('client')) handle(message);
+      if (this.current === 'closed') return;
+      if (isClientTextInputMessage(message)) chain(() => this._onClientText(message.text, parts, lines));
+      else if (isClientTranscriptMessage(message) && this._takesSpeechFrom('client')) handle(message);
     });
   }
 
@@ -1766,6 +1865,39 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       lines.open.delete(itemId);
       if (lines.open.size === 0) speech.end();
     }
+  }
+
+  /**
+   * One checked text the user typed (see `_wireClientTranscripts`): a user turn of its own, whatever the session takes
+   * its speech from. A reply being spoken is cut as a `cancel` barge-in cuts it, with no speech (`_cancelReply`): an
+   * interruption of it ends with it, and the audio a pause held and the speech the detector was still to hear are
+   * dropped. A turn the agent has yet to answer has its request aborted, with no `barge_in`, since no reply was cut.
+   * Then, once the agent's request for the cut reply has ended (`agentRequest`), a session that still listens resets
+   * the endpoint detector, dropping what it holds of the user's speech, with that speech's language and the client's
+   * finals joined for it, and takes the text as the user's turn (`_takeTurn`): no `turn_complete` and no
+   * `user_input_transcribed`, `source: 'text'`, `endpointReason: 'manual'`, no speech and full confidence. A text that
+   * finds the session closed or interrupting is dropped.
+   *
+   * @param text - The text, as `isClientTextInputMessage()` accepted it.
+   * @param parts - The session's parts.
+   * @param lines - The client's transcript lines, whose finals joined for the dropped speech go with it.
+   */
+  private async _onClientText(text: string, parts: ReplyParts, lines: { finals: string[] }): Promise<void> {
+    if (this.current === 'closed' || this.current === 'interrupting') return;
+    if (this.current === 'speaking') this._cancelReply(parts, { type: 'cancel' });
+    else if (this.current === 'processing') {
+      parts.agent.abort?.();
+      this._replyEnded(parts.endpoint);
+      this.stateTo('listening');
+      this.resetWatchdog();
+    }
+    // An agent answers one request at a time: the text's starts once the cut reply's has ended.
+    await this.agentRequest;
+    if (this.current !== 'listening') return;
+    inPart('endpoint', () => parts.endpoint.reset());
+    this.turnLanguage = undefined;
+    lines.finals = [];
+    this._takeTurn(parts, { text, source: 'text', reason: 'manual', durationMs: 0, confidence: 1 });
   }
 
   /**
@@ -2349,8 +2481,13 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
       this.transport.on('gap', (event: { lostMs?: number; droppedMs?: number }) => {
         if (!this.detached && this.current !== 'closed') this.fan?.gap('transport', event.lostMs ?? event.droppedMs ?? 0);
       });
-      // Client control is an allowlist: mute, unmute and stop. Anything else ends the call.
+      // Client messages are an allowlist: typed text, and the controls mute, unmute and stop. Anything else ends the call.
       this.transport.on('message', (message: { type?: string; action?: { type?: string } }) => {
+        if (message?.type === 'text_input') {
+          // Typed text is a user turn (`takeText`); a text the check refuses is dropped, and the call goes on.
+          if (isClientTextInputMessage(message)) void this.takeText(message.text).catch(() => this.fail('provider_failure'));
+          return;
+        }
         if (message?.type !== 'control' || !['mute', 'unmute', 'stop'].includes(message.action?.type ?? '')) {
           this.fail('transport_failure', 'transport');
           return;
@@ -2398,16 +2535,49 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.turnLanguage = undefined;
     this.emitEach('turn_complete', event);
     if ((this.current as PipelineState) !== 'listening' || this.detached || this.changing) return;
+    this.takeTurn(event, { text: event.transcript, source: 'speech', reason: event.reason, durationMs: event.durationMs, confidence: event.confidence, ...(language ? { language } : {}) });
+  }
+
+  /**
+   * Takes the user's typed text, a `text_input` message, as a turn of its own: no `turn_complete`, a user item with
+   * `source: 'text'` and `endpointReason: 'manual'`, and the agent asked with no speech and full confidence. A text
+   * that comes while the call processes a turn or speaks interrupts it first, through `interrupt()` and its generation
+   * fence: `barge_in` reports a reply or a prompt being spoken, with `speechDurationMs: 0`, and a turn the agent has
+   * yet to answer is aborted with none. A text that comes while the call stops, is detached or changes its generation,
+   * or once it has closed, is dropped, and so is one whose interruption leaves the call other than listening. A muted
+   * call takes typed text.
+   *
+   * @param text - The text, as `isClientTextInputMessage()` accepted it.
+   */
+  private async takeText(text: string): Promise<void> {
+    if (this.stopping || this.detached || this.changing || this.current === 'closed') return;
+    if (this.current === 'processing' || this.current === 'speaking') await this.interrupt('text');
+    if (this.stopping || this.detached || this.changing || this.current !== 'listening') return;
+    this.takeTurn(this.identity, { text, source: 'text', reason: 'manual', durationMs: 0, confidence: 1 });
+  }
+
+  /**
+   * Takes a user turn while the call listens: a turn the endpoint detector completed (`acceptTurn`), or typed text
+   * (`takeText`). The turn joins the conversation as the user's item; then the call moves to `processing`, advances
+   * the inference generation and the recognition turn, waits for `onGeneration` and resets the input sessions, sends
+   * `agent_thinking` and asks the agent, whose reply it speaks (`synthesize`). A listener that moves the call on ends
+   * the turn there.
+   *
+   * @param identity - The recognition turn the user's turn ends: the endpoint detector's event, or the call's identity
+   *   as it takes typed text. The reply carries its scope, call and turn with the new generation.
+   * @param turn - The turn.
+   */
+  private takeTurn(identity: AudioIdentity, turn: UserTurn): void {
     // The turn joins the conversation as the agent takes it.
     this.events.emit('conversation_item_added', {
-      item: { role: 'user', text: event.transcript, ...(language ? { language } : {}), source: 'speech', endpointReason: event.reason },
+      item: { role: 'user', text: turn.text, ...(turn.language ? { language: turn.language } : {}), source: turn.source, endpointReason: turn.reason },
       createdAt: Date.now(),
     });
     if ((this.current as PipelineState) !== 'listening' || this.detached || this.changing) return;
     this.stateTo('processing');
     this.changing = true;
     const generation = this.advance();
-    const outputIdentity = copyAudioIdentity({ ...event, generation });
+    const outputIdentity = copyAudioIdentity({ ...identity, generation });
     this.response = (async () => {
       await this.profile.onGeneration(generation);
       await this.resetInput();
@@ -2415,8 +2585,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
       if (!this.live(generation)) return;
       await this.send({ type: 'agent_thinking' }, generation);
       if (!this.live(generation)) return;
-      const metadata: VoiceTurnMetadata = { speakers: [], endpointReason: event.reason, speechDurationMs: event.durationMs, wasInterrupted: false, transcriptConfidence: event.confidence, identity: outputIdentity };
-      await this.synthesize(inPart('agent', () => this.agent.sendText(event.transcript, metadata)), outputIdentity, 'reply');
+      const metadata: VoiceTurnMetadata = { speakers: [], endpointReason: turn.reason, speechDurationMs: turn.durationMs, wasInterrupted: false, transcriptConfidence: turn.confidence, identity: outputIdentity };
+      await this.synthesize(inPart('agent', () => this.agent.sendText(turn.text, metadata)), outputIdentity, 'reply');
     })().catch((err: unknown) => {
       if (this.live(generation)) this.fail('provider_failure', err instanceof PartFailure ? err.source : 'session');
     });
@@ -2543,22 +2713,25 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   /**
    * Advances the generation synchronously, then aborts the agent, cancels synthesis, clears playback, waits for the
    * old generation's inference fence and resets input before the call listens again. A reply or a prompt being spoken
-   * joins the conversation as interrupted; when the user's speech interrupted it, `barge_in` says so first.
+   * joins the conversation as interrupted; when the user's speech or typed text interrupted it, `barge_in` says so
+   * first.
    *
-   * @param cause - `'speech'` when the user's speech interrupts the agent; `'other'` for a mute, a gap or a detach.
+   * @param cause - `'speech'` when the user's speech interrupts the agent; `'text'` when the user's typed text does,
+   *   which reports `barge_in`, with no speech, only for a reply or a prompt being spoken; `'other'` for a mute, a gap
+   *   or a detach.
    */
-  private interrupt(cause: 'speech' | 'other' = 'other'): Promise<void> {
+  private interrupt(cause: 'speech' | 'text' | 'other' = 'other'): Promise<void> {
     if (this.current === 'closed' || this.changing) return this.transition;
     const interrupted = copyAudioIdentity(this.identity);
     const old = { ...this.identity.generation };
-    // advance() clears the measure of the speech that interrupts.
-    const speechDurationMs = this.speechMs;
+    // advance() clears the measure of the speech that interrupts; typed text is no speech.
+    const speechDurationMs = cause === 'speech' ? this.speechMs : 0;
     this.changing = true;
     const generation = this.advance();
     this.stateTo('interrupting');
     this.profile.onInterrupted(interrupted);
     this.emit('interrupted', interrupted);
-    if (cause === 'speech') {
+    if (cause === 'speech' || (cause === 'text' && this.replying)) {
       // Speech while the call processes a turn cuts no reply: the text of the last one, which played, is not reported.
       this.events.emit('barge_in', { speechDurationMs, interruptedText: this.replying ? this.replyText : '', playedDurationMs: this.queue?.stats().playedMs ?? 0, action: 'cancel', createdAt: Date.now() });
     }
