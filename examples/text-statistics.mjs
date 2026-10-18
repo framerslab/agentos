@@ -10,11 +10,10 @@
 //   - Flesch-Kincaid reading ease and grade level
 //   - similarity by TF-IDF cosine, Jaccard and Levenshtein
 //   - language detection for English, French and Japanese text
-//   - keyword classification against candidate class names
+//   - sentiment scored with natural's English AFINN lexicon
+//   - keyword classification against candidate class names, and a trained Naive Bayes model
 //
-// analyzeSentiment() is left out: it answers a neutral result for every text, because
-// its lexicon does not load (docs/text/TEXT_STATISTICS.md, "Sentiment"). initialize()
-// logs that as a warning, and the class logs its other steps too.
+// The class logs its steps with console as it goes.
 //
 // Usage:
 //   pnpm install && pnpm run build
@@ -80,6 +79,20 @@ for (const [name, text] of Object.entries(passages)) {
   console.log(`${name.padEnd(9)}`, ranked.map(({ language, confidence }) => `${language} ${confidence}`).join(', '));
 }
 
+console.log('\n=== sentiment ===\n');
+// AFINN values summed and mapped into -1 to 1 as s / sqrt(s * s + 15):
+//   thank 2 + wonderful 4 + love 3 = 9 -> 0.919; terrible -3 + useless -2 = -5 -> -0.791;
+//   "no" flips problem (-2) to 2, and great adds 3 -> 0.791; no listed word -> 0.
+for (const text of [
+  'Thank you, this is wonderful and I love it.',
+  'This update is terrible and the app is useless.',
+  'No problem, this is great.',
+  'The meeting is on Tuesday.',
+]) {
+  const { score, polarity } = await stats.analyzeSentiment(text);
+  console.log(`${polarity.padEnd(8)} ${score.toFixed(3).padStart(6)}  ${text}`);
+}
+
 console.log('\n=== keyword classification ===\n');
 // With no trained model, classifyText() logs a warning and scores each class by the words of
 // its name found in the text.
@@ -88,5 +101,20 @@ const classified = await stats.classifyText(ticket, {
   candidateClasses: ['billing refund', 'shipping delay', 'account login'],
 });
 console.log(classified);
+
+console.log('\n=== naive Bayes classification ===\n');
+// The model reads its examples as it reads the ticket: lower-cased words, natural's stop words
+// left out, Porter stems. The ticket shares card, charg and twice with the billing examples.
+await stats.trainModel(
+  [
+    { text: 'My card was charged twice for one order', label: 'billing' },
+    { text: 'The invoice shows the wrong amount', label: 'billing' },
+    { text: 'My parcel arrived late and the box was crushed', label: 'shipping' },
+    { text: 'The order has not shipped yet', label: 'shipping' },
+  ],
+  'text_classifier_naive_bayes',
+);
+const bayes = await stats.classifyText(ticket, { candidateClasses: ['billing', 'shipping'], method: 'naive_bayes' });
+console.log('bestClass:', bayes.bestClass);
 
 await stats.shutdown();

@@ -2,7 +2,7 @@
  * @fileoverview Semantic text chunker that splits on natural boundaries instead
  * of fixed character counts.
  *
- * Three-tier splitting strategy:
+ * Splitting, in order:
  * 1. **Heading boundaries** — Markdown headings (`# ## ###` etc.) start new chunks
  * 2. **Paragraph boundaries** — Double newlines are the preferred split point
  * 3. **Sentence boundaries** — Period/exclamation/question followed by whitespace
@@ -12,7 +12,8 @@
  * overlap context from the previous chunk for retrieval continuity.
  *
  * Special handling:
- * - **Code blocks** (fenced with triple backticks) are kept intact when possible
+ * - **Code blocks** (fenced with triple backticks) stay one chunk unless longer than `maxSize`; a fence left open
+ *   runs to the end of the text
  * - **Markdown headings** always start new chunks for better section-level retrieval
  * - **Small fragments** below `minSize` are merged with the previous chunk
  *
@@ -167,10 +168,12 @@ export class SemanticChunker {
    * 6. Merge small fragments (< `minSize`) with the previous chunk
    * 7. Add overlap from the end of the previous chunk to each chunk
    *
+   * A text that is empty or white space alone gives no chunks: `chunk()` answers `[]` and does not throw. A code
+   * fence left open runs to the end of the text as one code block.
+   *
    * @param {string} text - The full text to chunk.
    * @param {Record<string, unknown>} [metadata] - Optional metadata attached to all chunks.
-   * @returns {SemanticChunk[]} Array of chunks in order.
-   * @throws {Error} If text is empty.
+   * @returns {SemanticChunk[]} Array of chunks in order; empty for an empty or white-space text.
    *
    * @example
    * ```typescript
@@ -265,7 +268,8 @@ export class SemanticChunker {
       // Handle code block boundaries
       if (this.config.preserveCodeBlocks && CODE_FENCE_RE.test(line.trim())) {
         if (!inCodeBlock) {
-          // Starting a code block — flush current segment first
+          // Starting a code block: flush the gathering segment and empty it, so a fence left open to the end of the
+          // text, which the end of this loop flushes as a code block, does not flush that text a second time.
           if (currentSegment.trim().length > 0) {
             segments.push({
               text: currentSegment,
@@ -273,6 +277,7 @@ export class SemanticChunker {
               boundary: currentBoundary,
             });
           }
+          currentSegment = '';
           inCodeBlock = true;
           codeBlockStart = lineOffset;
           codeBlockContent = line + '\n';

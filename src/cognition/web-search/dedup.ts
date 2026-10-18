@@ -2,7 +2,8 @@
  * @module web-search/dedup
  *
  * Semantic deduplication for web search results.
- * Uses TF-IDF cosine similarity to detect near-duplicates across providers.
+ * Uses the cosine of term-frequency vectors (no inverse document frequency) to detect near-duplicates across
+ * providers.
  * Pure functions, no IO.
  */
 import { cosineSimilarity } from '../rag/citation/cosine';
@@ -33,8 +34,8 @@ export function buildTfVector(text: string, vocabulary: Map<string, number>): nu
 }
 
 /**
- * Merge a source candidate into a target candidate.
- * Combines provider ranks and keeps the richest content.
+ * Merge a source candidate into a target candidate: the target gains the providers only the source holds, with
+ * their ranks, the source's content when it has none, and the higher relevanceScore.
  */
 function mergeCandidates(target: RRFCandidate, source: RRFCandidate): void {
   for (const [prov, rank] of source.providerRanks) {
@@ -58,10 +59,14 @@ function mergeCandidates(target: RRFCandidate, source: RRFCandidate): void {
  * Semantic dedup: merge near-duplicate results across providers.
  *
  * Two-pass:
- * 1. URL normalization merge (exact match after stripping protocol/www/tracking)
- * 2. TF-IDF cosine similarity on snippets (catches same article at different URLs)
+ * 1. URL normalization merge (exact match after {@link normalizeUrl}: scheme, `www.`, trailing slashes and tracking
+ *    parameters dropped)
+ * 2. Cosine similarity of the snippets' term-frequency vectors, each count divided by the snippet's word count
+ *    (catches same article at different URLs)
  *
- * Keeps the version with richest content (prefers full markdown over snippet-only).
+ * The first candidate of each group stays and gains the providers only later ones hold, with their ranks. It takes
+ * a later candidate's content when it has none, and the higher relevanceScore. The candidates given are left as they
+ * were: a merge changes a copy of the first.
  *
  * @param candidates - Raw candidates from all providers
  * @param threshold - Cosine similarity threshold for dedup (default 0.85)
@@ -80,7 +85,13 @@ export function semanticDedup(
     if (existing) {
       mergeCandidates(existing, c);
     } else {
-      urlMap.set(normUrl, { ...c, normalizedUrl: normUrl });
+      // A copy with its own ranks and sources, so the merges below leave the caller's candidate as it was.
+      urlMap.set(normUrl, {
+        ...c,
+        normalizedUrl: normUrl,
+        providerRanks: new Map(c.providerRanks),
+        providerSources: [...c.providerSources],
+      });
     }
   }
 

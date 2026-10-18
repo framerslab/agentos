@@ -140,6 +140,16 @@ describe('SemanticChunker', () => {
       expect(codeChunk!.text).toContain('function hello()');
       expect(codeChunk!.text).toContain('console.log');
     });
+
+    it('gives the text before a code block left open once, then the block to the end of the text', () => {
+      const chunker = new SemanticChunker({ minSize: 10, overlap: 0 });
+      const intro = 'An introduction long enough to stand as a chunk of its own.';
+      const chunks = chunker.chunk(`${intro}\n\n\`\`\`ts\nconst open = true;\n`);
+      expect(chunks.map((c) => c.boundaryType)).toEqual(['paragraph', 'code-block']);
+      expect(chunks.filter((c) => c.text.includes('An introduction'))).toHaveLength(1);
+      expect(chunks[1].text).toBe('```ts\nconst open = true;\n\n');
+      expect(chunks[1].startOffset).toBe(intro.length + 2);
+    });
   });
 
   describe('sentence splitting fallback', () => {

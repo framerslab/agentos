@@ -151,7 +151,8 @@ export class RerankerService {
       modelId: config?.modelId ?? providerConfig?.defaultModelId ?? this.config.defaultModelId ?? '',
       topN: config?.topN,
       maxDocuments: config?.maxDocuments ?? 100,
-      timeoutMs: config?.timeoutMs ?? providerConfig?.defaultTimeoutMs ?? 30000,
+      // Unset when neither the call nor the provider's settings name one, so the provider's own default applies.
+      timeoutMs: config?.timeoutMs ?? providerConfig?.defaultTimeoutMs,
       params: config?.params,
     };
 
@@ -285,9 +286,11 @@ export class RerankerService {
           continue;
         }
 
+        // A stage without a model leaves modelId unset, so rerank() takes the provider's defaultModelId from the
+        // settings, else the service's, else the provider's own.
         current = await this.rerankChunks(query, current, {
           providerId: stage.provider,
-          modelId: stage.model ?? '',
+          modelId: stage.model,
           topN: stage.topK,
         });
         stagesRun.push(stage.provider);

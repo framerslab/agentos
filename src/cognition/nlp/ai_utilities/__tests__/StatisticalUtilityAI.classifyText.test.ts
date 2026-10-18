@@ -160,4 +160,17 @@ describe('classifyText — keyword_matching', () => {
     // Confidence should be low
     expect(result.confidence).toBeLessThanOrEqual(0.1);
   });
+
+  it('splits a class name at white space, so a doubled or trailing space scores nothing', async () => {
+    const result = await util.classifyText('xylophone zebra quantum', {
+      candidateClasses: ['attack  now ', 'defend'],
+      method: 'keyword_matching',
+    });
+    expect(result.allScores).toEqual([
+      { classLabel: 'attack  now ', score: 0 },
+      { classLabel: 'defend', score: 0 },
+    ]);
+    expect(result.bestClass).toBe('attack  now ');
+    expect(result.confidence).toBe(0.1);
+  });
 });
