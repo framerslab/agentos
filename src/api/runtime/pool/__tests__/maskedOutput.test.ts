@@ -157,6 +157,50 @@ describe('maskedPrebuilt', () => {
     expect(seen).toEqual([{ type: 'text', text: 'held ' }, { type: 'text', text: 'sk-unit-' }, { type: 'tool-call', toolName: 't', args: {} }]);
     expect(thrown?.message).toBe('stream died [redacted]');
   });
+
+  it('a part behind a held tail waits until the text before it is out: a piece that settles only part of the tail releases that part and keeps the part behind the rest, and parts that arrived between held pieces come out between them', async () => {
+    // 'sk-unit-' is held when the tool call arrives; 's' keeps 'sk-unit-s' held, still a prefix of the secret; 'k' settles
+    // 'sk-unit-' as no secret and holds 'sk', so the tool call comes out after 'sk-unit-' and before 'sk done'.
+    const partial = {
+      ...seat,
+      stream: () => ({
+        fullStream: pieces(
+          { type: 'text', text: 'x sk-unit-', agent: 'a' },
+          { type: 'tool-call', toolName: 't', args: {}, agent: 'a' },
+          { type: 'text', text: 's', agent: 'a' },
+          { type: 'text', text: 'k', agent: 'a' },
+          { type: 'text', text: ' done', agent: 'a' },
+        ),
+      }),
+    } as unknown as Agent;
+    expect(await drain((maskedPrebuilt(partial, mask).stream('go') as unknown as Streamed).fullStream)).toEqual([
+      { type: 'text', text: 'x ', agent: 'a' },
+      { type: 'text', text: 'sk-unit-', agent: 'a' },
+      { type: 'tool-call', toolName: 't', args: {}, agent: 'a' },
+      { type: 'text', text: 'sk done', agent: 'a' },
+    ]);
+    // The tool call arrived after 'sk-' and the tool result after 'unit-', both held; 'x' settles the run as no secret.
+    const between = {
+      ...seat,
+      stream: () => ({
+        fullStream: pieces(
+          { type: 'text', text: 'a sk-', agent: 'a' },
+          { type: 'tool-call', toolName: 't', args: {}, agent: 'a' },
+          { type: 'text', text: 'unit-', agent: 'a' },
+          { type: 'tool-result', toolName: 't', result: 'r', agent: 'a' },
+          { type: 'text', text: 'x', agent: 'a' },
+        ),
+      }),
+    } as unknown as Agent;
+    expect(await drain((maskedPrebuilt(between, mask).stream('go') as unknown as Streamed).fullStream)).toEqual([
+      { type: 'text', text: 'a ', agent: 'a' },
+      { type: 'text', text: 'sk-', agent: 'a' },
+      { type: 'tool-call', toolName: 't', args: {}, agent: 'a' },
+      { type: 'text', text: 'unit-', agent: 'a' },
+      { type: 'tool-result', toolName: 't', result: 'r', agent: 'a' },
+      { type: 'text', text: 'x', agent: 'a' },
+    ]);
+  });
 });
 
 describe('maskStreamMembers', () => {
