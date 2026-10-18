@@ -151,7 +151,8 @@ export class SentimentTracker {
         method: stConfig?.method || 'lexicon_based',
         modelId: stConfig?.modelId || persona.defaultModelId,
         providerId: stConfig?.providerId || persona.defaultProviderId,
-        language: (userCtx.language as string) || 'en',
+        // The user's language, else the persona's; with neither, the utility class scores in its own default.
+        language: (userCtx.language as string) || persona.defaultLanguage || undefined,
       });
 
       // Update UserContext with current sentiment

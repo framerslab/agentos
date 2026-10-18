@@ -63,7 +63,7 @@
 
 - [**Text Processing & Search**](./text/TEXT_OVERVIEW.md): the section's map, what loads in a browser, and the runnable examples
 - [**Text Processing Pipeline**](./text/TEXT_PROCESSING.md): tokenizers for prose and code, stop words, Porter stemming and the three preset pipelines
-- [**Text Statistics and Classification**](./text/TEXT_STATISTICS.md): `StatisticalUtilityAI`, `LLMUtilityAI` and `HybridUtilityAI` for sentences, n-grams, keywords, readability, similarity, language, summaries and classification
+- [**Text Statistics and Classification**](./text/TEXT_STATISTICS.md): `StatisticalUtilityAI`, `LLMUtilityAI` and `HybridUtilityAI` for sentences, n-grams, keywords, readability, similarity, language, summaries, sentiment and classification
 - [**Lexical and Hybrid Search**](./text/LEXICAL_AND_HYBRID_SEARCH.md): `LexicalIndex`, `BM25Index`, `FuzzyIndex`, `HybridSearcher` and reciprocal rank fusion
 - [**Chunking and Snippets**](./text/CHUNKING_AND_SNIPPETS.md): `SemanticChunker`, `chunkTurns`, `ChunkingEngine` and `snippetAround`
 - [**Reranking**](./text/RERANKING.md): `RerankerService` and the local, Cohere and LLM-judge rerankers
@@ -98,7 +98,7 @@
 - [**Platform Support**](./architecture/PLATFORM_SUPPORT.md) — Supported environments and requirements
 - [**Observability (OpenTelemetry)**](./observability/OBSERVABILITY.md) — Tracing, metrics, and log correlation/export (opt-in)
 - [**Logging (Pino + OpenTelemetry)**](./observability/LOGGING.md) — Structured logs, trace correlation, and OTEL LogRecord export (opt-in)
-- [**API Key Rotation**](./KEY_ROTATION.md): comma-separated keys per provider, which providers rotate them, and which rest a key after a quota error
+- [**API Key Rotation**](./KEY_ROTATION.md): comma-separated keys per provider as a pool: ordered or round-robin, failover when a key is revoked, unpaid or throttled, probes and persisted state
 - [**CLI Error Codes**](./features/CLI_ERROR_CODES.md): the codes a CLI subprocess bridge raises, and when the Claude Code and Gemini CLI providers raise each one
 
 ### Ecosystem

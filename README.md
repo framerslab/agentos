@@ -219,7 +219,7 @@ Extensions load from the manifest a host passes to `AgentOS.create({ extensionMa
 
 ## Configure API Keys
 
-Three layers, highest priority first: inline `apiKey` on the call, a module-level `setDefaultProvider()` at boot, or environment-variable auto-detection (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and the rest, resolved in priority order and reorderable with `setProviderPriority([...])`). A comma-separated list of keys rotates per request on the providers that support it ([Key rotation](https://github.com/framerslab/agentos/blob/master/docs/KEY_ROTATION.md)).
+Three layers, highest priority first: inline `apiKey` on the call, a module-level `setDefaultProvider()` at boot, or environment-variable auto-detection (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and the rest, resolved in priority order and reorderable with `setProviderPriority([...])`). A comma-separated list of keys gives a provider a key pool: round-robin by default, or `AGENTOS_KEY_POOL_STRATEGY=ordered` to use the keys in order and fail over to the next when one is revoked, unpaid or throttled ([Key rotation](https://github.com/framerslab/agentos/blob/master/docs/KEY_ROTATION.md)).
 
 [Full credential resolution + default models per provider ->](https://docs.agentos.sh/architecture/llm-providers)
 

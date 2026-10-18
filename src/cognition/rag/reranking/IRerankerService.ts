@@ -88,7 +88,10 @@ export interface RerankerRequestConfig {
   topN?: number;
   /** Maximum documents to send to reranker (limits cost). Default: 100 */
   maxDocuments?: number;
-  /** Request timeout in milliseconds. Default: 30000 */
+  /**
+   * Request timeout in milliseconds. `RerankerService.rerank()` sends the call's, else the provider settings'
+   * `defaultTimeoutMs`, else none, and the provider applies its own: 30000 for Cohere and the LLM judge.
+   */
   timeoutMs?: number;
   /** Provider-specific parameters */
   params?: Record<string, unknown>;
@@ -180,6 +183,9 @@ export interface RerankChainStage {
   provider: string;
   /** Max results to keep after this stage. */
   topK: number;
-  /** Optional model override for this stage. */
+  /**
+   * The model this stage asks for. Unset, the stage takes the provider's `defaultModelId` from the service's
+   * provider settings, else the service's `defaultModelId`, else the provider's own default.
+   */
   model?: string;
 }

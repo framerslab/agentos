@@ -7,6 +7,7 @@ import { IPromptEngine } from '../../../core/llm/IPromptEngine';
 import { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager';
 import { IProvider, ChatMessage, ModelCompletionResponse } from '../../../core/llm/providers/IProvider';
 import { IUtilityAI, ParseJsonOptions, SummarizationOptions } from '../../nlp/ai_utilities/IUtilityAI';
+import { StatisticalUtilityAI } from '../../nlp/ai_utilities/StatisticalUtilityAI';
 import { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator';
 import { IRetrievalAugmentor } from '../../rag/IRetrievalAugmentor';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
@@ -491,5 +492,49 @@ describe('GMI Core Functionality', () => {
     expect(gmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
     expect(mockWorkingMemory.close).toHaveBeenCalled();
     // Add more shutdown assertions if other components have specific shutdown actions called by GMI
+  });
+});
+
+describe('GMI turn-summary ingestion with a StatisticalUtilityAI', () => {
+  // The utility class gmi() gives every agent: it summarizes by sentences and makes no model call.
+  const userInput = 'The parcel is late. It was due on Monday. Where is it now?';
+
+  /** Runs one turn of a GMI that ingests its turns, and answers the content of the one document it ingested. */
+  async function ingestOneTurn(summarization: { enabled: boolean; method?: 'extractive' | 'abstractive_llm' }): Promise<string> {
+    vi.clearAllMocks();
+    const utilityAI = new StatisticalUtilityAI('gmi-turn-summary');
+    await utilityAI.initialize({ defaultLanguage: 'en' });
+    const turnGmi = new GMI('test-turn-summary');
+    await turnGmi.initialize(
+      {
+        ...mockPersona,
+        memoryConfig: {
+          enabled: true,
+          ragConfig: {
+            enabled: true,
+            ingestionTriggers: { onTurnSummary: true },
+            defaultIngestionDataSourceId: 'turns',
+            ingestionProcessing: { summarization },
+          },
+        },
+      },
+      { ...mockBaseConfig, utilityAI },
+    );
+    const input: GMITurnInput = { interactionId: 'turn-summary-1', userId: 'user-test', type: GMIInteractionType.TEXT, content: userInput };
+    for await (const _chunk of turnGmi.processTurnStream(input)) { /* consume */ }
+    const ingest = mockRetrievalAugmentor.ingestDocuments as ReturnType<typeof vi.fn>;
+    expect(ingest).toHaveBeenCalledTimes(1);
+    return (ingest.mock.calls[0][0] as { content: string }).content;
+  }
+
+  it("summarizes a turn with the persona's extractive method", async () => {
+    // 'short', the length a persona that names none asks for, is the first two sentences of "User: ...\n\nAssistant: ...".
+    expect(await ingestOneTurn({ enabled: true, method: 'extractive' })).toBe('User: The parcel is late. It was due on Monday.');
+  });
+
+  it('ingests the turn as it is when its summary fails', async () => {
+    // abstractive_llm, the method a persona that names none asks for, is not a method of the statistical class.
+    const content = await ingestOneTurn({ enabled: true });
+    expect(content.startsWith(`User: ${userInput}\n\nAssistant: `)).toBe(true);
   });
 });

@@ -70,10 +70,12 @@ export interface LexicalIndexJSON {
 
 /**
  * What keeps a saved index from being one {@link LexicalIndex.toJSON} could have written, or undefined when nothing
- * does. `k1` and `b` are finite numbers. Each document is `[id, length]` or `[id, length, metadata]`, its id unlike
- * every earlier one and its length in tokens a whole number of 0 or more; its metadata is taken as given. Each term
- * is `[term, postings]`, unlike every earlier term, and each posting `[position, count]`: the position of one of the
- * documents, given once for the term, and a whole count of 1 or more.
+ * does. `k1` and `b` are finite numbers. Each document is `[id, length]` or `[id, length, metadata]` and nothing
+ * more, its id a non-empty string unlike every earlier one and its length in tokens a whole number of 0 or more; its
+ * metadata is taken as given. Each term is `[term, postings]`, unlike every earlier term, with one posting or more,
+ * and each posting `[position, count]`: the position of one of the documents, given once for the term, and a whole
+ * count of 1 or more. A document's counts over all terms add up to its length. A term's text is taken as given,
+ * since a caller's tokenizer can answer any string.
  */
 function shapeProblem(json: LexicalIndexJSON): string | undefined {
   if (!Number.isFinite(json.k1) || !Number.isFinite(json.b)) return 'k1 or b is not a finite number';
@@ -82,9 +84,16 @@ function shapeProblem(json: LexicalIndexJSON): string | undefined {
   const ids = new Set<string>();
   for (let at = 0; at < documents.length; at += 1) {
     const entry: unknown = documents[at];
-    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Number.isInteger(entry[1]) || entry[1] < 0) {
+    if (
+      !Array.isArray(entry) ||
+      (entry.length !== 2 && entry.length !== 3) ||
+      typeof entry[0] !== 'string' ||
+      !Number.isInteger(entry[1]) ||
+      entry[1] < 0
+    ) {
       return `documents[${at}] is not [id, length] or [id, length, metadata]`;
     }
+    if (entry[0] === '') return `documents[${at}] has an empty id`;
     if (ids.has(entry[0])) return `documents[${at}] repeats the id of an earlier document`;
     ids.add(entry[0]);
   }
@@ -93,16 +102,20 @@ function shapeProblem(json: LexicalIndexJSON): string | undefined {
   const seenTerms = new Set<string>();
   // The term each document position was last seen under, so a position given twice in one term's postings shows.
   const lastTerm = new Int32Array(documents.length).fill(-1);
+  // The words each document position holds, summed over its postings.
+  const counted = new Array<number>(documents.length).fill(0);
   for (let at = 0; at < terms.length; at += 1) {
     const entry: unknown = terms[at];
-    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) {
       return `terms[${at}] is not [term, postings]`;
     }
     if (seenTerms.has(entry[0])) return `terms[${at}] repeats an earlier term`;
     seenTerms.add(entry[0]);
+    if ((entry[1] as unknown[]).length === 0) return `terms[${at}] holds no postings`;
     for (const posting of entry[1] as unknown[]) {
       if (
         !Array.isArray(posting) ||
+        posting.length !== 2 ||
         !Number.isInteger(posting[0]) ||
         posting[0] < 0 ||
         posting[0] >= documents.length ||
@@ -113,6 +126,13 @@ function shapeProblem(json: LexicalIndexJSON): string | undefined {
       }
       if (lastTerm[posting[0]] === at) return `terms[${at}] holds the position ${posting[0]} twice`;
       lastTerm[posting[0]] = at;
+      counted[posting[0]] += posting[1];
+    }
+  }
+  // A document's length is the number of its words, each counted under its term.
+  for (let at = 0; at < documents.length; at += 1) {
+    if (counted[at] !== documents[at][1]) {
+      return `documents[${at}] has the length ${documents[at][1]}, and its postings add up to ${counted[at]}`;
     }
   }
   return undefined;

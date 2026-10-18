@@ -36,8 +36,9 @@ const isPostgres = (adapter: StorageAdapter): boolean => adapter.kind.includes('
  * Whether Postgres has an index named `index` in the schema of `table`, the table the connection's search path
  * resolves: the schema where `CREATE INDEX IF NOT EXISTS index ON table` makes it, and where its IF NOT EXISTS
  * looks. An unqualified `to_regclass(index)` would also find a same-named index in a later schema on the search
- * path (a fresh schema ahead of an initialized `public`) and skip the index the table needs. Reads the catalog
- * without taking a lock on the table.
+ * path (a fresh schema ahead of an initialized `public`) and skip the index the table needs. Ask once `table`
+ * exists: before, its name can resolve to a same-named table in a later schema, not the one `CREATE TABLE IF NOT
+ * EXISTS` is about to make in the first. Reads the catalog without taking a lock on the table.
  */
 export async function postgresIndexExists(adapter: StorageAdapter, index: string, table: string): Promise<boolean> {
   const row = await adapter.get<{ found: boolean }>(

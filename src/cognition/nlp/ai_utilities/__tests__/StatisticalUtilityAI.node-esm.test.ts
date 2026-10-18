@@ -70,4 +70,15 @@ describe.skipIf(!inCI && !existsSync(builtModule))('StatisticalUtilityAI built f
     expect(results).toHaveLength(1);
     expect(results[0].language).toBe('ja');
   });
+
+  it('scores sentiment with the lexicons natural ships', () => {
+    const out = runInNode(`
+      const negative = await utility.analyzeSentiment('This is terrible and I hate it.');
+      const positive = await utility.analyzeSentiment('This is wonderful and I love it.');
+      process.stdout.write('\\n${RESULT_MARK}' + JSON.stringify({ negative: negative.score, positive: positive.score }) + '\\n');
+    `);
+    const scores = readResult<{ negative: number; positive: number }>(out);
+    expect(scores.negative).toBeLessThan(-0.5);
+    expect(scores.positive).toBeGreaterThan(0.5);
+  });
 });

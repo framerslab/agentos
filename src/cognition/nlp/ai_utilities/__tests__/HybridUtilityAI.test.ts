@@ -74,8 +74,8 @@ describe('HybridUtilityAI', () => {
     });
 
     it('summarize delegates to llm', async () => {
-      await hybrid.summarize('text to summarize', { method: 'first_n_sentences' });
-      expect(llmMock.summarize).toHaveBeenCalledWith('text to summarize', { method: 'first_n_sentences' });
+      await hybrid.summarize('text to summarize', { method: 'abstractive_llm' });
+      expect(llmMock.summarize).toHaveBeenCalledWith('text to summarize', { method: 'abstractive_llm' });
       expect(statMock.summarize).not.toHaveBeenCalled();
     });
 

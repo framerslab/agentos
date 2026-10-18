@@ -175,8 +175,13 @@ export interface PersonaRagConfigIngestionTrigger {
 export interface PersonaRagIngestionProcessingConfig {
     summarization?: {
         enabled: boolean;
-        targetLength?: 'short' | 'medium' | 'long' | number; // Number of words/sentences or category
-        method?: 'extractive' | 'abstractive_llm';
+        targetLength?: 'short' | 'medium' | 'long' | number; // A share of the turn from 0 to 1, a count of sentences above 1, or a category; 'short' unless given
+        /**
+         * The utility class's summary method, `'abstractive_llm'` unless given; `'extractive'` is read as
+         * `'extractive_sentence_rank'`. A turn whose summary fails, such as one asked of a class without the method, is
+         * ingested as it is.
+         */
+        method?: 'extractive' | 'abstractive_llm' | 'key_points_llm' | 'first_n_sentences' | 'extractive_sentence_rank';
         modelId?: string; // For abstractive_llm
         providerId?: string; // For abstractive_llm
     };
@@ -240,7 +245,7 @@ export interface PersonaMemoryConfig {
  * sentimentTracking: { enabled: true }
  *
  * @example
- * // Full: LLM-based analysis with custom thresholds
+ * // Full: custom thresholds; 'llm' sends a HybridUtilityAI's scoring to its LLM-backed class
  * sentimentTracking: {
  *   enabled: true,
  *   method: 'llm',
@@ -261,17 +266,17 @@ export interface SentimentTrackingConfig {
     enabled: boolean;
 
     /**
-     * Sentiment analysis method.
-     * - 'lexicon_based': Fast (~10-50ms), no LLM cost, basic accuracy (VADER-style)
-     * - 'llm': Uses LLM call, higher accuracy, ~500-1000ms latency, costs tokens
-     * - 'trained_classifier': Uses trained ML model (if available)
+     * The `method` the tracker passes to the GMI's utility class with each turn. The utility class decides how a
+     * turn is scored: `LLMUtilityAI` makes a provider call for each turn (and a repair call when its reply does not
+     * parse) and `StatisticalUtilityAI` scores with a word lexicon and makes none, whatever this names. A `HybridUtilityAI` that holds both sends `'llm'` to its
+     * LLM-backed class and `'lexicon_based'` or `'trained_classifier'` to its statistical class.
      * @default 'lexicon_based'
      */
     method?: 'lexicon_based' | 'llm' | 'trained_classifier';
 
     /**
-     * Model ID for LLM-based or trained_classifier methods.
-     * Falls back to persona defaultModelId if not specified.
+     * The `modelId` an `LLMUtilityAI` scores a turn with, else the persona's `defaultModelId`.
+     * `StatisticalUtilityAI` does not read it.
      */
     modelId?: string;
 

@@ -26,7 +26,7 @@ flowchart LR
 | To | Use | Page |
 |---|---|---|
 | Split text into words, drop stop words, stem | `TextProcessingPipeline`, `createProsePipeline()`, `createRagPipeline()`, `createCodePipeline()` | [Text Processing Pipeline](./TEXT_PROCESSING.md) |
-| Count, compare and classify text: sentences, n-grams, keywords, readability, similarity, language, summaries | `StatisticalUtilityAI`, `LLMUtilityAI`, `HybridUtilityAI` | [Text Statistics and Classification](./TEXT_STATISTICS.md) |
+| Count, compare and classify text: sentences, n-grams, keywords, readability, similarity, language, summaries, sentiment | `StatisticalUtilityAI`, `LLMUtilityAI`, `HybridUtilityAI` | [Text Statistics and Classification](./TEXT_STATISTICS.md) |
 | Search by keywords, save the index as JSON, search in a browser | `LexicalIndex`, `BM25Index` | [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md) |
 | Search records as someone types, with typos, word beginnings and field weights, and mark the matches | `FuzzyIndex` | [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md#fuzzyindex) |
 | Fuse keyword and vector search | `HybridSearcher`, `reciprocalRankFusion()` | [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md#hybridsearcher) |
@@ -47,7 +47,7 @@ flowchart LR
 | `BM25Index`, `HybridSearcher`, `SemanticChunker` | `@framers/agentos/cognition/rag` | Node | `HybridSearcher` calls the embedder you give it |
 | `reciprocalRankFusion` | `@framers/agentos/cognition/memory` | Node | No |
 | `fuseRanked` | `@framers/agentos/cognition/rag` | Node | No |
-| Rerankers | `@framers/agentos/cognition/rag/reranking` | Node; its modules import no Node module of their own | The local cross-encoder runs a model in-process; Cohere and the LLM judge call out |
+| Rerankers | `@framers/agentos/cognition/rag/reranking` | Node or a browser: no reranking module imports a Node module. Cohere sends its requests with the global `fetch`, and the local cross-encoder imports Transformers.js on its first call | The local cross-encoder runs a model in-process; Cohere and the LLM judge call out |
 
 ## Examples
 
