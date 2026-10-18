@@ -451,7 +451,8 @@ threw, its breaker was open, or a tool approval failed during its call),
 by its deadline is aborted: its request in flight ends, no further step or hop
 starts, and the timeout does not count against the provider's breaker. The
 caller's `abortSignal` settles every seat at once, a seat waiting on its
-approval included, and the call rejects with the panel's ledger error carrying
+approval included (an approval that resolves as the abort lands starts
+nothing), and the call rejects with the panel's ledger error carrying
 the abort's reason. A signal from another realm or a polyfill's, which no
 `instanceof` check of this realm recognizes, is linked to each seat's stop by
 its `abort` event the same way.

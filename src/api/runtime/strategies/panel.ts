@@ -444,6 +444,10 @@ export function compilePanel(
       const ownerOn = droppedOnceSettled(on, () => slot.settled);
       const stop = new AbortController();
       const signal = stop.signal;
+      // The seat is settled the moment its stop aborts, the caller's abort
+      // relayed or its deadline: a gate that returns afterwards skips its
+      // tool, and an approval that returns afterwards starts nothing.
+      signal.addEventListener('abort', () => { slot.settled = true; }, { once: true });
       const unlink = linkAbort(callerSignal, stop);
       // An async boundary of its own: a generate that throws synchronously
       // rejects this promise, and cannot escape the seat or keep its slot.
@@ -451,6 +455,8 @@ export function compilePanel(
         // A seat that takes its slot after the caller's abort asks no approval and sends nothing.
         if (signal.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
         const decision = await checkBeforeAgent(owner, input, agentCalls.slice(), { ...agencyConfig, on: ownerOn });
+        // An abort that landed while the approval was pending: the seat sends nothing, whatever the handler said.
+        if (signal.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
         if (decision && !decision.approved) {
           return { kind: 'rejected', reason: decision.reason ?? 'rejected by HITL', durationMs: elapsed() };
         }
