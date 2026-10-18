@@ -53,6 +53,13 @@ export interface RunEmulatedToolLoopOptions {
    * its query; without it, `maskToolError` masks the whole response.
    */
   maskToolOutput?: (text: string) => string;
+  /**
+   * Masks a tool's output as a value before the response is serialized: each
+   * string, and each number whose digits hold a listed value, so a secret JSON
+   * escaping would change is masked whole. An agency seat passes its call
+   * mask's value form here.
+   */
+  maskToolValue?: (output: unknown) => unknown;
 }
 
 export interface EmulatedToolLoopResult {
@@ -125,12 +132,14 @@ export async function runEmulatedToolLoop(
         try {
           opts.onToolExecute?.(call.name);
           const raw = await tool.execute(args, opts.toolContext as ToolExecutionContext);
-          // A returned failure is masked before the model reads it, and
+          // The output is masked as a value before the response is written,
+          // and a returned failure is masked before the model reads it, and
           // recorded as the native loops record it.
-          const result =
-            opts.maskToolError && raw.success === false && typeof raw.error === 'string'
-              ? { ...raw, error: opts.maskToolError(raw.error) }
-              : raw;
+          const result = {
+            ...raw,
+            ...(opts.maskToolValue && raw.output !== undefined ? { output: opts.maskToolValue(raw.output) } : {}),
+            ...(opts.maskToolError && raw.success === false && typeof raw.error === 'string' ? { error: opts.maskToolError(raw.error) } : {}),
+          };
           toolCalls.push({
             name: call.name,
             args: call.arguments,

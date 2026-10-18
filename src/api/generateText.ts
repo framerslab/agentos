@@ -2185,6 +2185,24 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
    * mask is applied as it is. A failed tool's text takes the error mask.
    */
   const maskToolOutput = (text: string): string => (isCallMask(opts.__maskError) ? opts.__maskError.text(text) : maskToolText(text));
+  /**
+   * A tool's output as a value, masked before it is serialized: under an
+   * agency's call mask each string, and each number whose digits hold a listed
+   * value, is replaced, so a secret JSON escaping would change (one with a
+   * quote or a backslash) is masked whole, and the call record holds the
+   * masked output. A bare mask reads text only and leaves the value as it is.
+   */
+  const maskToolValue = (output: unknown): unknown => (isCallMask(opts.__maskError) ? opts.__maskError.strings(output) : output);
+  /** A masked turn as the request carries it: the JSON it still is, else (a replacement inside what a class wrote through toJSON) the masked text as a JSON string. */
+  const asJsonText = (sent: string, turn: string): string => {
+    if (sent === turn) return sent;
+    try {
+      JSON.parse(sent);
+      return sent;
+    } catch {
+      return JSON.stringify(sent);
+    }
+  };
 
   try {
     const successResult: GenerateTextResult = await withAgentOSSpan('agentos.api.generate_text', async (span) => {
@@ -2508,6 +2526,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
           maskToolOutput: opts.__maskError ? maskToolOutput : undefined,
+          maskToolValue: opts.__maskError ? maskToolValue : undefined,
           // Native tool turns (session history, a failover continuation)
           // become the shim's own <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -3056,23 +3075,26 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                     tcId || undefined,
                   ),
                 );
-                // One masked string serves the record and the tool turn: the
-                // seat's next request carries no key. The whole turn passes
-                // the mask, a successful output included: a tool that returns
-                // a credential of the call (a config read, an echo of the
-                // environment) would otherwise send it to the seat's provider,
-                // and the call's list holds no value a model is meant to read.
-                // A successful output passes the listed values alone, so a URL
-                // it returns is sent as the tool gave it; a failed tool's turn
-                // takes the error mask, URL patterns included.
+                // One masked output serves the record and the tool turn: the
+                // seat's next request carries no key. The output is masked as
+                // a value before it is serialized, then the whole turn passes
+                // the text mask: a tool that returns a credential of the call
+                // (a config read, an echo of the environment) would otherwise
+                // send it to the seat's provider, and the call's list holds no
+                // value a model is meant to read. A successful output passes
+                // the listed values alone, so a URL it returns is sent as the
+                // tool gave it; a failed tool's turn takes the error mask, URL
+                // patterns included. A turn a replacement left as no JSON is
+                // sent as a JSON string.
                 const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
-                record.result = result.output;
+                const output = maskToolValue(result.output);
+                record.result = output;
                 record.error = result.success ? undefined: errorText;
-                const turn = JSON.stringify(result.output ?? errorText ?? '');
+                const turn = JSON.stringify(output ?? errorText ?? '');
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: result.success ? maskToolOutput(turn) : maskToolText(turn),
+                  content: asJsonText(result.success ? maskToolOutput(turn) : maskToolText(turn), turn),
                 } as any);
               } catch (err: any) {
                 record.error = maskToolText(err?.message ?? String(err));

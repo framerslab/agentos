@@ -518,7 +518,8 @@ export function createErrorMask(holder: { list: readonly string[] }): CallMask {
 
 /**
  * A copy of `value` with every string redacted, at any depth of plain objects
- * and arrays (a conversation delta, a tool-call list). An Error inside it from
+ * and arrays (a conversation delta, a tool-call list), and every number whose
+ * digits hold a secret replaced by the string `[redacted]`. An Error inside it from
  * which a secret can be reached (one a tool returned as its output, its
  * message or cause holding a key) is replaced by its masked stand-in
  * ({@link maskedCopyOf}); a clean Error, any other class instance and a typed
@@ -550,14 +551,18 @@ export function maskStrings<T>(value: T, secrets: readonly string[]): T {
 
 /**
  * A copy of `value` with every string passed through `redact`, at any depth
- * of plain objects and arrays, and every Error from which a secret can be
- * reached replaced by its masked stand-in, one copy per Error.
+ * of plain objects and arrays, every number whose digits hold a secret
+ * replaced by the string `[redacted]`, and every Error from which a secret can
+ * be reached replaced by its masked stand-in, one copy per Error.
  */
 function copyStrings<T>(value: T, secrets: readonly string[], redact: (text: string) => string): T {
   const copies = new WeakMap<object, object>();
   const pending: Array<[source: object, copy: object]> = [];
   const copyOf = (item: unknown): unknown => {
     if (typeof item === 'string') return redact(item);
+    // A number whose digits hold a listed value (a tool that returns a numeric key) comes back as the string
+    // `[redacted]`: left as it is, its serialized form would be masked into no JSON.
+    if (typeof item === 'number') return holds(String(item), secrets) ? '[redacted]' : item;
     if (!isObject(item)) return item;
     const known = copies.get(item);
     if (known) return known;

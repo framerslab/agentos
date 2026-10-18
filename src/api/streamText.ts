@@ -457,6 +457,24 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
      * a bare mask is applied as it is. A failed tool's text takes the error mask.
      */
     const maskToolOutput = (text: string): string => (isCallMask(opts.__maskError) ? opts.__maskError.text(text) : maskToolText(text));
+    /**
+     * A tool's output as a value, masked before it is serialized: under an
+     * agency's call mask each string, and each number whose digits hold a
+     * listed value, is replaced, so a secret JSON escaping would change (one
+     * with a quote or a backslash) is masked whole, and the call record and
+     * the tool-result part hold the masked output. A bare mask reads text only.
+     */
+    const maskToolValue = (output: unknown): unknown => (isCallMask(opts.__maskError) ? opts.__maskError.strings(output) : output);
+    /** A masked turn as the request carries it: the JSON it still is, else (a replacement inside what a class wrote through toJSON) the masked text as a JSON string. */
+    const asJsonText = (sent: string, turn: string): string => {
+      if (sent === turn) return sent;
+      try {
+        JSON.parse(sent);
+        return sent;
+      } catch {
+        return JSON.stringify(sent);
+      }
+    };
     const startedAt = Date.now();
     const rootSpan = startAgentOSSpan('agentos.api.stream_text');
     const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -801,6 +819,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
           maskToolOutput: opts.__maskError ? maskToolOutput : undefined,
+          maskToolValue: opts.__maskError ? maskToolValue : undefined,
           // Native tool turns in the history become the shim's own
           // <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -1408,25 +1427,28 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 toolCallId || undefined,
               ),
             );
-            // One masked string serves the record, the tool-result part and
-            // the tool turn: the seat's next request carries no key. The whole
-            // turn passes the mask, a successful output included: a tool that
-            // returns a credential of the call would otherwise send it to the
-            // seat's provider. A successful output passes the listed values
-            // alone, so a URL it returns is sent as the tool gave it; a failed
-            // tool's turn takes the error mask, URL patterns included. The
-            // part is read back from a turn the mask changed.
+            // One masked output serves the record, the tool-result part and
+            // the tool turn: the seat's next request carries no key. The
+            // output is masked as a value before it is serialized, then the
+            // whole turn passes the text mask: a tool that returns a
+            // credential of the call would otherwise send it to the seat's
+            // provider. A successful output passes the listed values alone, so
+            // a URL it returns is sent as the tool gave it; a failed tool's
+            // turn takes the error mask, URL patterns included. A turn a
+            // replacement left as no JSON is sent as a JSON string, and the
+            // part is read back from a turn the text mask changed.
             const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
-            toolCallRecord.result = result.output;
+            const output = maskToolValue(result.output);
+            toolCallRecord.result = output;
             toolCallRecord.error = result.success ? undefined: errorText;
-            const turn = JSON.stringify(result.output ?? { error: errorText ?? 'Tool execution failed.' });
-            const sentTurn = result.success ? maskToolOutput(turn) : maskToolText(turn);
-            let partResult: unknown = result.output ?? { error: errorText };
+            const turn = JSON.stringify(output ?? { error: errorText ?? 'Tool execution failed.' });
+            const sentTurn = asJsonText(result.success ? maskToolOutput(turn) : maskToolText(turn), turn);
+            let partResult: unknown = output ?? { error: errorText };
             if (sentTurn !== turn) {
               try {
                 partResult = JSON.parse(sentTurn);
               } catch {
-                // A replacement inside a JSON number leaves no JSON to read: the part carries the masked text.
+                // Not reached: asJsonText sends JSON. Kept so a part is never lost to a parse.
                 partResult = sentTurn;
               }
             }

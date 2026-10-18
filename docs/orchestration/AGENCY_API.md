@@ -416,7 +416,11 @@ whole; every other string of a part too), tool errors and tool turns (a tool res
 credential reaches the seat's next request masked; a successful result is
 masked by the listed values alone, so a URL it returns keeps its query and
 credentials as the tool gave them, while a failed tool's text also loses any
-URL credentials and `key=` value), `onFallback` and the `fallback_fired` and
+URL credentials and `key=` value; the output is masked as a value before it is
+serialized, so a listed value with a quote or a backslash, which JSON escaping
+would change, is masked whole, a number whose digits hold a listed value
+becomes the string `[redacted]`, the call record and the tool-result part hold
+the masked output, and the turn the next request carries stays JSON), `onFallback` and the `fallback_fired` and
 `fallback_exhausted` log lines. What a seat answers reaches the next seat, a
 synthesizer, a manager or the chair masked. A pre-built seat's answers and
 errors are masked as they leave it, a rejected `generate()` included; its own
