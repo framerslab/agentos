@@ -291,6 +291,19 @@ function adaptNamedEntries(entries: Iterable<[string, unknown]>): ITool[] {
  * });
  * ```
  */
+/**
+ * Whether `tools` is an iterator, which one read exhausts (a generator): such
+ * a table is read once, since a second {@link adaptTools} of it would be
+ * empty. An array, a Map, a record and an iterable that makes a fresh iterator
+ * on each read are read again before a later step.
+ *
+ * @param tools - The high-level tool input.
+ * @returns `true` for an iterator.
+ */
+export function isSingleUseToolInput(tools: AdaptableToolInput | undefined): boolean {
+  return isIterableInput(tools) && typeof (tools as { next?: unknown }).next === 'function';
+}
+
 export function adaptTools(tools: AdaptableToolInput | undefined): ITool[] {
   if (!tools) return [];
 

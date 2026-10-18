@@ -13,7 +13,7 @@ import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities } from './runtime/hostPolicy.js';
-import { adaptTools } from './runtime/toolAdapter.js';
+import { adaptTools, isSingleUseToolInput } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
 import { APPROVAL_GRANTED, askApprovalGate } from './runtime/approval-gate.js';
 import {
@@ -718,8 +718,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // step: a hierarchical manager's spawn_specialist writes delegate_to_<role>
       // into the table the manager was given, and the manager's next step
       // sends the new tool and runs it when the model calls it. A table whose
-      // names are unchanged keeps the tools of the first read.
+      // names are unchanged keeps the tools of the first read, and a table
+      // given as a single-use iterable (a generator), which the first read
+      // exhausted, is not read again.
+      const reusableTools = !isSingleUseToolInput(opts.tools);
       const refreshTools = (): void => {
+        if (!reusableTools) return;
         const current = adaptTools(opts.tools);
         if (current.length === tools.length && current.every((tool, i) => tool.name === tools[i].name)) return;
         tools = current;
