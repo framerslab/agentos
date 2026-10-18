@@ -7,7 +7,7 @@
 import type { AgencyOptions, AgencySeatConfig, AgencyStrategy, Agent, ModelPoolEntry } from '../../types.js';
 import { AgencyConfigError, AgencyPanelError } from '../../types.js';
 import { isAgent } from '../strategies/shared.js';
-import { TEXT_PROVIDER_IDS, resolveSeatCredentials } from './resolve.js';
+import { TEXT_PROVIDER_IDS, availabilityOf, resolveSeatCredentials } from './resolve.js';
 import { vendorOf } from './vendor.js';
 import { knownProviderPrefixOf } from '../../model.js';
 
@@ -160,10 +160,13 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       if (v) reachableVendors.add(v);
       else if (opts.quorum?.minVendors !== undefined) fail(`seat "${name}": its vendor is unknown; declare vendor on the seat or drop quorum.minVendors`);
       // A hop of the seat's own chain can answer for it, and the record then names the hop's provider and vendor.
+      // Only a hop seating keeps counts: one whose key, URL or binary is unmet is dropped for the call and answers nothing.
       for (const hop of Array.isArray(seat.fallbackProviders) ? seat.fallbackProviders : []) {
         if (!hop || typeof hop.provider !== 'string') continue;
-        reachableProviders.add(hop.provider);
-        const hopVendor = vendorOf(hop.provider, hop.model ?? '', { vendor: hop.vendor, baseUrl: hop.baseUrl });
+        const hopResolved = resolveSeatCredentials({ provider: hop.provider, model: hop.model, apiKey: hop.apiKey, baseUrl: hop.baseUrl, inherits: false }, opts);
+        if (!hopResolved.ok || availabilityOf(hopResolved.value, { breakerOpen: () => false })) continue;
+        reachableProviders.add(hopResolved.value.provider);
+        const hopVendor = vendorOf(hopResolved.value.provider, hopResolved.value.model, { vendor: hop.vendor, baseUrl: hopResolved.value.baseUrl });
         if (hopVendor) reachableVendors.add(hopVendor);
       }
     } else if (pooled) {
@@ -200,12 +203,17 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       if (q.minVendors > reachableVendors.size) fail(`quorum.minVendors (${q.minVendors}) is above the ${reachableVendors.size} distinct vendor(s) the seats can reach`);
     }
   }
-  // A pre-built seat's result names one provider, so each can add at most one to the run's count; the run's count stays the check.
-  // A panel is checked with or without a pool: its fixed seats' providers are counted above either way.
+  // Each seat answers once, so a run counts at most one provider per seat: the bound is the smaller of the seat count and
+  // the distinct providers within reach, one more per pre-built seat, whose result names one provider the agency cannot
+  // see. A panel is checked with or without a pool: its fixed seats' providers are counted above either way.
   const prebuiltSeats = seats.length - configSeats.length;
   const minProviders = opts.quorum?.minProviders;
-  if ((isPanel || (strategy === 'parallel' && pool)) && minProviders !== undefined && minProviders > reachableProviders.size + prebuiltSeats) {
-    fail(`quorum.minProviders (${minProviders}) is above the ${reachableProviders.size} distinct provider(s) the config seats can reach plus the ${prebuiltSeats} pre-built seat(s)`);
+  const providersAtOnce = Math.min(seats.length, reachableProviders.size + prebuiltSeats);
+  if ((isPanel || (strategy === 'parallel' && pool)) && minProviders !== undefined && minProviders > providersAtOnce) {
+    fail(
+      `quorum.minProviders (${minProviders}) is above the ${providersAtOnce} distinct provider(s) the seats can answer with at once ` +
+      `(${seats.length} seat(s); ${reachableProviders.size} provider(s) within the config seats' reach, plus the ${prebuiltSeats} pre-built seat(s))`,
+    );
   }
   if (pool && strategy === 'hierarchical' && !opts.model && !opts.provider) fail('Hierarchical strategy requires an agency-level model or provider for the manager agent.');
 }

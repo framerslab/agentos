@@ -2,8 +2,10 @@
  * @fileoverview No credential in any record. The secret list of a call holds
  * every key and URL credential the call can send: what seating resolved, what
  * the agency's config writes (the agency level, the pool, the seats, their
- * hops and the chair), every `setDefaultProvider()` value and every provider
- * variable that is set. An error is masked in place where its own strings can
+ * hops and the chair), what a pre-built seat was built with (its own key, URL
+ * and hops; a nested agency's level, pool, seats and chair), every
+ * `setDefaultProvider()` value and every provider variable that is set. An
+ * error is masked in place where its own strings can
  * be written; an object it only references is replaced, on the error's own
  * property, by a masked copy; where a string cannot be written, a plain Error
  * carries the name, code, httpStatus and the masked message and stack.
@@ -54,16 +56,44 @@ export function collectCallSecrets(agency: AgencyOptions, seatingSecrets: readon
     add(apiKey);
     if (typeof baseUrl === 'string') add(baseUrlCredentials(baseUrl));
   };
-  // A seat or the chair, with the hops of its own chain. A pre-built seat writes none of these and adds nothing.
+  // A seat or the chair, with the hops of its own chain. A pre-built seat writes none of these on itself.
   const addSeat = (seat: unknown): void => {
     addWritten(seat);
     const hops = isObject(seat) ? (seat as { fallbackProviders?: unknown }).fallbackProviders : undefined;
     if (Array.isArray(hops)) hops.forEach(addWritten);
   };
+  // A pre-built seat keeps the config it was built from on `__config` (agent() and agency() define it for the
+  // export): its own key, URL and hops, and for a nested agency its agency level, pool, seats and chair, with every
+  // pre-built seat among them read the same way. An answer that repeats its own key is then masked like any other.
+  const seen: WeakSet<object> = new WeakSet();
+  const addPrebuilt = (seat: unknown): void => {
+    if (!isObject(seat) || seen.has(seat)) return;
+    seen.add(seat);
+    let config: unknown;
+    try {
+      config = (seat as { __config?: unknown }).__config;
+    } catch {
+      return;
+    }
+    if (!isObject(config)) return;
+    addSeat(config);
+    const { modelPool, agents, chair } = config as { modelPool?: unknown; agents?: unknown; chair?: unknown };
+    if (isObject(modelPool)) Object.values(modelPool).forEach(addWritten);
+    if (isObject(agents)) {
+      for (const member of Object.values(agents)) {
+        addSeat(member);
+        addPrebuilt(member);
+      }
+    }
+    addSeat(chair);
+  };
   seatingSecrets.forEach(add);
   addWritten(agency);
   Object.values(agency.modelPool ?? {}).forEach(addWritten);
-  Object.values(agency.agents ?? {}).forEach(addSeat);
+  for (const seat of Object.values(agency.agents ?? {})) {
+    addSeat(seat);
+    addPrebuilt(seat);
+  }
   addSeat(agency.chair);
   addWritten(getDefaultProvider());
   const env = providerEnvSecrets();

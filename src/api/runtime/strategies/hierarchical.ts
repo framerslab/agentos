@@ -50,6 +50,7 @@ import {
   ownAgentInternals,
 } from './shared.js';
 import { isCallMask } from '../pool/redact.js';
+import { resolveSeatCredentials } from '../pool/resolve.js';
 
 type StrategyTotalUsage = {
   promptTokens: number;
@@ -394,12 +395,19 @@ export function buildHierarchicalTools(
           const { generateText } = await import('../../generateText.js');
           const judge = new EmergentAgentJudge({
             judgeModel,
-            // In an agency with a pool, the judge's key resolves as a seat's
-            // does: never a setDefaultProvider() default that names no provider.
+            // The judge's provider, model, key and URL resolve as a fixed
+            // seat's do: its own provider (a small model's, else the
+            // agency's), the agency-level key and URL only on the agency's own
+            // provider, as the manager carries them, else a default that names
+            // the provider, else its variable. In an agency with a pool the
+            // call is strict too: never a default that names no provider.
             generateText: async (model, prompt) => {
+              const provider = judgeProviderFor(judgeModel) ?? agencyConfig.provider;
+              const resolved = resolveSeatCredentials({ provider, model, inherits: true }, agencyConfig);
               const r = await generateText({
-                model,
-                provider: judgeProviderFor(judgeModel) ?? agencyConfig.provider,
+                ...(resolved.ok
+                  ? { provider: resolved.value.provider, model: resolved.value.model, apiKey: resolved.value.apiKey, baseUrl: resolved.value.baseUrl }
+                  : { provider, model }),
                 prompt,
                 ...internals,
               });

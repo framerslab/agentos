@@ -47,6 +47,12 @@ export interface RunEmulatedToolLoopOptions {
   approvalGate?: ApprovalGateFn;
   /** Masks a tool's error text before it is recorded and returned to the model (an agency seat's mask). */
   maskToolError?: (text: string) => string;
+  /**
+   * Masks a successful tool response before the model reads it. An agency
+   * seat passes the listed values alone here, so a URL a tool returns keeps
+   * its query; without it, `maskToolError` masks the whole response.
+   */
+  maskToolOutput?: (text: string) => string;
 }
 
 export interface EmulatedToolLoopResult {
@@ -132,9 +138,12 @@ export async function runEmulatedToolLoop(
           });
           // The whole response passes the mask, a successful output included:
           // a tool that returns a credential of the call would otherwise send
-          // it to the seat's provider.
+          // it to the seat's provider. A successful response takes the output
+          // mask when the caller gives one (the listed values alone), a failed
+          // one the error mask.
           const response = formatToolResponse(call.name, result);
-          return opts.maskToolError ? opts.maskToolError(response) : response;
+          const maskResponse = result.success === false ? opts.maskToolError : (opts.maskToolOutput ?? opts.maskToolError);
+          return maskResponse ? maskResponse(response) : response;
         } catch (err) {
           const error = opts.maskToolError ? opts.maskToolError(String(err)) : String(err);
           toolCalls.push({ name: call.name, args: call.arguments, error });

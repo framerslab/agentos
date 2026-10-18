@@ -62,6 +62,7 @@ import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstru
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { lazyLogger } from './runtime/lazyLogger.js';
+import { isCallMask } from './runtime/pool/redact.js';
 import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 
 /**
@@ -449,6 +450,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       const masked = opts.__maskError?.(text);
       return typeof masked === 'string' ? masked : text;
     };
+    /**
+     * A tool's successful output as the next request carries it. Under an
+     * agency's call mask the listed values alone are replaced, so a URL the
+     * tool returns keeps its query and its credentials as the tool gave them;
+     * a bare mask is applied as it is. A failed tool's text takes the error mask.
+     */
+    const maskToolOutput = (text: string): string => (isCallMask(opts.__maskError) ? opts.__maskError.text(text) : maskToolText(text));
     const startedAt = Date.now();
     const rootSpan = startAgentOSSpan('agentos.api.stream_text');
     const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -789,8 +797,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
-          // A seat's mask reaches the shim's tool errors too.
+          // A seat's mask reaches the shim's tool errors too, and a successful
+          // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
+          maskToolOutput: opts.__maskError ? maskToolOutput : undefined,
           // Native tool turns in the history become the shim's own
           // <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -1402,12 +1412,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // the tool turn: the seat's next request carries no key. The whole
             // turn passes the mask, a successful output included: a tool that
             // returns a credential of the call would otherwise send it to the
-            // seat's provider. The part is read back from a turn the mask changed.
+            // seat's provider. A successful output passes the listed values
+            // alone, so a URL it returns is sent as the tool gave it; a failed
+            // tool's turn takes the error mask, URL patterns included. The
+            // part is read back from a turn the mask changed.
             const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
             toolCallRecord.result = result.output;
             toolCallRecord.error = result.success ? undefined: errorText;
             const turn = JSON.stringify(result.output ?? { error: errorText ?? 'Tool execution failed.' });
-            const sentTurn = maskToolText(turn);
+            const sentTurn = result.success ? maskToolOutput(turn) : maskToolText(turn);
             let partResult: unknown = result.output ?? { error: errorText };
             if (sentTurn !== turn) {
               try {

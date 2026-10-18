@@ -52,7 +52,8 @@ export function maskTextStream(pieces: AsyncIterable<unknown>, mask: CallMask): 
  * A stream of parts, masked: the text of `text` parts as {@link maskTextStream}
  * masks it, the text held from one agent released before another agent's text
  * and before any other part; an `error` part's error through the error mask;
- * any other part copied with its strings masked.
+ * the other strings of a text or error part, and every string of any other
+ * part, masked by the listed values.
  *
  * @param parts - A `fullStream`.
  * @param mask - The call's mask.
@@ -62,29 +63,33 @@ export function maskPartStream(parts: AsyncIterable<unknown>, mask: CallMask): A
   return {
     async *[Symbol.asyncIterator]() {
       const redactor = mask.chunks();
-      // The last text part whose text is still held, for the part that releases it.
+      // The last text part whose text is still held, its other strings masked, for the part that releases it.
       let held: Record<string, unknown> | undefined;
+      // That part's agent as it came, for the comparison with the next text part's.
+      let heldAgent: unknown;
       const release = (): Record<string, unknown> | undefined => {
         const rest = redactor.flush();
         const part = held && rest ? { ...held, text: rest } : undefined;
         held = undefined;
+        heldAgent = undefined;
         return part;
       };
       try {
         for await (const part of parts) {
           if (isRecord(part) && part.type === 'text' && typeof part.text === 'string') {
-            if (held && held.agent !== part.agent) {
+            if (held && heldAgent !== part.agent) {
               const released = release();
               if (released) yield released;
             }
-            held = part;
+            held = mask.strings(part);
+            heldAgent = part.agent;
             const out = redactor.push(part.text);
-            if (out) yield { ...part, text: out };
+            if (out) yield { ...held, text: out };
             continue;
           }
           const released = release();
           if (released) yield released;
-          yield isRecord(part) && part.type === 'error' ? { ...part, error: mask(part.error) } : mask.strings(part);
+          yield isRecord(part) && part.type === 'error' ? { ...mask.strings(part), error: mask(part.error) } : mask.strings(part);
         }
       } catch (error) {
         const released = release();
@@ -131,10 +136,11 @@ export function maskStreamMembers<T extends object>(result: T, mask: CallMask): 
 
 /**
  * A pre-built seat whose answers leave it masked: `generate()` resolves to a
- * copy of its result with every string masked, and `stream()` returns its
- * stream result through {@link maskStreamMembers}. The seat's own loops are
- * its own: what it sends to its provider is not reached. Every other member,
- * its description and dependencies included, is read from the seat itself.
+ * copy of its result with every string masked, or rejects through the error
+ * mask, and `stream()` returns its stream result through
+ * {@link maskStreamMembers}. The seat's own loops are its own: what it sends
+ * to its provider is not reached. Every other member, its description and
+ * dependencies included, is read from the seat itself.
  *
  * @param seat - The pre-built `Agent` in the roster.
  * @param mask - The call's mask.
@@ -144,7 +150,16 @@ export function maskedPrebuilt(seat: Agent, mask: CallMask): Agent {
   return new Proxy(seat, {
     get(target, key) {
       if (key === 'generate') {
-        return async (...args: Parameters<Agent['generate']>) => mask.strings(await target.generate(...args));
+        return async (...args: Parameters<Agent['generate']>) => {
+          let result: unknown;
+          try {
+            result = await target.generate(...args);
+          } catch (error) {
+            // A rejection leaves the seat masked, as its stream's does: a strategy's error callback reads it next.
+            throw mask(error);
+          }
+          return mask.strings(result);
+        };
       }
       if (key === 'stream') {
         return (...args: Parameters<Agent['stream']>) => {

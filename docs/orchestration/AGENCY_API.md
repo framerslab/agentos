@@ -404,16 +404,21 @@ roster as a pre-built seat instead. Agencies without these options keep the
 rules of the previous section.
 
 Every credential of eight characters or more that the call can send (from the
-config, a default or the environment; a comma-separated key pool part by part)
-is replaced with `[redacted]` in the result's text, `agentCalls` (outputs, tool
-arguments and results), `toolCalls`, `transcriptDelta`, seat records, thrown
-errors (message, stack, cause and details), `on.error` and `agentEnd` payloads,
-the provenance trail, stream parts (a secret split between two text chunks is
-masked whole), tool errors and tool turns (a tool result that holds a
-credential reaches the seat's next request masked), `onFallback` and the
-`fallback_fired` and `fallback_exhausted` log lines. What a seat answers
-reaches the next seat, a synthesizer, a manager or the chair masked. A
-pre-built seat's answers and errors are masked as they leave it; its own
+config, a default or the environment; a comma-separated key pool part by part;
+a pre-built seat's own key, URL and hops, a nested agency's level, pool, seats
+and chair included) is replaced with `[redacted]` in the result's text,
+`agentCalls` (outputs, tool arguments and results), `toolCalls`,
+`transcriptDelta`, seat records, thrown errors (message, stack, cause and
+details), `on.error` and `agentEnd` payloads, the provenance trail, stream
+parts (a secret split between two text chunks is masked whole; every other
+string of a part too), tool errors and tool turns (a tool result that holds a
+credential reaches the seat's next request masked; a successful result is
+masked by the listed values alone, so a URL it returns keeps its query and
+credentials as the tool gave them, while a failed tool's text also loses any
+URL credentials and `key=` value), `onFallback` and the `fallback_fired` and
+`fallback_exhausted` log lines. What a seat answers reaches the next seat, a
+synthesizer, a manager or the chair masked. A pre-built seat's answers and
+errors are masked as they leave it, a rejected `generate()` included; its own
 requests to its provider are its own.
 
 Per call, a pooled agency rejects `model`, `provider`, `apiKey`, `baseUrl`,
@@ -451,10 +456,11 @@ vendor and a pre-built seat never count). Zero healthy seats always throws
 `AgencyQuorumError`, whatever `onShortfall` says; any other shortfall throws by
 default or, with `onShortfall: 'proceed'`, writes `panel_quorum_shortfall`
 through the host's logger and goes on. Construction
-rejects a `minAgents` above the seat count, a `minProviders` above what the
-seats can reach (one more per pre-built seat), a `minVendors` above the vendors
-the config seats can reach, and `minVendors` with a pool entry whose vendor is
-unknown.
+rejects a `minAgents` above the seat count, a `minProviders` above the distinct
+providers the seats can answer with at once (at most one per seat; a fixed
+seat's hops count when their key, URL or binary is present at construction; one
+more per pre-built seat), a `minVendors` above the vendors the config seats can
+reach, and `minVendors` with a pool entry whose vendor is unknown.
 
 The chair is seated from its `from` list with the preferred rule, or as a fixed
 seat from its own config or the agency level. It gets the task and the healthy

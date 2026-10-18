@@ -29,6 +29,7 @@ import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { lazyLogger } from './runtime/lazyLogger.js';
+import { isCallMask } from './runtime/pool/redact.js';
 import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
@@ -2177,6 +2178,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     const masked = opts.__maskError?.(text);
     return typeof masked === 'string' ? masked : text;
   };
+  /**
+   * A tool's successful output as the next request carries it. Under an
+   * agency's call mask the listed values alone are replaced, so a URL the tool
+   * returns keeps its query and its credentials as the tool gave them; a bare
+   * mask is applied as it is. A failed tool's text takes the error mask.
+   */
+  const maskToolOutput = (text: string): string => (isCallMask(opts.__maskError) ? opts.__maskError.text(text) : maskToolText(text));
 
   try {
     const successResult: GenerateTextResult = await withAgentOSSpan('agentos.api.generate_text', async (span) => {
@@ -2496,8 +2504,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
-          // A seat's mask reaches the shim's tool errors too.
+          // A seat's mask reaches the shim's tool errors too, and a successful
+          // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
+          maskToolOutput: opts.__maskError ? maskToolOutput : undefined,
           // Native tool turns (session history, a failover continuation)
           // become the shim's own <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -3052,13 +3062,17 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // a credential of the call (a config read, an echo of the
                 // environment) would otherwise send it to the seat's provider,
                 // and the call's list holds no value a model is meant to read.
+                // A successful output passes the listed values alone, so a URL
+                // it returns is sent as the tool gave it; a failed tool's turn
+                // takes the error mask, URL patterns included.
                 const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
                 record.result = result.output;
                 record.error = result.success ? undefined: errorText;
+                const turn = JSON.stringify(result.output ?? errorText ?? '');
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: maskToolText(JSON.stringify(result.output ?? errorText ?? '')),
+                  content: result.success ? maskToolOutput(turn) : maskToolText(turn),
                 } as any);
               } catch (err: any) {
                 record.error = maskToolText(err?.message ?? String(err));
