@@ -49,11 +49,11 @@ export function maskTextStream(pieces: AsyncIterable<unknown>, mask: CallMask): 
   };
 }
 
-/** One agent's text in flight: its redactor, the last text part's other strings (what a held tail is released with) and the parts waiting behind that tail. */
+/** One agent's text in flight: its redactor, the last text part's other strings (what held text is released with) and the parts waiting behind the held tail, each with the count of held characters before it. */
 interface TextLane {
   redactor: ChunkRedactor;
   template?: Record<string, unknown>;
-  waiting: unknown[];
+  waiting: Array<{ part: unknown; at: number }>;
 }
 
 /**
@@ -64,9 +64,10 @@ interface TextLane {
  * tail that could start a secret stays held across the agent's other parts (a
  * tool call and its result between two steps), so a secret split around them
  * is masked whole. Those parts wait behind the tail and come out in their
- * order once the tail is settled: after it when it was no secret, before the
- * masked text when it was, after it at the end of the stream and before a
- * stream error. Another agent's parts pass meanwhile.
+ * place once the text around them is settled: between the characters that
+ * were held before and after them when the tail was no secret, before the
+ * text masked whole when a secret ran through it, and the same at the end of
+ * the stream and before a stream error. Another agent's parts pass meanwhile.
  *
  * @param parts - A `fullStream`.
  * @param mask - The call's mask.
@@ -84,13 +85,53 @@ export function maskPartStream(parts: AsyncIterable<unknown>, mask: CallMask): A
         }
         return lane;
       };
-      /** The parts waiting in `lane`, in their order, and the lane emptied. */
-      const waited = (lane: TextLane): unknown[] => lane.waiting.splice(0);
-      /** What a lane releases when the stream ends: its held tail, masked, then the parts that waited. */
+      /**
+       * The released text between two offsets of what was held and then
+       * pushed: what was held goes out with the template it was held with,
+       * the rest with this piece's.
+       */
+      const textBetween = function* (lane: TextLane, template: Record<string, unknown>, released: string, heldLength: number, from: number, to: number): Generator<unknown> {
+        if (from >= to) return;
+        const heldEnd = Math.min(to, heldLength);
+        if (from < heldEnd) yield { ...(lane.template ?? template), text: released.slice(from, heldEnd) };
+        if (to > heldLength) yield { ...template, text: released.slice(Math.max(from, heldLength), to) };
+      };
+      /**
+       * What `out`, the masked form of `released` (the first characters of the
+       * held text and the piece just pushed, up to what is still held), comes
+       * out as: with the waiting parts in their place among the text when no
+       * secret was masked, after the parts that arrived inside the masked text
+       * when one was. A part behind text still held stays, its offset moved up.
+       */
+      const release = function* (lane: TextLane, template: Record<string, unknown>, released: string, out: string, heldLength: number): Generator<unknown> {
+        const cut = released.length;
+        const staying: TextLane['waiting'] = [];
+        if (out === released) {
+          let from = 0;
+          for (const entry of lane.waiting) {
+            if (entry.at > cut) {
+              staying.push({ part: entry.part, at: entry.at - cut });
+              continue;
+            }
+            yield* textBetween(lane, template, released, heldLength, from, entry.at);
+            from = entry.at;
+            yield entry.part;
+          }
+          yield* textBetween(lane, template, released, heldLength, from, cut);
+        } else {
+          for (const entry of lane.waiting) {
+            if (entry.at > cut) staying.push({ part: entry.part, at: entry.at - cut });
+            else yield entry.part;
+          }
+          if (out) yield { ...template, text: out };
+        }
+        lane.waiting = staying;
+      };
+      /** What a lane releases when the stream ends: its held tail, masked, with the parts that waited in their place. */
       const settle = function* (lane: TextLane): Generator<unknown> {
+        const held = lane.redactor.held();
         const rest = lane.redactor.flush();
-        if (rest && lane.template) yield { ...lane.template, text: rest };
-        yield* waited(lane);
+        yield* release(lane, lane.template ?? {}, held, rest, held.length);
       };
       try {
         for await (const part of parts) {
@@ -100,29 +141,22 @@ export function maskPartStream(parts: AsyncIterable<unknown>, mask: CallMask): A
           }
           const lane = laneOf(part.agent);
           if (part.type === 'text' && typeof part.text === 'string') {
-            const tail = lane.redactor.held();
+            const held = lane.redactor.held();
             const out = lane.redactor.push(part.text);
             const template = mask.strings(part);
-            if (out && lane.waiting.length > 0) {
-              if (tail && out.startsWith(tail)) {
-                // The tail was no secret: it goes out as it was held, the waiting parts after it, the rest of this piece after them.
-                if (lane.template) yield { ...lane.template, text: tail };
-                yield* waited(lane);
-                const rest = out.slice(tail.length);
-                if (rest) yield { ...template, text: rest };
-              } else {
-                // A secret ran from the tail into this piece: the waiting parts go out, then the text masked whole.
-                yield* waited(lane);
-                yield { ...template, text: out };
+            if (out) {
+              if (lane.waiting.length === 0) yield { ...template, text: out };
+              else {
+                const released = (held + part.text).slice(0, held.length + part.text.length - lane.redactor.held().length);
+                yield* release(lane, template, released, out, held.length);
               }
-            } else if (out) {
-              yield { ...template, text: out };
             }
             lane.template = template;
             continue;
           }
           const masked = part.type === 'error' ? { ...mask.strings(part), error: mask(part.error) } : mask.strings(part);
-          if (lane.redactor.held()) lane.waiting.push(masked);
+          const heldLength = lane.redactor.held().length;
+          if (heldLength > 0) lane.waiting.push({ part: masked, at: heldLength });
           else yield masked;
         }
       } catch (error) {
