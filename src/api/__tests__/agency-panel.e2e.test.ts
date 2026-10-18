@@ -694,6 +694,28 @@ describe('8. keys on a hop', () => {
     // With no variable, the agency's key is the only key the judge's provider has; the review is still sent.
     expect(await judgeHeaders('')).toEqual([`Bearer ${K.chair}`]);
   });
+  it("a hierarchical agency without a pool sends its emergent judge the key every other call of the agency reads: a nameless setDefaultProvider key ahead of the provider's variable", async () => {
+    const nameless = 'sk-nameless-default-0014';
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    setDefaultProvider({ apiKey: nameless });
+    let managerTurn = 0;
+    route([
+      [OPENAI_LIST, openaiListing],
+      [OPENAI_CHAT, (req) => {
+        // The judge's request carries no tools; the manager's carry the delegate and spawn tools.
+        if (!(req.body?.tools ?? []).length) return openaiText('{"approved": true, "reasoning": "fits"}')(req);
+        managerTurn += 1;
+        return managerTurn === 1 ? openaiToolCall('spawn_specialist', { role: 'helper', instructions: 'Help.' }, 'c1')(req) : openaiText('manager done')(req);
+      }],
+    ]);
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', agents: { worker: { instructions: 'w' } }, strategy: 'hierarchical', emergent: { enabled: true, judge: true, planner: { judgeModel: 'gpt-4.1' } } } as never);
+    const r = await team.generate('go');
+    expect(r.text).toBe('manager done');
+    const sent = calls(OPENAI_CHAT, 'POST');
+    expect(sent.filter((c) => !(c.body?.tools ?? []).length)).toHaveLength(1);
+    // The manager's turns and the judge's review read the same key, in the usual order: the nameless default, then the variable.
+    expect(sent.map((c) => header(c, 'Authorization'))).toEqual(sent.map(() => `Bearer ${nameless}`));
+  });
   it("a pooled seat's failover reaches a logger factory the host sets after import: fallback_fired names both providers and carries the provider's message masked", async () => {
     route([[ANTHROPIC, anthropicError(529, `overloaded ${K.ant}`)], [OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('rescued')]]);
     // The seat takes opus, the first entry, and fails over to astra, its next candidate.
@@ -1633,6 +1655,29 @@ describe('25-26. approvals under panel and nested agencies', () => {
     const records = r.provenanceTrail!.events.filter((e) => e.kind === 'approvalDecided').map((e) => e.payload);
     expect(records).toEqual([{ approved: true, reason: 'cleared, saw [redacted]' }]);
     expect(JSON.stringify([r, decided])).not.toContain(K.ant);
+  });
+  it("a pooled seat's token counts stay numbers under the mask: a key of digits that a count contains leaves the result's, the seat's, the call record's and the final-output part's usage and the agency's totals as numbers", async () => {
+    const digits = '12345678';
+    const usage = { prompt_tokens: 12345678, completion_tokens: 5, total_tokens: 12345683 };
+    const reply = (text: string) => (req?: Captured) =>
+      req?.body?.stream === true
+        ? sse([oaiChunk('gpt-4.1', { role: 'assistant', content: text }), oaiChunk('gpt-4.1', {}, 'stop'), oaiChunk('gpt-4.1', null, null, usage), '[DONE]'])
+        : json({ id: 'c', object: 'chat.completion', created: 1, model: 'gpt-4.1', choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }], usage });
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, reply('B')]]);
+    const team = agency({ strategy: 'panel', modelPool: { astra: { provider: 'openai', model: 'gpt-4.1', apiKey: digits } }, agents: { only: { instructions: 'x' } }, chair: false } as never);
+    const r = await team.generate('review');
+    expect(r.agentCalls).toHaveLength(1);
+    expect(r.usage).toMatchObject({ promptTokens: 12345678, completionTokens: 5, totalTokens: 12345683 });
+    expect(r.agentCalls[0]?.usage).toMatchObject({ promptTokens: 12345678, totalTokens: 12345683 });
+    expect(r.seats[0]?.usage).toMatchObject({ promptTokens: 12345678, totalTokens: 12345683 });
+    expect(await team.usage()).toMatchObject({ promptTokens: 12345678, totalTokens: 12345683 });
+    expect((await team.session('s').send('again')).usage.promptTokens).toBe(12345678);
+    const streamed = team.stream('review');
+    const parts: Json[] = [];
+    for await (const part of streamed.fullStream) parts.push(part as unknown as Json);
+    expect(parts.find((p) => p.type === 'final-output')?.usage).toMatchObject({ promptTokens: 12345678, totalTokens: 12345683 });
+    expect((await streamed.result).usage.promptTokens).toBe(12345678);
+    expect((await team.usage()).promptTokens).toBe(12345678 * 3);
   });
   it('the handler is asked once per tool call; a seat whose approval times out is error; the call resolves whole', async () => {
     const handler = vi.fn(async (r: ApprovalRequest) => (r.agent === 'failure' ? new Promise<ApprovalDecision>(() => {}) : { approved: true }));
