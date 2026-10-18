@@ -317,6 +317,8 @@ const brain = await Brain.openPostgres(
 
 `brainId` is required in Postgres mode because all brains share the same schema. The discriminator scopes every query so two brains in the same database stay isolated. Per-file SQLite mode derives `brainId` from the filename automatically.
 
+An open makes the brain's tables and their indexes in the first schema on the connection's search path, where Postgres creates a table whose name names no schema ([PostgreSQL: the schema search path](https://www.postgresql.org/docs/current/ddl-schemas.html#DDL-SCHEMAS-PATH)). A connection whose search path puts a schema of its own ahead of an initialized `public` (`search_path=tenant_a,public`) gets every table and index in that schema, though `public` holds the same names. An open leaves out the `CREATE INDEX` statement for an index the table already has, since Postgres takes the table's lock before it checks `IF NOT EXISTS`, so an open does not wait for a long write transaction on the table to end.
+
 ### Multi-tenant isolation
 
 ```ts

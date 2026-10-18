@@ -38,16 +38,34 @@ const isPostgres = (adapter: StorageAdapter): boolean => adapter.kind.includes('
  * looks. An unqualified `to_regclass(index)` would also find a same-named index in a later schema on the search
  * path (a fresh schema ahead of an initialized `public`) and skip the index the table needs. Reads the catalog
  * without taking a lock on the table.
+ *
+ * With `inFirstSchema`, it looks in the first schema on the search path, `current_schema()`, instead: where a
+ * `CREATE TABLE IF NOT EXISTS table` that has not run yet makes the table. Until it runs, the search path can
+ * resolve `table` to a same-named table in a later schema, whose indexes are no answer for the table to be made.
  */
-export async function postgresIndexExists(adapter: StorageAdapter, index: string, table: string): Promise<boolean> {
-  const row = await adapter.get<{ found: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM pg_class i
-        WHERE i.relname = ? AND i.relkind IN ('i', 'I')
-          AND i.relnamespace = (SELECT t.relnamespace FROM pg_class t WHERE t.oid = to_regclass(?))
-     ) AS found`,
-    [index, table],
-  );
+export async function postgresIndexExists(
+  adapter: StorageAdapter,
+  index: string,
+  table: string,
+  { inFirstSchema = false }: { inFirstSchema?: boolean } = {},
+): Promise<boolean> {
+  const row = inFirstSchema
+    ? await adapter.get<{ found: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM pg_class i
+            WHERE i.relname = ? AND i.relkind IN ('i', 'I')
+              AND i.relnamespace = (SELECT n.oid FROM pg_namespace n WHERE n.nspname = current_schema())
+         ) AS found`,
+        [index],
+      )
+    : await adapter.get<{ found: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM pg_class i
+            WHERE i.relname = ? AND i.relkind IN ('i', 'I')
+              AND i.relnamespace = (SELECT t.relnamespace FROM pg_class t WHERE t.oid = to_regclass(?))
+         ) AS found`,
+        [index, table],
+      );
   return row?.found === true;
 }
 
