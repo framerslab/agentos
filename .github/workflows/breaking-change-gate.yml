@@ -9,6 +9,14 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened, labeled, unlabeled]
 
+# A newer event on a pull request (a push, an edit of its title or description, a
+# label added or removed) cancels the gate run it supersedes, and the newest run reads
+# the newest title, description and labels. A re-run keys a group of its own, its run
+# id, so re-running an older run never cancels the newest one.
+concurrency:
+  group: breaking-change-gate-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
 permissions:
   contents: read
   pull-requests: read
