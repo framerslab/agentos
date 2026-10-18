@@ -149,20 +149,21 @@ own orchestrator and reach into agentos for the lower-level primitives
 3. [API Hierarchy](#api-hierarchy)
 4. [Minimal Example](#minimal-example)
 5. [Models, Providers and Keys per Agent](#models-providers-and-keys-per-agent)
-6. [Orchestration Strategies](#orchestration-strategies)
-7. [Adaptive Mode](#adaptive-mode)
-8. [Emergent Agent Creation](#emergent-agent-creation)
-9. [Human-in-the-Loop (HITL)](#human-in-the-loop-hitl)
-10. [Memory and RAG](#memory-and-rag)
-11. [Voice and Channels](#voice-and-channels)
-12. [Guardrails and Security](#guardrails-and-security)
-13. [Permissions](#permissions)
-14. [Resource Controls](#resource-controls)
-15. [Observability and Callbacks](#observability-and-callbacks)
-16. [Structured Output with Zod](#structured-output-with-zod)
-17. [Nested Agencies](#nested-agencies)
-18. [Hierarchical Delegation — Manager Dispatches Dynamically](#hierarchical-delegation--manager-dispatches-dynamically)
-19. [Full-Featured Example](#full-featured-example)
+6. [Model Pools, Seating and the Panel Strategy](#model-pools-seating-and-the-panel-strategy)
+7. [Orchestration Strategies](#orchestration-strategies)
+8. [Adaptive Mode](#adaptive-mode)
+9. [Emergent Agent Creation](#emergent-agent-creation)
+10. [Human-in-the-Loop (HITL)](#human-in-the-loop-hitl)
+11. [Memory and RAG](#memory-and-rag)
+12. [Voice and Channels](#voice-and-channels)
+13. [Guardrails and Security](#guardrails-and-security)
+14. [Permissions](#permissions)
+15. [Resource Controls](#resource-controls)
+16. [Observability and Callbacks](#observability-and-callbacks)
+17. [Structured Output with Zod](#structured-output-with-zod)
+18. [Nested Agencies](#nested-agencies)
+19. [Hierarchical Delegation — Manager Dispatches Dynamically](#hierarchical-delegation--manager-dispatches-dynamically)
+20. [Full-Featured Example](#full-featured-example)
 
 ---
 
@@ -294,7 +295,10 @@ or names the seat's provider), else the provider's environment variable
 comma-separated key value becomes a rotating key pool. A seat with no key at
 all fails without failover, with one exception: `provider: 'anthropic'` with no
 Anthropic key but an `OPENROUTER_API_KEY` in the environment is routed through
-OpenRouter as `anthropic/<model>` and reports `provider: 'openrouter'`.
+OpenRouter as `anthropic/<model>` and reports `provider: 'openrouter'`. In an
+agency with a model pool or a panel, the rules of the next section replace this
+paragraph: a seat's key never comes from a default that names no provider, and
+Anthropic is never rerouted.
 
 Options passed to `generate(prompt, options)` apply to every seat and to the
 chair. A `model` or `provider` passed there replaces every seat's own setting,
@@ -306,8 +310,8 @@ error or a timeout), the call is retried on the providers whose keys are in the
 environment. With no `policyTier` set, the order and models are: OpenAI
 `gpt-5.6-sol`, Anthropic `claude-sonnet-5-5` (effort `low`), OpenRouter `openai/gpt-5.6-sol`,
 Gemini `gemini-3.1-pro-preview`; the seat's own provider is skipped. The
-seat's result then reports the provider that answered, but
-`agentCalls` does not record it. To pin every seat and the chair to their
+seat's result and its `agentCalls` record then name the provider and model
+that answered, and the record carries `fallback`. To pin every seat and the chair to their
 configured providers, pass `generate(prompt, { fallbackProviders: [] })`; to pin
 one seat, put a pre-built `agent({ ..., fallbackProviders: [] })` in the roster.
 
@@ -316,6 +320,183 @@ calls, usage and duration; the chair's own call is not in it. The result's
 top-level `provider` and `model` are the chair's for parallel, debate and
 hierarchical, the last seat's for sequential, and the last result of the final
 tier for graph. review-loop results and `stream()` results carry neither.
+
+---
+
+## Model Pools, Seating and the Panel Strategy
+
+`modelPool` names the models a seat may sit on. Each entry sets `provider` and a
+plain `model` id (a `provider:` prefix is rejected) and may set `apiKey`,
+`baseUrl`, `effort`, `thinking` and `maxTokens` (the defaults of a seat that
+sits there and sets none of its own), `weight` (its share under `weighted` and
+`round-robin`) and `vendor` (who trained the model, when the ids do not say).
+A pool entry may name `openai`, `openrouter`, `requesty`, `ollama`, `anthropic`,
+`groq`, `together`, `mistral`, `xai`, `gemini`, `claude-code-cli` or
+`gemini-cli`. A config seat that names neither `provider` nor `model` is a
+pooled seat: on every call it is filled from the pool, from the entries its
+`from` list names (default: every entry, in pool order). A seat with its own
+`provider` or `model` is a fixed seat; a pre-built `agent()` runs as it is.
+
+```typescript
+const team = agency({
+  strategy: 'panel',
+  modelPool: {
+    opus:   { provider: 'anthropic', model: 'claude-opus-5-5' },
+    astra:  { provider: 'openai',    model: 'gpt-6-astra' },
+    gemini: { provider: 'gemini',    model: 'gemini-3.1-pro-preview' },
+  },
+  seating: { policy: 'preferred', distinct: 'vendor' },
+  agents: {
+    correctness: { instructions: 'Find logic errors.' },
+    security:    { instructions: 'Find security defects.', from: ['astra', 'gemini'] },
+    failure:     { instructions: 'Find silent failures.' },
+  },
+  chair: { from: ['opus'], instructions: 'Merge the findings.' },
+  panel: { seatDeadlineMs: 120_000, concurrency: 3 },
+  quorum: { minAgents: 2, minVendors: 2 },
+});
+
+const result = await team.generate('Review this change.');
+result.seats;   // one record per seat: status, entry, provider, model, vendor, text, usage, durationMs, error
+result.chair;   // the chair's record
+result.quorum;  // { met, healthy, providers, vendors, shortfall? }
+result.seating; // which entry sat in each seat, which entries were available, which were skipped and why
+```
+
+### Seating
+
+`seating.policy` decides which available candidate a pooled seat takes:
+`preferred` (default) takes the first, `weighted` draws by `weight`,
+`round-robin` rotates call after call, `random` draws evenly. `seed` (a whole
+number from 0 to 4294967295, or a string) fixes the sequence of draws under
+`weighted` and `random`. `distinct` keeps seats on different vendors, providers
+or models while the pool allows it: `'vendor'` by default under `panel` and
+`parallel`, `false` under the other strategies. Fixed seats are seated first,
+so a fixed seat holds its vendor; pooled seats follow, the most constrained
+first.
+
+An entry is available when its provider's requirement is met and its circuit
+breaker is closed: a key for an API provider, a base URL for `ollama`, the
+binary on `PATH` for a CLI provider. An entry that fails is skipped for the
+call and listed in `seating.skipped` with the reason. Outside `panel`, a seat
+with no available candidate throws `AgencySeatingError` before any model is
+called, and a pooled seat's failover chain is its other available candidates,
+each with its own key (in preference order under `preferred`, by weight then
+pool order otherwise). Under `panel` a seat with no candidate is recorded
+`unseated`, and no seat has a chain. Every result carries `seating`.
+
+### Strict credentials and redaction
+
+In an agency with `modelPool`, `seating`, `chair`, `panel`, `quorum.minVendors`
+or `strategy: 'panel'`, one resolver gives every seat, pool entry and the chair
+its key and URL: the entry's or seat's own, else a `setDefaultProvider()`
+default that names that provider, else the provider's environment variable. The
+agency-level `apiKey` and `baseUrl` reach only a fixed seat or chair on the
+agency's own provider; a default that names no provider reaches no seat;
+Anthropic is never rerouted through OpenRouter; a provider with no key of its
+own fails. The rule rides every hop of a seat's chain, and the parallel and
+debate synthesizer, the hierarchical manager, a spawned specialist and the
+emergent judge resolve their keys the same way. A fixed seat's own
+`fallbackProviders` hops get their keys at seating; a hop whose requirement is
+unmet is dropped for the call and listed in `seating.skipped`. A seat with
+`runtime: 'gmi'` is rejected in such an agency; put a `gmi()` agent in the
+roster as a pre-built seat instead. Agencies without these options keep the
+rules of the previous section.
+
+Every credential of eight characters or more that the call can send (from the
+config, a default or the environment; a comma-separated key pool part by part)
+is replaced with `[redacted]` in the result's text, `agentCalls` (outputs, tool
+arguments and results), `toolCalls`, `transcriptDelta`, seat records, thrown
+errors (message, stack, cause and details), `on.error` and `agentEnd` payloads,
+the provenance trail, stream parts (a secret split between two text chunks is
+masked whole), tool errors and tool turns (a tool result that holds a
+credential reaches the seat's next request masked), `onFallback` and the
+`fallback_fired` and `fallback_exhausted` log lines. What a seat answers
+reaches the next seat, a synthesizer, a manager or the chair masked. A
+pre-built seat's answers and errors are masked as they leave it; its own
+requests to its provider are its own.
+
+Per call, a pooled agency rejects `model`, `provider`, `apiKey`, `baseUrl`,
+`fallbackProviders`, `onFallback`, `router`, `routerParams`, `hostPolicy`,
+`policyTier` and `customModelParams.model` or `.models` with
+`AgencyConfigError`, since each would move every seat off its seating. Under
+`panel` a call accepts only `temperature`, `topP`, `frequencyPenalty`,
+`presencePenalty`, `maxTokens`, `thinking`, `effort`, `requestTimeout`,
+`cache`, `promptCacheKey`, `promptCacheRetention`, `serviceTier`,
+`cacheDiagnostics`, `sessionId`, `usageLedger`, `source`, `toolChoice`,
+`chainOfThought`, `planning`, `onAfterGeneration`, `onBeforeToolExecution`,
+`customModelParams` (without `model`, `models`, `system`, `messages`, `tools`,
+`tool_choice`, `response_format`, `contents` or `systemInstruction`), `budget`,
+`hookErrors`, `abortSignal`, `maxAttempts` and `onAttempt`. A per-call `effort`
+sets every hop's.
+
+### The panel strategy
+
+`strategy: 'panel'` sends one prompt to every seat at once, each on its own
+model, under `panel.seatDeadlineMs` (no default) and `panel.concurrency`
+(default: all). Each seat ends with one status: `ok` (it returned at least
+`panel.minChars` non-whitespace characters, default 1), `empty`, `error` (it
+threw, its breaker was open, or a tool approval failed during its call),
+`timeout`, `rejected` (by a `beforeAgent` gate) or `unseated`. A seat stopped
+by its deadline is aborted: its request in flight ends, no further step or hop
+starts, and the timeout does not count against the provider's breaker. The
+caller's `abortSignal` settles every seat at once, a seat waiting on its
+approval included, and the call rejects with the panel's ledger error carrying
+the abort's reason.
+
+The quorum counts the healthy seats (status `ok`): `minAgents` defaults to 2
+for a roster of two or more and to 0 for a roster of one; `minProviders` counts
+distinct provider ids; `minVendors` counts distinct known vendors (an unknown
+vendor and a pre-built seat never count). Zero healthy seats always throws
+`AgencyQuorumError`, whatever `onShortfall` says; any other shortfall throws by
+default or, with `onShortfall: 'proceed'`, warns and goes on. Construction
+rejects a `minAgents` above the seat count, a `minProviders` above what the
+seats can reach (one more per pre-built seat), a `minVendors` above the vendors
+the config seats can reach, and `minVendors` with a pool entry whose vendor is
+unknown.
+
+The chair is seated from its `from` list with the preferred rule, or as a fixed
+seat from its own config or the agency level. It gets the task and the healthy
+seats' answers under their seat names, never a model or vendor name, in one
+step; `chair: false` returns the labelled answers as `text`. A chair that
+throws, times out, is rejected or returns no text throws `AgencyPanelError`.
+`AgencyQuorumError` and `AgencyPanelError` carry `seats`, `seating`, `quorum`
+and `usage` (every call that returned), and that usage is added to the
+agency's totals before the error is thrown. Under `panel`, `output` is not
+supported, `adaptive: true` is rejected, a seat named `chair` is rejected, and
+`stream()` yields one error part per failed seat, then one text part.
+`generate()` resolves to `PanelResult`.
+
+### Log lines
+
+Through the host's logger factory (`setLoggerFactory`), with every message
+masked: `agency_no_seat_answered` (info; a run whose every seat was rejected
+returns `text: ''` and runs no validation retry), `parallel_seat_failed`
+(warn), and `fallback_fired` and `fallback_exhausted` from the `fallback`
+component.
+
+### Upgrading to 0.14
+
+- `agency()` returns `AgencyInstance`: `generate()` is `Promise<AgencyResult>`
+  (`Promise<PanelResult>` under `panel`) where it was `Promise<unknown>`. A
+  cast of the result to an unrelated type needs `as unknown as` first.
+- `result.text` is `''`, not missing, when every seat was rejected.
+- `stream()` carries `result`, a promise of the finalized result `generate()`
+  returns.
+- A nested agency's `seating`, `seats`, `chair`, `quorum` and `provenanceTrail`
+  are stripped from the parent's result.
+- A callback that throws is logged and no longer rejects the call.
+- A run that breaches `maxTotalTokens` or `maxCostUSD` is added to the usage
+  totals before the limit error is thrown.
+- `quorum` is read by `panel` as well as `parallel`; `AgencyQuorumError` takes
+  an optional ledger and is exported from the package entry point with
+  `AgencyPanelError` and `AgencySeatingError`.
+- In an agency with `modelPool`, `seating`, `chair`, `panel`, `quorum.minVendors`
+  or `strategy: 'panel'`, credentials are strict (above): a
+  `setDefaultProvider()` key that names no provider no longer reaches a seat,
+  Anthropic is not rerouted through OpenRouter, and a per-call `model`,
+  `provider`, `apiKey`, `baseUrl` or `fallbackProviders` is rejected. An agency
+  without those options keeps the earlier rules.
 
 ---
 
@@ -386,15 +567,16 @@ console.log(agentCalls.map((c) => c.agent)); // the seats that answered
   model it serves, so an `openai` seat plus a seat that failed over to
   OpenRouter's `openai/gpt-5.6-sol` leg passes `minProviders: 2` on one vendor.
 - `onShortfall`: `'error'` (default) throws [`AgencyQuorumError`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) before
-  synthesis; `'proceed'` logs a warning and synthesizes anyway. The error class
-  is not exported from the package entry point; test
-  `err.name === 'AgencyQuorumError'`.
+  synthesis; `'proceed'` logs a warning and synthesizes anyway. The class is
+  exported from the package entry point, with `AgencyPanelError` and
+  `AgencySeatingError`.
 
 Three things the quorum does not check: a seat that returned empty text still
 counts as succeeded; two seats on different models of one provider count as
 one provider; and with `adaptive: true` the agency compiles the hierarchical
 strategy whatever `strategy` says, so the quorum is skipped without a warning.
-Only `parallel` enforces `quorum`.
+`parallel` and `panel` enforce `quorum`; the panel's rules are in
+[Model Pools, Seating and the Panel Strategy](#model-pools-seating-and-the-panel-strategy).
 
 ### debate
 
@@ -572,7 +754,8 @@ With `adaptive: true`, `agency()` compiles the hierarchical strategy whatever
 `strategy` says: a manager built from the agency-level model and instructions
 receives one `delegate_to_<name>` tool per roster agent and decides which to
 call. The declared `strategy` is not passed to the manager, so it plays no part
-in the run, and a `quorum` (read only by `parallel`) is skipped.
+in the run, and a `quorum` (read by `parallel` and `panel`) is skipped.
+`adaptive: true` with `strategy: 'panel'` is rejected at construction.
 
 ```typescript
 const smart = agency({

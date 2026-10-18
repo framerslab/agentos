@@ -168,7 +168,7 @@ await session.send('Explain recursion with an analogy.');
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
 | **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts (opt-in per persona) * mood-weighted memory bridge * bounded `adapt_personality` trait changes (opt-in) |
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
-| **Multi-Agent Teams** | 6 coordination strategies * manager delegation and specialist spawning * panel quorum on the parallel strategy * HITL approval gates |
+| **Multi-Agent Teams** | 7 coordination strategies * manager delegation and specialist spawning * model pools with seating policies and strict per-seat credentials * a panel strategy with a provider and vendor quorum * HITL approval gates |
 | **Orchestration** | `workflow()` DAGs * `AgentGraph` router, personality and discovery edges * `mission()` graphs from plan templates * checkpointing |
 | **Guardrails** | 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
 | **Emergent Capabilities** | Runtime tool forging * 4 self-improvement tools * tiered promotion * skill export |
@@ -195,7 +195,7 @@ const team = agency({
 const result = await team.generate('Compare TCP vs UDP for game networking.');
 ```
 
-Strategies: `sequential`, `parallel`, `debate`, `review-loop`, `hierarchical`, `graph`. With `hierarchical` + `emergent: { enabled: true }`, the manager forges new sub-agents at runtime. Every roster agent can set its own `provider`, `model`, `apiKey` and `effort`; a `parallel` agency can require a provider quorum (`quorum: { minProviders: 2 }`) before it synthesizes. [Multi-agent docs ->](https://docs.agentos.sh/features/agency-api)
+Strategies: `sequential`, `parallel`, `debate`, `review-loop`, `hierarchical`, `graph`, `panel`. With `hierarchical` + `emergent: { enabled: true }`, the manager forges new sub-agents at runtime. Every roster agent can set its own `provider`, `model`, `apiKey` and `effort`; a `parallel` or `panel` agency can require a provider quorum (`quorum: { minProviders: 2 }`) before it synthesizes. A `modelPool` fills every seat that names neither `provider` nor `model` from named models on each call, with strict per-seat credentials and every key redacted from the records. [Multi-agent docs ->](https://docs.agentos.sh/features/agency-api)
 
 ---
 
