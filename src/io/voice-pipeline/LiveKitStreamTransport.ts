@@ -5,6 +5,18 @@
  * agent that joined the room as a participant. Node only: it runs on
  * `@livekit/rtc-node`, an optional peer dependency.
  *
+ * ## The linked participant
+ * The transport hears and answers one remote participant, the linked one.
+ * The `participant` option links one as LiveKit Agents' sessions do: an
+ * identity at once, or with `'first'` the first participant in the room whose
+ * kind is in `participantKinds` (STANDARD and SIP unless given) or, when the
+ * room holds none, the first of them to join; participants of other kinds (an
+ * agent, a recorder, an ingress) are passed over. `participantIdentity` links
+ * one identity with the transport's own defaults. `setParticipant()` links
+ * another participant at any time. While nobody is linked, the audio source
+ * waits, `sendControl()` sends nothing and resolves, and every text stream
+ * that arrives is closed unread.
+ *
  * ## Audio (inbound)
  * One participant's microphone, read by {@link LiveKitRoomAudioSource} as
  * mono Float32 frames at the configured sample rate and emitted as `'audio'`.
@@ -83,15 +95,75 @@ import { LiveKitRoomAudioSource, type LiveKitParticipantLike, type LiveKitRoomLi
 /** The text stream topic of the control messages when none is configured. */
 export const LIVEKIT_TRANSPORT_DEFAULT_TOPIC = 'agentos.voice';
 
+/** The value of the `participant` option that links the first remote participant of a linked kind. */
+const FIRST = 'first';
+
+/** The kinds `'first'` links unless `participantKinds` names others: rtc-node's `ParticipantKind` STANDARD (0) and SIP (3). */
+const LINKED_KINDS: readonly number[] = [0, 3];
+
+/** rtc-node's `ParticipantKind.STANDARD`, the kind of a participant whose kind is not given. */
+const KIND_STANDARD = 0;
+
+/** The text stream topic text input reads unless `textInput` names another: LiveKit's chat topic. */
+const TEXT_INPUT_TOPIC = 'lk.chat';
+
 /** A frame's length in milliseconds. */
 const frameMs = (frame: AudioFrame): number => (frame.samples.length / frame.sampleRate) * 1000;
 
-/** Options of {@link LiveKitStreamTransport}: the connected room, the selected participant and optional call-scoped publishing. */
+/**
+ * The topic of a text input or output option: the one it names when it is on, `topic` when it is on and names none,
+ * `undefined` when it is off. Unset, the option is on when `on` is.
+ */
+function optionTopic(option: boolean | { topic?: string } | undefined, on: boolean, topic: string): string | undefined {
+  const value = option ?? on;
+  if (value === false) return undefined;
+  return value === true ? topic : value.topic ?? topic;
+}
+
+/** Options of {@link LiveKitStreamTransport}: the connected room, the participant it links and optional call-scoped publishing. */
 export interface LiveKitStreamTransportOptions {
   /** A connected room (rtc-node `Room`) the agent joined. */
   room: LiveKitRoomLike;
-  /** Identity of the participant the agent hears and answers. */
-  participantIdentity: string;
+  /**
+   * Identity of the participant the agent hears and answers, linked with the transport's own defaults: no text input
+   * and no transcription output unless set, and a close on the participant's departure only with `publisher` unless
+   * `closeOnDisconnect` is set. Give exactly one of this and `participant`.
+   */
+  participantIdentity?: string;
+  /**
+   * The participant to link, with LiveKit Agents' session defaults: an identity, linked at once, or `'first'`, the
+   * first remote participant whose kind is in `participantKinds`, in the room already or, when none is, the first of
+   * them to join. With it, `closeOnDisconnect`, `textInput` and `transcriptionOutput` are on unless set. Give exactly
+   * one of this and `participantIdentity`; a participant whose identity is `'first'` is linked with `setParticipant()`.
+   */
+  participant?: string | 'first';
+  /**
+   * The kinds `'first'` links, as rtc-node's `ParticipantKind` numbers them (STANDARD 0, INGRESS 1, EGRESS 2, SIP 3,
+   * AGENT 4, CONNECTOR 5, BRIDGE 6); a participant whose kind is not given counts as STANDARD. Default `[0, 3]`,
+   * STANDARD and SIP.
+   */
+  participantKinds?: readonly number[];
+  /**
+   * Close when the linked participant leaves the room. Default `true` with `participant`; with `participantIdentity`,
+   * a transport with `publisher` closes and a listen-only one stays open.
+   */
+  closeOnDisconnect?: boolean;
+  /**
+   * Read the text streams the linked participant sends on `topic` (`'lk.chat'` unless given) as `text_input` messages.
+   * Default `true` with `participant`, `false` with `participantIdentity`. A room that already handles the topic keeps
+   * it: text input is off, and one warning line says so.
+   */
+  textInput?: boolean | { topic?: string };
+  /**
+   * Write the user's transcripts and the agent's played text as transcription text streams on `topic`
+   * (`'lk.transcription'` unless given). Default `true` with `participant`, `false` with `participantIdentity`.
+   */
+  transcriptionOutput?: boolean | { topic?: string };
+  /**
+   * Takes the transport's warning lines: the line saying text input is off and, without a publisher, an error that
+   * nothing listens for. Each is a console warning when omitted.
+   */
+  logger?: { warn(message: string): void };
   /**
    * Sample rate of the inbound frames, a whole number of samples per second;
    * match the STT (24000 for OpenAI Realtime transcription). Must be 16000
@@ -194,25 +266,42 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   /** How many control messages wait to go out, behind a cancel's clear or behind a message that waits. */
   private waitingControls = 0;
   private readonly inputPump: Promise<void>;
+  /** The identity of the participant the transport hears and answers; `undefined` while `'first'` waits for one. */
+  private linked: string | undefined;
+  /** The kinds `'first'` links. */
+  private readonly kinds: readonly number[];
+  /** Whether `'first'` waits for a participant of a linked kind to join. */
+  private waitingForFirst = false;
+  /** The topic text input holds, or `undefined` while text input is off. */
+  private readonly textInputTopic: string | undefined;
 
   /**
    * @throws {Error} `invalid livekit input bound` when `bufferMs` is not a
    *   finite number of zero or more, or when `publisher` is given and
    *   `sampleRate` is not 16000.
+   * @throws {Error} `LiveKitStreamTransport: give exactly one of
+   *   participantIdentity and participant` when both are given, neither is,
+   *   or `participant` is empty.
    * @throws {RangeError} When `sampleRate` or `frameSizeMs` is refused, as
    *   {@link LiveKitRoomAudioSource} refuses them.
    * @throws {Error} When `publisher` is given and the room's local participant
    *   cannot publish a track, or a publisher bound is refused.
    * @throws {Error} When the room already has a text stream handler for the
    *   topic (rtc-node allows one per topic). Every refusal before this one
-   *   leaves the topic free.
+   *   leaves the topic free, and nothing listens to the room. A room that
+   *   already handles the text-input topic is no refusal: text input is off.
    */
   constructor(private readonly options: LiveKitStreamTransportOptions) {
     super(); this.topic = options.topic ?? LIVEKIT_TRANSPORT_DEFAULT_TOPIC; this.bufferMs = options.bufferMs ?? 2000;
     if (!Number.isFinite(this.bufferMs) || this.bufferMs < 0 || (options.publisher && options.sampleRate !== 16000)) throw new Error('invalid livekit input bound');
+    // `participant` follows LiveKit Agents' session conventions; `participantIdentity` keeps the transport's own defaults.
+    const conventions = options.participant !== undefined;
+    if (conventions === (options.participantIdentity !== undefined) || options.participant === '') throw new Error('LiveKitStreamTransport: give exactly one of participantIdentity and participant');
+    this.kinds = options.participantKinds ?? LINKED_KINDS;
+    this.linked = options.participant === FIRST ? this.firstOfKind() : options.participant ?? options.participantIdentity;
     // The source checks the options before the topic is taken, so a refused
     // option leaves the topic free; until it is read, the source holds nothing.
-    this.source = new LiveKitRoomAudioSource({ room: options.room, participantIdentity: options.participantIdentity,
+    this.source = new LiveKitRoomAudioSource({ room: options.room, participantIdentity: this.linked,
       sampleRate: options.sampleRate, frameSizeMs: options.frameSizeMs, rtc: options.rtc, strictMono: !!options.publisher });
     if (options.publisher) {
       this.playbackFormat = 'pcm';
@@ -236,9 +325,54 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       }
     });
     options.room.registerTextStreamHandler(this.topic, this.onText);
+    // rtc-node takes one handler a topic: a room that already handles the text-input topic keeps it, and text input is off.
+    let textInputTopic = optionTopic(options.textInput, conventions, TEXT_INPUT_TOPIC);
+    if (textInputTopic !== undefined) {
+      try { options.room.registerTextStreamHandler(textInputTopic, this.onTextInput); }
+      catch { this.warn(`LiveKitStreamTransport: text input is off, the room already handles the ${textInputTopic} topic`); textInputTopic = undefined; }
+    }
+    this.textInputTopic = textInputTopic;
     if (options.publisher) options.room.on('participantDisconnected', this.participantDisconnected);
+    // 'first' with nobody of a linked kind in the room links the first of them to join.
+    if (options.participant === FIRST && this.linked === undefined) { this.waitingForFirst = true; options.room.on('participantConnected', this.participantConnected); }
     this.inputPump = this.pump();
   }
+  /** Identity of the linked participant, or `undefined` while `'first'` waits for one to join. */
+  get participantIdentity(): string | undefined { return this.linked; }
+  /**
+   * Links another participant: the audio source moves to its microphone, its frames carrying its identity as
+   * `speakerHint`, the control topic and text input take its streams alone, control messages go to it, and the
+   * departure that closes the transport is its departure. A `'first'` wait ends. A transport that is not open, or the
+   * participant linked already, changes nothing.
+   *
+   * @param identity - The participant's identity.
+   * @throws {Error} When `identity` is empty.
+   */
+  setParticipant(identity: string): void {
+    if (typeof identity !== 'string' || identity === '') throw new Error('LiveKitStreamTransport: setParticipant needs a participant identity');
+    if (this._state === 'open') this.link(identity);
+  }
+  /** Links the participant with the identity, ending a `'first'` wait. */
+  private link(identity: string): void {
+    this.stopWaitingForFirst();
+    if (identity === this.linked) return;
+    this.linked = identity; this.source.setParticipant(identity);
+  }
+  /** The first remote participant in the room, in the room's order, whose kind `'first'` links. */
+  private firstOfKind(): string | undefined {
+    for (const participant of this.options.room.remoteParticipants.values()) {
+      if (this.kinds.includes(participant.kind ?? KIND_STANDARD)) return participant.identity;
+    }
+    return undefined;
+  }
+  private stopWaitingForFirst(): void {
+    if (!this.waitingForFirst) return;
+    this.waitingForFirst = false; this.options.room.off('participantConnected', this.participantConnected);
+  }
+  /** While `'first'` waits, links the first participant of a linked kind to join; one of another kind is passed over. */
+  private readonly participantConnected = (participant: LiveKitParticipantLike): void => {
+    if (this.waitingForFirst && this.kinds.includes(participant.kind ?? KIND_STANDARD)) this.link(participant.identity);
+  };
   /** Physical state; call reconnecting state remains the manager's responsibility. */
   get state(): 'connecting' | 'open' | 'closing' | 'closed' { return this._state; }
   /**
@@ -286,11 +420,13 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    */
   private async sendWire(message: unknown): Promise<void> {
     if (this._state !== 'open') throw new Error('LiveKitStreamTransport: cannot send while ' + this._state); if (!this.options.room.localParticipant) throw new Error('LiveKitStreamTransport: the room has no local participant; connect it first');
+    // While nobody is linked there is nobody to send to.
+    const to = this.linked; if (to === undefined) return;
     const text = JSON.stringify(message);
     if (this.publisher && (Buffer.byteLength(text) > 16384 || this.sendingControls >= 4)) throw new Error('livekit control bound');
     this.sendingControls++; let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const work = this.options.room.localParticipant.sendText(text, { topic: this.topic, destinationIdentities: [this.options.participantIdentity] });
+      const work = this.options.room.localParticipant.sendText(text, { topic: this.topic, destinationIdentities: [to] });
       if (!this.publisher) { await work; return; }
       await Promise.race([work, new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { this.close(); reject(new Error('livekit control timeout')); }, 5000); })]);
     } finally { if (timer) clearTimeout(timer); this.sendingControls--; }
@@ -298,9 +434,10 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   /**
    * Sends one JSON message to the participant as a text stream on the topic. Existing server messages retain their
    * wire representation; call-profile messages carry their captured scope and generation. A SIP participant reads no
-   * text streams, so nothing is sent to one and the send resolves. Outside participant playout a `barge_in` message
-   * first acts on the track, as a page acts on the audio it plays: a `cancel` clears what the track holds, a `pause`
-   * holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases it, each at once. Messages go out in the
+   * text streams, so nothing is sent to one and the send resolves, as it does while nobody is linked. Outside
+   * participant playout a `barge_in` message first acts on the track, as a page acts on the audio it plays: a `cancel`
+   * clears what the track holds, a `pause` holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases
+   * it, each at once. Messages go out in the
    * order they were asked for. A `cancel` goes out once its clear has finished, or once the publisher's
    * `receiptTimeoutMs` plus `maxDurationMs` have passed, so a capture that never returns does not hold it; a message
    * asked for while it waits, a `resume` for the next reply among them, waits behind it, and they go out one at a time
@@ -325,7 +462,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     } else if (action?.type === 'pause') this.publisher!.pause();
     else if (action?.type === 'resume') this.publisher!.resume();
     if (!previous && !cleared) {
-      if (isLiveKitSipParticipant(this.linkedParticipant())) return;
+      if (this.nobodyReads()) return;
       return this.sendWire(message);
     }
     this.waitingControls++;
@@ -335,7 +472,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
         if (previous) await previous;
         if (cleared) await this.clearOrDeadline(cleared);
       } finally { this.waitingControls--; }
-      if (isLiveKitSipParticipant(this.linkedParticipant())) return;
+      if (this.nobodyReads()) return;
       await this.sendWire(message);
     })();
     // A failed message is its caller's to report; the messages behind it still go out.
@@ -354,13 +491,18 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       await Promise.race([cleared, new Promise<void>((resolve) => { timer = setTimeout(resolve, receiptTimeoutMs + maxDurationMs); })]);
     } finally { clearTimeout(timer); }
   }
-  /** The participant the transport hears and answers, while it is in the room. */
-  private linkedParticipant(): LiveKitParticipantLike | undefined { return this.options.room.remoteParticipants.get(this.options.participantIdentity); }
+  /** The participant the transport hears and answers, while it is linked and in the room. */
+  private linkedParticipant(): LiveKitParticipantLike | undefined { return this.linked === undefined ? undefined : this.options.room.remoteParticipants.get(this.linked); }
+  /** Whether a control message has nobody to read it: nobody is linked, or the linked participant is a phone caller. */
+  private nobodyReads(): boolean { return this.linked === undefined || isLiveKitSipParticipant(this.linkedParticipant()); }
   /** Stops input synchronously without disconnecting the host-owned room. Native cleanup is awaited through whenClosed. */
   close(_code?: number, _reason?: string): void {
     if (this._state === 'closing' || this._state === 'closed') return; this._state = 'closing';
     this.options.room.unregisterTextStreamHandler(this.topic);
+    // Only a topic the transport holds is let go: a room that already handled the text-input topic keeps its handler.
+    if (this.textInputTopic !== undefined) this.options.room.unregisterTextStreamHandler(this.textInputTopic);
     if (this.options.publisher) this.options.room.off('participantDisconnected', this.participantDisconnected);
+    this.stopWaitingForFirst();
     // what a pause held goes with the transport: a resume after the close emits none of it, and no gap
     this.source.close(); this.held.length = 0; this.heldMs = 0; this.droppedMs = 0;
     const readers = [...this.readers]; this.readers.clear();
@@ -373,7 +515,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   }
   /** Positive native unpublish/disposal acknowledgement; rejection leaves the manager's media fence incomplete. */
   whenClosed(): Promise<void> { return this._state === 'closed' ? this.closing : Promise.reject(new Error('transport still open')); }
-  private readonly participantDisconnected = (participant: { identity: string }): void => { if (participant.identity === this.options.participantIdentity) this.close(); };
+  private readonly participantDisconnected = (participant: { identity: string }): void => { if (participant.identity === this.linked) this.close(); };
   /** Emits the participant's frames until the source ends, then closes. */
   private async pump(): Promise<void> {
     try {
@@ -405,8 +547,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     } finally { if (timer) clearTimeout(timer); }
   }
   private readonly onText = (reader: LiveKitTextStreamReaderLike, participant: { identity: string }): void => {
-    // Another sender's stream, or one that came as the transport closed: released unread.
-    if (participant.identity !== this.options.participantIdentity || this._state !== 'open') { closeTextReader(reader); return; }
+    // Another sender's stream, one that came while nobody is linked, or one that came as the transport closed: released unread.
+    if (participant.identity !== this.linked || this._state !== 'open') { closeTextReader(reader); return; }
     if (this.publisher && this.readers.size >= 4) { closeTextReader(reader); this.emitErrorSafe(new Error('livekit control refused')); this.close(); return; }
     this.readers.add(reader);
     const read = this.publisher ? this.readBounded(reader) : reader.readAll();
@@ -424,12 +566,19 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       if (this.publisher) this.close();
     }).finally(() => { this.readers.delete(reader); });
   };
+  /** Holds the text-input topic: every stream that arrives on it is closed unread. */
+  private readonly onTextInput = (reader: LiveKitTextStreamReaderLike): void => { closeTextReader(reader); };
   /**
    * Emit `'error'` only when a listener exists: an unlistened EventEmitter
    * `'error'` throws and takes the whole process down.
    */
   private emitErrorSafe(error: Error): void {
     if (this.listenerCount('error')) this.emit('error', error);
-    else if (!this.publisher) console.warn('[livekit-stream-transport] error (no listener attached):', error.message);
+    else if (!this.publisher) this.warn('[livekit-stream-transport] error (no listener attached):', error.message);
+  }
+  /** Writes one warning line through the host's `logger`, else as a console warning. */
+  private warn(...parts: string[]): void {
+    if (this.options.logger) this.options.logger.warn(parts.join(' '));
+    else console.warn(...parts);
   }
 }
