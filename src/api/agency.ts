@@ -968,7 +968,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
           /**
            * Sends a user message through the agency strategy and appends the
            * user turn to session history, and the assistant turn when the run
-           * answered.
+           * answered with text.
            *
            * @param text - User message text.
            * @returns The aggregated strategy result.
@@ -980,7 +980,8 @@ export function agency(opts: AgencyOptions): AgencyInstance {
               undefined,
               sessionId,
             );
-            // A run no seat answered is no assistant turn: the history keeps the user's message alone.
+            // An empty answer is no assistant turn, whether no seat answered or a seat returned no text: the history keeps
+            // the user's message alone, and the next prompt carries no empty answer.
             const answer = (result.text as string) ?? '';
             if (answer !== '') history.push({ role: 'assistant', content: answer });
             return result;

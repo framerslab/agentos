@@ -499,9 +499,10 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
 - `agency()` returns `AgencyInstance`: `generate()` is `Promise<AgencyResult>`
   (`Promise<PanelResult>` under `panel`) where it was `Promise<unknown>`. A
   cast of the result to an unrelated type needs `as unknown as` first.
-- `result.text` is `''`, not missing, when every seat was rejected, and a
-  session adds no assistant turn for such a run: `messages()` keeps the user's
-  turn alone.
+- `result.text` is `''`, not missing, when every seat was rejected. A session
+  adds no assistant turn for an empty answer, such a run's or a seat's reply
+  with no text: `messages()` keeps the user's turn alone, and the next prompt
+  carries no empty `Assistant:` line.
 - `stream()` carries `result`, a promise of the finalized result `generate()`
   returns.
 - A nested agency's `seating`, `seats`, `chair`, `quorum` and `provenanceTrail`
@@ -1023,7 +1024,8 @@ store is initialised (a `documents` list only logs guidance to use the
 runtime). Each member keeps its own session history for the duration of one
 `generate()` or `stream()` call; inside `agency().session()`, only the
 user/assistant message history and aggregate usage persist between `.send()`
-calls, and a run no seat answered adds no assistant turn to that history.
+calls, and an empty answer (a run no seat answered, or a reply with no text)
+adds no assistant turn to that history.
 
 To give members memory, pass built agents as roster members: an
 [`agent()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) with a `memoryProvider` keeps its hooks when it sits in a

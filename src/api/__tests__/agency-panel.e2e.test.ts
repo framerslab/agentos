@@ -1582,6 +1582,22 @@ describe('22-23. rotation, copies, retries, empty text', () => {
     expect(userText).toBe('User: first\nUser: second\nUser: third');
     expect(session.messages()).toEqual([{ role: 'user', content: 'first' }, { role: 'user', content: 'second' }, { role: 'user', content: 'third' }, { role: 'assistant', content: 'B' }]);
   });
+  it("a seat that answers with no text adds no assistant turn either: messages() keeps the user turn, and the next prompt carries no empty answer", async () => {
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiText(''), openaiText('B')]]]);
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { a: { instructions: 'x' } }, strategy: 'sequential' } as never);
+    const session = team.session('s') as { send: (t: string) => Promise<AgencyResult>; messages: () => Array<{ role: string; content: string }> };
+    const first = await session.send('first');
+    expect(first.text).toBe('');
+    expect(first.agentCalls).toHaveLength(1);
+    expect(session.messages()).toEqual([{ role: 'user', content: 'first' }]);
+    expect((await session.send('second')).text).toBe('B');
+    const sent = calls(OPENAI_CHAT, 'POST');
+    expect(sent).toHaveLength(2);
+    const content = (sent[1].body!.messages as Json[]).filter((m) => m.role === 'user').at(-1)?.content;
+    const userText = Array.isArray(content) ? content.map((p: Json) => String(p.text ?? '')).join('') : String(content ?? '');
+    expect(userText).toBe('User: first\nUser: second');
+    expect(session.messages()).toEqual([{ role: 'user', content: 'first' }, { role: 'user', content: 'second' }, { role: 'assistant', content: 'B' }]);
+  });
 });
 
 describe('25-26. approvals under panel and nested agencies', () => {
