@@ -114,8 +114,8 @@ export interface AudioFrame {
  * none. A consumer counts the text as heard only once the transport has
  * acknowledged that frame as played, and only the contiguous prefix of
  * acknowledged segments; a cleared or stale frame advances nothing. The legacy
- * `EncodedAudioChunk.text` is never read as a played fragment: current
- * providers fill it with every token accumulated so far.
+ * `EncodedAudioChunk.text` is never read as a played fragment: the adapters
+ * fill it with the text of the segment in flight.
  */
 export interface TtsTextBoundary {
   /** The segment's id, unique within the reply. */
@@ -177,9 +177,10 @@ export interface EncodedAudioChunk {
   durationMs: number;
 
   /**
-   * The text fragment that was synthesised into this chunk. Preserved so
-   * barge-in handlers can report `VoiceTurnMetadata.interruptedRemainder`
-   * accurately when playback is cut short.
+   * Legacy: the text of the sentence segment in flight when the provider sent
+   * this chunk, the text submitted to it since its last terminal response. It
+   * is not the text this chunk plays and is never read as heard: the played
+   * text comes from `textBoundary` on acknowledged frames.
    */
   text: string;
 
