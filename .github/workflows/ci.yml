@@ -53,6 +53,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      # The extensions registry, a dev dependency, installs the curated @framers/agentos-ext-*
+      # packages, which declare @framers/agentos as a peer. package.json's dev dependency on
+      # "link:." resolves those peers to this checkout, so the tests that load them run this tree;
+      # this fails when the lockfile or the install gives them a published AgentOS instead.
+      - name: The curated extensions resolve AgentOS to this checkout
+        run: node --test scripts/curated-extensions-peer.test.mjs
+
       - name: Build
         run: pnpm run build
 
