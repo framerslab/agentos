@@ -909,11 +909,11 @@ describe('LiveKitStreamTransport speaking in the room', () => {
       await vi.advanceTimersByTimeAsync(2_999);
       await settle();
       expect(s.orchestrator.state).toBe('speaking');
-      expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking']);
+      expect(sentTypes(room)).toEqual(['session_started', 'agent_thinking', 'agent_speaking']);
       await vi.advanceTimersByTimeAsync(1);
       await settle();
       expect(s.orchestrator.state).toBe('listening');
-      expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking', 'agent_done']);
+      expect(sentTypes(room)).toEqual(['session_started', 'agent_thinking', 'agent_speaking', 'agent_done']);
       // What the track had not played is cleared, so none of the stalled reply plays later.
       expect(source.clears).toBe(clears + 1);
     } finally {
@@ -926,7 +926,7 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     expect(s.tts.cancel).not.toHaveBeenCalled();
     await s.reply();
     await vi.waitFor(() =>
-      expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_speaking', 'agent_done', 'agent_thinking', 'agent_speaking'])
+      expect(sentTypes(room)).toEqual(['session_started', 'agent_thinking', 'agent_speaking', 'agent_done', 'agent_thinking', 'agent_speaking'])
     );
     expect(s.errors).toEqual([]);
     await s.orchestrator.stopSession('done');
