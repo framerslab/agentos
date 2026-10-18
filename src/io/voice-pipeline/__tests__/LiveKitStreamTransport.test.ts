@@ -192,6 +192,19 @@ describe('LiveKitStreamTransport', () => {
     transport.close();
   });
 
+  it('sends each message without waiting for one the room has not finished sending', async () => {
+    const room = new FakeRoom();
+    const { transport } = open(room);
+    // The room never finishes sending the first message.
+    room.localParticipant.sendText.mockImplementationOnce(() => new Promise<{}>(() => {}));
+    void transport.sendControl({ type: 'agent_thinking' });
+    const done = transport.sendControl({ type: 'agent_done', text: 'Hello', durationMs: 20 });
+    await settle();
+    expect(sentTypes(room)).toEqual(['agent_thinking', 'agent_done']);
+    await done;
+    transport.close();
+  });
+
   it('uses the topic it is given, for both directions', async () => {
     const room = new FakeRoom();
     const { transport } = open(room, 'voice.control');
@@ -1190,6 +1203,110 @@ describe('LiveKitStreamTransport speaking in the room', () => {
     expect(actions).toEqual(['cancel', 'pause', 'resume']);
     transport.close();
     await transport.whenClosed();
+  });
+
+  it('sends a cancel whose clear never finishes, and the messages behind it, once receiptTimeoutMs plus maxDurationMs have passed', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    await transport.readyForPlayback();
+    // The track never takes the chunk: its capture never returns, so the cancel's clear never finishes.
+    FakeAudioSource.created[0]!.gate = new Promise<void>(() => {});
+    void transport.sendAudio(toneChunk(1));
+    await settle();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      void transport.sendControl({ type: 'barge_in', action: { type: 'cancel' } });
+      void transport.sendControl({ type: 'agent_thinking' });
+      await settle();
+      expect(sentTypes(room)).toEqual([]);
+      // receiptTimeoutMs is 1000 and maxDurationMs 2000.
+      await vi.advanceTimersByTimeAsync(2_999);
+      await settle();
+      expect(sentTypes(room)).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await settle();
+      expect(sentTypes(room)).toEqual(['barge_in', 'agent_thinking']);
+    } finally {
+      vi.useRealTimers();
+    }
+    transport.close();
+  });
+
+  it('refuses a fifth message in flight with livekit control bound', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      // The room takes each message and finishes none.
+      room.localParticipant.sendText.mockImplementation(() => new Promise<{}>(() => {}));
+      for (let i = 0; i < 4; i++) void transport.sendControl({ type: 'agent_thinking' });
+      let outcome: string | undefined;
+      void transport.sendControl({ type: 'agent_thinking' }).then(
+        () => {
+          outcome = 'sent';
+        },
+        (error: Error) => {
+          outcome = error.message;
+        }
+      );
+      await settle();
+      expect(outcome).toBe('livekit control bound');
+      expect(room.localParticipant.sendText).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+    transport.close();
+  });
+
+  it('refuses a message with livekit control bound once sixty-four wait behind a cancel', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const transport = new LiveKitStreamTransport({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 16_000,
+      rtc: fakeRtc(),
+      publisher: { ...speaking, rtc: fakePublishingRtc() },
+    });
+    await transport.readyForPlayback();
+    // The cancel's clear waits for a capture that never returns.
+    FakeAudioSource.created[0]!.gate = new Promise<void>(() => {});
+    void transport.sendAudio(toneChunk(1));
+    await settle();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      void transport.sendControl({ type: 'barge_in', action: { type: 'cancel' } });
+      for (let i = 0; i < 63; i++) void transport.sendControl({ type: 'agent_thinking' });
+      let outcome: string | undefined;
+      void transport.sendControl({ type: 'agent_thinking' }).then(
+        () => {
+          outcome = 'sent';
+        },
+        (error: Error) => {
+          outcome = error.message;
+        }
+      );
+      await settle();
+      expect(outcome).toBe('livekit control bound');
+      expect(sentTypes(room)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+    transport.close();
   });
 });
 

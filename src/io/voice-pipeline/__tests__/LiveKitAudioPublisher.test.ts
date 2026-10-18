@@ -244,6 +244,24 @@ describe('native playout', () => {
     expect(f.source().capturedSamples).toBe(960); expect(f.source().clears).toBe(2);
     await f.publisher.close();
   });
+  it('starts the playout bound once the track is published, so a first publish slower than the bound drops nothing', async () => {
+    let publish!: () => void;
+    const participant = { publishTrack: vi.fn(() => new Promise<{ sid: string }>((resolve) => { publish = () => resolve({ sid: 'track-a' }); })), unpublishTrack: vi.fn(async () => {}) };
+    const publisher = new LiveKitAudioPublisher({ scopeId: 'scope-a', callId: 'call-a', generation: () => generation, sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc: fakePublishingRtc() }, participant, async () => {});
+    let outcome: string | undefined;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const sent = publisher.sendAudio(unscoped());
+      void publisher.waitForPlayout().then(() => { outcome = 'played'; }, (error: Error) => { outcome = error.message; });
+      await settle();
+      // The publish takes longer than receiptTimeoutMs plus maxDurationMs, and the wait does not give up meanwhile.
+      await vi.advanceTimersByTimeAsync(5_000); await settle(); expect(outcome).toBeUndefined();
+      publish(); await sent;
+      expect(FakeAudioSource.created[0]!.capturedSamples).toBe(960);
+      FakeAudioSource.created[0]!.playOut(); await settle(); expect(outcome).toBe('played');
+    } finally { vi.useRealTimers(); }
+    await publisher.close();
+  });
   it('holds the track on a pause: clears its queue, captures nothing until the resume, then the held chunks in order', async () => {
     const f = native(); await f.publisher.ready();
     let free!: () => void; f.source().gate = new Promise<void>((resolve) => { free = resolve; });
