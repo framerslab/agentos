@@ -49,6 +49,9 @@ export { STT_CHAIN_VENDORS, parseSttEntry, type SttChainVendor, type SttEntry } 
 // functions in types.ts (sameVoiceGeneration and copyAudioIdentity) are not this entry's.
 export type * from './types.js';
 
+// The names of a voice session's events, for a page that relays them; types.ts imports nothing at run time.
+export { VOICE_SESSION_EVENT_NAMES } from './types.js';
+
 // The emitter the contracts extend, and the browser-safe sessions' base.
 export { VoiceEventEmitter, type EventEmitterLike, type VoiceEventListener } from './VoiceEventEmitter.js';
 

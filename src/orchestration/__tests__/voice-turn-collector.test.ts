@@ -192,3 +192,84 @@ describe('VoiceTurnCollector', () => {
     expect(events[0].endpointReason).toBe('unknown');
   });
 });
+
+// ---------------------------------------------------------------------------
+// A started session's own events
+// ---------------------------------------------------------------------------
+
+describe("VoiceTurnCollector on a started session's own events", () => {
+  /** A collector that reads `VoiceSessionEventMap`'s names, as VoiceNodeExecutor makes one for a started session. */
+  function onSession(initialTurnCount = 0) {
+    const session = new EventEmitter();
+    const events: any[] = [];
+    const collector = new VoiceTurnCollector(session, (evt) => events.push(evt), 'test-node', initialTurnCount, { events: 'session' });
+    return { session, events, collector };
+  }
+
+  it("forwards interim transcripts, buffers finals, and counts each user item as a turn", () => {
+    const { session, events, collector } = onSession();
+    session.emit('user_input_transcribed', { transcript: 'Book a', isFinal: false, confidence: 0.5, createdAt: 1 });
+    session.emit('user_input_transcribed', { transcript: 'Book a table.', isFinal: true, confidence: 0.9, speakerId: 'Speaker_1', createdAt: 2 });
+    session.emit('conversation_item_added', { item: { role: 'user', text: 'Book a table.', source: 'speech', endpointReason: 'punctuation' }, createdAt: 3 });
+
+    expect(events).toEqual([
+      { type: 'voice_transcript', nodeId: 'test-node', text: 'Book a', isFinal: false, speaker: undefined, confidence: 0.5 },
+      { type: 'voice_transcript', nodeId: 'test-node', text: 'Book a table.', isFinal: true, speaker: 'Speaker_1', confidence: 0.9 },
+      { type: 'voice_turn_complete', nodeId: 'test-node', transcript: 'Book a table.', turnIndex: 1, endpointReason: 'punctuation' },
+    ]);
+    expect(collector.getTranscript()).toEqual([{ speaker: 'Speaker_1', text: 'Book a table.', timestamp: expect.any(Number) }]);
+    expect(collector.getLastSpeaker()).toBe('Speaker_1');
+    expect(collector.getTurnCount()).toBe(1);
+  });
+
+  it('counts a turn once, though the session emits turn_complete beside its user item, and no agent reply', () => {
+    const { session, collector } = onSession(2);
+    session.emit('turn_complete', { transcript: 'Book a table.', reason: 'punctuation' });
+    session.emit('conversation_item_added', { item: { role: 'user', text: 'Book a table.', source: 'speech' }, createdAt: 1 });
+    session.emit('conversation_item_added', { item: { role: 'assistant', text: 'Booked.', playedText: 'Booked.', interrupted: false }, createdAt: 2 });
+    session.emit('final_transcript', { text: 'a relayed final' });
+
+    expect(collector.getTurnCount()).toBe(3);
+    expect(collector.getTranscript()).toEqual([]);
+  });
+
+  it('forwards a barge-in that cut the reply, and not the pause and resume of a false interruption', () => {
+    const { session, events } = onSession();
+    session.emit('barge_in', { speechDurationMs: 100, interruptedText: 'It is', playedDurationMs: 400, action: 'pause', createdAt: 1 });
+    session.emit('barge_in', { speechDurationMs: 400, interruptedText: 'It is booked', playedDurationMs: 400, action: 'resume', createdAt: 2 });
+    expect(events).toEqual([]);
+
+    session.emit('barge_in', { speechDurationMs: 300, interruptedText: 'It is booked for', playedDurationMs: 900, action: 'cancel', createdAt: 3 });
+    expect(events).toEqual([{ type: 'voice_barge_in', nodeId: 'test-node', interruptedText: 'It is booked for', userSpeech: '' }]);
+  });
+
+  it("defaults a turn's endpoint reason to unknown and a final's speaker to user, and forwards a barge-in", () => {
+    const { session, events, collector } = onSession();
+    session.emit('user_input_transcribed', { transcript: 'Wait.', isFinal: true, createdAt: 1 });
+    session.emit('conversation_item_added', { item: { role: 'user', text: 'Wait.', source: 'client' }, createdAt: 2 });
+    session.emit('barge_in', { speechDurationMs: 300, interruptedText: 'It is booked for', playedDurationMs: 800, action: 'cancel', createdAt: 3 });
+
+    expect(collector.getLastSpeaker()).toBe('user');
+    expect(events.slice(1)).toEqual([
+      { type: 'voice_turn_complete', nodeId: 'test-node', transcript: 'Wait.', turnIndex: 1, endpointReason: 'unknown' },
+      { type: 'voice_barge_in', nodeId: 'test-node', interruptedText: 'It is booked for', userSpeech: '' },
+    ]);
+  });
+});
+
+describe('VoiceTurnCollector.dispose', () => {
+  it.each(['relayed', 'session'] as const)('removes every listener it added to a session read as %s, and stops collecting', (names) => {
+    const session = new EventEmitter();
+    const events: any[] = [];
+    const collector = new VoiceTurnCollector(session, (evt) => events.push(evt), 'test-node', 0, { events: names });
+    expect(session.eventNames().length).toBeGreaterThan(0);
+
+    collector.dispose();
+    collector.dispose();
+    expect(session.eventNames()).toEqual([]);
+    session.emit('turn_complete', { transcript: 'Late.', reason: 'silence' });
+    session.emit('conversation_item_added', { item: { role: 'user', text: 'Late.', source: 'speech' }, createdAt: 1 });
+    expect(events).toEqual([]);
+    expect(collector.getTurnCount()).toBe(0);
+  });
+});

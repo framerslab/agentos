@@ -268,9 +268,12 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * outside a pause, has stalled: what it had not played is discarded and the wait rejects with
    * `publisher drain timeout`. A capture that does not return within the same bound, whoever waits for it, makes the
    * transport emit `livekit output stalled` and close, once the control messages already waiting have gone out. A
-   * listen-only transport resolves at once.
+   * listen-only transport resolves at once. An aborted `signal` rejects the wait at once
+   * (`publisher playout wait aborted`), as a session aborts it when a barge-in cuts the reply or the session closes.
+   *
+   * @param signal - Ends the wait when aborted.
    */
-  async waitForPlayout(): Promise<void> { await this.publisher?.waitForPlayout(); }
+  async waitForPlayout(signal?: AbortSignal): Promise<void> { await this.publisher?.waitForPlayout(signal); }
   /** Discards only this physical path's queued output; a closed path must finish native cleanup. */
   async clearPlayback(generation: VoiceGeneration): Promise<void> {
     if (this._state === 'closed') { await this.closing; return; }

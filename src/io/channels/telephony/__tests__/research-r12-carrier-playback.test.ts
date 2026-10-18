@@ -120,7 +120,8 @@ describe('carrier playback under the voice pipeline without a call profile', () 
       for (const name of written) p.ws.emit('message', JSON.stringify({ event: 'mark', streamSid: 's', mark: { name } }));
       expect(p.played).toEqual(written);
       p.tts.emit('flush_complete');
-      expect(p.runtime.state).toBe('listening');
+      // The transport offers no waitForPlayout(), so the pipeline holds the floor for the reply's 60 ms of audio.
+      await vi.waitFor(() => expect(p.runtime.state).toBe('listening'));
       await settle();
       expect(p.errors).toEqual([]);
     } finally { await p.runtime.stopSession(); }

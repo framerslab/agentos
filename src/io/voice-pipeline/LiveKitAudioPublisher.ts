@@ -537,7 +537,9 @@ export class LiveKitAudioPublisher {
    * it waits, has been captured or discarded, and the track's native queue has played out
    * (`AudioSource.waitForPlayout()`). A pause holds it while chunks wait for the track; a queue that a clear, a pause
    * or a close emptied counts as played out, and in participant playout the participant's receipt is not waited for.
-   * A clear or a close ends it at once.
+   * A clear or a close ends it at once, and so does an aborted `signal`, as a session aborts it when a barge-in cuts
+   * the reply or the session closes: the wait rejects at once with `publisher playout wait aborted`, and the track
+   * plays on.
    *
    * The wait is bounded: a track that takes no frame, and does not play its queue out, for `receiptTimeoutMs` plus
    * `maxDurationMs` while no pause holds it has stalled; the clock starts once the track is published and its first
@@ -547,8 +549,28 @@ export class LiveKitAudioPublisher {
    * wait does. A single capture that has not returned within `receiptTimeoutMs` plus `maxDurationMs` is given up,
    * whoever waits for it: its chunk's send rejects with `publisher capture stalled`, a close no longer waits for it,
    * and the transport closes its path.
+   *
+   * @param signal - Ends the wait when aborted.
    */
-  async waitForPlayout(): Promise<void> {
+  async waitForPlayout(signal?: AbortSignal): Promise<void> {
+    if (!signal) return this.drainPlayout();
+    if (signal.aborted) throw new Error('publisher playout wait aborted');
+    let abort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(new Error('publisher playout wait aborted'));
+      signal.addEventListener('abort', abort, { once: true });
+    });
+    const drained = this.drainPlayout();
+    // A drain that fails after the wait was aborted has no one to tell.
+    drained.catch(() => {});
+    try {
+      await Promise.race([drained, aborted]);
+    } finally {
+      if (abort) signal.removeEventListener('abort', abort);
+    }
+  }
+  /** Waits until every chunk admitted so far, and any admitted meanwhile, has left the track ({@link waitForPlayout}). */
+  private async drainPlayout(): Promise<void> {
     const stalls = this.stalls;
     for (;;) {
       const queued = this.queued; const sending = this.sending; const cancellation = this.cancellation;
