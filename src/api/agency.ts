@@ -234,6 +234,11 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   const secretsHolder: { list: readonly string[] } = { list: [] };
   /** An error masked in place where its strings can be written (its class and shape stay), else a masked plain Error. */
   const mask = createErrorMask(secretsHolder);
+  // The list holds what the config writes, the defaults and the provider
+  // variables from construction, before any seating: the agency's own
+  // `agentStart` fires before the first call is seated, and a callback that
+  // throws a configured key there is written to the host's logger masked.
+  if (pooled) secretsHolder.list = collectCallSecrets(opts, []);
   /** A masked stand-in that never writes `error`: for an error someone else owns, a HITL handler's. */
   const maskedCopy = (error: unknown): unknown => (pooled ? maskedCopyOf(error, secretsHolder.list) : error);
   const toError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
