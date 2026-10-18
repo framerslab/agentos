@@ -2290,8 +2290,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       span?.setAttribute('llm.provider', resolved.providerId);
       span?.setAttribute('llm.model', resolved.modelId);
 
-      const tools = adaptTools(opts.tools);
-      const toolMap = new Map<string, ITool>();
+      let tools = adaptTools(opts.tools);
+      let toolMap = new Map<string, ITool>();
       for (const t of tools) toolMap.set(t.name, t);
 
       // Build messages
@@ -2364,13 +2364,26 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
       span?.setAttribute('agentos.api.tool_count', tools.length);
 
-      const toolSchemas =
-        tools.length > 0
-          ? tools.map((t) => ({
+      const toolSchemasOf = (list: ITool[]) =>
+        list.length > 0
+          ? list.map((t) => ({
               type: 'function' as const,
               function: { name: t.name, description: t.description, parameters: t.inputSchema },
             }))
          : undefined;
+      let toolSchemas = toolSchemasOf(tools);
+      // A table that grew since the call started is read again before a later
+      // step: a hierarchical manager's spawn_specialist writes delegate_to_<role>
+      // into the table the manager was given, and the manager's next step
+      // sends the new tool and runs it when the model calls it. A table whose
+      // names are unchanged keeps the tools of the first read.
+      const refreshTools = (): void => {
+        const current = adaptTools(opts.tools);
+        if (current.length === tools.length && current.every((t, i) => t.name === tools[i].name)) return;
+        tools = current;
+        toolMap = new Map(current.map((t) => [t.name, t]));
+        toolSchemas = toolSchemasOf(current);
+      };
 
       // A catalog model is sent only a request it can hold: otherwise the
       // call throws in place of the send and the walk moves on. Checked on
@@ -2639,6 +2652,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       for (let step = 0; step < maxSteps; step++) {
         // No step starts once the caller's signal has aborted.
         opts.abortSignal?.throwIfAborted();
+        if (step > 0) refreshTools();
         // The step's index in the whole call: a fallback leg that continues
         // after completed tool rounds numbers on from them.
         const runStep = stepOffset + step;

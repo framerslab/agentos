@@ -816,6 +816,13 @@ copies it at the start of each run, so the specialist is gone in the next
 `'shared'`) is accepted and not read, so no tier keeps a specialist past its
 run.
 
+The manager's tool table is read again before each of its steps, so
+`delegate_to_<role>` is in the manager's next request and runs when the manager
+calls it. The same holds for any tool that a tool's `execute` adds to the table
+an `agent()` was given, in `generate()` and in `stream()`. The prompt shim (a
+model without native tool calls) reads its tool list once at the start of the
+call, so a specialist spawned under it cannot be delegated to in that run.
+
 | `planner` field | Default | Effect |
 |---|---|---|
 | `maxSpecialists` | `5` | Hard cap on **successful** synthesis count per run. Past the cap, `spawn_specialist` returns an error to the manager. |

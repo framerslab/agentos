@@ -511,9 +511,14 @@ export function compileHierarchical(
         `Use the delegate_to_<name> tools to assign work. Synthesize their outputs into a final answer.` +
         (agencyConfig.instructions ? `\n\n${agencyConfig.instructions}` : '');
 
-      // Merge agency-level tools with the delegation tools. Agency tools
-      // (e.g. shared search, calculator) are available alongside delegation.
+      // The agency's tools (a shared search, a calculator) join the
+      // delegation table itself, a delegate winning a name clash, and the
+      // manager is given that table, not a copy: spawn_specialist writes
+      // delegate_to_<role> into it mid-run, and the manager's next step reads
+      // the table again, so a copy taken here would hide every spawned
+      // specialist from the manager.
       const mergedTools = mergeAdaptableTools(agencyConfig.tools, agentTools);
+      if (mergedTools) Object.assign(agentTools, mergedTools);
 
       const manager = createAgent({
         model: agencyConfig.model,
@@ -521,7 +526,7 @@ export function compileHierarchical(
         apiKey: agencyConfig.apiKey,
         baseUrl: agencyConfig.baseUrl,
         instructions: managerInstructions,
-        tools: mergedTools,
+        tools: mergedTools ? agentTools : undefined,
         // Higher maxSteps than default because the manager needs room to
         // call multiple delegation tools before synthesizing.
         maxSteps: agencyConfig.maxSteps ?? 10,
