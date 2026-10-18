@@ -187,6 +187,32 @@ type Raced<T> =
  * it. A signal that has already aborted ends the race at once. A late
  * settlement is swallowed.
  */
+/** The members an abort signal is read and listened to by, whatever realm or polyfill built it. */
+type AbortSignalLike = Pick<AbortSignal, 'aborted' | 'reason'> & {
+  addEventListener(type: 'abort', listener: () => void): void;
+  removeEventListener(type: 'abort', listener: () => void): void;
+};
+
+/** Whether `value` says whether it has aborted and fires `abort`: an AbortSignal of this realm, of another, or a polyfill's. */
+const isAbortSignalLike = (value: unknown): value is AbortSignalLike =>
+  isRecord(value) && typeof value.aborted === 'boolean' && typeof value.addEventListener === 'function' && typeof value.removeEventListener === 'function';
+
+/**
+ * Aborts `stop` with `signal`'s reason when `signal` aborts, at once when it
+ * already has. Returns what unlinks them, for when the seat has settled, so a
+ * long-lived caller signal keeps no listener per seat.
+ */
+function linkAbort(signal: AbortSignalLike | undefined, stop: AbortController): () => void {
+  if (!signal) return () => undefined;
+  const relay = (): void => stop.abort(signal.reason);
+  if (signal.aborted) {
+    relay();
+    return () => undefined;
+  }
+  signal.addEventListener('abort', relay);
+  return () => signal.removeEventListener('abort', relay);
+}
+
 async function withDeadline<T>(work: Promise<T>, ms: number | undefined, signal?: AbortSignal): Promise<Raced<T>> {
   const settled = work.then(
     (value): Raced<T> => ({ timedOut: false, value }),
@@ -362,10 +388,11 @@ export function compilePanel(
     delete callOpts.__approvalGate;
     const requested = callOpts.requestTimeout;
     const callTimeout = typeof requested === 'number' ? requested : undefined;
-    // The caller's abort signal, which every seat's own stop is linked to. A value
-    // that is no AbortSignal cannot be linked: it rides on to the seats as given.
-    const callerSignal = callOpts.abortSignal;
-    const linkable = callerSignal === undefined || callerSignal instanceof AbortSignal;
+    // The caller's abort signal, which every seat's own stop is linked to by
+    // its `abort` event: a signal from another realm or a polyfill's, which no
+    // `instanceof` check of this realm recognizes, links the same way. A value
+    // that fires no such event is no signal, and the seats run on their own stops.
+    const callerSignal = isAbortSignalLike(callOpts.abortSignal) ? callOpts.abortSignal : undefined;
     const sem = semaphore(panelOpts.concurrency ?? Number.POSITIVE_INFINITY);
     const seatNames = Object.keys(agencyConfig.agents);
     const records = new Map<string, PanelSeatRecord>();
@@ -416,16 +443,13 @@ export function compilePanel(
       // Once this seat has settled, the notifications of its gates are dropped.
       const ownerOn = droppedOnceSettled(on, () => slot.settled);
       const stop = new AbortController();
-      const signal = !linkable
-        ? undefined
-        : callerSignal instanceof AbortSignal
-          ? AbortSignal.any([callerSignal, stop.signal])
-          : stop.signal;
+      const signal = stop.signal;
+      const unlink = linkAbort(callerSignal, stop);
       // An async boundary of its own: a generate that throws synchronously
       // rejects this promise, and cannot escape the seat or keep its slot.
       const work = (async (): Promise<Outcome> => {
         // A seat that takes its slot after the caller's abort asks no approval and sends nothing.
-        if (signal?.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
+        if (signal.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
         const decision = await checkBeforeAgent(owner, input, agentCalls.slice(), { ...agencyConfig, on: ownerOn });
         if (decision && !decision.approved) {
           return { kind: 'rejected', reason: decision.reason ?? 'rejected by HITL', durationMs: elapsed() };
@@ -458,7 +482,7 @@ export function compilePanel(
         const gate = gateFor(owner, slot, ownerOn);
         if (gate) agentOpts.__approvalGate = gate;
         if (requestTimeout !== undefined) agentOpts.requestTimeout = requestTimeout;
-        if (signal) agentOpts.abortSignal = signal;
+        agentOpts.abortSignal = signal;
         // Our deadline is the smallest bound: a timeout then says nothing about
         // the provider, and the flag keeps it off the breaker. A received flag
         // rides on only with the received requestTimeout it was set for.
@@ -469,7 +493,7 @@ export function compilePanel(
         return { kind: 'returned', result: isRecord(result) ? result : {}, durationMs: elapsed() };
       })();
       work.catch(() => undefined);
-      const raced = await withDeadline(work, remaining(), signal);
+      const raced = await withDeadline(work, remaining(), signal).finally(unlink);
       if (raced.timedOut) {
         // Settled first: from here on the seat's gates drop their notifications and skip every tool.
         slot.settled = true;

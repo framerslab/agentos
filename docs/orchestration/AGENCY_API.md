@@ -407,11 +407,12 @@ Every credential of eight characters or more that the call can send (from the
 config, a default or the environment; a comma-separated key pool part by part;
 a pre-built seat's own key, URL and hops, a nested agency's level, pool, seats
 and chair included) is replaced with `[redacted]` in the result's text,
-`agentCalls` (outputs, tool arguments and results), `toolCalls`,
-`transcriptDelta`, seat records, thrown errors (message, stack, cause and
-details), `on.error` and `agentEnd` payloads, the provenance trail, stream
-parts (a secret split between two text chunks is masked whole; every other
-string of a part too), tool errors and tool turns (a tool result that holds a
+`agentCalls` (outputs, tool arguments and results, an Error a tool returned
+as its output included), `toolCalls`, `transcriptDelta`, seat records, thrown
+errors (message, stack, cause and details), `on.error` and `agentEnd`
+payloads, the provenance trail, stream parts (a secret split between two text
+chunks, or around a tool call and its result between two steps, is masked
+whole; every other string of a part too), tool errors and tool turns (a tool result that holds a
 credential reaches the seat's next request masked; a successful result is
 masked by the listed values alone, so a URL it returns keeps its query and
 credentials as the tool gave them, while a failed tool's text also loses any
@@ -447,7 +448,9 @@ by its deadline is aborted: its request in flight ends, no further step or hop
 starts, and the timeout does not count against the provider's breaker. The
 caller's `abortSignal` settles every seat at once, a seat waiting on its
 approval included, and the call rejects with the panel's ledger error carrying
-the abort's reason.
+the abort's reason. A signal from another realm or a polyfill's, which no
+`instanceof` check of this realm recognizes, is linked to each seat's stop by
+its `abort` event the same way.
 
 The quorum counts the healthy seats (status `ok`): `minAgents` defaults to 2
 for a roster of two or more and to 0 for a roster of one; `minProviders` counts

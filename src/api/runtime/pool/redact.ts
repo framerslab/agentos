@@ -144,6 +144,8 @@ export interface ChunkRedactor {
   push(chunk: string): string;
   /** Returns the masked text still held, at the end of the stream. */
   flush(): string;
+  /** The tail still held, as it came: text that could start a secret. For a reader that keeps what arrives behind it in order. */
+  held(): string;
 }
 
 /**
@@ -189,6 +191,9 @@ export function createChunkRedactor(getSecrets: () => readonly string[]): ChunkR
       const out = redactSecrets(pending, getSecrets());
       pending = '';
       return out;
+    },
+    held(): string {
+      return pending;
     },
   };
 }
@@ -513,33 +518,42 @@ export function createErrorMask(holder: { list: readonly string[] }): CallMask {
 
 /**
  * A copy of `value` with every string redacted, at any depth of plain objects
- * and arrays (a conversation delta, a tool-call list). Anything else, a class
- * instance or a typed array, comes back as it is. Finalization uses it where
- * the tool loops cannot mask: on what a pre-built seat returns.
+ * and arrays (a conversation delta, a tool-call list). An Error inside it from
+ * which a secret can be reached (one a tool returned as its output, its
+ * message or cause holding a key) is replaced by its masked stand-in
+ * ({@link maskedCopyOf}); a clean Error, any other class instance and a typed
+ * array come back as they are. Finalization uses it where the tool loops
+ * cannot mask: on what a pre-built seat returns.
  *
  * @param value - A record made of plain objects, arrays and strings.
  * @param secrets - The call's redaction list.
  * @returns The redacted copy; `value` itself when the list is empty.
  */
 export function redactStrings<T>(value: T, secrets: readonly string[]): T {
-  return secrets.length === 0 ? value : copyStrings(value, (text) => redactText(text, secrets));
+  return secrets.length === 0 ? value : copyStrings(value, secrets, (text) => redactText(text, secrets));
 }
 
 /**
- * {@link redactStrings} with the listed values alone ({@link redactSecrets}):
- * for what a seat answers, its result and its tool calls, where a URL in a
- * reply is the reply's own.
+ * {@link redactStrings} with the listed values alone ({@link redactSecrets})
+ * for its strings: for what a seat answers, its result and its tool calls,
+ * where a URL in a reply is the reply's own. An Error inside it is replaced
+ * as {@link redactStrings} replaces it, the error mask's URL patterns
+ * included, as a failed tool's error is masked.
  *
  * @param value - A record made of plain objects, arrays and strings.
  * @param secrets - The call's redaction list.
  * @returns The masked copy; `value` itself when the list is empty.
  */
 export function maskStrings<T>(value: T, secrets: readonly string[]): T {
-  return secrets.length === 0 ? value : copyStrings(value, (text) => redactSecrets(text, secrets));
+  return secrets.length === 0 ? value : copyStrings(value, secrets, (text) => redactSecrets(text, secrets));
 }
 
-/** A copy of `value` with every string passed through `redact`, at any depth of plain objects and arrays. */
-function copyStrings<T>(value: T, redact: (text: string) => string): T {
+/**
+ * A copy of `value` with every string passed through `redact`, at any depth
+ * of plain objects and arrays, and every Error from which a secret can be
+ * reached replaced by its masked stand-in, one copy per Error.
+ */
+function copyStrings<T>(value: T, secrets: readonly string[], redact: (text: string) => string): T {
   const copies = new WeakMap<object, object>();
   const pending: Array<[source: object, copy: object]> = [];
   const copyOf = (item: unknown): unknown => {
@@ -547,6 +561,13 @@ function copyStrings<T>(value: T, redact: (text: string) => string): T {
     if (!isObject(item)) return item;
     const known = copies.get(item);
     if (known) return known;
+    if (item instanceof Error) {
+      // Not a plain object, so no shell copies it member by member: the error mask's stand-in carries its name, code,
+      // httpStatus and masked message and stack, and nothing it referenced; a clean error is itself.
+      const stood = maskedCopyOf(item, secrets) as object;
+      copies.set(item, stood);
+      return stood;
+    }
     const copy = shellOf(item);
     if (!copy) return item;
     copies.set(item, copy);
