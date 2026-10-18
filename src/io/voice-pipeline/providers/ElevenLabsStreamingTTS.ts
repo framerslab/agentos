@@ -8,10 +8,12 @@
  * ## ElevenLabs WebSocket Protocol
  *
  * - **Endpoint:** `wss://api.elevenlabs.io/v1/text-to-speech/{voiceId}/stream-input`
- * - **Authentication:** `xi-api-key` query parameter
+ * - **Authentication:** `xi-api-key` header
  * - **Inbound (client → ElevenLabs):** JSON text chunks `{ text: "...", ... }`
  * - **Outbound (ElevenLabs → client):** JSON with base64-encoded audio `{ audio: "...", ... }`
- * - **Flush:** Send `{ text: "" }` to signal end-of-input and flush remaining audio
+ * - **End of stream:** `{ text: "" }`, the `CloseConnection` message, ends the
+ *   stream: ElevenLabs returns the remaining audio and answers
+ *   `{ isFinal: true }`.
  *
  * ## Audio Output
  *
@@ -19,7 +21,24 @@
  * and wrapped in an {@link EncodedAudioChunk} with format `'mp3'` before being
  * emitted as an `'audio'` event.
  *
- * @see https://elevenlabs.io/docs/api-reference/websockets
+ * ## Sentence segments
+ *
+ * The session synthesizes one sentence segment at a time
+ * ({@link SegmentSynthesisQueue}). Each segment goes out on a socket of its
+ * own: the first message of a socket is the initial `{ text: " " }` with the
+ * voice and generation settings, then the segment's text, then the
+ * end-of-stream message; `isFinal` completes the segment. The end-of-stream
+ * message spends the socket, so the next segment opens a new one and closes
+ * the spent one when the server has not. The segment's boundary
+ * ({@link TtsTextBoundary}) rides on the last frame `isFinal` proves
+ * complete; every earlier frame carries none. A segment with no `isFinal`
+ * within five seconds, or whose socket closes first, ends without a boundary.
+ * A socket's close while the session is open closes nothing else (the server
+ * closes an idle socket after `inactivity_timeout`, 20 seconds by default):
+ * only `close()` ends the session. Messages of a socket that is no longer the
+ * session's current one are dropped.
+ *
+ * @see https://elevenlabs.io/docs/api-reference/text-to-speech/v-1-text-to-speech-voice-id-stream-input
  */
 
 import { EventEmitter } from 'node:events';
@@ -30,6 +49,7 @@ import type {
   StreamingTTSConfig,
   EncodedAudioChunk,
 } from '../types.js';
+import { SegmentSynthesisQueue } from './SegmentSynthesisQueue.js';
 import { ApiKeyPool } from '../../../core/providers/ApiKeyPool.js';
 import {
   defaultCapabilities,
@@ -112,10 +132,12 @@ interface ELAudioMessage {
  * by the voice pipeline orchestrator.
  */
 class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTSSession {
+  /** The current socket; `null` between segments once the server, a cancel or a close has closed it. */
   private ws: WebSocket | null = null;
+  /** Whether the current socket has been sent the end-of-stream message: a spent socket takes no further text. */
+  private spent = false;
   private closed = false;
-  private pendingFlush = false;
-  private accumulatedText = '';
+  private readonly segments: SegmentSynthesisQueue;
 
   /** Estimated bytes per second for duration calculation. MP3 at 128kbps = ~16000 bytes/sec. */
   private static readonly BYTES_PER_SEC_MP3 = 16_000;
@@ -125,13 +147,28 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
     private readonly sessionConfig: StreamingTTSConfig
   ) {
     super();
+    this.segments = new SegmentSynthesisQueue({
+      start: (segment, signal) => this.synthesize(segment.text, signal),
+      emit: (chunk) => this.emit('audio', chunk),
+      flushed: () => this.emit('flush_complete'),
+    });
   }
 
   /**
-   * Open the WebSocket connection to ElevenLabs streaming endpoint.
-   * Sends the initial BOS (beginning of stream) message with generation config.
+   * Open the first WebSocket connection to the ElevenLabs streaming endpoint
+   * and send its initial message with the generation settings.
    */
   async connect(): Promise<void> {
+    await this.open();
+  }
+
+  /**
+   * Opens a socket and sends its initial `{ text: " " }` message with the voice
+   * and generation settings; resolves once that message is sent. Rejects when
+   * the socket errors or closes before it opens. The socket becomes the
+   * session's current one as it is created.
+   */
+  private open(): Promise<WebSocket> {
     const voiceId = this.sessionConfig.voice ?? this.config.voiceId ?? 'EXAVITQu4vr4xnSDxMaL';
     const model = this.config.model ?? 'eleven_multilingual_v2';
 
@@ -146,24 +183,35 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
 
     const url = `${wsBase}/text-to-speech/${voiceId}/stream-input?${params.toString()}`;
 
-    return new Promise<void>((resolve, reject) => {
-      this.ws = new WebSocket(url, {
+    return new Promise<WebSocket>((resolve, reject) => {
+      let settled = false;
+      const ws = new WebSocket(url, {
         headers: {
           'xi-api-key': this.config.apiKey,
         },
       });
+      this.ws = ws;
+      this.spent = false;
 
-      this.ws.on('open', () => {
-        // Send BOS (beginning of stream) message with generation settings
-        // First-class expressiveness wins over legacy providerOptions per
-        // knob — same camelCase names, plain spread merge.
+      ws.on('open', () => {
+        if (settled) return;
+        settled = true;
+        // A cancel or a close while the socket opened made it no one's: it closes unused.
+        if (this.ws !== ws) {
+          ws.close(1000, 'superseded');
+          reject(new Error('elevenlabs socket superseded'));
+          return;
+        }
+        // The initial message carries the generation settings. First-class
+        // expressiveness wins over legacy providerOptions per knob: the same
+        // camelCase names, a plain spread merge.
         const opts: Record<string, unknown> = {
           ...(this.sessionConfig?.providerOptions ?? {}),
           ...(this.sessionConfig?.expressiveness ?? {}),
         };
-        this.ws!.send(
+        ws.send(
           JSON.stringify({
-            text: ' ', // Initial space triggers the stream
+            text: ' ', // The initial text must be a blank space.
             voice_settings: {
               stability: (opts.stability as number) ?? 0.5,
               similarity_boost: (opts.similarityBoost as number) ?? 0.75,
@@ -176,86 +224,109 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
             },
           })
         );
-        resolve();
+        resolve(ws);
       });
 
-      this.ws.on('error', (err) => {
-        this.emit('error', err);
-        reject(err);
+      // Before the socket opens the error rejects the open; after it, the error reaches the session's listener.
+      ws.on('error', (err: Error) => {
+        if (!settled) {
+          settled = true;
+          reject(err);
+          return;
+        }
+        if (this.ws === ws) this._emitErrorSafe(err);
       });
 
-      this.ws.on('message', (data: Buffer | string) => {
+      ws.on('message', (data: Buffer | string) => {
+        if (this.ws !== ws) return;
         this._handleMessage(typeof data === 'string' ? data : data.toString('utf-8'));
       });
 
-      this.ws.on('close', () => {
-        this.closed = true;
-        this.emit('close');
+      // A socket closes at the server's hand too (an idle one after inactivity_timeout, 20 seconds by default, or on
+      // an error). Only close() closes the session: a segment still in flight on this socket ends without a boundary.
+      ws.on('close', () => {
+        if (!settled) {
+          settled = true;
+          reject(new Error('elevenlabs ws closed before it opened'));
+        }
+        if (this.ws !== ws) return;
+        this.ws = null;
+        if (!this.closed) this.segments.abandon();
       });
     });
   }
 
-  /**
-   * Push text tokens into the TTS stream.
-   * ElevenLabs expects text to be sent as JSON messages. Text is accumulated
-   * and sent in chunks to allow the synthesis engine to produce natural-sounding
-   * speech with proper prosody across sentence boundaries.
-   */
-  pushTokens(tokens: string): void {
-    if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-    this.accumulatedText += tokens;
-
-    // Send text to ElevenLabs as it arrives — the server handles buffering
-    // and chunking for optimal synthesis quality
-    this.ws.send(JSON.stringify({ text: tokens }));
+  /** Emits `'error'` only to a listener: an unlistened EventEmitter `'error'` throws. */
+  private _emitErrorSafe(err: Error): void {
+    if (this.listenerCount('error') > 0) this.emit('error', err);
   }
 
   /**
-   * Signal end-of-text and flush remaining audio from the synthesis buffer.
-   * ElevenLabs requires an empty text message to signal EOS (end of stream).
-   * Resolves when all audio has been received (the server sends an isFinal message).
+   * The socket for the next segment: the current one while it is open and has
+   * not been sent the end-of-stream message, else a new one. A spent socket the
+   * server has not closed yet is closed here.
+   */
+  private async socket(): Promise<WebSocket> {
+    if (this.ws && !this.spent && this.ws.readyState === WebSocket.OPEN) return this.ws;
+    const old = this.ws;
+    this.ws = null;
+    if (old && old.readyState === WebSocket.OPEN) old.close(1000, 'segment complete');
+    const ws = await this.open();
+    if (this.closed) {
+      ws.close(1000, 'session closed');
+      throw new Error('elevenlabs session closed');
+    }
+    return ws;
+  }
+
+  /**
+   * Sends one segment: its text, then the end-of-stream message, on a socket of
+   * its own. A cancel or a close while the socket opens sends nothing; a socket
+   * that fails to open reaches the session's `'error'` listener and ends the
+   * segment without a boundary.
+   */
+  private async synthesize(text: string, signal: AbortSignal): Promise<void> {
+    let ws: WebSocket;
+    try {
+      ws = await this.socket();
+    } catch (err) {
+      // A cancel or a close while the socket opened is no failure.
+      if (signal.aborted || this.closed) return;
+      this._emitErrorSafe(err instanceof Error ? err : new Error(String(err)));
+      throw err;
+    }
+    if (signal.aborted || this.ws !== ws) return;
+    ws.send(JSON.stringify({ text }));
+    ws.send(JSON.stringify({ text: '' }));
+    this.spent = true;
+  }
+
+  /** Feeds the text to the segmenter; each sentence it completes is queued and synthesized in turn. */
+  pushTokens(tokens: string): void {
+    if (this.closed) return;
+    this.segments.push(tokens);
+  }
+
+  /**
+   * Queues the final, unterminated segment and resolves once every queued
+   * segment has completed or timed out; `flush_complete` goes out once, then.
+   * A cancel or a close ends the wait without `flush_complete`.
    */
   async flush(): Promise<void> {
-    if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-    this.pendingFlush = true;
-
-    // Send EOS (end of stream) — empty string signals the end of input
-    this.ws.send(JSON.stringify({ text: '' }));
-
-    // Wait for the final audio chunk or timeout
-    return new Promise<void>((resolve) => {
-      const onFlush = () => {
-        this.removeListener('_internal_flush', onFlush);
-        clearTimeout(timeout);
-        resolve();
-      };
-
-      // Safety timeout: resolve after 5s even if no final message arrives
-      const timeout = setTimeout(() => {
-        this.removeListener('_internal_flush', onFlush);
-        this.pendingFlush = false;
-        this.emit('flush_complete');
-        resolve();
-      }, 5_000);
-
-      this.on('_internal_flush', onFlush);
-    });
+    if (this.closed) return;
+    await this.segments.flush();
   }
 
   /**
-   * Cancel the current synthesis and discard any pending audio.
-   * Closes the WebSocket — a new session must be created for more synthesis.
+   * Drops the queued segments, the held frame and the segment in flight, and
+   * closes the current socket. The session stays open: the next segment opens
+   * a new socket.
    */
   cancel(): void {
-    this.pendingFlush = false;
-    this.accumulatedText = '';
-
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      // Send a close signal
-      this.ws.close(1000, 'cancelled');
-    }
+    this.segments.cancel();
+    const ws = this.ws;
+    this.ws = null;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.close(1000, 'cancelled');
   }
 
   /**
@@ -264,13 +335,11 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.segments.cancel();
 
-    if (this.ws) {
-      if (this.ws.readyState === WebSocket.OPEN) {
-        this.ws.close(1000, 'session closed');
-      }
-      this.ws = null;
-    }
+    const ws = this.ws;
+    this.ws = null;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.close(1000, 'session closed');
 
     this.emit('close');
   }
@@ -288,7 +357,7 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
     try {
       msg = JSON.parse(raw);
     } catch {
-      return; // Malformed JSON — skip
+      return; // Malformed JSON: skipped.
     }
 
     // Audio chunk received
@@ -305,22 +374,15 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
         format: 'mp3',
         sampleRate: 44100,
         durationMs,
-        text: this.accumulatedText,
+        // Legacy: the text of the segment in flight, never read as the text this frame plays.
+        text: this.segments.inFlightText,
       };
 
-      this.emit('audio', chunk);
+      this.segments.frame(chunk);
     }
 
-    // Final message — all audio has been sent
-    if (msg.isFinal) {
-      this.accumulatedText = '';
-
-      if (this.pendingFlush) {
-        this.pendingFlush = false;
-        this.emit('_internal_flush');
-        this.emit('flush_complete');
-      }
-    }
+    // The generation is complete: the held frame goes out with the segment's boundary.
+    if (msg.isFinal) this.segments.completed();
   }
 }
 
