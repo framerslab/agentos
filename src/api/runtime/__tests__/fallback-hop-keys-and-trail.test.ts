@@ -527,6 +527,32 @@ describe("a seat's mask reaches a tool's error before the next request carries i
   });
 });
 
+describe('a tool table given as a single-use iterable is read once', () => {
+  it('a generator of tools, which one read exhausts, keeps its tools on the second step of generateText and of streamText', async () => {
+    const ran: string[] = [];
+    const PING = tool('ping', async () => { ran.push('ping'); return { success: true, output: 'pong' }; });
+    const toolsOf = (call: unknown[]): string[] => (((call[0] as { tools?: Array<{ function?: { name?: string } }> }).tools) ?? []).map((t) => t.function?.name ?? '');
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['ping'])).mockResolvedValueOnce(toolCallsReply(['ping'])).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: (function* () { yield PING; })() as never, maxSteps: 5 });
+    expect(generated.text).toBe('done');
+    expect(ran).toEqual(['ping', 'ping']);
+    expect(generated.toolCalls.map((t) => t.error)).toEqual([undefined, undefined]);
+    expect(hoisted.generateCompletion.mock.calls.map(toolsOf)).toEqual([['ping'], ['ping'], ['ping']]);
+
+    ran.length = 0;
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['ping']); })
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['ping']); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: (function* () { yield PING; })() as never, maxSteps: 5 });
+    await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect(ran).toEqual(['ping', 'ping']);
+    expect((await streamed.toolCalls).map((t) => t.error)).toEqual([undefined, undefined]);
+    expect(hoisted.generateCompletionStream.mock.calls.map(toolsOf)).toEqual([['ping'], ['ping'], ['ping']]);
+  });
+});
+
 describe("a stream's fallback names who answered, whichever way the stream ends", () => {
   const served = (ok: boolean) => ({
     fired: false,
