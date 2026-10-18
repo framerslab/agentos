@@ -94,7 +94,8 @@ const CREATE_INDEX_IF_NOT_EXISTS =
  * table exists, on the table the statement's name resolves to then, which is the table the statement indexes: one the
  * script has just made in the first schema on the search path, though a later schema holds a table of that name, or
  * a session's temporary table of that name where the search path reaches it first (a path that does not name
- * `pg_temp` searches the session's temporary schema before any other).
+ * `pg_temp` searches the session's temporary schema before any other). Each call may run on another connection of a
+ * pool, so a pool's connections are taken to share their session state, as the adapter's `withConnection` asks.
  */
 async function execSchemaScriptOnPostgres(adapter: StorageAdapter, script: string): Promise<void> {
   const indexes = [...script.matchAll(CREATE_INDEX_IF_NOT_EXISTS)].map((match) => ({
