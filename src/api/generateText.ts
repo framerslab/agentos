@@ -2192,7 +2192,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
    * quote or a backslash) is masked whole, and the call record holds the
    * masked output. A bare mask reads text only and leaves the value as it is.
    */
-  const maskToolValue = (output: unknown): unknown => (isCallMask(opts.__maskError) ? opts.__maskError.strings(output) : output);
+  const maskToolValue = (output: unknown): unknown => (isCallMask(opts.__maskError) ? opts.__maskError.strings(output, true) : output);
   /** A masked turn as the request carries it: the JSON it still is, else (a replacement inside what a class wrote through toJSON) the masked text as a JSON string. */
   const asJsonText = (sent: string, turn: string): string => {
     if (sent === turn) return sent;

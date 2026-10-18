@@ -496,7 +496,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         finalized.transcriptDelta = redactStrings(finalized.transcriptDelta, secrets);
       }
       if (Array.isArray(finalized.toolCalls)) {
-        finalized.toolCalls = redactStrings(finalized.toolCalls, secrets);
+        finalized.toolCalls = redactStrings(finalized.toolCalls, secrets, true);
       }
     }
 
@@ -1431,17 +1431,22 @@ function emptyUsageTotals(): UsageTotals {
   return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 }
 
+/** A finite number as it is, anything else (a count an adapter or a mask turned into a string, NaN) as undefined, so the totals' arithmetic reads numbers alone. */
+function countOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 function normalizeUsage(raw: unknown): UsageTotals {
-  const usage = (raw as Partial<UsageTotals> | undefined) ?? {};
+  const usage = (raw as Partial<Record<keyof UsageTotals, unknown>> | undefined) ?? {};
   return {
-    promptTokens: usage.promptTokens ?? 0,
-    completionTokens: usage.completionTokens ?? 0,
-    totalTokens: usage.totalTokens ?? 0,
-    costUSD: usage.costUSD,
+    promptTokens: countOf(usage.promptTokens) ?? 0,
+    completionTokens: countOf(usage.completionTokens) ?? 0,
+    totalTokens: countOf(usage.totalTokens) ?? 0,
+    costUSD: countOf(usage.costUSD),
     // Preserve cache-token fields from the source. Undefined stays
     // undefined so consumers distinguish "not reported" from "zero".
-    cacheReadTokens: usage.cacheReadTokens,
-    cacheCreationTokens: usage.cacheCreationTokens,
+    cacheReadTokens: countOf(usage.cacheReadTokens),
+    cacheCreationTokens: countOf(usage.cacheCreationTokens),
   };
 }
 

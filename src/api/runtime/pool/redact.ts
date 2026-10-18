@@ -489,8 +489,14 @@ export interface CallMask {
   (error: unknown): unknown;
   /** `text` with every listed secret replaced ({@link redactSecrets}). */
   text(text: string): string;
-  /** A copy of a record of plain objects and arrays with every string masked as {@link CallMask.text} masks it. */
-  strings<T>(value: T): T;
+  /**
+   * A copy of a record of plain objects and arrays with every string masked as
+   * {@link CallMask.text} masks it. With `numbers`, for what a tool returns, a
+   * number whose digits hold a listed value becomes the string `[redacted]`;
+   * without it every number stays: a usage count, a duration or a timestamp is
+   * the library's own and never a key.
+   */
+  strings<T>(value: T, numbers?: boolean): T;
   /** A {@link ChunkRedactor} for one stream of text. */
   chunks(): ChunkRedactor;
 }
@@ -511,15 +517,15 @@ export function isCallMask(mask: unknown): mask is CallMask {
 export function createErrorMask(holder: { list: readonly string[] }): CallMask {
   const mask = ((error: unknown) => maskError(error, holder.list)) as CallMask;
   mask.text = (text) => redactSecrets(text, holder.list);
-  mask.strings = (value) => maskStrings(value, holder.list);
+  mask.strings = (value, numbers) => maskStrings(value, holder.list, numbers);
   mask.chunks = () => createChunkRedactor(() => holder.list);
   return mask;
 }
 
 /**
  * A copy of `value` with every string redacted, at any depth of plain objects
- * and arrays (a conversation delta, a tool-call list), and every number whose
- * digits hold a secret replaced by the string `[redacted]`. An Error inside it from
+ * and arrays (a conversation delta, a tool-call list), and, with `numbers`,
+ * every number whose digits hold a secret replaced by the string `[redacted]`. An Error inside it from
  * which a secret can be reached (one a tool returned as its output, its
  * message or cause holding a key) is replaced by its masked stand-in
  * ({@link maskedCopyOf}); a clean Error, any other class instance and a typed
@@ -528,10 +534,11 @@ export function createErrorMask(holder: { list: readonly string[] }): CallMask {
  *
  * @param value - A record made of plain objects, arrays and strings.
  * @param secrets - The call's redaction list.
+ * @param numbers - Whether a number whose digits hold a secret is replaced: for what a tool returns, never for the library's own counts.
  * @returns The redacted copy; `value` itself when the list is empty.
  */
-export function redactStrings<T>(value: T, secrets: readonly string[]): T {
-  return secrets.length === 0 ? value : copyStrings(value, secrets, (text) => redactText(text, secrets));
+export function redactStrings<T>(value: T, secrets: readonly string[], numbers = false): T {
+  return secrets.length === 0 ? value : copyStrings(value, secrets, (text) => redactText(text, secrets), numbers);
 }
 
 /**
@@ -543,26 +550,29 @@ export function redactStrings<T>(value: T, secrets: readonly string[]): T {
  *
  * @param value - A record made of plain objects, arrays and strings.
  * @param secrets - The call's redaction list.
+ * @param numbers - Whether a number whose digits hold a secret is replaced: for what a tool returns, never for the library's own counts.
  * @returns The masked copy; `value` itself when the list is empty.
  */
-export function maskStrings<T>(value: T, secrets: readonly string[]): T {
-  return secrets.length === 0 ? value : copyStrings(value, secrets, (text) => redactSecrets(text, secrets));
+export function maskStrings<T>(value: T, secrets: readonly string[], numbers = false): T {
+  return secrets.length === 0 ? value : copyStrings(value, secrets, (text) => redactSecrets(text, secrets), numbers);
 }
 
 /**
  * A copy of `value` with every string passed through `redact`, at any depth
- * of plain objects and arrays, every number whose digits hold a secret
- * replaced by the string `[redacted]`, and every Error from which a secret can
- * be reached replaced by its masked stand-in, one copy per Error.
+ * of plain objects and arrays, with `numbers` every number whose digits hold a
+ * secret replaced by the string `[redacted]`, and every Error from which a
+ * secret can be reached replaced by its masked stand-in, one copy per Error.
  */
-function copyStrings<T>(value: T, secrets: readonly string[], redact: (text: string) => string): T {
+function copyStrings<T>(value: T, secrets: readonly string[], redact: (text: string) => string, numbers: boolean): T {
   const copies = new WeakMap<object, object>();
   const pending: Array<[source: object, copy: object]> = [];
   const copyOf = (item: unknown): unknown => {
     if (typeof item === 'string') return redact(item);
-    // A number whose digits hold a listed value (a tool that returns a numeric key) comes back as the string
-    // `[redacted]`: left as it is, its serialized form would be masked into no JSON.
-    if (typeof item === 'number') return holds(String(item), secrets) ? '[redacted]' : item;
+    // With `numbers`, a number whose digits hold a listed value (a tool that returns a numeric key) comes back as
+    // the string `[redacted]`: left as it is, its serialized form would be masked into no JSON. Without it a number
+    // stays: a usage count, a duration or a timestamp is the library's own, and a count turned into a string would
+    // be summed as one.
+    if (typeof item === 'number') return numbers && holds(String(item), secrets) ? '[redacted]' : item;
     if (!isObject(item)) return item;
     const known = copies.get(item);
     if (known) return known;
