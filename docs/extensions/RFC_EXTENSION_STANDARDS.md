@@ -66,9 +66,9 @@ A tool implements [`ITool`](https://github.com/framerslab/agentos/blob/master/sr
 `ToolExecutor` checks a call's arguments against `inputSchema` before `execute` runs, and a successful result's output against `outputSchema`, with Ajv, which reads a schema as JSON Schema draft-07:
 
 - It reports every error, coerces a value to the type its schema names where it can (`"5"` to 5, the output itself included), and fills in a `default` the schema gives.
-- It checks the standard formats (`date-time`, `email`, `uri` and the others of `ajv-formats`). It passes over a keyword it does not know, as JSON Schema says to, and a format it does not know, with a warning in the log when it compiles the schema.
+- It checks the standard formats (`date-time`, `email`, `uri` and the others of `ajv-formats`). It passes over a keyword it does not know, as JSON Schema says to, and a format it does not know, which it names in the log when it compiles the schema.
 - A schema compiles on the first call that reads it, once for as long as its object lives. Two tools may each hold a copy of one schema under a shared `$id`, and a tool registered again may bring a new copy.
-- A schema that does not compile fails the call with an error that names the schema's fault and `details.code` `SYS_CONFIGURATION_ERROR`. Such faults are a `type` that is no JSON Schema type, a `$schema` that names a draft other than draft-07, the draft-07 meta-schema's own `$id`, or `$async`. For an input schema the tool does not run; for an output schema the tool has run, and the result keeps its output.
+- A schema that does not compile, such as one whose `type` is no JSON Schema type, whose `$schema` names a draft other than draft-07, that takes the draft-07 meta-schema's own `$id` or that is marked `$async`, fails the call with an error that names the schema's fault and `details.code` `SYS_CONFIGURATION_ERROR`. For an input schema the tool does not run. For an output schema the tool has run: the executor's result keeps its output, as it does for an output that fails its schema, and `ToolOrchestrator`, which the runtime calls tools through, answers the failed call with `output: null`, the error and its details.
 
 ```typescript
 // src/tools/webSearch.ts

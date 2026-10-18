@@ -231,8 +231,9 @@ export interface ITool<TInput extends Record<string, any> = any, TOutput = any> 
    * consumers of the tool's result (including other tools or the GMI), and can aid the LLM
    * in understanding what to expect back from the tool.
    * `ToolExecutor` checks a successful result's output against it, read as JSON Schema draft-07, and answers the
-   * output as the check coerced it. An output that fails it, or an output schema that does not compile, fails the call
-   * with the output kept.
+   * output as the check coerced it. An output that fails it, or an output schema that does not compile, fails the call:
+   * the executor's result keeps the output, and `ToolOrchestrator`, which the runtime calls tools through, answers the
+   * call with `output: null`, the error and its details.
    * @type {JSONSchemaObject | undefined}
    * @optional
    * @readonly

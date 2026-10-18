@@ -44,7 +44,7 @@ const assistant = {
   baseSystemPrompt: 'You answer with your tools.',
 } as unknown as IPersonaDefinition;
 
-/** A model step that calls the tools given, in order. */
+/** A completion step that calls the tools given, in order. */
 const toolCalls = (calls: Array<{ id: string; name: string; args: Record<string, unknown> }>): Array<Record<string, unknown>> => [
   {
     isFinal: true,
@@ -61,6 +61,7 @@ const toolCalls = (calls: Array<{ id: string; name: string; args: Record<string,
   },
 ];
 
+/** Boots the full runtime with the stubbed OpenAI provider and the one persona; `extra` adds to its config (`tools`). */
 async function boot(extra: Record<string, unknown> = {}): Promise<AgentOS> {
   return AgentOS.create({
     modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'test' } }] },
@@ -69,10 +70,11 @@ async function boot(extra: Record<string, unknown> = {}): Promise<AgentOS> {
     ...extra,
   } as any);
 }
+/** Sends one turn in a session and reads its stream to the end. */
 async function send(os: AgentOS, sessionId: string): Promise<void> {
   for await (const _chunk of os.processRequest({ userId: 'ana', sessionId, textInput: 'Go.', selectedPersonaId: 'assistant' } as any)) { /* drain */ }
 }
-/** The content of the tool messages one model call received, in order. */
+/** The content of the tool messages one completion call received, in order. */
 const toolMessages = (messages: Array<{ role: string; content: unknown }> | undefined): string[] =>
   (messages ?? []).filter((m) => m.role === 'tool').map((m) => String(m.content));
 
@@ -115,5 +117,22 @@ describe('tool calls checked against their JSON Schemas on the full runtime', ()
     expect(results[0]).toContain('"echoed":"hi"');
     expect(results[1]).toContain('"shouted":"HI"');
     expect(results[2]).toContain("Invalid arguments for tool 'shout'");
+  });
+
+  it("answer a tool whose output schema does not compile with the schema's error, after the tool has run", async () => {
+    const execute = vi.fn(async () => ({ success: true, output: { text: 'hi' } }));
+    // 'nonsense' is no JSON Schema type.
+    const odd = {
+      id: 'odd-v1', name: 'odd', displayName: 'Odd', description: 'Answers with an output its schema cannot check.',
+      inputSchema: { type: 'object', properties: {} }, outputSchema: { type: 'nonsense' }, execute,
+    };
+    booted = await boot({ tools: { odd } });
+    provider.replies.push(toolCalls([{ id: 'call-odd', name: 'odd', args: {} }]));
+    await send(booted, 's-odd');
+    expect(execute).toHaveBeenCalledTimes(1);
+    const results = toolMessages(provider.seenMessages[1]);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toContain("Error from tool 'odd'");
+    expect(results[0]).toContain("The output schema of tool 'odd' does not compile");
   });
 });

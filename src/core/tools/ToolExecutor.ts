@@ -393,7 +393,8 @@ export class ToolExecutor {
         try {
           validateOutput = this.schemaChecks.check(tool.outputSchema);
         } catch (schemaError: any) {
-          // The tool has run, and its output cannot be checked: the call fails, with the output kept for the host.
+          // The tool has run, and its output cannot be checked: the call fails. Its result keeps the output, as a failed
+          // output check's does; ToolOrchestrator answers a failed call with `output: null`, the error and the details.
           const schemaErrorMsg = `The output schema of tool '${tool.name}' does not compile: ${schemaError?.message ?? String(schemaError)}`;
           console.error(`${logContext}: ${schemaErrorMsg}`);
           return {
