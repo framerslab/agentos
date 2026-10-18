@@ -51,4 +51,17 @@ describe('validatePoolOptions', () => {
     // The same hop with its key: two seats, two providers.
     expect(() => validatePoolOptions(opts({ agents: { ...keyless, a: { ...openai, fallbackProviders: [anthropicHop] } }, chair: false, quorum: { minProviders: 2 } }), 'panel')).not.toThrow();
   });
+  it('the bound is what one assignment of the seats can answer with: a seat that reaches three providers beside two seats on one does not make three, and a hop on the second seat does; the vendors the same way', () => {
+    const openai = { provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-oai-00000002', instructions: 'x' };
+    const anthropicHop = { provider: 'anthropic', model: 'claude-opus-5-5', apiKey: 'sk-ant-00000001' };
+    const geminiHop = { provider: 'gemini', model: 'gemini-2.5-flash', apiKey: 'gem-00000003' };
+    // Three providers within reach and three seats, yet seat a answers with one of them: at most two distinct providers in a run.
+    const wide = { a: { ...openai, fallbackProviders: [anthropicHop, geminiHop] }, b: { ...openai, instructions: 'y' }, c: { ...openai, instructions: 'z' } };
+    expect(() => validatePoolOptions(opts({ agents: wide, chair: false, quorum: { minProviders: 3 } }), 'panel')).toThrow(/minProviders \(3\) is above the 2 /);
+    expect(() => validatePoolOptions(opts({ agents: wide, chair: false, quorum: { minVendors: 3 } }), 'panel')).toThrow(/minVendors \(3\) is above the 2 /);
+    expect(() => validatePoolOptions(opts({ agents: wide, chair: false, quorum: { minProviders: 2, minVendors: 2 } }), 'panel')).not.toThrow();
+    // Seat b's own hop lets a answer on Gemini, b on Anthropic and c on OpenAI.
+    const assignable = { ...wide, b: { ...openai, instructions: 'y', fallbackProviders: [anthropicHop] } };
+    expect(() => validatePoolOptions(opts({ agents: assignable, chair: false, quorum: { minProviders: 3, minVendors: 3 } }), 'panel')).not.toThrow();
+  });
 });
