@@ -1544,6 +1544,8 @@ describe('25-26. approvals under panel and nested agencies', () => {
 
 describe('24. a tool table that grows mid-call', () => {
   const toolNames = (c: Captured): string[] => ((c.body?.tools ?? []) as Json[]).map((t) => t.function?.name as string);
+  /** The stream read to its end, then its text: streamText's promises settle once a consumer has read the stream, and `text` awaited alone starts no request (27 below). */
+  const drained = async (st: { fullStream: AsyncIterable<unknown>; text: Promise<string> }): Promise<string> => { for await (const part of st.fullStream) void part; return st.text; };
   it.each(['generate', 'stream'] as const)("a tool that a tool's execute adds to the table is in the next step's request and runs when the model calls it, in %s()", async (api) => {
     vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
     const ran: string[] = [];
@@ -1556,7 +1558,7 @@ describe('24. a tool table that grows mid-call', () => {
     let turn = 0;
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, (req) => { turn += 1; return turn === 1 ? openaiToolCall('add_tool', {}, 'c1')(req) : turn === 2 ? openaiToolCall('second', {}, 'c2')(req) : openaiText('done')(req); }]]);
     const a = agent({ provider: 'openai', model: 'gpt-4.1', instructions: 'x', tools: table as never, maxSteps: 5 });
-    const text = api === 'generate' ? (await a.generate('go')).text : await a.stream('go').text;
+    const text = api === 'generate' ? (await a.generate('go')).text : await drained(a.stream('go'));
     expect(text).toBe('done');
     expect(ran).toEqual(['second']);
     expect(calls(OPENAI_CHAT, 'POST').map(toolNames)).toEqual([['add_tool'], ['add_tool', 'second'], ['add_tool', 'second']]);
@@ -1582,5 +1584,27 @@ describe('24. a tool table that grows mid-call', () => {
     expect(JSON.stringify(managerRequests[2].body!.messages)).toContain('helped');
     expect(JSON.stringify(managerRequests[2].body!.messages)).not.toContain('not found');
     expect(r.agentCalls.map((c) => [c.agent, c.output])).toEqual([['helper', 'helped']]);
+  });
+});
+
+describe('27. a stream is read before its promises settle', () => {
+  it("a bare agent stream's text awaited alone sends no request and stays pending; reading the stream sends it and settles text and toolCalls", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('done')]]);
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', instructions: 'x' });
+    const st = a.stream('go');
+    let settled = false;
+    void st.text.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // streamText's contract: the request goes out when a consumer reads the stream, not when one of its promises is
+    // awaited; a promise awaited alone never settles, so a caller that wants only the text reads the stream first.
+    expect(calls(OPENAI_CHAT, 'POST')).toHaveLength(0);
+    expect(settled).toBe(false);
+    const chunks: string[] = [];
+    for await (const chunk of st.textStream) chunks.push(chunk);
+    expect(chunks.join('')).toBe('done');
+    expect(await st.text).toBe('done');
+    expect(await st.toolCalls).toEqual([]);
+    expect(calls(OPENAI_CHAT, 'POST')).toHaveLength(1);
   });
 });
