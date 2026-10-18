@@ -361,3 +361,66 @@ describe('VoiceNodeExecutor on a started session', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// A node that starts after the call has ended
+// ---------------------------------------------------------------------------
+
+/**
+ * What `run` settles with, or `'still waiting'` when it has not settled within 100 ms: a node that waits for an event
+ * that fired before it started never settles.
+ */
+async function settledSoon<T>(run: Promise<T>): Promise<T | 'still waiting'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waiting = new Promise<'still waiting'>((resolve) => {
+    timer = setTimeout(() => resolve('still waiting'), 100);
+  });
+  try {
+    return await Promise.race([run, waiting]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+describe('VoiceNodeExecutor when the call ended before the node started', () => {
+  it('hangs up at once on a started session that has closed, and leaves no listener behind', async () => {
+    const executor = new VoiceNodeExecutor(vi.fn());
+    const node = createVoiceNode({ maxTurns: 1 }, { hangup: 'end' });
+    const { session, transport } = startedSession();
+    session.state = 'closed';
+    const state = { scratch: { voiceSession: session } } as any;
+
+    const result = await settledSoon(executor.execute(node, state));
+
+    expect(result).toMatchObject({ success: true, routeTarget: 'end', output: { exitReason: 'hangup' } });
+    expect(session.eventNames()).toEqual([]);
+    expect(transport.eventNames()).toEqual([]);
+  });
+
+  it('hangs up at once on relayed events when the transport has closed', async () => {
+    const executor = new VoiceNodeExecutor(vi.fn());
+    const node = createVoiceNode({ maxTurns: 1 }, { hangup: 'end' });
+    const state = createState();
+    const transport = (state.scratch as any).voiceTransport as EventEmitter;
+    (transport as any).state = 'closed';
+
+    const result = await settledSoon(executor.execute(node, state));
+
+    expect(result).toMatchObject({ success: true, routeTarget: 'end', output: { exitReason: 'hangup' } });
+    expect(transport.eventNames()).toEqual([]);
+  });
+
+  it('ends at once as interrupted under a parent signal aborted before the node started', async () => {
+    const executor = new VoiceNodeExecutor(vi.fn());
+    const node = createVoiceNode({ maxTurns: 1 }, { interrupted: 'stop' });
+    const { session } = startedSession();
+    const signal = AbortSignal.abort();
+    const state = { scratch: { voiceSession: session, abortSignal: signal } } as any;
+
+    const result = await settledSoon(executor.execute(node, state));
+
+    expect(result).toMatchObject({ success: true, routeTarget: 'stop', output: { exitReason: 'interrupted' } });
+    expect(getEventListeners(signal, 'abort')).toHaveLength(0);
+    expect(session.eventNames()).toEqual([]);
+  });
+});
