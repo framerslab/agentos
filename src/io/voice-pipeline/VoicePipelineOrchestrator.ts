@@ -1348,13 +1348,18 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       call.on('state_change', (state: PipelineState) => this.stateTo(state));
       // As without a profile, a listener that throws is reported and the listeners after it still run.
       call.on('turn_complete', (event: TurnCompleteEvent) => this._emitEach(this, 'turn_complete', event));
+      // Set as the call's close goes out. The call's state reads 'closed' before that, while the session_error of a
+      // failure whose 'error' listener closed the call is still to go out ahead of close.
+      let ended = false;
       call.on('close', (closed: VoiceSessionEventMap['close']) => {
+        ended = true;
         this.stateTo('closed');
         this._emitEach(this, 'close', closed);
       });
-      // The call's session events, from its start: a host that listens here before startSession() hears it open.
+      // The call's session events, from its start: a host that listens here before startSession() hears it open. As
+      // without a profile, a listener here that closes the call ends the event there: no listener after it gets it.
       for (const name of ['agent_state_changed', 'user_state_changed', 'user_input_transcribed', 'conversation_item_added', 'speech_created', 'barge_in', 'session_error'] as const) {
-        call.on(name, (payload: unknown) => this._emitEach(this, name, payload));
+        call.on(name, (payload: unknown) => emitEach(this, name, [payload], (err, what) => this._listenerFailed(err, what, name), () => ended));
       }
       for (const name of ['gap', 'generation', 'interrupted', 'usage', 'failure', 'detached', 'reattached', 'transcript'] as const) call.on(name, (event: unknown) => this.emit(name, event));
       await call.start();

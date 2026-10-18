@@ -3,7 +3,8 @@
  * a scoped STT session, a VAD session, an audio endpoint detector, a pull-contract TTS session and a transport that
  * acknowledges each chunk's playback. One turn, one barge-in and one close emit the same events, in the same order,
  * as a session without a call profile, on the orchestrator from before `startSession()` returns and on the call's
- * own session; and a failure keeps its `Error` on `'error'` and `errorMonitor` and adds `session_error` before `close`.
+ * own session; a failure keeps its `Error` on `'error'` and `errorMonitor` and adds `session_error` before `close`;
+ * and an orchestrator listener that closes the call ends the event it was handed: no listener after it gets it.
  */
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
@@ -19,6 +20,7 @@ import type {
   ScopedStreamingSTTSession,
   StreamingTTSConfig,
   StreamingTTSSession,
+  VoiceSessionEventMap,
 } from '../types.js';
 
 /** A call over fake parts, its session started with a log of the orchestrator's session events taken from before. */
@@ -288,6 +290,27 @@ describe('session events under a call profile', () => {
     await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
 
     expect(log).toEqual(['session_error stt false', 'close stopped']);
+    // The orchestrator's listeners get the session_error too: the call reads 'closed' before it goes out.
+    expect(f.log).toEqual(['agent initializing>listening', 'session_error stt false', 'close stopped']);
+  });
+
+  it("hands an event to none of the orchestrator's later listeners once one of them closes the call", async () => {
+    const f = await call();
+    f.runtime.on('agent_state_changed', ({ newState }: VoiceSessionEventMap['agent_state_changed']) => {
+      if (newState === 'thinking') void f.runtime.stopSession('done');
+    });
+    const later = recordSessionEvents(f.runtime);
+    const own = recordSessionEvents(f.session);
+
+    f.turn();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+
+    // The agent's move to thinking reached the listener that closed the call, and no listener after it.
+    expect(f.log).toEqual(['agent initializing>listening', 'item user speech hello', 'agent listening>thinking', 'close done']);
+    expect(later).toEqual(['item user speech hello', 'close done']);
+    expect(own).toEqual(['item user speech hello', 'close done']);
+    // A later stop has the first one's outcome: the call's cleanup finished.
+    await f.runtime.stopSession();
   });
 
   it('names the transport as the source of a reply whose audio the transport refuses', async () => {
