@@ -65,6 +65,33 @@ describe('maskedPrebuilt', () => {
     expect(await streamed.text).toBe('t [redacted]');
     await expect(streamed.usage).rejects.toThrow('u [redacted]');
   });
+
+  it('a generate() that rejects leaves it masked, as its stream does', async () => {
+    const failing = { ...seat, generate: async () => { throw new Error(`refused ${SECRET}`); } } as unknown as Agent;
+    await expect(maskedPrebuilt(failing, mask).generate('go')).rejects.toThrow('refused [redacted]');
+  });
+
+  it('its stream() masks the other strings of a text part and of an error part, on the text released at once and on the text held for a later piece', async () => {
+    const chatty = {
+      ...seat,
+      stream: () => ({
+        fullStream: pieces(
+          { type: 'text', text: 'plain', agent: 'a', note: `n ${SECRET}` },
+          { type: 'error', error: new Error('e'), agent: 'a', detail: `d ${SECRET}` },
+          // The tail could start the secret: 'held ' is released now, 'sk-unit-' when the stream ends.
+          { type: 'text', text: 'held sk-unit-', agent: 'b', note: `m ${SECRET}` },
+        ),
+      }),
+    } as unknown as Agent;
+    const parts = await drain((maskedPrebuilt(chatty, mask).stream('go') as unknown as Streamed).fullStream);
+    expect(parts).toHaveLength(4);
+    expect(parts[0]).toEqual({ type: 'text', text: 'plain', agent: 'a', note: 'n [redacted]' });
+    expect(parts[1]).toMatchObject({ type: 'error', agent: 'a', detail: 'd [redacted]' });
+    expect((parts[1].error as Error).message).toBe('e');
+    expect(parts[2]).toEqual({ type: 'text', text: 'held ', agent: 'b', note: 'm [redacted]' });
+    expect(parts[3]).toEqual({ type: 'text', text: 'sk-unit-', agent: 'b', note: 'm [redacted]' });
+    expect(JSON.stringify(parts)).not.toContain(SECRET);
+  });
 });
 
 describe('maskStreamMembers', () => {

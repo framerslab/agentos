@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { validatePoolOptions } from '../validate.js';
 import { AgencyConfigError, type AgencyOptions } from '../../../types.js';
 
 const POOL = { opus: { provider: 'anthropic', model: 'claude-opus-5-5', apiKey: 'sk-ant-00000001' }, astra: { provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-oai-00000002' } };
 const opts = (o: Partial<AgencyOptions>): AgencyOptions => ({ agents: {}, ...o });
+afterEach(() => vi.unstubAllEnvs());
 
 describe('validatePoolOptions', () => {
   it('an Ollama tag named after a provider is a plain id there; the same prefix on another provider is rejected', () => {
@@ -37,5 +38,17 @@ describe('validatePoolOptions', () => {
     // Seat a's own chain can answer for it on Anthropic: two providers and two vendors are within reach.
     const withChain = { a: { ...fixed, fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-5-5', apiKey: 'sk-ant-00000001' }] }, b: { ...fixed, instructions: 'y' } };
     expect(() => validatePoolOptions(opts({ agents: withChain, chair: false, quorum: { minProviders: 2, minVendors: 2 } }), 'panel')).not.toThrow();
+  });
+  it('a panel whose quorum.minProviders is above its seat count fails construction: a seat answers with one provider, however many hops its chain holds; a hop with no key anywhere is dropped at seating and is not counted', () => {
+    const openai = { provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-oai-00000002', instructions: 'x' };
+    const anthropicHop = { provider: 'anthropic', model: 'claude-opus-5-5', apiKey: 'sk-ant-00000001' };
+    // One seat, two providers within its reach: one answer per run, so two distinct providers can never answer.
+    expect(() => validatePoolOptions(opts({ agents: { a: { ...openai, fallbackProviders: [anthropicHop] } }, chair: false, quorum: { minProviders: 2 } }), 'panel')).toThrow(/minProviders \(2\) is above the 1 /);
+    // Two seats on OpenAI; Anthropic is within reach only through a hop with no key, which seating drops.
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    const keyless = { a: { ...openai, fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-5-5' }] }, b: { ...openai, instructions: 'y' } };
+    expect(() => validatePoolOptions(opts({ agents: keyless, chair: false, quorum: { minProviders: 2 } }), 'panel')).toThrow(/minProviders \(2\) is above the 1 /);
+    // The same hop with its key: two seats, two providers.
+    expect(() => validatePoolOptions(opts({ agents: { ...keyless, a: { ...openai, fallbackProviders: [anthropicHop] } }, chair: false, quorum: { minProviders: 2 } }), 'panel')).not.toThrow();
   });
 });

@@ -3,6 +3,8 @@ import { collectCallSecrets, maskError, redactText, createErrorMask, redactStrin
 import { setDefaultProvider, clearDefaultProvider } from '../../global-default.js';
 import { OpenAIProviderError } from '../../../../core/llm/providers/errors/OpenAIProviderError.js';
 import type { AgencyOptions } from '../../../types.js';
+import { agent } from '../../../agent.js';
+import { agency } from '../../../agency.js';
 
 afterEach(() => { vi.unstubAllEnvs(); clearDefaultProvider(); });
 const K1 = 'sk-secret-one-0001', K2 = 'sk-secret-two-0002';
@@ -31,6 +33,20 @@ describe('collectCallSecrets', () => {
     // Seating listed nothing: every entry was skipped, as when every entry's key has an open breaker.
     expect(collectCallSecrets(agency, [])).toEqual(expect.arrayContaining(['sk-pool-entry-0011', 'p:pw-pool-0012', 'sk-fixed-seat-0013', 'sk-hop-00000014', 'h:pw-hop-00015', 'gem-chair-000016']));
     expect(() => collectCallSecrets({ agents: {}, chair: false } as AgencyOptions, [])).not.toThrow();
+  });
+
+  it("lists a pre-built seat's own key, URL credentials and hop keys, read from the config agent() keeps on it, and a nested agency's level, pool, seats and chair", () => {
+    const prebuilt = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-prebuilt-own-0017', baseUrl: 'https://b:pw-prebuilt-0018@pre.local/v1', fallbackProviders: [{ provider: 'mistral', apiKey: 'sk-prebuilt-hop-0019' }] });
+    const nested = agency({
+      strategy: 'panel',
+      apiKey: 'sk-nested-level-0020',
+      provider: 'openai',
+      modelPool: { m: { provider: 'xai', model: 'grok-4', apiKey: 'xai-nested-pool-0021' } },
+      agents: { inner: { provider: 'gemini', model: 'gemini-2.5-flash', apiKey: 'gem-nested-seat-0022' }, deeper: prebuilt },
+      chair: { provider: 'openai', apiKey: 'sk-nested-chair-0023' },
+    } as never);
+    const list = collectCallSecrets({ agents: { prebuilt, nested } } as unknown as AgencyOptions, []);
+    expect(list).toEqual(expect.arrayContaining(['sk-prebuilt-own-0017', 'b:pw-prebuilt-0018', 'sk-prebuilt-hop-0019', 'sk-nested-level-0020', 'xai-nested-pool-0021', 'gem-nested-seat-0022', 'sk-nested-chair-0023']));
   });
 
   it('keeps a comma-separated value whole beside its parts, so a short part and URL credentials with a comma are still masked', () => {

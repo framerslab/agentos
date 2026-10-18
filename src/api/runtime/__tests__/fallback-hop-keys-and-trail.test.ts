@@ -40,6 +40,7 @@ vi.mock('../../model.js', () => ({
 import { generateText } from '../../generateText.js';
 import { streamText } from '../../streamText.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+import { createErrorMask } from '../pool/redact.js';
 
 const usage = { promptTokens: 1, completionTokens: 1, totalTokens: 2 };
 const status = (code: number, message = 'failed') => Object.assign(new Error(`[${code}] ${message}`), { httpStatus: code });
@@ -118,6 +119,8 @@ const BOOM = tool('boom', async () => {
 });
 /** Returns a failure with an output beside its error, as a refusal of hierarchical's delegate tools does: both hold the key. */
 const SOFT_OUT = tool('softOut', async () => ({ success: false, output: `out saw ${SECRET}`, error: `soft saw ${SECRET}` }));
+/** Succeeds with a URL whose key parameter is the tool's own, and a note that holds the call's key. */
+const URL_OUT = tool('lookup', async () => ({ success: true, output: { url: 'https://h.local/?key=public-0001', note: `saw ${SECRET}` } }));
 
 type Part = { type: string; [key: string]: unknown };
 async function drain(r: ReturnType<typeof streamText>): Promise<Part[]> {
@@ -400,6 +403,39 @@ describe("a seat's mask reaches a tool's error before the next request carries i
     const streamedTurn = JSON.stringify(hoisted.generateCompletionStream.mock.calls[1]);
     expect(streamedTurn).not.toContain(SECRET);
     expect(streamedTurn).toContain('out saw [redacted]');
+  });
+
+  it("under an agency's call mask a successful output is masked by the listed values alone: a URL the tool returns keeps its key parameter while the listed key is replaced, in both native loops and on the prompt shim", async () => {
+    const callMask = createErrorMask({ list: [SECRET] });
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['lookup'])).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [URL_OUT] as never, maxSteps: 3, __maskError: callMask });
+    expect(generated.text).toBe('done');
+    const generatedTurn = JSON.stringify(hoisted.generateCompletion.mock.calls[1]);
+    expect(generatedTurn).toContain('key=public-0001');
+    expect(generatedTurn).toContain('saw [redacted]');
+    expect(generatedTurn).not.toContain(SECRET);
+
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['lookup']); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [URL_OUT] as never, maxSteps: 3, __maskError: callMask });
+    const parts = await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect(parts.find((p) => p.type === 'tool-result')).toMatchObject({ toolName: 'lookup', result: { url: 'https://h.local/?key=public-0001', note: 'saw [redacted]' } });
+    const streamedTurn = JSON.stringify(hoisted.generateCompletionStream.mock.calls[1]);
+    expect(streamedTurn).toContain('key=public-0001');
+    expect(streamedTurn).not.toContain(SECRET);
+
+    hoisted.generateCompletion.mockReset();
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(reply('<tool_call>{"name":"lookup","arguments":{}}</tool_call>'))
+      .mockResolvedValueOnce(reply('done'));
+    const shim = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [URL_OUT] as never, toolMode: 'prompt', __maskError: callMask });
+    expect(shim.text).toBe('done');
+    const shimTurn = JSON.stringify(hoisted.generateCompletion.mock.calls[1]);
+    expect(shimTurn).toContain('key=public-0001');
+    expect(shimTurn).toContain('saw [redacted]');
+    expect(shimTurn).not.toContain(SECRET);
   });
 });
 

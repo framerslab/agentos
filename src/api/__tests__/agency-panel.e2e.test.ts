@@ -611,27 +611,33 @@ describe('8. keys on a hop', () => {
     expect(calls(GEMINI, 'POST').map((c) => header(c, 'x-goog-api-key'))).toEqual([K.gemEnv]);
     expect(JSON.stringify(fetchMock.mock.calls.map(([, i]) => (i as RequestInit).headers))).not.toContain(nameless);
   });
-  it("a pooled hierarchical agency's emergent judge resolves its key as a seat does: a nameless setDefaultProvider key never reaches it", async () => {
-    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+  it("a pooled hierarchical agency's emergent judge resolves its key as a seat does: the agency-level key on the agency's provider, whether or not the provider's variable is set, and never a nameless setDefaultProvider key", async () => {
     const nameless = 'sk-nameless-default-0013';
-    setDefaultProvider({ apiKey: nameless });
-    let managerTurn = 0;
-    route([
-      [OPENAI_LIST, openaiListing],
-      [OPENAI_CHAT, (req) => {
-        // The judge's request carries no tools; the manager's carry the delegate and spawn tools.
-        if (!(req.body?.tools ?? []).length) return openaiText('{"approved": true, "reasoning": "fits"}')(req);
-        managerTurn += 1;
-        return managerTurn === 1 ? openaiToolCall('spawn_specialist', { role: 'helper', instructions: 'Help.' }, 'c1')(req) : openaiText('manager done')(req);
-      }],
-    ]);
-    const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { gemini: POOL().gemini }, agents: { worker: { instructions: 'w' } }, strategy: 'hierarchical', emergent: { enabled: true, judge: true, planner: { judgeModel: 'gpt-4.1' } } } as never);
-    const r = await team.generate('go');
-    expect(r.text).toBe('manager done');
-    const judged = calls(OPENAI_CHAT, 'POST').filter((c) => !(c.body?.tools ?? []).length);
-    expect(judged).toHaveLength(1);
-    expect(header(judged[0], 'Authorization')).toBe(`Bearer ${K.oaiEnv}`);
-    expect(JSON.stringify(fetchMock.mock.calls.map(([, i]) => (i as RequestInit).headers))).not.toContain(nameless);
+    /** Runs one spawn with a judge review and returns the Authorization header of every judge request. */
+    const judgeHeaders = async (envKey: string): Promise<Array<string | undefined>> => {
+      fetchMock.mockReset();
+      vi.stubEnv('OPENAI_API_KEY', envKey);
+      setDefaultProvider({ apiKey: nameless });
+      let managerTurn = 0;
+      route([
+        [OPENAI_LIST, openaiListing],
+        [OPENAI_CHAT, (req) => {
+          // The judge's request carries no tools; the manager's carry the delegate and spawn tools.
+          if (!(req.body?.tools ?? []).length) return openaiText('{"approved": true, "reasoning": "fits"}')(req);
+          managerTurn += 1;
+          return managerTurn === 1 ? openaiToolCall('spawn_specialist', { role: 'helper', instructions: 'Help.' }, 'c1')(req) : openaiText('manager done')(req);
+        }],
+      ]);
+      const team = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { gemini: POOL().gemini }, agents: { worker: { instructions: 'w' } }, strategy: 'hierarchical', emergent: { enabled: true, judge: true, planner: { judgeModel: 'gpt-4.1' } } } as never);
+      const r = await team.generate('go');
+      expect(r.text).toBe('manager done');
+      expect(JSON.stringify(fetchMock.mock.calls.map(([, i]) => (i as RequestInit).headers))).not.toContain(nameless);
+      return calls(OPENAI_CHAT, 'POST').filter((c) => !(c.body?.tools ?? []).length).map((c) => header(c, 'Authorization'));
+    };
+    // The agency's key, as the manager sends it: a fixed seat on the agency's provider inherits it before the provider's variable.
+    expect(await judgeHeaders(K.oaiEnv)).toEqual([`Bearer ${K.chair}`]);
+    // With no variable, the agency's key is the only key the judge's provider has; the review is still sent.
+    expect(await judgeHeaders('')).toEqual([`Bearer ${K.chair}`]);
   });
   it("a pooled seat's failover reaches a logger factory the host sets after import: fallback_fired names both providers and carries the provider's message masked", async () => {
     route([[ANTHROPIC, anthropicError(529, `overloaded ${K.ant}`)], [OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('rescued')]]);
