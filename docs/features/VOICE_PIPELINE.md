@@ -175,6 +175,29 @@ Without a call profile, speech that starts while the pipeline is `speaking` inte
 - A `cancel` from a stock handler carries `injectMarker: '[interrupted]'`; the client receives it in the `barge_in` message, and nothing writes it into the conversation history.
 - There is no `disabled` handler, and the config's `bargeIn` field is not read. To never interrupt, pass a handler whose `handleBargein()` returns `{ type: 'ignore' }`.
 
+### Text boundaries
+
+A streaming TTS chunk may carry a `textBoundary` (`TtsTextBoundary`): the exact text of one sentence segment of the reply, with its offsets in the text the session was given (`start` to `end`, exclusive of `end`, every character and every space kept), on the last audio frame of a segment the provider reported complete, and on no other frame. Its `final` is always `true`: a frame that carries a boundary ends a whole segment.
+
+`DeepgramAuraStreamingTTS` and `ElevenLabsStreamingTTS` cut the text they are given into sentence segments as it arrives (`SentenceSegmenter`): a segment ends at a sentence-ending mark (`.`, `!`, `?` or `…`, with the closing quotes and brackets right after it) once whitespace has followed it, so a decimal point or an abbreviation inside a word ends none, and `flush()` cuts whatever remains as the final segment. One segment is in flight at a time, each through its provider's completion message: Deepgram Aura receives a segment as one `Speak` and one `Flush` and answers `Flushed`; ElevenLabs receives it as one text message and the end-of-stream message on a socket of its own and answers `isFinal`, and the next segment opens a new socket. While a segment is in flight its newest frame is held back; the completion message sends it out with the segment's boundary, and every earlier frame goes out without one. A segment with no completion message within five seconds sends its held frame out without a boundary and counts as done, and the next segment starts: a timeout is not completion. A segment whose provider sent no frame attaches nothing, and a frame that arrives with no segment in flight carries none. `cancel()` drops the held frame and the segments still queued, and what the provider still sends attaches nothing. `flush_complete` goes out once per `flush()`, after the last of its segments, never per segment.
+
+Under a call profile, `PlaybackQueue` records each chunk that carries a boundary under its playback sequence and counts the segment heard when the transport acknowledges that chunk's playback. The `conversation_item_added` of an interrupted reply carries the contiguous prefix of acknowledged segments as its `playedText`, exactly as submitted: a segment whose last frame was not acknowledged, and every segment after it, is left out, so an interrupted partial segment is never called heard; a receipt that comes after the cancel proves nothing. `barge_in.playedDurationMs` keeps counting the acknowledged audio. A session without a call profile does not acknowledge chunks one by one, so its interrupted items keep `playedText: ''`; in both runtimes a reply that plays to its end has `playedText` equal to `text`.
+
+The legacy `text` field of a chunk is the text of the segment in flight when the provider sent the chunk, the text submitted since its last completion message; it is not the text the chunk plays and is never read as heard.
+
+```typescript
+import { PlayedTextTracker } from '@framers/agentos/io/voice-pipeline';
+
+const played = new PlayedTextTracker();
+session.on('audio', (chunk: EncodedAudioChunk) => {
+  // textBoundary is set on the last frame of one sentence segment alone; its text is submitted.slice(start, end).
+  played.sent(keyOf(chunk), chunk.textBoundary); // a chunk without a boundary is not recorded
+});
+// When the transport reports a chunk as played, under the same key:
+played.acknowledged(keyOf(chunk));
+played.playedText; // the contiguous prefix of acknowledged segments; '' until one is proven
+```
+
 ## Extension Packs
 
 These packs live in [agentos-extensions](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/voice). The orchestrator does not load packs: a host builds a pack's provider or detector and passes it in `overrides`.
