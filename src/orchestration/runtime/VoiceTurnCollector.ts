@@ -15,7 +15,10 @@
  * | `user_input_transcribed`, `isFinal: false` | `voice_transcript`     | No        |
  * | `user_input_transcribed`, `isFinal: true`  | `voice_transcript`     | Yes       |
  * | `conversation_item_added`, a user item     | `voice_turn_complete`  | N/A       |
- * | `barge_in`                                 | `voice_barge_in`       | N/A       |
+ * | `barge_in`, `action: 'cancel'`             | `voice_barge_in`       | N/A       |
+ *
+ * A session's `barge_in` also reports speech that paused the reply (`'pause'`) and the reply going on after a false
+ * interruption (`'resume'`); neither cut the reply, so neither reaches the graph.
  *
  * The names a host relays a pipeline's events under onto an emitter of its own (`events: 'relayed'`, the default):
  *
@@ -221,8 +224,10 @@ export class VoiceTurnCollector {
       this.turn(item.text ?? '', item.endpointReason);
     });
 
-    // The user's speech paused, resumed or cut the reply.
-    this.listen('barge_in', (evt: { interruptedText?: string; userSpeech?: string } | undefined) => this.bargeIn(evt));
+    // The user's speech cut the reply. A pause, and the resume of a false interruption, left it playing.
+    this.listen('barge_in', (evt: Partial<VoiceSessionEventMap['barge_in']> | undefined) => {
+      if (evt?.action === 'cancel') this.bargeIn(evt);
+    });
   }
 
   /** Reads the names a host relays a pipeline's events under. */

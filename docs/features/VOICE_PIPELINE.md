@@ -921,7 +921,7 @@ A voice node runs only when both of these hold; otherwise it returns `success: f
 The executor reads the node's `mode`, `speakText`, `maxTurns`, `exitOn` and `exitKeywords`. The node's `stt`, `tts`, `voice`, `endpointing`, `bargeIn`, `diarization` and `language` are not read: the node uses whatever pipeline the transport carries.
 
 - `mode: 'speak-only'` sends `speakText` to TTS through the adapter's `deliverNodeOutput()` and exits with `completed`.
-- Any other mode reads the started session in `state.scratch.voiceSession`, the `VoicePipelineSession` that `startSession()` returned, under its own event names ([Session events](#session-events)), and races the exit conditions below: each final `user_input_transcribed` is a line of the node's transcript, each user item of `conversation_item_added` is a turn, the user's `user_state_changed` to `speaking` and each turn are speech activity, each `barge_in` is forwarded, and the session's `close` is a hangup. `VoiceTransportAdapter` puts the session there when its fourth argument is `{ session, orchestrator }`, a started session and the orchestrator that runs it.
+- Any other mode reads the started session in `state.scratch.voiceSession`, the `VoicePipelineSession` that `startSession()` returned, under its own event names ([Session events](#session-events)), and races the exit conditions below: each final `user_input_transcribed` is a line of the node's transcript, each user item of `conversation_item_added` is a turn, the user's `user_state_changed` to `speaking` and each turn are speech activity, each `barge_in` that cut the reply (`action: 'cancel'`) is forwarded, and not a pause or the resume of a false interruption, which left the reply playing, and the session's `close` is a hangup. `VoiceTransportAdapter` puts the session there when its fourth argument is `{ session, orchestrator }`, a started session and the orchestrator that runs it.
 - Without a started session the node reads `transport._voiceSession` instead, an emitter onto which a host relays the pipeline's events under the names `interim_transcript`, `final_transcript`, `turn_complete`, `speech_start` and `barge_in`; that path is deprecated and stays until the next minor.
 - When the node settles, by any exit, every listener it added to the session and the transport, the silence timer and its abort listener go with it, so a node a graph runs again and again on one call adds nothing per run.
 
@@ -976,7 +976,7 @@ await adapter.init(state); // state.scratch.voiceSession is the started session
 | `voice_transcript` (`isFinal: true`) | each final transcript: a final `user_input_transcribed`, its speaker `user` unless it names one, or a relayed `final_transcript` |
 | `voice_turn_complete` | each user turn: a user item of `conversation_item_added`, with its `endpointReason` or `unknown`, or a relayed `turn_complete`; and each `getNodeInput()` result |
 | `voice_audio` (direction `outbound`) | `deliverNodeOutput()` |
-| `voice_barge_in` | each `barge_in` on the session |
+| `voice_barge_in` | each `barge_in` of the started session that cut the reply (`action: 'cancel'`), or a relayed `barge_in` |
 | `voice_session` (action `ended`) | the node exits, with its `exitReason`, or the adapter is disposed |
 
 The executor and the adapter send these events to the sink each was constructed with:
