@@ -39,7 +39,9 @@
  *   the chunk out, `waitForPlayout()` once it has played out every chunk
  *   sent, `clearPlayback()` needs no answer, and a `barge_in` message acts
  *   on the track as it is sent: a cancel clears it, a pause holds it, and a
- *   resume releases it.
+ *   resume releases it, each at once, while the messages themselves reach
+ *   the participant in the order they were sent, a cancel once its clear
+ *   has finished.
  * - Participant playout, when `publisher.playout` is `'participant'` or the
  *   participant's `agentos.playout` attribute is: one chunk at a time,
  *   announced to the participant, and `waitForPlayback()` resolves only after
@@ -181,6 +183,10 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private readonly readers = new Set<LiveKitTextStreamReaderLike>();
   private closing: Promise<void> = Promise.resolve();
   private sendingControls = 0;
+  /** The end of the control messages asked for so far, which go out in that order; it never rejects. */
+  private controls: Promise<void> = Promise.resolve();
+  /** How many control messages asked for have not yet gone out or failed. */
+  private unsentControls = 0;
   private readonly inputPump: Promise<void>;
 
   /**
@@ -275,19 +281,37 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * wire representation; call-profile messages carry their captured scope and generation. A SIP participant reads no
    * text streams, so nothing is sent to one and the send resolves. Outside participant playout a `barge_in` message
    * first acts on the track, as a page acts on the audio it plays: a `cancel` clears what the track holds, a `pause`
-   * holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases it.
+   * holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases it, each at once. Messages go out in the
+   * order they were asked for: a `cancel` goes out once its clear has finished, and a message asked for after it, a
+   * `resume` for the next reply among them, waits until it has gone out or failed.
    *
    * @throws {Error} When the transport is not open or the room has no local participant.
    */
   async sendControl(message: ServerTextMessage): Promise<void> {
     if (this._state !== 'open') throw new Error('LiveKitStreamTransport: cannot send while ' + this._state);
+    let cleared: Promise<void> | undefined;
     if (message.type === 'barge_in' && this.publisher && this.publisher.playout !== 'participant') {
-      if (message.action.type === 'cancel') await this.publisher.clearPlayback();
-      else if (message.action.type === 'pause') this.publisher.pause();
+      if (message.action.type === 'cancel') {
+        cleared = this.publisher.clearPlayback();
+        // Handled here as well, so a clear that fails while an earlier message is still going out is no unhandled rejection.
+        cleared.catch(() => {});
+      } else if (message.action.type === 'pause') this.publisher.pause();
       else if (message.action.type === 'resume') this.publisher.resume();
     }
-    if (isLiveKitSipParticipant(this.linkedParticipant())) return;
-    await this.sendWire(message);
+    // With nothing ahead of it and no clear to wait for, a message starts going out within this call.
+    const previous = this.unsentControls > 0 ? this.controls : undefined;
+    this.unsentControls++;
+    const sent = (async () => {
+      try {
+        if (previous) await previous;
+        if (cleared) await cleared;
+        if (isLiveKitSipParticipant(this.linkedParticipant())) return;
+        await this.sendWire(message);
+      } finally { this.unsentControls--; }
+    })();
+    // A failed message is its caller's to report; the messages after it still go out.
+    this.controls = sent.catch(() => {});
+    return sent;
   }
   /** The participant the transport hears and answers, while it is in the room. */
   private linkedParticipant(): LiveKitParticipantLike | undefined { return this.options.room.remoteParticipants.get(this.options.participantIdentity); }
