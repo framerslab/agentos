@@ -3025,14 +3025,17 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                   ),
                 );
                 // One masked string serves the record and the tool turn: the
-                // seat's next request carries no key.
+                // seat's next request carries no key. A failed tool's turn
+                // carries its output when it has one, which can repeat its
+                // error (a refusal's does), so that turn passes the mask whole.
                 const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
                 record.result = result.output;
                 record.error = result.success ? undefined: errorText;
+                const turn = JSON.stringify(result.output ?? errorText ?? '');
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: JSON.stringify(result.output ?? errorText ?? ''),
+                  content: result.success ? turn : maskToolText(turn),
                 } as any);
               } catch (err: any) {
                 record.error = maskToolText(err?.message ?? String(err));
@@ -3333,7 +3336,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             fallbackProvider: fb.provider,
             fallbackModel: fb.model,
             errorType: lastErr.name,
-            errorMessage: lastErr.message.slice(0, 200),
+            // A seat's mask first: a provider's message can echo the key it was sent.
+            errorMessage: maskToolText(lastErr.message).slice(0, 200),
             attempt,
             // Live signal that per-leg rebuild is active (2026-07-07 spec
             // rollout verification): absent for legacy verbatim-carry callers.
@@ -3341,7 +3345,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               ? { rebuiltResponseFormatType: describeResponseFormatShape(rebuiltResponseFormat) }
               : {}),
           });
-          opts.onFallback?.(lastErr, fb.provider);
+          // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
+          opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastErr) as Error) : lastErr, fb.provider);
           // Build a new options object targeting the fallback provider.
           const fallbackResult = await generateText({
             ...opts,
@@ -3483,7 +3488,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         primaryProvider: metricProviderId,
         attempts: attempt,
         errorType: lastErr.name,
-        errorMessage: lastErr.message.slice(0, 200),
+        errorMessage: maskToolText(lastErr.message).slice(0, 200),
       });
       metricStatus = 'error';
       throw markChainWalked(

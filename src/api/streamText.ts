@@ -1376,23 +1376,36 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ),
             );
             // One masked string serves the record, the tool-result part and
-            // the tool turn: the seat's next request carries no key.
+            // the tool turn: the seat's next request carries no key. A failed
+            // tool's part and turn carry its output when it has one, which
+            // can repeat its error (a refusal's does): under a seat's mask the
+            // turn passes the mask whole, and the part is read back from it.
             const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
             toolCallRecord.result = result.output;
             toolCallRecord.error = result.success ? undefined: errorText;
+            const turn = JSON.stringify(result.output ?? { error: errorText ?? 'Tool execution failed.' });
+            const maskedFailure = !result.success && result.output !== undefined && opts.__maskError !== undefined;
+            const sentTurn = maskedFailure ? maskToolText(turn) : turn;
+            let partResult: unknown = result.output ?? { error: errorText };
+            if (maskedFailure) {
+              try {
+                partResult = JSON.parse(sentTurn);
+              } catch {
+                // A replacement inside a JSON number leaves no JSON to read: the part carries the masked text.
+                partResult = sentTurn;
+              }
+            }
             const resultPart: StreamPart = {
               type: 'tool-result',
               toolName: fnName,
-              result: result.output ?? { error: errorText },
+              result: partResult,
             };
             parts.push(resultPart);
             yield resultPart;
             messages.push({
               role: 'tool',
               tool_call_id: toolCallId,
-              content: JSON.stringify(
-                result.output ?? { error: errorText ?? 'Tool execution failed.' }
-              ),
+              content: sentTurn,
             } as any);
           } catch (err: any) {
             toolCallRecord.error = maskToolText(err?.message ?? String(err));
@@ -1609,10 +1622,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               fallbackProvider: fb.provider,
               fallbackModel: fb.model,
               errorType: lastFallbackError.name,
-              errorMessage: lastFallbackError.message.slice(0, 200),
+              // A seat's mask first: a provider's message can echo the key it was sent.
+              errorMessage: maskToolText(lastFallbackError.message).slice(0, 200),
               attempt,
             });
-            opts.onFallback?.(lastFallbackError, fb.provider);
+            // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
+            opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastFallbackError) as Error) : lastFallbackError, fb.provider);
             const fallbackResult = streamText({
               ...opts,
               provider: fb.provider,
@@ -1807,7 +1822,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               primaryProvider: recordedProviderId,
               attempts: attempt,
               errorType: lastFallbackError.name,
-              errorMessage: lastFallbackError.message.slice(0, 200),
+              errorMessage: maskToolText(lastFallbackError.message).slice(0, 200),
             });
           }
           metricStatus = 'error';
