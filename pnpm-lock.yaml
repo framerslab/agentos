@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@framers/sql-storage-adapter':
-        specifier: ^0.7.14
-        version: 0.7.14(better-sqlite3@13.0.3)
+        specifier: ^0.8.1
+        version: 0.8.1(better-sqlite3@13.0.3)
       '@livekit/rtc-node':
         specifier: ^1.1.0
         version: 1.1.0
@@ -1345,8 +1345,8 @@ packages:
       pg:
         optional: true
 
-  '@framers/sql-storage-adapter@0.7.14':
-    resolution: {integrity: sha512-MXERr9rLdppu6cXWo1T6hBxJVzFKS03tKzWtHeugB7d/UNdegIOomflolCH9/5ogr69M61YTm4cdyNKj08em8A==}
+  '@framers/sql-storage-adapter@0.8.1':
+    resolution: {integrity: sha512-Zcw3ChiT19XH+JWJI+9SBm0YbqhKoeLOT1KbNp1BVB6NQ9qexDhRj1FIka2nlkIZ9rlMKVqlQVbXD2MoY2nT6Q==}
     peerDependencies:
       '@aws-sdk/client-s3': ^3.0.0
       '@capacitor-community/sqlite': ^6.0.0 || ^7.0.0 || ^8.0.0
@@ -5027,7 +5027,7 @@ packages:
     resolution: {integrity: sha512-0Wd+GPz1O134cP62YU2GTOPNA7Qgl09XwCqM5zpBv87ERCXdfDtyKXvV7c9U22yWJh44QZqBocFnXN11K96qow==}
 
   libsignal@https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7:
-    resolution: {gitHosted: true, integrity: sha512-KmRMuAYSfd4upRD0xOgKbURxRXNE8X8NtgmkUOJFXOn9ESSCXguIZ7PJu8OBJIr7KGww41Vf/Pbgko+PgWQ55g==, tarball: https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7}
     version: 6.0.0
 
   lie@3.3.0:
@@ -9360,7 +9360,7 @@ snapshots:
       pg: 8.23.1
     optional: true
 
-  '@framers/sql-storage-adapter@0.7.14(better-sqlite3@13.0.3)':
+  '@framers/sql-storage-adapter@0.8.1(better-sqlite3@13.0.3)':
     dependencies:
       pg: 8.23.1
       sql.js: 1.14.2
