@@ -94,6 +94,8 @@ export function seatMetadataOf(member: BaseAgentConfig | Agent): SeatMetadata {
  * @param quorum - The agency's quorum config; `undefined` is a no-op.
  * @param settled - Successful fan-out results (name + generate result).
  * @param rosterSize - Total agents attempted, for the error message.
+ * @param cause - The first seat that failed, when one did: the error's `cause`, so the caller reads why the quorum
+ *   went unmet, an outage's own error included.
  * @throws {AgencyQuorumError} On shortfall when `onShortfall` is `'error'`
  *   (the default).
  */
@@ -101,6 +103,7 @@ export function enforceQuorum(
   quorum: AgencyQuorumConfig | undefined,
   settled: Array<{ name: string; result: Record<string, unknown> }>,
   rosterSize: number,
+  cause?: Error,
 ): void {
   if (!quorum) return;
   const minAgents = quorum.minAgents ?? 0;
@@ -118,7 +121,9 @@ export function enforceQuorum(
     agencyLogger.warn(`${detail}: proceeding (onShortfall=proceed)`, { event: 'parallel_quorum_shortfall', shortfall: detail });
     return;
   }
-  throw new AgencyQuorumError(detail);
+  const shortfall = new AgencyQuorumError(detail);
+  if (cause) Object.defineProperty(shortfall, 'cause', { value: cause, writable: true, enumerable: false, configurable: true });
+  throw shortfall;
 }
 
 /**

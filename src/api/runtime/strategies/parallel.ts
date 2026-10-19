@@ -179,14 +179,16 @@ export function compileParallel(
 
       // Quorum enforcement (optional): a panel that lost too many seats — or
       // collapsed to a single provider — must not synthesize a false
-      // consensus. Throws AgencyQuorumError before any synthesis spend.
-      enforceQuorum(agencyConfig.quorum, settled, entries.length);
+      // consensus. Throws AgencyQuorumError before any synthesis spend, with
+      // the first failed seat's error as its cause when a seat failed.
+      enforceQuorum(agencyConfig.quorum, settled, entries.length, firstFailure);
 
       // No agent is left: there is nothing to synthesize, and a synthesizer
       // sent no answer would make one up. When a seat failed, the run is the
       // seats' failure (an outage, a key every provider refused) and rejects
       // with the first failed seat's error, each failure logged and passed to
-      // on.error above; an empty text would resolve it as an answer. When
+      // on.error above; an empty text would resolve it as an answer. A quorum
+      // the run does not meet has thrown above, carrying that error. When
       // each was rejected or blocked, the run returns no text, no call record
       // and no usage, which the agency logs as a run no seat answered and runs
       // no validation retry on.
