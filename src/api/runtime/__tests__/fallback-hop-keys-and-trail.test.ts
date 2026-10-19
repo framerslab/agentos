@@ -566,6 +566,55 @@ describe("a seat's mask reaches a tool's error before the next request carries i
     expect((await streamed.toolCalls).map((c) => [c.name, c.error])).toEqual(names.map((name) => [name, undefined]));
     expect(toolTurns(hoisted.generateCompletionStream.mock.calls[1])).toEqual(['""', '""', '""', '""']);
   });
+
+  it("a tool whose successful output cannot be written as JSON (a getter that throws, a toJSON that throws on a value holding the key) fails under an agency's call mask as it does without one: its record carries the masked error and its turn is that error, in both native loops, and the prompt loop records it once", async () => {
+    const callMask = createErrorMask({ list: [SECRET] });
+    const GETTER_OUT = tool('getter', async () => ({ success: true, output: { kept: 'k', get data(): string { throw new Error(`getter saw ${SECRET}`); } } }));
+    const WRITER_OUT = tool('writer', async () => ({ success: true, output: { token: SECRET, toJSON(): never { throw new Error('toJSON failed'); } } }));
+    const UNWRITABLE = [GETTER_OUT, WRITER_OUT];
+    const names = UNWRITABLE.map((t) => t.name);
+    const errors = ['getter saw [redacted]', 'toJSON failed'];
+    const toolTurns = (call: unknown[]): unknown[] => sentMessages(call).filter((m) => m.role === 'tool').map((m) => m.content);
+
+    // Without a mask each tool fails where its output is written: the masked runs below must match.
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(names)).mockResolvedValueOnce(reply('done'));
+    const bare = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: UNWRITABLE as never, maxSteps: 3 });
+    expect(bare.toolCalls.map((c) => [c.name, c.error])).toEqual([['getter', `getter saw ${SECRET}`], ['writer', 'toJSON failed']]);
+
+    hoisted.generateCompletion.mockReset();
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(names)).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: UNWRITABLE as never, maxSteps: 3, __maskError: callMask });
+    expect(generated.text).toBe('done');
+    expect(generated.toolCalls.map((c) => [c.name, c.error])).toEqual(names.map((name, i) => [name, errors[i]]));
+    expect(toolTurns(hoisted.generateCompletion.mock.calls[1])).toEqual(errors.map((error) => JSON.stringify({ error })));
+
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(names); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: UNWRITABLE as never, maxSteps: 3, __maskError: callMask });
+    const parts = await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect((await streamed.toolCalls).map((c) => [c.name, c.error])).toEqual(names.map((name, i) => [name, errors[i]]));
+    expect(parts.filter((p) => p.type === 'tool-result').map((p) => p.result)).toEqual(errors.map((error) => ({ error })));
+    expect(toolTurns(hoisted.generateCompletionStream.mock.calls[1])).toEqual(errors.map((error) => JSON.stringify({ error })));
+
+    // The prompt loop writes the response before it records the call, so the failure is recorded once, with or without a mask.
+    const shimRun = async (maskError?: typeof callMask) => {
+      hoisted.generateCompletion.mockReset();
+      hoisted.generateCompletion
+        .mockResolvedValueOnce(reply('<tool_call>{"name":"getter","arguments":{}}</tool_call>'))
+        .mockResolvedValueOnce(reply('done'));
+      const result = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [GETTER_OUT] as never, toolMode: 'prompt', __maskError: maskError });
+      return { result, sent: sentText(hoisted.generateCompletion.mock.calls[1]) };
+    };
+    const bareShim = await shimRun();
+    expect(bareShim.result.toolCalls.map((c) => [c.name, c.error])).toEqual([['getter', `Error: getter saw ${SECRET}`]]);
+    const maskedShim = await shimRun(callMask);
+    expect(maskedShim.result.text).toBe('done');
+    expect(maskedShim.result.toolCalls.map((c) => [c.name, c.error])).toEqual([['getter', 'Error: getter saw [redacted]']]);
+    expect(maskedShim.sent).toContain('<tool_response>{"name":"getter","error":"Error: getter saw [redacted]"}</tool_response>');
+    expect(maskedShim.sent).not.toContain(SECRET);
+  });
 });
 
 describe('a later step converts no tool schema while the table keeps its names', () => {
