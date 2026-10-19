@@ -11,7 +11,12 @@
  * the segment complete. Every earlier frame goes out without one. A segment
  * with no terminal response within `timeoutMs` ends without a boundary, and
  * so does one the adapter abandons because its socket closed first: a timeout
- * is not completion.
+ * is not completion. The wait runs from the moment the adapter has asked for
+ * the terminal response, `hooks.start` returning or resolving. While a start is
+ * still pending and no segment waits behind it, the adapter may take a new
+ * segment into the one in flight (`hooks.extend`), so the provider gets the
+ * text now and one terminal response proves them together: the boundary then
+ * covers the joined text, under the first segment's id.
  *
  * `flush()` cuts the final, unterminated segment and resolves once every
  * segment queued so far has ended; the adapter's `flush_complete` goes out
@@ -43,16 +48,29 @@ export const DEFAULT_SEGMENT_TIMEOUT_MS = 5_000;
 /** What the queue asks of its adapter. */
 export interface SegmentSynthesisHooks {
   /**
-   * Sends one segment to the provider. The segment is in flight from this call
-   * until its terminal response, its timeout, its abandonment or a cancel;
-   * `signal` aborts then, so a start that first awaits a socket sends nothing
-   * after it. A start that throws or rejects ends the segment without a
-   * boundary.
+   * Sends one segment to the provider and asks for its terminal response. The
+   * segment is in flight from this call until its terminal response, its
+   * timeout, its abandonment or a cancel; `signal` aborts then, so a start that
+   * first awaits a socket or a slot sends nothing after it. The segment's wait
+   * for the terminal response (`timeoutMs`) runs from the moment this returns
+   * or resolves, since only then has the response been asked for. A start that
+   * throws or rejects ends the segment without a boundary.
    *
    * @param segment - The segment, with its exact text and offsets.
    * @param signal - Aborted once the segment is no longer in flight.
    */
   start(segment: TextSegment, signal: AbortSignal): void | Promise<void>;
+  /**
+   * Takes a new segment into the one in flight while that one's `start` is
+   * still pending and no segment waits behind it: the adapter sends the
+   * segment's text, so one terminal response proves them together, and returns
+   * `true`; `false` leaves the segment queued for a start of its own. Without
+   * this hook every segment waits its turn.
+   *
+   * @param segment - The new segment, which follows the one in flight exactly.
+   * @param signal - The signal of the segment in flight.
+   */
+  extend?(segment: TextSegment, signal: AbortSignal): boolean;
   /**
    * Hands a frame to the adapter's consumers, as its `audio` event.
    *
@@ -75,10 +93,16 @@ export interface SegmentSynthesisHooks {
 
 /** The segment in flight, with the newest frame held back for its boundary. */
 interface Flight {
+  /** The segment, with the segments taken into it. */
   segment: TextSegment;
   held?: EncodedAudioChunk;
-  timer: ReturnType<typeof setTimeout>;
+  /** The wait for the terminal response, once it has been asked for. */
+  timer?: ReturnType<typeof setTimeout>;
   abort: AbortController;
+  /** Whether the terminal response has been asked for: `start` returned or resolved. */
+  armed: boolean;
+  /** How many queued segments the flight holds. */
+  count: number;
 }
 
 /** A `flush()` call waiting for the segments queued before it to end. */
@@ -161,7 +185,7 @@ export class SegmentSynthesisQueue {
     if (!flight) return;
     this.end(flight);
     if (flight.held) this.hooks.emit({ ...flight.held, textBoundary: boundaryOf(flight.segment) });
-    this.finish();
+    this.finish(flight);
   }
 
   /** The segment in flight ends without a terminal response: its held frame goes out without a boundary. */
@@ -170,7 +194,7 @@ export class SegmentSynthesisQueue {
     if (!flight) return;
     this.end(flight);
     if (flight.held) this.hooks.emit(flight.held);
-    this.finish();
+    this.finish(flight);
   }
 
   /** Drops the queued segments, the held frame and the segment in flight, forgets the text, and resolves the pending flushes without `flush_complete`. */
@@ -196,8 +220,16 @@ export class SegmentSynthesisQueue {
   }
 
   private enqueue(segment: TextSegment): void {
-    this.pending.push(segment);
     this.queued++;
+    const flight = this.flight;
+    // A segment arriving while the one in flight has yet to ask for its terminal response may join it, when the
+    // adapter takes it and no segment waits behind: one terminal response then proves them together.
+    if (flight && !flight.armed && this.pending.length === 0 && this.hooks.extend?.(segment, flight.abort.signal)) {
+      flight.segment = { segmentId: flight.segment.segmentId, start: flight.segment.start, end: segment.end, text: flight.segment.text + segment.text };
+      flight.count++;
+      return;
+    }
+    this.pending.push(segment);
     this.startNext();
   }
 
@@ -205,22 +237,27 @@ export class SegmentSynthesisQueue {
     if (this.flight || this.holding) return;
     const segment = this.pending.shift();
     if (!segment) return;
-    const abort = new AbortController();
-    const flight: Flight = {
-      segment,
-      abort,
-      timer: setTimeout(() => this.timeout(flight), this.hooks.timeoutMs ?? DEFAULT_SEGMENT_TIMEOUT_MS),
-    };
+    const flight: Flight = { segment, abort: new AbortController(), armed: false, count: 1 };
     this.flight = flight;
     let started: Promise<void>;
     try {
-      started = Promise.resolve(this.hooks.start(segment, abort.signal));
+      started = Promise.resolve(this.hooks.start(segment, flight.abort.signal));
     } catch (error) {
       started = Promise.reject(error);
     }
-    started.catch(() => {
-      if (this.flight === flight) this.abandon();
-    });
+    started.then(
+      () => this.arm(flight),
+      () => {
+        if (this.flight === flight) this.abandon();
+      }
+    );
+  }
+
+  /** The terminal response has been asked for: the segment's wait for it begins. */
+  private arm(flight: Flight): void {
+    if (this.flight !== flight || flight.armed) return;
+    flight.armed = true;
+    flight.timer = setTimeout(() => this.timeout(flight), this.hooks.timeoutMs ?? DEFAULT_SEGMENT_TIMEOUT_MS);
   }
 
   private timeout(flight: Flight): void {
@@ -228,19 +265,19 @@ export class SegmentSynthesisQueue {
     this.end(flight);
     if (flight.held) this.hooks.emit(flight.held);
     this.hooks.timedOut?.(flight.segment);
-    this.finish();
+    this.finish(flight);
   }
 
   /** Takes the segment out of flight: its timer cleared, its start aborted. */
   private end(flight: Flight): void {
-    clearTimeout(flight.timer);
+    if (flight.timer !== undefined) clearTimeout(flight.timer);
     flight.abort.abort();
     if (this.flight === flight) this.flight = undefined;
   }
 
-  /** One more segment has ended: the flushes it completes settle, then the next segment starts. */
-  private finish(): void {
-    this.ended++;
+  /** A flight has ended, with every segment it held: the flushes it completes settle, then the next segment starts. */
+  private finish(flight: Flight): void {
+    this.ended += flight.count;
     this.settle();
     this.startNext();
   }

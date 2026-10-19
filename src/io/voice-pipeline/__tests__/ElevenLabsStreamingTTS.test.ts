@@ -459,6 +459,6 @@ describe('ElevenLabsStreamingTTS', () => {
     session.pushTokens('Three. ');
     await opened();
     expect(sockets()).toHaveLength(3);
-    expect(texts(sockets()[2])).toEqual([{ text: 'Three.' }, { text: '' }]);
+    expect(texts(sockets()[2])).toEqual([{ text: ' Three.' }, { text: '' }]);
   });
 });

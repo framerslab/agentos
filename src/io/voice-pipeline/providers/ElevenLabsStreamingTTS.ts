@@ -32,11 +32,14 @@
  * the spent one when the server has not. The segment's boundary
  * ({@link TtsTextBoundary}) rides on the last frame `isFinal` proves
  * complete; every earlier frame carries none. A segment with no `isFinal`
- * within five seconds, or whose socket closes first, ends without a boundary.
- * A socket's close while the session is open closes nothing else (the server
- * closes an idle socket after `inactivity_timeout`, 20 seconds by default):
- * only `close()` ends the session. Messages of a socket that is no longer the
- * session's current one are dropped.
+ * within five seconds of its end-of-stream message, or whose socket closes
+ * first, ends without a boundary. A socket that does not open within eight
+ * seconds is given up: the session's first rejects `startSession()`, a later
+ * one ends its segment without a boundary and reaches the session's `'error'`
+ * listener. A socket's close while the session is open closes nothing else
+ * (the server closes an idle socket after `inactivity_timeout`, 20 seconds by
+ * default): only `close()` ends the session. Messages of a socket that is no
+ * longer the session's current one are dropped.
  *
  * @see https://elevenlabs.io/docs/api-reference/text-to-speech/v-1-text-to-speech-voice-id-stream-input
  */
@@ -58,6 +61,9 @@ import {
   type ProviderCapabilities,
 } from '../HealthyProvider.js';
 import { VoicePipelineError } from '../VoicePipelineError.js';
+
+/** How long a socket has to open before the open is given up. */
+const CONNECT_TIMEOUT_MS = 8_000;
 
 async function defaultElevenLabsTtsProbe(apiKey: string) {
   const start = Date.now();
@@ -192,10 +198,20 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
       });
       this.ws = ws;
       this.spent = false;
+      // A socket that does not open in time is given up: closed, and no longer the session's, so what it reports
+      // later is ignored.
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        if (this.ws === ws) this.ws = null;
+        ws.close(1000, 'connect timeout');
+        reject(new Error(`elevenlabs ws connect timed out after ${CONNECT_TIMEOUT_MS}ms`));
+      }, CONNECT_TIMEOUT_MS);
 
       ws.on('open', () => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         // A cancel or a close while the socket opened made it no one's: it closes unused.
         if (this.ws !== ws) {
           ws.close(1000, 'superseded');
@@ -231,6 +247,7 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
       ws.on('error', (err: Error) => {
         if (!settled) {
           settled = true;
+          clearTimeout(timer);
           reject(err);
           return;
         }
@@ -247,6 +264,7 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
       ws.on('close', () => {
         if (!settled) {
           settled = true;
+          clearTimeout(timer);
           reject(new Error('elevenlabs ws closed before it opened'));
         }
         if (this.ws !== ws) return;

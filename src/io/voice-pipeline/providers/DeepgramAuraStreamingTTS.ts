@@ -30,9 +30,12 @@
  * `Clear`, before it starts: a `Flushed` of a segment that timed out or was
  * cleared must never complete the segment after it, and Deepgram's
  * `sequence_id` is documented only as "The sequence ID of the response", so the
- * session does not read it. Deepgram accepts at most 20 `Flush` messages in
- * 60 seconds and answers the rest with a `Warning`; such a segment ends on its
- * timeout.
+ * session does not read it. Deepgram takes at most 20 `Flush` messages in 60
+ * seconds and answers the rest with a `Warning`: a segment that would pass that
+ * limit is spoken without a `Flush`, the segments after it join it, each as its
+ * own `Speak`, and one `Flush` once the window has passed completes them
+ * together, so the boundary of that frame covers their joined text. A segment's
+ * five seconds run from its `Flush`.
  *
  * @see https://developers.deepgram.com/docs/tts-websocket
  * @see https://developers.deepgram.com/docs/tts-ws-flush
@@ -48,6 +51,7 @@ import type {
   EncodedAudioChunk,
 } from '../types.js';
 import { SegmentSynthesisQueue } from './SegmentSynthesisQueue.js';
+import type { TextSegment } from '../ttsTextBoundaries.js';
 import { ApiKeyPool } from '../../../core/providers/ApiKeyPool.js';
 import {
   defaultCapabilities,
@@ -65,6 +69,10 @@ const CONNECT_TIMEOUT_MS = 8_000;
 const STALE_FLUSHED_MS = 5_000;
 /** How long the next segment waits for the `Cleared` that answers a `Clear`, one round trip. */
 const CLEARED_MS = 1_000;
+/** The most `Flush` messages Deepgram takes in {@link FLUSH_WINDOW_MS}. */
+const FLUSH_LIMIT = 20;
+/** Deepgram's window for the `Flush` limit, 60 seconds, with one second for the clocks on either side. */
+const FLUSH_WINDOW_MS = 61_000;
 
 async function defaultDeepgramTtsProbe(apiKey: string) {
   const start = Date.now();
@@ -147,6 +155,10 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * timer bounds the wait.
    */
   private stale?: ReturnType<typeof setTimeout>;
+  /** When each `Flush` of the last {@link FLUSH_WINDOW_MS} was sent, oldest first. */
+  private readonly flushes: number[] = [];
+  /** Whether the segment in flight waits for a `Flush` slot: a new segment then joins it. */
+  private waitingForSlot = false;
   private readonly voice: string;
   private readonly encoding: string;
   private readonly container: 'wav' | 'raw';
@@ -163,10 +175,16 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     this.container = mapped.container;
     this.sampleRate = sessionConfig.sampleRate ?? DEFAULT_SAMPLE_RATE;
     this.segments = new SegmentSynthesisQueue({
-      start: (segment) => {
+      start: (segment, signal) => {
         this.send({ type: 'Speak', text: segment.text });
-        this.send({ type: 'Flush' });
+        if (this.flushSlotFree()) {
+          this.sendFlush();
+          return undefined;
+        }
+        return this.flushWhenSlotFrees(signal);
       },
+      // A segment arriving while the one in flight waits for a Flush slot is spoken now and completed with it.
+      extend: (segment) => this.speakMore(segment),
       emit: (chunk) => this.emit('audio', chunk),
       flushed: () => this.emit('flush_complete'),
       // The segment's Flush is still outstanding: its Flushed may yet come, and must not complete the next segment.
@@ -310,6 +328,67 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   private send(message: { type: string; text?: string }): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error('deepgram aura ws is not open');
     this.ws.send(JSON.stringify(message));
+  }
+
+  /** Whether another `Flush` may go out now: fewer than {@link FLUSH_LIMIT} went out in the last {@link FLUSH_WINDOW_MS}. */
+  private flushSlotFree(): boolean {
+    const since = Date.now() - FLUSH_WINDOW_MS;
+    while (this.flushes.length > 0 && this.flushes[0]! <= since) this.flushes.shift();
+    return this.flushes.length < FLUSH_LIMIT;
+  }
+
+  /** Sends `Flush` and counts it against the window. */
+  private sendFlush(): void {
+    this.send({ type: 'Flush' });
+    this.flushes.push(Date.now());
+  }
+
+  /**
+   * Waits for a `Flush` slot, then sends the `Flush`; a cancel or a close (`signal`) ends the wait with nothing sent.
+   * The segments that arrive meanwhile join the one in flight ({@link speakMore}).
+   */
+  private async flushWhenSlotFrees(signal: AbortSignal): Promise<void> {
+    this.waitingForSlot = true;
+    try {
+      while (!this.flushSlotFree()) {
+        await this.slotTimer(this.flushes[0]! + FLUSH_WINDOW_MS - Date.now(), signal);
+        if (signal.aborted) return;
+      }
+    } finally {
+      this.waitingForSlot = false;
+    }
+    this.sendFlush();
+  }
+
+  /** Resolves after `ms`, or at once when `signal` aborts. */
+  private slotTimer(ms: number, signal: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      const done = (): void => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', done);
+        resolve();
+      };
+      const timer = setTimeout(done, Math.max(0, ms));
+      signal.addEventListener('abort', done, { once: true });
+    });
+  }
+
+  /**
+   * Speaks a segment that joins the one waiting for a `Flush` slot, so one `Flush` completes them together; `false`
+   * leaves it queued, when no segment waits for a slot or the socket is not open.
+   */
+  private speakMore(segment: TextSegment): boolean {
+    if (!this.waitingForSlot) return false;
+    try {
+      this.send({ type: 'Speak', text: segment.text });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Keeps the next segment from starting until a stale `Flushed` or a `Cleared` arrives, or `ms` have passed. */
