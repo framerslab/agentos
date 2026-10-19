@@ -299,9 +299,13 @@ export interface ModelCompletionOptions {
    *   - OpenAI strict JSON Schema mode:
    *       `{ type: 'json_schema',
    *          json_schema: { name, strict: true, schema } }`
-   *   - Anthropic forced tool-use marker (routed to tool_choice
-   *     internally by AnthropicProvider):
+   *   - Anthropic structured-output marker (AnthropicProvider sends it as
+   *     `output_config.format` on a model with the JSON output format, as a
+   *     forced tool call on Claude Opus 4 and Sonnet 4, and as a schema block
+   *     in the system prompt when neither carries the schema; `route` is the
+   *     builder's verdict for the model it was built for):
    *       `{ _agentosUseToolForStructuredOutput: true,
+   *          route: 'json_schema' | 'forced_tool' | 'none',
    *          tool: { name, input_schema } }`
    *   - Gemini responseSchema (routed to generationConfig
    *     internally by GeminiProvider):

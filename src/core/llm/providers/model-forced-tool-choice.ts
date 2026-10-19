@@ -14,11 +14,11 @@
  *   - {@link AnthropicProvider} clamps any resolved forced `tool_choice` to
  *     `auto` for those models (the same defensive clamp it already applies when
  *     extended thinking is active), so no caller has to remember the quirk.
- *   - {@link generateObject} skips the forced-tool structured-output payload
- *     for those models and falls through to the prompt-only JSON path instead (the
- *     schema already rides in the system prompt; the result text is
- *     extractJson + safeParse'd in the retry loop), so structured output
- *     degrades gracefully on those models and the request still succeeds.
+ *   - `anthropicSchemaRoute` (model-strict-tool-use.ts) sends a schema request
+ *     as a forced tool only on a model that has no JSON output format and
+ *     accepts a forced choice (Claude Opus 4 and Sonnet 4); every current model
+ *     takes the JSON output format instead, so this predicate no longer decides
+ *     whether structured output is enforced on them.
  *
  * Sibling of `modelSupportsThinking` / `modelSupportsTemperature`. Kept in its
  * own pure module so the unit test imports no provider/SDK code.
