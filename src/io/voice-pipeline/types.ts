@@ -277,7 +277,8 @@ export interface IStreamTransport extends EventEmitterLike {
    * on a transport that plays it on its own timing after taking it, as a speaking `LiveKitStreamTransport` does: every
    * chunk sent so far, and any sent while it waits. Audio a clear discarded counts as played out.
    * `VoicePipelineOrchestrator` without a call profile keeps a reply `speaking` until it settles, so speech over the
-   * rest of the reply interrupts it; a rejection ends the reply as a resolution does. It aborts `signal` when a barge-in
+   * rest of the reply interrupts it; a rejection ends the reply too, as interrupted, since what of it played is not
+   * known (`VoiceConversationItem`), unless the wait was aborted. It aborts `signal` when a barge-in
    * cuts the reply or the session closes first, and a transport may then settle the wait at once. On a transport
    * without it, the orchestrator keeps the reply `speaking` for the duration of the audio it was sent instead
    * (`VoicePipelineConfig.maxPlayoutWaitMs`).
@@ -1902,10 +1903,14 @@ export type VoiceConversationItem =
       /**
        * The part of `text` the session knows was heard: all of it for a reply whose audio played out, and, for a reply
        * a barge-in cut, the prefix the transport has acknowledged as played, which is empty while no transport reports
-       * which text it played. A partly played reply's heard extent is then unknown, and `text` is not cut to a guess.
+       * which text it played. A partly played reply's heard extent is then unknown, and `text` is not cut to a guess;
+       * so is that of a reply whose transport's playout wait (`IStreamTransport.waitForPlayout()`) rejected.
        */
       playedText: string;
-      /** Whether a barge-in or another interruption cut the reply. */
+      /**
+       * Whether a barge-in or another interruption cut the reply, or its audio did not play out: the transport's playout
+       * wait rejected, as a stalled LiveKit track's does once it has discarded what it had not played.
+       */
       interrupted: boolean;
     };
 

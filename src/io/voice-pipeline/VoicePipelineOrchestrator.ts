@@ -483,6 +483,11 @@ interface ReplyRecord {
   playsUntil: number;
   /** Whether the reply has its first word, from which the agent speaks (`agent_state_changed`). */
   started: boolean;
+  /**
+   * Whether a wait for the reply's audio to play out failed (`_finishReply`), as a stalled LiveKit track's does once it
+   * has discarded what it had not played: what of the reply was heard is then not known.
+   */
+  playoutFailed?: boolean;
 }
 
 /** The parts of a session without a call profile that its replies and their interruptions act on. */
@@ -1210,10 +1215,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Ends the reply once its audio has played: the pipeline stays `speaking` until then, so speech over the rest of the
    * reply interrupts it as over any part of it, and the agent holds the floor. A transport that reports its playout
    * (`waitForPlayout()`, as a speaking `LiveKitStreamTransport` does) says when the audio it was sent has played out; a
-   * wait that rejects ends the reply as one that resolves. On any other transport the reply waits for the audio's own
-   * duration (`ReplyRecord.playsUntil`), at most `maxPlayoutWaitMs`, and ends at once when that has passed. A barge-in
-   * that cuts the reply, a stop and a later wait abort the wait (`_stopPlayoutWait`), and a wait that settles after the
-   * reply was cut or replaced changes nothing. Then the reply ends (`_settleReply`).
+   * wait that rejects, as a stalled LiveKit track's does once it has discarded what it had not played, ends the reply
+   * too, though what of it was heard is not known (`ReplyRecord.playoutFailed`). On any other transport the reply waits
+   * for the audio's own duration (`ReplyRecord.playsUntil`), at most `maxPlayoutWaitMs`, and ends at once when that has
+   * passed. A barge-in that cuts the reply, a stop and a later wait abort the wait (`_stopPlayoutWait`), and a wait that
+   * settles after the reply was cut or replaced changes nothing. Then the reply ends (`_settleReply`).
    *
    * @param parts - The session's parts.
    */
@@ -1222,9 +1228,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     this._stopPlayoutWait();
     const wait = new AbortController();
     this.playoutWait = wait;
-    const settle = (): void => {
+    const settle = (played: boolean): void => {
       if (wait.signal.aborted) return;
       this.playoutWait = undefined;
+      if (!played) reply.playoutFailed = true;
       if (this._currentReply === reply && this.current === 'speaking') this.supervise(() => this._settleReply(parts));
     };
     let playout: Promise<void> | undefined;
@@ -1235,7 +1242,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     }
     if (playout) {
       // As in _watchSend(), Promise.resolve() also takes a promise of another realm or library.
-      Promise.resolve(playout).then(settle, settle);
+      Promise.resolve(playout).then(
+        () => settle(true),
+        () => settle(false)
+      );
       return;
     }
     // The transport cannot say when its audio has played: the audio it was sent plays for its own duration.
@@ -1245,7 +1255,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       this._settleReply(parts);
       return;
     }
-    const timer = setTimeout(settle, Math.min(leftMs, MAX_TIMER_MS));
+    const timer = setTimeout(() => settle(true), Math.min(leftMs, MAX_TIMER_MS));
     wait.signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
   }
 
@@ -1280,14 +1290,17 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Ends the reply once its audio has played (`_finishReply`): the transport is sent `agent_done`, the reply joins the
-   * conversation as played (`conversation_item_added`), the pipeline returns to `listening`, the endpoint detector is
-   * reset and told the user holds the floor, and the watchdog starts.
+   * conversation as played (`conversation_item_added`), or, when a wait for its playout failed, as interrupted with no
+   * text known heard, the pipeline returns to `listening`, the endpoint detector is reset and told the user holds the
+   * floor, and the watchdog starts.
    *
    * @param parts - The session's parts.
    */
   private _replyDone(parts: ReplyParts): void {
     this._watchSend(() => parts.transport.sendControl({ type: 'agent_done', text: this.text, durationMs: this.playedMs }));
-    if (this.text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text: this.text, playedText: this.text, interrupted: false }, createdAt: Date.now() });
+    // A reply whose playout wait failed joins as a cut one does: which of its words were heard is not known.
+    const heard = !this._currentReply.playoutFailed;
+    if (this.text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text: this.text, playedText: heard ? this.text : '', interrupted: !heard }, createdAt: Date.now() });
     // A listener may have stopped the session.
     if (this.current !== 'speaking') return;
     this.stateTo('listening');
