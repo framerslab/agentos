@@ -2518,6 +2518,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       const runShim = async (): Promise<GenerateTextResult> => {
         const loopResult = await runEmulatedToolLoop({
           tools: Array.from(toolMap.values()),
+          // The table is read again before each later round, as on the native
+          // loop, so a tool added mid-call (a spawned specialist's delegate
+          // tool) is listed and runs.
+          currentTools: () => {
+            refreshTools();
+            return Array.from(toolMap.values());
+          },
           onToolExecute: () => {
             toolProgress.shimRanTool = true;
           },

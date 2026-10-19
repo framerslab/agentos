@@ -17,6 +17,13 @@ export interface EmulatedToolCallRecord { name: string; args: Record<string, unk
 
 export interface RunEmulatedToolLoopOptions {
   tools: ITool[];
+  /**
+   * Reads the tool table again before each later round. A table whose names
+   * changed since the last read (a hierarchical manager's `spawn_specialist`
+   * adds `delegate_to_<role>`) is rendered into the tool block again and its
+   * tools run; one whose names are unchanged keeps the tools of the last read.
+   */
+  currentTools?: () => ITool[];
   messages: EmulatedLoopMessage[];
   /** Buffered model call. Returns the full assistant text + usage. */
   callModel: (messages: EmulatedLoopMessage[]) => Promise<{ text: string; usage?: { totalTokens?: number } }>;
@@ -78,15 +85,26 @@ export interface EmulatedToolLoopResult {
 export async function runEmulatedToolLoop(
   opts: RunEmulatedToolLoopOptions
 ): Promise<EmulatedToolLoopResult> {
-  const toolMap = new Map(opts.tools.map((t) => [t.name, t]));
+  let tools = opts.tools;
+  let toolMap = new Map(tools.map((t) => [t.name, t]));
   const messages: EmulatedLoopMessage[] = [
-    { role: 'system', content: renderToolSystemBlock(opts.tools) },
+    { role: 'system', content: renderToolSystemBlock(tools) },
     ...opts.messages,
   ];
   const toolCalls: EmulatedToolCallRecord[] = [];
   let totalTokens = 0;
 
   for (let step = 0; step < opts.maxRoundtrips; step++) {
+    // A tool the last round added (a spawned specialist's delegate tool) is
+    // listed in this round's tool block and runs when the model calls it.
+    if (step > 0 && opts.currentTools) {
+      const current = opts.currentTools();
+      if (current.length !== tools.length || current.some((t, i) => t.name !== tools[i].name)) {
+        tools = current;
+        toolMap = new Map(current.map((t) => [t.name, t]));
+        messages[0] = { role: 'system', content: renderToolSystemBlock(current) };
+      }
+    }
     const { text, usage } = await opts.callModel(messages);
     totalTokens += usage?.totalTokens ?? 0;
     const { calls, cleanedText, parseErrors } = parseToolCalls(text);

@@ -811,6 +811,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       async function* runShimStream(): AsyncGenerator<StreamPart> {
         const loopResult = await runEmulatedToolLoop({
           tools: Array.from(toolMap.values()),
+          // The table is read again before each later round, as on the native
+          // loop, so a tool added mid-call (a spawned specialist's delegate
+          // tool) is listed and runs.
+          currentTools: () => {
+            refreshTools();
+            return Array.from(toolMap.values());
+          },
           onToolExecute: () => {
             shimRanTool = true;
           },

@@ -859,9 +859,11 @@ The manager's tool table is read again before each of its steps, so
 calls it. The same holds for any tool that a tool's `execute` adds to the table
 an `agent()` was given, in `generate()` and in `stream()`. A table given as a
 single-use iterable (a generator), which the first read exhausts, is read once
-and keeps its tools. The prompt shim (a
-model without native tool calls) reads its tool list once at the start of the
-call, so a specialist spawned under it cannot be delegated to in that run.
+and keeps its tools. The prompt shim (`toolMode: 'prompt'`, or a model that
+refuses native tool calls under `'auto'`) reads the table before each of its
+rounds too, and renders its tool block again when the names changed, so a
+specialist spawned under it is listed in the next round and runs when the
+manager calls it.
 
 | `planner` field | Default | Effect |
 |---|---|---|
