@@ -2256,6 +2256,50 @@ describe('AnthropicProvider', () => {
       }
     });
 
+    it('a passthrough tools array without the schema tool sends no forced choice naming it: the schema rides the prompt; with the schema tool in it, the choice is forced on it', async () => {
+      // A forced tool_choice must name a tool the request carries; the
+      // passthrough array keeps precedence over the schema tool, so a forced
+      // choice on Claude Sonnet 4 (forced-tool route) needs the tool in it.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const lookup = { name: 'lookup', description: 'Look up.', input_schema: { type: 'object', properties: { q: { type: 'string' } } } };
+        const schema = { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] };
+        const marker = { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: schema } } as never;
+        fetchMock
+          .mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })))
+          .mockResolvedValueOnce(
+            mockSseResponse(
+              makeAnthropicResponse({ content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { x: 2 } }], stop_reason: 'tool_use' }),
+            ),
+          );
+
+        const withoutSchemaTool = await provider.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Go.' }], {
+          customModelParams: { tools: [lookup] },
+          responseFormat: marker,
+        });
+        const first = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(first.tools).toEqual([lookup]);
+        expect(first.tool_choice).toBeUndefined();
+        expect(String(first.system)).toContain('Answer with JSON only, matching this schema:');
+        expect(withoutSchemaTool.schemaRoute).toBe('none');
+        expect(withoutSchemaTool.schemaInPayload).toBe(false);
+
+        const emit = { name: 'emit', input_schema: schema };
+        const withSchemaTool = await provider.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Go.' }], {
+          customModelParams: { tools: [lookup, emit] },
+          responseFormat: marker,
+        });
+        const second = JSON.parse(fetchMock.mock.calls[1][1].body);
+        expect(second.tools).toEqual([lookup, emit]);
+        expect(second.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+        expect(String(second.system ?? '')).not.toContain('Answer with JSON only');
+        expect(withSchemaTool.schemaRoute).toBe('forced_tool');
+        expect(withSchemaTool.choices[0].message.content).toBe('{"x":2}');
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
     it('names the route it took on every completion and stream chunk of a schema request, and on no other', async () => {
       const recordMarker = {
         _agentosUseToolForStructuredOutput: true,

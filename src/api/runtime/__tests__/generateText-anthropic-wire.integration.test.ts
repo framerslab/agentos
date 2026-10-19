@@ -13,7 +13,7 @@ const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
 import { buildFallbackChain, generateText, isContentPolicyRefusal } from '../../generateText.js';
-import { generateObject } from '../../generateObject.js';
+import { generateObject, ObjectGenerationError } from '../../generateObject.js';
 import { streamObject } from '../../streamObject.js';
 import { streamText, type StreamPart } from '../../streamText.js';
 import { agent } from '../../agent.js';
@@ -67,6 +67,19 @@ function toolTurn(model: string, name: string, input: Json): Reply {
       { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } },
       { type: 'content_block_stop', index: 0 },
       { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 5 } },
+      { type: 'message_stop' },
+    ]);
+}
+
+/** A forced tool call to `name` cut off by `max_tokens` while its input was still being written. */
+function cutToolTurn(model: string, name: string, partialJson: string): Reply {
+  return () =>
+    sse([
+      messageStart(model, { input_tokens: 10 }),
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name, input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: partialJson } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: null }, usage: { output_tokens: 16 } },
       { type: 'message_stop' },
     ]);
 }
@@ -293,6 +306,38 @@ describe('Anthropic catalog and pricing through the public API', () => {
     expect(bodies[0].output_config?.format).toBeUndefined();
   });
 
+  it('generateObject with a record schema and a thinking budget on Claude Opus 4.8 sends no clamped tool, and the provider\'s schema block survives the auto-cache', async () => {
+    // Opus 4.8 accepts a forced tool choice, but not beside thinking: the
+    // schema rides the prompt, and the auto-cache re-emits the system blocks
+    // as an array to place its marker, the schema block among them.
+    route({ 'claude-opus-4-8': [textTurn('claude-opus-4-8', '{"scores":{"a":1}}')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await generateObject({
+        model: 'anthropic:claude-opus-4-8',
+        schema: z.object({ scores: z.record(z.string(), z.number()) }),
+        schemaName: 'scores',
+        system: 'You grade things.',
+        prompt: 'Grade a.',
+        thinking: { budgetTokens: 1024 },
+        fallbackProviders: [],
+      });
+
+      expect(result.object).toEqual({ scores: { a: 1 } });
+      const [body] = postedBodies();
+      expect(['adaptive', 'enabled']).toContain(body.thinking?.type);
+      expect(body.tools).toBeUndefined();
+      expect(body.tool_choice).toBeUndefined();
+      expect(body.output_config?.format).toBeUndefined();
+      expect(Array.isArray(body.system)).toBe(true);
+      expect((body.system as Json[]).some((block) => block.cache_control)).toBe(true);
+      expect(String((body.system as Json[]).at(-1)?.text)).toMatch(/^Answer with JSON only, matching this schema: /);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes('clamping'))).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('reports Claude Opus 5.5 cache reads at 0.05x in result.usage.costUSD', async () => {
     route({
       'claude-opus-5-5': [
@@ -474,6 +519,62 @@ describe('Claude refusals through the public API', () => {
     } finally {
       random.mockRestore();
     }
+  });
+});
+
+describe('Structured sends on the GMI runtime through the real provider', () => {
+  const gmiSession = (model: string, id: string) =>
+    agent({ runtime: 'gmi', provider: 'anthropic', model, memory: false, fallbackProviders: [] }).session(id);
+
+  it('a send cut off at maxTokens on Claude Sonnet 5.5 rejects naming the cut-off, after one request on the JSON output format', async () => {
+    route({ 'claude-sonnet-5-5': [truncatedTurn('claude-sonnet-5-5', '{"city":"Ly')] });
+    const session = gmiSession('claude-sonnet-5-5', 'cut-format');
+
+    const error = await rejectionOf(session.send('Where?', { responseSchema: z.object({ city: z.string() }), maxTokens: 16 }));
+
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (16)');
+    expect((error as ObjectGenerationError).rawText).toBe('{"city":"Ly');
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].output_config.format.type).toBe('json_schema');
+    expect(bodies[0].tools).toBeUndefined();
+    expect(session.messages()).toEqual([]);
+  });
+
+  it('a send with a record schema on Claude Sonnet 4.6 sends one non-strict forced tool and returns its call as the object', async () => {
+    route({ 'claude-sonnet-4-6': [toolTurn('claude-sonnet-4-6', 'scores', { scores: { a: 1, b: 2 } })] });
+    const session = gmiSession('claude-sonnet-4-6', 'forced-record');
+
+    const result = await session.send('Score a and b.', {
+      responseSchema: z.object({ scores: z.record(z.string(), z.number()) }),
+      schemaName: 'scores',
+    });
+
+    expect(result.object).toEqual({ scores: { a: 1, b: 2 } });
+    expect(result.finishReason).toBe('stop');
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].tools).toHaveLength(1);
+    expect(bodies[0].tools[0].name).toBe('scores');
+    expect(bodies[0].tools[0].strict).toBeUndefined();
+    expect(bodies[0].tool_choice).toEqual({ type: 'tool', name: 'scores' });
+    expect(bodies[0].output_config?.format).toBeUndefined();
+  });
+
+  it('a send whose forced schema tool call on Claude Sonnet 4.6 was cut off at maxTokens rejects naming the cut-off, with one request and no tool run', async () => {
+    route({ 'claude-sonnet-4-6': [cutToolTurn('claude-sonnet-4-6', 'scores', '{"scores":{"a":')] });
+    const session = gmiSession('claude-sonnet-4-6', 'forced-cut');
+
+    const error = await rejectionOf(
+      session.send('Score a.', { responseSchema: z.object({ scores: z.record(z.string(), z.number()) }), schemaName: 'scores', maxTokens: 16 }),
+    );
+
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (16)');
+    expect((error as ObjectGenerationError).rawText).toBe('{"scores":{"a":');
+    expect(postedBodies()).toHaveLength(1);
+    expect(session.messages()).toEqual([]);
   });
 });
 

@@ -526,6 +526,57 @@ describe('CompletionGateway.stream', () => {
     expect(attempt.schemaInPayload).toBe(false);
   });
 
+  it('a JSON-output-format answer cut off at the output limit is not lifted: the final chunk keeps its text and its length finish', async () => {
+    const cut = '{"city":"Ly';
+    const res = resolutionWith(async function* () {
+      yield { responseTextDelta: cut };
+      yield { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: cut }, finishReason: 'length' }] };
+    }, { providerId: 'anthropic', modelId: 'claude-sonnet-5-5', toolFormat: 'anthropic_tools' });
+    const chunks = await drain(createCompletionGateway().stream(res, [], {}, z.object({ city: z.string() }), 'answer'));
+    expect(chunks.some((c) => c.structuredOutput !== undefined)).toBe(false);
+    expect(chunks.at(-1)?.choices[0]).toMatchObject({ message: { content: cut }, finishReason: 'length' });
+  });
+
+  it('a forced schema tool call whose arguments were cut off is no answer: the call is removed, its arguments become the text, nothing is lifted', async () => {
+    const cut = '{"city":"Ly';
+    const res = resolutionWith(async function* () {
+      yield { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'answer', arguments: cut } }] }, finishReason: 'length' }] };
+    }, { providerId: 'anthropic', modelId: 'claude-x', toolFormat: 'anthropic_tools' });
+    const chunks = await drain(createCompletionGateway().stream(res, [], {}, z.object({ city: z.string() }), 'answer'));
+    const last = chunks.at(-1);
+    expect(last?.structuredOutput).toBeUndefined();
+    expect(last?.choices[0].message.tool_calls).toBeUndefined();
+    expect(last?.choices[0]).toMatchObject({ message: { content: cut }, finishReason: 'length' });
+  });
+
+  it('on Claude Sonnet 4.6 a record schema (outside the JSON output format) takes the forced tool, and its call is lifted into structuredOutput', async () => {
+    let seen: Record<string, unknown> = {};
+    const res = resolutionWith(async function* (options) {
+      seen = options;
+      yield { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'answer', arguments: '{"city":"Lyon","scores":{"a":1}}' } }] }, finishReason: 'tool_use' }] };
+    }, { providerId: 'anthropic', modelId: 'claude-sonnet-4-6', toolFormat: 'anthropic_tools' });
+    const attempt = createCompletionGateway().stream(res, [], {}, z.object({ city: z.string(), scores: z.record(z.string(), z.number()) }), 'answer');
+    const chunks = await drain(attempt);
+    expect(seen.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'forced_tool', tool: { name: 'answer' } });
+    expect(chunks.at(-1)).toMatchObject({ structuredOutput: { city: 'Lyon', scores: { a: 1 } } });
+    expect(chunks.at(-1)?.choices[0].message.tool_calls).toBeUndefined();
+    expect(attempt.schemaRoute).toBe('forced_tool');
+    expect(attempt.schemaInPayload).toBe(true);
+  });
+
+  it('lifts from where the provider says it put the schema: a format marker whose chunks say forced_tool (a citations request) has its schema tool call lifted', async () => {
+    const res = resolutionWith(async function* () {
+      yield { schemaRoute: 'forced_tool', isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'answer', arguments: '{"city":"Lyon"}' } }] }, finishReason: 'tool_use' }] };
+    }, { providerId: 'anthropic', modelId: 'claude-sonnet-4-6', toolFormat: 'anthropic_tools' });
+    const attempt = createCompletionGateway().stream(res, [], {}, z.object({ city: z.string() }), 'answer');
+    // Before the stream: the marker's own route.
+    expect(attempt.schemaRoute).toBe('json_schema');
+    const chunks = await drain(attempt);
+    expect(chunks.at(-1)).toMatchObject({ structuredOutput: { city: 'Lyon' } });
+    expect(chunks.at(-1)?.choices[0].message.tool_calls).toBeUndefined();
+    expect(attempt.schemaRoute).toBe('forced_tool');
+  });
+
   it('a failure before content carries the usage the provider billed', async () => {
     const gateway = createCompletionGateway();
     const attempt = gateway.stream(resolutionWith(async function* () {
