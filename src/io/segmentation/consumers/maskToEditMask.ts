@@ -10,7 +10,8 @@ import type { SegmentMask } from '../types.js';
  * @param masks one mask or many (unioned)
  * @param opts.target `'object'` (default) edits the masked object; `'background'`
  *   inverts so everything except the object is edited.
- * @param opts.width/height optional canvas size; defaults to the first mask's.
+ * @param opts.width optional canvas width; defaults to the first mask's.
+ * @param opts.height optional canvas height; defaults to the first mask's.
  */
 export async function maskToEditMask(
   masks: SegmentMask | SegmentMask[],
