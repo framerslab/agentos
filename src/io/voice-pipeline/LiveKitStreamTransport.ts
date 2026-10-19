@@ -106,7 +106,10 @@
  * participant playout a `waitForPlayout()` begun after it was sent; the
  * contiguous prefix of such segments is the played text, and each time it
  * grows the line is written as an interim holding it. `agent_done` writes the
- * final with the reply's text. A `barge_in` `cancel` or a `clearPlayback()`
+ * final with the reply's text, or, when the transport's wait for the reply's
+ * playout failed (a track that stalled), with the played text alone, as the
+ * session's own item of that reply proves none of the rest heard. A
+ * `barge_in` `cancel` or a `clearPlayback()`
  * cuts the reply, and its final holds the played text alone, as LiveKit
  * Agents truncate an interrupted agent's transcription to its spoken output;
  * with none played it is empty, which takes back a line the room was shown. A
@@ -176,13 +179,15 @@ const frameMs = (frame: AudioFrame): number => (frame.samples.length / frame.sam
 
 /**
  * The agent's transcription line of one reply: its id, the played text its chunks' acknowledged boundaries prove, the
- * sequences of its chunks that carry a boundary and were not refused, and the played text it was last written with.
+ * sequences of its chunks that carry a boundary and were not refused, the played text it was last written with, and
+ * whether a wait for the reply's playout failed, which leaves the rest of the reply unproven.
  */
 interface AgentLine {
   readonly itemId: string;
   readonly tracker: PlayedTextTracker;
   readonly sent: Set<number>;
   written: string;
+  playoutFailed: boolean;
 }
 
 /**
@@ -540,13 +545,14 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * (`publisher playout wait aborted`), as a session aborts it when a barge-in cuts the reply or the session closes.
    * Outside participant playout, a wait that resolves counts the chunks sent before it began as played on the agent's
    * line; what a clear or a pause discarded was forgotten first, so it counts as nothing. In participant playout only
-   * the participant's receipts do.
+   * the participant's receipts do. A wait that rejects, unless its `signal` ended it, proves the reply did not play
+   * out: `agent_done` then ends the agent's line with the text proven played alone.
    *
    * @param signal - Ends the wait when aborted.
    */
   async waitForPlayout(signal?: AbortSignal): Promise<void> {
     const line = this.agentLine; const sent = line ? [...line.sent] : [];
-    await this.publisher?.waitForPlayout(signal);
+    try { await this.publisher?.waitForPlayout(signal); } catch (error) { if (line && !signal?.aborted) line.playoutFailed = true; throw error; }
     if (line && this.publisher?.playout !== 'participant') this.acknowledge(line, sent);
   }
   /**
@@ -647,8 +653,9 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * Writes what a message the session sends says of the conversation. A `transcript` is a line of the user's, opened by
    * the first one after a final and closed by its final. `agent_speaking` opens the agent's line of the reply, ending
    * one still open as a cut; `agent_done`, which the session sends once the reply played, ends it with the reply's
-   * text; a `barge_in` `cancel` cuts it. A pause the track holds forgets what the track held, which a playout wait that
-   * the pause ended does not prove played.
+   * text, or with the text proven played alone when the wait for the reply's playout failed; a `barge_in` `cancel`
+   * cuts it. A pause the track holds forgets what the track held, which a playout wait that the pause ended does not
+   * prove played.
    */
   private transcribe(message: ServerTextMessage, action: BargeinAction | undefined): void {
     if (message.type === 'transcript') {
@@ -659,9 +666,12 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     } else if (message.type === 'agent_speaking') {
       if (!this.agentOutput) return;
       this.cutAgentLine();
-      this.agentLine = { itemId: `${this.id}:agent-${++this.agentLines}`, tracker: new PlayedTextTracker(), sent: new Set(), written: '' };
-    } else if (message.type === 'agent_done') this.endAgentLine(message.text);
-    else if (message.type === 'barge_in') {
+      this.agentLine = { itemId: `${this.id}:agent-${++this.agentLines}`, tracker: new PlayedTextTracker(), sent: new Set(), written: '', playoutFailed: false };
+    } else if (message.type === 'agent_done') {
+      // A reply whose playout wait failed is unproven past what was acknowledged, as the session's own item says.
+      const line = this.agentLine;
+      this.endAgentLine(line?.playoutFailed ? line.tracker.playedText : message.text);
+    } else if (message.type === 'barge_in') {
       if (message.action.type === 'cancel') this.cutAgentLine();
       else if (action?.type === 'pause') this.agentLine?.tracker.cleared();
     }
