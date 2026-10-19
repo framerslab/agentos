@@ -292,6 +292,22 @@ function emitEach(
 }
 
 /**
+ * A failure named by its type alone, without throwing, for a console warning that must not carry the failure's text:
+ * a listener's own error can quote the event it was handed, such as a transcript.
+ *
+ * @param reason - What was thrown or rejected with.
+ * @returns An `Error`'s `name`, such as `Error` or `SyntaxError`, or else the value's type.
+ */
+function kindOf(reason: unknown): string {
+  try {
+    if (!isError(reason)) return `a thrown ${typeof reason}`;
+    return typeof reason.name === 'string' && reason.name ? reason.name : 'Error';
+  } catch {
+    return `an unprintable ${typeof reason}`;
+  }
+}
+
+/**
  * The one speaker a transcript's words name, when every word that names a speaker names the same one.
  *
  * @param words - The transcript's words.
@@ -890,14 +906,16 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * A listener of one of the session's events threw or rejected: it is reported as `'error'` (`_reportError`) and as a
-   * recoverable `session_error`, except that a `session_error` listener's own failure raises no `session_error`.
+   * recoverable `session_error`, except that a `session_error` listener's own failure raises no `session_error`. Its
+   * console warning, written when nothing listens for `'error'`, names its type alone: a listener's own error can quote
+   * the event it was handed, such as a transcript.
    *
    * @param err - What the listener threw or rejected with.
    * @param what - What failed, for the console warning.
    * @param event - The event the listener was handed.
    */
   private _listenerFailed(err: unknown, what: string, event: string): void {
-    const error = this._reportError(err, what);
+    const error = this._reportError(err, what, this, true, false);
     if (event !== 'session_error') this._sessionError(error, true, 'session');
   }
 
@@ -1385,7 +1403,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (!overrides.streamingSTT) throw new Error('streamingSTT is required');
     if (!overrides.streamingTTS) throw new Error('streamingTTS is required');
     if (overrides.callProfile) {
-      const call = new CallPipelineRuntime(this.config, transport, agent, overrides.streamingSTT, overrides.streamingTTS, overrides.callProfile, (err, what, target, warnUnheard) => this._reportError(err, what, target, warnUnheard));
+      const call = new CallPipelineRuntime(this.config, transport, agent, overrides.streamingSTT, overrides.streamingTTS, overrides.callProfile, (err, what, target, warnUnheard, withText) => this._reportError(err, what, target, warnUnheard, withText));
       this.call = call;
       this.transport = transport;
       call.on('state_change', (state: PipelineState) => this.stateTo(state));
@@ -1839,16 +1857,17 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * @param target - Whose listeners get the failure: the orchestrator, or the session it returned.
    * @param warnUnheard - Whether a failure that nothing listens for as `'error'` is written as a console warning; a
    *   report that another report writes the warning for passes `false`, and its `errorMonitor` listeners still get it.
+   * @param withText - Whether a console warning carries the failure's text, and that of what an `'error'` listener
+   *   throws; `false` for a listener of a session event that failed, whose own error can quote the event it was handed,
+   *   such as a transcript, and which a warning then names by its type alone (`kindOf()`). The listeners get the failure
+   *   as it is either way.
    * @returns The `Error` the listeners were handed, for `session_error`.
    */
-  private _reportError(err: unknown, what: string, target: EventEmitter = this, warnUnheard = true): Error {
+  private _reportError(err: unknown, what: string, target: EventEmitter = this, warnUnheard = true, withText = true): Error {
     const error = isError(err) ? err : new Error(describeReason(err));
+    const told = (reason: unknown): string => (withText ? describeReason(reason) : kindOf(reason));
     const warnListenerFailed = (thrown: unknown): void => {
-      console.warn(
-        `[voice-pipeline-orchestrator] ${what}:`,
-        describeReason(error),
-        `(an 'error' listener failed: ${describeReason(thrown)})`
-      );
+      console.warn(`[voice-pipeline-orchestrator] ${what}:`, told(error), `(an 'error' listener failed: ${told(thrown)})`);
     };
     const handToListeners = (event: string | symbol): void => {
       for (const listener of target.rawListeners(event)) {
@@ -1863,7 +1882,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     };
     handToListeners(EventEmitter.errorMonitor);
     if (target.listenerCount('error') === 0) {
-      if (warnUnheard) console.warn(`[voice-pipeline-orchestrator] ${what}:`, describeReason(error));
+      if (warnUnheard) console.warn(`[voice-pipeline-orchestrator] ${what}:`, told(error));
       return error;
     }
     handToListeners('error');
@@ -2195,7 +2214,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
    * @param report - Reports a failure to the listeners of `target`, the orchestrator's by default, as the orchestrator
    *   reports its own (`'error'`, or a console warning with no listener), and gives the `Error` it handed them.
    */
-  constructor(private readonly config: VoicePipelineConfig, readonly transport: IStreamTransport, private readonly agent: IVoicePipelineAgentSession, private readonly sttProvider: IStreamingSTT, private readonly ttsProvider: IStreamingTTS, private readonly profile: CallPipelineProfile, private readonly report: (err: unknown, what: string, target?: EventEmitter, warnUnheard?: boolean) => Error) {
+  constructor(private readonly config: VoicePipelineConfig, readonly transport: IStreamTransport, private readonly agent: IVoicePipelineAgentSession, private readonly sttProvider: IStreamingSTT, private readonly ttsProvider: IStreamingTTS, private readonly profile: CallPipelineProfile, private readonly report: (err: unknown, what: string, target?: EventEmitter, warnUnheard?: boolean, withText?: boolean) => Error) {
     super();
     this.events = new SessionEvents(() => [this], (err, what, event) => this.listenerFailed(err, what, event), config.userAwayTimeoutMs);
     this.identity = copyAudioIdentity(profile.identity);
@@ -2248,7 +2267,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
    * @param event - The event the listener was handed.
    */
   private listenerFailed(err: unknown, what: string, event: string): void {
-    const error = this.report(err, what);
+    // As without a call profile, the console warning names the error's type alone: it can quote the event.
+    const error = this.report(err, what, undefined, true, false);
     if (event !== 'session_error') this.sessionError(error, true, 'session');
   }
 
