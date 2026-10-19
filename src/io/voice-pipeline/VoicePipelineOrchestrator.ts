@@ -1341,10 +1341,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * LISTENING for longer than {@link VoicePipelineConfig.maxTurnDurationMs}
    * (default 30 s) without a `turn_complete`, the watchdog gives the endpoint
    * detector a synthetic `speech_end`, so a user who walks away does not hold
-   * the pipeline in LISTENING forever.
+   * the pipeline in LISTENING forever. A closed session gets no watchdog: a
+   * listener that stopped it returns into the step that would reset it.
    */
   private resetWatchdog(): void {
     if (this.watchdog) clearTimeout(this.watchdog);
+    if (this.current === 'closed') return;
     this.watchdog = setTimeout(() => {
       if (this.current === 'listening') this.supervise(() => this.endpoint?.pushVadEvent({ type: 'speech_end', timestamp: Date.now(), source: 'vad' }), 'endpoint');
     }, this.config.maxTurnDurationMs ?? 30000);
