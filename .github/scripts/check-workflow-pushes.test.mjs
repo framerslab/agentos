@@ -144,7 +144,8 @@ describe('refused: a workflow that pushes to master', () => {
           git push origin 'refs/heads/*:refs/heads/*'
           git push origin :
           git push origin +:
-    `) }, [/pushes every branch, master among them$/, /pushes every branch, master among them$/, /pushes to refs\/heads\/\*$/, /pushes every branch the remote also has/, /pushes every branch the remote also has/]);
+          git push origin 'refs/*:refs/*'
+    `) }, [/pushes every branch, master among them$/, /pushes every branch, master among them$/, /pushes to refs\/heads\/\*$/, /pushes every branch the remote also has/, /pushes every branch the remote also has/, /pushes to refs\/\*$/]);
   });
 
   test('expressions and defaults that resolve to the default branch', () => {
@@ -209,6 +210,26 @@ describe('refused: a workflow that pushes to master', () => {
     `) }, Array(8).fill(/pushes to master$/));
   });
 
+  test('a push in text the shell expands or reads: a ${ } default, an unquoted heredoc, a heredoc or words piped to a shell', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+      - run: |
+          echo "$\{CACHE:-$(git push origin HEAD:master)}"
+          cat <<EOF > notes.txt
+          pushed: $(git push origin HEAD:master)
+          EOF
+          cat <<'EOF' | bash
+          git push origin master
+          EOF
+          echo 'git push origin HEAD:master' | sh
+          printf '%s\n' 'git push origin master' |& bash -s
+          bash -o pipefail <<'EOF'
+          git push origin master
+          EOF
+          bash <<< 'git push origin HEAD:master'
+          cat <<< "git push origin master" | sh -e
+    `) }, Array(8).fill(/pushes to master$/));
+  });
+
   test('a step that checks out master makes a pull request job push it', () => {
     expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
       - uses: actions/checkout@v5
@@ -219,7 +240,25 @@ describe('refused: a workflow that pushes to master', () => {
           git switch feature
           git checkout main
           git push origin HEAD
-    `) }, [/^jobs\.j\.steps\[1\]: "git push" pushes the checked-out branch/, /^jobs\.j\.steps\[2\]: "git push origin HEAD" pushes the checked-out branch/]);
+      - run: |
+          git switch feature
+          git switch --track origin/master
+          git push origin
+      - run: |
+          git checkout feature
+          git checkout -t origin/main
+          git push
+    `) }, [/^jobs\.j\.steps\[1\]: "git push" pushes the checked-out branch/, /^jobs\.j\.steps\[2\]: "git push origin HEAD" pushes the checked-out branch/, /^jobs\.j\.steps\[3\]: "git push origin" pushes the checked-out branch/, /^jobs\.j\.steps\[4\]: "git push" pushes the checked-out branch/]);
+  });
+
+  test('a pull request review run, on which git-auto-commit-action has no head branch and pushes the checked-out one', () => {
+    // github.head_ref is set on pull_request and pull_request_target alone (GitHub's contexts reference).
+    expectFindings({ '.github/workflows/w.yml': workflow('pull_request_review:', text`
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+      - uses: stefanzweifel/git-auto-commit-action@v5
+    `) }, [/git-auto-commit-action with no branch input pushes the checked-out branch, master on a run on master$/]);
   });
 
   test('actions that push to master', () => {
@@ -233,7 +272,11 @@ describe('refused: a workflow that pushes to master', () => {
       - uses: EndBug/add-and-commit@v9
         with:
           push: origin HEAD:master --force
-    `) }, [/ad-m\/github-push-action with no branch input pushes master on v0\.6\.0 and earlier/, /JamesIves\/github-pages-deploy-action publishes to master$/, /git-auto-commit-action with no branch input pushes the checked-out branch, master on a run on master$/, /EndBug\/add-and-commit with no new_branch input pushes the checked-out branch/, /"git push origin HEAD:master --force" pushes to master$/]);
+      # dry_run came in v11.1.0; v10 ignores it and pushes.
+      - uses: EndBug/add-and-commit@v10
+        with:
+          dry_run: true
+    `) }, [/ad-m\/github-push-action with no branch input pushes master on v0\.6\.0 and earlier/, /JamesIves\/github-pages-deploy-action publishes to master$/, /git-auto-commit-action with no branch input pushes the checked-out branch, master on a run on master$/, /EndBug\/add-and-commit with no new_branch input pushes the checked-out branch/, /"git push origin HEAD:master --force" pushes to master$/, /EndBug\/add-and-commit with no new_branch input pushes the checked-out branch/]);
   });
 
   test('semantic-release on master while the configuration lists @semantic-release/git', () => {
@@ -274,6 +317,14 @@ describe('allowed: a workflow that does not push to master', () => {
           git push --dry-run origin HEAD:master
           git push -n origin master
           command -v git
+          echo git push origin HEAD:master | tee push.log
+          cat <<'EOF' | sh -c 'cat > release.sh'
+          git push origin master
+          EOF
+          bash release.sh <<'EOF'
+          git push origin master
+          EOF
+          bash release.sh <<< 'git push origin master'
     `) }, []);
   });
 
@@ -288,6 +339,8 @@ describe('allowed: a workflow that does not push to master', () => {
           git push origin tag v1.2.4
           git push "https://x-access-token:%{{ secrets.TOKEN }}@github.com/o/r.git" HEAD:refs/heads/feature
           git switch -c other
+          git push
+          git switch -c feature --track origin/master
           git push
     `) }, []);
   });
@@ -308,6 +361,11 @@ describe('allowed: a workflow that does not push to master', () => {
       - uses: EndBug/add-and-commit@v9
         with:
           new_branch: chore/generated
+      - uses: EndBug/add-and-commit@v11.1.0
+        with:
+          dry_run: true
+      - uses: EndBug/add-and-commit@v11
+        with: { dry_run: true }
     `) }, []);
   });
 

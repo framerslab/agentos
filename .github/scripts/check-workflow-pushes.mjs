@@ -25,15 +25,18 @@
  *   (branch), ad-m/github-push-action (branch; with none it pushes master on v0.6.0 and earlier),
  *   stefanzweifel/git-auto-commit-action (branch, else the pull request's head branch on a pull request event and
  *   the checked-out branch on any other) and EndBug/add-and-commit (new_branch, else the checked-out branch; a push
- *   input other than true or false is read as git push arguments);
+ *   input other than true or false is read as git push arguments; dry_run, which came in v11.1.0, pushes nothing);
  * - semantic-release run on the default branch (the program, through npx, bunx, npm exec, pnpm exec or dlx, yarn or
  *   bun, a package script that runs it, or cycjimmy/semantic-release-action) while a release configuration lists
  *   @semantic-release/git, which commits the release to the branch the run is on.
  * Commands are read where the shell runs them: at command position, past variable assignments and env, command,
  * exec, sudo, nohup, time, nice and timeout, inside $( ) and backticks (also within double quotes), in an sh -c or
- * bash -c string, an eval, and a heredoc fed to a shell. A word that is only printed (echo git push ...), a heredoc
- * fed to another program, a comment and a dry run are not pushes. Not read: a branch held in a shell variable, a
- * job's or step's if: condition, and a push made by a script file or by an action not named above.
+ * bash -c string, an eval, a heredoc or a here-string fed to a shell or to a cat piped into one, the words an echo or
+ * a printf pipes into a shell, and the substitutions in a ${ } (${CACHE:-$(...)}) and in an unquoted heredoc's body,
+ * which run whatever program reads it. A word that is only printed (echo git push ...), a quoted heredoc fed to
+ * another program, a comment and a dry run are not pushes. Not read: a branch held in a shell variable, a job's or
+ * step's if: condition, a script a shell reads from a file, a variable or a download (curl ... | bash), and a push
+ * made by a script file or by an action not named above.
  *
  * Usage: node .github/scripts/check-workflow-pushes.mjs [--root <dir>] [file ...]
  * DEFAULT_BRANCH names the default branch (master when unset); master and main are refused whatever it is. YQ names
@@ -59,7 +62,8 @@ import { pathToFileURL } from 'node:url';
  * @typedef {object} State
  * @property {boolean} run whether the run's own branch can be the default branch
  * @property {boolean} head whether the checked-out branch can be the default branch
- * @property {boolean} pullRequestOnly whether every trigger is a pull request event, on which github.head_ref is set
+ * @property {boolean} pullRequestOnly whether every trigger is pull_request or pull_request_target, the events that
+ *   set github.head_ref
  * @property {string} dir the directory run steps start in, relative to the root
  */
 /**
@@ -76,7 +80,9 @@ export class ReadError extends Error {}
 const USAGE = 'Usage: node .github/scripts/check-workflow-pushes.mjs [--root <dir>] [file ...]';
 // Events whose runs are never on a branch: a pull request's merge ref, a merge queue's ref, a release's tag.
 const OFF_BRANCH_EVENTS = new Set(['pull_request', 'pull_request_review', 'pull_request_review_comment', 'merge_group', 'release']);
-const PULL_REQUEST_EVENTS = new Set(['pull_request', 'pull_request_target', 'pull_request_review', 'pull_request_review_comment']);
+// The events that set github.head_ref, the pull request's head branch (GitHub's contexts reference names these two
+// alone); git-auto-commit-action's branch input defaults to it.
+const PULL_REQUEST_EVENTS = new Set(['pull_request', 'pull_request_target']);
 // Words that open a compound command; the command after them is at command position.
 const RESERVED = new Set(['!', '{', '}', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
 const SHELLS = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh']);
@@ -116,6 +122,22 @@ const base = (word) => word.slice(word.lastIndexOf('/') + 1);
 const isAssignment = (word) => /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word);
 /** @param {string} word an option of sh or bash that makes it run its next argument (-c, -ec, -xc) */
 const isCommandOption = (word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word);
+/**
+ * Whether a command is a shell that reads its script from its standard input: no -c, and no script file operand
+ * unless -s makes the operands its arguments (-o and -O take a value).
+ * @param {{ name: string, args: string[] } | null} run
+ */
+const readsScript = (run) => {
+  if (run === null || !SHELLS.has(run.name) || run.args.some(isCommandOption)) return false;
+  if (run.args.some((a) => /^-[A-Za-z]*s[A-Za-z]*$/.test(a))) return true;
+  for (let k = 0; k < run.args.length; k++) {
+    const a = run.args[k];
+    if (a === '--') return k + 1 === run.args.length;
+    if (/^[-+][oO]$/.test(a)) k++;
+    else if (!/^[-+]/.test(a)) return false;
+  }
+  return true;
+};
 /** @param {string} text */
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -149,9 +171,17 @@ export function invoked(words) {
 }
 
 /**
+ * A heredoc waiting for its body: the delimiter, whether <<- strips tabs, the words of its command, whether the
+ * delimiter was quoted (which keeps the body from being expanded) and whether a shell reads it as a script.
+ * @typedef {{ delimiter: string, tabs: boolean, words: string[], quoted: boolean, script: boolean }} Heredoc
+ */
+
+/**
  * The simple commands of a shell script, each as its words with quotes and escapes removed, in the order they end.
  * A command substitution's commands come out on their own and its text stays in its word; a heredoc's body is read
- * as a script when it feeds a shell, and skipped otherwise.
+ * as a script when it feeds a shell, directly or through a cat piped into one, and otherwise its substitutions are
+ * read when its delimiter is unquoted. A here-string fed so, and what an echo or a printf pipes into a shell, is read
+ * as a script too.
  * @param {string} src
  * @returns {string[][]}
  */
@@ -204,7 +234,22 @@ export function shellCommands(src) {
     }
     if (src.startsWith('${', i)) {
       i += 2;
-      for (let depth = 1; i < n && depth > 0; i++) depth += src[i] === '{' ? 1 : src[i] === '}' ? -1 : 0;
+      // A default value, an alternative or a pattern can hold a command substitution, which runs when the shell
+      // expands the parameter: ${CACHE:-$(git push origin HEAD:master)}.
+      for (let depth = 1; i < n && depth > 0; ) {
+        const c = src[i];
+        if (c === '\\') {
+          i += 2;
+        } else if (c === '$' && (src[i + 1] === '(' || src[i + 1] === '{')) {
+          dollar();
+        } else if (c === '`') {
+          i++;
+          commandsUntil('`');
+        } else {
+          depth += c === '{' ? 1 : c === '}' ? -1 : 0;
+          i++;
+        }
+      }
       return src.slice(start, i);
     }
     if (src.startsWith("$'", i)) {
@@ -255,7 +300,7 @@ export function shellCommands(src) {
     return text;
   };
 
-  /** @param {{ delimiter: string, tabs: boolean, words: string[] }} heredoc */
+  /** @param {Heredoc} heredoc */
   const readHeredoc = (heredoc) => {
     /** @type {string[]} */
     const lines = [];
@@ -268,8 +313,15 @@ export function shellCommands(src) {
       if (line.replace(/\r$/, '') === heredoc.delimiter) break;
       lines.push(line);
     }
+    const body = lines.join('\n');
     const run = invoked(heredoc.words);
-    if (run && SHELLS.has(run.name) && !run.args.some(isCommandOption)) out.push(...shellCommands(lines.join('\n')));
+    if (heredoc.script || readsScript(run)) {
+      out.push(...shellCommands(body));
+    } else if (!heredoc.quoted) {
+      // An unquoted delimiter leaves the body's $( ) and backticks to run before the program reads it, as within
+      // double quotes. The body is read as one double-quoted word of a ':' command, which is dropped.
+      out.push(...shellCommands(`: "${body.replace(/"/g, "'")}"`).slice(0, -1));
+    }
   };
 
   /**
@@ -283,9 +335,13 @@ export function shellCommands(src) {
     let words = [];
     /** @type {string | null} */
     let word = null;
-    /** @type {{ delimiter: string, tabs: boolean, words: string[] }[]} */
+    /** @type {Heredoc[]} */
     let heredocs = [];
     let depth = 0;
+    /** @type {string[] | null} the command whose output a | feeds to the next command */
+    let piped = null;
+    /** @type {{ words: string[], text: string }[]} the here-strings (<<<) of the line, with their commands */
+    let strings = [];
     /** @param {string} text */
     const add = (text) => {
       word = (word ?? '') + text;
@@ -294,9 +350,36 @@ export function shellCommands(src) {
       if (word !== null) words.push(word);
       word = null;
     };
-    const endCommand = () => {
+    /**
+     * A shell that reads its script from its standard input runs what the command before it writes there: the
+     * heredoc of a cat (cat <<'EOF' | bash), or the words of an echo or a printf.
+     * @param {string[]} source
+     * @param {string[]} sink
+     */
+    const feed = (source, sink) => {
+      if (!readsScript(invoked(sink))) return;
+      const from = invoked(source);
+      if (!from) return;
+      if (from.name === 'cat' && from.args.every((a) => a.startsWith('-'))) {
+        for (const heredoc of heredocs) if (heredoc.words === source) heredoc.script = true;
+        for (const s of strings) if (s.words === source) out.push(...shellCommands(s.text));
+      } else if (from.name === 'echo' || from.name === 'printf') {
+        let k = 0;
+        if (from.name === 'echo') while (k < from.args.length && /^-[neE]+$/.test(from.args[k])) k++;
+        out.push(...shellCommands(from.args.slice(k).join(from.name === 'echo' ? ' ' : '\n').replace(/\\n/g, '\n')));
+      }
+    };
+    /** @param {boolean} [pipe] whether a | ends the command, feeding its output to the next one */
+    const endCommand = (pipe = false) => {
       endWord();
-      if (words.length > 0) out.push(words);
+      // An empty command (the & of |&, a line break after |) leaves a pipe as it is.
+      if (words.length > 0) {
+        out.push(words);
+        // A here-string fed to a shell is its script: bash <<< "git push ...".
+        if (readsScript(invoked(words))) for (const s of strings) if (s.words === words) out.push(...shellCommands(s.text));
+        if (piped) feed(piped, words);
+        piped = pipe ? words : null;
+      }
       words = [];
     };
     while (i < n) {
@@ -330,24 +413,27 @@ export function shellCommands(src) {
         endCommand();
         for (const heredoc of heredocs) readHeredoc(heredoc);
         heredocs = [];
+        strings = [];
       } else if (c === '<' || c === '>' || (c === '&' && src[i + 1] === '>')) {
         if (word !== null && /^\d+$/.test(word)) word = null; // the descriptor of 2>&1
         endWord();
         if (src.startsWith('<<<', i)) {
           i += 3;
-          target();
+          strings.push({ words, text: target() });
         } else if (src.startsWith('<<', i)) {
           i += 2;
           const tabs = src[i] === '-';
           if (tabs) i++;
-          heredocs.push({ delimiter: target(), tabs, words });
+          const from = i;
+          const delimiter = target();
+          heredocs.push({ delimiter, tabs, words, quoted: /['"\\]/.test(src.slice(from, i)), script: false });
         } else {
           i++;
           while (i < n && '<>&|'.includes(src[i])) i++;
           target();
         }
       } else if (c === ';' || c === '&' || c === '|') {
-        endCommand();
+        endCommand(c === '|' && src[i + 1] !== '|' && src[i - 1] !== '|');
         i++;
       } else if (c === '(') {
         endCommand();
@@ -477,7 +563,8 @@ export function classify(name, ctx) {
   if (/^\$\{?GITHUB_HEAD_REF\}?$/.test(s)) return 'other';
   const fallback = /^\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=]([^}]*)\}$/.exec(s);
   if (fallback) return classify(fallback[1], ctx) === 'protected' ? 'protected' : '';
-  if (s.includes('*')) return [...ctx.names].some((branch) => refGlob(s).test(branch)) ? 'protected' : 'other';
+  // A pattern is matched against each branch's short and full names: refs/*:refs/* updates refs/heads/master.
+  if (s.includes('*')) return [...ctx.names].some((branch) => refGlob(s).test(branch) || refGlob(s).test(`refs/heads/${branch}`)) ? 'protected' : 'other';
   if (/[$`]/.test(s)) return '';
   return ctx.names.has(s) ? 'protected' : 'other';
 }
@@ -584,6 +671,10 @@ function checkout(sub, args, { state, ctx }) {
   const create = sub === 'checkout' ? ['-b', '-B', '--orphan'] : ['-c', '-C', '--create', '--force-create', '--orphan'];
   // git checkout <tree-ish> -- <paths> restores files and leaves the branch as it is.
   if (sub === 'checkout' && args.includes('--') && !args.some((a) => create.includes(a))) return;
+  // --track with no name for the new branch names it for the remote-tracking branch past the remote's part, so
+  // git switch --track origin/master makes and checks out master (git-checkout(1), -t).
+  const track = args.some((a) => a === '-t' || a === '--track' || a.startsWith('--track='))
+    && !args.some((a) => create.includes(a) || /^--(?:create|force-create|orphan)=/.test(a));
   for (let k = 0; k < args.length; k++) {
     const a = args[k];
     if (a === '--') return;
@@ -593,12 +684,13 @@ function checkout(sub, args, { state, ctx }) {
     }
     const attached = /^--(?:create|force-create|orphan)=(.+)$/.exec(a);
     const creates = create.includes(a) || attached !== null;
-    const name = create.includes(a) ? args[k + 1] : attached ? attached[1] : a.startsWith('-') ? undefined : a;
-    if (name === undefined) continue;
+    const operand = create.includes(a) ? args[k + 1] : attached ? attached[1] : a.startsWith('-') ? undefined : a;
+    if (operand === undefined) continue;
+    const name = track ? operand.replace(/^(?:refs\/)?(?:remotes\/)?[^/]+\//, '') : operand;
     // A branch made here is a new one unless it is named for the default branch (-B master resets it).
     const kind = classify(name, ctx);
     if (kind === 'protected') state.head = true;
-    else if (kind === 'other' || creates) state.head = false;
+    else if (kind === 'other' || creates || track) state.head = false;
     else if (kind === 'run') state.head = state.run;
     return;
   }
@@ -757,6 +849,21 @@ function checkCommand(words, step, depth) {
 }
 
 /**
+ * Whether an action reference names a release at or after major.minor: @v11 (the newest 11 release) and @v11.1.0 do
+ * for 11.1; @v11.0.0, a commit and a branch do not.
+ * @param {string} uses
+ * @param {number} major
+ * @param {number} minor
+ */
+function releaseAtLeast(uses, major, minor) {
+  const m = /@v?(\d+)(?:\.(\d+))?(?:\.\d+)?$/.exec(uses.trim());
+  if (!m) return false;
+  const have = Number(m[1]);
+  const sub = m[2] === undefined ? Infinity : Number(m[2]);
+  return have > major || (have === major && sub >= minor);
+}
+
+/**
  * Reports an action step that pushes to the default branch, and follows actions/checkout.
  * @param {string} uses
  * @param {unknown} inputs
@@ -797,6 +904,8 @@ function checkAction(uses, inputs, step) {
     if (input('branch') !== '') destination(input('branch'), 'stefanzweifel/git-auto-commit-action pushes to');
     else if (state.head && !state.pullRequestOnly) report(`stefanzweifel/git-auto-commit-action with no branch input pushes the checked-out branch, ${branch} on a run on ${branch}`);
   } else if (action === 'endbug/add-and-commit') {
+    // dry_run came in v11.1.0; an earlier version ignores it and pushes.
+    if (input('dry_run') === 'true' && releaseAtLeast(uses, 11, 1)) return;
     const push = 'push' in given ? input('push') : 'true';
     if (push === 'false') return;
     if (push !== 'true') {
