@@ -531,9 +531,10 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
   returns.
 - A nested agency's `seating`, `seats`, `chair`, `quorum` and `provenanceTrail`
   are stripped from the parent's result.
-- A callback that throws, whichever part of the run fires it (the agency, its
-  strategy, a tool approval or a HITL check), is written through the host's
-  logger as `agency_callback_threw` and no longer rejects the call.
+- A callback that throws, or an async one whose promise rejects, whichever
+  part of the run fires it (the agency, its strategy, a tool approval or a HITL
+  check), is written through the host's logger as `agency_callback_threw` and
+  no longer rejects the call or leaves a rejection unhandled.
 - A run that breaches `maxTotalTokens` or `maxCostUSD` is added to the usage
   totals before the limit error is thrown.
 - `quorum` is read by `panel` as well as `parallel`; `AgencyQuorumError` takes
@@ -1288,9 +1289,9 @@ for (const call of result.agentCalls) {
 per-member record is `result.agentCalls`, and on the sequential and graph
 strategies `stream()` emits `agent-start` and `agent-end` parts per member on
 `fullStream`. `handoff` and `toolCall` are declared on the callback type and
-never fired. A callback that throws is written through the host's logger as
-`agency_callback_threw` and never fails the run or changes its result,
-whichever part of the run fires it. `observability` (`logLevel`,
+never fired. A callback that throws, or an async one whose promise rejects,
+is written through the host's logger as `agency_callback_threw` and never
+fails the run or changes its result, whichever part of the run fires it. `observability` (`logLevel`,
 `traceEvents`, `otel`) is accepted and not read by `agency()`.
 
 ### Provenance / audit trail

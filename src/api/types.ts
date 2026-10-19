@@ -1000,10 +1000,10 @@ export type AgencyTraceEvent =
  * Event callbacks registered on `BaseAgentConfig.on`. Each returns `void`.
  * An agency runs every one inside a try/catch, whichever part of a run fires
  * it (the agency, its strategy, a tool approval or a HITL check): a callback
- * that throws is written through the host's logger as
- * `agency_callback_threw` (in an agency with a pool or a panel, with every
- * key the agency can send masked in its message), and never fails the call
- * or changes what it returns.
+ * that throws, or an async one whose promise rejects, is written through the
+ * host's logger as `agency_callback_threw` (in an agency with a pool or a
+ * panel, with every key the agency can send masked in its message), and never
+ * fails the call, changes what it returns or leaves a rejection unhandled.
  */
 export interface AgencyCallbacks {
   /** Called immediately before an agent starts. */
