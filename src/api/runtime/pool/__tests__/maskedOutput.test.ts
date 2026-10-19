@@ -228,3 +228,29 @@ describe('maskStreamMembers', () => {
     expect(thrown?.message).toBe('stream died [redacted]');
   });
 });
+
+describe('a number a tool returns', () => {
+  it("is masked when its digits hold a listed value, in a pre-built seat's tool calls, its tool-result parts and its toolCalls promise, while a count stays a number", async () => {
+    const digits = createErrorMask({ list: ['12345678'] });
+    const numeric = {
+      generate: async () => ({ text: 'ok', toolCalls: [{ name: 'pin', args: {}, result: 912345678 }], usage: { totalTokens: 12345678 } }),
+      stream: () => ({
+        fullStream: pieces({ type: 'tool-result', toolName: 'pin', result: 912345678 }, { type: 'finish', usage: { totalTokens: 12345678 } }),
+        toolCalls: Promise.resolve([{ name: 'pin', args: {}, result: 912345678 }]),
+        usage: Promise.resolve({ totalTokens: 12345678 }),
+      }),
+      session: () => ({}),
+      usage: async () => ({}),
+      close: async () => {},
+    } as unknown as Agent;
+    const masked = maskedPrebuilt(numeric, digits);
+    expect(await masked.generate('go')).toEqual({ text: 'ok', toolCalls: [{ name: 'pin', args: {}, result: '[redacted]' }], usage: { totalTokens: 12345678 } });
+    const streamed = masked.stream('go') as unknown as { fullStream: AsyncIterable<unknown>; toolCalls: Promise<unknown>; usage: Promise<unknown> };
+    expect(await drain(streamed.fullStream)).toEqual([
+      { type: 'tool-result', toolName: 'pin', result: '[redacted]' },
+      { type: 'finish', usage: { totalTokens: 12345678 } },
+    ]);
+    expect(await streamed.toolCalls).toEqual([{ name: 'pin', args: {}, result: '[redacted]' }]);
+    expect(await streamed.usage).toEqual({ totalTokens: 12345678 });
+  });
+});

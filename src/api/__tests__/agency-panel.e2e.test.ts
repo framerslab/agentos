@@ -874,6 +874,18 @@ const ownStrings = (e: unknown): string => {
   for (const k of Object.getOwnPropertyNames(e)) { try { const v = (e as Json)[k]; out.push(typeof v === 'string' ? v : JSON.stringify(v) ?? ''); } catch { /* accessor */ } }
   return out.join('\n');
 };
+/** An error whose message is clean and whose toJSON writes a key it keeps in a private field, which no walk of its properties reaches. */
+class KeyedError extends Error {
+  readonly #key: string;
+  constructor(message: string, key: string) {
+    super(message);
+    this.name = 'KeyedError';
+    this.#key = key;
+  }
+  toJSON(): Record<string, unknown> {
+    return { message: this.message, key: this.#key };
+  }
+}
 const errorEcho = (key: string) => ({ openai: openaiError(500, `rejected key ${key} by upstream`), anthropic: anthropicError(500, `rejected key ${key} by upstream`, 'api_error'), gemini: geminiError(500, `rejected key ${key} by upstream`) });
 
 describe('13. no credential in any record', () => {
@@ -1031,6 +1043,36 @@ describe('13. no credential in any record', () => {
     expect(result.agentCalls[0].toolCalls[0].result).toEqual({ status: { '[redacted]': 'active' } });
     expect(JSON.stringify(result)).not.toContain(K.oaiEnv);
     expect(JSON.stringify(calls(OPENAI_CHAT, 'POST').map((c) => c.body))).not.toContain(K.oaiEnv);
+  });
+
+  it("a tool that returns an Error whose toJSON writes a key from a private field: the tool-call record holds what that toJSON writes, masked, as the provider's turn does", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const tools = { lookup: { description: 'l', parameters: { type: 'object', properties: {} }, execute: async () => new KeyedError('lookup failed', K.oaiEnv) } };
+    const team = agency({ modelPool: { astra: { provider: 'openai', model: 'gpt-4.1' } }, agents: { one: { instructions: 'x', tools } }, strategy: 'sequential' } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('lookup', {}), openaiText('done')]]]);
+    const result = await team.generate('go');
+    expect(result.text).toBe('done');
+    expect(result.agentCalls[0].toolCalls[0].result).toEqual({ message: 'lookup failed', key: '[redacted]' });
+    expect(JSON.stringify(result)).not.toContain(K.oaiEnv);
+    expect(JSON.stringify(calls(OPENAI_CHAT, 'POST').map((c) => c.body))).not.toContain(K.oaiEnv);
+  });
+
+  it("a pre-built seat's tool that returns a number whose digits hold a listed key: the call record holds it masked, in generate() and in stream()", async () => {
+    const digits = '12345678';
+    const tools = { pin: { description: 'p', parameters: { type: 'object', properties: {} }, execute: async () => 912345678 } };
+    const pre = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: digits, fallbackProviders: [], tools });
+    const team = agency({ modelPool: { opus: POOL().opus }, agents: { pre }, strategy: 'sequential' } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('pin', {}), openaiText('done')]]]);
+    const generated = await team.generate('go');
+    expect(generated.text).toBe('done');
+    expect(generated.agentCalls[0].toolCalls.map((t) => t.result)).toEqual(['[redacted]']);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('pin', {}), openaiText('done')]]]);
+    const streamed = team.stream('go');
+    const parts: unknown[] = [];
+    for await (const part of streamed.fullStream) parts.push(part);
+    const final = await streamed.result;
+    expect(final.agentCalls[0].toolCalls.map((t) => t.result)).toEqual(['[redacted]']);
+    expect(JSON.stringify([generated.agentCalls, final.agentCalls])).not.toContain(digits);
   });
 
   it("under panel a seat's answer that repeats a key is redacted in its seat record and the chair's answer in the result's text", async () => {
@@ -1212,6 +1254,41 @@ describe('13. no credential in any record', () => {
       expect(err.message).toContain('[redacted]');
       if (thrown === timeout) { expect(err).toBeInstanceOf(OpenAIProviderError); expect((err.details as DOMException).name).toBe('AbortError'); }
     }
+  });
+
+  it("a pre-built seat's error whose toJSON writes a key from a private field reaches the caller and on.error as an error whose JSON holds no key", async () => {
+    const errors: Json[] = [];
+    const seat = { generate: async () => { throw new KeyedError('upstream failed', K.ant); }, stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} } as unknown as Agent;
+    const err = await agency({ modelPool: { opus: POOL().opus }, agents: { seat }, strategy: 'sequential', on: { error: (e: Json) => errors.push(e) } } as never).generate('go').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('upstream failed');
+    expect(JSON.stringify(err)).not.toContain(K.ant);
+    expect(errors.length).toBeGreaterThan(0);
+    expect(JSON.stringify(errors)).not.toContain(K.ant);
+  });
+
+  it('a frozen pre-built seat runs in a pooled agency: its generate() and stream() leave it masked, as an unfrozen seat does', async () => {
+    // Each own property of a frozen object is neither writable nor configurable, and a proxy must return such a
+    // property's own value: a proxy over the seat itself could not hand out the masking generate and stream.
+    const seat = Object.freeze({
+      generate: async () => ({ text: `answer ${K.ant}` }),
+      stream: () => ({
+        textStream: (async function* () { yield `streamed ${K.ant}`; })(),
+        text: Promise.resolve(`streamed ${K.ant}`),
+        usage: Promise.resolve({ promptTokens: 1, completionTokens: 1, totalTokens: 2 }),
+        toolCalls: Promise.resolve([]),
+      }),
+      session: () => ({}),
+      usage: async () => ({}),
+      close: async () => {},
+    }) as unknown as Agent;
+    const team = agency({ modelPool: { opus: POOL().opus }, agents: { seat }, strategy: 'sequential' } as never);
+    expect((await team.generate('go')).text).toBe('answer [redacted]');
+    const parts: Json[] = [];
+    for await (const part of team.stream('go').fullStream) parts.push(part as unknown as Json);
+    expect(parts.filter((p) => p.type === 'text').map((p) => p.text).join('')).toBe('streamed [redacted]');
+    expect(JSON.stringify(parts)).not.toContain(K.ant);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('a pre-built seat and a debate judge failing with an environment key are masked in on.error of generate and stream and in the next call trail; a key under 8 characters masks nothing; a tool error is masked in the call record', async () => {
@@ -1709,6 +1786,18 @@ describe('22-23. rotation, copies, retries, empty text', () => {
     // No synthesizer was asked in either run.
     expect(calls(OPENAI_CHAT, 'POST')).toEqual([]);
     expect(calls(ANTHROPIC, 'POST')).toEqual([]);
+  });
+  it("a parallel quorum that no seat meets because each failed throws AgencyQuorumError with the first failed seat's error, masked, as its cause, and asks no synthesizer", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('a synthesis of no answer')]]);
+    const failing = (what: string) => ({ generate: async () => { throw new Error(`${what} rejected ${K.oaiEnv}`); }, stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} }) as unknown as Agent;
+    const err = await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { opus: POOL().opus }, agents: { a: failing('first'), b: failing('second') }, strategy: 'parallel', quorum: { minAgents: 1 } } as never).generate('go').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AgencyQuorumError);
+    const cause = (err as { cause?: unknown }).cause;
+    expect(cause).toBeInstanceOf(Error);
+    expect((cause as Error).message).toBe('first rejected [redacted]');
+    expect(ownStrings(err)).not.toContain(K.oaiEnv);
+    expect(calls(OPENAI_CHAT, 'POST')).toEqual([]);
   });
   it("a plain seat that answers with no text on a provider that reports no tokens answered: parallel counts it toward the quorum and hands it to the synthesizer, and debate records its turn", async () => {
     // A CLI provider reports 0 tokens when it reads no usage; a reply with no text from it is still the seat's answer.

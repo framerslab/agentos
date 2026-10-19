@@ -541,6 +541,58 @@ describe("a seat's mask reaches a tool's error before the next request carries i
   });
 });
 
+describe('a later step converts no tool schema while the table keeps its names', () => {
+  it("generateText and streamText read a record table's names before a later step and adapt its definitions again only when the names change", async () => {
+    let reads = 0;
+    const ran: string[] = [];
+    const schema = { type: 'object', properties: {} };
+    // An adaptation of the table reads the definition's parameters, the schema it converts; the names are its keys.
+    const tools = {
+      ping: {
+        description: 'p',
+        get parameters() {
+          reads += 1;
+          return schema;
+        },
+        execute: async () => {
+          ran.push('ping');
+          return 'pong';
+        },
+      },
+    };
+    let atFirstSend = -1;
+    hoisted.generateCompletion
+      .mockImplementationOnce(async () => {
+        atFirstSend = reads;
+        return toolCallsReply(['ping']);
+      })
+      .mockResolvedValueOnce(toolCallsReply(['ping']))
+      .mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: tools as never, maxSteps: 5 });
+    expect(generated.text).toBe('done');
+    expect(ran).toEqual(['ping', 'ping']);
+    expect(atFirstSend).toBeGreaterThan(0);
+    expect(reads).toBe(atFirstSend);
+
+    reads = 0;
+    ran.length = 0;
+    atFirstSend = -1;
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () {
+        atFirstSend = reads;
+        yield toolCallsChunk(['ping']);
+      })
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['ping']); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: tools as never, maxSteps: 5 });
+    await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect(ran).toEqual(['ping', 'ping']);
+    expect(atFirstSend).toBeGreaterThan(0);
+    expect(reads).toBe(atFirstSend);
+  });
+});
+
 describe('a tool table given as a single-use iterable is read once', () => {
   it('a generator of tools, which one read exhausts, keeps its tools on the second step of generateText and of streamText', async () => {
     const ran: string[] = [];
