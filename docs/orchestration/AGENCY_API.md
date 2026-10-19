@@ -411,10 +411,13 @@ config, a default or the environment; a comma-separated key pool part by part;
 a pre-built seat's own key, URL and hops, a nested agency's level, pool, seats
 and chair included) is replaced with `[redacted]` in the result's text,
 `agentCalls` (outputs, tool arguments and results, an Error a tool returned
-as its output included, and a class instance it returned held as its JSON,
-masked, as the tool turn carried it; an object's keys are masked as its
-values are), `toolCalls`, `transcriptDelta`, seat records, thrown
-errors (message, stack, cause and details), `on.error` and `agentEnd`
+as its output included, and a class instance it returned, or an Error with a
+`toJSON` of its own, held as its JSON, masked, as the tool turn carried it; an
+object's keys are masked as its values are), `toolCalls`, `transcriptDelta`,
+seat records, thrown errors (message, stack, cause and details; an error whose
+own `toJSON` still writes a listed value, read from a private field or a
+closure, is replaced by a plain Error with its name, code, `httpStatus` and
+masked message and stack), `on.error` and `agentEnd`
 payloads, the provenance trail (an approval decision's reason and
 modifications, its numbers included), stream parts (a secret split between two text
 chunks, or around a tool call and its result between two steps, is masked
@@ -425,13 +428,14 @@ credentials as the tool gave them, while a failed tool's text also loses any
 URL credentials and `key=` value; the output is masked as a value before it is
 serialized, so a listed value with a quote or a backslash, which JSON escaping
 would change, is masked whole, a number whose digits hold a listed value
-becomes the string `[redacted]` (in a tool's output and an approval decision
-alone: the library's own counts, durations and timestamps stay numbers), the call record and the tool-result part hold
+becomes the string `[redacted]` (in a tool's output, a pre-built seat's tool
+calls and tool-result parts included, and an approval decision alone: the
+library's own counts, durations and timestamps stay numbers), the call record and the tool-result part hold
 the masked output, and the turn the next request carries stays JSON), `onFallback` and the `fallback_fired` and
 `fallback_exhausted` log lines. What a seat answers reaches the next seat, a
 synthesizer, a manager or the chair masked. A pre-built seat's answers and
-errors are masked as they leave it, a rejected `generate()` included; its own
-requests to its provider are its own.
+errors are masked as they leave it, a rejected `generate()` included, a frozen
+seat's too; its own requests to its provider are its own.
 
 Per call, a pooled agency rejects `model`, `provider`, `apiKey`, `baseUrl`,
 `fallbackProviders`, `onFallback`, `router`, `routerParams`, `hostPolicy`,
@@ -510,7 +514,8 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
   `parallel` and `debate` no synthesizer runs then, and a nested agency that
   no seat of its own answered counts as a rejected seat. A `parallel` run left
   with no seat because a seat failed rejects with the first failed seat's
-  error. A session
+  error, or, when a `quorum` it does not meet throws `AgencyQuorumError`,
+  with that error as the quorum error's `cause`. A session
   adds no assistant turn for an empty answer, such a run's or a seat's reply
   with no text: `messages()` keeps the user's turn alone, and the next prompt
   carries no empty `Assistant:` line.
@@ -529,8 +534,9 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
   or `strategy: 'panel'`, credentials are strict (above): a
   `setDefaultProvider()` key that names no provider no longer reaches a seat,
   Anthropic is not rerouted through OpenRouter, and a per-call `model`,
-  `provider`, `apiKey`, `baseUrl` or `fallbackProviders` is rejected. An agency
-  without those options keeps the earlier rules.
+  `provider`, `apiKey`, `baseUrl`, `fallbackProviders` or any other option the
+  per-call list above names is rejected. An agency without those options keeps
+  the earlier rules.
 
 ---
 
@@ -565,8 +571,10 @@ outputs using the agency-level `model` and `provider` (the chair).  Requires
 synthesis runs: if each seat was rejected or blocked, the text is `''`; if a
 seat failed, the call rejects with the first failed seat's error, after each
 failure is written as `parallel_seat_failed` and passed to `on.error`. A
-nested agency that no seat of its own answered counts as a rejected seat,
-toward the quorum too.
+`quorum` the run does not meet throws `AgencyQuorumError` first, with the
+first failed seat's error as its `cause` when a seat failed. A nested agency
+that no seat of its own answered counts as a rejected seat, toward the quorum
+too.
 
 Each seat can run on its own provider, model and key, so one question can be
 put to several vendors at once and the chair reads every answer:
@@ -598,7 +606,8 @@ console.log(agentCalls.map((c) => c.agent)); // the seats that answered
 `quorum` sets a floor on the panel after the fan-out and before synthesis:
 
 - `minAgents`: how many seats must succeed. A seat succeeds when its call
-  resolves and no HITL gate rejected it.
+  resolves and no HITL gate rejected it; a nested agency succeeds when a seat
+  of its own answered.
 - `minProviders`: how many distinct provider ids must be among the successful
   seats. The id is the `provider` each seat's result reports, which is the
   provider that answered: a seat served by its failover chain counts as the
@@ -606,13 +615,15 @@ console.log(agentCalls.map((c) => c.agent)); // the seats that answered
   model it serves, so an `openai` seat plus a seat that failed over to
   OpenRouter's `openai/gpt-5.6-sol` leg passes `minProviders: 2` on one vendor.
 - `onShortfall`: `'error'` (default) throws [`AgencyQuorumError`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) before
-  synthesis; `'proceed'` writes `parallel_quorum_shortfall` through the
+  synthesis, with the first failed seat's error as its `cause` when a seat
+  failed; `'proceed'` writes `parallel_quorum_shortfall` through the
   host's logger and synthesizes anyway, unless no seat is left. The class is
   exported from the package entry point, with `AgencyPanelError` and
   `AgencySeatingError`.
 
-Three things the quorum does not check: a seat that returned empty text still
-counts as succeeded; two seats on different models of one provider count as
+Three things the quorum does not check: a plain seat that returned empty text
+still counts as succeeded (a nested agency that no seat of its own answered
+does not, as above); two seats on different models of one provider count as
 one provider; and with `adaptive: true` the agency compiles the hierarchical
 strategy whatever `strategy` says, so the quorum is skipped without a warning.
 `parallel` and `panel` enforce `quorum`; the panel's rules are in
