@@ -57,12 +57,13 @@
  * - Both runtimes take the user's typed text, a `text_input` message that `isClientTextInputMessage()` accepts, as a
  *   user turn of its own, whatever the session takes its speech from: `conversation_item_added` with
  *   `source: 'text'` and `endpointReason: 'manual'`, with no `turn_complete` and no `user_input_transcribed`, and the
- *   speech heard so far is dropped. A text that comes while the session is `speaking` cuts the reply as a `cancel`
- *   barge-in does, with `speechDurationMs: 0`; one that comes while it is `processing` aborts the agent's request,
- *   with no `barge_in`. Without a call profile the text's turn starts once the agent's request for the cut reply has
- *   ended, since an agent answers one request at a time, or `TEXT_TURN_UNWIND_MS` after the cut when that request has
- *   not ended (`_onClientText`); a call profile cuts through `interrupt()` and its generation fence (`takeText`). A
- *   `text_input` message the check refuses is dropped.
+ *   speech heard so far is dropped. A text that comes while the session is `speaking`, before or after the reply's
+ *   first word, cuts the reply as a `cancel` barge-in does, with `speechDurationMs: 0`; a reply cut before its first
+ *   word adds no assistant item. Without a call profile the text's turn starts once the agent's request for the cut
+ *   reply has ended, since an agent answers one request at a time, or `TEXT_TURN_UNWIND_MS` after the cut when that
+ *   request has not ended, and a reply that took the floor meanwhile is cut in its turn (`_onClientText`); a call
+ *   profile cuts through `interrupt()` and its generation fence (`takeText`), where a turn the agent has yet to answer
+ *   is aborted with no `barge_in`. A `text_input` message the check refuses is dropped.
  * - A transport that plays one audio format alone (`IStreamTransport.playbackFormat`, `'pcm'` for
  *   `LiveKitStreamTransport` with a publisher) gets it: the TTS session is asked for that format, and a chunk in
  *   another one is reported once, naming the TTS provider, and not sent.
@@ -1880,31 +1881,36 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * One checked text the user typed (see `_wireClientTranscripts`): a user turn of its own, whatever the session takes
    * its speech from. A reply being spoken is cut as a `cancel` barge-in cuts it, with no speech (`_cancelReply`): an
    * interruption of it ends with it, and the audio a pause held and the speech the detector was still to hear are
-   * dropped. A turn the agent has yet to answer has its request aborted, with no `barge_in`, since no reply was cut.
-   * Then, once the agent's request for the cut reply has ended (`agentRequest`), or `TEXT_TURN_UNWIND_MS` after the
-   * cut when it has not (`_unwound`), a session that still listens resets the endpoint detector, dropping what it
-   * holds of the user's speech, with that speech's language and the client's finals joined for it, and takes the text
-   * as the user's turn (`_takeTurn`): no `turn_complete` and no `user_input_transcribed`, `source: 'text'`,
-   * `endpointReason: 'manual'`, no speech and full confidence. A text that finds the session closed or interrupting
-   * is dropped.
+   * dropped; a reply cut before its first word adds no assistant item, and `barge_in` carries an empty
+   * `interruptedText`. `_takeTurn` leaves `processing` within the turn of the event loop that takes a turn, so no
+   * message finds the session there; the `processing` branch is a guard, which aborts the agent's request with no
+   * `barge_in`. Then, once the agent's request for the cut reply has ended (`agentRequest`), or `TEXT_TURN_UNWIND_MS`
+   * after the cut when it has not (`_unwound`), the text is taken; a reply that took the floor meanwhile, from a turn
+   * of the user's speech, is cut in its turn, since the text interrupts whatever the agent says, as LiveKit Agents'
+   * text input does. The session, listening, resets the endpoint detector, dropping what it holds of the user's
+   * speech, with that speech's language and the client's finals joined for it, and takes the text as the user's turn
+   * (`_takeTurn`): no `turn_complete` and no `user_input_transcribed`, `source: 'text'`, `endpointReason: 'manual'`,
+   * no speech and full confidence. A text that finds the session closed, or in no state that takes a turn, is dropped.
    *
    * @param text - The text, as `isClientTextInputMessage()` accepted it.
    * @param parts - The session's parts.
    * @param lines - The client's transcript lines, whose finals joined for the dropped speech go with it.
    */
   private async _onClientText(text: string, parts: ReplyParts, lines: { finals: string[] }): Promise<void> {
-    if (this.current === 'closed' || this.current === 'interrupting') return;
-    if (this.current === 'speaking') this._cancelReply(parts, { type: 'cancel' });
-    else if (this.current === 'processing') {
-      parts.agent.abort?.();
-      this._replyEnded(parts.endpoint);
-      this.stateTo('listening');
-      this.resetWatchdog();
+    for (;;) {
+      if (this.current === 'speaking') this._cancelReply(parts, { type: 'cancel' });
+      else if (this.current === 'processing') {
+        parts.agent.abort?.();
+        this._replyEnded(parts.endpoint);
+        this.stateTo('listening');
+        this.resetWatchdog();
+      } else if (this.current !== 'listening') return;
+      // An agent answers one request at a time: the text's starts once the cut reply's has ended, or once the bound has
+      // passed, so a stream that does not end after abort() holds no later message of the client's.
+      await this._unwound(this.agentRequest);
+      // A reply that took the floor while the wait ran is cut in its turn, and the text waits for its request the same way.
+      if (this.current === 'listening') break;
     }
-    // An agent answers one request at a time: the text's starts once the cut reply's has ended, or once the bound has
-    // passed, so a stream that does not end after abort() holds no later message of the client's.
-    await this._unwound(this.agentRequest);
-    if (this.current !== 'listening') return;
     inPart('endpoint', () => parts.endpoint.reset());
     this.turnLanguage = undefined;
     lines.finals = [];
