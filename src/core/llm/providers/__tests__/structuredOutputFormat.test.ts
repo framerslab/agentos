@@ -186,4 +186,14 @@ describe('buildResponseFormat for anthropic carries the route for the model it i
     // No model id (a fallback entry resolved later): the schema alone decides.
     expect(buildResponseFormat({ provider: 'anthropic', schema, schemaName: 'place' })).toMatchObject({ route: 'json_schema' });
   });
+
+  it('a record on a model that accepts a forced choice, and a record with no model id, take the forced tool', () => {
+    const recordSchema = z.object({ scores: z.record(z.string(), z.number()) });
+    expect(
+      buildResponseFormat({ provider: 'anthropic', modelId: 'claude-sonnet-4-6', schema: recordSchema, schemaName: 'place' }),
+    ).toMatchObject({ route: 'forced_tool', tool: { name: 'place' } });
+    expect(buildResponseFormat({ provider: 'anthropic', schema: recordSchema, schemaName: 'place' })).toMatchObject({
+      route: 'forced_tool',
+    });
+  });
 });

@@ -300,10 +300,17 @@ export interface ModelCompletionOptions {
    *       `{ type: 'json_schema',
    *          json_schema: { name, strict: true, schema } }`
    *   - Anthropic structured-output marker (AnthropicProvider sends it as
-   *     `output_config.format` on a model with the JSON output format, as a
-   *     forced tool call on Claude Opus 4 and Sonnet 4, and as a schema block
-   *     in the system prompt when neither carries the schema; `route` is the
-   *     builder's verdict for the model it was built for):
+   *     `output_config.format` on a model with the JSON output format when
+   *     the schema fits the format's limits; as a non-strict forced tool call
+   *     on a model without the format (Claude Opus 4 and Sonnet 4) and for a
+   *     schema the format cannot carry on a model that accepts a forced
+   *     choice; and as a schema block in the system prompt for such a schema
+   *     on a model that refuses a forced choice, or on the forced-tool route
+   *     when the request turns thinking on (the format route keeps the format
+   *     with thinking on). `route` is the
+   *     builder's verdict for the model it was built for; the provider decides
+   *     again for the model it sends to and says which route it took on the
+   *     response, `schemaRoute`):
    *       `{ _agentosUseToolForStructuredOutput: true,
    *          route: 'json_schema' | 'forced_tool' | 'none',
    *          tool: { name, input_schema } }`
@@ -423,10 +430,22 @@ export interface ModelCompletionResponse {
    * `json_schema` request that no endpoint can serve again in `json_object`
    * mode; Anthropic puts the schema in its own system block when neither the
    * JSON output format nor a forced tool can carry it on the model sent to
-   * (a record schema, a request that enables citations). Unset when the
-   * request carried the payload the caller asked for.
+   * (a record schema on a model that refuses a forced choice, a forced tool
+   * that thinking would clamp). Unset when the request carried the payload the
+   * caller asked for.
    */
   schemaInPayload?: boolean;
+  /**
+   * On every completion and chunk of an Anthropic request that carried the
+   * structured-output marker: the route the provider sent the schema by, for
+   * the model it sent to. `json_schema` (the JSON output format: the answer is
+   * the text), `forced_tool` (the schema tool's call is the answer) or `none`
+   * (the schema rode the prompt; `schemaInPayload` is false too). It can
+   * differ from the marker's `route`, which was decided before the request's
+   * thinking, citations, passthrough `model` and `tools` were known. Unset on
+   * other requests and providers.
+   */
+  schemaRoute?: 'json_schema' | 'forced_tool' | 'none';
   /** Unified error envelope; present ONLY if an error occurred for this request/chunk. */
   error?: {
     /** Human readable message suitable for UI display or logging. */

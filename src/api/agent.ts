@@ -364,14 +364,15 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
   /**
    * Zod schema describing the expected shape of the assistant reply. When
    * present, agentos converts the schema to JSON Schema, routes through
-   * the provider's native structured-output API (OpenAI json_schema,
-   * Anthropic forced tool-use, Gemini responseSchema), and returns a
+   * the provider's native structured-output API (OpenAI json_schema;
+   * Anthropic's JSON output format, or a forced tool call for a schema
+   * the format cannot carry; Gemini responseSchema), and returns a
    * Zod-validated typed object on `result.object` alongside the JSON
    * string in `result.text`. A call whose provider payload carries no
-   * schema (a provider with none, an Anthropic model that rejects a
-   * forced tool choice, JSON-object mode) gets the schema in its system
-   * prompt, in the words `generateObject` uses; each fallback provider is
-   * checked for its own payload.
+   * schema (a provider with none, a record schema on an Anthropic model
+   * that refuses a forced tool choice, JSON-object mode) gets the schema
+   * in its system prompt, in the words `generateObject` uses; each
+   * fallback provider is checked for its own payload.
    *
    * The agent's tools are left out of a schema request, and with them the
    * chain-of-thought instruction; `runtime: 'legacy'` (the default) warns
@@ -1168,8 +1169,9 @@ export function agent(opts: AgentOptions): Agent {
           // Schema-aware calls disable tools. Mixing native structured
           // output with tool-calling requires a multi-turn schema+tool
           // protocol that this overload doesn't speak. Anthropic's
-          // forced tool-use mode reserves the tool slot for the schema
-          // tool, and OpenAI's json_schema mode forbids tools alongside.
+          // forced schema tool (a schema its JSON output format cannot
+          // carry) reserves the tool slot, and OpenAI's json_schema mode
+          // forbids tools alongside.
           // Strip caller-provided tools when responseSchema is set;
           // surface a console.warn so the caller can adjust if they
           // meant to pass both. (toolChoice is not part of

@@ -1901,8 +1901,9 @@ export class GMI implements IGMI {
           const check = lifted ? structuredReply.checkValue(stepStructuredOutput) : checkStructuredReply(currentIterationTextResponse, structuredReply);
           // 'forced_tool' when the gateway lifted a forced schema tool call; a JSON text answer the gateway lifted
           // from an Anthropic hop on the JSON output format is 'provider_schema', as any payload that carried the
-          // schema; a hop that sent it in the prompt alone reports 'prompt_only'. A gateway that does not say keeps
-          // the earlier report.
+          // schema; a hop that sent it in the prompt alone reports 'prompt_only'. The route is the one the hop's
+          // request took, as its provider said it, so the label says what was sent. A gateway that does not say
+          // keeps the earlier report.
           const enforcement =
             lifted && stepSchemaRoute !== 'json_schema'
               ? 'forced_tool'

@@ -36,7 +36,13 @@ export interface StructuredOutputMeta {
   valid: boolean;
   /** Model calls the turn made for the structured reply. */
   attempts: number;
-  /** How the schema reached the model: a forced tool call lifted by the gateway, the gateway's provider-native schema format, or the instruction in the system prompt alone. */
+  /**
+   * How the schema reached the model: `forced_tool`, a forced schema tool call the gateway lifted; `provider_schema`, a
+   * hop whose payload carried the schema (OpenAI's strict json_schema, Gemini's responseSchema, Anthropic's JSON output
+   * format, whose text answer the gateway lifts, and a forced tool call that did not parse or that the output limit
+   * stopped); `prompt_only`, the schema reached the model in the prompt alone (a record schema on a Claude model that
+   * refuses a forced choice, say).
+   */
   enforcement: 'forced_tool' | 'provider_schema' | 'prompt_only';
   /** Where the last check ran: on the model's reply, or on the text an output guardrail rewrote. */
   stage: 'model' | 'post_guardrail';
