@@ -182,6 +182,9 @@ const DEFAULT_MAX_PLAYOUT_WAIT_MS = 30_000;
 /** The longest delay `setTimeout()` keeps; a longer one would fire at once. */
 const MAX_TIMER_MS = 2_147_483_647;
 
+/** How long a stop waits for the client to have its `session_ended` before the transport closes, in milliseconds. */
+const SESSION_ENDED_SEND_MS = 500;
+
 /**
  * A failure of one part of a session, naming the part for `session_error`. It carries no text of the failure it
  * stands for, which can hold what was said; the session reports it content-free.
@@ -679,9 +682,6 @@ export interface VoicePipelineOverrides {
  *
  * @see {@link VoicePipelineSession} for the public session interface returned by `startSession()`.
  */
-/** How long a stop waits for the client to have its `session_ended` before the transport closes, in milliseconds. */
-const SESSION_ENDED_SEND_MS = 500;
-
 export class VoicePipelineOrchestrator extends EventEmitter {
   private current: PipelineState = 'idle';
   private call?: CallPipelineRuntime;
