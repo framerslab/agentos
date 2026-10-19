@@ -2132,6 +2132,24 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(created).toEqual([{ source: 'say', userInitiated: true }]);
   });
 
+  it('creates no speech for a prompt pushed while the session listens, whose audio does not reach the transport', async () => {
+    await start();
+    const created: string[] = [];
+    orchestrator.on('speech_created', ({ source }: VoiceSessionEventMap['speech_created']) => created.push(source));
+    // The TTS session synthesizes the prompt, and its audio comes while the session listens.
+    vi.mocked(ttsSession.flush).mockImplementationOnce(async () => {
+      ttsSession.emit('audio', makeAudioChunk());
+      ttsSession.emit('flush_complete');
+    });
+
+    await orchestrator.pushToTTS('Thanks for calling.');
+
+    expect(ttsSession.pushTokens).toHaveBeenCalledWith('Thanks for calling.');
+    expect(transport.sendAudio).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
+    expect(orchestrator.state).toBe('listening');
+  });
+
   it('sends no session_ended to a transport that closed itself', async () => {
     await start();
     (transport as any).state = 'closed';
