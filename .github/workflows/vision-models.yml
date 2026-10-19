@@ -27,10 +27,11 @@ permissions:
   contents: read
 
 # Off master (a pull request, or a manual run on another branch) a newer run
-# cancels the one it supersedes. On master (the weekly run and a manual run there)
-# a run waits for the one in progress instead of cancelling it, so every master
-# run that starts finishes; a run that starts waiting replaces the one already
-# waiting.
+# cancels the one it supersedes. On master (the weekly run and a manual run
+# there) a run queued during another waits for it to finish, so a later run
+# never cancels the run in progress. At most one run waits: a run that starts
+# waiting cancels the one already waiting, which shows as cancelled without
+# having run.
 concurrency:
   group: vision-models-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
