@@ -2,7 +2,9 @@
  * @fileoverview Construction-time validation of a pool, seating, chair,
  * panel and quorum configuration. Throws AgencyConfigError with the first
  * problem found; reads the environment for vendors and reachable providers,
- * as seating will at the call.
+ * as seating will at the call: a pool entry, a fixed seat or a hop whose key,
+ * URL or binary is unmet adds nothing to a quorum's bound, since seating
+ * leaves it out.
  */
 import type { AgencyOptions, AgencySeatConfig, AgencyStrategy, Agent, ModelPoolEntry } from '../../types.js';
 import { AgencyConfigError, AgencyPanelError } from '../../types.js';
@@ -119,11 +121,20 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
   const reachableVendors = new Set<string>();
   const reachableProviders = new Set<string>();
   const entryVendor = new Map<string, string | undefined>();
+  // What seating keeps, read with the environment as it stands: a pool entry, a fixed seat or a hop whose key, URL or
+  // binary is unmet is left out at every call and answers nothing, and seating unseats such a fixed seat before it
+  // reads the seat's chain. The breaker is the call's state, not the configuration's, and is not read.
+  const ruleOnly = { breakerOpen: () => false };
+  const availableEntries = new Set<string>();
+  const leftOut: string[] = [];
   if (pool) {
     for (const [name, e] of Object.entries(pool)) {
       const resolved = resolveSeatCredentials({ provider: e.provider, model: e.model, apiKey: e.apiKey, baseUrl: e.baseUrl, inherits: false }, opts);
       const v = vendorOf(e.provider, e.model, { vendor: e.vendor, baseUrl: resolved.ok ? resolved.value.baseUrl : e.baseUrl });
       entryVendor.set(name, v);
+      const unmet = resolved.ok ? availabilityOf(resolved.value, ruleOnly) : resolved.reason;
+      if (unmet) leftOut.push(`entry "${name}": ${unmet}`);
+      else availableEntries.add(name);
     }
     // With minVendors set, every pool entry needs a known vendor, reachable by a seat or not.
     if (opts.quorum?.minVendors !== undefined) {
@@ -158,22 +169,34 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
     if (pooledSurface && !pooled) {
       const resolved = resolveSeatCredentials({ provider: seat.provider, model: seat.model, apiKey: seat.apiKey, baseUrl: seat.baseUrl, inherits: true }, opts);
       if (!resolved.ok) fail(`seat "${name}": ${resolved.reason}`);
-      const providers = new Set<string>([resolved.value.provider]);
+      const providers = new Set<string>();
       const vendors = new Set<string>();
-      reachableProviders.add(resolved.value.provider);
       const v = vendorOf(resolved.value.provider, resolved.value.model, { vendor: seat.vendor, baseUrl: resolved.value.baseUrl });
-      if (v) vendors.add(v);
-      else if (opts.quorum?.minVendors !== undefined) fail(`seat "${name}": its vendor is unknown; declare vendor on the seat or drop quorum.minVendors`);
-      // A hop of the seat's own chain can answer for it, and the record then names the hop's provider and vendor.
-      // Only a hop seating keeps counts: one whose key, URL or binary is unmet is dropped for the call and answers nothing.
-      for (const hop of Array.isArray(seat.fallbackProviders) ? seat.fallbackProviders : []) {
-        if (!hop || typeof hop.provider !== 'string') continue;
-        const hopResolved = resolveSeatCredentials({ provider: hop.provider, model: hop.model, apiKey: hop.apiKey, baseUrl: hop.baseUrl, inherits: false }, opts);
-        if (!hopResolved.ok || availabilityOf(hopResolved.value, { breakerOpen: () => false })) continue;
-        providers.add(hopResolved.value.provider);
-        reachableProviders.add(hopResolved.value.provider);
-        const hopVendor = vendorOf(hopResolved.value.provider, hopResolved.value.model, { vendor: hop.vendor, baseUrl: hopResolved.value.baseUrl });
-        if (hopVendor) vendors.add(hopVendor);
+      if (!v && opts.quorum?.minVendors !== undefined) fail(`seat "${name}": its vendor is unknown; declare vendor on the seat or drop quorum.minVendors`);
+      const unmet = availabilityOf(resolved.value, ruleOnly);
+      // Unseated at every call before its chain is read: neither the seat nor a hop of it answers.
+      if (unmet) leftOut.push(`seat "${name}": ${unmet}`);
+      else {
+        providers.add(resolved.value.provider);
+        reachableProviders.add(resolved.value.provider);
+        if (v) vendors.add(v);
+        // A hop of the seat's own chain can answer for it, and the record then names the hop's provider and vendor.
+        // Only a hop seating keeps counts: one whose key, URL or binary is unmet is dropped for the call and answers
+        // nothing. Named as seating's record names it.
+        const chain = Array.isArray(seat.fallbackProviders) ? seat.fallbackProviders : [];
+        chain.forEach((hop, i) => {
+          if (!hop || typeof hop.provider !== 'string') return;
+          const hopResolved = resolveSeatCredentials({ provider: hop.provider, model: hop.model, apiKey: hop.apiKey, baseUrl: hop.baseUrl, inherits: false }, opts);
+          const hopUnmet = hopResolved.ok ? availabilityOf(hopResolved.value, ruleOnly) : hopResolved.reason;
+          if (!hopResolved.ok || hopUnmet) {
+            leftOut.push(`hop "${name}/fallbackProviders/${i}": ${hopUnmet}`);
+            return;
+          }
+          providers.add(hopResolved.value.provider);
+          reachableProviders.add(hopResolved.value.provider);
+          const hopVendor = vendorOf(hopResolved.value.provider, hopResolved.value.model, { vendor: hop.vendor, baseUrl: hopResolved.value.baseUrl });
+          if (hopVendor) vendors.add(hopVendor);
+        });
       }
       vendors.forEach((vendor) => reachableVendors.add(vendor));
       seatProviders.push(providers);
@@ -183,17 +206,21 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       const providers = new Set<string>();
       const vendors = new Set<string>();
       for (const c of candidates) {
+        const v = entryVendor.get(c);
+        if (!v && opts.quorum?.minVendors !== undefined) fail(`modelPool entry "${c}": its vendor is unknown; declare vendor on the entry or drop quorum.minVendors`);
+        // An entry seating skips seats nobody.
+        if (!availableEntries.has(c)) continue;
         providers.add(pool![c].provider);
         reachableProviders.add(pool![c].provider);
-        const v = entryVendor.get(c);
         if (v) vendors.add(v);
-        else if (opts.quorum?.minVendors !== undefined) fail(`modelPool entry "${c}": its vendor is unknown; declare vendor on the entry or drop quorum.minVendors`);
       }
       vendors.forEach((vendor) => reachableVendors.add(vendor));
       seatProviders.push(providers);
       seatVendors.push(vendors);
     }
   }
+  // Named in a bound's message, so a quorum the environment leaves out of reach says what is missing.
+  const leftOutNote = leftOut.length > 0 ? `; left out at every call while the environment stays as it is: ${leftOut.join(', ')}` : '';
   if (isPanel) {
     const chair = opts.chair;
     if (chair !== false) {
@@ -218,21 +245,21 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       // A pre-built seat's vendor is unknown and never counts, so the config seats alone answer the vendor quorum.
       const vendorsAtOnce = distinctAtOnce(seatVendors);
       if (q.minVendors > vendorsAtOnce) {
-        fail(`quorum.minVendors (${q.minVendors}) is above the ${vendorsAtOnce} distinct vendor(s) the seats can answer with at once (${reachableVendors.size} vendor(s) within the config seats' reach, one per seat)`);
+        fail(`quorum.minVendors (${q.minVendors}) is above the ${vendorsAtOnce} distinct vendor(s) the seats can answer with at once (${reachableVendors.size} vendor(s) within the config seats' reach, one per seat)${leftOutNote}`);
       }
     }
   }
   // Each seat answers once, with one provider of its own reach: the bound is the most distinct providers one assignment of
-  // the config seats can answer with (a seat that reaches three providers beside two seats on one makes two, not three),
-  // one more per pre-built seat, whose result names one provider the agency cannot see. A panel is checked with or
-  // without a pool: its fixed seats' providers are counted above either way.
+  // the config seats can answer with (a seat that reaches three providers beside two seats on one makes two, not three;
+  // a seat seating leaves out reaches none), one more per pre-built seat, whose result names one provider the agency
+  // cannot see. A panel is checked with or without a pool: its fixed seats' providers are counted above either way.
   const prebuiltSeats = seats.length - configSeats.length;
   const minProviders = opts.quorum?.minProviders;
   const providersAtOnce = distinctAtOnce(seatProviders) + prebuiltSeats;
   if ((isPanel || (strategy === 'parallel' && pool)) && minProviders !== undefined && minProviders > providersAtOnce) {
     fail(
       `quorum.minProviders (${minProviders}) is above the ${providersAtOnce} distinct provider(s) the seats can answer with at once ` +
-      `(${seats.length} seat(s); ${reachableProviders.size} provider(s) within the config seats' reach, plus the ${prebuiltSeats} pre-built seat(s))`,
+      `(${seats.length} seat(s); ${reachableProviders.size} provider(s) within the config seats' reach, plus the ${prebuiltSeats} pre-built seat(s))${leftOutNote}`,
     );
   }
   if (pool && strategy === 'hierarchical' && !opts.model && !opts.provider) fail('Hierarchical strategy requires an agency-level model or provider for the manager agent.');
