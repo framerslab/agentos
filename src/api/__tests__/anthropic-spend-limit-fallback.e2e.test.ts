@@ -6,7 +6,9 @@
  * generateText must treat it as it treats the credit-balance 400: move the
  * call to the next provider and open the provider health breaker's billing
  * class, so the calls after it skip Anthropic until the window ends instead of
- * failing on it one by one.
+ * failing on it one by one. A pool whose every key answers it ends the request
+ * with ALL_KEYS_FAILED carrying that answer's status and message, which opens
+ * the same class.
  *
  * Drives generateText through the real resolver, provider manager,
  * AnthropicProvider, OpenAIProvider and health registry; only fetch is stubbed.
@@ -61,7 +63,7 @@ const ask = () =>
 
 const savedOpenRouterKey = process.env.OPENROUTER_API_KEY;
 
-describe("Anthropic's spend-limit 400 on a single key", () => {
+describe("Anthropic's spend-limit 400", () => {
   beforeEach(() => {
     fetchMock.mockReset();
     globalLLMProviderHealth.reset();
@@ -90,7 +92,7 @@ describe("Anthropic's spend-limit 400 on a single key", () => {
     vi.restoreAllMocks();
   });
 
-  it('moves the call to the next provider and opens the billing breaker, so the next call skips Anthropic', async () => {
+  it('on a single key, moves the call to the next provider and opens the billing breaker, so the next call skips Anthropic', async () => {
     const first = await ask();
     expect(first.text).toBe('Served by OpenAI.');
     expect(first.provider).toBe('openai');
@@ -104,5 +106,40 @@ describe("Anthropic's spend-limit 400 on a single key", () => {
     expect(second.text).toBe('Served by OpenAI.');
     // No request to Anthropic while its breaker is open.
     expect(requestsTo(/api\.anthropic\.com\/v1\/messages/)).toBe(1);
+  });
+
+  it("on every key of a pool, hops once, throws ALL_KEYS_FAILED with the answer's 400 and message, and opens the same billing breaker", async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-spend-limit-0001,sk-ant-spend-limit-0003');
+    const handedOver: Error[] = [];
+    const call = () =>
+      generateText({
+        provider: 'anthropic',
+        model: 'claude-opus-5-5',
+        prompt: 'Hello?',
+        fallbackProviders: [{ provider: 'openai', model: 'gpt-4.1' }],
+        onFallback: (error) => handedOver.push(error),
+      });
+
+    const first = await call();
+    expect(first.text).toBe('Served by OpenAI.');
+    expect(first.provider).toBe('openai');
+    // One send per key: the first key's answer hops the request to the second, whose answer takes out the last key.
+    const sentKeys = fetchMock.mock.calls
+      .filter(([url]) => /api\.anthropic\.com\/v1\/messages/.test(String(url)))
+      .map(([, init]) => new Headers((init as RequestInit | undefined)?.headers).get('x-api-key'));
+    expect(new Set(sentKeys)).toEqual(new Set(['sk-ant-spend-limit-0001', 'sk-ant-spend-limit-0003']));
+    expect(sentKeys).toHaveLength(2);
+    // The error the chain moved on is the dead pool's, with the status and message of the answer that ended it.
+    expect(handedOver).toHaveLength(1);
+    expect(handedOver[0]).toMatchObject({ code: 'ALL_KEYS_FAILED', httpStatus: 400 });
+    expect(handedOver[0]!.message).toContain('You have reached your specified workspace API usage limits');
+    // The billing class, as for the single key: one failure opens it, for the billing window.
+    const stats = globalLLMProviderHealth.getStats('anthropic');
+    expect(stats).toMatchObject({ state: 'open', totalTrips: 1 });
+    expect(stats!.cooldownRemainingMs).toBeGreaterThan(4 * 60_000);
+
+    const second = await call();
+    expect(second.text).toBe('Served by OpenAI.');
+    expect(requestsTo(/api\.anthropic\.com\/v1\/messages/)).toBe(2);
   });
 });
