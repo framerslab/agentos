@@ -2135,6 +2135,18 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(orchestrator.state).toBe('closed');
   });
 
+  it("sends the client none of the host's configuration but the fields VoicePipelineConfig declares", async () => {
+    // A host's configuration object that carries a setting of the host's own, which the type does not declare.
+    orchestrator = new VoicePipelineOrchestrator({ ...makeConfig({ language: 'en' }), deepgramKey: 'not-a-real-key' } as VoicePipelineConfig);
+    const session = await start();
+
+    expect(transport.sendControl).toHaveBeenCalledWith({
+      type: 'session_started',
+      sessionId: session.sessionId,
+      config: { stt: 'mock-stt', tts: 'mock-tts', maxTurnDurationMs: 30_000, language: 'en' },
+    });
+  });
+
   it("creates the speech a host says through pushToTTS while a reply speaks, with source 'say', without a call profile", async () => {
     await start();
     await takeTurn();
