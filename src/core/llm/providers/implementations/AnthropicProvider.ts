@@ -558,16 +558,23 @@ export class AnthropicProvider implements IProvider {
    * @throws {AnthropicProviderError} If the API key is missing.
    */
   public async initialize(config: AnthropicProviderConfig): Promise<void> {
-    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
-    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
-    // the new configuration nor overwrite what the new pool loads from the store.
-    await this.keyPool?.close();
     if (!config.apiKey) {
       throw new AnthropicProviderError(
         'API key is required for AnthropicProvider initialization. Set ANTHROPIC_API_KEY.',
         'INIT_FAILED_MISSING_API_KEY',
       );
     }
+    // The new pool is built before anything of the old state is touched: its construction makes no request, so a
+    // timing it refuses (a RangeError) leaves this provider as it was, its pool and its recheck timer included.
+    const keyPool = new ApiKeyPool(config.apiKey, {
+      ...(config.keyPool ?? {}),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('anthropic')),
+      probe: (key, kind) => this.probeKey(key, kind),
+    });
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
 
     this.config = {
       baseURL: 'https://api.anthropic.com',
@@ -593,11 +600,7 @@ export class AnthropicProvider implements IProvider {
       defaultMaxTokens: 16000,
       ...config,
     };
-    this.keyPool = new ApiKeyPool(config.apiKey, {
-      ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('anthropic')),
-      probe: (key, kind) => this.probeKey(key, kind),
-    });
+    this.keyPool = keyPool;
     await this.keyPool.ready();
     this.defaultModelId = config.defaultModelId;
     this.isInitialized = true;

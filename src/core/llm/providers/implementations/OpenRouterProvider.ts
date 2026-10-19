@@ -434,16 +434,23 @@ export class OpenRouterProvider implements IProvider {
   constructor() {}
 
   public async initialize(config: OpenRouterProviderConfig): Promise<void> {
-    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
-    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
-    // the new configuration nor overwrite what the new pool loads from the store.
-    await this.keyPool?.close();
     if (!config.apiKey) {
       throw new OpenRouterProviderError(
         'OpenRouter API key (apiKey) is required for initialization.',
         'INIT_FAILED_MISSING_API_KEY'
       );
     }
+    // The new pool is built before anything of the old state is touched: its construction makes no request, so a
+    // timing it refuses (a RangeError) leaves this provider as it was, its pool and its recheck timer included.
+    const keyPool = new ApiKeyPool(config.apiKey, {
+      ...(config.keyPool ?? {}),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openrouter')),
+      probe: (key) => this.probeKey(key),
+    });
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     // Corrected: Ensure all properties of Required<OpenRouterProviderConfig> are present
     // by providing defaults for optional fields before freezing.
     this.config = Object.freeze({
@@ -455,11 +462,7 @@ export class OpenRouterProvider implements IProvider {
       requestTimeout: config.requestTimeout || 60000,
       streamRequestTimeout: config.streamRequestTimeout || 180000,
     });
-    this.keyPool = new ApiKeyPool(config.apiKey, {
-      ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openrouter')),
-      probe: (key) => this.probeKey(key),
-    });
+    this.keyPool = keyPool;
     await this.keyPool.ready();
     this.defaultModelId = this.config.defaultModelId; // Store the potentially undefined value
 

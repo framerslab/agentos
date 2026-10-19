@@ -209,6 +209,32 @@ describe('AnthropicProvider key failover', () => {
     expect(after.map(keyOf)).toEqual(['sk_a', 'sk_b', 'sk_a']);
   });
 
+  it('a re-initialize that is refused leaves the provider as it was, its pool and its recheck timer included', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const p = await provider('sk_a,sk_b', { keyPool: { strategy: 'ordered', recheckMs: 1000 } });
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, authError)).mockResolvedValueOnce(jsonResponse(200, okMessage));
+    await ask(p);
+    const internals = p as unknown as { keyPool: unknown; config: unknown };
+    const pool = internals.keyPool;
+    const config = internals.config;
+    // A missing key and a timing the pool refuses: both throw before the old pool is closed or the config replaced.
+    await expect(p.initialize({ apiKey: '' })).rejects.toMatchObject({ code: 'INIT_FAILED_MISSING_API_KEY' });
+    await expect(p.initialize({ apiKey: 'sk_a,sk_b', keyPool: { recheckMs: 0 } })).rejects.toBeInstanceOf(RangeError);
+    expect(internals.keyPool).toBe(pool);
+    expect(internals.config).toBe(config);
+    expect(p.isInitialized).toBe(true);
+    // The timer is alive: the failed key is probed at its recheck, and requests go out with the old key list.
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { data: [] }));
+    await vi.advanceTimersByTimeAsync(1001);
+    const probe = callsOf()[2];
+    expect(probe.url).toContain('/v1/models');
+    expect(keyOf(probe)).toBe('sk_a');
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, okMessage));
+    await ask(p);
+    expect(keyOf(callsOf()[3])).toBe('sk_a');
+  });
+
   it('probes a billing failure with a one-token request, never a models list', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));

@@ -204,6 +204,29 @@ describe('OpenAIProvider key failover', () => {
     expect((await store.load('openai:reinit'))?.map((row) => row.status)).toEqual(['ok']);
   });
 
+  it('a re-initialize that is refused leaves the provider as it was, its pool and its recheck timer included', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const p = await provider('sk_alpha_0001,sk_beta_0002', { keyPool: { strategy: 'ordered', recheckMs: 1000 } });
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, invalidKey)).mockResolvedValueOnce(jsonResponse(200, okChat));
+    await ask(p);
+    const internals = p as unknown as { keyPool: unknown; config: unknown };
+    const pool = internals.keyPool;
+    const config = internals.config;
+    await expect(p.initialize({ apiKey: '' })).rejects.toMatchObject({ code: 'INIT_FAILED_MISSING_API_KEY' });
+    await expect(p.initialize({ apiKey: 'sk_alpha_0001,sk_beta_0002', keyPool: { cooldownMs: -1 } })).rejects.toBeInstanceOf(RangeError);
+    expect(internals.keyPool).toBe(pool);
+    expect(internals.config).toBe(config);
+    expect(p.isInitialized).toBe(true);
+    // Neither refusal sent a request, and the timer still probes the failed key at its recheck.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, modelList));
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(callsOf()[2].url).toContain('/models');
+    expect(keyOf(callsOf()[2])).toBe('sk_alpha_0001');
+    expect((pool as { snapshot(): Array<Record<string, unknown>> }).snapshot()[0]).toMatchObject({ status: 'ok' });
+  });
+
   it('probes a billing failure with a one-token completion on the default model, never a models list', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
