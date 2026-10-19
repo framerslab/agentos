@@ -2547,7 +2547,9 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.replying = true;
     await this.send({ type: 'agent_speaking', text: '' }, generation);
     let started = false;
-    for await (const token of fromPart('agent', tokens)) {
+    // A reply's tokens are the agent's, so a failure of their stream names the agent. A prompt's are the host's own
+    // stream, read as it is: its failure is the host's, which the session reports as its own and `speak()` rejects with.
+    for await (const token of source === 'reply' ? fromPart('agent', tokens) : tokens) {
       if (!this.live(generation)) return;
       if (!started) {
         // The first word: the speech is created, and the agent speaks.

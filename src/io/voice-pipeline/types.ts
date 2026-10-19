@@ -1873,8 +1873,8 @@ export type VoiceUserState = 'listening' | 'speaking' | 'away';
 
 /**
  * The part of a session a `session_error` came from: its STT, TTS, agent, transport, VAD or endpoint detector, or the
- * session itself (a listener that threw, speech from a second source, a barge-in handler that failed, work the
- * session runs across its parts).
+ * session itself (a listener that threw, speech from a second source, a barge-in handler that failed, a host prompt's
+ * stream of text that failed, work the session runs across its parts).
  */
 export type VoiceSessionErrorSource = 'stt' | 'tts' | 'agent' | 'transport' | 'vad' | 'endpoint' | 'session';
 
