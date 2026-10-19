@@ -2418,6 +2418,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     });
     if ((this.current as PipelineState) !== 'listening' || this.detached || this.changing) return;
     this.stateTo('processing');
+    // A listener of the agent's move to thinking may have closed the call: a closed call takes the turn no further.
+    if ((this.current as PipelineState) !== 'processing') return;
     this.changing = true;
     const generation = this.advance();
     const outputIdentity = copyAudioIdentity({ ...event, generation });
@@ -2537,6 +2539,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   async speak(text: string | AsyncIterable<string>): Promise<void> {
     if (this.stopping || this.current !== 'listening' || this.detached || this.changing) throw new Error('session not ready');
     this.stateTo('processing');
+    // A listener of the agent's move to thinking may have closed the call: a closed call speaks no prompt.
+    if ((this.current as PipelineState) !== 'processing') return;
     this.changing = true;
     const generation = this.advance();
     const identity = copyAudioIdentity(this.identity);
