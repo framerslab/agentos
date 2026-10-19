@@ -558,7 +558,7 @@ export class AnthropicProvider implements IProvider {
    * @throws {AnthropicProviderError} If the API key is missing.
    */
   public async initialize(config: AnthropicProviderConfig): Promise<void> {
-    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
     // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
     // the new configuration nor overwrite what the new pool loads from the store.
     await this.keyPool?.close();
@@ -602,7 +602,7 @@ export class AnthropicProvider implements IProvider {
     this.defaultModelId = config.defaultModelId;
     this.isInitialized = true;
     // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
-    // breaker holds still gets its keys back; the interval never keeps the process alive.
+    // breaker holds still gets its keys back; the timer never keeps the process alive.
     if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
 
     const env = typeof process !== 'undefined' ? process.env : undefined;
@@ -1513,7 +1513,7 @@ export class AnthropicProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
-    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    // Stops the recheck timer, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
     await this.keyPool?.close();
     this.isInitialized = false;
     console.log('AnthropicProvider shutdown complete.');
@@ -2786,7 +2786,7 @@ export class AnthropicProvider implements IProvider {
       }
       // Rotate the key per attempt so a retry after a 429 fails over to a
       // different key from the pool instead of hammering the throttled one.
-      const apiKey = this.nextApiKey();
+      const apiKey = await this.drawApiKey();
       if (apiKey === '') throw this.allKeysFailedError();
       const attemptStartedAt = Date.now();
       const headers = this.buildHeaders(apiKey);
@@ -2961,7 +2961,7 @@ export class AnthropicProvider implements IProvider {
     attemptOut?: { apiKey?: string; startedAt?: number },
   ): Promise<ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
-    const apiKey = this.nextApiKey();
+    const apiKey = await this.drawApiKey();
     if (apiKey === '') throw this.allKeysFailedError();
     const startedAt = Date.now();
     if (attemptOut) {
@@ -3082,14 +3082,17 @@ export class AnthropicProvider implements IProvider {
    * @private
    */
   /**
-   * Resolve the next API key. With a multi-key pool this is a weighted
-   * round-robin that skips keys currently in quota cooldown; with a single
+   * Resolve the next API key. With a multi-key pool this is the pool's
+   * strategy, which skips keys resting after a 429 or taken out; with a single
    * key it returns that key. Call this once PER ATTEMPT (not once per
    * request) so a retry after a 429 fails over to a different key rather
-   * than reusing the throttled one.
+   * than reusing the throttled one. When no key is usable while a probe of a
+   * failed key is in flight (its recheck came due), it waits for that probe,
+   * bounded by the pool's probe timeout, and draws again, so the first request
+   * after a recheck is served by a key that came back.
    */
-  private nextApiKey(): string {
-    return this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
+  private async drawApiKey(): Promise<string> {
+    return this.keyPool?.hasKeys ? this.keyPool.nextAfterProbes() : this.config.apiKey;
   }
 
   private buildHeaders(apiKey: string): Record<string, string> {

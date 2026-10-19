@@ -189,6 +189,26 @@ describe('AnthropicProvider key failover', () => {
     expect(keyOf(callsOf()[3])).toBe('sk_a');
   });
 
+  it('serves the first request after the recheck comes due from the key its probe brings back, instead of failing it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const p = await provider('sk_a,sk_b', { keyPool: { strategy: 'ordered', recheckMs: 60_000 } });
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, authError)).mockResolvedValueOnce(jsonResponse(401, authError));
+    await expect(ask(p)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED', httpStatus: 401 });
+    // The keys work again; the clock reaches their recheck before the pool's timer has run, so the request itself
+    // finds both keys due: it starts their probes, waits for them, and goes out with the first key they bring back.
+    vi.setSystemTime(new Date(Date.now() + 60_000));
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { data: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, { data: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, okMessage));
+    const answer = await ask(p);
+    expect(answer.choices[0]?.message?.content).toBe('hello');
+    const after = callsOf().slice(2);
+    expect(after.map((call) => (call.url.includes('/v1/models') ? 'probe' : 'request'))).toEqual(['probe', 'probe', 'request']);
+    expect(after.map(keyOf)).toEqual(['sk_a', 'sk_b', 'sk_a']);
+  });
+
   it('probes a billing failure with a one-token request, never a models list', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));

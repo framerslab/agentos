@@ -281,6 +281,22 @@ function isContentPolicyDecline(error: unknown): boolean {
 }
 
 /**
+ * A provider's `ALL_KEYS_FAILED` whose `details.retryAfterMs` is 0: every key
+ * of its pool is out, but a key's recheck is due, so a probe was just started
+ * or is running and may bring the key back at once. That is no verdict on the
+ * provider yet: counted, it would re-open the breaker for another full window
+ * at the very call that half-closed it, while the probe passes a second later.
+ * Once the probe fails, the key's next recheck is later, `retryAfterMs` is
+ * above 0, and the next such error trips the breaker as before.
+ */
+function isRecheckDue(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const { code, details } = error as { code?: unknown; details?: unknown };
+  if (code !== 'ALL_KEYS_FAILED' || !details || typeof details !== 'object') return false;
+  return (details as { retryAfterMs?: unknown }).retryAfterMs === 0;
+}
+
+/**
  * The most per-credential records the registry keeps: one for each key or
  * base URL of a caller's own that failed (see `providerHealthKey`). A
  * service that passes each tenant's key would otherwise keep one per key for
@@ -348,14 +364,16 @@ export class LLMProviderHealthRegistry {
    * a repeat failure on an open breaker just refreshes the
    * cooldown for the new error class.
    *
-   * A content-policy decline and a context-window rejection are ignored
-   * entirely (see {@link isContentPolicyDecline} and
-   * {@link isRequestTooLarge}): they neither trip the breaker nor count
-   * toward a streak.
+   * A content-policy decline, a context-window rejection and a key pool's
+   * `ALL_KEYS_FAILED` whose `retryAfterMs` is 0 (a key's probe is due or
+   * running) are ignored entirely (see {@link isContentPolicyDecline},
+   * {@link isRequestTooLarge} and {@link isRecheckDue}): they neither trip the
+   * breaker nor count toward a streak.
    */
   recordFailure(providerId: string, error: unknown): void {
     if (isContentPolicyDecline(error)) return;
     if (isRequestTooLarge(error)) return;
+    if (isRecheckDue(error)) return;
     const status = classifyErrorStatus(error);
     // Billing/quota exhaustion is provider health regardless of the
     // transport status it wears: OpenAI reports it as 429, Anthropic as

@@ -941,7 +941,7 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async initialize(config: OpenAIProviderConfig): Promise<void> {
-    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
     // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
     // the new configuration nor overwrite what the new pool loads from the store.
     await this.keyPool?.close();
@@ -971,7 +971,7 @@ export class OpenAIProvider implements IProvider {
       await this.refreshAvailableModels();
       this.isInitialized = true;
       // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
-      // breaker holds still gets its keys back; the interval never keeps the process alive.
+      // breaker holds still gets its keys back; the timer never keeps the process alive.
       if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
       const env = typeof process !== 'undefined' ? process.env : undefined;
       const debugOn = !!env && (env.AGENTOS_DEBUG === '1' || env.AGENTOS_DEBUG === 'true' || (env.AGENTOS_LOG_LEVEL ?? '').toLowerCase() === 'debug');
@@ -1124,6 +1124,9 @@ export class OpenAIProvider implements IProvider {
 
   /**
    * Resolves the API key to use for a request, prioritizing per-request override, then OAuth flow, then system default.
+   * A pool with no usable key while a probe of a failed key is in flight (its recheck came due) waits for that probe,
+   * bounded by the pool's probe timeout, and draws again, so the first request after a recheck is served by a key that
+   * came back.
    * @private
    * @param {string | undefined} apiKeyOverride - API key provided directly in request options.
    * @returns {Promise<string>} The API key to use.
@@ -1135,7 +1138,7 @@ export class OpenAIProvider implements IProvider {
       return await this.config.oauthFlow.getAccessToken();
     }
     if (this.keyPool?.hasKeys) {
-      const key = this.keyPool.next();
+      const key = await this.keyPool.nextAfterProbes();
       if (key === '') throw this.allKeysFailedError();
       return key;
     }
@@ -1791,7 +1794,7 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
-    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    // Stops the recheck timer, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
     await this.keyPool?.close();
     // For OpenAIProvider, using stateless HTTP requests, there might not be
     // persistent connections to close. If connection pooling or WebSockets

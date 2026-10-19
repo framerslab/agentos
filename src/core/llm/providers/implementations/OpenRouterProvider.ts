@@ -434,7 +434,7 @@ export class OpenRouterProvider implements IProvider {
   constructor() {}
 
   public async initialize(config: OpenRouterProviderConfig): Promise<void> {
-    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
     // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
     // the new configuration nor overwrite what the new pool loads from the store.
     await this.keyPool?.close();
@@ -486,7 +486,7 @@ export class OpenRouterProvider implements IProvider {
       await this.refreshAvailableModels();
       this.isInitialized = true;
       // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
-      // breaker holds still gets its keys back; the interval never keeps the process alive.
+      // breaker holds still gets its keys back; the timer never keeps the process alive.
       if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
       console.log(`OpenRouterProvider initialized. Default Model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models via OpenRouter.`);
     } catch (error: unknown) {
@@ -1334,7 +1334,7 @@ export class OpenRouterProvider implements IProvider {
   }
 
   public async shutdown(): Promise<void> {
-    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    // Stops the recheck timer, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
     await this.keyPool?.close();
     this.isInitialized = false;
     this.availableModelsCache.clear();
@@ -1543,7 +1543,9 @@ export class OpenRouterProvider implements IProvider {
     // transient attempt.
     let keyHops = 0;
     for (let attempt = 0; attempt < OpenRouterProvider.MAX_REQUEST_ATTEMPTS; attempt++) {
-      const apiKey = this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
+      // With no usable key while a probe of a failed key is in flight (its recheck came due), the draw waits for that
+      // probe, bounded by the pool's probe timeout, so the first request after a recheck is served by a key that came back.
+      const apiKey = this.keyPool?.hasKeys ? await this.keyPool.nextAfterProbes() : this.config.apiKey;
       if (apiKey === '') throw this.allKeysFailedError();
       const attemptStartedAt = Date.now();
       try {

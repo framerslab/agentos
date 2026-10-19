@@ -815,7 +815,7 @@ export class GeminiProvider implements IProvider {
    * @throws {GeminiProviderError} If the API key is missing.
    */
   public async initialize(config: GeminiProviderConfig): Promise<void> {
-    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
     // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
     // the new configuration nor overwrite what the new pool loads from the store.
     await this.keyPool?.close();
@@ -842,7 +842,7 @@ export class GeminiProvider implements IProvider {
     this.defaultModelId = this.config.defaultModelId;
     this.isInitialized = true;
     // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
-    // breaker holds still gets its keys back; the interval never keeps the process alive.
+    // breaker holds still gets its keys back; the timer never keeps the process alive.
     if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
 
     console.log(
@@ -1307,7 +1307,7 @@ export class GeminiProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
-    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    // Stops the recheck timer, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
     await this.keyPool?.close();
     this.isInitialized = false;
     console.log('GeminiProvider shutdown complete.');
@@ -1913,10 +1913,14 @@ export class GeminiProvider implements IProvider {
   /**
    * The next API key to send: the pool rotates between configured keys and
    * skips one in cooldown after a 429. Falls back to the configured key when
-   * the provider was configured without initialization (tests).
+   * the provider was configured without initialization (tests). When no key
+   * is usable while a probe of a failed key is in flight (its recheck came
+   * due), it waits for that probe, bounded by the pool's probe timeout, and
+   * draws again, so the first request after a recheck is served by a key that
+   * came back.
    */
-  private nextApiKey(): string {
-    return this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
+  private async drawApiKey(): Promise<string> {
+    return this.keyPool?.hasKeys ? this.keyPool.nextAfterProbes() : this.config.apiKey;
   }
 
   /** Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. */
@@ -2008,7 +2012,7 @@ export class GeminiProvider implements IProvider {
       if (abortSignal?.aborted) {
         throw new GeminiProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
       }
-      const apiKey = this.nextApiKey();
+      const apiKey = await this.drawApiKey();
       if (apiKey === '') throw this.allKeysFailedError();
       const attemptStartedAt = Date.now();
       const controller = new AbortController();
@@ -2151,7 +2155,7 @@ export class GeminiProvider implements IProvider {
     body: Record<string, unknown>,
     requestTimeoutOverride?: number,
   ): Promise<ReadableStream<Uint8Array>> {
-    const apiKey = this.nextApiKey();
+    const apiKey = await this.drawApiKey();
     if (apiKey === '') throw this.allKeysFailedError();
     const startedAt = Date.now();
     const url = `${this.config.baseURL}${endpoint}?alt=sse`;

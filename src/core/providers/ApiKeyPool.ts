@@ -165,8 +165,12 @@ export class ApiKeyPool {
   private readonly configuredLogger?: ILogger;
   private readyPromise?: Promise<void>;
   private readonly inFlightProbes = new Map<string, Promise<void>>();
-  /** The interval `startRechecks()` runs, if any: one per pool. */
-  private recheckTimer: ReturnType<typeof setInterval> | undefined;
+  /** The one-shot timer `startRechecks()` arms, if any: one per pool, re-armed after each run. */
+  private recheckTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The longest wait between two runs of the timer while `startRechecks()` is on; undefined when it is off. */
+  private recheckSweepMs: number | undefined;
+  /** Counts the `startRechecks()` calls, so an earlier call's stop function cannot end a later call's timer. */
+  private recheckGeneration = 0;
   private readonly pendingSaves = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlightSaves = new Set<Promise<void>>();
   private readonly lastLogged = new Map<string, number>();
@@ -285,6 +289,23 @@ export class ApiKeyPool {
     return resting[0].key;
   }
 
+  /**
+   * `next()`, and when it finds no key to hand out while a probe of a failed
+   * key is in flight (one this draw just started because its recheck came
+   * due, or the timer's), waits for those probes, each bounded by
+   * `probeTimeoutMs`, and draws once more. So the first request after a
+   * recheck comes due is served by a key that came back, instead of failing
+   * on a probe that was about to pass and re-opening the provider health
+   * breaker for another window. The providers draw their first key of a
+   * request through it.
+   */
+  async nextAfterProbes(): Promise<string> {
+    const key = this.next();
+    if (key !== '' || this.inFlightProbes.size === 0) return key;
+    await Promise.allSettled(Array.from(this.inFlightProbes.values()));
+    return this.next();
+  }
+
   /** How many keys `next()` may hand out now. */
   usable(): number {
     const now = Date.now();
@@ -352,6 +373,7 @@ export class ApiKeyPool {
       this.log('warn', 'key_pool.all_keys_failed', undefined, true, { kinds: this.kindsSeen(), retryAfterMs: this.soonestReturnMs(now) });
     }
     this.scheduleSave(entry);
+    this.armRecheckTimer();
   }
 
   /** Records a success: the key is usable, its failure count cleared, its last-good time kept. */
@@ -373,6 +395,7 @@ export class ApiKeyPool {
       state.updatedAt = now;
       if (previous !== 'ok') this.log('info', 'key_pool.key_recovered', entry, true, { by: 'success' });
       this.scheduleSave(entry);
+      this.armRecheckTimer();
     }
   }
 
@@ -395,45 +418,40 @@ export class ApiKeyPool {
   }
 
   /**
-   * Runs `recheck()` on an interval that never keeps the process alive, one
-   * interval per pool (a second call replaces the first); returns the function
-   * that stops it. The interval holds the pool weakly where the runtime has
+   * Probes failed keys on the pool's own clock: one timer per pool, armed to
+   * the soonest `nextRecheckAt` of a failed key (so the first probe runs
+   * `recheckMs` after the failure, where an interval fixed at start could run
+   * it up to twice that late) and at the latest `intervalMs` ahead, re-armed
+   * after each run, each failure, each success and each probe. A second call
+   * replaces the first; the returned function stops it. The timer never
+   * keeps the process alive and holds the pool weakly where the runtime has
    * `WeakRef`: a pool nothing else holds (a provider dropped without
    * `shutdown()`, a manager evicted from `createProviderManager()`'s cache)
-   * ends its interval on the next tick instead of being kept alive by it.
+   * ends its timer at its next run instead of being kept alive by it.
    */
   startRechecks(intervalMs: number = this.recheckMs): () => void {
     const every = positiveMs('the recheck interval', intervalMs, this.recheckMs);
     this.stopRechecks();
-    const ref = typeof WeakRef === 'function' ? new WeakRef<ApiKeyPool>(this) : undefined;
-    const strong = ref ? undefined : this;
-    const timer: ReturnType<typeof setInterval> = setInterval(() => {
-      const pool = ref ? ref.deref() : strong;
-      if (!pool) {
-        clearInterval(timer);
-        return;
-      }
-      void pool.recheck().catch(() => undefined);
-    }, every);
-    const maybeUnref = timer as unknown as { unref?: () => void };
-    if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
-    this.recheckTimer = timer;
+    this.recheckGeneration += 1;
+    const generation = this.recheckGeneration;
+    this.recheckSweepMs = every;
+    this.armRecheckTimer();
     return () => {
-      if (this.recheckTimer === timer) this.stopRechecks();
-      else clearInterval(timer);
+      if (this.recheckGeneration === generation) this.stopRechecks();
     };
   }
 
-  /** Stops the interval `startRechecks()` started, if any. Probes already running finish. */
+  /** Stops the timer `startRechecks()` armed, if any. Probes already running finish. */
   stopRechecks(): void {
+    this.recheckSweepMs = undefined;
     if (this.recheckTimer === undefined) return;
-    clearInterval(this.recheckTimer);
+    clearTimeout(this.recheckTimer);
     this.recheckTimer = undefined;
   }
 
   /**
    * Ends the pool's work for a host that is shutting down: stops the recheck
-   * interval, waits for the probes in flight (each bounded by the probe
+   * timer, waits for the probes in flight (each bounded by the probe
    * timeout), then writes every pending state change (bounded by
    * `storeTimeoutMs`), so what a probe found during shutdown is kept and a
    * store that does not answer cannot hold the host. The providers'
@@ -507,6 +525,42 @@ export class ApiKeyPool {
     return soonest;
   }
 
+  /**
+   * Arms (or re-arms) the one-shot recheck timer: to the soonest failed key's
+   * recheck when the pool has a probe, and at the latest a sweep ahead.
+   * Nothing while `startRechecks()` is off.
+   */
+  private armRecheckTimer(): void {
+    const sweepMs = this.recheckSweepMs;
+    if (sweepMs === undefined) return;
+    if (this.recheckTimer !== undefined) {
+      clearTimeout(this.recheckTimer);
+      this.recheckTimer = undefined;
+    }
+    const now = Date.now();
+    let due = now + sweepMs;
+    if (this.probe) {
+      for (const entry of this.entries) {
+        if (entry.state.status !== 'failed') continue;
+        const at = entry.state.nextRecheckAt ?? now;
+        if (at < due) due = at;
+      }
+    }
+    const ref = typeof WeakRef === 'function' ? new WeakRef<ApiKeyPool>(this) : undefined;
+    const strong = ref ? undefined : this;
+    const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
+      const pool = ref ? ref.deref() : strong;
+      if (!pool || pool.recheckTimer !== timer) return;
+      pool.recheckTimer = undefined;
+      void pool
+        .recheck()
+        .catch(() => undefined)
+        .finally(() => pool.armRecheckTimer());
+    }, Math.max(0, due - now));
+    unrefTimer(timer);
+    this.recheckTimer = timer;
+  }
+
   private scheduleDueRechecks(now: number): void {
     if (!this.probe) return;
     for (const entry of this.entries) {
@@ -558,6 +612,7 @@ export class ApiKeyPool {
       state.updatedAt = now;
       this.log('info', 'key_pool.key_recovered', entry, true, { by: 'probe' });
       this.scheduleSave(entry);
+      this.armRecheckTimer();
       return;
     }
     if (result === 'quota') {
@@ -568,6 +623,7 @@ export class ApiKeyPool {
       state.updatedAt = now;
       this.log('warn', 'key_pool.probe_failed', entry, true, { result });
       this.scheduleSave(entry);
+      this.armRecheckTimer();
       return;
     }
     // auth, billing or unknown: still out; the next recheck waits longer.
@@ -577,6 +633,7 @@ export class ApiKeyPool {
     state.updatedAt = now;
     this.log('warn', 'key_pool.probe_failed', entry, false, { result, failures: state.failures, nextRecheckAt: state.nextRecheckAt });
     this.scheduleSave(entry);
+    this.armRecheckTimer();
   }
 
   /** A store call raced against a deadline; what settles after the deadline is ignored, a late rejection included. */
@@ -632,6 +689,8 @@ export class ApiKeyPool {
       this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'load', reason: 'version', version: otherVersion });
     }
     this.logger().debug?.('key_pool.state_loaded', { poolId: this.id, rows: rows.length, applied });
+    // Loaded failed keys may be due already: the timer, when on, probes them at once.
+    if (applied > 0) this.armRecheckTimer();
   }
 
   /**

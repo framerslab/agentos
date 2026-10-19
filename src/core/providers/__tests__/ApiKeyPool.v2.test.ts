@@ -186,6 +186,44 @@ describe('ApiKeyPool v2', () => {
       expect(pool.next()).toBe('sk_b');
     });
 
+    it('nextAfterProbes() waits for the probes a due recheck just started and draws the key that came back', async () => {
+      const answers: Array<(result: ProbeResult) => void> = [];
+      const probe = vi.fn(() => new Promise<ProbeResult>((resolve) => {
+        answers.push(resolve);
+      }));
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, probe });
+      pool.markFailed('sk_a', 'auth');
+      pool.markFailed('sk_b', 'auth');
+      // Not due: nothing to wait for, the pool answers at once.
+      expect(await pool.nextAfterProbes()).toBe('');
+      expect(probe).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1001);
+      let drawn: string | undefined;
+      const drawing = pool.nextAfterProbes().then((key) => {
+        drawn = key;
+      });
+      await Promise.resolve();
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(drawn).toBeUndefined();
+      for (const answer of answers) answer('ok');
+      await drawing;
+      expect(drawn).toBe('sk_a');
+      expect(pool.snapshot().map((s) => s.status)).toEqual(['ok', 'ok']);
+    });
+
+    it('nextAfterProbes() answers \'\' once the probes it waited for fail, and a usable key at once', async () => {
+      const probe = vi.fn(async (): Promise<ProbeResult> => 'auth');
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, probe });
+      expect(await pool.nextAfterProbes()).toBe('sk_a');
+      pool.markFailed('sk_a', 'auth');
+      pool.markFailed('sk_b', 'auth');
+      vi.advanceTimersByTime(1001);
+      expect(await pool.nextAfterProbes()).toBe('');
+      expect(probe).toHaveBeenCalledTimes(2);
+      // Each failed probe pushed its key's next recheck out, so the error the provider throws now names a later return.
+      expect(pool.soonestReturnMs()).toBe(2000);
+    });
+
     it('runs one probe per key at a time', async () => {
       let resolveProbe: (r: ProbeResult) => void = () => undefined;
       const probe = vi.fn(() => new Promise<ProbeResult>((resolve) => { resolveProbe = resolve; }));
@@ -202,7 +240,7 @@ describe('ApiKeyPool v2', () => {
     });
   });
 
-  describe('the recheck interval and close()', () => {
+  describe('the recheck timer and close()', () => {
     it('refuses a zero, negative or non-finite recheck, maximum recheck or probe timeout, and a non-positive interval', () => {
       for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
         expect(() => new ApiKeyPool('sk_a,sk_b', { recheckMs: bad })).toThrow(RangeError);
@@ -231,7 +269,7 @@ describe('ApiKeyPool v2', () => {
       expect([equal.next(), equal.next(), equal.next()]).toEqual(['sk_a', 'sk_b', 'sk_a']);
     });
 
-    it('keeps one interval per pool: a second start replaces the first, and either stop ends it', () => {
+    it('keeps one timer per pool: a second start replaces the first, and its stop ends it', () => {
       const pool = new ApiKeyPool('sk_a,sk_b', { recheckMs: 1000 });
       const before = vi.getTimerCount();
       pool.startRechecks();
@@ -244,7 +282,37 @@ describe('ApiKeyPool v2', () => {
       expect(vi.getTimerCount()).toBe(before);
     });
 
-    it('ends its interval on the next tick once nothing else holds the pool', () => {
+    it('probes a failed key when its recheck is due, not at the next tick of an interval fixed at start', async () => {
+      // Started at T=0 with a 30-minute recheck, a key that fails at T=10 is probed at T=40, not at T=60.
+      const probe = vi.fn(async (): Promise<ProbeResult> => 'ok');
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 30 * 60_000, probe });
+      pool.startRechecks();
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      pool.markFailed('sk_a', 'auth');
+      await vi.advanceTimersByTimeAsync(29 * 60_000 + 59_000);
+      expect(probe).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(pool.snapshot()[0].status).toBe('ok');
+      // Nothing is failed now: the timer only sweeps.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(probe).toHaveBeenCalledTimes(1);
+      pool.stopRechecks();
+    });
+
+    it('a stop function of an earlier start leaves a later start running', async () => {
+      const probe = vi.fn(async (): Promise<ProbeResult> => 'ok');
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, probe });
+      const stopFirst = pool.startRechecks();
+      pool.startRechecks();
+      stopFirst();
+      pool.markFailed('sk_a', 'auth');
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(probe).toHaveBeenCalledTimes(1);
+      pool.stopRechecks();
+    });
+
+    it('ends its timer at its next run once nothing else holds the pool', () => {
       let released = false;
       class FakeWeakRef<T> {
         constructor(private readonly value: T) {}
@@ -260,7 +328,7 @@ describe('ApiKeyPool v2', () => {
         const before = vi.getTimerCount();
         pool.startRechecks();
         expect(vi.getTimerCount()).toBe(before + 1);
-        // A collected pool: the interval finds nothing behind its weak reference and clears itself.
+        // A collected pool: the timer finds nothing behind its weak reference and arms no other.
         released = true;
         vi.advanceTimersByTime(1001);
         expect(vi.getTimerCount()).toBe(before);
@@ -270,7 +338,7 @@ describe('ApiKeyPool v2', () => {
       }
     });
 
-    it('close() stops the interval, waits for a probe in flight and saves what it found', async () => {
+    it('close() stops the timer, waits for a probe in flight and saves what it found', async () => {
       const store = new InMemoryKeyPoolStateStore();
       let answer: (result: ProbeResult) => void = () => undefined;
       const probe = vi.fn(() => new Promise<ProbeResult>((resolve) => {
@@ -291,7 +359,7 @@ describe('ApiKeyPool v2', () => {
       answer('ok');
       await closing;
       expect((await store.load('p:close'))?.map((row) => row.status)).toEqual(['ok']);
-      // The interval is gone: time passing starts no further probe.
+      // The timer is gone: time passing starts no further probe.
       pool.markFailed('sk_alpha_0001', 'auth');
       vi.advanceTimersByTime(5000);
       expect(probe).toHaveBeenCalledTimes(1);

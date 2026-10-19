@@ -182,7 +182,7 @@ export class RequestyProvider implements IProvider {
   constructor() {}
 
   public async initialize(config: RequestyProviderConfig): Promise<void> {
-    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
     // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
     // the new configuration nor overwrite what the new pool loads from the store.
     await this.keyPool?.close();
@@ -234,7 +234,7 @@ export class RequestyProvider implements IProvider {
       await this.refreshAvailableModels();
       this.isInitialized = true;
       // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
-      // breaker holds still gets its keys back; the interval never keeps the process alive.
+      // breaker holds still gets its keys back; the timer never keeps the process alive.
       if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
       console.log(`RequestyProvider initialized. Default Model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models via Requesty.`);
     } catch (error: unknown) {
@@ -622,9 +622,10 @@ export class RequestyProvider implements IProvider {
     try {
       // Auth rides per request since the key is no longer on the axios
       // instance; keep the health probe representative of real traffic.
+      const apiKey = await this.resolveApiKey();
       await this.client.get('/models', {
         timeout: Math.min(this.config.requestTimeout || 10000, 10000),
-        headers: { Authorization: `Bearer ${this.resolveApiKey()}` },
+        headers: { Authorization: `Bearer ${apiKey}` },
       });
       return { isHealthy: true, details: { message: "Successfully connected to Requesty /models endpoint." } };
     } catch (error: unknown) {
@@ -641,7 +642,7 @@ export class RequestyProvider implements IProvider {
   }
 
   public async shutdown(): Promise<void> {
-    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    // Stops the recheck timer, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
     await this.keyPool?.close();
     this.isInitialized = false;
     this.availableModelsCache.clear();
@@ -829,12 +830,15 @@ export class RequestyProvider implements IProvider {
 
   /**
    * Resolve the bearer key for one request: a per call override wins,
-   * otherwise the next key from the pool (weighted rotation).
+   * otherwise the next key from the pool (weighted rotation). With no usable
+   * key while a probe of a failed key is in flight (its recheck came due), the
+   * draw waits for that probe, bounded by the pool's probe timeout, so the
+   * first request after a recheck is served by a key that came back.
    */
-  private resolveApiKey(apiKeyOverride?: string): string {
+  private async resolveApiKey(apiKeyOverride?: string): Promise<string> {
     if (apiKeyOverride) return apiKeyOverride;
     if (this.keyPool?.hasKeys) {
-      const key = this.keyPool.next();
+      const key = await this.keyPool.nextAfterProbes();
       if (key === '') throw this.allKeysFailedError();
       return key;
     }
@@ -897,7 +901,7 @@ export class RequestyProvider implements IProvider {
     expectStream: boolean = false,
     perRequest?: { apiKeyOverride?: string; signal?: AbortSignal }
   ): Promise<T> {
-    const apiKey = this.resolveApiKey(perRequest?.apiKeyOverride);
+    const apiKey = await this.resolveApiKey(perRequest?.apiKeyOverride);
     const attemptStartedAt = Date.now();
     try {
       const response = await this.client.request<T>({

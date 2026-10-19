@@ -265,3 +265,34 @@ describe('classifyErrorStatus — the httpStatus shape is load-bearing on its ow
     }
   });
 });
+
+describe('LLMProviderHealthRegistry: a key pool whose recheck is due has no verdict yet', () => {
+  /**
+   * The ALL_KEYS_FAILED a provider throws before it sends anything once every key of its pool is out: the status of
+   * the kind that took the keys out, the kinds, and the soonest a key may come back.
+   */
+  const allKeysFailed = (retryAfterMs: number) => ({
+    code: 'ALL_KEYS_FAILED',
+    httpStatus: 401,
+    message: 'Every Anthropic API key is out of rotation (auth).',
+    details: { kinds: ['auth'], retryAfterMs },
+  });
+
+  it('ignores one whose retryAfterMs is 0, since a probe of a key is due or running', () => {
+    const reg = new LLMProviderHealthRegistry();
+    for (let i = 0; i < 10; i++) reg.recordFailure('anthropic', allKeysFailed(0));
+    expect(reg.isOpen('anthropic')).toBe(false);
+    expect(reg.getStats('anthropic')).toBeNull();
+  });
+
+  it('trips on one whose keys come back later, as on the answer that took them out', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      reg.recordFailure('anthropic', allKeysFailed(30 * 60_000));
+      expect(reg.isOpen('anthropic')).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
