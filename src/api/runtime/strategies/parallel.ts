@@ -145,11 +145,15 @@ export function compileParallel(
       // This two-pass approach lets us collect error telemetry while still
       // producing a valid synthesis from the successful agents.
       const settled: Array<{ name: string; result: Record<string, unknown>; durationMs: number }> = [];
+      // The first seat that failed, in roster order: the run's error when no
+      // seat is left.
+      let firstFailure: Error | undefined;
       for (let i = 0; i < allSettled.length; i++) {
         const outcome = allSettled[i];
         if (outcome.status === 'rejected') {
           const agentName = entries[i][0];
           const error = outcome.reason instanceof Error ? outcome.reason : new Error(String(outcome.reason));
+          firstFailure ??= error;
           // To the host's logger, with the message through the call's mask: a
           // provider's message can echo the key it was sent.
           agencyLogger.warn(`parallel seat "${agentName}" failed`, {
@@ -178,11 +182,16 @@ export function compileParallel(
       // consensus. Throws AgencyQuorumError before any synthesis spend.
       enforceQuorum(agencyConfig.quorum, settled, entries.length);
 
-      // No agent is left (each was rejected, blocked or failed): there is
-      // nothing to synthesize, and a synthesizer sent no answer would make one
-      // up. The run returns no text, no call record and no usage, which the
-      // agency logs as a run no seat answered and runs no validation retry on.
+      // No agent is left: there is nothing to synthesize, and a synthesizer
+      // sent no answer would make one up. When a seat failed, the run is the
+      // seats' failure (an outage, a key every provider refused) and rejects
+      // with the first failed seat's error, each failure logged and passed to
+      // on.error above; an empty text would resolve it as an answer. When
+      // each was rejected or blocked, the run returns no text, no call record
+      // and no usage, which the agency logs as a run no seat answered and runs
+      // no validation retry on.
       if (settled.length === 0) {
+        if (firstFailure) throw firstFailure;
         return { text: '', agentCalls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } };
       }
 

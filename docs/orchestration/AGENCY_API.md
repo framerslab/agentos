@@ -508,7 +508,9 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
   cast of the result to an unrelated type needs `as unknown as` first.
 - `result.text` is `''`, not missing, when every seat was rejected; under
   `parallel` and `debate` no synthesizer runs then, and a nested agency that
-  no seat of its own answered counts as a rejected seat. A session
+  no seat of its own answered counts as a rejected seat. A `parallel` run left
+  with no seat because a seat failed rejects with the first failed seat's
+  error. A session
   adds no assistant turn for an empty answer, such a run's or a seat's reply
   with no text: `messages()` keeps the user's turn alone, and the next prompt
   carries no empty `Assistant:` line.
@@ -559,10 +561,12 @@ console.log(agentCalls.length); // 3 — one record per agent
 
 All agents run concurrently on the same prompt.  A synthesis step merges their
 outputs using the agency-level `model` and `provider` (the chair).  Requires
-`model` or `provider` at the agency level.  When every seat was rejected,
-blocked or failed, no synthesis runs and the text is `''`; a nested agency
-that no seat of its own answered counts as a rejected seat, toward the quorum
-too.
+`model` or `provider` at the agency level.  When no seat is left, no
+synthesis runs: if each seat was rejected or blocked, the text is `''`; if a
+seat failed, the call rejects with the first failed seat's error, after each
+failure is written as `parallel_seat_failed` and passed to `on.error`. A
+nested agency that no seat of its own answered counts as a rejected seat,
+toward the quorum too.
 
 Each seat can run on its own provider, model and key, so one question can be
 put to several vendors at once and the chair reads every answer:
