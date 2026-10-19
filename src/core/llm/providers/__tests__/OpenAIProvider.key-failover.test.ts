@@ -5,7 +5,8 @@ vi.stubGlobal('fetch', fetchMock);
 
 import { OpenAIProvider } from '../implementations/OpenAIProvider';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
-import { InMemoryKeyPoolStateStore } from '../../../providers/KeyPoolStateStore';
+import { InMemoryKeyPoolStateStore, type KeyState } from '../../../providers/KeyPoolStateStore';
+import { keyFingerprint } from '../../../providers/ApiKeyPool';
 
 /**
  * Several OpenAI keys in one provider (the key pool v2 design): a key that
@@ -225,6 +226,50 @@ describe('OpenAIProvider key failover', () => {
     expect(callsOf()[2].url).toContain('/models');
     expect(keyOf(callsOf()[2])).toBe('sk_alpha_0001');
     expect((pool as { snapshot(): Array<Record<string, unknown>> }).snapshot()[0]).toMatchObject({ status: 'ok' });
+  });
+
+  it('initializes with every key out of rotation, sends nothing until the recheck, and its timer probes the keys back', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const hours = 60 * 60_000;
+    // The previous process held both keys out for billing with a doubled delay; the credit was topped up since.
+    const store = new InMemoryKeyPoolStateStore();
+    const id = 'openai:all-out';
+    const outRow = (key: string, label: string): KeyState => ({
+      fingerprint: keyFingerprint(key),
+      label,
+      status: 'failed',
+      kind: 'billing',
+      failures: 3,
+      lastFailAt: Date.now() - 60_000,
+      nextRecheckAt: Date.now() + 5 * hours,
+      updatedAt: Date.now() - 60_000,
+      version: 1,
+    });
+    await store.save(id, outRow('sk_alpha_0001', 'k00001'));
+    await store.save(id, outRow('sk_beta_0002', 'k10002'));
+    const p = new OpenAIProvider();
+    await p.initialize({ apiKey: 'sk_alpha_0001,sk_beta_0002', maxRetries: 2, keyPool: { strategy: 'ordered', id, store } });
+    expect(p.isInitialized).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(ask(p)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED', httpStatus: 402 });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // At the recheck the timer probes each key with a one-token completion on the first chat model the account lists.
+    fetchMock.mockImplementation(async (url: unknown) =>
+      String(url).endsWith('/models')
+        ? jsonResponse(200, { object: 'list', data: [{ id: 'gpt-4o-mini', object: 'model', created: 1, owned_by: 'openai' }] })
+        : jsonResponse(200, okChat),
+    );
+    await vi.advanceTimersByTimeAsync(5 * hours + 1);
+    const probes = callsOf();
+    expect(probes.filter((call) => call.url.endsWith('/models')).map(keyOf).sort()).toEqual(['sk_alpha_0001', 'sk_beta_0002']);
+    expect(probes.filter((call) => call.url.endsWith('/chat/completions')).map(keyOf).sort()).toEqual(['sk_alpha_0001', 'sk_beta_0002']);
+    const pool = (p as unknown as { keyPool: { snapshot(): Array<Record<string, unknown>> } }).keyPool;
+    expect(pool.snapshot().map((s) => s.status)).toEqual(['ok', 'ok']);
+    const answer = await ask(p);
+    expect(answer.choices[0]?.message?.content).toBe('hello');
+    expect(keyOf(callsOf()[probes.length])).toBe('sk_alpha_0001');
   });
 
   it('probes a billing failure with a one-token completion on the default model, never a models list', async () => {

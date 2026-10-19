@@ -10,6 +10,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RequestyProvider } from '../implementations/RequestyProvider.js';
 import { RequestyProviderError } from '../errors/RequestyProviderError.js';
+import { InMemoryKeyPoolStateStore } from '../../../providers/KeyPoolStateStore.js';
+import { keyFingerprint } from '../../../providers/ApiKeyPool.js';
 
 interface MockClient {
   request: ReturnType<typeof vi.fn>;
@@ -102,6 +104,36 @@ describe('RequestyProvider key failover', () => {
     expect(a).toMatchObject({ status: 'resting', kind: 'quota' });
     expect((a.until as number) - before).toBeGreaterThan(6000);
     expect((a.until as number) - before).toBeLessThanOrEqual(7100);
+  });
+
+  it('initializes with every key out of rotation without the model listing, and runs the recheck timer', async () => {
+    const client: MockClient = { request: vi.fn(), get: vi.fn() };
+    const axios = (await import('axios')).default;
+    vi.spyOn(axios, 'create').mockReturnValue(client as never);
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const store = new InMemoryKeyPoolStateStore();
+    for (const [key, label] of [['key_alpha_0001', 'k00001'], ['key_beta_0002', 'k10002']] as const) {
+      await store.save('requesty:all-out', {
+        fingerprint: keyFingerprint(key),
+        label,
+        status: 'failed',
+        kind: 'auth',
+        failures: 1,
+        lastFailAt: Date.now() - 1000,
+        nextRecheckAt: Date.now() + 60 * 60_000,
+        updatedAt: Date.now() - 1000,
+        version: 1,
+      });
+    }
+    const provider = new RequestyProvider();
+    await provider.initialize({ apiKey: 'key_alpha_0001,key_beta_0002', keyPool: { strategy: 'ordered', id: 'requesty:all-out', store } });
+    expect(provider.isInitialized).toBe(true);
+    expect(client.request).not.toHaveBeenCalled();
+    expect((provider as unknown as { keyPool: { recheckTimer?: unknown } }).keyPool.recheckTimer).toBeDefined();
+    await expect(ask(provider)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED' });
+    expect(client.request).not.toHaveBeenCalled();
+    await provider.shutdown();
   });
 
   it("keeps a 400 as the request's fault: no mark", async () => {

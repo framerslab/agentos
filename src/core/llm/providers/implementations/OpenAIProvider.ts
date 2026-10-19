@@ -969,6 +969,17 @@ export class OpenAIProvider implements IProvider {
     await this.keyPool.ready();
     this.defaultModelId = config.defaultModelId;
 
+    // Every key of a pool of several is out (the store held them failed): the model listing would draw no key and
+    // fail the initialize, and a provider that never initializes runs no recheck timer, so nothing would probe the
+    // keys back until a fresh process forgot them. It initializes without the listing instead and its timer probes
+    // the keys at their recheck; the model cache fills on the first lookup that misses it.
+    if (keyPool.size > 1 && keyPool.usable() === 0) {
+      this.isInitialized = true;
+      keyPool.startRechecks();
+      console.warn('OpenAIProvider: every API key of the pool is out of rotation; initialized without the model listing, and the keys are probed at their recheck.');
+      return;
+    }
+
     try {
       // Attempt to list models to verify API key and connectivity.
       await this.refreshAvailableModels();
