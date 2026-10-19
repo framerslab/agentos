@@ -779,8 +779,7 @@ export interface GenerateTextOptions {
    * availability-only chain.
    *
    * Mirrors the existing `policyTier` parameter on
-   * {@link import('./generateImage.js').GenerateImageOptions} and
-   * {@link import('./editImage.js').EditImageOptions}.
+   * {@link GenerateImageOptions} and {@link EditImageOptions}.
    */
   policyTier?: 'safe' | 'standard' | 'mature' | 'private-adult';
   /**
@@ -1004,7 +1003,8 @@ export interface GenerateTextResult {
    * is configured. `undefined` when verification was not requested or could
    * not run for this turn.
    *
-   * @see {@link import('./types.js').VerifyCitationsConfig}
+   * @see `VerifyCitationsConfig` (exported from `@framers/agentos/api`) for
+   * the `verifyCitations` options.
    */
   grounding?: import('../cognition/rag/citation/types.js').VerifiedResponse;
   /**

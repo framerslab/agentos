@@ -327,9 +327,9 @@ export interface VideoAnalysisProgressEvent {
  * description, and optional transcript.
  *
  * Scenes are contiguous segments of video bounded by visual
- * discontinuities (hard cuts, dissolves, fades). The
- * {@link SceneDetector} identifies boundaries, and a vision LLM
- * describes the content of each scene.
+ * discontinuities (hard cuts, dissolves, fades). The `SceneDetector`
+ * class (exported from `@framers/agentos/io/vision`) identifies
+ * boundaries, and a vision LLM describes the content of each scene.
  *
  * This is a richer version of the base {@link VideoScene} type that
  * includes cut-type classification, confidence, transcript, and key

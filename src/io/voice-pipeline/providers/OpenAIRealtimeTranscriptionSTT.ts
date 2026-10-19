@@ -1856,8 +1856,8 @@ function resolveSettings(
 
 /**
  * Streaming STT provider for OpenAI's Realtime transcription sessions.
- * Implements {@link IStreamingSTT} for use with {@link VoicePipelineOrchestrator}
- * and {@link StreamingSTTChain}.
+ * Implements {@link IStreamingSTT} for use with `VoicePipelineOrchestrator`
+ * and `StreamingSTTChain`, both exported from `@framers/agentos/io/voice-pipeline`.
  *
  * @example
  * ```typescript
@@ -1918,7 +1918,8 @@ export class OpenAIRealtimeTranscriptionSTT implements IStreamingSTT, HealthyPro
   /**
    * Opens a transcription session on a fresh key from the pool. Resolves once
    * OpenAI has confirmed the session update; rejects (with no retry) when the
-   * first connection cannot open, so a {@link StreamingSTTChain} falls back.
+   * first connection cannot open, so a `StreamingSTTChain` (exported from
+   * `@framers/agentos/io/voice-pipeline`) falls back.
    * A first connection that closes as its session update is confirmed is
    * replaced by the retry rules first: this resolves once the replacement is
    * open, and rejects with the error that ends the retries.

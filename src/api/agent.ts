@@ -316,7 +316,7 @@ export interface AgentOptions extends BaseAgentConfig {
    * before `instructions`, `chainOfThought`, `personality`, or `skills`. STYLE.md
    * is appended as a second system message when present.
    *
-   * @see {@link loadSoul} in `@framers/agentos/cognition/substrate/personas/SoulLoader`
+   * @see `loadSoul` in `@framers/agentos/cognition/substrate/personas/SoulLoader`
    * for the loader implementation and full SOUL.md format spec.
    * @see https://github.com/aaronjmars/soul.md for the cross-framework convention.
    */

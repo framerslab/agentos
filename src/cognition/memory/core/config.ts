@@ -344,14 +344,16 @@ export interface CognitiveMemoryConfig {
   rerankerService?: import('../../rag/reranking/RerankerService.js').RerankerService;
 
   /**
-   * Optional memory archive for write-ahead verbatim preservation.
+   * Optional memory archive, read by `CognitiveMemoryManager.rehydrate()`,
+   * which returns a trace's archived verbatim content.
    *
-   * When provided, TemporalGist preserves the original content in cold
-   * storage before overwriting with the gist. Enables on-demand rehydration
-   * via `CognitiveMemoryManager.rehydrate()`.
+   * The manager hands this archive to neither the temporal-gist mechanism
+   * nor its consolidation pipeline, so setting it does not make gisting keep
+   * a verbatim copy.
    *
-   * @default undefined (no archive, gist is destructive)
-   * @see {@link IMemoryArchive} — the archive contract
+   * @default undefined (no archive; rehydrate() returns null)
+   * @see `IMemoryArchive`, the archive contract, exported from
+   * `@framers/agentos/memory/archive/IMemoryArchive`
    */
   archive?: import('../archive/IMemoryArchive.js').IMemoryArchive;
 

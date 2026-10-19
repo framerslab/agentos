@@ -203,7 +203,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
   /**
    * Ordered fallback providers tried when the primary fails with a retryable
    * error. When undefined, auto-built from env keys. Pass `[]` to disable.
-   * @see {@link import('./generateText.js').GenerateTextOptions.fallbackProviders}
+   * @see {@link GenerateTextOptions.fallbackProviders}
    */
   fallbackProviders?: import('./generateText.js').FallbackProviderEntry[];
 
@@ -214,7 +214,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Caller's intended content policy tier. Forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.policyTier}
+   * {@link GenerateTextOptions.policyTier}
    * so structured-output callers get the same policy-aware fallback
    * behavior as plain text callers — mature/private-adult requests
    * auto-route refusals to an uncensored OpenRouter model instead of
@@ -231,7 +231,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
   policyTier?: 'safe' | 'standard' | 'mature' | 'private-adult';
   /**
    * Per-call request timeout in milliseconds, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.requestTimeout}.
+   * {@link GenerateTextOptions.requestTimeout}.
    * Structured-output callers that emit long strings (e.g. codegen TSX) raise
    * the abort window for this call without slowing the provider's default
    * failover for chat / narration traffic.
@@ -249,14 +249,14 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Ends the call when it aborts: no further attempt or fallback hop starts, and the call rejects with the signal's
-   * reason. Forwarded to every attempt's {@link import('./generateText.js').GenerateTextOptions.abortSignal}, which
+   * reason. Forwarded to every attempt's {@link GenerateTextOptions.abortSignal}, which
    * hands it to the provider request.
    */
   abortSignal?: AbortSignal;
 
   /**
    * Reasoning-depth / token-spend control, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.effort}. On
+   * {@link GenerateTextOptions.effort}. On
    * effort-capable models the provider emits it as `output_config.effort`
    * (Anthropic) or `reasoning_effort` (OpenAI o-series / GPT-5). Dropped on
    * models that don't support it.
@@ -265,7 +265,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Extended-thinking switch, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.thinking}.
+   * {@link GenerateTextOptions.thinking}.
    * `false` turns thinking off with the model's own off shape (Sonnet 5.5
    * takes `between_tools`, at effort `high` or below); Opus 5.5, Fable and
    * Mythos always think. Omitted keeps the model's default, which is thinking
@@ -277,7 +277,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Per-call prompt-cache control, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.cache}.
+   * {@link GenerateTextOptions.cache}.
    * `false` opts this call out of ALL cache marking (the schema block's
    * marker included — right for one-shot extractions); `{ ttl: '1h' }` puts
    * a 1-hour TTL on the provider's auto markers (the moving message-tail).
@@ -296,7 +296,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Per-conversation affinity key, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.sessionId}.
+   * {@link GenerateTextOptions.sessionId}.
    * OpenRouter emits it as `session_id` for provider sticky routing —
    * upstream prompt caches are host-scoped, so a load-balanced multi-call
    * pipeline otherwise cold-misses the cache a prior call wrote on a
@@ -308,7 +308,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Opt-in source label forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.source} and
+   * {@link GenerateTextOptions.source} and
    * surfaced on the global LLM usage observer event. Hosts tag their
    * cost/telemetry rows with it (e.g. 'codegen_tool',
    * 'narrator_state_extractor') — without it every structured-output
