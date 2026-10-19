@@ -271,6 +271,32 @@ function containsSecret(root: object, secrets: readonly string[]): boolean {
 }
 
 /**
+ * Whether what a serializer writes of `value` through a toJSON of its own
+ * holds a listed value, as a key or as a string: the method can read one that
+ * no walk of the value's properties reaches, from a private field or a
+ * closure. A value with no toJSON, or whose JSON cannot be written, writes
+ * none this way.
+ */
+function serializesSecret(value: object, secrets: readonly string[]): boolean {
+  if (typeof read(value, 'toJSON') !== 'function') return false;
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(value);
+  } catch {
+    return false;
+  }
+  if (text === undefined) return false;
+  if (holds(text, secrets)) return true;
+  // JSON escaping changes a value with a quote or a backslash: read back, each key and string is checked as written.
+  let found = false;
+  JSON.parse(text, (key: string, item: unknown) => {
+    if (holds(key, secrets) || (typeof item === 'string' && holds(item, secrets))) found = true;
+    return item;
+  });
+  return found;
+}
+
+/**
  * One walk over everything `root` references, at any depth and safe against
  * cycles. `dirty` holds every object from which a secret can be reached
  * without passing through `root`; `root` is in it when an object it
@@ -428,10 +454,11 @@ function maskInPlace(target: object, secrets: readonly string[]): boolean {
  * copy: the error keeps its class, its shape and the marks a failover walker
  * reads, the referenced objects are left as they were, and the same object is
  * returned. Where a string cannot be written (a frozen error, an accessor with
- * no setter, a message a class serves from a private field), or the error's
- * object graph is too large to walk, a plain Error with the original's name,
- * code and httpStatus and the masked message and stack is returned instead.
- * Never throws.
+ * no setter, a message a class serves from a private field), where a toJSON of
+ * the error's own still writes a listed value (one it reads from a private
+ * field or a closure), or where the error's object graph is too large to walk,
+ * a plain Error with the original's name, code and httpStatus and the masked
+ * message and stack is returned instead. Never throws.
  *
  * @param error - What was thrown, or an error text.
  * @param secrets - The call's redaction list ({@link collectCallSecrets}).
@@ -447,7 +474,7 @@ export function maskError(error: unknown, secrets: readonly string[]): unknown {
     } catch {
       // Too large to walk, or a proxy that refuses: the plain Error below references none of it.
     }
-    return masked ? error : plainErrorCopy(error, secrets);
+    return masked && !serializesSecret(error, secrets) ? error : plainErrorCopy(error, secrets);
   } catch {
     return new Error('error masked: the original could not be read');
   }
@@ -455,9 +482,9 @@ export function maskError(error: unknown, secrets: readonly string[]): unknown {
 
 /**
  * A masked stand-in for `error` that never writes `error` or anything it
- * references: `error` itself when no secret can be reached from it, else a
- * plain Error with its name, code and httpStatus and its masked message and
- * stack. A string comes back redacted. For an error that belongs to someone
+ * references: `error` itself when no secret can be reached from it and no
+ * toJSON of its own writes one, else a plain Error with its name, code and
+ * httpStatus and its masked message and stack. A string comes back redacted. For an error that belongs to someone
  * else, such as a HITL handler's, which {@link maskError} would write in
  * place. Never throws.
  *
@@ -475,7 +502,7 @@ export function maskedCopyOf(error: unknown, secrets: readonly string[]): unknow
     } catch {
       // Too large to walk, or a proxy that refuses: the plain Error below references none of it.
     }
-    return clean ? error : plainErrorCopy(error, secrets);
+    return clean && !serializesSecret(error, secrets) ? error : plainErrorCopy(error, secrets);
   } catch {
     return new Error('error masked: the original could not be read');
   }
@@ -530,8 +557,8 @@ export function createErrorMask(holder: { list: readonly string[] }): CallMask {
  * which a secret can be reached (one a tool returned as its output, its
  * message or cause holding a key) is replaced by its masked stand-in
  * ({@link maskedCopyOf}); any other class instance from which a secret can
- * be reached (a class, a URL or a Map a tool returns), and a plain object with
- * a toJSON of its own whose JSON holds one, is replaced by its JSON,
+ * be reached (a class, a URL or a Map a tool returns), and a plain object or
+ * an Error with a toJSON of its own whose JSON holds one, is replaced by its JSON,
  * parsed and masked, the form a provider's turn carries, or by `[redacted]`
  * when it has no JSON; a clean Error, a clean class instance and a typed array
  * come back as they are. Finalization uses it where the tool loops cannot
@@ -608,16 +635,18 @@ function copyStrings<T>(value: T, secrets: readonly string[], redact: (text: str
     if (!isObject(item)) return item;
     const known = copies.get(item);
     if (known) return known;
-    if (item instanceof Error) {
+    // A value with a toJSON of its own is written by it, so it is masked as what it writes, as a class instance is:
+    // a copy member by member, or an Error's stand-in, would keep or drop what the toJSON writes, and the method can
+    // read a secret no walk reaches (a private field, a closure), which the record would write when serialized.
+    const serialized = typeof read(item, 'toJSON') === 'function';
+    if (item instanceof Error && !serialized) {
       // Not a plain object, so no shell copies it member by member: the error mask's stand-in carries its name, code,
       // httpStatus and masked message and stack, and nothing it referenced; a clean error is itself.
       const stood = maskedCopyOf(item, secrets) as object;
       copies.set(item, stood);
       return stood;
     }
-    // A plain object with a toJSON of its own is written by it, as a class instance is, so it is masked as one: a
-    // member-by-member copy would keep the toJSON, and the record would write the secret again when serialized.
-    const copy = typeof read(item, 'toJSON') === 'function' ? undefined : shellOf(item);
+    const copy = serialized ? undefined : shellOf(item);
     if (!copy) {
       // Kept for the next reference to the same instance, a clean one as itself, so each is walked once.
       const stood = serializedStandIn(item);

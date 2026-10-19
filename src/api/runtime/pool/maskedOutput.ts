@@ -49,6 +49,38 @@ export function maskTextStream(pieces: AsyncIterable<unknown>, mask: CallMask): 
   };
 }
 
+/**
+ * A part with every string masked by the listed values, and a `tool-result`
+ * part's result as a tool's output is masked: a number whose digits hold a
+ * listed value becomes `[redacted]` too. A count, a duration or a timestamp
+ * of any other part stays a number.
+ *
+ * @param part - A stream part.
+ * @param mask - The call's mask.
+ * @returns The masked part.
+ */
+export function maskedPart<T>(part: T, mask: CallMask): T {
+  const masked = mask.strings(part);
+  if (!isRecord(part) || part.type !== 'tool-result' || !('result' in part) || !isRecord(masked)) return masked;
+  return { ...masked, result: mask.strings(part.result, true) } as T;
+}
+
+/**
+ * A seat's `generate()` result with every string masked by the listed values,
+ * and its tool calls as a tool's output is masked: a number whose digits hold
+ * a listed value becomes `[redacted]` too, while the result's counts stay
+ * numbers.
+ *
+ * @param result - What a seat's `generate()` resolved to.
+ * @param mask - The call's mask.
+ * @returns The masked result.
+ */
+export function maskedResult<T>(result: T, mask: CallMask): T {
+  const masked = mask.strings(result);
+  if (!isRecord(result) || Array.isArray(result) || !Array.isArray(result.toolCalls) || !isRecord(masked)) return masked;
+  return { ...masked, toolCalls: mask.strings(result.toolCalls, true) } as T;
+}
+
 /** One agent's text in flight: its redactor, the last text part's other strings (what held text is released with) and the parts waiting behind the held tail, each with the count of held characters before it. */
 interface TextLane {
   redactor: ChunkRedactor;
@@ -154,7 +186,7 @@ export function maskPartStream(parts: AsyncIterable<unknown>, mask: CallMask): A
             lane.template = template;
             continue;
           }
-          const masked = part.type === 'error' ? { ...mask.strings(part), error: mask(part.error) } : mask.strings(part);
+          const masked = part.type === 'error' ? { ...mask.strings(part), error: mask(part.error) } : maskedPart(part, mask);
           const heldLength = lane.redactor.held().length;
           if (heldLength > 0) lane.waiting.push({ part: masked, at: heldLength });
           else yield masked;
@@ -172,7 +204,9 @@ export function maskPartStream(parts: AsyncIterable<unknown>, mask: CallMask): A
  * A stream result with its members masked: `textStream` and
  * `finalTextStream` as text ({@link maskTextStream}), any other iterable as
  * parts ({@link maskPartStream}), and each promise settled to a copy of its
- * value with every string masked, or rejected through the error mask. Each
+ * value with every string masked (the `toolCalls` promise's as a tool's
+ * output is masked, a number whose digits hold a listed value included), or
+ * rejected through the error mask. Each
  * masked promise is marked handled, as the result's own members are, so a
  * caller that reads only some of them leaves no rejection unhandled. Every
  * other member is kept as it is.
@@ -188,7 +222,7 @@ export function maskStreamMembers<T extends object>(result: T, mask: CallMask): 
       out[key] = key === 'textStream' || key === 'finalTextStream' ? maskTextStream(value, mask) : maskPartStream(value, mask);
     } else if (isThenable(value)) {
       const masked = Promise.resolve(value).then(
-        (settled) => mask.strings(settled),
+        (settled) => (key === 'toolCalls' ? mask.strings(settled, true) : mask.strings(settled)),
         (error: unknown) => {
           throw mask(error);
         },
@@ -202,39 +236,54 @@ export function maskStreamMembers<T extends object>(result: T, mask: CallMask): 
 
 /**
  * A pre-built seat whose answers leave it masked: `generate()` resolves to a
- * copy of its result with every string masked, or rejects through the error
- * mask, and `stream()` returns its stream result through
- * {@link maskStreamMembers}. The seat's own loops are its own: what it sends
- * to its provider is not reached. Every other member, its description and
- * dependencies included, is read from the seat itself.
+ * copy of its result with every string masked ({@link maskedResult}), or
+ * rejects through the error mask, and `stream()` returns its stream result
+ * through {@link maskStreamMembers}. The seat's own loops are its own: what it
+ * sends to its provider is not reached. Every other member, its description
+ * and dependencies included, is read from the seat itself, a method bound to
+ * it. The proxy's target is a blank object, never the seat: a proxy must
+ * return the own value of a target's property that is neither writable nor
+ * configurable, so over a frozen seat it could hand out no masking
+ * `generate` or `stream`.
  *
  * @param seat - The pre-built `Agent` in the roster.
  * @param mask - The call's mask.
  * @returns The seat as the call's strategy runs it.
  */
 export function maskedPrebuilt(seat: Agent, mask: CallMask): Agent {
-  return new Proxy(seat, {
-    get(target, key) {
-      if (key === 'generate') {
-        return async (...args: Parameters<Agent['generate']>) => {
-          let result: unknown;
-          try {
-            result = await target.generate(...args);
-          } catch (error) {
-            // A rejection leaves the seat masked, as its stream's does: a strategy's error callback reads it next.
-            throw mask(error);
-          }
-          return mask.strings(result);
-        };
-      }
-      if (key === 'stream') {
-        return (...args: Parameters<Agent['stream']>) => {
-          const streamed = target.stream(...args) as unknown;
-          return isRecord(streamed) ? maskStreamMembers(streamed, mask) : streamed;
-        };
-      }
-      const value = Reflect.get(target, key, target) as unknown;
-      return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+  const generate = async (...args: Parameters<Agent['generate']>): Promise<unknown> => {
+    let result: unknown;
+    try {
+      result = await seat.generate(...args);
+    } catch (error) {
+      // A rejection leaves the seat masked, as its stream's does: a strategy's error callback reads it next.
+      throw mask(error);
+    }
+    return maskedResult(result, mask);
+  };
+  const stream = (...args: Parameters<Agent['stream']>): unknown => {
+    const streamed = seat.stream(...args) as unknown;
+    return isRecord(streamed) ? maskStreamMembers(streamed, mask) : streamed;
+  };
+  const own = (key: PropertyKey): unknown => (key === 'generate' ? generate : key === 'stream' ? stream : undefined);
+  return new Proxy(Object.create(null) as object, {
+    get(_target, key) {
+      const wrapped = own(key);
+      if (wrapped) return wrapped;
+      const value = Reflect.get(seat, key, seat) as unknown;
+      return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(seat) : value;
     },
-  });
+    set: (_target, key, value) => Reflect.set(seat, key, value, seat),
+    has: (_target, key) => Reflect.has(seat, key),
+    ownKeys: () => Reflect.ownKeys(seat),
+    getOwnPropertyDescriptor(_target, key) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(seat, key);
+      if (!descriptor) return undefined;
+      // Reported configurable: the blank target holds no such property, and a proxy may report a property the
+      // target lacks only as configurable.
+      const wrapped = own(key);
+      return { ...descriptor, ...(wrapped && 'value' in descriptor ? { value: wrapped } : {}), configurable: true };
+    },
+    getPrototypeOf: () => Reflect.getPrototypeOf(seat),
+  }) as Agent;
 }
