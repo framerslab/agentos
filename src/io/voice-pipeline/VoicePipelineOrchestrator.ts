@@ -2723,19 +2723,30 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     }
   }
 
-  /** Purge callers omit drain; disposal fences every generation after content acceptance is closed. */
+  /**
+   * Purge callers omit drain; disposal fences every generation after content acceptance is closed. The call announces
+   * its close once: a close made while it goes out, as by a listener of `close` that makes sure the session stopped,
+   * shares the first close's cleanup, and one made after a cleanup that failed runs the cleanup again and emits nothing.
+   */
   close(reason?: string): Promise<void> {
     if (this.closing) return this.closing;
     this.stopping = true;
     this.draining = false;
     const old = { ...this.identity.generation };
-    this.stateTo('closed');
-    this.detached = true;
-    // A failure whose 'error' listener closed the call has its session_error before close.
-    this.sendFailureEvents();
-    // The call's events end here: the away timer stops, and nothing is emitted after close.
-    this.events.close();
-    this.emitEach('close', { reason: reason ?? 'closed', ...(this.failure ? { error: this.failure } : {}), createdAt: Date.now() });
+    // Only close() moves the call to closed, so a call that reads closed has announced its close already.
+    if (this.current !== 'closed') {
+      this.stateTo('closed');
+      this.detached = true;
+      // A failure whose 'error' listener closed the call has its session_error before close.
+      this.sendFailureEvents();
+      // The call's events end here: the away timer stops, and nothing is emitted after close.
+      this.events.close();
+      this.emitEach('close', { reason: reason ?? 'closed', ...(this.failure ? { error: this.failure } : {}), createdAt: Date.now() });
+      // A listener that closed the call again while its close went out started the cleanup: this close has its outcome.
+      // Cast needed because TypeScript keeps `this.closing` narrowed by the check above; a listener may have set it.
+      const started = this.closing as Promise<void> | undefined;
+      if (started) return started;
+    }
     this.closing = (async () => {
       await this.cancelSynthesis();
       await this.clearPlayback();
