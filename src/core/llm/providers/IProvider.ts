@@ -421,7 +421,10 @@ export interface ModelCompletionResponse {
    * response schema the caller's `responseFormat` put in the payload, with the
    * schema stated in the prompt instead: OpenRouter sends a strict
    * `json_schema` request that no endpoint can serve again in `json_object`
-   * mode. Unset when the request carried the payload the caller asked for.
+   * mode; Anthropic puts the schema in its own system block when neither the
+   * JSON output format nor a forced tool can carry it on the model sent to
+   * (a record schema, a request that enables citations). Unset when the
+   * request carried the payload the caller asked for.
    */
   schemaInPayload?: boolean;
   /** Unified error envelope; present ONLY if an error occurred for this request/chunk. */

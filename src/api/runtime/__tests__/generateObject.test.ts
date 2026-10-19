@@ -1111,3 +1111,40 @@ describe('generateObject — the schema text carries the Zod size checks (2026-1
     expect(systemText()).toContain('"maxLength": 40');
   });
 });
+
+describe('enum casing repair', () => {
+  // Anthropic's JSON output format does not guarantee the capitalization of
+  // enum and const values; generateObject repairs a case-only difference once
+  // before a retry is spent.
+  beforeEach(() => {
+    hoisted.generateCompletion.mockReset();
+  });
+
+  it('an enum value that differs from the schema only by case is repaired without a retry', async () => {
+    const schema = z.object({ verdict: z.enum(['red', 'green']) });
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"verdict":"RED"}'));
+
+    const result = await generateObject({ schema, prompt: 'grade' });
+
+    expect(result.object).toEqual({ verdict: 'red' });
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('when the repaired candidate still fails, the retry is told the issue that remains, not the casing', async () => {
+    const schema = z.object({ verdict: z.enum(['red', 'green']), score: z.number().max(10) });
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(mockResponse('{"verdict":"RED","score":42}'))
+      .mockResolvedValueOnce(mockResponse('{"verdict":"red","score":7}'));
+
+    const result = await generateObject({ schema, prompt: 'grade' });
+
+    expect(result.object).toEqual({ verdict: 'red', score: 7 });
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
+    const retry = JSON.stringify(hoisted.generateCompletion.mock.calls[1]);
+    const at = retry.indexOf('Validation errors:');
+    expect(at).toBeGreaterThan(-1);
+    const feedback = retry.slice(at, retry.indexOf('Please fix the JSON', at));
+    expect(feedback).toContain('score');
+    expect(feedback).not.toContain('verdict');
+  });
+});

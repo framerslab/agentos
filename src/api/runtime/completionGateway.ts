@@ -843,6 +843,10 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     let answerText = '';
     let answerLifted = false;
     const liftJsonText = (raw: ModelCompletionResponse): ModelCompletionResponse => {
+      // A hop whose provider put the schema in the prompt itself (its chunks say
+      // schemaInPayload false) answered as prompt-only text: nothing is lifted, and
+      // the session extracts the JSON from the text as it does for any prompt-only hop.
+      if (schemaInPayload === false) return raw;
       if (raw.responseTextDelta) answerText += raw.responseTextDelta;
       if (answerLifted || !raw.isFinal) return raw;
       const content = raw.choices?.[0]?.message?.content;

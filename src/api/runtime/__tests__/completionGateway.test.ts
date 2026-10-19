@@ -513,6 +513,19 @@ describe('CompletionGateway.stream', () => {
     expect(chunks.some((c) => c.structuredOutput !== undefined)).toBe(false);
   });
 
+  it('a hop whose chunks say schemaInPayload false (the provider put the schema in the prompt itself) lifts no text: the session extracts the JSON', async () => {
+    const fenced = '```json\n{"city":"Lyon"}\n```';
+    const res = resolutionWith(async function* () {
+      yield { responseTextDelta: fenced, schemaInPayload: false };
+      yield { ...stop(fenced), schemaInPayload: false };
+    }, { providerId: 'anthropic', modelId: 'claude-sonnet-5-5', toolFormat: 'anthropic_tools' });
+    const attempt = createCompletionGateway().stream(res, [], {}, z.object({ city: z.string() }), 'answer');
+    const chunks = await drain(attempt);
+    expect(chunks.some((c) => c.structuredOutput !== undefined)).toBe(false);
+    expect(chunks.at(-1)?.choices?.[0]?.message?.content).toBe(fenced);
+    expect(attempt.schemaInPayload).toBe(false);
+  });
+
   it('a failure before content carries the usage the provider billed', async () => {
     const gateway = createCompletionGateway();
     const attempt = gateway.stream(resolutionWith(async function* () {

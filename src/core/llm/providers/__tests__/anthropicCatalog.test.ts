@@ -43,6 +43,9 @@ describe('anthropicModelPricing (prices for a host, USD per 1K tokens)', () => {
 
   it('never guesses by prefix: claude-opus-4 and claude are unpriced', () => {
     expect(anthropicModelPricing('claude-opus-4')).toBeUndefined();
+    // The retired May 2025 snapshots price by their exact id alone: the bare family name is not their alias.
+    expect(anthropicModelPricing('claude-sonnet-4')).toBeUndefined();
+    expect(anthropicModelPricing('claude-opus-4-20250514')).toMatchObject({ input: 0.015, output: 0.075 });
     expect(anthropicModelPricing('claude')).toBeUndefined();
     expect(anthropicModelPricing('claude-opus')).toBeUndefined();
     expect(anthropicModelPricing(undefined)).toBeUndefined();
@@ -54,7 +57,8 @@ describe('anthropicModelPricing (prices for a host, USD per 1K tokens)', () => {
       input: 0.0001,
       output: 0.0005,
       cacheRead: 0.00001,
-      longContext: { fromTokens: 100000, input: 0.0005, output: 0.0025 },
+      // Over 100K prompt tokens a cache read costs 0.05 per million, five times the base rate as the input does.
+      longContext: { fromTokens: 100000, input: 0.0005, output: 0.0025, cacheRead: 0.00005 },
     });
     expect(anthropicModelPricing('claude-sonnet-5-5')?.longContext).toBeUndefined();
   });

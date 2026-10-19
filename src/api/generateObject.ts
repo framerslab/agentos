@@ -780,11 +780,13 @@ export async function generateObject<T extends ZodType>(
       // schema's spelling and re-validate once before a retry is spent.
       const casing = repairEnumCasing(parsed, validation.error);
       if (casing.repaired) {
-        const revalidation = effectiveSchema.safeParse(casing.value) as typeof validation;
-        if (revalidation.success) {
-          parsed = casing.value;
-          validation = revalidation;
-        }
+        // Adopt the repaired candidate and its revalidation even when that still
+        // fails, as the container repair above does: with the casing right, the
+        // issues left (a refinement, a bound, a missing field) are the ones the
+        // retry's feedback and the terminal error should name, not the casing
+        // the model would be asked to fix again.
+        parsed = casing.value;
+        validation = effectiveSchema.safeParse(casing.value) as typeof validation;
       }
     }
 

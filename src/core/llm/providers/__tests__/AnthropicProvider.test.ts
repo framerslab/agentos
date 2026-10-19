@@ -1790,6 +1790,147 @@ describe('AnthropicProvider', () => {
       }
     });
 
+    it('the prompt-only schema block never grows a caller-owned passthrough system array: the same params twice send one block each', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const system = [{ type: 'text', text: 'You grade things.' }];
+        const customModelParams = { system };
+        const recordSchema = {
+          type: 'object',
+          properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+          required: ['scores'],
+        };
+        for (let i = 0; i < 2; i++) {
+          fetchMock.mockResolvedValueOnce(
+            mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"scores":{"a":1}}' }], stop_reason: 'end_turn' })),
+          );
+          await provider.generateCompletion('claude-opus-5-5', [{ role: 'user', content: 'Grade.' }], {
+            customModelParams,
+            responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: recordSchema } } as never,
+          });
+        }
+        expect(system).toEqual([{ type: 'text', text: 'You grade things.' }]);
+        expect(fetchMock.mock.calls).toHaveLength(2);
+        for (const call of fetchMock.mock.calls) {
+          const body = JSON.parse(call[1].body);
+          expect(body.system[0]).toEqual({ type: 'text', text: 'You grade things.' });
+          const schemaBlocks = (body.system as Array<{ text: string }>).filter((b) => b.text.startsWith('Answer with JSON only, matching this schema:'));
+          expect(schemaBlocks).toHaveLength(1);
+        }
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('the citations downgrade drops a passthrough output_config.format, keeps the rest of output_config, and the completion says the schema rode the prompt', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })),
+        );
+        const completion = await provider.generateCompletion('claude-opus-5-5', [{ role: 'user', content: 'Summarize the document.' }], {
+          customModelParams: {
+            output_config: {
+              effort: 'high',
+              format: { type: 'json_schema', schema: { type: 'object', properties: {}, additionalProperties: false } },
+            },
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'document',
+                    source: { type: 'text', media_type: 'text/plain', data: 'The sky is blue.' },
+                    citations: { enabled: true },
+                  },
+                  { type: 'text', text: 'Summarize the document.' },
+                ],
+              },
+            ],
+          },
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: { name: 'emit', input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+          } as never,
+        });
+        const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(body.output_config).toEqual({ effort: 'high' });
+        expect(body.tools).toBeUndefined();
+        expect(body.tool_choice).toBeUndefined();
+        expect(String(body.system)).toContain('Answer with JSON only, matching this schema:');
+        expect(completion.schemaInPayload).toBe(false);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('routes by the model on the wire: a passthrough model from Opus 5.5 to Sonnet 4 takes the forced tool, and the reverse takes the format', async () => {
+      const marker = {
+        _agentosUseToolForStructuredOutput: true,
+        tool: { name: 'emit', input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+      } as never;
+      fetchMock.mockResolvedValueOnce(
+        mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })),
+      );
+      await provider.generateCompletion('claude-opus-5-5', [{ role: 'user', content: 'Go.' }], {
+        customModelParams: { model: 'claude-sonnet-4-20250514' },
+        responseFormat: marker,
+      });
+      const toSonnet4 = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(toSonnet4.model).toBe('claude-sonnet-4-20250514');
+      expect(toSonnet4.output_config).toBeUndefined();
+      expect(toSonnet4.tools?.[0]?.name).toBe('emit');
+      expect(toSonnet4.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+
+      fetchMock.mockResolvedValueOnce(
+        mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })),
+      );
+      await provider.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Go.' }], {
+        customModelParams: { model: 'claude-opus-5-5' },
+        responseFormat: marker,
+      });
+      const toOpus = JSON.parse(fetchMock.mock.calls[1][1].body);
+      expect(toOpus.model).toBe('claude-opus-5-5');
+      expect(toOpus.output_config?.format?.type).toBe('json_schema');
+      expect(toOpus.tools).toBeUndefined();
+      expect(toOpus.tool_choice).toBeUndefined();
+    });
+
+    it('the prompt-only route says so on every stream chunk (schemaInPayload false); the format route says nothing', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const recordMarker = {
+          _agentosUseToolForStructuredOutput: true,
+          tool: {
+            name: 'emit',
+            input_schema: { type: 'object', properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } }, required: ['scores'] },
+          },
+        } as never;
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"scores":{"a":1}}' }], stop_reason: 'end_turn' })),
+        );
+        const chunks: Array<{ schemaInPayload?: boolean }> = [];
+        for await (const chunk of provider.generateCompletionStream('claude-sonnet-5-5', [{ role: 'user', content: 'Grade.' }], { responseFormat: recordMarker })) {
+          chunks.push(chunk as { schemaInPayload?: boolean });
+        }
+        expect(chunks.length).toBeGreaterThan(0);
+        expect(chunks.every((c) => c.schemaInPayload === false)).toBe(true);
+
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })),
+        );
+        const onFormat = await provider.generateCompletion('claude-sonnet-5-5', [{ role: 'user', content: 'Go.' }], {
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: { name: 'emit', input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+          } as never,
+        });
+        expect(onFormat.schemaInPayload).toBeUndefined();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
     it('keeps the forced tool on claude-sonnet-4-20250514 (no JSON output format), now never strict', async () => {
       const msg = makeAnthropicResponse({
         content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { x: 2 } }],

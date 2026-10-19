@@ -1853,6 +1853,7 @@ export class GMI implements IGMI {
               stepFinishReason = null;
               stepFinalChunk = undefined;
               stepStructuredOutput = undefined;
+              stepSchemaRoute = undefined;
               resolution = next;
               continue hopLoop;
             }

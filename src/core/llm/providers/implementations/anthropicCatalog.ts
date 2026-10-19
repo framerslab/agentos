@@ -487,6 +487,8 @@ export interface AnthropicModelPrice {
     readonly fromTokens: number;
     readonly input: number;
     readonly output: number;
+    /** The cache-read rate over `fromTokens`: the base rate scaled as the input rate is. */
+    readonly cacheRead: number;
   };
 }
 
@@ -504,9 +506,11 @@ function perThousand(perMillion: number): number {
  * The catalog row a host's model id names, by an exact id, else by the id with
  * its dated suffix (`-YYYYMMDD`) removed, else the row that is the id plus a
  * dated suffix (the bare alias `claude-opus-4-5` names the row
- * `claude-opus-4-5-20251101`; with two such rows the newest wins). Never a
- * prefix guess: `claude-opus-4` is not priced as Opus 4.8, and `claude` is not
- * priced at all.
+ * `claude-opus-4-5-20251101`; with two such rows the newest wins). A retired
+ * snapshot is priced by its exact id alone, so `claude-opus-4` and
+ * `claude-sonnet-4` (whose only rows are the retired May 2025 ids) stay
+ * unpriced. Never a prefix guess: `claude-opus-4` is not priced as Opus 4.8,
+ * and `claude` is not priced at all.
  */
 function catalogRowForPricing(modelId: string): AnthropicModelInfo | undefined {
   const exact = ANTHROPIC_MODELS.find((m) => m.modelId === modelId);
@@ -516,7 +520,9 @@ function catalogRowForPricing(modelId: string): AnthropicModelInfo | undefined {
     const byBare = ANTHROPIC_MODELS.find((m) => m.modelId === bare);
     if (byBare) return byBare;
   }
-  const dated = ANTHROPIC_MODELS.filter((m) => m.modelId.startsWith(`${modelId}-`) && /^-\d{8}$/.test(m.modelId.slice(modelId.length)));
+  const dated = ANTHROPIC_MODELS.filter(
+    (m) => m.status !== 'deprecated' && m.modelId.startsWith(`${modelId}-`) && /^-\d{8}$/.test(m.modelId.slice(modelId.length)),
+  );
   if (dated.length === 0) return undefined;
   return dated.sort((a, b) => (a.modelId < b.modelId ? 1 : a.modelId > b.modelId ? -1 : 0))[0];
 }
@@ -526,14 +532,16 @@ function catalogRowForPricing(modelId: string): AnthropicModelInfo | undefined {
  * `openAIModelPricing` prices an OpenAI call: the host strips any
  * `anthropic:` prefix first, as it does for OpenAI. Resolution is by an exact
  * catalog id, else the id with its dated suffix removed, else the catalog row
- * that is the id plus a dated suffix; an id the catalog does not name this way
- * (`claude-opus-4`, `claude`) is `undefined`, never the provider's prefix
+ * that is the id plus a dated suffix (a retired snapshot only by its exact id);
+ * an id the catalog does not name this way (`claude-opus-4`, `claude`) is
+ * `undefined`, never the provider's prefix
  * guess, so a spend guard refuses what it cannot price instead of pricing it
  * as another model.
  *
  * @returns Prices in USD per 1K tokens, `cacheRead` being the row's cache-read
- *   rate or 0.1x its input price, and `longContext` on a model priced by
- *   prompt length; `undefined` for an empty, unknown or unpriced id.
+ *   rate or 0.1x its input price, and `longContext` (its own `input`, `output`
+ *   and `cacheRead` over `fromTokens`) on a model priced by prompt length;
+ *   `undefined` for an empty, unknown or unpriced id.
  */
 export function anthropicModelPricing(modelId: string | undefined): AnthropicModelPrice | undefined {
   if (!modelId) return undefined;
@@ -551,6 +559,10 @@ export function anthropicModelPricing(modelId: string | undefined): AnthropicMod
             fromTokens: row.longContextFromTokens,
             input: perThousand(row.pricePer1MTokensInputLongContext),
             output: perThousand(row.pricePer1MTokensOutputLongContext),
+            cacheRead: perThousand(
+              (row.pricePer1MTokensCacheRead ?? row.pricePer1MTokensInput * 0.1) *
+                (row.pricePer1MTokensInputLongContext / row.pricePer1MTokensInput),
+            ),
           },
         }
       : {}),
