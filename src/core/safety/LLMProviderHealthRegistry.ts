@@ -197,9 +197,13 @@ export function classifyErrorStatus(error: unknown): number | null {
  * operator set, and the HTTP 429 "You have reached your API usage limits"
  * (`error.details.error_code` `enforced_spend_limit_reached`) for the
  * tier's monthly cap, which the 429 class would flap on every 30 seconds
- * until the month turns. A 400 or 429 whose `details` carry the answer's
- * error envelope is also read by the key pool's own classifier, so the
- * breaker and the pool cannot name a billing answer differently.
+ * until the month turns. The message is matched by the documented
+ * opening ("You have reached your [specified [workspace]] API usage
+ * limits"), never by "api usage limits" alone, so a request's own 400
+ * that names such a parameter stays the caller's. A 400 or 429 whose
+ * `details` carry the answer's error envelope is also read by the key
+ * pool's own classifier, so the breaker and the pool cannot name a
+ * billing answer differently.
  *
  * @internal
  */
@@ -225,7 +229,7 @@ export function isQuotaExhaustion(error: unknown): boolean {
   if (marks.some((m) => m === 'insufficient_quota' || m === 'billing_error')) return true;
   if (
     typeof obj.message === 'string' &&
-    /insufficient_quota|exceeded your current quota|credit balance is too low|api usage limits/i.test(
+    /insufficient_quota|exceeded your current quota|credit balance is too low|you have reached your (?:specified (?:workspace )?)?api usage limits/i.test(
       obj.message,
     )
   ) {

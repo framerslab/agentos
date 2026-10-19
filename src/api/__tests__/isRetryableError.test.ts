@@ -101,6 +101,14 @@ describe('isRetryableError', () => {
     expect(isRetryableError(new Error(workspace.message))).toBe(true);
   });
 
+  it("matches the spend limits by their documented opening, not a request's own 400 that names usage limits", () => {
+    // The phrase is anchored on "You have reached your [specified [workspace]] API usage limits" (the rate limits
+    // page, read 19 October 2026), so a bad request that mentions such a parameter stays the caller's error.
+    const badParameter = new AnthropicProviderError('Invalid api usage limits parameter', 'STREAM_CONNECTION_FAILED', 400, 'invalid_request_error');
+    expect(isRetryableError(badParameter)).toBe(false);
+    expect(isRetryableError(new Error('Invalid api usage limits parameter'))).toBe(false);
+  });
+
   it('matches an overloaded provider (HTTP 529), typed, grepped or reported mid-stream', () => {
     // Anthropic answers 529 `overloaded_error` when it has no capacity: the
     // request is fine and another provider may serve it. Not retryable, an

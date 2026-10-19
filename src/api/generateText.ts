@@ -1655,12 +1655,15 @@ export function isRetryableError(error: unknown): boolean {
   // none of the other phrases and is only otherwise caught by the
   // numeric httpStatus 402 branch — a wrapped / re-thrown error that
   // loses the typed `httpStatus` field would slip through without it.
-  // `api usage limits` covers Anthropic's spend limits: the HTTP 400 "You
-  // have reached your specified (workspace) API usage limits" for a limit
-  // the operator set, which no status or code here walks, and the 429 "You
-  // have reached your API usage limits" for the tier's monthly cap.
+  // The "you have reached your ... api usage limits" phrase covers
+  // Anthropic's spend limits: the HTTP 400 "You have reached your specified
+  // (workspace) API usage limits" for a limit the operator set, which no
+  // status or code here walks, and the 429 "You have reached your API usage
+  // limits" for the tier's monthly cap. It is matched by that documented
+  // opening, so a request's own 400 that names a usage-limits parameter is
+  // not moved to the next provider.
   if (
-    /requires more credits|insufficient credits|credit balance|api usage limits|rate limit|quota|exceeded your current quota|overloaded/i.test(
+    /requires more credits|insufficient credits|credit balance|you have reached your (?:specified (?:workspace )?)?api usage limits|rate limit|quota|exceeded your current quota|overloaded/i.test(
       msg,
     )
   ) {

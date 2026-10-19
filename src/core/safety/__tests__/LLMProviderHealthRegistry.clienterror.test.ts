@@ -241,6 +241,14 @@ describe('LLMProviderHealthRegistry — quota exhaustion wearing client-error st
     }
   });
 
+  it("leaves a request's own 400 that names usage limits to the caller: the spend-limit words are matched by their opening", () => {
+    const reg = new LLMProviderHealthRegistry();
+    for (let i = 0; i < 10; i++) {
+      reg.recordFailure('anthropic', { httpStatus: 400, type: 'invalid_request_error', message: 'Invalid api usage limits parameter' });
+    }
+    expect(reg.isOpen('anthropic')).toBe(false);
+  });
+
   it("trips the billing breaker on a single 429 for the tier's monthly spend cap instead of counting it toward the 429 streak", () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
