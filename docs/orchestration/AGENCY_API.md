@@ -383,7 +383,9 @@ with no available candidate throws `AgencySeatingError` before any model is
 called, and a pooled seat's failover chain is its other available candidates,
 each with its own key (in preference order under `preferred`, by weight then
 pool order otherwise). Under `panel` a seat with no candidate is recorded
-`unseated`, and no seat has a chain. Every result carries `seating`.
+`unseated`, a pooled seat has no chain, and a fixed seat keeps the
+`fallbackProviders` it names and no default chain. Every result carries
+`seating`.
 
 ### Strict credentials and redaction
 
