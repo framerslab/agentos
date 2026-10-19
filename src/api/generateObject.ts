@@ -551,8 +551,8 @@ export async function generateObject<T extends ZodType>(
   // built by the same shared function the fallback legs use, so the
   // (provider, model, schema) -> payload logic lives exactly once. See
   // runtime/responseFormatForProvider.ts for the per-provider behavior
-  // (OpenAI strict json_schema gate, Anthropic forced tool + Fable
-  // prompt-only degrade, Gemini responseSchema, OpenRouter strict gate,
+  // (OpenAI strict json_schema gate; Anthropic's JSON output format, forced
+  // tool or prompt-only route; Gemini responseSchema, OpenRouter strict gate,
   // json_object fallbacks).
   const { providerId, modelId } = resolveModelOption(opts, 'text');
   let responseFormat = buildResponseFormatForProvider({

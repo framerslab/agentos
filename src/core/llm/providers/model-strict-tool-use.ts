@@ -15,11 +15,13 @@
  *     validate the model's tool input against `input_schema` server-side.
  *
  * {@link anthropicSchemaRoute} decides, for one model and one schema, whether
- * a schema request rides the JSON output format, a forced tool call (Claude
- * Opus 4 and Sonnet 4, which have no JSON outputs and accept a forced
- * `tool_choice`), or the prompt alone. `structuredOutputFormat.ts` computes it
- * when it builds the marker and `AnthropicProvider` computes it again for the
- * model it sends to, on the same object schema, so the two never disagree.
+ * a schema request rides the JSON output format, a non-strict forced tool call
+ * (a model without JSON outputs, or a schema the format cannot carry, on a
+ * model that accepts a forced `tool_choice`), or the prompt alone.
+ * `structuredOutputFormat.ts` computes it when it builds the marker and
+ * `AnthropicProvider` computes it again for the model it sends to, on the same
+ * object schema, then turns a forced tool that thinking would clamp into the
+ * prompt route.
  *
  * The flag is NOT universally supported: models older than the 4.5
  * generation reject unknown tool fields ("tools.0.strict: Extra inputs are
@@ -91,30 +93,43 @@ export type AnthropicSchemaRoute = 'json_schema' | 'forced_tool' | 'none';
  *
  *  - `json_schema` when the model has JSON outputs
  *    ({@link modelSupportsJsonOutputs}) and the format carries the schema
- *    ({@link jsonOutputSchemaSupported});
- *  - else `forced_tool` when the model has no JSON outputs and accepts a
- *    forced `tool_choice` (Claude Opus 4 and Sonnet 4, whose thinking is off
- *    unless asked);
- *  - else `none`: a model with JSON outputs whose schema the format cannot
- *    carry (a record, an untyped node, a `$ref` or `oneOf`, a root without
- *    properties, or more union-typed or optional properties than the format
- *    takes) answers from the prompt. Claude Opus 5 and Sonnet 5 used to send
- *    such a schema as a non-strict forced tool, clamped to `auto` whenever
- *    thinking was on; the prompt is the honest route.
+ *    ({@link jsonOutputSchemaSupported}, beside the request's other strict
+ *    schemas when the caller names them);
+ *  - else `forced_tool` when the model accepts a forced `tool_choice`
+ *    ({@link modelSupportsForcedToolChoice}): a model without JSON outputs
+ *    (Claude Opus 4 and Sonnet 4, the May 2025 ids, and any id outside both
+ *    lists), and a schema the format cannot carry (a record, an untyped node,
+ *    a `$ref` or `oneOf`, a root without properties, more union-typed or
+ *    optional properties than the format takes) on every model that takes a
+ *    forced choice: Claude Sonnet 4.6, Opus 4.5 to 4.8, Sonnet 4.5, Haiku 4.5
+ *    and 5.5, Opus 5 and Sonnet 5. The non-strict forced tool is the route the
+ *    repository built for those schemas ({@link toolInputSchemaSupportsStrict}),
+ *    and it goes out unclamped unless the request turns thinking on, which the
+ *    provider reads on its payload and answers with the prompt route instead;
+ *  - else `none`, the schema in the prompt: a schema the format cannot carry
+ *    on a model that refuses a forced choice (Claude Opus 5.5, Sonnet 5.5,
+ *    Fable and Mythos 5.1).
  *
  * An empty model id (a fallback entry that names no model, resolved to the
- * provider's default later) routes by the schema alone: `json_schema` when
- * the format carries it, else `none`. The provider then decides for its real
- * model, and a schema the format carries is carried by either route the
- * provider computes, so the two never disagree.
+ * provider's default later) routes by the schema: `json_schema` when the
+ * format carries it, else `forced_tool` (the deny list names no empty id). The
+ * provider then decides for the model on the wire, on the same object schema;
+ * a schema the format carries is carried by either route it can compute, so
+ * the two agree on what is sent.
  *
  * @param modelId Anthropic-side model id, or `''` when it is not known yet.
  * @param objectSchema The marker's object schema.
+ * @param otherStrictSchemas The `input_schema` of every other strict schema the
+ *   request carries (a direct caller's `strict: true` tools): the vendor sums
+ *   the union-typed and optional parameter limits over them and the format.
  */
-export function anthropicSchemaRoute(modelId: string, objectSchema: unknown): AnthropicSchemaRoute {
-  const formatCarriesIt = jsonOutputSchemaSupported(objectSchema);
-  if (!modelId || modelSupportsJsonOutputs(modelId)) {
-    return formatCarriesIt ? 'json_schema' : 'none';
+export function anthropicSchemaRoute(
+  modelId: string,
+  objectSchema: unknown,
+  otherStrictSchemas: readonly unknown[] = [],
+): AnthropicSchemaRoute {
+  if ((!modelId || modelSupportsJsonOutputs(modelId)) && jsonOutputSchemaSupported(objectSchema, otherStrictSchemas)) {
+    return 'json_schema';
   }
   return modelSupportsForcedToolChoice(modelId) ? 'forced_tool' : 'none';
 }
@@ -151,14 +166,35 @@ const JSON_OUTPUT_REFUSED_KEYWORDS = [
  * strict check refuses, so it routes away from the format as the vendor's
  * "recursive schemas" exclusion asks, by that path rather than by a `$ref`.
  *
+ * The union-typed and optional parameter limits are the request's, summed over
+ * the format and every strict tool beside it: a strict caller tool of ten
+ * union-typed parameters beside a format schema of ten answered 400 ("20
+ * parameters with type arrays or anyOf ... limit: 16 parameters with unions",
+ * live-probed 2026-10-19 on claude-haiku-5-5), so `otherStrictSchemas` counts
+ * toward them.
+ *
  * @param objectSchema The marker's object schema.
+ * @param otherStrictSchemas The `input_schema` of every strict tool the request
+ *   carries beside the format.
  */
-export function jsonOutputSchemaSupported(objectSchema: unknown): boolean {
+export function jsonOutputSchemaSupported(objectSchema: unknown, otherStrictSchemas: readonly unknown[] = []): boolean {
   if (!objectSchema || typeof objectSchema !== 'object' || Array.isArray(objectSchema)) return false;
   const root = objectSchema as Record<string, unknown>;
   if (!root.properties || typeof root.properties !== 'object' || Array.isArray(root.properties)) return false;
   if (!toolInputSchemaSupportsStrict(objectSchema)) return false;
+  if (otherStrictSchemas.length > 0 && !strictSchemasWithinLimits([objectSchema, ...otherStrictSchemas])) return false;
   return !carriesRefusedKeyword(objectSchema, 0);
+}
+
+/**
+ * Whether the strict schemas of one request stay within the vendor's limits
+ * together: at most {@link STRICT_MAX_UNION_TYPED_PARAMETERS} union-typed and
+ * {@link STRICT_MAX_OPTIONAL_PARAMETERS} optional parameters, summed.
+ */
+function strictSchemasWithinLimits(schemas: readonly unknown[]): boolean {
+  const counts = { unionTyped: 0, optional: 0 };
+  for (const schema of schemas) countStrictParameters(schema, 0, counts);
+  return counts.unionTyped <= STRICT_MAX_UNION_TYPED_PARAMETERS && counts.optional <= STRICT_MAX_OPTIONAL_PARAMETERS;
 }
 
 /** True when `node` or a subschema below it carries a keyword of {@link JSON_OUTPUT_REFUSED_KEYWORDS}. */
@@ -197,7 +233,7 @@ function carriesRefusedKeyword(node: unknown, depth: number): boolean {
  * (https://platform.claude.com/docs/en/build-with-claude/structured-outputs,
  * "String formats", read 2026-10-18). Any other `format` value is refused with
  * `output_config.format.schema: For 'string' type, format '<name>' is not
- * supported` (live-probed 2026-10-18 on claude-haiku-5-5 with `slug`), so
+ * supported` (live-probed 2026-10-19 on claude-haiku-5-5 with `slug`), so
  * {@link anthropicJsonOutputSchema} strips it.
  */
 export const JSON_OUTPUT_STRING_FORMATS: ReadonlySet<string> = new Set([
@@ -220,7 +256,7 @@ export const JSON_OUTPUT_STRING_FORMATS: ReadonlySet<string> = new Set([
  * removed ({@link toolInputSchemaWithExplicitNoExtraProps}), and, besides,
  * `minItems` above 1 removed (the format takes only 0 and 1: `For 'array'
  * type, 'minItems' values other than 0 or 1 are not supported`, live-probed
- * 2026-10-18 on claude-haiku-5-5; a lowered `z.tuple` carries its arity
+ * 2026-10-19 on claude-haiku-5-5; a lowered `z.tuple` carries its arity
  * there) and any `format` outside {@link JSON_OUTPUT_STRING_FORMATS} removed.
  *
  * `minLength`, `maxLength` and `pattern` stay: the same probe answered 200 to
@@ -279,15 +315,17 @@ function stripForJsonOutputs(node: unknown, depth: number): unknown {
  * 400s deterministically on every attempt. So this check answers "can the
  * schema BE MADE strict", not "is it strict-ready as-lowered".
  *
- * This is the schema-shape half of the strict gate; model capability
- * ({@link modelSupportsStrictToolUse}) is the other half, and
- * AnthropicProvider stamps `strict: true` only when BOTH hold. Without the
- * shape half, every record-bearing generateObject schema (component trees,
- * mechanics compositions, dungeon layouts) failed 100% at the provider the
- * day strict tools shipped — the schema can never satisfy strict mode, so
- * the only sound move is degrading that call to the non-strict forced tool
- * (best-effort adherence + caller-side Zod validation, the pre-strict
- * behavior). Mirrors how the OpenAI / OpenRouter strict paths gate on
+ * This is the schema-shape half of the structured-outputs gate; model
+ * capability ({@link modelSupportsJsonOutputs}) is the other half, and
+ * AnthropicProvider sends the JSON output format only when BOTH hold
+ * ({@link anthropicSchemaRoute}). Without the shape half, every
+ * record-bearing generateObject schema (component trees, mechanics
+ * compositions, dungeon layouts) failed 100% at the provider the day strict
+ * tools shipped — the schema can never satisfy strict mode, so the only sound
+ * move is degrading that call to the non-strict forced tool (best-effort
+ * adherence + caller-side Zod validation, the pre-strict behavior), which is
+ * the route such a schema takes on every model that accepts a forced choice.
+ * Mirrors how the OpenAI / OpenRouter strict paths gate on
  * `canUseStrictJsonSchema` before opting a schema into strict mode.
  *
  * The walk visits only positions that hold subschemas (`properties` /
@@ -320,8 +358,11 @@ export function toolInputSchemaSupportsStrict(inputSchema: unknown): boolean {
  * Anthropic's explicit limit on parameters that use `anyOf` or a type array
  * (`"type": ["string", "null"]`), summed over every strict schema in a request:
  * https://platform.claude.com/docs/en/build-with-claude/structured-outputs
- * ("Schema complexity limits"). The forced structured-output tool is the only
- * strict schema in its request, so its own count is the request's total.
+ * ("Schema complexity limits"). The JSON output format's schema is one of
+ * them: a strict tool of ten such parameters beside a format schema of ten
+ * answered 400 (live-probed 2026-10-19), so {@link jsonOutputSchemaSupported}
+ * sums the format with the request's strict tools. The forced schema tool is
+ * never sent strict.
  */
 export const STRICT_MAX_UNION_TYPED_PARAMETERS = 16;
 
