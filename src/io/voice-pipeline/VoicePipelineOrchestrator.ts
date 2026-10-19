@@ -1770,14 +1770,16 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Hands an event to each of `target`'s listeners for it, in order, through {@link emitEach}: a listener that throws
-   * or rejects is reported (`_listenerFailed`) and the listeners after it still run.
+   * or rejects is reported (`_listenerFailed`) and the listeners after it still run. A listener that stops the session
+   * ends any event but `close` there, as it ends a session event ({@link SessionEvents}): the listeners after it get
+   * nothing, so no `turn_complete` follows `close`.
    *
    * @param target - The orchestrator or the session it returned.
    * @param event - The event to hand on.
    * @param args - What each listener is handed.
    */
   private _emitEach(target: EventEmitter, event: string, ...args: unknown[]): void {
-    emitEach(target, event, args, (err, what) => this._listenerFailed(err, what, event));
+    emitEach(target, event, args, (err, what) => this._listenerFailed(err, what, event), () => event !== 'close' && this.current === 'closed');
   }
 
   /**
@@ -2176,13 +2178,14 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
 
   /**
    * Hands an event to this session's listeners through {@link emitEach}: a listener that throws or rejects is
-   * reported, and the listeners after it still run.
+   * reported, and the listeners after it still run. A listener that closes the call ends any event but `close` there,
+   * as in the orchestrator's `_emitEach()`.
    *
    * @param event - The event.
    * @param args - What each listener is handed.
    */
   private emitEach(event: string, ...args: unknown[]): void {
-    emitEach(this, event, args, (err, what) => this.listenerFailed(err, what, event));
+    emitEach(this, event, args, (err, what) => this.listenerFailed(err, what, event), () => event !== 'close' && this.current === 'closed');
   }
 
   /**
