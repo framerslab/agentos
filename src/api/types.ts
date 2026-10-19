@@ -1004,9 +1004,10 @@ export type AgencyTraceEvent =
  * host's logger as `agency_callback_threw` (in an agency with a pool or a
  * panel, with every key the agency can send masked in its message), and never
  * fails the call, changes what it returns or leaves a rejection unhandled. An
- * agency reads each one from the `on` object when the run fires it, so a
- * callback set, replaced or deleted there after `agency()` returns is the one
- * that runs.
+ * agency reads each one from the `on` object when the run fires it, and none
+ * when it is built, so a callback set, replaced or deleted there after
+ * `agency()` returns is the one that runs, and a getter there that throws is
+ * written as a callback that throws is, at its event.
  */
 export interface AgencyCallbacks {
   /** Called immediately before an agent starts. */

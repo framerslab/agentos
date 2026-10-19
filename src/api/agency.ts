@@ -135,10 +135,11 @@ const CALLBACK_NAMES: Record<keyof AgencyCallbacks, true> = {
 /**
  * A callback for every name the agency fires, each run through `fire`, which
  * catches what it throws and what the promise of an async one rejects with.
- * Each reads `on` by name when the run fires it, not when the agency is
- * built: a callback the host sets, replaces or deletes on its `on` object
- * after `agency()` returns is the one that runs, or none runs, and a method
- * an instance inherits runs as an own one does, with `on` as `this`. The read
+ * Each reads `on` by name when the run fires it, and nothing of `on` is read
+ * when the agency is built: a callback the host sets, replaces or deletes on
+ * its `on` object after `agency()` returns is the one that runs, or none
+ * runs, a getter there is read only when its event fires, and a method an
+ * instance inherits runs as an own one does, with `on` as `this`. The read
  * runs inside `fire`, so a getter that throws is caught as a callback that
  * throws is.
  *
@@ -147,7 +148,8 @@ const CALLBACK_NAMES: Record<keyof AgencyCallbacks, true> = {
  * @returns A callback for every name, none of which throws.
  */
 function guardedCallbacks(on: AgencyCallbacks, fire: (name: string, call: () => unknown) => void): AgencyCallbacks {
-  const out: Record<string, unknown> = { ...on };
+  // Not a copy of `on`: a spread would read every getter there now, outside `fire`.
+  const out: Record<string, unknown> = {};
   for (const name of Object.keys(CALLBACK_NAMES) as Array<keyof AgencyCallbacks>) {
     out[name] = (event: unknown) =>
       fire(name, () => {
@@ -281,8 +283,9 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   // this agency, its strategy, a gate or a HITL check. One that throws is
   // written to the host's logger with its message through the call's mask,
   // and never fails the call or changes what it returns. The guard reads the
-  // host's `on` object at each event, so a callback set, replaced or deleted
-  // there after construction is the one that runs. Wrapped before the trail's
+  // host's `on` object at each event and never at construction, so a callback
+  // set, replaced or deleted there after construction is the one that runs,
+  // and a getter there that throws fails no construction. Wrapped before the trail's
   // and the masks' wrappers below, which copy the guard's callbacks, every
   // name present: those wrappers run whatever the host's callback does.
   if (opts.on) opts = { ...opts, on: guardedCallbacks(opts.on, fire) };

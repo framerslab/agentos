@@ -1296,9 +1296,11 @@ strategies `stream()` emits `agent-start` and `agent-end` parts per member on
 never fired. A callback that throws, or an async one whose promise rejects,
 is written through the host's logger as `agency_callback_threw` and never
 fails the run or changes its result, whichever part of the run fires it. The
-agency reads each callback from `on` when the run fires it: one set, replaced
-or deleted on that object after `agency()` returns is the one that runs, from
-the next event on. `observability` (`logLevel`,
+agency reads each callback from `on` when the run fires it, and nothing of `on`
+when it is built: one set, replaced or deleted on that object after `agency()`
+returns is the one that runs, from the next event on, and a getter there is
+read only when its event fires, so one that throws is written as
+`agency_callback_threw` and never fails `agency()`. `observability` (`logLevel`,
 `traceEvents`, `otel`) is accepted and not read by `agency()`.
 
 ### Provenance / audit trail
