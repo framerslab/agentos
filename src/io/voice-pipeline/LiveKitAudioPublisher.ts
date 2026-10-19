@@ -267,6 +267,8 @@ export class LiveKitAudioPublisher {
    * room; `undefined` before.
    */
   get playout(): LiveKitPlayout | undefined { return this.mode; }
+  /** SID of the published track once the local participant has published it; `undefined` before. */
+  get trackSid(): string | undefined { return this.publication; }
   /** Whether the options carry the call identity participant playout needs. */
   private identified(): boolean { return !!this.options.scopeId && !!this.options.callId && typeof this.options.generation === 'function'; }
   /**

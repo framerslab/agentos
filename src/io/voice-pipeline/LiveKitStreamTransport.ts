@@ -86,6 +86,39 @@
  * as well: 16384 bytes a message, four in flight, and a send not done within
  * five seconds closes the transport.
  *
+ * ## Transcription
+ * Transcription output, on by default with `participant` (the
+ * `transcriptionOutput` option), writes the conversation into the room through
+ * two {@link LiveKitTranscriptionOutput}s, as text streams on
+ * `'lk.transcription'`, the topic LiveKit's transcriptions use, each carrying
+ * `lk.segment_id`, `lk.transcription_final` and `lk.transcribed_track_id`.
+ * The user's lines come from the `transcript` messages the session sends: the
+ * first after a final opens a line, each interim is written to it and its
+ * final closes it. They carry the SID of the microphone track the transport
+ * reads, so they follow `setParticipant()`.
+ *
+ * With a publisher, the agent's line of each reply opens at `agent_speaking`
+ * and carries the published track's SID. It is written from the text
+ * boundaries the reply's chunks carry (`EncodedAudioChunk.textBoundary`), never
+ * from their legacy `text`: a chunk that ends a segment counts once the track
+ * has played it, as `waitForPlayback()` resolving for it says, or outside
+ * participant playout a `waitForPlayout()` begun after it was sent; the
+ * contiguous prefix of such segments is the played text, and each time it
+ * grows the line is written as an interim holding it. `agent_done` writes the
+ * final with the reply's text. A `barge_in` `cancel` or a `clearPlayback()`
+ * cuts the reply, and its final holds the played text alone, as LiveKit
+ * Agents truncate an interrupted agent's transcription to its spoken output;
+ * with none played it is empty, which takes back a line the room was shown. A
+ * pause the track holds forgets what the track held.
+ *
+ * Line ids carry the transport's `id` (`<id>:user-1`, `<id>:agent-1`), so two
+ * transports' lines never share one. Every stream is sent by the room's local
+ * participant, the user's lines too: rtc-node's `sendText` names no other
+ * sender. Writes never hold up a send; a write that fails emits `'error'` with
+ * `livekit transcription failed`, and the transport stays open. No line is
+ * written once the transport has closed; a write already under way still goes
+ * out.
+ *
  * ## Lifetime
  * The linked participant leaving the room closes the transport while
  * `closeOnDisconnect` is on: by default with `participant`, listen-only or
@@ -105,12 +138,15 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { AudioFrame, IPlaybackTransport, EncodedAudioChunk, ClientTextMessage, ServerTextMessage, PlaybackReceipt, VoiceGeneration } from './types.js';
+import type { AudioFrame, IPlaybackTransport, EncodedAudioChunk, ClientTextMessage, ServerTextMessage, PlaybackReceipt, VoiceGeneration, BargeinAction, TranscriptEvent } from './types.js';
 import { LiveKitAudioPublisher, isLiveKitSipParticipant, type LiveKitAudioPublisherOptions, type LiveKitPlayout } from './LiveKitAudioPublisher.js';
 import { PlaybackAcknowledgementSchema } from './PlaybackAcknowledgements.js';
 import { isClientTranscriptMessage } from './clientTranscript.js';
 import { isClientTextInputMessage, MAX_TEXT_INPUT_LENGTH } from './clientTextInput.js';
+import { LIVEKIT_TRANSCRIPTION_TOPIC } from './transcriptLedger.js';
+import { PlayedTextTracker } from './ttsTextBoundaries.js';
 import { LiveKitRoomAudioSource, type LiveKitParticipantLike, type LiveKitRoomLike, type LiveKitRtcModule, type LiveKitTextStreamReaderLike } from '../hearing/LiveKitRoomAudioSource.js';
+import { LiveKitTranscriptionOutput } from '../hearing/LiveKitTranscriptionOutput.js';
 
 /** The text stream topic of the control messages when none is configured. */
 export const LIVEKIT_TRANSPORT_DEFAULT_TOPIC = 'agentos.voice';
@@ -135,6 +171,17 @@ const TEXT_INPUT_MAX_BYTES = MAX_TEXT_INPUT_LENGTH * 3;
 
 /** A frame's length in milliseconds. */
 const frameMs = (frame: AudioFrame): number => (frame.samples.length / frame.sampleRate) * 1000;
+
+/**
+ * The agent's transcription line of one reply: its id, the played text its chunks' acknowledged boundaries prove, the
+ * sequences of its chunks that carry a boundary and were not refused, and the played text it was last written with.
+ */
+interface AgentLine {
+  readonly itemId: string;
+  readonly tracker: PlayedTextTracker;
+  readonly sent: Set<number>;
+  written: string;
+}
 
 /**
  * The topic of a text input or output option: the one it names when it is on, `topic` when it is on and names none,
@@ -185,7 +232,10 @@ export interface LiveKitStreamTransportOptions {
   textInput?: boolean | { topic?: string };
   /**
    * Write the user's transcripts and the agent's played text as transcription text streams on `topic`
-   * (`'lk.transcription'` unless given). Default `true` with `participant`, `false` with `participantIdentity`.
+   * (`'lk.transcription'` unless given). Default `true` with `participant`, `false` with `participantIdentity`. The
+   * user's lines come from the `transcript` messages the session sends and carry the SID of the microphone track the
+   * transport reads; with `publisher`, the agent's line of each reply carries the published track's SID and holds the
+   * text its chunks' boundaries prove played until `agent_done` gives its final.
    */
   transcriptionOutput?: boolean | { topic?: string };
   /**
@@ -250,13 +300,14 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
  * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. With text input, also a `text_input` message for each text the linked participant sends on the text-input topic. |
  * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting, the linked participant leaving while `closeOnDisconnect` is on or, with a publisher, a refused message or a capture that never returned. |
- * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), a text input refused (`livekit text input refused`, which leaves the transport open), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. |
+ * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), a text input refused (`livekit text input refused`, which leaves the transport open), a transcription write that failed (`livekit transcription failed`, which leaves it open too), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. |
  *
  * Without a publisher, an error that nothing listens for is written as a
  * console warning instead, since an `'error'` that nothing listens for would
  * throw. With a publisher, errors carry fixed messages (`livekit input
- * failed`, `livekit control refused`, `livekit output stalled`, `livekit
- * cleanup incomplete`), and one that nothing listens for is dropped. A room or selected participant loss
+ * failed`, `livekit control refused`, `livekit text input refused`, `livekit
+ * transcription failed`, `livekit output stalled`, `livekit cleanup
+ * incomplete`), and one that nothing listens for is dropped. A room or selected participant loss
  * closes this physical path; `CallTransportBinding` interprets it as a detach.
  *
  * @example
@@ -310,6 +361,19 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private readonly textInputTopic: string | undefined;
   /** Whether the linked participant leaving the room closes the transport: `closeOnDisconnect`, or its default. */
   private readonly closeOnDeparture: boolean;
+  /** Writes the user's lines, with the SID of the microphone track the source reads; unset when transcription output is off. */
+  private readonly userOutput?: LiveKitTranscriptionOutput;
+  /** Writes the agent's lines, with the published track's SID; unset when transcription output is off or nothing is published. */
+  private readonly agentOutput?: LiveKitTranscriptionOutput;
+  /** The id of the user's line being heard: opened by the first transcript after a final, closed by its final. */
+  private userLine: string | undefined;
+  /** The agent's line of the reply being spoken, from `agent_speaking` until its final. */
+  private agentLine: AgentLine | undefined;
+  /** How many lines of the user's, and of the agent's, were opened; each line's id counts on from them. */
+  private userLines = 0;
+  private agentLines = 0;
+  /** While the agent's lines are written, the sequence the next chunk without one takes, from 1. */
+  private nextSequence = 1;
 
   /**
    * @throws {Error} `invalid livekit input bound` when `bufferMs` is not a
@@ -368,6 +432,12 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       catch { this.warn(`LiveKitStreamTransport: text input is off, the room already handles the ${textInputTopic} topic`); textInputTopic = undefined; }
     }
     this.textInputTopic = textInputTopic;
+    // Transcription output takes no topic: it sends its streams through the room's local participant.
+    const transcriptionTopic = optionTopic(options.transcriptionOutput, conventions, LIVEKIT_TRANSCRIPTION_TOPIC);
+    if (transcriptionTopic !== undefined) {
+      this.userOutput = new LiveKitTranscriptionOutput({ room: options.room, topic: transcriptionTopic, trackSid: () => this.source.trackSid });
+      if (this.publisher) this.agentOutput = new LiveKitTranscriptionOutput({ room: options.room, topic: transcriptionTopic, trackSid: () => this.publisher?.trackSid });
+    }
     // With `participantIdentity` and no `closeOnDisconnect`, only a speaking transport closes when the participant leaves.
     this.closeOnDeparture = options.closeOnDisconnect ?? (conventions || !!options.publisher);
     if (this.closeOnDeparture) options.room.on('participantDisconnected', this.participantDisconnected);
@@ -423,15 +493,33 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * `publisher.receiptTimeoutMs`. Listen-only readiness allocates nothing.
    */
   async readyForPlayback(): Promise<void> { if (this._state !== 'open') throw new Error('transport closed'); await this.publisher?.ready(); }
-  /** Listen-only construction still rejects; speaking delegates to the one native conversion boundary. */
+  /**
+   * Listen-only construction still rejects; speaking delegates to the one native conversion boundary. While the
+   * agent's lines are written, a chunk without a sequence takes the next of the transport's own, from 1, and plays
+   * under it, so `waitForPlayback()` names it as it names the publisher's; a chunk that carries a `textBoundary` is
+   * recorded for the agent's line under its sequence, and forgotten when its send fails.
+   */
   sendAudio(chunk: EncodedAudioChunk): Promise<void> {
-    const result = this.publisher ? this.publisher.sendAudio(chunk) : Promise.reject(new Error('LiveKitStreamTransport does not publish audio: it carries what the agent hears and its control messages'));
-    result.catch(() => {}); return result;
+    if (!this.publisher) {
+      const refused = Promise.reject(new Error('LiveKitStreamTransport does not publish audio: it carries what the agent hears and its control messages'));
+      refused.catch(() => {}); return refused;
+    }
+    const sent = this.agentOutput && chunk.sequence === undefined ? { ...chunk, sequence: this.nextSequence++ } : chunk;
+    const line = this.agentLine; const sequence = sent.sequence; const boundary = sent.textBoundary;
+    if (line && sequence !== undefined && boundary) { line.tracker.sent(sequence, boundary); line.sent.add(sequence); }
+    const result = this.publisher.sendAudio(sent);
+    // A refused chunk never plays, so a playout wait does not count its text as heard.
+    result.catch(() => { if (line && sequence !== undefined) line.sent.delete(sequence); }); return result;
   }
-  /** Resolves once the chunk has played: in native playout once the track has played it out, in participant playout once the native queue has drained and the participant's receipt has come. */
+  /**
+   * Resolves once the chunk has played: in native playout once the track has played it out, in participant playout
+   * once the native queue has drained and the participant's receipt has come. The text the chunk's boundary ends
+   * then counts as played on the agent's line.
+   */
   waitForPlayback(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
     if (!this.publisher) return Promise.reject(new Error('LiveKitStreamTransport does not publish audio'));
-    return this.publisher.waitForPlayback(generation, sequence, signal);
+    const played = this.publisher.waitForPlayback(generation, sequence, signal); const line = this.agentLine;
+    return line ? played.then((receipt) => { this.acknowledge(line, [sequence]); return receipt; }) : played;
   }
   /**
    * Resolves once the track has played out what the transport was handed: every chunk sent so far, and any sent while
@@ -442,13 +530,24 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * transport emit `livekit output stalled` and close, once the control messages already waiting have gone out. A
    * listen-only transport resolves at once. An aborted `signal` rejects the wait at once
    * (`publisher playout wait aborted`), as a session aborts it when a barge-in cuts the reply or the session closes.
+   * Outside participant playout, a wait that resolves counts the chunks sent before it began as played on the agent's
+   * line; what a clear or a pause discarded was forgotten first, so it counts as nothing. In participant playout only
+   * the participant's receipts do.
    *
    * @param signal - Ends the wait when aborted.
    */
-  async waitForPlayout(signal?: AbortSignal): Promise<void> { await this.publisher?.waitForPlayout(signal); }
-  /** Discards only this physical path's queued output; a closed path must finish native cleanup. */
+  async waitForPlayout(signal?: AbortSignal): Promise<void> {
+    const line = this.agentLine; const sent = line ? [...line.sent] : [];
+    await this.publisher?.waitForPlayout(signal);
+    if (line && this.publisher?.playout !== 'participant') this.acknowledge(line, sent);
+  }
+  /**
+   * Discards only this physical path's queued output; a closed path must finish native cleanup. The clear cuts the
+   * reply: the agent's line ends with the text proven played.
+   */
   async clearPlayback(generation: VoiceGeneration): Promise<void> {
     if (this._state === 'closed') { await this.closing; return; }
+    this.cutAgentLine();
     await this.publisher?.clearPlayback(generation);
   }
   /**
@@ -480,7 +579,9 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * `receiptTimeoutMs` plus `maxDurationMs` have passed, so a capture that never returns does not hold it; a message
    * asked for while it waits, a `resume` for the next reply among them, waits behind it, and they go out one at a time
    * once it has; at most 64 messages wait, the `cancel` included (`livekit control bound` beyond). A message with nothing waiting ahead
-   * of it goes out within the call, beside any still going out.
+   * of it goes out within the call, beside any still going out. With transcription output, what a message the
+   * transport takes says of the conversation is written to the room's transcription first, as the module's
+   * "Transcription" part describes, without waiting for the write; it is written for a phone caller too.
    *
    * @throws {Error} When the transport is not open or the room has no local participant, and `livekit control bound`
    *   when 64 messages wait already.
@@ -499,6 +600,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       cleared.catch(() => {});
     } else if (action?.type === 'pause') this.publisher!.pause();
     else if (action?.type === 'resume') this.publisher!.resume();
+    this.transcribe(message, action);
     if (!previous && !cleared) {
       if (this.nobodyReads()) return;
       return this.sendWire(message);
@@ -533,6 +635,56 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private linkedParticipant(): LiveKitParticipantLike | undefined { return this.linked === undefined ? undefined : this.options.room.remoteParticipants.get(this.linked); }
   /** Whether a control message has nobody to read it: nobody is linked, or the linked participant is a phone caller. */
   private nobodyReads(): boolean { return this.linked === undefined || isLiveKitSipParticipant(this.linkedParticipant()); }
+  /**
+   * Writes what a message the session sends says of the conversation. A `transcript` is a line of the user's, opened by
+   * the first one after a final and closed by its final. `agent_speaking` opens the agent's line of the reply, ending
+   * one still open as a cut; `agent_done`, which the session sends once the reply played, ends it with the reply's
+   * text; a `barge_in` `cancel` cuts it. A pause the track holds forgets what the track held, which a playout wait that
+   * the pause ended does not prove played.
+   */
+  private transcribe(message: ServerTextMessage, action: BargeinAction | undefined): void {
+    if (message.type === 'transcript') {
+      if (!this.userOutput) return;
+      const itemId = this.userLine ??= `${this.id}:user-${++this.userLines}`;
+      if (message.isFinal) this.userLine = undefined;
+      this.writeLine(this.userOutput, { text: message.text, isFinal: message.isFinal, confidence: message.confidence, words: [] }, itemId);
+    } else if (message.type === 'agent_speaking') {
+      if (!this.agentOutput) return;
+      this.cutAgentLine();
+      this.agentLine = { itemId: `${this.id}:agent-${++this.agentLines}`, tracker: new PlayedTextTracker(), sent: new Set(), written: '' };
+    } else if (message.type === 'agent_done') this.endAgentLine(message.text);
+    else if (message.type === 'barge_in') {
+      if (message.action.type === 'cancel') this.cutAgentLine();
+      else if (action?.type === 'pause') this.agentLine?.tracker.cleared();
+    }
+  }
+  /**
+   * Counts the chunks with these sequences as played on the agent's line, while it is still the reply's line and the
+   * transport is open, and writes the line as an interim when its played text grew.
+   */
+  private acknowledge(line: AgentLine, sequences: readonly number[]): void {
+    if (line !== this.agentLine || this._state !== 'open' || !this.agentOutput) return;
+    for (const sequence of sequences) if (line.sent.has(sequence)) line.tracker.acknowledged(sequence);
+    const played = line.tracker.playedText;
+    if (played === line.written) return;
+    line.written = played;
+    this.writeLine(this.agentOutput, { text: played, isFinal: false, confidence: 1, words: [] }, line.itemId);
+  }
+  /** Ends the agent's line, if one is open, with a final holding `text`. */
+  private endAgentLine(text: string): void {
+    const line = this.agentLine; if (!line || !this.agentOutput) return;
+    this.agentLine = undefined;
+    this.writeLine(this.agentOutput, { text, isFinal: true, confidence: 1, words: [] }, line.itemId);
+  }
+  /**
+   * Ends the agent's line of a cut reply with the text proven played. With none proven, the final is empty: it takes
+   * back a line the room was shown, and a line it was not shown stays unwritten.
+   */
+  private cutAgentLine(): void { if (this.agentLine) this.endAgentLine(this.agentLine.tracker.playedText); }
+  /** Writes one line without holding up a send; a write that fails emits `livekit transcription failed` while the transport is open. */
+  private writeLine(output: LiveKitTranscriptionOutput, event: TranscriptEvent, itemId: string): void {
+    output.write(event, { itemId }).catch(() => { if (this._state === 'open') this.emitErrorSafe(new Error('livekit transcription failed')); });
+  }
   /** Stops input synchronously without disconnecting the host-owned room. Native cleanup is awaited through whenClosed. */
   close(_code?: number, _reason?: string): void {
     if (this._state === 'closing' || this._state === 'closed') return; this._state = 'closing';
