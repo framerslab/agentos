@@ -539,6 +539,33 @@ describe("a seat's mask reaches a tool's error before the next request carries i
     expect(plainy.toolCalls[0].result).toEqual({ id: '[redacted]' });
     expect(JSON.stringify(plainy.toolCalls)).not.toContain(DIGITS);
   });
+
+  it("under an agency's call mask a tool that succeeds with an output JSON leaves out (a function, a symbol, a toJSON that returns nothing), or with none, stays a success: its record carries no error and its turn is the empty string's JSON, in both native loops", async () => {
+    const callMask = createErrorMask({ list: [SECRET] });
+    const NO_JSON = [
+      tool('fnOut', async () => ({ success: true, output: () => 'f' })),
+      tool('symbolOut', async () => ({ success: true, output: Symbol('s') })),
+      tool('silentOut', async () => ({ success: true, output: { toJSON: () => undefined } })),
+      tool('noneOut', async () => ({ success: true })),
+    ];
+    const names = NO_JSON.map((t) => t.name);
+    const toolTurns = (call: unknown[]): unknown[] => sentMessages(call).filter((m) => m.role === 'tool').map((m) => m.content);
+
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(names)).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: NO_JSON as never, maxSteps: 3, __maskError: callMask });
+    expect(generated.text).toBe('done');
+    expect(generated.toolCalls.map((c) => [c.name, c.error])).toEqual(names.map((name) => [name, undefined]));
+    expect(toolTurns(hoisted.generateCompletion.mock.calls[1])).toEqual(['""', '""', '""', '""']);
+
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(names); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: NO_JSON as never, maxSteps: 3, __maskError: callMask });
+    await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect((await streamed.toolCalls).map((c) => [c.name, c.error])).toEqual(names.map((name) => [name, undefined]));
+    expect(toolTurns(hoisted.generateCompletionStream.mock.calls[1])).toEqual(['""', '""', '""', '""']);
+  });
 });
 
 describe('a later step converts no tool schema while the table keeps its names', () => {
