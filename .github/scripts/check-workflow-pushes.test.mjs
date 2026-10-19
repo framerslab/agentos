@@ -251,6 +251,25 @@ describe('refused: a workflow that pushes to master', () => {
     `) }, [/^jobs\.j\.steps\[1\]: "git push" pushes the checked-out branch/, /^jobs\.j\.steps\[2\]: "git push origin HEAD" pushes the checked-out branch/, /^jobs\.j\.steps\[3\]: "git push origin" pushes the checked-out branch/, /^jobs\.j\.steps\[4\]: "git push" pushes the checked-out branch/]);
   });
 
+  test('a switch back to master with git switch -, git checkout - or @{-N}', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - uses: actions/checkout@v5
+      - run: |
+          git switch -c feature
+          git switch -
+          git push origin HEAD
+      - run: |
+          git checkout -b one
+          git checkout -b two
+          git checkout @{-2}
+          git push
+      - run: |
+          git checkout --detach
+          git checkout -q -
+          git push origin HEAD
+    `) }, [/^jobs\.j\.steps\[1\]: "git push origin HEAD" pushes the checked-out branch/, /^jobs\.j\.steps\[2\]: "git push" pushes the checked-out branch/, /^jobs\.j\.steps\[3\]: "git push origin HEAD" pushes the checked-out branch/]);
+  });
+
   test('a pull request review run, on which git-auto-commit-action has no head branch and pushes the checked-out one', () => {
     // github.head_ref is set on pull_request and pull_request_target alone (GitHub's contexts reference).
     expectFindings({ '.github/workflows/w.yml': workflow('pull_request_review:', text`
@@ -342,6 +361,21 @@ describe('allowed: a workflow that does not push to master', () => {
           git push
           git switch -c feature --track origin/master
           git push
+    `) }, []);
+  });
+
+  test('git switch - back to a branch of its own, and a branch started from the one before', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - uses: actions/checkout@v5
+      - run: |
+          git switch -c one
+          git switch -c two
+          git switch -
+          git push origin HEAD
+          git checkout - -- package.json
+          git push
+          git switch - -c three
+          git push -u origin HEAD
     `) }, []);
   });
 

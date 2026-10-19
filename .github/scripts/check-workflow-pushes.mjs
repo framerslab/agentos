@@ -20,7 +20,8 @@
  *   push to the run's own branch (${{ github.ref_name }}, $GITHUB_REF) from a workflow that runs on it. A workflow
  *   runs on the default branch unless its triggers keep it off: pull_request, pull_request_review(_comment),
  *   merge_group and release never run on a branch, and push filters are read as GitHub reads them. A step that
- *   checks out a branch (actions/checkout with ref, git checkout, git switch) changes the checked-out branch;
+ *   checks out a branch (actions/checkout with ref, git checkout, git switch) changes the checked-out branch, and
+ *   git switch - or git checkout - (@{-1}, @{-N}) returns to the one checked out before it;
  * - an action that pushes there: peaceiris/actions-gh-pages (publish_branch), JamesIves/github-pages-deploy-action
  *   (branch), ad-m/github-push-action (branch; with none it pushes master on v0.6.0 and earlier),
  *   stefanzweifel/git-auto-commit-action (branch, else the pull request's head branch on a pull request event and
@@ -62,6 +63,8 @@ import { pathToFileURL } from 'node:url';
  * @typedef {object} State
  * @property {boolean} run whether the run's own branch can be the default branch
  * @property {boolean} head whether the checked-out branch can be the default branch
+ * @property {boolean[]} prev the same for each branch checked out before it, the newest last: git switch - and
+ *   @{-N} return to them
  * @property {boolean} pullRequestOnly whether every trigger is pull_request or pull_request_target, the events that
  *   set github.head_ref
  * @property {string} dir the directory run steps start in, relative to the root
@@ -662,6 +665,17 @@ function checkPush(args, { state, ctx, report }) {
 }
 
 /**
+ * Checks out a branch: the one before it becomes the newest earlier branch, as git's reflog records it (each
+ * checkout, a detaching one too, is a "checkout: moving from <old> to <new>" line, and @{-N} reads the Nth newest).
+ * @param {State} state
+ * @param {boolean} head whether the branch checked out can be the default branch
+ */
+function moveHead(state, head) {
+  state.prev.push(state.head);
+  state.head = head;
+}
+
+/**
  * Follows git checkout and git switch: the branch they check out is the checked-out branch from then on.
  * @param {string} sub
  * @param {string[]} args
@@ -669,17 +683,24 @@ function checkPush(args, { state, ctx, report }) {
  */
 function checkout(sub, args, { state, ctx }) {
   const create = sub === 'checkout' ? ['-b', '-B', '--orphan'] : ['-c', '-C', '--create', '--force-create', '--orphan'];
+  const creating = args.some((a) => create.includes(a) || /^--(?:create|force-create|orphan)=/.test(a));
   // git checkout <tree-ish> -- <paths> restores files and leaves the branch as it is.
-  if (sub === 'checkout' && args.includes('--') && !args.some((a) => create.includes(a))) return;
+  if (sub === 'checkout' && args.includes('--') && !creating) return;
   // --track with no name for the new branch names it for the remote-tracking branch past the remote's part, so
   // git switch --track origin/master makes and checks out master (git-checkout(1), -t).
-  const track = args.some((a) => a === '-t' || a === '--track' || a.startsWith('--track='))
-    && !args.some((a) => create.includes(a) || /^--(?:create|force-create|orphan)=/.test(a));
+  const track = args.some((a) => a === '-t' || a === '--track' || a.startsWith('--track=')) && !creating;
   for (let k = 0; k < args.length; k++) {
     const a = args[k];
     if (a === '--') return;
     if (a === '--detach' || (sub === 'switch' && a === '-d')) {
-      state.head = false;
+      moveHead(state, false);
+      return;
+    }
+    // - is @{-1}, the branch checked out before this one; @{-N} is the Nth before it. Where git has no such branch
+    // the job's starting branch stands in. With -c or -b it is only the new branch's start.
+    const back = a === '-' ? 1 : Number(/^@\{-(\d+)\}$/.exec(a)?.[1] ?? 0);
+    if (back > 0 && !creating) {
+      moveHead(state, state.prev.length >= back ? state.prev[state.prev.length - back] : state.run);
       return;
     }
     const attached = /^--(?:create|force-create|orphan)=(.+)$/.exec(a);
@@ -689,9 +710,9 @@ function checkout(sub, args, { state, ctx }) {
     const name = track ? operand.replace(/^(?:refs\/)?(?:remotes\/)?[^/]+\//, '') : operand;
     // A branch made here is a new one unless it is named for the default branch (-B master resets it).
     const kind = classify(name, ctx);
-    if (kind === 'protected') state.head = true;
-    else if (kind === 'other' || creates || track) state.head = false;
-    else if (kind === 'run') state.head = state.run;
+    if (kind === 'protected') moveHead(state, true);
+    else if (kind === 'other' || creates || track) moveHead(state, false);
+    else if (kind === 'run') moveHead(state, state.run);
     return;
   }
 }
@@ -889,7 +910,7 @@ function checkAction(uses, inputs, step) {
   if (action === 'actions/checkout') {
     const ref = input('ref');
     const kind = ref === '' ? 'run' : classify(ref, ctx);
-    state.head = kind === 'protected' || (kind !== 'other' && state.run);
+    moveHead(state, kind === 'protected' || (kind !== 'other' && state.run));
   } else if (action === 'peaceiris/actions-gh-pages') {
     destination(input('publish_branch') || 'gh-pages', 'peaceiris/actions-gh-pages publishes to');
   } else if (action === 'jamesives/github-pages-deploy-action') {
@@ -970,7 +991,7 @@ function checkDocument(file, doc, ctx, findings) {
   const runs = d.runs && typeof d.runs === 'object' ? /** @type {Record<string, unknown>} */ (d.runs) : null;
   if (runs && runs.using === 'composite') {
     // A composite action runs in the job that calls it, which may be on the default branch.
-    checkSteps(file, runs.steps, '.runs', { run: true, head: true, pullRequestOnly: false, dir: '.' }, ctx, findings);
+    checkSteps(file, runs.steps, '.runs', { run: true, head: true, prev: [], pullRequestOnly: false, dir: '.' }, ctx, findings);
     return;
   }
   if (!d.jobs || typeof d.jobs !== 'object') return;
@@ -982,7 +1003,7 @@ function checkDocument(file, doc, ctx, findings) {
     if (!job || typeof job !== 'object') continue;
     const j = /** @type {Record<string, unknown>} */ (job);
     const dir = workingDirectory(j.defaults) || workingDirectory(d.defaults) || '.';
-    checkSteps(file, j.steps, `.jobs[${JSON.stringify(id)}]`, { run, head: run, pullRequestOnly, dir }, ctx, findings);
+    checkSteps(file, j.steps, `.jobs[${JSON.stringify(id)}]`, { run, head: run, prev: [], pullRequestOnly, dir }, ctx, findings);
   }
 }
 
