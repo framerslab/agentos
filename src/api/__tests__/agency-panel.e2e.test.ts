@@ -1021,6 +1021,18 @@ describe('13. no credential in any record', () => {
     expect(JSON.stringify(calls(OPENAI_CHAT, 'POST').map((c) => c.body))).not.toContain(K.oaiEnv);
   });
 
+  it("a tool that returns an object keyed by a key: the tool-call record and the result hold the key masked, as the provider's turn does", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const tools = { keys: { description: 'k', parameters: { type: 'object', properties: {} }, execute: async () => ({ status: { [K.oaiEnv]: 'active' } }) } };
+    const team = agency({ modelPool: { astra: { provider: 'openai', model: 'gpt-4.1' } }, agents: { one: { instructions: 'x', tools } }, strategy: 'sequential' } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('keys', {}, 'c1'), openaiText('done')]]]);
+    const result = await team.generate('go');
+    expect(result.text).toBe('done');
+    expect(result.agentCalls[0].toolCalls[0].result).toEqual({ status: { '[redacted]': 'active' } });
+    expect(JSON.stringify(result)).not.toContain(K.oaiEnv);
+    expect(JSON.stringify(calls(OPENAI_CHAT, 'POST').map((c) => c.body))).not.toContain(K.oaiEnv);
+  });
+
   it("under panel a seat's answer that repeats a key is redacted in its seat record and the chair's answer in the result's text", async () => {
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText(`B saw ${K.oai}`)], [ANTHROPIC, [anthropicText('A'), anthropicText(`Merged ${K.oai}`)]], [GEMINI, geminiText('C')]]);
     const result = await panel().generate('review');
