@@ -35,7 +35,11 @@
  * limit is spoken without a `Flush`, the segments after it join it, each as its
  * own `Speak`, and one `Flush` once the window has passed completes them
  * together, so the boundary of that frame covers their joined text. A segment's
- * five seconds run from its `Flush`.
+ * five seconds run from its `Flush`. A socket Deepgram closes while a segment
+ * is in flight or a flush waits is the reply's failure: `'error'`
+ * (`deepgram aura ws closed`), the segments end without a boundary, a flush
+ * under way completes with `flush_complete`, and the session closes; a socket
+ * closed between replies closes the session alone.
  *
  * @see https://developers.deepgram.com/docs/tts-websocket
  * @see https://developers.deepgram.com/docs/tts-ws-flush
@@ -259,9 +263,13 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
       this.ws.on('message', (data: Buffer, isBinary: boolean) => this._handleMessage(data, isBinary));
       this.ws.on('close', () => {
         if (!settled) fail(new Error('deepgram aura ws closed before the upgrade completed'));
+        // A socket lost while a segment is in flight or a flush waits is the reply's failure, reported before the
+        // session closes; one closed between replies closes the session alone.
+        const lostReply = settled && this.segments.busy;
         this.closed = true;
-        // The segments queued and in flight end without a boundary; a flush under way resolves without flush_complete.
-        this.segments.cancel();
+        if (lostReply) this._emitErrorSafe(new Error('deepgram aura ws closed'));
+        // The segments in flight and queued end without a boundary, and a flush under way completes, so the reply ends.
+        this.segments.lost();
         this.release();
         this.emit('close');
       });
@@ -289,7 +297,9 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   /**
    * Queues the final, unterminated segment and resolves once every queued
    * segment has completed or timed out; `flush_complete` goes out once, then.
-   * A cancel or a close ends the wait without `flush_complete`.
+   * A cancel or `close()` ends the wait without `flush_complete`; a socket
+   * Deepgram closes ends it with `flush_complete`, after the `'error'` that
+   * reports the lost reply.
    */
   async flush(): Promise<void> {
     if (this.closed) return;

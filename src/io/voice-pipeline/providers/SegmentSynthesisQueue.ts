@@ -23,8 +23,11 @@
  * once per `flush()` call, through `hooks.flushed`, and never for a segment's
  * completion. `cancel()` drops the queued segments, the held frame and the
  * segment in flight, and resolves the pending flushes without
- * `flush_complete`. `hold()` keeps the next segment from starting until
- * `release()`, for an adapter that must first let a stale response pass.
+ * `flush_complete`. `lost()`, for a provider that is gone, ends the segment in
+ * flight without a boundary, its held frame going out, drops the queued
+ * segments and completes the pending flushes with `flush_complete`, so the
+ * reply they belong to ends. `hold()` keeps the next segment from starting
+ * until `release()`, for an adapter that must first let a stale response pass.
  *
  * @example
  * ```typescript
@@ -139,6 +142,11 @@ export class SegmentSynthesisQueue {
     return this.flight !== undefined;
   }
 
+  /** Whether a segment is in flight or queued, or a flush waits: the provider still owes the adapter a response. */
+  get busy(): boolean {
+    return this.flight !== undefined || this.pending.length > 0 || this.waiters.length > 0;
+  }
+
   /**
    * Appends submitted text; each sentence it completes is queued, and the first starts at once when none is in flight.
    *
@@ -195,6 +203,23 @@ export class SegmentSynthesisQueue {
     this.end(flight);
     if (flight.held) this.hooks.emit(flight.held);
     this.finish(flight);
+  }
+
+  /**
+   * The provider is gone: the segment in flight ends without a boundary, its held frame going out, the queued segments
+   * are dropped and the text forgotten, and the pending flushes complete, with `flush_complete`, since every segment
+   * queued before them has ended. A caller's `cancel()` differs in taking `flush_complete` with it.
+   */
+  lost(): void {
+    const flight = this.flight;
+    if (flight) {
+      this.end(flight);
+      if (flight.held) this.hooks.emit(flight.held);
+    }
+    this.pending.length = 0;
+    this.segmenter.reset();
+    this.ended = this.queued;
+    this.settle();
   }
 
   /** Drops the queued segments, the held frame and the segment in flight, forgets the text, and resolves the pending flushes without `flush_complete`. */
