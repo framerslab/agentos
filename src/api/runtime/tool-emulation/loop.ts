@@ -158,6 +158,14 @@ export async function runEmulatedToolLoop(
             ...(opts.maskToolValue && raw.output !== undefined ? { output: opts.maskToolValue(raw.output) } : {}),
             ...(opts.maskToolError && raw.success === false && typeof raw.error === 'string' ? { error: opts.maskToolError(raw.error) } : {}),
           };
+          // The response is written before the call is recorded, so an output
+          // no serializer can write (a getter or a toJSON that throws, a
+          // cycle) is recorded once, as the failure the catch below records.
+          // The masked copy reads such a getter as undefined, so the output as
+          // the tool returned it is written first, and fails the tool as an
+          // unmasked response does.
+          if (result.success && result.output !== raw.output && raw.output != null) JSON.stringify(raw.output);
+          const response = formatToolResponse(call.name, result);
           toolCalls.push({
             name: call.name,
             args: call.arguments,
@@ -168,7 +176,6 @@ export async function runEmulatedToolLoop(
           // it to the seat's provider. A successful response takes the output
           // mask when the caller gives one (the listed values alone), a failed
           // one the error mask.
-          const response = formatToolResponse(call.name, result);
           const maskResponse = result.success === false ? opts.maskToolError : (opts.maskToolOutput ?? opts.maskToolError);
           return maskResponse ? maskResponse(response) : response;
         } catch (err) {

@@ -145,7 +145,10 @@ error instead of silently no-oping.
 In the native tool loop of either call, the model's next step receives a tool's
 output as JSON. A tool that succeeds with no output, or with one JSON leaves out
 (a function, a symbol, a `toJSON` that returns nothing), is sent as the empty
-string's JSON (`""`) and recorded as a success.
+string's JSON (`""`) and recorded as a success. A tool whose output cannot be
+written as JSON (a getter or a `toJSON` that throws, a cycle) fails with the
+error the write threw, in the native loops and the prompt-tool loop alike, and
+an agency seat's mask does not change that.
 
 The same `tools` forms work on `agent({ tools })` and `agency({ tools })`.
 When an agency-level tool set is combined with per-agent tools, AgentOS

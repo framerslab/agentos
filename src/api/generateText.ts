@@ -2209,10 +2209,16 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
    * A tool turn's JSON: the output's, else `absent`'s, for an output that is
    * absent or that JSON leaves out (a function, a symbol, a toJSON that
    * returns nothing). A tool that succeeded with such an output is sent as one
-   * that returned nothing, never as a failure.
+   * that returned nothing, never as a failure. When the mask made a copy of
+   * the output, `returned` (the output as the tool gave it) is written first:
+   * the copy reads a getter that throws as undefined, so an output no
+   * serializer can write (such a getter, a toJSON that throws) fails the tool
+   * here as it does without a mask.
    */
-  const toolTurnJson = (output: unknown, absent: unknown): string =>
-    (output == null ? undefined : (JSON.stringify(output) as string | undefined)) ?? (JSON.stringify(absent) as string | undefined) ?? '""';
+  const toolTurnJson = (output: unknown, absent: unknown, returned: unknown = output): string => {
+    if (returned !== output && returned != null) JSON.stringify(returned);
+    return (output == null ? undefined : (JSON.stringify(output) as string | undefined)) ?? (JSON.stringify(absent) as string | undefined) ?? '""';
+  };
 
   try {
     const successResult: GenerateTextResult = await withAgentOSSpan('agentos.api.generate_text', async (span) => {
@@ -3115,11 +3121,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // sent as a JSON string, and an output JSON leaves out (a
                 // function, a symbol) as an absent one is, so a tool that
                 // succeeded never reaches the mask as no text and fails there.
+                // An output no serializer can write fails here, masked or not.
                 const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
                 const output = maskToolValue(result.output);
                 record.result = output;
                 record.error = result.success ? undefined: errorText;
-                const turn = toolTurnJson(output, errorText ?? '');
+                const turn = toolTurnJson(output, errorText ?? '', result.output);
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
