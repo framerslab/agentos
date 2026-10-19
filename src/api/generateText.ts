@@ -853,8 +853,10 @@ export interface GenerateTextOptions {
    * (`output_config.format`, every model that has it, when the schema fits
    * its limits), as a non-strict forced tool call (a model without the format,
    * and a schema it cannot carry on a model that accepts a forced choice) or
-   * as a schema block in the system prompt (a model that refuses a forced
-   * choice, or thinking on), Gemini uses a _gemini.responseSchema extra.
+   * as a schema block in the system prompt (such a schema on a model that
+   * refuses a forced choice, or a forced-tool request that turns thinking on;
+   * the format itself rides with thinking), Gemini uses a
+   * _gemini.responseSchema extra.
    * The provider implementations consume whatever shape is here.
    */
   _responseFormat?: { type: string } | Record<string, unknown>;

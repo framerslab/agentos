@@ -721,35 +721,37 @@ Sonnet 5, Haiku 4.5 and Haiku 5.5 among them. It carries every schema on Claude
 Opus 4 and Claude Sonnet 4 (the May 2025 ids, retired on 2026-06-15), which have
 no JSON output format. The call's input is the answer: it becomes the message's
 JSON text and leaves `tool_calls`, so `generateText()`'s tool loop never runs it
-as a tool. A passthrough `customModelParams.tools` array replaces the
-schema tool, so it must hold a tool of the schema's name for the forced choice
-to go out; without one the schema rides the prompt. A passthrough `tool_choice`
-keeps precedence too: one that does not force the schema tool (`auto`, `none`,
+as a tool. A passthrough `customModelParams.tools` array replaces the schema
+tool, so it must hold a tool of the schema's name for the forced choice to go
+out; without one the schema rides the prompt. A passthrough `tool_choice` keeps
+precedence too: one that does not force the schema tool (`auto`, `none`,
 another tool's name) sends the schema in the prompt, and `any` forces it when it
 is the one tool on the wire. The format and prompt routes send no schema tool,
-so a passthrough `tool_choice` they leave with no tool on the wire is dropped. When neither route carries
-the schema (such a schema on Claude Opus 5.5, Sonnet 5.5, Fable or Mythos 5.1,
-which refuse a forced tool choice), and when a request on the forced-tool route
-turns thinking on, which a forced tool choice cannot ride beside, the provider
-puts the schema into the system prompt itself as one block after the caller's
-("Answer with JSON only, matching this schema: ...") and warns once per model
-and reason; the schema tool is never sent clamped to `auto`. A request that enables citations leaves the format, which the API
-refuses beside citations, for the forced tool, or for the prompt on a model
-that refuses a forced choice. Every completion and stream chunk of a schema
-request names the route it took (`schemaRoute`), and one whose schema rode the
-prompt says `schemaInPayload: false`, so a completion gateway lifts the answer
-from where the request put it. A cut-off answer (`max_tokens`) keeps
-`finishReason: 'length'`, even when its JSON parses (the provider builds `{}`
-for a forced call cut before its input began): `generateObject()` raises its
-output budget and asks again when the answer does not parse or validate, and
-returns one that does with `finishReason: 'length'`; a completion gateway lifts
-nothing from it, and a session's `send()` on the GMI runtime rejects naming the
-cut-off, whatever the JSON. Two cautions from
-the vendor's page: a schema property that asks
-for the model's reasoning may draw a refusal, and the capitalization of `enum`
-and `const` values is not guaranteed, so `generateObject()` repairs an enum or
-literal value that differs from the schema's only by case once before it spends
-a retry.
+so a passthrough `tool_choice` they leave with no tool on the wire is dropped.
+When neither route carries the schema (such a schema on Claude Opus 5.5, Sonnet
+5.5, Fable or Mythos 5.1, which refuse a forced tool choice), and when a request
+on the forced-tool route turns thinking on, which a forced tool choice cannot
+ride beside, the provider puts the schema into the system prompt itself as one
+block after the caller's ("Answer with JSON only, matching this schema: ...")
+and warns once per model and reason. The schema tool is never sent clamped to
+`auto`, and thinking moves only the forced-tool route: a request on the format
+route keeps the format with thinking on. A request that enables citations
+leaves the format, which the API refuses beside citations, for the forced tool,
+or for the prompt on a model that refuses a forced choice. Every completion and
+stream chunk of a schema request names the route it took (`schemaRoute`), and
+one whose schema rode the prompt says `schemaInPayload: false`, so a completion
+gateway lifts the answer from where the request put it. A cut-off answer
+(`max_tokens`) keeps `finishReason: 'length'`, even when its JSON parses: the
+provider builds `{}` for a forced call cut before its input began, and answers
+a forced call cut mid-JSON with its raw input as the text, in one request.
+`generateObject()` raises its output budget and asks again when the answer does
+not parse or validate, and returns one that does with `finishReason: 'length'`;
+a completion gateway lifts nothing from a cut-off, and a session's `send()` on
+the GMI runtime rejects naming the cut-off, whatever the JSON. Two cautions
+from the vendor's page: a schema property that asks for the model's reasoning
+may draw a refusal, and the capitalization of `enum` and `const` values is not
+guaranteed, so `generateObject()` repairs an enum or literal value that differs
+from the schema's only by case once before it spends a retry.
 
 The Tool Choice column is what the provider does with the `toolChoice` option
 (`'auto'`, `'none'`, `'required'`, or `{ type: 'function', function: { name } }`).
@@ -757,7 +759,7 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 | Provider | Structured Output | Tool Choice |
 |----------|-------------------|-------------|
 | OpenAI | `json_schema` with `strict: true` when the schema fits OpenAI's strict rules, otherwise JSON-object mode | Sent as `tool_choice` |
-| Anthropic | The native JSON output format (`output_config.format`) on every model that has it and whose schema fits its limits; a non-strict forced tool call whose input is the schema for a schema the format cannot carry on a model that accepts a forced choice, and for every schema on Claude Opus 4 and Sonnet 4; the provider's own schema block in the system prompt when neither carries the schema, thinking is on, or a passthrough `tool_choice` does not force the schema tool | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
+| Anthropic | The native JSON output format (`output_config.format`) on every model that has it and whose schema fits its limits; a non-strict forced tool call whose input is the schema for a schema the format cannot carry on a model that accepts a forced choice, and for every schema on Claude Opus 4 and Sonnet 4; the provider's own schema block in the system prompt when neither carries the schema, and on the forced-tool route when the request turns thinking on or a passthrough `tools` or `tool_choice` leaves the schema tool unforced (the format route keeps the format with thinking on) | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
 | Gemini | `responseSchema` with JSON output | Not sent; the API default applies |
 | OpenRouter | Strict `json_schema` when the schema fits, otherwise JSON-object mode. When OpenRouter finds no endpoint that serves the strict schema (HTTP 404, "No endpoints found"), the request is sent once more in JSON-object mode with the schema written into its system prompt, unless the system prompt states a schema already | Sent as `tool_choice`; the routed model decides |
 | Requesty | None | Sent as `tool_choice`; the routed model decides |

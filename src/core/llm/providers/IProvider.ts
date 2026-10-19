@@ -304,8 +304,10 @@ export interface ModelCompletionOptions {
    *     the schema fits the format's limits; as a non-strict forced tool call
    *     on a model without the format (Claude Opus 4 and Sonnet 4) and for a
    *     schema the format cannot carry on a model that accepts a forced
-   *     choice; and as a schema block in the system prompt on a model that
-   *     refuses a forced choice or when thinking is on. `route` is the
+   *     choice; and as a schema block in the system prompt for such a schema
+   *     on a model that refuses a forced choice, or on the forced-tool route
+   *     when the request turns thinking on (the format route keeps the format
+   *     with thinking on). `route` is the
    *     builder's verdict for the model it was built for; the provider decides
    *     again for the model it sends to and says which route it took on the
    *     response, `schemaRoute`):
