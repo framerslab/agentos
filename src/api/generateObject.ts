@@ -21,7 +21,14 @@ import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.j
 import { estimateMaxTokensForZodSchema } from './runtime/schemaTokenEstimate.js';
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
 import { buildResponseFormat } from '../core/llm/providers/structuredOutputFormat.js';
-import { buildSchemaInstructionText, extractJson, repairStringEncodedContainers, summarizeBadResponse, summarizeZodErrors } from './runtime/structuredReply.js';
+import {
+  buildSchemaInstructionText,
+  extractJson,
+  repairEnumCasing,
+  repairStringEncodedContainers,
+  summarizeBadResponse,
+  summarizeZodErrors,
+} from './runtime/structuredReply.js';
 import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 
 /**
@@ -763,6 +770,23 @@ export async function generateObject<T extends ZodType>(
         // thing and the failure log masked the actual cause.
         parsed = repair.value;
         validation = revalidation;
+      }
+    }
+
+    if (!validation.success) {
+      // Anthropic's JSON output format does not guarantee the capitalization
+      // of enum and const values. When the only defects are enum or literal
+      // values that differ from the schema's by case, repair them to the
+      // schema's spelling and re-validate once before a retry is spent.
+      const casing = repairEnumCasing(parsed, validation.error);
+      if (casing.repaired) {
+        // Adopt the repaired candidate and its revalidation even when that still
+        // fails, as the container repair above does: with the casing right, the
+        // issues left (a refinement, a bound, a missing field) are the ones the
+        // retry's feedback and the terminal error should name, not the casing
+        // the model would be asked to fix again.
+        parsed = casing.value;
+        validation = effectiveSchema.safeParse(casing.value) as typeof validation;
       }
     }
 

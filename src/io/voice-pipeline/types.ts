@@ -313,7 +313,8 @@ export interface IStreamTransport extends EventEmitterLike {
    * on a transport that plays it on its own timing after taking it, as a speaking `LiveKitStreamTransport` does: every
    * chunk sent so far, and any sent while it waits. Audio a clear discarded counts as played out.
    * `VoicePipelineOrchestrator` without a call profile keeps a reply `speaking` until it settles, so speech over the
-   * rest of the reply interrupts it; a rejection ends the reply as a resolution does. It aborts `signal` when a barge-in
+   * rest of the reply interrupts it; a rejection ends the reply too, as interrupted, since what of it played is not
+   * known (`VoiceConversationItem`), unless the wait was aborted. It aborts `signal` when a barge-in
    * cuts the reply or the session closes first, and a transport may then settle the wait at once. On a transport
    * without it, the orchestrator keeps the reply `speaking` for the duration of the audio it was sent instead
    * (`VoicePipelineConfig.maxPlayoutWaitMs`).
@@ -1889,8 +1890,9 @@ export interface VoicePipelineSession extends EventEmitterLike {
  * - `'idle'`: input is turned off, so the agent hears nothing. `VoicePipelineOrchestrator` never reports it; a host
  *   API that can turn a session's input off does.
  * - `'listening'`: the agent waits for the user's turn.
- * - `'thinking'`: the user's turn has completed and the agent's reply has no word yet.
- * - `'speaking'`: the reply has its first word, until its audio has played out or a barge-in cuts it.
+ * - `'thinking'`: the user's turn has completed and the agent's reply has no word yet, or, under a call profile, a
+ *   prompt `pushToTTS()` speaks has no word yet.
+ * - `'speaking'`: the reply or the prompt has its first word, until its audio has played out or a barge-in cuts it.
  */
 export type VoiceAgentState = 'initializing' | 'idle' | 'listening' | 'thinking' | 'speaking';
 
@@ -1908,8 +1910,8 @@ export type VoiceUserState = 'listening' | 'speaking' | 'away';
 
 /**
  * The part of a session a `session_error` came from: its STT, TTS, agent, transport, VAD or endpoint detector, or the
- * session itself (a listener that threw, speech from a second source, a barge-in handler that failed, work the
- * session runs across its parts).
+ * session itself (a listener that threw, speech from a second source, a barge-in handler that failed, a host prompt's
+ * stream of text that failed, work the session runs across its parts).
  */
 export type VoiceSessionErrorSource = 'stt' | 'tts' | 'agent' | 'transport' | 'vad' | 'endpoint' | 'session';
 
@@ -1938,10 +1940,14 @@ export type VoiceConversationItem =
       /**
        * The part of `text` the session knows was heard: all of it for a reply whose audio played out, and, for a reply
        * a barge-in cut, the prefix the transport has acknowledged as played, which is empty while no transport reports
-       * which text it played. A partly played reply's heard extent is then unknown, and `text` is not cut to a guess.
+       * which text it played. A partly played reply's heard extent is then unknown, and `text` is not cut to a guess;
+       * so is that of a reply whose transport's playout wait (`IStreamTransport.waitForPlayout()`) rejected.
        */
       playedText: string;
-      /** Whether a barge-in or another interruption cut the reply. */
+      /**
+       * Whether a barge-in or another interruption cut the reply, or its audio did not play out: the transport's playout
+       * wait rejected, as a stalled LiveKit track's does once it has discarded what it had not played.
+       */
       interrupted: boolean;
     };
 
@@ -1997,8 +2003,9 @@ export interface VoiceSessionEventMap {
   /** A reply or a host prompt began to speak: its first word; LiveKit Agents' `speech_created`. */
   speech_created: {
     /**
-     * `'reply'` for the agent's answer to a turn, `'say'` for a prompt the host speaks through `pushToTTS()`, which a
-     * call profile speaks as a reply of its own.
+     * `'reply'` for the agent's answer to a turn, `'say'` for a prompt the host speaks through `pushToTTS()`: under a
+     * call profile each one, which it speaks as a reply of its own, and without one a prompt pushed while a reply is
+     * speaking, whose audio goes out with the reply's.
      */
     source: 'reply' | 'say';
     /** Whether the host asked for the speech (`true` for a prompt) rather than the session (`false` for a reply). */
@@ -2219,8 +2226,9 @@ export type ServerTextMessage =
       sessionId: string;
       /**
        * The effective configuration (may differ from the client's request).
-       * `VoicePipelineOrchestrator` leaves out `sttOptions` and `ttsOptions`,
-       * the provider options, which can hold what a host keeps from its client.
+       * `VoicePipelineOrchestrator` sends the fields `VoicePipelineConfig`
+       * declares, less `sttOptions` and `ttsOptions`, the provider options,
+       * which can hold what a host keeps from its client.
        */
       config: VoicePipelineConfig;
     }

@@ -58,6 +58,19 @@ function textTurn(model: string, text: string, usage: Json = { input_tokens: 10 
     ]);
 }
 
+/** A reply cut off by `max_tokens` after writing `text`. */
+function truncatedTurn(model: string, text: string): Reply {
+  return () =>
+    sse([
+      messageStart(model, { input_tokens: 10 }),
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: null }, usage: { output_tokens: 3 } },
+      { type: 'message_stop' },
+    ]);
+}
+
 /**
  * A reply Claude refuses (`stop_reason: 'refusal'`), after writing
  * `partialText` when one is given.
@@ -162,7 +175,7 @@ beforeEach(() => {
 });
 
 describe('Anthropic catalog and pricing through the public API', () => {
-  it('generateObject on Claude Sonnet 5.5 sends no forced tool and parses the JSON reply', async () => {
+  it('generateObject on Claude Sonnet 5.5 sends the JSON output format, no forced tool, and parses the JSON reply', async () => {
     route({ 'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', '{"answer":"ok"}')] });
 
     const result = await generateObject({
@@ -174,10 +187,72 @@ describe('Anthropic catalog and pricing through the public API', () => {
 
     expect(result.object).toEqual({ answer: 'ok' });
     const [body] = postedBodies();
-    // Sonnet 5.5 returns HTTP 400 on a forced tool_choice, so structured
-    // output rides the prompt-only JSON path.
+    // Sonnet 5.5 has the JSON output format: the schema goes out as
+    // output_config.format, with no tool and no tool_choice.
+    expect(body.output_config.format.type).toBe('json_schema');
+    expect(body.output_config.format.schema).toMatchObject({ type: 'object', additionalProperties: false, required: ['answer'] });
     expect(body.tool_choice).toBeUndefined();
     expect(body.tools).toBeUndefined();
+  });
+
+  it('generateObject on Claude Opus 5.5 sends output_config.format with the stamped Zod schema and no tools, and parses the text answer', async () => {
+    route({ 'claude-opus-5-5': [textTurn('claude-opus-5-5', '{"name":"Ada","tags":["a","b"]}')] });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-opus-5-5',
+      schema: z.object({ name: z.string(), tags: z.array(z.string()) }),
+      schemaName: 'person',
+      prompt: 'Describe Ada.',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ name: 'Ada', tags: ['a', 'b'] });
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].output_config.format.type).toBe('json_schema');
+    expect(bodies[0].output_config.format.schema).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      properties: { name: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } } },
+    });
+    expect(bodies[0].tools).toBeUndefined();
+    expect(bodies[0].tool_choice).toBeUndefined();
+  });
+
+  it('generateObject on Claude Opus 5.5 escalates the output budget after a max_tokens stop and completes on the second attempt', async () => {
+    route({
+      'claude-opus-5-5': [
+        truncatedTurn('claude-opus-5-5', '{"name":"Ada","ta'),
+        textTurn('claude-opus-5-5', '{"name":"Ada","tags":["a"]}'),
+      ],
+    });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-opus-5-5',
+      schema: z.object({ name: z.string(), tags: z.array(z.string()) }),
+      prompt: 'Describe Ada.',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ name: 'Ada', tags: ['a'] });
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].max_tokens).toBeGreaterThan(bodies[0].max_tokens);
+    expect(bodies[1].output_config.format.type).toBe('json_schema');
+  });
+
+  it('generateObject repairs an enum value that differs from the schema by case without spending a retry', async () => {
+    route({ 'claude-opus-5-5': [textTurn('claude-opus-5-5', '{"answer":"Yes"}')] });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-opus-5-5',
+      schema: z.object({ answer: z.enum(['yes', 'no']) }),
+      prompt: 'Yes or no?',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ answer: 'yes' });
+    expect(postedBodies()).toHaveLength(1);
   });
 
   it('reports Claude Opus 5.5 cache reads at 0.05x in result.usage.costUSD', async () => {
@@ -558,7 +633,8 @@ describe('structured calls carry thinking and effort to the wire', () => {
     expect(result.object).toEqual({ answer: 'ok' });
     const [body] = postedBodies();
     expect(body.thinking).toEqual({ type: 'between_tools' });
-    expect(body.output_config).toEqual({ effort: 'low' });
+    // The JSON output format rides beside the effort in the same output_config.
+    expect(body.output_config).toMatchObject({ effort: 'low', format: { type: 'json_schema' } });
   });
 
   it('streamObject on Sonnet 5.5 with thinking off sends between_tools at the given effort', async () => {

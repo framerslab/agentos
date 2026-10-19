@@ -135,7 +135,7 @@ describe('AgentSession.send responseSchema fallback rebuild (2026-07-07)', () =>
     expect(primaryOptions.responseFormat?.type).toBeUndefined();
   });
 
-  it('Fable primary degrades to the prompt-only JSON path (no forced-tool marker)', async () => {
+  it('Fable primary sends the JSON output format marker (route json_schema) and no schema text', async () => {
     hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
       okResponse(modelId, '{"title":"x"}'),
     );
@@ -155,12 +155,11 @@ describe('AgentSession.send responseSchema fallback rebuild (2026-07-07)', () =>
     const primaryOptions = (hoisted.generateCompletion.mock.calls[0]?.[2] ?? {}) as {
       responseFormat?: unknown;
     };
-    // Fable rejects a forced tool_choice at the API level; the primary must
-    // run schema-in-prompt only, exactly like generateObject's primary path.
-    expect(primaryOptions.responseFormat).toBeUndefined();
+    // Fable has the JSON output format: the marker carries the schema with
+    // route json_schema, so the system prompt does not repeat it.
+    expect(primaryOptions.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
     const system = systemOf(hoisted.generateCompletion.mock.calls[0] as unknown[]);
-    expect(system).toContain(SCHEMA_LINE);
-    expect(system).toContain('"title"');
+    expect(system).not.toContain(SCHEMA_LINE);
   });
 
   it('record schema on an openai primary degrades to json_object (strict gate)', async () => {
@@ -194,7 +193,7 @@ describe('AgentSession.send responseSchema fallback rebuild (2026-07-07)', () =>
     expect(system).toContain('"palette"');
   });
 
-  it('each leg decides for its own payload: a strict primary sends no schema text, a Claude Sonnet 5.5 leg (no forced tool) gets it in its system prompt', async () => {
+  it('each leg decides for its own payload: a strict primary and a Claude Sonnet 5.5 leg (the JSON output format) each carry the schema, so neither gets schema text', async () => {
     hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
       if (modelId === 'claude-sonnet-5-5') return okResponse(modelId, '{"title":"x"}');
       throw new Error('503 overloaded');
@@ -218,8 +217,10 @@ describe('AgentSession.send responseSchema fallback rebuild (2026-07-07)', () =>
     expect((primary?.[2] as { responseFormat?: { type?: string } } | undefined)?.responseFormat?.type).toBe('json_schema');
     expect(systemOf(primary)).not.toContain(SCHEMA_LINE);
     expect(leg).toBeDefined();
-    expect((leg?.[2] as { responseFormat?: unknown } | undefined)?.responseFormat).toBeUndefined();
-    expect(systemOf(leg)).toContain(SCHEMA_LINE);
-    expect(systemOf(leg)).toContain('"title"');
+    expect((leg?.[2] as { responseFormat?: unknown } | undefined)?.responseFormat).toMatchObject({
+      _agentosUseToolForStructuredOutput: true,
+      route: 'json_schema',
+    });
+    expect(systemOf(leg)).not.toContain(SCHEMA_LINE);
   });
 });

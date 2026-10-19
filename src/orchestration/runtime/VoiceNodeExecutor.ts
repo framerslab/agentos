@@ -51,6 +51,17 @@ import type { VoiceSessionEventMap } from '../../io/voice-pipeline/types.js';
 /** The silence a `silence-timeout` node waits through, in milliseconds. */
 const SILENCE_TIMEOUT_MS = 30_000;
 
+/**
+ * Whether a session or a transport reads `closed`, as a `VoicePipelineSession` and an `IStreamTransport` report it in
+ * `state`. An emitter without a `state`, such as one a host relays a pipeline's events onto, never does.
+ *
+ * @param value - The session or the transport.
+ * @returns `true` when its `state` is `'closed'`.
+ */
+function readsClosed(value: unknown): boolean {
+  return (value as { state?: unknown } | null | undefined)?.state === 'closed';
+}
+
 // ---------------------------------------------------------------------------
 // Checkpoint type
 // ---------------------------------------------------------------------------
@@ -111,7 +122,8 @@ export interface VoiceNodeCheckpoint {
  * multiple exit conditions to determine when the node is done.
  *
  * Exit conditions are evaluated concurrently via a single `Promise` race:
- * - **Hangup** -- transport emits `close` or `disconnected`, or a started session emits `close`.
+ * - **Hangup** -- transport emits `close` or `disconnected`, or a started session emits `close`;
+ *   at once when either already reads `closed` as the node starts.
  * - **Turns exhausted** -- a user turn completes (a started session's `conversation_item_added`
  *   with a user item, or a relayed `turn_complete`) and the collector's count reaches
  *   `config.maxTurns`.
@@ -119,7 +131,8 @@ export interface VoiceNodeCheckpoint {
  *   relayed `final_transcript`) contains one of `config.exitKeywords`.
  * - **Silence timeout** -- no speech activity for 30 seconds (when `exitOn: 'silence-timeout'`).
  * - **Abort/barge-in** -- the internal `AbortController` is signalled, either by a
- *   parent abort signal or a `VoiceInterruptError`.
+ *   parent abort signal (at once when it was aborted before the node started) or a
+ *   `VoiceInterruptError`.
  *
  * @example
  * ```ts
@@ -250,6 +263,8 @@ export class VoiceNodeExecutor {
     const parentSignal = scratch?.abortSignal as AbortSignal | undefined;
     const onParentAbort = (): void => controller.abort(parentSignal?.reason);
     parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+    // A signal aborted before the node started fires no abort event again: the node is interrupted at once.
+    if (parentSignal?.aborted) controller.abort(parentSignal.reason);
 
     try {
       // The session whose events the node reads: the started session, under its own
@@ -562,6 +577,16 @@ export class VoiceNodeExecutor {
       };
       controller.signal.addEventListener('abort', onAbort, { once: true });
       releases.push(() => controller.signal.removeEventListener('abort', onAbort));
+
+      // -- Already over ----------------------------------------------------
+      // An abort that came before the race, and a call that ended before the
+      // node started, fire nothing more: the race settles at once, once every
+      // listener above is in place, so that settling releases them all.
+      if (controller.signal.aborted) {
+        onAbort();
+      } else if ((events === 'session' && readsClosed(session)) || readsClosed(transport)) {
+        settleWith({ reason: 'hangup' });
+      }
     });
   }
 }

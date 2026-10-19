@@ -1,51 +1,267 @@
 /**
- * @fileoverview Strict-tool-use capability helper for the Anthropic Claude
- * models.
+ * @fileoverview Structured-outputs capability helpers for the Anthropic Claude
+ * models: which models have the surface, which schemas it carries, and the
+ * one function that picks the route a schema request takes.
  *
- * Anthropic's structured-outputs surface (beta `structured-outputs-2025-11-13`)
- * adds `strict: true` on a tool definition: the API then validates the model's
- * tool input against `input_schema` server-side and guarantees conformance,
- * instead of the best-effort schema adherence unmarked tools get. That is
- * exactly what the forced-tool structured-output path wants — without it, a
- * long or adversarial generation can emit tool input that drifts from the
- * schema and the caller's Zod parse fails with nothing to retry on.
+ * Anthropic's structured-outputs surface has two halves that share one model
+ * list and one set of schema limits
+ * (https://platform.claude.com/docs/en/build-with-claude/structured-outputs,
+ * read 2026-10-18):
+ *
+ *   - JSON outputs: `output_config.format = { type: 'json_schema', schema }`
+ *     makes the model answer valid JSON in its text block, with thinking,
+ *     streaming and tools in the same request. No beta header.
+ *   - Strict tool use: `strict: true` on a tool definition makes the API
+ *     validate the model's tool input against `input_schema` server-side.
+ *
+ * {@link anthropicSchemaRoute} decides, for one model and one schema, whether
+ * a schema request rides the JSON output format, a forced tool call (Claude
+ * Opus 4 and Sonnet 4, which have no JSON outputs and accept a forced
+ * `tool_choice`), or the prompt alone. `structuredOutputFormat.ts` computes it
+ * when it builds the marker and `AnthropicProvider` computes it again for the
+ * model it sends to, on the same object schema, so the two never disagree.
  *
  * The flag is NOT universally supported: models older than the 4.5
  * generation reject unknown tool fields ("tools.0.strict: Extra inputs are
  * not permitted"), so sending it blind would 400 every structured-output
- * call on those models. This helper is the single gate deciding when the
- * flag (and its beta header — see AnthropicProvider.betaHeaders) may ride.
- *
- * Two consumers read this:
- *   - {@link AnthropicProvider} adds `strict: true` to the forced
- *     structured-output tool when the resolved model supports it, and emits
- *     the matching `anthropic-beta` header for any payload whose tools carry
- *     the flag.
- *   - Tests pin the allowlist so a new model family gets an explicit,
- *     reviewed decision instead of silently inheriting behavior.
+ * call on those models. Tests pin the allowlist so a new model family gets
+ * an explicit, reviewed decision instead of silently inheriting behavior.
  *
  * Sibling of `modelSupportsForcedToolChoice` / `modelSupportsThinking`. Kept
  * in its own pure module so the unit test imports no provider/SDK code.
  */
+import { modelSupportsForcedToolChoice } from './model-forced-tool-choice.js';
+
+/**
+ * The Claude models with Anthropic's structured outputs, JSON outputs and
+ * strict tool use alike: Fable 5 and 5.1; Mythos 5, 5.1 and Preview; Opus 4.5
+ * through 4.8, 5 and 5.5; Sonnet 4.5, 4.6, 5 and 5.5; Haiku 4.5 and 5.5 (the
+ * vendor's "Supported models" list, read 2026-10-18), dated variants
+ * included. `\b` matches at the hyphen before a trailing version digit, so
+ * `opus-5` covers `claude-opus-5-5` and `fable-5` covers `claude-fable-5-1`,
+ * while `sonnet-4-50` is not `sonnet-4-5`. Claude Opus 4 and Claude Sonnet 4
+ * (the May 2025 snapshots, `claude-opus-4-20250514` and
+ * `claude-sonnet-4-20250514`) are not on the list.
+ */
+const STRUCTURED_OUTPUTS_MODELS =
+  /^claude-(opus-(4-[5-9]|5)|sonnet-(4-[5-9]|5)|haiku-(4-5|5)|fable-5|mythos-(5|preview))\b/i;
 
 /**
  * Whether the Anthropic API accepts `strict: true` on a tool definition for
- * the given Claude model id.
- *
- * Allow-by-explicit-family: the structured-outputs surface launched with the
- * 4.5 generation (Sonnet 4.5, Opus 4.5, Haiku 4.5) and carries forward to
- * every later family (Opus 4.6-4.8, Sonnet 5, Haiku 5, Fable 5). Older
- * models (Sonnet 4.x dated snapshots, Opus 4.0/4.1, the 3.x line) reject
- * the field. New families get added here as Anthropic releases them.
+ * the given Claude model id: the same model list as
+ * {@link modelSupportsJsonOutputs}, since the vendor gives both features one.
  *
  * @param modelId Anthropic-side model id (e.g. `"claude-sonnet-5"` or
  *   `"claude-opus-4-8"`, dated variants included).
  * @returns `true` when the model accepts `strict: true` tool definitions.
  */
 export function modelSupportsStrictToolUse(modelId: string): boolean {
-  return /^claude-(sonnet-(4-5|5)|opus-(4-[5-9]|5)|haiku-(4-5|5)|fable-5)\b/i.test(
-    modelId,
-  );
+  return STRUCTURED_OUTPUTS_MODELS.test(modelId);
+}
+
+/**
+ * Whether the Anthropic API accepts `output_config.format` (JSON outputs) for
+ * the given Claude model id. The vendor lists the same models for strict tool
+ * use ({@link modelSupportsStrictToolUse}).
+ *
+ * @param modelId Anthropic-side model id, dated variants included.
+ */
+export function modelSupportsJsonOutputs(modelId: string): boolean {
+  return STRUCTURED_OUTPUTS_MODELS.test(modelId);
+}
+
+/**
+ * How a schema request reaches a Claude model:
+ *
+ *  - `json_schema`: `output_config.format` with the schema; the model answers
+ *    JSON in its text block.
+ *  - `forced_tool`: one tool whose `input_schema` is the schema, with
+ *    `tool_choice: { type: 'tool', name }`; the answer is the tool call's
+ *    input.
+ *  - `none`: neither; the schema rides the prompt and the caller's Zod schema
+ *    validates the text.
+ */
+export type AnthropicSchemaRoute = 'json_schema' | 'forced_tool' | 'none';
+
+/**
+ * The route one schema request takes on one model, decided on the object
+ * schema the structured-output marker carries (the schema AFTER
+ * `ensureAnthropicObjectSchema`, so the builder and the provider judge the
+ * same object):
+ *
+ *  - `json_schema` when the model has JSON outputs
+ *    ({@link modelSupportsJsonOutputs}) and the format carries the schema
+ *    ({@link jsonOutputSchemaSupported});
+ *  - else `forced_tool` when the model has no JSON outputs and accepts a
+ *    forced `tool_choice` (Claude Opus 4 and Sonnet 4, whose thinking is off
+ *    unless asked);
+ *  - else `none`: a model with JSON outputs whose schema the format cannot
+ *    carry (a record, an untyped node, a `$ref` or `oneOf`, a root without
+ *    properties, or more union-typed or optional properties than the format
+ *    takes) answers from the prompt. Claude Opus 5 and Sonnet 5 used to send
+ *    such a schema as a non-strict forced tool, clamped to `auto` whenever
+ *    thinking was on; the prompt is the honest route.
+ *
+ * An empty model id (a fallback entry that names no model, resolved to the
+ * provider's default later) routes by the schema alone: `json_schema` when
+ * the format carries it, else `none`. The provider then decides for its real
+ * model, and a schema the format carries is carried by either route the
+ * provider computes, so the two never disagree.
+ *
+ * @param modelId Anthropic-side model id, or `''` when it is not known yet.
+ * @param objectSchema The marker's object schema.
+ */
+export function anthropicSchemaRoute(modelId: string, objectSchema: unknown): AnthropicSchemaRoute {
+  const formatCarriesIt = jsonOutputSchemaSupported(objectSchema);
+  if (!modelId || modelSupportsJsonOutputs(modelId)) {
+    return formatCarriesIt ? 'json_schema' : 'none';
+  }
+  return modelSupportsForcedToolChoice(modelId) ? 'forced_tool' : 'none';
+}
+
+/**
+ * Keywords the JSON output format does not take anywhere in a schema: a `$ref`
+ * (with the `$defs` and `definitions` it would point at; the vendor takes an
+ * internal `$ref`, but the lowering never emits one and a hand-written one is
+ * refused whole rather than checked for an external target), `oneOf` (on
+ * neither of the vendor's lists), `not`, `if`, `patternProperties` and
+ * `dependentSchemas`.
+ */
+const JSON_OUTPUT_REFUSED_KEYWORDS = [
+  '$ref',
+  '$defs',
+  'definitions',
+  'oneOf',
+  'not',
+  'if',
+  'patternProperties',
+  'dependentSchemas',
+] as const;
+
+/**
+ * Whether the JSON output format carries an object schema as the marker holds
+ * it: the schema can be made strict ({@link toolInputSchemaSupportsStrict}: no
+ * `additionalProperties` other than `false`, every node typed, the union-typed
+ * and optional parameter counts within the vendor's limits), its root is an
+ * object with `properties` (a `{ type: 'string' }` or `{ type: 'array' }` root
+ * from a direct caller is not one the format answers), and no node carries a
+ * keyword of {@link JSON_OUTPUT_REFUSED_KEYWORDS}.
+ *
+ * A recursive Zod schema (`z.lazy`) lowers to an untyped `{}` node, which the
+ * strict check refuses, so it routes away from the format as the vendor's
+ * "recursive schemas" exclusion asks, by that path rather than by a `$ref`.
+ *
+ * @param objectSchema The marker's object schema.
+ */
+export function jsonOutputSchemaSupported(objectSchema: unknown): boolean {
+  if (!objectSchema || typeof objectSchema !== 'object' || Array.isArray(objectSchema)) return false;
+  const root = objectSchema as Record<string, unknown>;
+  if (!root.properties || typeof root.properties !== 'object' || Array.isArray(root.properties)) return false;
+  if (!toolInputSchemaSupportsStrict(objectSchema)) return false;
+  return !carriesRefusedKeyword(objectSchema, 0);
+}
+
+/** True when `node` or a subschema below it carries a keyword of {@link JSON_OUTPUT_REFUSED_KEYWORDS}. */
+function carriesRefusedKeyword(node: unknown, depth: number): boolean {
+  if (depth > MAX_STRICT_SCAN_DEPTH) return true;
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return false;
+  const schema = node as Record<string, unknown>;
+  if (JSON_OUTPUT_REFUSED_KEYWORDS.some((kw) => kw in schema)) return true;
+  // `properties` values are subschemas keyed by FIELD name; a field named
+  // `$ref` or `not` is data, so only each value's own keys are read.
+  const properties = schema.properties;
+  if (properties && typeof properties === 'object' && !Array.isArray(properties)) {
+    for (const sub of Object.values(properties as Record<string, unknown>)) {
+      if (carriesRefusedKeyword(sub, depth + 1)) return true;
+    }
+  }
+  for (const key of ['items', 'prefixItems', 'anyOf', 'allOf'] as const) {
+    const value = schema[key];
+    if (Array.isArray(value)) {
+      for (const sub of value) if (carriesRefusedKeyword(sub, depth + 1)) return true;
+    } else if (value && typeof value === 'object') {
+      if (carriesRefusedKeyword(value, depth + 1)) return true;
+    }
+  }
+  for (const key of ['additionalProperties', 'then', 'else', 'contains', 'unevaluatedProperties'] as const) {
+    const value = schema[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      if (carriesRefusedKeyword(value, depth + 1)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The string formats the JSON output format takes
+ * (https://platform.claude.com/docs/en/build-with-claude/structured-outputs,
+ * "String formats", read 2026-10-18). Any other `format` value is refused with
+ * `output_config.format.schema: For 'string' type, format '<name>' is not
+ * supported` (live-probed 2026-10-18 on claude-haiku-5-5 with `slug`), so
+ * {@link anthropicJsonOutputSchema} strips it.
+ */
+export const JSON_OUTPUT_STRING_FORMATS: ReadonlySet<string> = new Set([
+  'date-time',
+  'time',
+  'date',
+  'duration',
+  'email',
+  'hostname',
+  'uri',
+  'ipv4',
+  'ipv6',
+  'uuid',
+]);
+
+/**
+ * The schema the provider sends as `output_config.format.schema`: the
+ * marker's object schema with `additionalProperties: false` stamped on every
+ * object node and the keywords the structured-outputs validator rejects
+ * removed ({@link toolInputSchemaWithExplicitNoExtraProps}), and, besides,
+ * `minItems` above 1 removed (the format takes only 0 and 1: `For 'array'
+ * type, 'minItems' values other than 0 or 1 are not supported`, live-probed
+ * 2026-10-18 on claude-haiku-5-5; a lowered `z.tuple` carries its arity
+ * there) and any `format` outside {@link JSON_OUTPUT_STRING_FORMATS} removed.
+ *
+ * `minLength`, `maxLength` and `pattern` stay: the same probe answered 200 to
+ * each of them on the format, as the strict tool path has kept them since its
+ * probe of 2026-07-07. Every strip is lossless for the caller, whose Zod
+ * schema re-validates the parsed answer with every constraint.
+ *
+ * Pure and non-mutating: the caller's schema object is never written to.
+ *
+ * @param inputSchema The marker's object schema.
+ */
+export function anthropicJsonOutputSchema(inputSchema: unknown): unknown {
+  return stripForJsonOutputs(toolInputSchemaWithExplicitNoExtraProps(inputSchema), 0);
+}
+
+function stripForJsonOutputs(node: unknown, depth: number): unknown {
+  if (depth > MAX_STRICT_SCAN_DEPTH) return node;
+  if (!node || typeof node !== 'object') return node;
+  if (Array.isArray(node)) return node.map((sub) => stripForJsonOutputs(sub, depth + 1));
+  const out: Record<string, unknown> = { ...(node as Record<string, unknown>) };
+  if (typeof out.minItems === 'number' && out.minItems > 1) delete out.minItems;
+  if ('format' in out && !(typeof out.format === 'string' && JSON_OUTPUT_STRING_FORMATS.has(out.format))) {
+    delete out.format;
+  }
+  for (const key of ['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas'] as const) {
+    const map = out[key];
+    if (map && typeof map === 'object' && !Array.isArray(map)) {
+      const next: Record<string, unknown> = {};
+      for (const [k, sub] of Object.entries(map as Record<string, unknown>)) {
+        next[k] = stripForJsonOutputs(sub, depth + 1);
+      }
+      out[key] = next;
+    }
+  }
+  for (const key of ['items', 'prefixItems', 'anyOf', 'oneOf', 'allOf'] as const) {
+    if (out[key] !== undefined && typeof out[key] === 'object') out[key] = stripForJsonOutputs(out[key], depth + 1);
+  }
+  for (const key of ['additionalProperties', 'if', 'then', 'else', 'not', 'contains', 'unevaluatedProperties'] as const) {
+    if (out[key] !== undefined && typeof out[key] === 'object') out[key] = stripForJsonOutputs(out[key], depth + 1);
+  }
+  return out;
 }
 
 /**
