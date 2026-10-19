@@ -122,6 +122,19 @@ describe('OpenAIProvider key failover', () => {
     expect(keyOf(callsOf()[3])).toBe('sk_gamma_0003');
   });
 
+  it("reports an attempt whose key hops all answered with its last answer's status, not as one that got no answer", async () => {
+    const p = await provider('sk_alpha_0001,sk_beta_0002');
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, invalidKey)).mockResolvedValueOnce(jsonResponse(401, invalidKey));
+    const outcomes: Array<{ attempt: number; status: number | null; ok: boolean }> = [];
+    const error = await p
+      .generateCompletion('gpt-4o', [{ role: 'user', content: 'hi' }], { maxAttempts: 1, onAttempt: (outcome) => outcomes.push(outcome) })
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: 'ALL_KEYS_FAILED', httpStatus: 401 });
+    // One attempt, two sends: the hop is free, and the attempt is reported once with the answer it ended on.
+    expect(callsOf().map(keyOf)).toEqual(['sk_alpha_0001', 'sk_beta_0002']);
+    expect(outcomes).toEqual([{ attempt: 1, status: 401, ok: false }]);
+  });
+
   it("reads OpenAI's insufficient_quota 429 as a billing failure, not a throttle", async () => {
     const p = await provider('sk_alpha_0001,sk_beta_0002');
     fetchMock.mockResolvedValueOnce(jsonResponse(429, insufficientQuota)).mockResolvedValueOnce(jsonResponse(200, okChat));

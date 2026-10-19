@@ -239,12 +239,17 @@ export interface GenerateObjectOptions<T extends ZodType> {
   requestTimeout?: number;
 
   /**
-   * The most requests each generation's call sends, a first and its retries together; the provider's configured
-   * count when left out. A validation retry (`maxRetries`) is a generation of its own, with its own count.
+   * The most attempts each generation's call makes, a first and its retries together; the provider's configured
+   * count when left out. A validation retry (`maxRetries`) is a generation of its own, with its own count. Within one
+   * attempt, a key-scoped failure on a pool of several keys re-sends the same request with the next usable key, at
+   * most once per key, and those sends are not counted.
    */
   maxAttempts?: number;
 
-  /** Called after each request a generation's call sent, so a caller can settle the attempts it paid for. */
+  /**
+   * Called once per attempt a generation's call made, with the answer of the attempt's last send (a key hop's
+   * earlier answers are not reported), so a caller can settle the attempts it paid for.
+   */
   onAttempt?: (outcome: AttemptOutcome) => void;
 
   /**

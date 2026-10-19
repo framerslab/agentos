@@ -2655,8 +2655,9 @@ export class OpenAIProvider implements IProvider {
    * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, and once
    *   it has fired no further attempt is sent.
    * @param [attempts] - The call's attempt count (`max`, the configured `maxRetries` when left out) and its
-   *   report (`onAttempt`, called once for each request sent). A {@link CountingAttemptBudget} authorizes
-   *   each attempt before it is sent, so one past the count is refused first.
+   *   report (`onAttempt`, called once for each attempt sent, with the answer of its last send). A
+   *   {@link CountingAttemptBudget} authorizes each attempt before it is sent, so one past the count is refused
+   *   first; a key hop re-sends inside its attempt and is not counted.
    * @returns {Promise<T | ReadableStream<Uint8Array>>} The API response or stream.
    * @throws {OpenAIProviderError} If the request fails after retries or for non-retryable errors;
    *   `REQUEST_ABORTED` when the caller's signal ends it.
@@ -2724,7 +2725,7 @@ export class OpenAIProvider implements IProvider {
     const allowed = attempts?.max ?? this.config.maxRetries!;
     if (!Number.isInteger(allowed) || allowed < 1) throw new RangeError('maxAttempts is a whole number, 1 or more');
     const budget = new CountingAttemptBudget({ maxAttempts: allowed, perAttempt: {} });
-    // Each request sent is reported once, with its answer's status, or with none when no answer came.
+    // Each attempt sent is reported once, with the status of its last send's answer, or with none when no answer came.
     let reported = -1;
     const report = (attempt: number, status: number | null, ok: boolean): void => {
       if (attempt === reported) return;
@@ -2794,13 +2795,19 @@ export class OpenAIProvider implements IProvider {
           });
           if (this.keyPool.usable() === 0) {
             if (kind !== 'quota') {
+              // Every send of this attempt answered: the attempt is reported with its last answer, not as one that
+              // got none (the catch below reports only an attempt not reported yet).
+              report(attempt, response.status, false);
               throw this.allKeysFailedError(keyErrorData?.error?.message, response.status, keyErrorData?.error?.type, keyErrorData?.error?.code ?? undefined);
             }
             break;
           }
           if (++keyHops >= this.keyPool.size) break;
           const nextKey = this.keyPool.next();
-          if (nextKey === '') throw this.allKeysFailedError();
+          if (nextKey === '') {
+            report(attempt, response.status, false);
+            throw this.allKeysFailedError();
+          }
           currentKey = nextKey;
           headers['Authorization'] = `Bearer ${currentKey}`;
           attemptStartedAt = Date.now();

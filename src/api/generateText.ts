@@ -448,9 +448,16 @@ export interface GenerateTextOptions {
    * only; providers without a request timeout ignore it.
    */
   requestTimeout?: number;
-  /** The most requests this call sends, a first and its retries together; the provider's configured count when left out. */
+  /**
+   * The most attempts this call makes, a first and its retries together; the provider's configured count when left
+   * out. Within one attempt, a key-scoped failure (a rejected, unpaid or throttled key) on a pool of several keys
+   * re-sends the same request with the next usable key, at most once per key, and those sends are not counted.
+   */
   maxAttempts?: number;
-  /** Called after each request this call sent, so a caller can settle the attempts it paid for. */
+  /**
+   * Called once per attempt, with the answer of the attempt's last send (a key hop's earlier answers are not
+   * reported), so a caller can settle the attempts it paid for.
+   */
   onAttempt?: (outcome: AttemptOutcome) => void;
   /**
    * Ends the call when it aborts: the provider request in flight is cancelled, no further step, retry or fallback

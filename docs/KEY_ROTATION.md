@@ -50,7 +50,7 @@ Every other answer (a bad request, a missing model, a server error, a 403 `permi
 | Provider | Hops on a key failure | Streaming |
 |---|---|---|
 | Anthropic | Yes, inside the request | Hops before the first event reaches the caller; an in-stream error event that names the key marks it. |
-| OpenAI (and Groq, Mistral, Together, xAI and LiteLLM, which send through an `OpenAIProvider`) | Yes, inside the attempt, so the attempt budget is untouched | Hops before the first event, as the same request path serves both. |
+| OpenAI (and Groq, Mistral, Together, xAI and LiteLLM, which send through an `OpenAIProvider`) | Yes, inside the attempt, so the attempt budget (`maxAttempts`) is untouched; `onAttempt` reports the attempt once, with the answer of its last send, also when the hops end in `ALL_KEYS_FAILED` | Hops before the first event, as the same request path serves both. |
 | Gemini | Yes, inside the request | A streaming request marks the key; the next request draws another. |
 | OpenRouter | Yes, inside the request | The same. |
 | Requesty | No: a single-shot request path marks the key, and the next request draws another | The same. |

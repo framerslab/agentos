@@ -117,11 +117,11 @@ export interface ChatMessage {
 // ... (ensure ModelCompletionOptions, ModelUsage, ModelCompletionChoice, ModelCompletionResponse, etc. are correctly defined or imported if they were part of the "..." )
 
 
-/** One request a call sent to its provider, as {@link ModelCompletionOptions.onAttempt} reports it. */
+/** One attempt a call made to its provider, as {@link ModelCompletionOptions.onAttempt} reports it. */
 export interface AttemptOutcome {
-  /** The request's number in the call, from 1. */
+  /** The attempt's number in the call, from 1. */
   attempt: number;
-  /** The HTTP status it answered, or null when none came (a timeout, a network failure). */
+  /** The HTTP status its last send answered (after any key hops inside it), or null when none came (a timeout, a network failure). */
   status: number | null;
   /** True when it answered with a success. */
   ok: boolean;
@@ -157,9 +157,16 @@ export interface ModelCompletionOptions {
    * this field.
    */
   requestTimeout?: number;
-  /** The most requests this call sends, a first and its retries together; the provider's configured count when left out. */
+  /**
+   * The most attempts this call makes, a first and its retries together; the provider's configured count when left
+   * out. Within one attempt, a key-scoped failure (a rejected, unpaid or throttled key) on a pool of several keys
+   * re-sends the same request with the next usable key, at most once per key, and those sends are not counted.
+   */
   maxAttempts?: number;
-  /** Called after each request this call sent, so a caller can settle the attempts it paid for. */
+  /**
+   * Called once per attempt, with the answer of the attempt's last send (a key hop's earlier answers are not
+   * reported), so a caller can settle the attempts it paid for.
+   */
   onAttempt?: (outcome: AttemptOutcome) => void;
   /**
    * Anthropic extended-thinking switch. `{ budgetTokens }` turns thinking on:
