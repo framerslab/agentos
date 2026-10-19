@@ -129,12 +129,6 @@ export class SemanticChunker {
    * Creates a new SemanticChunker.
    *
    * @param {SemanticChunkerConfig} [config] - Chunking configuration.
-   * @param {number} [config.targetSize=1000] - Target chunk size in characters.
-   * @param {number} [config.maxSize=2000] - Maximum chunk size (hard limit).
-   * @param {number} [config.minSize=200] - Minimum chunk size before merging.
-   * @param {number} [config.overlap=100] - Overlap characters from previous chunk.
-   * @param {boolean} [config.preserveCodeBlocks=true] - Keep code blocks intact.
-   * @param {boolean} [config.respectHeadings=true] - Start new chunks at headings.
    *
    * @example
    * ```typescript
