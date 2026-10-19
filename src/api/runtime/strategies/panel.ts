@@ -521,6 +521,17 @@ export function compilePanel(
         isRecord(t) && typeof t.error === 'string' ? { ...t, error: redacted(t.error) } : t,
       );
 
+    /**
+     * A seat that failed, timed out or found no entry to sit on, written
+     * through the host's logger with its message masked: the run can meet its
+     * quorum without it, and a host that sets no `on.error` reads the failure
+     * nowhere else, as `parallel_seat_failed` writes a parallel seat's.
+     */
+    const logSeatFailed = (name: string, status: 'error' | 'timeout' | 'unseated', error: string): void => {
+      const what = status === 'error' ? 'failed' : status === 'timeout' ? 'timed out' : 'was not seated';
+      agencyLogger.warn(`panel seat "${name}" ${what}`, { event: 'panel_seat_failed', agent: name, status, error: redacted(error) });
+    };
+
     /** The record of a seat whose call ended, and the callbacks its status fires. */
     const settleSeat = (
       name: string,
@@ -536,6 +547,8 @@ export function compilePanel(
         // A tool approval that failed during the call makes the seat an error,
         // whatever text it returned. The gate reported that error to on.error.
         const failed = slot.error !== undefined;
+        const failure = failed ? redacted(slot.error) : undefined;
+        if (failure !== undefined) logSeatFailed(name, 'error', failure);
         const status: PanelSeatRecord['status'] = failed ? 'error' : nonWhitespace(answered.text) >= minChars ? 'ok' : 'empty';
         addUsage(outcome.result.usage);
         callRecords.set(name, {
@@ -554,19 +567,23 @@ export function compilePanel(
           status,
           truncated: status === 'ok' && (answered.finishReason === 'length' || answered.finishReason === 'tool-calls') ? true : undefined,
           durationMs,
-          error: failed ? redacted(slot.error) : undefined,
+          error: failure,
         });
       }
       if (outcome.kind === 'threw') {
+        const error = redacted(outcome.error);
+        logSeatFailed(name, 'error', error);
         on.error?.({ agent: name, error: freshError(outcome.error, mask), timestamp: Date.now() });
-        return seatRecord({ ...base, status: 'error', text: '', durationMs, error: redacted(outcome.error) });
+        return seatRecord({ ...base, status: 'error', text: '', durationMs, error });
       }
       if (outcome.kind === 'timeout') {
         const error = `seat "${name}" timed out after ${seatDeadlineMs}ms`;
+        logSeatFailed(name, 'timeout', error);
         on.error?.({ agent: name, error: new Error(error), timestamp: Date.now() });
         return seatRecord({ ...base, status: 'timeout', text: '', durationMs, error });
       }
       if (outcome.kind === 'error') {
+        logSeatFailed(name, 'error', outcome.message);
         on.error?.({ agent: name, error: new Error(outcome.message), timestamp: Date.now() });
         return seatRecord({ ...base, status: 'error', text: '', durationMs, error: outcome.message });
       }
@@ -580,7 +597,9 @@ export function compilePanel(
         const assigned: SeatingSeatRecord | undefined = seating.record.seats[name];
         const seat: SeatedConfig | Agent | undefined = agents[name];
         if (assigned?.unseated || seat === undefined) {
-          records.set(name, seatRecord({ seat: name, status: 'unseated', text: '', durationMs: 0, error: assigned?.reason ?? 'not seated' }));
+          const reason = assigned?.reason ?? 'not seated';
+          logSeatFailed(name, 'unseated', reason);
+          records.set(name, seatRecord({ seat: name, status: 'unseated', text: '', durationMs: 0, error: reason }));
           return;
         }
         // The deadline starts when the seat takes its slot, and the slot is
