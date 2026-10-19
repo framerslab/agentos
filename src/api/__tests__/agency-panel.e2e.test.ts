@@ -60,7 +60,7 @@ import { seatHealthId } from '../runtime/pool/resolve.js';
 import { OpenAIProviderError } from '../../core/llm/providers/errors/OpenAIProviderError.js';
 import {
   AgencyConfigError, AgencyQuorumError, AgencyPanelError, AgencySeatingError,
-  type Agent, type PanelResult, type AgencyResult, type ApprovalRequest, type ApprovalDecision,
+  type Agent, type AgencyCallbacks, type PanelResult, type AgencyResult, type ApprovalRequest, type ApprovalDecision,
 } from '../types.js';
 
 type Json = Record<string, any>;
@@ -1879,6 +1879,31 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       ['warn', 'approvalRequested', 'requested handler down'],
       ['warn', 'approvalDecided', 'decided handler down'],
     ]);
+  });
+  it("a callback the host sets, replaces or deletes on its on object after agency() returns is the one that runs at the next call, guarded: in an agency without a pool, and in a panel whose error callback and trail wrapped on at construction", async () => {
+    const answering = { generate: async () => ({ text: 'B', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }), stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} } as unknown as Agent;
+    const seen: string[] = [];
+    const on: AgencyCallbacks = { agentEnd: () => { seen.push('first agentEnd'); } };
+    const plain = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { b: answering }, strategy: 'sequential', on } as never);
+    // Replaced and added after construction: the new agentEnd runs in place of the first, and the added agentStart, which throws, runs guarded.
+    on.agentEnd = (e) => { seen.push(`agentEnd ${e.agent}`); };
+    on.agentStart = (e) => { seen.push(`agentStart ${e.agent}`); throw new Error('added handler down'); };
+    const lines = await logLines(async () => {
+      expect((await plain.generate('go')).text).toBe('B');
+      // Deleted after the first call: the next call runs without it.
+      delete on.agentStart;
+      expect((await plain.generate('again')).text).toBe('B');
+    });
+    expect(seen).toEqual(['agentStart __agency__', 'agentEnd __agency__', 'agentEnd __agency__']);
+    expect(lines.filter((l) => l.meta?.event === 'agency_callback_threw').map((l) => [l.meta?.callback, l.meta?.error])).toEqual([['agentStart', 'added handler down']]);
+    // A panel's error callback and its trail wrap on at construction; an agentEnd added after still runs for every seat, the chair and the agency.
+    threeProviders();
+    const panelOn: AgencyCallbacks = { error: () => {} };
+    const team = panel({ on: panelOn, provenance: { enabled: true } });
+    const ended: string[] = [];
+    panelOn.agentEnd = (e) => { ended.push(e.agent); };
+    expect((await team.generate('review')).text).toBe('Merged findings');
+    expect([...ended].sort()).toEqual(['__agency__', 'chair', 'correctness', 'failure', 'security']);
   });
   it('a run no seat answered adds no assistant turn to its session: messages() keeps the user turn alone, in send() and in stream(), and the next prompt carries no empty answer', async () => {
     let decide: (r: ApprovalRequest) => Promise<ApprovalDecision> = hitl.autoReject('no');
