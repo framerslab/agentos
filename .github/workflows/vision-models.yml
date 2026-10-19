@@ -26,9 +26,13 @@ on:
 permissions:
   contents: read
 
+# Off master (a pull request, or a manual run on another branch) a newer run
+# cancels the one it supersedes. On master (the weekly run and a manual run there)
+# a run waits for the one in progress instead of cancelling it, so every master
+# run that starts finishes; GitHub replaces an older waiting run with the newer one.
 concurrency:
   group: vision-models-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   models:
