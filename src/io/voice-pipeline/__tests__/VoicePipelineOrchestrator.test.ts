@@ -2160,27 +2160,25 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(agentSession.sendText).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(1);
     await vi.advanceTimersByTimeAsync(0);
-    // Two seconds after the cut the agent receives the first text anyway; its reply ends, and the second text cuts that
-    // reply and is taken in its turn.
+    // Two seconds after the cut the agent receives the first text anyway. The second text, next in the chain, cuts
+    // the first text's reply before its first word, so that reply joins the conversation as nothing and no barge-in
+    // item is added, and the second text is taken in its turn.
     expect(vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text)).toEqual(['Hello there', 'Book a table.', 'By the window.']);
     expect(log.slice(7)).toEqual([
       'item user text Book a table.',
       'agent listening>thinking',
-      'speech reply false',
-      'agent thinking>speaking',
       'barge_in cancel',
-      'item assistant interrupted Reply to Book a table.|',
-      'agent speaking>listening',
+      'agent thinking>listening',
       'item user text By the window.',
       'agent listening>thinking',
       'speech reply false',
       'agent thinking>speaking',
     ]);
     expect(orchestrator.state).toBe('speaking');
-    // The cut reply's stream yields at last: its token belongs to no reply that speaks now.
+    // The cut replies' streams yield at last: their tokens belong to no reply that speaks now.
     release(' late');
     await vi.advanceTimersByTimeAsync(0);
-    expect(vi.mocked(ttsSession.pushTokens).mock.calls.map(([token]) => token)).toEqual(['Hello', 'Reply to Book a table.', 'Reply to By the window.']);
+    expect(vi.mocked(ttsSession.pushTokens).mock.calls.map(([token]) => token)).toEqual(['Hello', 'Reply to By the window.']);
     expect(orchestrator.state).toBe('speaking');
     // The bound's timer is cleared once the wait ends, and the watchdog is cleared while the agent speaks.
     expect(vi.getTimerCount()).toBe(0);
