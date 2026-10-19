@@ -482,10 +482,14 @@ through the host's logger and goes on. Construction
 rejects a `minAgents` above the seat count, a `minProviders` above the most
 distinct providers one assignment of the seats can answer with (each seat one
 provider of its own reach, so a seat that reaches three providers beside two
-seats on one makes two, not three; a fixed seat's hops count when their key,
-URL or binary is present at construction; one more per pre-built seat), a
+seats on one makes two, not three; one more per pre-built seat), a
 `minVendors` above the vendors the config seats can answer with the same way,
-and `minVendors` with a pool entry whose vendor is unknown.
+and `minVendors` with a pool entry whose vendor is unknown. A pool entry, a
+fixed seat and a fixed seat's hop are within reach only when their key, URL or
+binary is present at construction, since seating leaves the rest out at the
+call: a fixed seat with no key of its own adds nothing, its keyed hops
+included, because seating unseats it before its chain is read. A bound that
+fails names each entry, seat and hop it left out, and why.
 
 The chair is seated from its `from` list with the preferred rule, or as a fixed
 seat from its own config or the agency level. It gets the task and the healthy
@@ -1291,7 +1295,10 @@ strategies `stream()` emits `agent-start` and `agent-end` parts per member on
 `fullStream`. `handoff` and `toolCall` are declared on the callback type and
 never fired. A callback that throws, or an async one whose promise rejects,
 is written through the host's logger as `agency_callback_threw` and never
-fails the run or changes its result, whichever part of the run fires it. `observability` (`logLevel`,
+fails the run or changes its result, whichever part of the run fires it. The
+agency reads each callback from `on` when the run fires it: one set, replaced
+or deleted on that object after `agency()` returns is the one that runs, from
+the next event on. `observability` (`logLevel`,
 `traceEvents`, `otel`) is accepted and not read by `agency()`.
 
 ### Provenance / audit trail
