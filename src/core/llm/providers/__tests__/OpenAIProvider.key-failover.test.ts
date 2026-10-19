@@ -270,6 +270,10 @@ describe('OpenAIProvider key failover', () => {
     const answer = await ask(p);
     expect(answer.choices[0]?.message?.content).toBe('hello');
     expect(keyOf(callsOf()[probes.length])).toBe('sk_alpha_0001');
+    // It initialized without the listing; the first listing now that a key is back makes it.
+    const models = await p.listAvailableModels();
+    expect(models.map((model) => model.modelId)).toEqual(['gpt-4o-mini']);
+    expect(callsOf()[probes.length + 1].url).toMatch(/\/models$/);
   });
 
   it('probes a billing failure with a one-token completion on the default model, never a models list', async () => {

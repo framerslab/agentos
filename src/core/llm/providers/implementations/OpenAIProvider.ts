@@ -1772,8 +1772,16 @@ export class OpenAIProvider implements IProvider {
   /** @inheritdoc */
   public async listAvailableModels(filter?: { capability?: string }): Promise<ModelInfo[]> {
     this.ensureInitialized();
-    // Optionally refresh cache, or rely on initialization. For simplicity, using cached.
-    // await this.refreshAvailableModels(); 
+    // The listing initialize() makes fills the cache. A provider that initialized with every key of its pool out
+    // made none, so its first listing once a probe brings a key back fills the cache here; a filled cache is served
+    // as it is.
+    if (this.availableModelsCache.size === 0) {
+      try {
+        await this.refreshAvailableModels();
+      } catch (error) {
+        console.warn('OpenAIProvider: Failed to refresh models while listing them after finding an empty cache', error);
+      }
+    }
 
     const models = Array.from(this.availableModelsCache.values());
     if (filter?.capability) {
