@@ -206,6 +206,27 @@ describe('maskedPrebuilt', () => {
       { type: 'text', text: 'x', agent: 'a' },
     ]);
   });
+
+  it('a part that waited behind a tail that is no secret stays after that tail when the piece that settles it carries a secret later on: only the parts from the masked text on come out before it', async () => {
+    // 's' could start the secret, so it is held when the tool call arrives; the next piece shows it is no secret and holds the whole secret after 'x '.
+    const later = {
+      ...seat,
+      stream: () => ({
+        fullStream: pieces(
+          { type: 'text', text: 'say s', agent: 'a' },
+          { type: 'tool-call', toolName: 't', args: {}, agent: 'a' },
+          { type: 'text', text: `x ${SECRET} end`, agent: 'a' },
+        ),
+      }),
+    } as unknown as Agent;
+    expect(await drain((maskedPrebuilt(later, mask).stream('go') as unknown as Streamed).fullStream)).toEqual([
+      { type: 'text', text: 'say ', agent: 'a' },
+      { type: 'text', text: 's', agent: 'a' },
+      { type: 'tool-call', toolName: 't', args: {}, agent: 'a' },
+      { type: 'text', text: 'x ', agent: 'a' },
+      { type: 'text', text: '[redacted] end', agent: 'a' },
+    ]);
+  });
 });
 
 describe('maskStreamMembers', () => {
