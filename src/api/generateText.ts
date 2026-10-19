@@ -21,7 +21,7 @@ import {
   mergeRequiredCapabilities,
   type HostLLMPolicy,
 } from './runtime/hostPolicy.js';
-import { adaptTools, isSingleUseToolInput, type AdaptableToolInput } from './runtime/toolAdapter.js';
+import { adaptTools, isSingleUseToolInput, toolInputNames, type AdaptableToolInput } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
 import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from './runtime/approval-gate.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
@@ -2320,6 +2320,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       span?.setAttribute('llm.model', resolved.modelId);
 
       let tools = adaptTools(opts.tools);
+      // The names the table held when it was last adapted.
+      let adaptedNames = toolInputNames(opts.tools);
       let toolMap = new Map<string, ITool>();
       for (const t of tools) toolMap.set(t.name, t);
 
@@ -2404,13 +2406,17 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // A table that grew since the call started is read again before a later
       // step: a hierarchical manager's spawn_specialist writes delegate_to_<role>
       // into the table the manager was given, and the manager's next step
-      // sends the new tool and runs it when the model calls it. A table whose
-      // names are unchanged keeps the tools of the first read, and a table
-      // given as a single-use iterable (a generator), which the first read
-      // exhausted, is not read again.
+      // sends the new tool and runs it when the model calls it. The names are
+      // read first, which converts no schema: a table whose names are
+      // unchanged keeps the tools of the first read and is not adapted again,
+      // and a table given as a single-use iterable (a generator), which the
+      // first read exhausted, is not read again.
       const reusableTools = !isSingleUseToolInput(opts.tools);
       const refreshTools = (): void => {
         if (!reusableTools) return;
+        const names = toolInputNames(opts.tools);
+        if (names.length === adaptedNames.length && names.every((name, i) => name === adaptedNames[i])) return;
+        adaptedNames = names;
         const current = adaptTools(opts.tools);
         if (current.length === tools.length && current.every((t, i) => t.name === tools[i].name)) return;
         tools = current;

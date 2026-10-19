@@ -13,7 +13,7 @@ import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities } from './runtime/hostPolicy.js';
-import { adaptTools, isSingleUseToolInput } from './runtime/toolAdapter.js';
+import { adaptTools, isSingleUseToolInput, toolInputNames } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
 import { APPROVAL_GRANTED, askApprovalGate } from './runtime/approval-gate.js';
 import {
@@ -658,6 +658,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       rootSpan?.setAttribute('llm.model', resolved.modelId);
 
       let tools = adaptTools(opts.tools);
+      // The names the table held when it was last adapted.
+      let adaptedNames = toolInputNames(opts.tools);
       let toolMap = new Map<string, ITool>();
       for (const tool of tools) toolMap.set(tool.name, tool);
       const helperToolRunId = randomUUID();
@@ -717,13 +719,17 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // A table that grew since the call started is read again before a later
       // step: a hierarchical manager's spawn_specialist writes delegate_to_<role>
       // into the table the manager was given, and the manager's next step
-      // sends the new tool and runs it when the model calls it. A table whose
-      // names are unchanged keeps the tools of the first read, and a table
-      // given as a single-use iterable (a generator), which the first read
-      // exhausted, is not read again.
+      // sends the new tool and runs it when the model calls it. The names are
+      // read first, which converts no schema: a table whose names are
+      // unchanged keeps the tools of the first read and is not adapted again,
+      // and a table given as a single-use iterable (a generator), which the
+      // first read exhausted, is not read again.
       const reusableTools = !isSingleUseToolInput(opts.tools);
       const refreshTools = (): void => {
         if (!reusableTools) return;
+        const names = toolInputNames(opts.tools);
+        if (names.length === adaptedNames.length && names.every((name, i) => name === adaptedNames[i])) return;
+        adaptedNames = names;
         const current = adaptTools(opts.tools);
         if (current.length === tools.length && current.every((tool, i) => tool.name === tools[i].name)) return;
         tools = current;
