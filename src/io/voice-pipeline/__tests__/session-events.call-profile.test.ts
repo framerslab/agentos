@@ -479,6 +479,25 @@ describe('session events under a call profile', () => {
     expect(failures).toEqual([['session', false]]);
   });
 
+  it("writes a session event listener's failure as a console warning by its type, never by what its error quotes", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const f = await call();
+      // A listener whose own error quotes the transcript it was handed.
+      f.session.on('user_input_transcribed', ({ transcript }) => {
+        throw new Error(`could not read ${transcript}`);
+      });
+
+      f.final();
+      await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual(['[voice-pipeline-orchestrator] a user_input_transcribed listener failed: Error']);
+      await f.runtime.stopSession();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('names the transport as the source of a reply whose audio the transport refuses', async () => {
     const f = await call();
     f.transport.sendAudio = vi.fn(async () => {

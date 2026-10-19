@@ -786,8 +786,9 @@ describe('VoicePipelineOrchestrator', () => {
       endpoint.emit('turn_complete', makeTurnComplete());
       await vi.advanceTimersByTimeAsync(0);
 
+      // Both rejections are written, each by its type: a listener's own error can quote the event it was handed.
       expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
-        expect.stringMatching(/the turn_complete listener rejected.*the error listener rejected/),
+        "[voice-pipeline-orchestrator] a turn_complete listener failed: Error (an 'error' listener failed: Error)",
       ]);
       expect(unhandled).toEqual([]);
     } finally {
@@ -2349,6 +2350,32 @@ describe('VoicePipelineOrchestrator session events', () => {
 
     expect(heard).toEqual(['the listener that stops', 'close']);
     expect(orchestrator.state).toBe('closed');
+  });
+
+  it("writes a session event listener's failure as a console warning by its type, never by what its error quotes", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await start();
+      // A listener whose own error quotes the transcript it was handed.
+      session.on('user_input_transcribed', ({ transcript }) => {
+        throw new Error(`could not read ${transcript}`);
+      });
+
+      // Nothing listens for 'error': the warning names the event and the error's type, and nothing that was said.
+      sttSession.emit('transcript', { text: 'Hello there', confidence: 0.9, words: [], isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual(['[voice-pipeline-orchestrator] a user_input_transcribed listener failed: Error']);
+
+      // An 'error' listener gets the listener's own Error, the host's to read.
+      const errors: Error[] = [];
+      orchestrator.on('error', (error: Error) => errors.push(error));
+      sttSession.emit('transcript', { text: 'Hello again', confidence: 0.9, words: [], isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(errors.map((error) => error.message)).toEqual(['could not read Hello again']);
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
