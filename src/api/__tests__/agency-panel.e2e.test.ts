@@ -1758,6 +1758,28 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       consoleWarn.mockRestore();
     }
   });
+  it("a panel seat whose key is refused, whose deadline passes or that finds no entry to sit on is written through the host's logger as panel_seat_failed, its message masked, though the run meets its quorum", async () => {
+    vi.stubEnv('XAI_API_KEY', '');
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiError(401, `rejected key ${K.oai} by upstream`)], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, never]]);
+    const lines = await logLines(async () => {
+      const r = await agency({
+        strategy: 'panel',
+        modelPool: { ...POOL(), grok: { provider: 'xai', model: 'grok-4' } },
+        agents: { ...SEATS(), extra: { instructions: 'x', from: ['grok'] } },
+        chair: { from: ['opus'], instructions: 'Merge.' },
+        panel: { seatDeadlineMs: 300 },
+        quorum: { minAgents: 1 },
+      } as never).generate('review');
+      expect(r.text).toBe('Merged');
+      expect(r.seats.map((s) => [s.seat, s.status])).toEqual([['correctness', 'ok'], ['security', 'error'], ['failure', 'timeout'], ['extra', 'unseated']]);
+    });
+    const failed = lines.filter((l) => l.meta?.event === 'panel_seat_failed');
+    expect(failed.map((l) => [l.level, l.meta?.agent, l.meta?.status]).sort()).toEqual([['warn', 'extra', 'unseated'], ['warn', 'failure', 'timeout'], ['warn', 'security', 'error']]);
+    expect(failed.find((l) => l.meta?.agent === 'security')?.meta?.error).toContain('rejected key [redacted] by upstream');
+    expect(failed.find((l) => l.meta?.agent === 'failure')?.meta?.error).toBe('seat "failure" timed out after 300ms');
+    expect(failed.find((l) => l.meta?.agent === 'extra')?.meta?.error).toContain('XAI_API_KEY');
+    expect(JSON.stringify(lines)).not.toContain(K.oai);
+  });
   it("an agentStart callback that throws on a pooled agency's first call, before the call is seated, is written through the host's logger masked: the mask holds the configured keys from construction", async () => {
     const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
