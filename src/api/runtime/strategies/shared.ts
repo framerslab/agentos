@@ -291,9 +291,9 @@ export function maskedMessageOf(error: unknown, mask: ((error: unknown) => unkno
  * Whether no seat answered a result: it carries no text, no call record and
  * no tokens, and no model returned it, as when every seat was rejected and no
  * model was called. Such a result's text is `''`, which is no answer: the
- * agency logs it and runs no validation retry on it, and a parallel or debate
- * strategy counts a nested agency's such run as a seat that gave no answer, as
- * a rejected one ({@link nestedRunUnanswered}). A manager or a synthesizer that
+ * agency logs it and runs no validation retry on it, and every strategy counts
+ * a nested agency's such run as a seat that gave no answer: a rejected one
+ * ({@link nestedRunUnanswered}), under panel an empty one. A manager or a synthesizer that
  * ran and returned no text is not such a run: a model's result carries its
  * `finishReason`, whatever its provider reports for usage (a CLI provider
  * reports 0 tokens when it reads none).
@@ -323,6 +323,30 @@ export function noSeatAnswered(result: Record<string, unknown>): boolean {
  */
 export function nestedRunUnanswered(result: Record<string, unknown>): boolean {
   return Array.isArray(result.agentCalls) && noSeatAnswered(result);
+}
+
+/**
+ * {@link nestedRunUnanswered} for a seat that streamed: an agency's stream
+ * carries an `agentCalls` promise and a plain agent's does not, and the
+ * promise is read only when the seat streamed no text, cost nothing and
+ * reported no finish reason, so an answered run is never held for it. A
+ * promise that rejects is no such run.
+ *
+ * @param stream - What the seat's `stream()` returned.
+ * @param text - The text the seat streamed.
+ * @param usage - What its usage promise settled to.
+ * @param finishReason - What its finish-reason promise settled to.
+ * @returns Whether the seat is a nested agency that gave no answer.
+ */
+export async function nestedStreamUnanswered(
+  stream: { agentCalls?: unknown } | null | undefined,
+  text: string,
+  usage: unknown,
+  finishReason: unknown,
+): Promise<boolean> {
+  if (!stream || stream.agentCalls === undefined || !noSeatAnswered({ text, usage, finishReason })) return false;
+  const agentCalls = await Promise.resolve(stream.agentCalls).catch(() => undefined);
+  return nestedRunUnanswered({ text, agentCalls, usage, finishReason });
 }
 
 /**

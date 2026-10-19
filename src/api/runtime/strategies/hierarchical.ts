@@ -48,6 +48,7 @@ import {
   buildAgentCallUsage,
   callRecordExtras,
   ownAgentInternals,
+  nestedRunUnanswered,
 } from './shared.js';
 import { isCallMask } from '../pool/redact.js';
 import { resolveSeatCredentials } from '../pool/resolve.js';
@@ -247,6 +248,12 @@ export function buildHierarchicalTools(
           throw mask ? mask(err) : err;
         }
         const durationMs = Date.now() - start;
+        // A nested agency that no seat of its own answered gave no answer, as a
+        // rejected delegate gives none: the manager is told so, and no record
+        // is kept.
+        if (nestedRunUnanswered(result)) {
+          return refusal(`Agent "${name}" gave no answer: no seat of its own answered.`);
+        }
 
         // The answer the manager's provider is sent, and the call record keeps.
         const resultText = answer((result.text as string) ?? '');
