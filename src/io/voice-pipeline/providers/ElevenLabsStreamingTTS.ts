@@ -34,12 +34,14 @@
  * complete; every earlier frame carries none. A segment with no `isFinal`
  * within five seconds of its end-of-stream message, or whose socket closes
  * first, ends without a boundary. A socket that does not open within eight
- * seconds is given up: the session's first rejects `startSession()`, a later
- * one ends its segment without a boundary and reaches the session's `'error'`
- * listener. A socket's close while the session is open closes nothing else
- * (the server closes an idle socket after `inactivity_timeout`, 20 seconds by
- * default): only `close()` ends the session. Messages of a socket that is no
- * longer the session's current one are dropped.
+ * seconds, or that errors or closes before it opens, is given up: the
+ * session's first rejects `startSession()`, a later one ends its segment
+ * without a boundary and reaches the session's `'error'` listener, and the
+ * next segment opens a socket of its own. A socket's close while the session
+ * is open closes nothing else (the server closes an idle socket after
+ * `inactivity_timeout`, 20 seconds by default): only `close()` ends the
+ * session. Messages of a socket that is no longer the session's current one
+ * are dropped.
  *
  * @see https://elevenlabs.io/docs/api-reference/text-to-speech/v-1-text-to-speech-voice-id-stream-input
  */
@@ -207,6 +209,15 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
         ws.close(1000, 'connect timeout');
         reject(new Error(`elevenlabs ws connect timed out after ${CONNECT_TIMEOUT_MS}ms`));
       }, CONNECT_TIMEOUT_MS);
+      // The socket failed before it opened: it is no longer the session's, and the open's rejection ends the segment
+      // it was for through synthesize(), which reports the error. The close that follows a failed connect, and
+      // whatever else the socket reports, then changes nothing.
+      const giveUp = (error: Error): void => {
+        settled = true;
+        clearTimeout(timer);
+        if (this.ws === ws) this.ws = null;
+        reject(error);
+      };
 
       ws.on('open', () => {
         if (settled) return;
@@ -246,9 +257,7 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
       // Before the socket opens the error rejects the open; after it, the error reaches the session's listener.
       ws.on('error', (err: Error) => {
         if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          reject(err);
+          giveUp(err);
           return;
         }
         if (this.ws === ws) this._emitErrorSafe(err);
@@ -263,9 +272,8 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
       // an error). Only close() closes the session: a segment still in flight on this socket ends without a boundary.
       ws.on('close', () => {
         if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          reject(new Error('elevenlabs ws closed before it opened'));
+          giveUp(new Error('elevenlabs ws closed before it opened'));
+          return;
         }
         if (this.ws !== ws) return;
         this.ws = null;
