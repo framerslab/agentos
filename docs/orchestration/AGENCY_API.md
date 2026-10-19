@@ -517,7 +517,8 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
   (`Promise<PanelResult>` under `panel`) where it was `Promise<unknown>`. A
   cast of the result to an unrelated type needs `as unknown as` first.
 - `result.text` is `''`, not missing, when every seat was rejected; under
-  `parallel` and `debate` no synthesizer runs then. A nested agency that no
+  `parallel` and `debate` no synthesizer runs then, and a `panel` with no
+  healthy seat throws `AgencyQuorumError` instead. A nested agency that no
   seat of its own answered counts as a rejected seat (under `panel`, an
   `empty` one). A `parallel` run left
   with no seat because a seat failed rejects with the first failed seat's
