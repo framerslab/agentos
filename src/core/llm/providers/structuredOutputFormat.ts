@@ -30,7 +30,7 @@ import { anthropicSchemaRoute, type AnthropicSchemaRoute } from './model-strict-
  * {@link anthropicSchemaRoute}). The provider computes the route again for the
  * model it sends to, on this same `input_schema`.
  */
-export interface AnthropicStructuredOutputMarker {
+export type AnthropicStructuredOutputMarker = {
   _agentosUseToolForStructuredOutput: true;
   /** `json_schema`, `forced_tool` or `none`, for the model id the builder was given. */
   route: AnthropicSchemaRoute;
@@ -40,7 +40,7 @@ export interface AnthropicStructuredOutputMarker {
     /** The object schema, after {@link ensureAnthropicObjectSchema}. */
     input_schema: Record<string, unknown>;
   };
-}
+};
 
 /**
  * Input to {@link buildResponseFormat}.

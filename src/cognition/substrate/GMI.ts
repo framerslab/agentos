@@ -1621,6 +1621,8 @@ export class GMI implements IGMI {
         // Whether the answering attempt's provider payload carried the response schema (the gateway says).
         // Initialised through the assertion, so tsc does not narrow it to undefined where it is read.
         let stepSchemaInPayload = undefined as boolean | undefined;
+        // The route the gateway's Anthropic hop took, read with it once the stream has ended.
+        let stepSchemaRoute = undefined as CompletionAttempt['schemaRoute'];
         let modelTargetInfo!: ModelTargetInfo;
 
         // One attempt per hop. A failure before any output moves to the next
@@ -1818,6 +1820,7 @@ export class GMI implements IGMI {
           // Read once the stream has ended: a provider that sent the request again without the
           // schema payload (OpenRouter's json_object retry) has said so by then.
           stepSchemaInPayload = gatewayAttempt?.schemaInPayload;
+          stepSchemaRoute = gatewayAttempt?.schemaRoute;
 
           if (gateway && route && resolution && attemptOutcome) {
             const outcome = await attemptOutcome;
@@ -1900,7 +1903,7 @@ export class GMI implements IGMI {
           // schema; a hop that sent it in the prompt alone reports 'prompt_only'. A gateway that does not say keeps
           // the earlier report.
           const enforcement =
-            lifted && gatewayAttempt?.schemaRoute !== 'json_schema'
+            lifted && stepSchemaRoute !== 'json_schema'
               ? 'forced_tool'
               : gateway && stepSchemaInPayload !== false
                 ? 'provider_schema'
