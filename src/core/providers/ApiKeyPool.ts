@@ -281,7 +281,11 @@ export class ApiKeyPool {
    * given, else the cooldown); `auth` and `billing` take it out until a probe
    * passes, or until the recheck delay has run when there is no probe. A
    * result whose `at` is older than the key's last recorded result is
-   * ignored, so an old answer never undoes a newer one.
+   * ignored, so an old answer never undoes a newer one. An auth or billing
+   * failure counts toward the recheck delay only when its request started
+   * after the key's previous failure was recorded: the answers of requests
+   * that were in flight together (each drew the key while it was ok) count
+   * once.
    */
   markFailed(key: string, kind: KeyFailureKind, detail?: { retryAfterMs?: number; status?: number; at?: number }): void {
     const entry = this.entries.find((e) => e.key === key);
@@ -305,7 +309,10 @@ export class ApiKeyPool {
       state.until = now + rest;
       state.nextRecheckAt = undefined;
     } else {
-      state.failures += 1;
+      // One failure per piece of evidence: a request that started after the previous record. Eight concurrent
+      // answers from requests that all drew the key while it was ok are one failure, so the first recheck stays at
+      // recheckMs instead of the delay's ceiling.
+      if (state.status !== 'failed' || at >= state.updatedAt) state.failures += 1;
       state.status = 'failed';
       state.until = undefined;
       state.nextRecheckAt = now + this.recheckDelay(state.failures);

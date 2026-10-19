@@ -113,6 +113,20 @@ describe('ApiKeyPool v2', () => {
       expect(pool.snapshot()[0]).toMatchObject({ failures: 3, nextRecheckAt: Date.now() + 3000 });
     });
 
+    it('counts the answers of requests that were in flight together as one failure', () => {
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, maxRecheckMs: 60_000 });
+      const started = Date.now();
+      vi.advanceTimersByTime(500);
+      // Eight requests drew sk_a while it was ok and all started before the first answer marked it: one failure, so
+      // the first recheck is recheckMs away, not the delay's ceiling.
+      for (let i = 0; i < 8; i++) pool.markFailed('sk_a', 'billing', { at: started + i });
+      expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', kind: 'billing', failures: 1, nextRecheckAt: Date.now() + 1000 });
+      // A request that started after that record is new evidence and doubles the delay.
+      vi.advanceTimersByTime(10);
+      pool.markFailed('sk_a', 'billing', { at: Date.now() });
+      expect(pool.snapshot()[0]).toMatchObject({ failures: 2, nextRecheckAt: Date.now() + 2000 });
+    });
+
     it('a success clears the failure count and the kind', () => {
       const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000 });
       pool.markFailed('sk_a', 'auth');
