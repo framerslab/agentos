@@ -51,9 +51,10 @@ export function maskTextStream(pieces: AsyncIterable<unknown>, mask: CallMask): 
 
 /**
  * A part with every string masked by the listed values, and a `tool-result`
- * part's result as a tool's output is masked: a number whose digits hold a
- * listed value becomes `[redacted]` too. A count, a duration or a timestamp
- * of any other part stays a number.
+ * part's result and a `tool-call` part's arguments as a tool's output is
+ * masked: a number whose digits hold a listed value becomes `[redacted]` too,
+ * as in the tool calls of a `generate()` result. A count, a duration or a
+ * timestamp of any other part stays a number.
  *
  * @param part - A stream part.
  * @param mask - The call's mask.
@@ -61,8 +62,10 @@ export function maskTextStream(pieces: AsyncIterable<unknown>, mask: CallMask): 
  */
 export function maskedPart<T>(part: T, mask: CallMask): T {
   const masked = mask.strings(part);
-  if (!isRecord(part) || part.type !== 'tool-result' || !('result' in part) || !isRecord(masked)) return masked;
-  return { ...masked, result: mask.strings(part.result, true) } as T;
+  if (!isRecord(part) || !isRecord(masked)) return masked;
+  if (part.type === 'tool-result' && 'result' in part) return { ...masked, result: mask.strings(part.result, true) } as T;
+  if (part.type === 'tool-call' && 'args' in part) return { ...masked, args: mask.strings(part.args, true) } as T;
+  return masked;
 }
 
 /**
