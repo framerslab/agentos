@@ -1557,14 +1557,16 @@ function conventions(room: FakeRoom, options: Omit<LiveKitStreamTransportOptions
   const audio: AudioFrame[] = [];
   const messages: ClientTextMessage[] = [];
   const errors: string[] = [];
+  const warnings: string[] = [];
   let closes = 0;
   transport.on('audio', (frame: AudioFrame) => audio.push(frame));
   transport.on('message', (message: ClientTextMessage) => messages.push(message));
   transport.on('error', (error: Error) => errors.push(error.message));
+  transport.on('warning', (warning: Error) => warnings.push(warning.message));
   transport.on('close', () => {
     closes += 1;
   });
-  return { transport, audio, messages, errors, closes: () => closes };
+  return { transport, audio, messages, errors, warnings, closes: () => closes };
 }
 
 /** A speaking transport linked with `participant`, on the fake publishing module, and the errors it emits. */
@@ -1907,11 +1909,13 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
   it('a text that fails the text_input check is reported and the transport stays open', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
-    const { transport, messages, errors } = conventions(room, { participant: 'user-1' });
+    const { transport, messages, errors, warnings } = conventions(room, { participant: 'user-1' });
     for (const text of ['', '   \n', 'x'.repeat(4_001)]) room.chat('user-1', text);
     await settle();
-    // The error says what was refused, never what the participant typed.
-    expect(errors).toEqual(['livekit text input refused', 'livekit text input refused', 'livekit text input refused']);
+    // Each is a warning, which says what was refused, never what the participant typed; 'error', which ends a session
+    // on the transport, carries none of them.
+    expect(warnings).toEqual(['livekit text input refused', 'livekit text input refused', 'livekit text input refused']);
+    expect(errors).toEqual([]);
     expect(messages).toEqual([]);
     expect(transport.state).toBe('open');
     // 4,000 characters is the limit in any script: 4,000 of 'é', 8,000 bytes, are taken whole.
@@ -1926,10 +1930,23 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     const speaker = speakingTo(speakingRoom, 'user-1');
     speakingRoom.chat('user-1', ' ');
     await settle();
-    expect(speaker.errors).toEqual(['livekit text input refused']);
+    expect(speaker.warnings).toEqual(['livekit text input refused']);
+    expect(speaker.errors).toEqual([]);
     expect(speaker.transport.state).toBe('open');
     speaker.transport.close();
     await speaker.transport.whenClosed();
+
+    // With nothing listening for 'warning', the warning is one line through the host's logger.
+    const loggedRoom = new FakeRoom();
+    loggedRoom.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const logger = { warn: vi.fn() };
+    const logged = new LiveKitStreamTransport({ room: loggedRoom, participant: 'user-1', sampleRate: 16_000, rtc: fakeRtc(), logger });
+    loggedRoom.chat('user-1', '   ');
+    await settle();
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledWith('LiveKitStreamTransport: livekit text input refused');
+    expect(logged.state).toBe('open');
+    logged.close();
   });
 
   it('a user transcript is written to lk.transcription with lk.segment_id, lk.transcription_final and lk.transcribed_track_id', async () => {
@@ -2100,19 +2117,32 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     await transport.whenClosed();
   });
 
-  it('reports a transcription write that fails as an error, and stays open', async () => {
+  it('reports a run of failed transcription writes as one warning, and stays open', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
-    const { transport, errors } = conventions(room, { participant: 'user-1' });
+    const { transport, errors, warnings } = conventions(room, { participant: 'user-1' });
+    let failing = true;
     room.localParticipant.sendText.mockImplementation(async (_text: string, options?: unknown) => {
-      if ((options as { topic?: string } | undefined)?.topic === 'lk.transcription') throw new Error('not sent');
+      if (failing && (options as { topic?: string } | undefined)?.topic === 'lk.transcription') throw new Error('not sent');
       return {};
     });
-    await transport.sendControl({ type: 'transcript', text: 'Hello', isFinal: true, confidence: 0.9 });
+    // Two writes fail in a row, as while the room's connection recovers: one warning says so.
+    await transport.sendControl({ type: 'transcript', text: 'Hello', isFinal: false, confidence: 0.9 });
+    await transport.sendControl({ type: 'transcript', text: 'Hello there', isFinal: true, confidence: 0.9 });
     await settle();
-    expect(errors).toEqual(['livekit transcription failed']);
+    expect(warnings).toEqual(['livekit transcription failed']);
+    // A write that goes out ends the run, so the next failure is reported again.
+    failing = false;
+    await transport.sendControl({ type: 'transcript', text: 'Thanks', isFinal: true, confidence: 0.9 });
+    await settle();
+    failing = true;
+    await transport.sendControl({ type: 'transcript', text: 'Bye', isFinal: true, confidence: 0.9 });
+    await settle();
+    expect(warnings).toEqual(['livekit transcription failed', 'livekit transcription failed']);
+    // 'error', which ends a session on the transport, carries none of them.
+    expect(errors).toEqual([]);
     expect(transport.state).toBe('open');
-    expect(controlTypes(room)).toEqual(['transcript']);
+    expect(controlTypes(room)).toEqual(['transcript', 'transcript', 'transcript', 'transcript']);
     transport.close();
   });
 
@@ -2185,6 +2215,35 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
       ['Hello', agent, 'true', 'TR_AGENT'],
     ]);
     expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
+
+  it('keeps a session running through a chat text the check refuses and a transcription write that fails', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const s = await converse(room, 'user-1', { conventions: true });
+    const warnings: string[] = [];
+    s.transport.on('warning', (warning: Error) => warnings.push(warning.message));
+    // The user sends whitespace alone, then a text past the limit, in the room's chat.
+    room.chat('user-1', '   ');
+    room.chat('user-1', 'x'.repeat(4_001));
+    await settle();
+    // The room's data channel refuses the transcription streams for a while.
+    room.localParticipant.sendText.mockImplementation(async (_text: string, options?: unknown) => {
+      if ((options as { topic?: string } | undefined)?.topic === 'lk.transcription') throw new Error('not sent');
+      return {};
+    });
+    s.stt.emit('transcript', { text: 'What time is it?', confidence: 0.9, words: [], isFinal: true });
+    await settle();
+    // Each is a warning the session never hears; 'error' would end it, as it ends any session on a transport.
+    expect(warnings).toEqual(['livekit text input refused', 'livekit text input refused', 'livekit transcription failed']);
+    expect(s.errors).toEqual([]);
+    expect(s.orchestrator.state).toBe('listening');
+    expect(s.transport.state).toBe('open');
+    // The session still takes what the user types next.
+    room.chat('user-1', 'Book a table.');
+    await vi.waitFor(() => expect(s.orchestrator.state).toBe('speaking'));
+    expect(controlTypes(room)).toContain('agent_thinking');
     await s.orchestrator.stopSession('done');
   });
 
