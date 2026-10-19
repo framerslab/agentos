@@ -464,6 +464,21 @@ describe('session events under a call profile', () => {
     expect(f.transport.close).toHaveBeenCalledOnce();
   });
 
+  it("names the session, not the agent, for a host prompt stream that fails, and rejects the host's call with its own error", async () => {
+    const f = await call();
+    const failures: Array<[string, boolean]> = [];
+    f.session.on('session_error', (event) => failures.push([event.source, event.recoverable]));
+    // The host's own stream of a prompt's text, which fails before its first word.
+    const prompt = (async function* () {
+      throw new Error('the prompt source failed');
+    })();
+
+    await expect(f.runtime.pushToTTS(prompt)).rejects.toThrow('the prompt source failed');
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+
+    expect(failures).toEqual([['session', false]]);
+  });
+
   it('names the transport as the source of a reply whose audio the transport refuses', async () => {
     const f = await call();
     f.transport.sendAudio = vi.fn(async () => {
