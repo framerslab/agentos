@@ -507,7 +507,8 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
   (`Promise<PanelResult>` under `panel`) where it was `Promise<unknown>`. A
   cast of the result to an unrelated type needs `as unknown as` first.
 - `result.text` is `''`, not missing, when every seat was rejected; under
-  `parallel` and `debate` no synthesizer runs then. A session
+  `parallel` and `debate` no synthesizer runs then, and a nested agency that
+  no seat of its own answered counts as a rejected seat. A session
   adds no assistant turn for an empty answer, such a run's or a seat's reply
   with no text: `messages()` keeps the user's turn alone, and the next prompt
   carries no empty `Assistant:` line.
@@ -559,7 +560,9 @@ console.log(agentCalls.length); // 3 — one record per agent
 All agents run concurrently on the same prompt.  A synthesis step merges their
 outputs using the agency-level `model` and `provider` (the chair).  Requires
 `model` or `provider` at the agency level.  When every seat was rejected,
-blocked or failed, no synthesis runs and the text is `''`.
+blocked or failed, no synthesis runs and the text is `''`; a nested agency
+that no seat of its own answered counts as a rejected seat, toward the quorum
+too.
 
 Each seat can run on its own provider, model and key, so one question can be
 put to several vendors at once and the chair reads every answer:
@@ -620,7 +623,8 @@ turns, including the current round's, and must quote the strongest opposing
 claim, attack it and add one new point in about 150 words.  After the last
 round a judge built from the agency-level `model` or `provider` writes the
 verdict, so one of the two is required.  A turn the approver rejects is sat
-out; when every turn is, no verdict is written and the text is `''`.  Putting
+out, as is a nested agency's turn that no seat of its own answered; when every
+turn is, no verdict is written and the text is `''`.  Putting
 the two sides on different vendors keeps one model from arguing with itself:
 
 ```typescript

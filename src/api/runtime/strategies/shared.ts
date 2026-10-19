@@ -283,6 +283,28 @@ export function maskedMessageOf(error: unknown, mask: ((error: unknown) => unkno
 }
 
 /**
+ * Whether no seat answered a result: it carries no text, no call record and
+ * no tokens, as when every seat was rejected and no model was called. Such a
+ * result's text is `''`, which is no answer: the agency logs it and runs no
+ * validation retry on it, and a parallel or debate strategy counts a nested
+ * agency's such run as a seat that gave no answer, as a rejected one. A
+ * manager or a synthesizer that ran and returned no text spent tokens, and is
+ * not such a run.
+ *
+ * @param result - A strategy's result, or a seat's.
+ * @returns Whether the result holds no answer and cost nothing.
+ */
+export function noSeatAnswered(result: Record<string, unknown>): boolean {
+  const { text, agentCalls, usage } = result;
+  const tokens = usage && typeof usage === 'object' ? (usage as { totalTokens?: unknown }).totalTokens : undefined;
+  return (
+    (typeof text !== 'string' || text === '') &&
+    (!Array.isArray(agentCalls) || agentCalls.length === 0) &&
+    (typeof tokens !== 'number' || tokens === 0)
+  );
+}
+
+/**
  * Merge agency-level defaults into an agent config.
  *
  * Agent-level values take precedence over agency-level defaults. Tools are

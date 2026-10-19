@@ -65,7 +65,7 @@
  */
 
 import { compileStrategy, isAgent } from './runtime/strategies/index.js';
-import { maskedMessageOf, seatMetadataOf } from './runtime/strategies/shared.js';
+import { maskedMessageOf, noSeatAnswered, seatMetadataOf } from './runtime/strategies/shared.js';
 import { validatePoolOptions, hasPoolSurface } from './runtime/pool/validate.js';
 import { createSeatingState, seatRoster, type SeatingState, type SeatedRoster } from './runtime/pool/seating.js';
 import { guardPerCallOptions } from './runtime/pool/guard.js';
@@ -115,23 +115,6 @@ import type { RawData, WebSocket } from 'ws';
 
 /** The agency's own lines, to the host's logger factory whenever the host set it. */
 const agencyLogger = lazyLogger('agency');
-
-/**
- * Whether no seat answered a strategy's result: it carries no text, no call
- * record and no tokens, as when every seat was rejected and no model was
- * called. Such a result's text is `''`, which is no answer: it is logged, and
- * no validation retry runs on it. A manager or a synthesizer that ran and
- * returned no text spent tokens, and is not such a run.
- */
-function noSeatAnswered(result: Record<string, unknown>): boolean {
-  const { text, agentCalls, usage } = result;
-  const tokens = usage && typeof usage === 'object' ? (usage as { totalTokens?: unknown }).totalTokens : undefined;
-  return (
-    (typeof text !== 'string' || text === '') &&
-    (!Array.isArray(agentCalls) || agentCalls.length === 0) &&
-    (typeof tokens !== 'number' || tokens === 0)
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Public factory

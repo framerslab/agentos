@@ -29,8 +29,9 @@
  * agent is sent the input the check read. The post-approval check also reads
  * the motion and each argument so far on its own. An agent the handler
  * rejects, or whose input the post-approval check blocks, sits that turn out;
- * the synthesizer still rules on the arguments that were made. When none was
- * made, no synthesizer runs and the text is `''`.
+ * the synthesizer still rules on the arguments that were made. A nested
+ * agency's turn that no seat of its own answered is sat out the same way.
+ * When no argument was made, no synthesizer runs and the text is `''`.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileReviewLoop} -- an alternative iterative strategy with explicit approval.
@@ -51,6 +52,7 @@ import {
   buildAgentCallUsage,
   callRecordExtras,
   ownAgentInternals,
+  noSeatAnswered,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -172,6 +174,10 @@ export function compileDebate(
           const start = Date.now();
           const result = (await a.generate(gate.input, opts)) as Record<string, unknown>;
           const durationMs = Date.now() - start;
+
+          // A nested agency's run that no seat of its own answered made no
+          // argument: the agent sits the turn out, as a rejected one does.
+          if (noSeatAnswered(result)) continue;
 
           const resultText = (result.text as string) ?? '';
           const resultUsage = (result.usage as ResultUsageSnapshot) ?? {};

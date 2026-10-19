@@ -21,8 +21,9 @@
  * Each agent is gated by {@link checkBeforeAgentInput} before invocation.
  * Rejected agents, and agents whose input the post-approval check blocks (the
  * approver's instructions included), return `null` and are filtered out
- * before synthesis. When every agent was rejected, blocked or failed, no
- * synthesis runs and the text is `''`.
+ * before synthesis, as is a nested agency's run that no seat of its own
+ * answered. When every agent was rejected, blocked or failed, no synthesis
+ * runs and the text is `''`.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileSequential} -- the simpler alternative for ordered pipelines.
@@ -46,6 +47,7 @@ import {
   enforceQuorum,
   ownAgentInternals,
   maskedMessageOf,
+  noSeatAnswered,
 } from './shared.js';
 import { lazyLogger } from '../lazyLogger.js';
 
@@ -162,8 +164,11 @@ export function compileParallel(
           });
           continue;
         }
-        // Skip null results (HITL-rejected agents).
-        if (outcome.value !== null) {
+        // Skip null results (HITL-rejected agents), and a nested agency's run
+        // that no seat of its own answered: it gave no answer, as a rejected
+        // agent gives none, so it neither meets the quorum nor reaches the
+        // synthesizer.
+        if (outcome.value !== null && !noSeatAnswered(outcome.value.result)) {
           settled.push(outcome.value);
         }
       }
