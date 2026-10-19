@@ -134,19 +134,20 @@ const CALLBACK_NAMES: Record<keyof AgencyCallbacks, true> = {
 
 /**
  * The callbacks `on` holds, each run through `fire`, which catches what it
- * throws. Each is read by name, so a method an instance inherits is wrapped
- * as an own one is, and a name `on` does not hold stays absent.
+ * throws and what the promise of an async one rejects with. Each is read by
+ * name, so a method an instance inherits is wrapped as an own one is, and a
+ * name `on` does not hold stays absent.
  *
  * @param on - The callbacks as the host gave them.
- * @param fire - Runs one callback and writes what it throws to the host's logger.
+ * @param fire - Runs one callback and writes what it throws or rejects with to the host's logger.
  * @returns The same callbacks, none of which throws.
  */
-function guardedCallbacks(on: AgencyCallbacks, fire: (name: string, call: () => void) => void): AgencyCallbacks {
+function guardedCallbacks(on: AgencyCallbacks, fire: (name: string, call: () => unknown) => void): AgencyCallbacks {
   const out: Record<string, unknown> = { ...on };
   for (const name of Object.keys(CALLBACK_NAMES) as Array<keyof AgencyCallbacks>) {
     const fn: unknown = on[name];
     if (typeof fn !== 'function') continue;
-    out[name] = (event: unknown) => fire(name, () => (fn as (event: unknown) => void).call(on, event));
+    out[name] = (event: unknown) => fire(name, () => (fn as (event: unknown) => unknown).call(on, event));
   }
   return out as AgencyCallbacks;
 }
@@ -252,12 +253,22 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   /** A masked stand-in that never writes `error`: for an error someone else owns, a HITL handler's. */
   const maskedCopy = (error: unknown): unknown => (pooled ? maskedCopyOf(error, secretsHolder.list) : error);
   const toError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
-  /** Runs one of this agency's own callbacks: a callback that throws is written to the host's logger, masked, and never fails the call. */
-  const fire = (name: string, call: () => void): void => {
-    try {
-      call();
-    } catch (err) {
+  /**
+   * Runs one of this agency's own callbacks: a callback that throws, or an
+   * async one whose promise rejects, is written to the host's logger, masked,
+   * and never fails the call or leaves a rejection unhandled.
+   */
+  const fire = (name: string, call: () => unknown): void => {
+    const threw = (err: unknown): void => {
       agencyLogger.warn(`${name} callback threw`, { event: 'agency_callback_threw', callback: name, error: maskedMessageOf(err, mask) });
+    };
+    try {
+      const returned = call();
+      if ((typeof returned === 'object' || typeof returned === 'function') && returned !== null && typeof (returned as PromiseLike<unknown>).then === 'function') {
+        Promise.resolve(returned).then(undefined, threw);
+      }
+    } catch (err) {
+      threw(err);
     }
   };
   // Every callback runs through `fire`, whichever part of a run fires it:
