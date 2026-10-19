@@ -850,9 +850,11 @@ export interface GenerateTextOptions {
    * Shape varies by provider: OpenAI accepts json_object or
    * json_schema, Anthropic uses an internal _agentosUseToolForStructuredOutput
    * marker whose `route` AnthropicProvider sends as the JSON output format
-   * (`output_config.format`, every model that has it), as a forced tool call
-   * (Claude Opus 4 and Sonnet 4) or as a schema block in the system prompt
-   * (neither carries the schema), Gemini uses a _gemini.responseSchema extra.
+   * (`output_config.format`, every model that has it, when the schema fits
+   * its limits), as a non-strict forced tool call (a model without the format,
+   * and a schema it cannot carry on a model that accepts a forced choice) or
+   * as a schema block in the system prompt (a model that refuses a forced
+   * choice, or thinking on), Gemini uses a _gemini.responseSchema extra.
    * The provider implementations consume whatever shape is here.
    */
   _responseFormat?: { type: string } | Record<string, unknown>;

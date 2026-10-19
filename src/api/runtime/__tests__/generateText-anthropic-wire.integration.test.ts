@@ -58,6 +58,19 @@ function textTurn(model: string, text: string, usage: Json = { input_tokens: 10 
     ]);
 }
 
+/** A forced tool call to `name` with `input` from `model`, as the forced schema tool is answered. */
+function toolTurn(model: string, name: string, input: Json): Reply {
+  return () =>
+    sse([
+      messageStart(model, { input_tokens: 10 }),
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name, input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 5 } },
+      { type: 'message_stop' },
+    ]);
+}
+
 /** A reply cut off by `max_tokens` after writing `text`. */
 function truncatedTurn(model: string, text: string): Reply {
   return () =>
@@ -253,6 +266,31 @@ describe('Anthropic catalog and pricing through the public API', () => {
 
     expect(result.object).toEqual({ answer: 'yes' });
     expect(postedBodies()).toHaveLength(1);
+  });
+
+  it('generateObject with a record schema on Claude Sonnet 4.6 sends one non-strict tool with a forced tool_choice and returns the tool call as the object', async () => {
+    // A record is outside the JSON output format; Sonnet 4.6, the provider's
+    // default text model, accepts a forced tool choice, so the non-strict
+    // forced tool carries the schema, as it did before the format.
+    route({ 'claude-sonnet-4-6': [toolTurn('claude-sonnet-4-6', 'scores', { scores: { a: 1, b: 2 } })] });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-sonnet-4-6',
+      schema: z.object({ scores: z.record(z.string(), z.number()) }),
+      schemaName: 'scores',
+      prompt: 'Score a and b.',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ scores: { a: 1, b: 2 } });
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].tools).toHaveLength(1);
+    expect(bodies[0].tools[0].name).toBe('scores');
+    expect(bodies[0].tools[0].strict).toBeUndefined();
+    expect(bodies[0].tools[0].input_schema.properties.scores).toMatchObject({ type: 'object' });
+    expect(bodies[0].tool_choice).toEqual({ type: 'tool', name: 'scores' });
+    expect(bodies[0].output_config?.format).toBeUndefined();
   });
 
   it('reports Claude Opus 5.5 cache reads at 0.05x in result.usage.costUSD', async () => {

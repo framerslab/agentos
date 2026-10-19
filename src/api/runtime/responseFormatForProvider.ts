@@ -57,11 +57,14 @@ export interface BuildResponseFormatForProviderInputs {
  *   strict validator, else loose `json_object`.
  * - `anthropic` — the structured-output marker with its route: the native
  *   JSON output format on every model that has it (Opus 4.5 and later,
- *   Sonnet 4.5 and later, Haiku 4.5 and later, Fable, Mythos), the forced
- *   schema tool on Claude Opus 4 and Sonnet 4, and `undefined` when neither
- *   carries the schema (a record, a `$ref`, a `oneOf`, an untyped node, more
- *   union-typed or optional properties than the format takes), which leaves
- *   the schema to the prompt.
+ *   Sonnet 4.5 and later, Haiku 4.5 and later, Fable, Mythos) when the
+ *   schema fits its limits; the non-strict forced schema tool on a model
+ *   without the format (Claude Opus 4 and Sonnet 4) and for a schema the
+ *   format cannot carry (a record, a `$ref`, a `oneOf`, an untyped node, more
+ *   union-typed or optional properties than the format takes) on a model that
+ *   accepts a forced choice, the empty id included; and `undefined` for such
+ *   a schema on a model that refuses a forced choice (Claude Opus 5.5, Sonnet
+ *   5.5, Fable, Mythos 5.1), which leaves the schema to the prompt.
  * - `gemini` — native `responseSchema` marker.
  * - `gemini-cli` — `undefined`. GeminiCLIProvider never reads
  *   `options.responseFormat` (bridge options + text return only), so

@@ -514,8 +514,16 @@ export async function* runGmiTurn(
   }
 }
 
-/** Parses a structured send's answer: the schema tool's arguments when a step carried them, else the reply text. */
-function parseStructured(folder: GmiTurnFolder, schema: ZodType): unknown {
+/**
+ * Parses a structured send's answer: the schema tool's arguments when a step carried them, else the reply text. A
+ * turn that ended on the output limit (finish reason `length`) with JSON that does not parse was cut off, and the
+ * error says so, the raw text attached: the session path does not escalate the budget as generateObject does.
+ *
+ * @param maxTokens - The turn's `maxTokens`, named in the cut-off's message when the turn set one.
+ */
+function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: number): unknown {
+  // Read before the parse: the gateway lifts only JSON that parses, so a cut-off keeps its finish reason.
+  const cutOff = folder.finishReason() === 'length';
   const structured = folder.structuredOutput();
   let raw: unknown = structured;
   if (structured === undefined || typeof structured === 'string') {
@@ -523,6 +531,13 @@ function parseStructured(folder: GmiTurnFolder, schema: ZodType): unknown {
     try {
       raw = JSON.parse(source);
     } catch (err) {
+      if (cutOff) {
+        const limit = typeof maxTokens === 'number' ? `maxTokens (${maxTokens})` : 'maxTokens';
+        throw new ObjectGenerationError(
+          `session.send: the answer was cut off at ${limit} before the JSON was complete; raise maxTokens for this schema`,
+          source,
+        );
+      }
       throw new ObjectGenerationError(
         `session.send: provider response is not valid JSON despite enforcement (${err instanceof Error ? err.message : String(err)})`,
         source,
@@ -557,7 +572,8 @@ export async function sendGmiTurn(
     ? {
         ...turn,
         acceptReply: () => {
-          object = parseStructured(folder, schema);
+          const maxTokens = turn.options?.maxTokens;
+          object = parseStructured(folder, schema, typeof maxTokens === 'number' ? maxTokens : undefined);
         },
       }
     : turn;

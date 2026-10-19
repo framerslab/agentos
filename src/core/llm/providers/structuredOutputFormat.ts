@@ -11,8 +11,10 @@
  *   - anthropic  → a marker carrying one object schema and its route
  *                  ({@link AnthropicStructuredOutputMarker}): the native JSON
  *                  output format (`output_config.format`) on every model that
- *                  has it, a forced tool call on Claude Opus 4 and Sonnet 4, or
- *                  none when neither carries the schema
+ *                  has it when the schema fits its limits, a non-strict forced
+ *                  tool call on a model without it or for a schema it cannot
+ *                  carry on a model that accepts a forced choice, or none when
+ *                  neither carries the schema
  *   - gemini     → generationConfig.responseMimeType + responseSchema
  *   - openrouter → degrades to json_object (OpenRouter has no schema enforcement)
  *   - requesty   → degrades to json_object (aggregator; no cross-upstream schema enforcement)
@@ -164,7 +166,7 @@ function mergePropertySchemas(schemas: unknown[]): unknown {
  *     (`jsonOutputSchemaSupported`), not on this wrap.
  *
  * The JSON output format itself takes a root `anyOf` of objects (live-probed
- * 2026-10-18 on claude-haiku-5-5), so the merge is not the API's demand there;
+ * 2026-10-19 on claude-haiku-5-5), so the merge is not the API's demand there;
  * it is kept so one object schema decides one route for both the format and
  * the forced tool, whose `input_schema` does need it.
  *
