@@ -40,6 +40,7 @@ vi.mock('../../model.js', () => ({
 import { generateText } from '../../generateText.js';
 import { streamText } from '../../streamText.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+import { createErrorMask } from '../pool/redact.js';
 
 const usage = { promptTokens: 1, completionTokens: 1, totalTokens: 2 };
 const status = (code: number, message = 'failed') => Object.assign(new Error(`[${code}] ${message}`), { httpStatus: code });
@@ -116,6 +117,10 @@ const SOFT = tool('soft', async () => ({ success: false, error: `soft saw ${SECR
 const BOOM = tool('boom', async () => {
   throw new Error(`boom saw ${SECRET}`);
 });
+/** Returns a failure with an output beside its error, as a refusal of hierarchical's delegate tools does: both hold the key. */
+const SOFT_OUT = tool('softOut', async () => ({ success: false, output: `out saw ${SECRET}`, error: `soft saw ${SECRET}` }));
+/** Succeeds with a URL whose key parameter is the tool's own, and a note that holds the call's key. */
+const URL_OUT = tool('lookup', async () => ({ success: true, output: { url: 'https://h.local/?key=public-0001', note: `saw ${SECRET}` } }));
 
 type Part = { type: string; [key: string]: unknown };
 async function drain(r: ReturnType<typeof streamText>): Promise<Part[]> {
@@ -377,6 +382,318 @@ describe("a seat's mask reaches a tool's error before the next request carries i
     expect(await shim.text).toBe('done');
     expect((await shim.toolCalls).map((c) => c.error)).toEqual(['soft saw [redacted]', 'Error: boom saw [redacted]']);
     for (const sent of hoisted.generateCompletion.mock.calls.slice(1)) expect(JSON.stringify(sent)).not.toContain(SECRET);
+  });
+
+  it("in both native loops, a failed tool's output, which the tool turn carries in place of its error, is masked too", async () => {
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['softOut'])).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [SOFT_OUT] as never, maxSteps: 3, __maskError: mask });
+    expect(generated.text).toBe('done');
+    const generatedTurn = JSON.stringify(hoisted.generateCompletion.mock.calls[1]);
+    expect(generatedTurn).not.toContain(SECRET);
+    expect(generatedTurn).toContain('out saw [redacted]');
+
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['softOut']); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [SOFT_OUT] as never, maxSteps: 3, __maskError: mask });
+    const parts = await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect(JSON.stringify(parts)).not.toContain(SECRET);
+    expect(parts.find((p) => p.type === 'tool-result')).toMatchObject({ toolName: 'softOut', result: 'out saw [redacted]' });
+    const streamedTurn = JSON.stringify(hoisted.generateCompletionStream.mock.calls[1]);
+    expect(streamedTurn).not.toContain(SECRET);
+    expect(streamedTurn).toContain('out saw [redacted]');
+  });
+
+  it("under an agency's call mask a successful output is masked by the listed values alone: a URL the tool returns keeps its key parameter while the listed key is replaced, in both native loops and on the prompt shim", async () => {
+    const callMask = createErrorMask({ list: [SECRET] });
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['lookup'])).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [URL_OUT] as never, maxSteps: 3, __maskError: callMask });
+    expect(generated.text).toBe('done');
+    const generatedTurn = JSON.stringify(hoisted.generateCompletion.mock.calls[1]);
+    expect(generatedTurn).toContain('key=public-0001');
+    expect(generatedTurn).toContain('saw [redacted]');
+    expect(generatedTurn).not.toContain(SECRET);
+
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['lookup']); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [URL_OUT] as never, maxSteps: 3, __maskError: callMask });
+    const parts = await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect(parts.find((p) => p.type === 'tool-result')).toMatchObject({ toolName: 'lookup', result: { url: 'https://h.local/?key=public-0001', note: 'saw [redacted]' } });
+    const streamedTurn = JSON.stringify(hoisted.generateCompletionStream.mock.calls[1]);
+    expect(streamedTurn).toContain('key=public-0001');
+    expect(streamedTurn).not.toContain(SECRET);
+
+    hoisted.generateCompletion.mockReset();
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(reply('<tool_call>{"name":"lookup","arguments":{}}</tool_call>'))
+      .mockResolvedValueOnce(reply('done'));
+    const shim = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [URL_OUT] as never, toolMode: 'prompt', __maskError: callMask });
+    expect(shim.text).toBe('done');
+    const shimTurn = JSON.stringify(hoisted.generateCompletion.mock.calls[1]);
+    expect(shimTurn).toContain('key=public-0001');
+    expect(shimTurn).toContain('saw [redacted]');
+    expect(shimTurn).not.toContain(SECRET);
+  });
+
+  /** The messages a provider call carries: the provider takes (modelId, messages, options). */
+  const sentMessages = (call: unknown[]): Array<{ role?: string; content?: unknown }> =>
+    (call[1] as Array<{ role?: string; content?: unknown }> | undefined) ?? [];
+  /** Every message content a provider call carries, as text: a tool turn's JSON, the shim's <tool_response> block. */
+  const sentText = (call: unknown[]): string =>
+    sentMessages(call).map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+  /** The last tool turn a provider call carries, as the text it was sent. */
+  const toolTurn = (call: unknown[]): string => {
+    const turn = sentMessages(call).filter((m) => m.role === 'tool').pop();
+    return typeof turn?.content === 'string' ? turn.content : JSON.stringify(turn?.content);
+  };
+
+  it('a listed value that JSON escaping changes, one with a quote or a backslash, is masked in the tool turn, the call record and the tool-result part: the output is masked as a value before it is serialized, in both native loops and on the shim', async () => {
+    const QUOTED = 'sk-quo"te\\back-0004';
+    const ESCAPED = JSON.stringify(QUOTED).slice(1, -1);
+    expect(ESCAPED).not.toBe(QUOTED);
+    const callMask = createErrorMask({ list: [QUOTED] });
+    const QUOTED_OUT = tool('quoted', async () => ({ success: true, output: { key: QUOTED, kept: 'k' } }));
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['quoted'])).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [QUOTED_OUT] as never, maxSteps: 3, __maskError: callMask });
+    expect(generated.text).toBe('done');
+    const generatedTurn = sentText(hoisted.generateCompletion.mock.calls[1]);
+    expect(generatedTurn).not.toContain(ESCAPED);
+    expect(generatedTurn).not.toContain(QUOTED);
+    expect(generatedTurn).toContain('[redacted]');
+    expect(generated.toolCalls[0].result).toEqual({ key: '[redacted]', kept: 'k' });
+
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['quoted']); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [QUOTED_OUT] as never, maxSteps: 3, __maskError: callMask });
+    const parts = await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect(parts.find((p) => p.type === 'tool-result')).toMatchObject({ toolName: 'quoted', result: { key: '[redacted]', kept: 'k' } });
+    expect((await streamed.toolCalls)[0].result).toEqual({ key: '[redacted]', kept: 'k' });
+    const streamedTurn = sentText(hoisted.generateCompletionStream.mock.calls[1]);
+    expect(streamedTurn).not.toContain(ESCAPED);
+    expect(streamedTurn).not.toContain(QUOTED);
+    expect(streamedTurn).toContain('[redacted]');
+
+    hoisted.generateCompletion.mockReset();
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(reply('<tool_call>{"name":"quoted","arguments":{}}</tool_call>'))
+      .mockResolvedValueOnce(reply('done'));
+    const shim = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [QUOTED_OUT] as never, toolMode: 'prompt', __maskError: callMask });
+    expect(shim.text).toBe('done');
+    const shimTurn = sentText(hoisted.generateCompletion.mock.calls[1]);
+    expect(shimTurn).not.toContain(ESCAPED);
+    expect(shimTurn).not.toContain(QUOTED);
+    expect(shimTurn).toContain('[redacted]');
+  });
+
+  it('a tool output whose number holds a listed value is replaced as a value, so the tool turn stays JSON, in both native loops, in the tool-result part, in the record and on the shim; a number a class writes through toJSON is sent as a JSON string', async () => {
+    const DIGITS = '20240001';
+    const callMask = createErrorMask({ list: [DIGITS] });
+    const NUMBER_OUT = tool('counter', async () => ({ success: true, output: { id: 20240001, note: 'n' } }));
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['counter'])).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [NUMBER_OUT] as never, maxSteps: 3, __maskError: callMask });
+    expect(generated.text).toBe('done');
+    expect(JSON.parse(toolTurn(hoisted.generateCompletion.mock.calls[1]))).toEqual({ id: '[redacted]', note: 'n' });
+    expect(generated.toolCalls[0].result).toEqual({ id: '[redacted]', note: 'n' });
+
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['counter']); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [NUMBER_OUT] as never, maxSteps: 3, __maskError: callMask });
+    const parts = await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect(parts.find((p) => p.type === 'tool-result')).toMatchObject({ toolName: 'counter', result: { id: '[redacted]', note: 'n' } });
+    expect((await streamed.toolCalls)[0].result).toEqual({ id: '[redacted]', note: 'n' });
+    expect(JSON.parse(toolTurn(hoisted.generateCompletionStream.mock.calls[1]))).toEqual({ id: '[redacted]', note: 'n' });
+
+    hoisted.generateCompletion.mockReset();
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(reply('<tool_call>{"name":"counter","arguments":{}}</tool_call>'))
+      .mockResolvedValueOnce(reply('done'));
+    const shim = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [NUMBER_OUT] as never, toolMode: 'prompt', __maskError: callMask });
+    expect(shim.text).toBe('done');
+    expect(sentText(hoisted.generateCompletion.mock.calls[1])).toContain('"output":{"id":"[redacted]","note":"n"}');
+
+    // A class instance is masked as what its toJSON writes: the number becomes the string [redacted], the turn is that
+    // string's JSON, and the record holds the masked form, not the instance, whose toJSON would write the key again.
+    class Counter { toJSON(): number { return 20240001; } }
+    const CLASS_OUT = tool('classy', async () => ({ success: true, output: new Counter() }));
+    hoisted.generateCompletion.mockReset();
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['classy'])).mockResolvedValueOnce(reply('done'));
+    const classy = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [CLASS_OUT] as never, maxSteps: 3, __maskError: callMask });
+    const classTurn = toolTurn(hoisted.generateCompletion.mock.calls[1]);
+    expect(classTurn).not.toContain(DIGITS);
+    expect(JSON.parse(classTurn)).toBe('[redacted]');
+    expect(classy.toolCalls[0].result).toBe('[redacted]');
+
+    // So is a plain object with a toJSON of its own: the turn stays JSON and the record holds what toJSON wrote, masked.
+    const PLAIN_OUT = tool('plainy', async () => ({ success: true, output: { toJSON: () => ({ id: 20240001 }) } }));
+    hoisted.generateCompletion.mockReset();
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['plainy'])).mockResolvedValueOnce(reply('done'));
+    const plainy = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [PLAIN_OUT] as never, maxSteps: 3, __maskError: callMask });
+    expect(JSON.parse(toolTurn(hoisted.generateCompletion.mock.calls[1]))).toEqual({ id: '[redacted]' });
+    expect(plainy.toolCalls[0].result).toEqual({ id: '[redacted]' });
+    expect(JSON.stringify(plainy.toolCalls)).not.toContain(DIGITS);
+  });
+
+  it("under an agency's call mask a tool that succeeds with an output JSON leaves out (a function, a symbol, a toJSON that returns nothing), or with none, stays a success: its record carries no error and its turn is the empty string's JSON, in both native loops", async () => {
+    const callMask = createErrorMask({ list: [SECRET] });
+    const NO_JSON = [
+      tool('fnOut', async () => ({ success: true, output: () => 'f' })),
+      tool('symbolOut', async () => ({ success: true, output: Symbol('s') })),
+      tool('silentOut', async () => ({ success: true, output: { toJSON: () => undefined } })),
+      tool('noneOut', async () => ({ success: true })),
+    ];
+    const names = NO_JSON.map((t) => t.name);
+    const toolTurns = (call: unknown[]): unknown[] => sentMessages(call).filter((m) => m.role === 'tool').map((m) => m.content);
+
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(names)).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: NO_JSON as never, maxSteps: 3, __maskError: callMask });
+    expect(generated.text).toBe('done');
+    expect(generated.toolCalls.map((c) => [c.name, c.error])).toEqual(names.map((name) => [name, undefined]));
+    expect(toolTurns(hoisted.generateCompletion.mock.calls[1])).toEqual(['""', '""', '""', '""']);
+
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(names); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: NO_JSON as never, maxSteps: 3, __maskError: callMask });
+    await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect((await streamed.toolCalls).map((c) => [c.name, c.error])).toEqual(names.map((name) => [name, undefined]));
+    expect(toolTurns(hoisted.generateCompletionStream.mock.calls[1])).toEqual(['""', '""', '""', '""']);
+  });
+
+  it("a tool whose successful output cannot be written as JSON (a getter that throws, a toJSON that throws on a value holding the key) fails under an agency's call mask as it does without one: its record carries the masked error and its turn is that error, in both native loops, and the prompt loop records it once", async () => {
+    const callMask = createErrorMask({ list: [SECRET] });
+    const GETTER_OUT = tool('getter', async () => ({ success: true, output: { kept: 'k', get data(): string { throw new Error(`getter saw ${SECRET}`); } } }));
+    const WRITER_OUT = tool('writer', async () => ({ success: true, output: { token: SECRET, toJSON(): never { throw new Error('toJSON failed'); } } }));
+    const UNWRITABLE = [GETTER_OUT, WRITER_OUT];
+    const names = UNWRITABLE.map((t) => t.name);
+    const errors = ['getter saw [redacted]', 'toJSON failed'];
+    const toolTurns = (call: unknown[]): unknown[] => sentMessages(call).filter((m) => m.role === 'tool').map((m) => m.content);
+
+    // Without a mask each tool fails where its output is written: the masked runs below must match.
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(names)).mockResolvedValueOnce(reply('done'));
+    const bare = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: UNWRITABLE as never, maxSteps: 3 });
+    expect(bare.toolCalls.map((c) => [c.name, c.error])).toEqual([['getter', `getter saw ${SECRET}`], ['writer', 'toJSON failed']]);
+
+    hoisted.generateCompletion.mockReset();
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(names)).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: UNWRITABLE as never, maxSteps: 3, __maskError: callMask });
+    expect(generated.text).toBe('done');
+    expect(generated.toolCalls.map((c) => [c.name, c.error])).toEqual(names.map((name, i) => [name, errors[i]]));
+    expect(toolTurns(hoisted.generateCompletion.mock.calls[1])).toEqual(errors.map((error) => JSON.stringify({ error })));
+
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(names); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: UNWRITABLE as never, maxSteps: 3, __maskError: callMask });
+    const parts = await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect((await streamed.toolCalls).map((c) => [c.name, c.error])).toEqual(names.map((name, i) => [name, errors[i]]));
+    expect(parts.filter((p) => p.type === 'tool-result').map((p) => p.result)).toEqual(errors.map((error) => ({ error })));
+    expect(toolTurns(hoisted.generateCompletionStream.mock.calls[1])).toEqual(errors.map((error) => JSON.stringify({ error })));
+
+    // The prompt loop writes the response before it records the call, so the failure is recorded once, with or without a mask.
+    const shimRun = async (maskError?: typeof callMask) => {
+      hoisted.generateCompletion.mockReset();
+      hoisted.generateCompletion
+        .mockResolvedValueOnce(reply('<tool_call>{"name":"getter","arguments":{}}</tool_call>'))
+        .mockResolvedValueOnce(reply('done'));
+      const result = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: [GETTER_OUT] as never, toolMode: 'prompt', __maskError: maskError });
+      return { result, sent: sentText(hoisted.generateCompletion.mock.calls[1]) };
+    };
+    const bareShim = await shimRun();
+    expect(bareShim.result.toolCalls.map((c) => [c.name, c.error])).toEqual([['getter', `Error: getter saw ${SECRET}`]]);
+    const maskedShim = await shimRun(callMask);
+    expect(maskedShim.result.text).toBe('done');
+    expect(maskedShim.result.toolCalls.map((c) => [c.name, c.error])).toEqual([['getter', 'Error: getter saw [redacted]']]);
+    expect(maskedShim.sent).toContain('<tool_response>{"name":"getter","error":"Error: getter saw [redacted]"}</tool_response>');
+    expect(maskedShim.sent).not.toContain(SECRET);
+  });
+});
+
+describe('a later step converts no tool schema while the table keeps its names', () => {
+  it("generateText and streamText read a record table's names before a later step and adapt its definitions again only when the names change", async () => {
+    let reads = 0;
+    const ran: string[] = [];
+    const schema = { type: 'object', properties: {} };
+    // An adaptation of the table reads the definition's parameters, the schema it converts; the names are its keys.
+    const tools = {
+      ping: {
+        description: 'p',
+        get parameters() {
+          reads += 1;
+          return schema;
+        },
+        execute: async () => {
+          ran.push('ping');
+          return 'pong';
+        },
+      },
+    };
+    let atFirstSend = -1;
+    hoisted.generateCompletion
+      .mockImplementationOnce(async () => {
+        atFirstSend = reads;
+        return toolCallsReply(['ping']);
+      })
+      .mockResolvedValueOnce(toolCallsReply(['ping']))
+      .mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: tools as never, maxSteps: 5 });
+    expect(generated.text).toBe('done');
+    expect(ran).toEqual(['ping', 'ping']);
+    expect(atFirstSend).toBeGreaterThan(0);
+    expect(reads).toBe(atFirstSend);
+
+    reads = 0;
+    ran.length = 0;
+    atFirstSend = -1;
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () {
+        atFirstSend = reads;
+        yield toolCallsChunk(['ping']);
+      })
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['ping']); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: tools as never, maxSteps: 5 });
+    await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect(ran).toEqual(['ping', 'ping']);
+    expect(atFirstSend).toBeGreaterThan(0);
+    expect(reads).toBe(atFirstSend);
+  });
+});
+
+describe('a tool table given as a single-use iterable is read once', () => {
+  it('a generator of tools, which one read exhausts, keeps its tools on the second step of generateText and of streamText', async () => {
+    const ran: string[] = [];
+    const PING = tool('ping', async () => { ran.push('ping'); return { success: true, output: 'pong' }; });
+    // The schemas ride in the provider call's options, its third argument.
+    const toolsOf = (call: unknown[]): string[] =>
+      ((call[2] as { tools?: Array<{ function?: { name?: string } }> } | undefined)?.tools ?? []).map((t) => t.function?.name ?? '');
+    hoisted.generateCompletion.mockResolvedValueOnce(toolCallsReply(['ping'])).mockResolvedValueOnce(toolCallsReply(['ping'])).mockResolvedValueOnce(reply('done'));
+    const generated = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: (function* () { yield PING; })() as never, maxSteps: 5 });
+    expect(generated.text).toBe('done');
+    expect(ran).toEqual(['ping', 'ping']);
+    expect(generated.toolCalls.map((t) => t.error)).toEqual([undefined, undefined]);
+    expect(hoisted.generateCompletion.mock.calls.map(toolsOf)).toEqual([['ping'], ['ping'], ['ping']]);
+
+    ran.length = 0;
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['ping']); })
+      .mockImplementationOnce(async function* () { yield toolCallsChunk(['ping']); })
+      .mockImplementationOnce(async function* () { yield textChunk('done'); });
+    const streamed = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'go', tools: (function* () { yield PING; })() as never, maxSteps: 5 });
+    await drain(streamed);
+    expect(await streamed.text).toBe('done');
+    expect(ran).toEqual(['ping', 'ping']);
+    expect((await streamed.toolCalls).map((t) => t.error)).toEqual([undefined, undefined]);
+    expect(hoisted.generateCompletionStream.mock.calls.map(toolsOf)).toEqual([['ping'], ['ping'], ['ping']]);
   });
 });
 

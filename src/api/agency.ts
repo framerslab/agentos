@@ -65,19 +65,22 @@
  */
 
 import { compileStrategy, isAgent } from './runtime/strategies/index.js';
-import { seatMetadataOf } from './runtime/strategies/shared.js';
+import { maskedMessageOf, noSeatAnswered, seatMetadataOf } from './runtime/strategies/shared.js';
 import { validatePoolOptions, hasPoolSurface } from './runtime/pool/validate.js';
 import { createSeatingState, seatRoster, type SeatingState, type SeatedRoster } from './runtime/pool/seating.js';
 import { guardPerCallOptions } from './runtime/pool/guard.js';
 import { collectCallSecrets, createErrorMask, maskedCopyOf, redactStrings, redactText } from './runtime/pool/redact.js';
+import { lazyLogger } from './runtime/lazyLogger.js';
 import type {
   AgencyOptions,
   Agent,
+  AgencyCallbacks,
   BaseAgentConfig,
   CompiledStrategy,
   ResourceControls,
   AgentCallRecord,
   GuardrailEvent,
+  ApprovalDecision,
   RagConfig,
   AgencyStreamPart,
   AgencyStreamResult,
@@ -110,6 +113,52 @@ import {
   type AgencyProvenanceTrail,
 } from './agency-provenance.js';
 import type { RawData, WebSocket } from 'ws';
+
+/** The agency's own lines, to the host's logger factory whenever the host set it. */
+const agencyLogger = lazyLogger('agency');
+
+/** Every callback an agency fires, by name: a callback added to {@link AgencyCallbacks} must be listed here. */
+const CALLBACK_NAMES: Record<keyof AgencyCallbacks, true> = {
+  agentStart: true,
+  agentEnd: true,
+  handoff: true,
+  toolCall: true,
+  error: true,
+  emergentForge: true,
+  guardrailResult: true,
+  limitReached: true,
+  approvalRequested: true,
+  approvalDecided: true,
+  guardrailHitlOverride: true,
+};
+
+/**
+ * A callback for every name the agency fires, each run through `fire`, which
+ * catches what it throws and what the promise of an async one rejects with.
+ * Each reads `on` by name when the run fires it, and nothing of `on` is read
+ * when the agency is built: a callback the host sets, replaces or deletes on
+ * its `on` object after `agency()` returns is the one that runs, or none
+ * runs, a getter there is read only when its event fires, and a method an
+ * instance inherits runs as an own one does, with `on` as `this`. The read
+ * runs inside `fire`, so a getter that throws is caught as a callback that
+ * throws is.
+ *
+ * @param on - The callbacks object as the host gave it, read at each event.
+ * @param fire - Runs one callback and writes what it throws or rejects with to the host's logger.
+ * @returns A callback for every name, none of which throws.
+ */
+function guardedCallbacks(on: AgencyCallbacks, fire: (name: string, call: () => unknown) => void): AgencyCallbacks {
+  // Not a copy of `on`: a spread would read every getter there now, outside `fire`.
+  const out: Record<string, unknown> = {};
+  for (const name of Object.keys(CALLBACK_NAMES) as Array<keyof AgencyCallbacks>) {
+    out[name] = (event: unknown) =>
+      fire(name, () => {
+        const fn: unknown = on[name];
+        return typeof fn === 'function' ? (fn as (event: unknown) => unknown).call(on, event) : undefined;
+      });
+  }
+  return out as AgencyCallbacks;
+}
 
 // ---------------------------------------------------------------------------
 // Public factory
@@ -188,15 +237,6 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   const pooled = hasPoolSurface(opts, chosenStrategy);
   if (pooled) validatePoolOptions(opts, chosenStrategy);
 
-  // The construction-time compile stays for every agency, over the roster as
-  // written: it reports a graph cycle, a one-seat review-loop and a manager
-  // without a model now, not at the first call. An agency with a pool or a
-  // panel compiles again for every call, over that call's seating.
-  const strategy: CompiledStrategy = compileStrategy(
-    chosenStrategy,
-    opts.agents,
-    opts,
-  );
   const seatingState: SeatingState | undefined = pooled ? createSeatingState(opts, chosenStrategy) : undefined;
 
   // 3. Extract resource controls (may be undefined).
@@ -213,17 +253,42 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   const secretsHolder: { list: readonly string[] } = { list: [] };
   /** An error masked in place where its strings can be written (its class and shape stay), else a masked plain Error. */
   const mask = createErrorMask(secretsHolder);
+  // The list holds what the config writes, the defaults and the provider
+  // variables from construction, before any seating: the agency's own
+  // `agentStart` fires before the first call is seated, and a callback that
+  // throws a configured key there is written to the host's logger masked.
+  if (pooled) secretsHolder.list = collectCallSecrets(opts, []);
   /** A masked stand-in that never writes `error`: for an error someone else owns, a HITL handler's. */
   const maskedCopy = (error: unknown): unknown => (pooled ? maskedCopyOf(error, secretsHolder.list) : error);
   const toError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
-  /** Runs one of this agency's own callbacks: a callback that throws is logged and never fails the call. */
-  const fire = (call: () => void): void => {
+  /**
+   * Runs one of this agency's own callbacks: a callback that throws, or an
+   * async one whose promise rejects, is written to the host's logger, masked,
+   * and never fails the call or leaves a rejection unhandled.
+   */
+  const fire = (name: string, call: () => unknown): void => {
+    const threw = (err: unknown): void => {
+      agencyLogger.warn(`${name} callback threw`, { event: 'agency_callback_threw', callback: name, error: maskedMessageOf(err, mask) });
+    };
     try {
-      call();
+      const returned = call();
+      if ((typeof returned === 'object' || typeof returned === 'function') && returned !== null && typeof (returned as PromiseLike<unknown>).then === 'function') {
+        Promise.resolve(returned).then(undefined, threw);
+      }
     } catch (err) {
-      console.warn('[AgentOS][Agency] callback threw:', err);
+      threw(err);
     }
   };
+  // Every callback runs through `fire`, whichever part of a run fires it:
+  // this agency, its strategy, a gate or a HITL check. One that throws is
+  // written to the host's logger with its message through the call's mask,
+  // and never fails the call or changes what it returns. The guard reads the
+  // host's `on` object at each event and never at construction, so a callback
+  // set, replaced or deleted there after construction is the one that runs,
+  // and a getter there that throws fails no construction. Wrapped before the trail's
+  // and the masks' wrappers below, which copy the guard's callbacks, every
+  // name present: those wrappers run whatever the host's callback does.
+  if (opts.on) opts = { ...opts, on: guardedCallbacks(opts.on, fire) };
 
   // 3b. Provenance recorder (in-memory event trail with optional hash chain).
   //     Hooks into opts.on so every callback the runtime fires is also written
@@ -252,6 +317,38 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       },
     };
   }
+
+  // 3d. A HITL handler's decision is text no seat's mask saw. In an agency
+  //     with a pool or a panel, its reason and its modifications pass the
+  //     call's list before the trail and the caller's handler read them, for
+  //     the beforeAgent, beforeTool and beforeReturn approvals alike; the
+  //     replacement a beforeReturn approval carries is masked where it is
+  //     returned, in finalizeExecutionResult. A decision holds no count of
+  //     the library's: its numbers are the approver's (`modifications.toolArgs`),
+  //     so one whose digits hold a listed value is masked as in what a tool
+  //     returns.
+  if (pooled && opts.on?.approvalDecided) {
+    const on = opts.on;
+    opts = {
+      ...opts,
+      on: {
+        ...on,
+        approvalDecided: (decision: ApprovalDecision) => on.approvalDecided?.(mask.strings(decision, true)),
+      },
+    };
+  }
+
+  // The construction-time compile stays for every agency, over the roster as
+  // written: it reports a graph cycle, a one-seat review-loop and a manager
+  // without a model now, not at the first call. An agency with a pool or a
+  // panel compiles again for every call, over that call's seating. Compiled
+  // after the callbacks are wrapped, so a strategy compiled once, in an
+  // agency without a pool or a panel, fires them guarded and recorded too.
+  const strategy: CompiledStrategy = compileStrategy(
+    chosenStrategy,
+    opts.agents,
+    opts,
+  );
 
   // 4. In-memory session store keyed by session ID.
   const sessions = new Map<string, AgencySession>();
@@ -400,8 +497,16 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     const elapsedMs = Date.now() - start;
 
     // A result always carries a text: sequential and graph return none when
-    // every seat was rejected.
+    // every seat was rejected. A run no seat answered is written to the log.
     if (typeof finalized.text !== 'string') finalized.text = '';
+    if (noSeatAnswered(result)) {
+      agencyLogger.info('no seat answered; the result text is empty', {
+        event: 'agency_no_seat_answered',
+        agency: agencyName,
+        strategy: chosenStrategy,
+        seats: Object.keys(opts.agents).length,
+      });
+    }
     // The ledger describes the agency that returns it. sequential and graph
     // spread their last seat's result into their own, so a nested panel's
     // seats, chair, quorum and seating are removed from any result that is
@@ -418,8 +523,14 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     delete finalized.provenanceTrail;
     if (seated) finalized.seating = seated.record;
     if (pooled) {
+      // Every string of the result through the call's list: the text, each
+      // call record with its output and its tool calls' arguments and
+      // results, and a panel's seat and chair records. The seats' answers
+      // leave them masked; this covers what a strategy builds from them too.
+      for (const key of Object.keys(finalized)) finalized[key] = mask.strings(finalized[key]);
       // What the seats' own loops cannot mask: a pre-built seat's or a nested
-      // agency's tool errors, conversation delta and tool calls come back raw.
+      // agency's tool errors, conversation delta and tool calls come back raw,
+      // and are masked here with the URL patterns an error's text gets.
       const secrets = secretsHolder.list;
       if (Array.isArray(finalized.agentCalls)) {
         finalized.agentCalls = (finalized.agentCalls as AgentCallRecord[]).map((call) =>
@@ -438,7 +549,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         finalized.transcriptDelta = redactStrings(finalized.transcriptDelta, secrets);
       }
       if (Array.isArray(finalized.toolCalls)) {
-        finalized.toolCalls = redactStrings(finalized.toolCalls, secrets);
+        finalized.toolCalls = redactStrings(finalized.toolCalls, secrets, true);
       }
     }
 
@@ -472,6 +583,14 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         : undefined,
     );
 
+    // A replacement the approval carried is the handler's text, which no
+    // seat's mask saw: in a pooled agency it passes the call's list as the
+    // strategy's text did, before the final-output part, agentEnd and the
+    // provenance record read it.
+    if (pooled && approvedResult !== finalized && typeof approvedResult.text === 'string') {
+      approvedResult.text = mask.text(approvedResult.text);
+    }
+
     streamPartBuffer?.push({
       type: 'final-output',
       text: (approvedResult.text as string) ?? '',
@@ -489,7 +608,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         : {}),
     });
 
-    fire(() => opts.on?.agentEnd?.({
+    fire('agentEnd', () => opts.on?.agentEnd?.({
       agent: agencyName,
       output: (approvedResult.text as string) ?? '',
       durationMs: elapsedMs,
@@ -539,7 +658,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     const slot = createApprovalSlot();
     const callOpts = buildCallOptions(execOpts, slot);
     const errors = callErrors(slot);
-    fire(() => opts.on?.agentStart?.({
+    fire('agentStart', () => opts.on?.agentStart?.({
       agent: agencyName,
       input: prompt,
       timestamp: start,
@@ -575,8 +694,11 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         const finalized = await finalizeExecutionResult(result, start, sessionId, undefined, seated);
         lastFinalized = finalized;
 
-        // Success path: no validation required, OR validation produced a `parsed` value
-        if (!hasValidation || finalized.parsed !== undefined) {
+        // Success path: no validation required, OR validation produced a
+        // `parsed` value. A run no seat answered is returned as it is: its
+        // empty text is no reply to correct, and a retry would ask every
+        // approver again.
+        if (!hasValidation || finalized.parsed !== undefined || noSeatAnswered(result)) {
           slot.settled = true;
           return finalized;
         }
@@ -600,7 +722,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       // The slot's error was reported by the gate that stored it; any other
       // error is reported here, masked, as the call rejects with it.
       if (!errors.isSlotError(error)) {
-        fire(() => opts.on?.error?.({
+        fire('error', () => opts.on?.error?.({
           agent: agencyName,
           error: toError(errors.maskOnce(error)),
           timestamp: Date.now(),
@@ -634,7 +756,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       const masked = errors.maskOnce(error);
       if (!errorReported) {
         errorReported = true;
-        fire(() => opts.on?.error?.({
+        fire('error', () => opts.on?.error?.({
           agent: agencyName,
           error: toError(masked),
           timestamp: Date.now(),
@@ -643,7 +765,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       return masked;
     };
 
-    fire(() => opts.on?.agentStart?.({
+    fire('agentStart', () => opts.on?.agentStart?.({
       agent: agencyName,
       input: prompt,
       timestamp: start,
@@ -670,17 +792,19 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       const streamResult = await deferredStream;
 
       if (streamResult.fullStream) {
-        // A strategy's error parts (a pre-built seat's, a sequential seat's)
-        // leave masked in an agency with a pool or a panel.
+        // In an agency with a pool or a panel, a strategy's error parts (a
+        // pre-built seat's, a sequential seat's) leave masked, and every other
+        // part with its strings masked. A seat's own stream already masks a
+        // secret split between two of its pieces.
         for await (const part of streamResult.fullStream) {
-          yield part.type === 'error' && pooled ? { ...part, error: toError(errors.maskOnce(part.error)) } : part;
+          yield !pooled ? part : part.type === 'error' ? { ...part, error: toError(errors.maskOnce(part.error)) } : mask.strings(part);
         }
         return;
       }
 
       if (streamResult.textStream) {
         for await (const chunk of streamResult.textStream) {
-          yield { type: 'text', text: chunk };
+          yield { type: 'text', text: pooled ? mask.text(chunk) : chunk };
         }
         return;
       }
@@ -688,7 +812,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       if (streamResult.text) {
         const fullText = await streamResult.text;
         if (fullText) {
-          yield { type: 'text', text: fullText };
+          yield { type: 'text', text: pooled ? mask.text(fullText) : fullText };
         }
       }
     })());
@@ -913,8 +1037,9 @@ export function agency(opts: AgencyOptions): AgencyInstance {
           id: sessionId,
 
           /**
-           * Sends a user message through the agency strategy and appends both
-           * turns to session history.
+           * Sends a user message through the agency strategy and appends the
+           * user turn to session history, and the assistant turn when the run
+           * answered with text.
            *
            * @param text - User message text.
            * @returns The aggregated strategy result.
@@ -926,7 +1051,10 @@ export function agency(opts: AgencyOptions): AgencyInstance {
               undefined,
               sessionId,
             );
-            history.push({ role: 'assistant', content: (result.text as string) ?? '' });
+            // An empty answer is no assistant turn, whether no seat answered or a seat returned no text: the history keeps
+            // the user's message alone, and the next prompt carries no empty answer.
+            const answer = (result.text as string) ?? '';
+            if (answer !== '') history.push({ role: 'assistant', content: answer });
             return result;
           },
 
@@ -934,7 +1062,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
            * Streams a user message through the agency strategy, feeding prior
            * conversation history into the prompt — matching the behaviour of
            * `session.send()`.  The assistant turn is appended to history once
-           * the full streamed text is resolved.
+           * the full streamed text is resolved, and not when it is empty.
            *
            * @param text - User message text.
            * @returns A streaming result compatible with `StreamTextResult`.
@@ -953,7 +1081,7 @@ export function agency(opts: AgencyOptions): AgencyInstance {
 
             // Append the assistant reply to history once streaming resolves.
             streamResult.text.then((assistantText) => {
-              history.push({ role: 'assistant', content: assistantText });
+              if (assistantText !== '') history.push({ role: 'assistant', content: assistantText });
             }).catch(() => {
               // Ignore resolution failures — history will just lack this turn.
             });
@@ -1356,17 +1484,22 @@ function emptyUsageTotals(): UsageTotals {
   return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 }
 
+/** A finite number as it is, anything else (a count an adapter or a mask turned into a string, NaN) as undefined, so the totals' arithmetic reads numbers alone. */
+function countOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 function normalizeUsage(raw: unknown): UsageTotals {
-  const usage = (raw as Partial<UsageTotals> | undefined) ?? {};
+  const usage = (raw as Partial<Record<keyof UsageTotals, unknown>> | undefined) ?? {};
   return {
-    promptTokens: usage.promptTokens ?? 0,
-    completionTokens: usage.completionTokens ?? 0,
-    totalTokens: usage.totalTokens ?? 0,
-    costUSD: usage.costUSD,
+    promptTokens: countOf(usage.promptTokens) ?? 0,
+    completionTokens: countOf(usage.completionTokens) ?? 0,
+    totalTokens: countOf(usage.totalTokens) ?? 0,
+    costUSD: countOf(usage.costUSD),
     // Preserve cache-token fields from the source. Undefined stays
     // undefined so consumers distinguish "not reported" from "zero".
-    cacheReadTokens: usage.cacheReadTokens,
-    cacheCreationTokens: usage.cacheCreationTokens,
+    cacheReadTokens: countOf(usage.cacheReadTokens),
+    cacheCreationTokens: countOf(usage.cacheCreationTokens),
   };
 }
 

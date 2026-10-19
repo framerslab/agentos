@@ -14,6 +14,8 @@ import { resolveSeatCredentials, availabilityOf, type ResolvedCredentials } from
 import { vendorOf } from './vendor.js';
 import { isPooledSeat } from './validate.js';
 import { callRng, drawSeed, seedToUint32 } from './prng.js';
+import { isCallMask } from './redact.js';
+import { maskedPrebuilt } from './maskedOutput.js';
 
 /** How a pooled seat picks among its candidates: `preferred`, `weighted`, `round-robin` or `random`. */
 export type SeatingPolicy = SeatingRecord['policy'];
@@ -108,7 +110,11 @@ function roundRobinStep(totals: Map<string, number>, available: string[], allowe
 
 /** What one call's seating produced. */
 export interface SeatedRoster {
-  /** The roster in the caller's order: seated copies of the config seats, pre-built seats as they are; no unseated seat. */
+  /**
+   * The roster in the caller's order: seated copies of the config seats, and
+   * the pre-built seats, each behind the call's mask when seating was given an
+   * agency's call mask ({@link maskedPrebuilt}); no unseated seat.
+   */
   roster: Record<string, SeatedConfig | Agent>;
   /** The seated chair config, `false` for no chair, undefined outside `panel`. */
   chair?: SeatedConfig | false;
@@ -149,7 +155,7 @@ function distinctKey(distinct: Distinct, c: { provider: string; model: string; v
  * @param state - The instance's state from {@link createSeatingState}.
  * @param strategy - The strategy the agency runs.
  * @param callOpts - The call's own options; a per-call `effort` sets every hop's.
- * @param mask - The call's error mask, written onto every seated config.
+ * @param mask - The call's mask, written onto every seated config; an agency's call mask also wraps every pre-built seat.
  * @param deps - Replacements for the binary probe and the breaker check.
  * @returns The seated roster, the chair, the record and what the redactor needs.
  */
@@ -243,7 +249,8 @@ export function seatRoster(
   // 2. Fixed and pre-built seats first: a fixed seat holds its vendor before any pooled seat is filled.
   const pooledNames: string[] = [];
   for (const [name, seat] of Object.entries(opts.agents)) {
-    if (isAgent(seat)) { roster[name] = seat; seats[name] = { prebuilt: true }; continue; }
+    // A pre-built seat's answers reach the other seats and the records through the call's mask.
+    if (isAgent(seat)) { roster[name] = isCallMask(mask) ? maskedPrebuilt(seat, mask) : seat; seats[name] = { prebuilt: true }; continue; }
     if (isPooledSeat(seat, opts)) { pooledNames.push(name); continue; }
     const seated = seatFixedLike(name, seat, true);
     if (typeof seated === 'string') {
