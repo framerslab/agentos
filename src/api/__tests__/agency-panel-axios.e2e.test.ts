@@ -1,6 +1,6 @@
 /**
  * @file agency-panel-axios.e2e.test.ts
- * Seats on providers that send through axios (OpenRouter, Ollama). axios is
+ * Seats on providers that send through axios (OpenRouter, Ollama, Requesty). axios is
  * replaced by a client that forwards to the stubbed global fetch, so the
  * same request capture works; the providers themselves are the real classes.
  */
@@ -41,12 +41,14 @@ import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegi
 
 type Json = Record<string, any>;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
-const K = { or: 'sk-or-pool-00000021', ant: 'sk-ant-pool-00000022' };
+const K = { or: 'sk-or-pool-00000021', ant: 'sk-ant-pool-00000022', rq: 'rq-pool-00000024' };
 const ORLIST = /openrouter\.ai\/api\/v1\/models/;
 const ORCHAT = /openrouter\.ai\/api\/v1\/chat\/completions/;
 const OLLAMA_ROOT = /^http:\/\/127\.0\.0\.1:11434\/?$/;
 const OLLAMA_CHAT = /127\.0\.0\.1:11434\/api\/chat/;
 const ANTHROPIC = /api\.anthropic\.com\/v1\/messages/;
+const RQLIST = /router\.requesty\.ai\/v1\/models/;
+const RQCHAT = /router\.requesty\.ai\/v1\/chat\/completions/;
 const orListing = () => json({ data: [{ id: 'openai/gpt-4o', name: 'GPT-4o', context_length: 128000, pricing: { prompt: '0.000005', completion: '0.000015' }, architecture: { modality: 'text' } }] });
 const orText = (text: string, model = 'openai/gpt-4o') => () => json({ id: 'gen', object: 'chat.completion', created: 1, model, choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
 const orError = (status: number, message: string) => () => json({ error: { message, code: status } }, status);
@@ -99,5 +101,18 @@ describe('OpenRouter seats', () => {
     route([[ORLIST, orListing], [ORCHAT, orError(500, `upstream rejected ${K.or}`)], [ANTHROPIC, () => anthropicText('Merged')]]);
     const r = await agency({ strategy: 'panel', modelPool: { host: { provider: 'openrouter', model: 'openai/gpt-4o', apiKey: K.or }, opus: { provider: 'anthropic', model: 'claude-opus-5-5', apiKey: K.ant } }, agents: { a: { instructions: 'x', from: ['host'] }, b: { instructions: 'y', from: ['opus'] } }, chair: false, quorum: { minAgents: 1 } } as never).generate('review');
     expect(JSON.stringify(r.seats)).not.toContain(K.or);
+  });
+});
+
+describe('Requesty seats', () => {
+  it("a Requesty entry is seated, and its call goes to Requesty with the entry's own key and model id", async () => {
+    route([[RQLIST, () => json({ data: [{ id: 'openai/gpt-4o' }] })], [RQCHAT, orText('routed view')], [ANTHROPIC, () => anthropicText('Merged')]]);
+    const r = await agency({ strategy: 'panel', modelPool: { router: { provider: 'requesty', model: 'openai/gpt-4o', apiKey: K.rq }, opus: { provider: 'anthropic', model: 'claude-opus-5-5', apiKey: K.ant } }, agents: { a: { instructions: 'x', from: ['router'] } }, chair: { from: ['opus'] }, quorum: { minAgents: 1 } } as never).generate('review');
+    const chat = calls(RQCHAT)[0];
+    expect(chat.init.headers?.Authorization).toBe(`Bearer ${K.rq}`);
+    expect(JSON.parse(chat.init.body!).model).toBe('openai/gpt-4o');
+    expect(r.seating!.seats.a).toMatchObject({ entry: 'router', provider: 'requesty', model: 'openai/gpt-4o' });
+    expect(r.seats[0]).toMatchObject({ status: 'ok', provider: 'requesty', model: 'openai/gpt-4o', text: 'routed view' });
+    expect(r.text).toBe('Merged');
   });
 });
