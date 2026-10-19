@@ -2573,12 +2573,13 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.tts = undefined;
     tts.close();
     this.queue = undefined;
-    await this.send({ type: 'agent_done', text, durationMs: queue.stats().playedMs }, generation);
-    if (!this.live(generation)) return;
-    // The reply played to its end: it joins the conversation as heard, and no later barge-in reports its text.
+    // The reply played to its end, its whole playback acknowledged: it joins the conversation as heard now, and no later
+    // barge-in, as one while agent_done goes out, reports its text.
     this.replying = false;
     this.replyText = '';
     if (text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text, playedText: text, interrupted: false }, createdAt: Date.now() });
+    if (!this.live(generation)) return;
+    await this.send({ type: 'agent_done', text, durationMs: queue.stats().playedMs }, generation);
     if (!this.live(generation)) return;
     this.changing = true;
     await this.resetInput();
