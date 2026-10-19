@@ -2122,6 +2122,19 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(transport.close).toHaveBeenCalledWith(1000, 'done');
   });
 
+  it('sends nothing after session_ended when a listener of the move to speaking stops the session', async () => {
+    await start();
+    orchestrator.on('state_changed', ({ to }: { from: string; to: string }) => {
+      if (to === 'speaking') void orchestrator.stopSession('time_limit');
+    });
+
+    await takeTurn();
+
+    // session_ended is the last message before the transport closes: the reply's agent_speaking does not follow it.
+    expect(vi.mocked(transport.sendControl).mock.calls.map(([message]) => message.type)).toEqual(['session_started', 'agent_thinking', 'session_ended']);
+    expect(orchestrator.state).toBe('closed');
+  });
+
   it("creates the speech a host says through pushToTTS while a reply speaks, with source 'say', without a call profile", async () => {
     await start();
     await takeTurn();
