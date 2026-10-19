@@ -41,12 +41,13 @@
  * every text the check accepts, and five seconds), else whole, and emitted as
  * a `text_input` message once `isClientTextInputMessage()` accepts it. A text
  * it refuses (empty, whitespace alone, over 4,000 characters), or a stream
- * that fails or passes the bounds, emits `'error'` with
- * `livekit text input refused`, which names no text, and the transport stays
- * open, with a publisher too. Another sender's stream, and every stream while
- * nobody is linked, is closed unread. A room that already handles the topic
- * keeps its handler: text input is off, and one warning line says so, through
- * `logger` when one is given.
+ * that fails or passes the bounds, is dropped and reported as `'warning'` with
+ * `livekit text input refused`, which names no text, or as one warning line
+ * when nothing listens for `'warning'`; the transport stays open, with a
+ * publisher too, and so does a session on it, which ends on `'error'`.
+ * Another sender's stream, and every stream while nobody is linked, is closed
+ * unread. A room that already handles the topic keeps its handler: text input
+ * is off, and one warning line says so, through `logger` when one is given.
  *
  * ## Audio (outbound)
  * Without the `publisher` option the transport publishes nothing:
@@ -123,10 +124,12 @@
  * Line ids carry the transport's `id` (`<id>:user-1`, `<id>:agent-1`), so two
  * transports' lines never share one. Every stream is sent by the room's local
  * participant, the user's lines too: rtc-node's `sendText` names no other
- * sender. Writes never hold up a send; a write that fails emits `'error'` with
- * `livekit transcription failed`, and the transport stays open. No line is
- * written once the transport has closed; a write already under way still goes
- * out.
+ * sender. Writes never hold up a send. A write that fails is reported as
+ * `'warning'` with `livekit transcription failed`, or as one warning line when
+ * nothing listens for `'warning'`, once for a run of failures, until a write
+ * goes out again; the transport stays open, and so does a session on it. No
+ * line is written once the transport has closed; a write already under way
+ * still goes out.
  *
  * ## Lifetime
  * The linked participant leaving the room, for any disconnect reason, closes
@@ -238,8 +241,9 @@ export interface LiveKitStreamTransportOptions {
    * Read the text streams the linked participant sends on `topic` (`'lk.chat'` unless it names one; an empty one names
    * none) as `text_input` messages. Default `true` with `participant`, `false` with `participantIdentity`. A stream is
    * read with bounds (12000 bytes, five seconds) when its reader has an async iterator, and a text
-   * `isClientTextInputMessage()` refuses emits `livekit text input refused` while the transport stays open. A room
-   * that already handles the topic keeps it: text input is off, and one warning line says so.
+   * `isClientTextInputMessage()` refuses is dropped and reported as the warning `livekit text input refused` while the
+   * transport stays open. A room that already handles the topic keeps it: text input is off, and one warning line says
+   * so.
    */
   textInput?: boolean | { topic?: string };
   /**
@@ -251,8 +255,9 @@ export interface LiveKitStreamTransportOptions {
    */
   transcriptionOutput?: boolean | { topic?: string };
   /**
-   * Takes the transport's warning lines: the line saying text input is off and, without a publisher, an error that
-   * nothing listens for. Each is a console warning when omitted.
+   * Takes the transport's warning lines: the line saying text input is off, a warning that nothing listens for
+   * (`LiveKitStreamTransport: livekit text input refused`, `LiveKitStreamTransport: livekit transcription failed`)
+   * and, without a publisher, an error that nothing listens for. Each is a console warning when omitted.
    */
   logger?: { warn(message: string): void };
   /**
@@ -312,16 +317,16 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
  * | `'message'` | {@link ClientTextMessage} | A JSON message from the linked participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. With text input, also a `text_input` message for each text the linked participant sends on the text-input topic. |
  * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting, the linked participant leaving while `closeOnDisconnect` is on or, with a publisher, a refused message or a capture that never returned. |
- * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), a text input refused (`livekit text input refused`, which leaves the transport open), a transcription write that failed (`livekit transcription failed`, which leaves it open too), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. |
+ * | `'warning'` | `Error`                   | A failure the transport and a session on it go on after, with a fixed message that names no text: a text input refused (`livekit text input refused`), or the first of a run of transcription writes that failed (`livekit transcription failed`). With nothing listening for it, one warning line, through `logger` when one is given. |
+ * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. A session on the transport ends on it, as `IStreamTransport` defines `'error'` as fatal. |
  *
  * Without a publisher, an error that nothing listens for is written as a
  * warning line instead, through `logger` when one is given, since an
  * `'error'` that nothing listens for would throw. With a publisher, errors
  * carry fixed messages (`livekit input failed`, `livekit control refused`,
- * `livekit text input refused`, `livekit transcription failed`, `livekit
- * output stalled`, `livekit cleanup incomplete`), and one that nothing
- * listens for is dropped. A room loss, or the linked participant's departure
- * while `closeOnDisconnect` is on, closes this physical path;
+ * `livekit output stalled`, `livekit cleanup incomplete`), and one that
+ * nothing listens for is dropped. A room loss, or the linked participant's
+ * departure while `closeOnDisconnect` is on, closes this physical path;
  * `CallTransportBinding` interprets it as a detach.
  *
  * @example
@@ -392,6 +397,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private agentLines = 0;
   /** While the agent's lines are written, the sequence the next chunk without one takes, from 1. */
   private nextSequence = 1;
+  /** Whether the last transcription write failed: a run of failed writes is reported once, until a write goes out. */
+  private transcriptionFailing = false;
 
   /**
    * @throws {Error} `invalid livekit input bound` when `bufferMs` is not a
@@ -704,9 +711,20 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * back a line the room was shown, and a line it was not shown stays unwritten.
    */
   private cutAgentLine(): void { if (this.agentLine) this.endAgentLine(this.agentLine.tracker.playedText); }
-  /** Writes one line without holding up a send; a write that fails emits `livekit transcription failed` while the transport is open. */
+  /**
+   * Writes one line without holding up a send. A write that fails while the transport is open is reported as the
+   * warning `livekit transcription failed`, once for a run of failed writes, as while the room's connection recovers,
+   * until a write goes out again. A `'warning'` listener that throws is reported as the transport's error.
+   */
   private writeLine(output: LiveKitTranscriptionOutput, event: TranscriptEvent, itemId: string): void {
-    output.write(event, { itemId }).catch(() => { if (this._state === 'open') this.emitErrorSafe(new Error('livekit transcription failed')); });
+    output.write(event, { itemId }).then(
+      (sent) => { if (sent) this.transcriptionFailing = false; },
+      () => {
+        if (this._state !== 'open' || this.transcriptionFailing) return;
+        this.transcriptionFailing = true;
+        this.warnOf(new Error('livekit transcription failed'));
+      }
+    ).catch((error: unknown) => { if (this._state === 'open') this.emitErrorSafe(error instanceof Error ? error : new Error(String(error))); });
   }
   /** Stops input synchronously without disconnecting the host-owned room. Native cleanup is awaited through whenClosed. */
   close(_code?: number, _reason?: string): void {
@@ -782,21 +800,22 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   /**
    * Takes a stream on the text-input topic. The linked participant's, while the transport is open, is read, with bounds
    * when its reader has an async iterator and whole otherwise, and emitted as a `text_input` message once
-   * `isClientTextInputMessage()` accepts it; a text it refuses, or a stream that fails or passes the bounds, emits
-   * `livekit text input refused` and the transport stays open. Any other stream is closed unread.
+   * `isClientTextInputMessage()` accepts it; a text it refuses, or a stream that fails or passes the bounds, is dropped
+   * and reported as the warning `livekit text input refused`, and the transport stays open. Any other stream is closed
+   * unread.
    */
   private readonly onTextInput = (reader: LiveKitTextStreamReaderLike, participant: { identity: string }): void => {
     if (participant.identity !== this.linked || this._state !== 'open') { closeTextReader(reader); return; }
     this.textInputReaders.add(reader);
     const read = reader[Symbol.asyncIterator] ? this.readBounded(reader, TEXT_INPUT_MAX_BYTES) : reader.readAll();
-    // The error names the refusal, never the text.
-    const refused = (): void => { if (this._state === 'open') this.emitErrorSafe(new Error('livekit text input refused')); };
+    // The warning names the refusal, never the text; an 'error' would end the session on the transport.
+    const refused = (): void => { if (this._state === 'open') this.warnOf(new Error('livekit text input refused')); };
     void read.then((text) => {
       if (this._state !== 'open') return;
       const message = { type: 'text_input' as const, text };
       if (isClientTextInputMessage(message)) this.emit('message', message); else refused();
     }, refused)
-      // A 'message' listener that throws is reported as the transport's error, as the control topic reports one.
+      // A 'message' or 'warning' listener that throws is reported as the transport's error, as the control topic reports one.
       .catch((error: unknown) => { if (this._state === 'open') this.emitErrorSafe(error instanceof Error ? error : new Error(String(error))); })
       .finally(() => { this.textInputReaders.delete(reader); });
   };
@@ -807,6 +826,15 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private emitErrorSafe(error: Error): void {
     if (this.listenerCount('error')) this.emit('error', error);
     else if (!this.publisher) this.warn('[livekit-stream-transport] error (no listener attached):', error.message);
+  }
+  /**
+   * Reports a failure the transport goes on after, which `'error'` must not carry: `IStreamTransport` defines `'error'`
+   * as fatal, and a session on the transport ends on it. A `'warning'` listener gets the error; with none, it is one
+   * warning line (`LiveKitStreamTransport: <message>`). Its message is fixed and names no text.
+   */
+  private warnOf(warning: Error): void {
+    if (this.listenerCount('warning')) this.emit('warning', warning);
+    else this.warn(`LiveKitStreamTransport: ${warning.message}`);
   }
   /** Writes one warning line through the host's `logger`, else as a console warning. */
   private warn(...parts: string[]): void {
