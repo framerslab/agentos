@@ -1925,9 +1925,19 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         if (!transport || transport.state === 'closed') return;
         // A session that opened tells its client why it ends; the transport closes below, once that send has settled.
         if (this.publicSession && transport.state === 'open') {
-          ended = new Promise<void>((resolve) => {
-            this._watchSend(() => Promise.resolve(transport.sendControl(reason === undefined ? { type: 'session_ended' } : { type: 'session_ended', reason })).finally(resolve));
-          });
+          let sending: Promise<void>;
+          try {
+            sending = Promise.resolve(transport.sendControl(reason === undefined ? { type: 'session_ended' } : { type: 'session_ended', reason }));
+          } catch (err) {
+            // A send that throws has settled too: the transport closes at once.
+            sending = Promise.reject(err);
+          }
+          ended = sending.then(
+            () => undefined,
+            () => undefined
+          );
+          // _watchSend() reports a send that failed.
+          this._watchSend(() => sending);
         }
       },
     ]) {
