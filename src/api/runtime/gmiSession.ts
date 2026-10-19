@@ -516,14 +516,18 @@ export async function* runGmiTurn(
 
 /**
  * Parses a structured send's answer: the schema tool's arguments when a step carried them, else the reply text. A
- * turn that ended on the output limit (finish reason `length`) with JSON that does not parse was cut off, and the
- * error says so, the raw text attached: the session path does not escalate the budget as generateObject does.
+ * turn whose last step stopped at the output limit (finish reason `length`) was cut off: JSON that does not parse,
+ * or that parses and does not match the schema, rejects with an error that says so, the raw text attached, since the
+ * session path does not escalate the budget as generateObject does. JSON that parses and matches is the answer: its
+ * root object closed, so nothing was cut from it.
  *
  * @param maxTokens - The turn's `maxTokens`, named in the cut-off's message when the turn set one.
  */
 function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: number): unknown {
-  // Read before the parse: the gateway lifts only JSON that parses, so a cut-off keeps its finish reason.
-  const cutOff = folder.finishReason() === 'length';
+  // The last step's own stop reason: the folder reports 'stop' for any step whose answer the gateway lifted, and the
+  // gateway lifts any JSON that parses.
+  const cutOff = normalizeStreamFinishReason(folder.steps.at(-1)?.finishReason ?? null) === 'length';
+  const limit = typeof maxTokens === 'number' ? `maxTokens (${maxTokens})` : 'maxTokens';
   const structured = folder.structuredOutput();
   let raw: unknown = structured;
   if (structured === undefined || typeof structured === 'string') {
@@ -532,7 +536,6 @@ function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: num
       raw = JSON.parse(source);
     } catch (err) {
       if (cutOff) {
-        const limit = typeof maxTokens === 'number' ? `maxTokens (${maxTokens})` : 'maxTokens';
         throw new ObjectGenerationError(
           `session.send: the answer was cut off at ${limit} before the JSON was complete; raise maxTokens for this schema`,
           source,
@@ -546,6 +549,13 @@ function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: num
   }
   const safe = schema.safeParse(raw);
   if (!safe.success) {
+    if (cutOff) {
+      throw new ObjectGenerationError(
+        `session.send: the answer was cut off at ${limit} and its JSON does not match the schema; raise maxTokens for this schema`,
+        folder.text(),
+        safe.error,
+      );
+    }
     throw new ObjectGenerationError('session.send: provider-enforced JSON failed Zod validation', folder.text(), safe.error);
   }
   return safe.data;

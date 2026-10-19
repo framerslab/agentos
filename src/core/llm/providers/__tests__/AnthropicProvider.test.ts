@@ -1453,6 +1453,28 @@ describe('AnthropicProvider', () => {
       );
 
       expect(result.choices[0].message.content).toBe('{"x":2}');
+      // The forced schema call is the answer, not a call for a tool loop to run.
+      expect(result.choices[0].message.tool_calls).toBeUndefined();
+      expect(result.choices[0].finishReason).toBe('stop');
+    });
+
+    it('keeps a caller tool call beside the consumed schema call, and the tool_use stop with it', async () => {
+      const msg = makeAnthropicResponse({
+        content: [
+          { type: 'tool_use', id: 'toolu_s', name: 'emit', input: { x: 2 } },
+          { type: 'tool_use', id: 'toolu_c', name: 'lookup', input: { q: 'a' } },
+        ],
+        stop_reason: 'tool_use',
+      });
+      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+
+      const result = await provider.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Hi' }], {
+        responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit' } } as never,
+      });
+
+      expect(result.choices[0].message.content).toBe('{"x":2}');
+      expect(result.choices[0].message.tool_calls?.map((call) => call.id)).toEqual(['toolu_c']);
+      expect(result.choices[0].finishReason).toBe('tool_calls');
     });
 
     it('sends the JSON output format with the stamped schema, no tool and no tool_choice on claude-opus-4-8', async () => {

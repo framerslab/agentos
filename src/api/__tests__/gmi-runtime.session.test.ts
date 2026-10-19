@@ -285,6 +285,27 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
+  it('a structured send stopped at maxTokens whose JSON parses but misses a required field rejects naming the cut-off, not a schema mismatch', async () => {
+    // The gateway lifts JSON that parses, and a lifted answer reads as a clean stop in the result: the cut-off is
+    // read from the step's own finish reason.
+    const k = key(); script('anthropic', k, { replies: [reply.cutOff('{"city":"Lyon"}')] });
+    const session = agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s');
+    const error = await session
+      .send('where?', { responseSchema: z.object({ city: z.string(), country: z.string() }), maxTokens: 16 })
+      .then(() => undefined, (e: unknown) => e);
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (16)');
+    expect((error as ObjectGenerationError).validationErrors).toBeDefined();
+    expect(session.messages()).toEqual([]);
+  });
+
+  it('a structured send stopped at maxTokens whose JSON parses and matches the schema keeps the answer: the closed object was written whole', async () => {
+    const k = key(); script('anthropic', k, { replies: [reply.cutOff('{"city":"Lyon"}')] });
+    const r = await agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s')
+      .send('where?', { responseSchema: z.object({ city: z.string() }), maxTokens: 16 });
+    expect(r.object).toEqual({ city: 'Lyon' });
+  });
+
   it('a structured send whose forced schema tool call was cut off rejects naming the cut-off: the cut arguments are the step\'s text, never a tool the turn runs', async () => {
     const k = key(); const cut = '{"city":"Lyon","scores":{"a":';
     const s = script('anthropic', k, { replies: [reply.cutSchemaTool('scores', cut)] });

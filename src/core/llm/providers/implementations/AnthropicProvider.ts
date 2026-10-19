@@ -2601,9 +2601,24 @@ export class AnthropicProvider implements IProvider {
       throw this.refusalError(pricedModelId, apiResponse.stop_details, fullText, usage);
     }
 
-    // Collect tool_use blocks and convert to OpenAI-style tool_calls
+    // Schema-driven structured output: when the request forced the schema
+    // tool, the matching tool_use block is the answer. Its input becomes the
+    // message's JSON text, which keeps result.text uniform with OpenAI's
+    // json_schema response for callers that read result.text directly, and
+    // the block leaves the tool calls: a tool loop (generateText's) would
+    // otherwise run it as a tool it does not have and ask the model again.
+    const schemaToolBlock = structuredOutputName
+      ? apiResponse.content.find(
+          b => b.type === 'tool_use' && b.name === structuredOutputName && b.input !== undefined,
+        )
+      : undefined;
+    if (schemaToolBlock) {
+      fullText = JSON.stringify(schemaToolBlock.input);
+    }
+
+    // Collect the other tool_use blocks and convert to OpenAI-style tool_calls
     const toolCalls = apiResponse.content
-      .filter(block => block.type === 'tool_use')
+      .filter(block => block.type === 'tool_use' && block !== schemaToolBlock)
       .map(block => ({
         id: block.id!,
         type: 'function' as const,
@@ -2631,22 +2646,12 @@ export class AnthropicProvider implements IProvider {
       return [];
     });
 
-    // Schema-driven structured output: if the request set a forced tool
-    // for structured output, find the matching tool_use block and surface
-    // its input as JSON-string content. This keeps result.text uniform
-    // with OpenAI's json_schema response (text is valid JSON) for
-    // session.send callers that consume result.text directly.
-    if (structuredOutputName) {
-      const toolBlock = apiResponse.content.find(
-        b => b.type === 'tool_use' && b.name === structuredOutputName,
-      );
-      if (toolBlock?.input !== undefined) {
-        fullText = JSON.stringify(toolBlock.input);
-      }
-    }
-
     const hasToolCalls = toolCalls.length > 0;
-    const finishReason = this.mapStopReason(apiResponse.stop_reason);
+    // A tool_use stop whose only call was the schema answer finished the answer.
+    const finishReason =
+      schemaToolBlock && !hasToolCalls && apiResponse.stop_reason === 'tool_use'
+        ? 'stop'
+        : this.mapStopReason(apiResponse.stop_reason);
 
     const choice: ModelCompletionChoice = {
       index: 0,

@@ -296,6 +296,8 @@ describe('Anthropic catalog and pricing through the public API', () => {
     });
 
     expect(result.object).toEqual({ scores: { a: 1, b: 2 } });
+    // The forced schema call is the answer: generateText's tool loop never sees it as a missing tool.
+    expect(result.finishReason).toBe('stop');
     const bodies = postedBodies();
     expect(bodies).toHaveLength(1);
     expect(bodies[0].tools).toHaveLength(1);
@@ -304,6 +306,24 @@ describe('Anthropic catalog and pricing through the public API', () => {
     expect(bodies[0].tools[0].input_schema.properties.scores).toMatchObject({ type: 'object' });
     expect(bodies[0].tool_choice).toEqual({ type: 'tool', name: 'scores' });
     expect(bodies[0].output_config?.format).toBeUndefined();
+  });
+
+  it('a session send with a record schema on Claude Sonnet 4.6 (the default runtime) takes one request: the forced schema call is the answer, not a tool round', async () => {
+    // agent() runs up to five steps by default; a schema call left in tool_calls
+    // ran as a missing tool and asked the model again on each of them.
+    route({ 'claude-sonnet-4-6': [toolTurn('claude-sonnet-4-6', 'scores', { scores: { a: 1 } })] });
+    const session = agent({ provider: 'anthropic', model: 'claude-sonnet-4-6', memory: false, fallbackProviders: [] }).session('legacy-forced');
+
+    const result = await session.send('Score a.', {
+      responseSchema: z.object({ scores: z.record(z.string(), z.number()) }),
+      schemaName: 'scores',
+    });
+
+    expect(result.object).toEqual({ scores: { a: 1 } });
+    expect(result.finishReason).toBe('stop');
+    expect(result.toolCalls).toEqual([]);
+    expect(postedBodies()).toHaveLength(1);
+    expect(session.messages().map((m) => m.role)).toEqual(['user', 'assistant']);
   });
 
   it('generateObject with a record schema and a thinking budget on Claude Opus 4.8 sends no clamped tool, and the provider\'s schema block survives the auto-cache', async () => {
