@@ -1108,8 +1108,15 @@ export class AnthropicProvider implements IProvider {
     let stream: ReadableStream<Uint8Array> | undefined;
     while (stream === undefined) {
       try {
-        stream = await this.makeStreamRequest('/v1/messages', payload, undefined, undefined, streamAttempt);
+        // The caller's signal ends a draw that waits on the pool's probes, the connection and the body's reads.
+        stream = await this.makeStreamRequest('/v1/messages', payload, undefined, abortSignal, streamAttempt);
       } catch (error: unknown) {
+        // An abort before the first event, while the draw waited on the probes or the connection was opening,
+        // ends the stream with the abort chunk, as an abort before the request does.
+        if (abortSignal?.aborted) {
+          yield this.buildAbortChunk(modelId);
+          return;
+        }
         if (error instanceof AnthropicProviderError) {
           const keyDetails = error.details as KeyFailureDetails | undefined;
           if (keyDetails?.keyFailure && (keyDetails.keyCount ?? 1) > 1) {
@@ -1418,6 +1425,12 @@ export class AnthropicProvider implements IProvider {
       // it instead of reading an error chunk.
       if (streamError instanceof AnthropicProviderError && streamError.code === 'content_filter') {
         throw streamError;
+      }
+      // The caller's signal rides on the fetch, so an abort mid-stream ends the body's read at once: the stream
+      // ends with the abort chunk, not an error chunk.
+      if (abortSignal?.aborted) {
+        yield this.buildAbortChunk(modelId);
+        return;
       }
       const message = streamError instanceof Error ? streamError.message : 'Anthropic stream processing error';
       console.error(`AnthropicProvider stream error for model ${modelId}:`, message);
