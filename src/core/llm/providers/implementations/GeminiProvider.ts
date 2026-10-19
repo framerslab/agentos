@@ -41,6 +41,13 @@ import { computeRetryBackoffMs } from './retry-backoff.js';
 import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
+/** What a key-scoped stream connection failure carries on its details, for the stream's hop loop. */
+interface StreamKeyFailureDetails {
+  keyFailure?: KeyFailureKind;
+  keyUsable?: number;
+  keyCount?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -962,16 +969,37 @@ export class GeminiProvider implements IProvider {
 
     // Streaming endpoint uses ?alt=sse and the API key query param
     const endpoint = `/models/${modelId}:streamGenerateContent`;
-    let stream: ReadableStream<Uint8Array>;
-    try {
-      stream = await this.makeStreamRequest(endpoint, payload, options.requestTimeout);
-    } catch (error: unknown) {
-      // A retired pinned id fails here, before any chunk: serve the whole
-      // stream from its alias (its chunks carry the alias as modelId).
-      const alias = this.retiredModelAlias(modelId, error);
-      if (!alias) throw error;
-      yield* this.generateCompletionStream(alias, messages, options);
-      return;
+    // A key-scoped connection failure, before any event has reached the
+    // caller, moves to the next usable key at once (at most one hop per key);
+    // after content has streamed an error surfaces as before and the key stays
+    // marked for the next request.
+    let keyHops = 0;
+    let stream: ReadableStream<Uint8Array> | undefined;
+    while (stream === undefined) {
+      try {
+        stream = await this.makeStreamRequest(endpoint, payload, options.requestTimeout, abortSignal);
+      } catch (error: unknown) {
+        // An abort while the draw waited on the pool's probes surfaces as the abort chunk, not a throw.
+        if (abortSignal?.aborted) {
+          yield this.buildAbortChunk(modelId);
+          return;
+        }
+        if (error instanceof GeminiProviderError) {
+          const keyDetails = error.details as StreamKeyFailureDetails | undefined;
+          if (keyDetails?.keyFailure && (keyDetails.keyCount ?? 1) > 1) {
+            if ((keyDetails.keyUsable ?? 0) > 0 && ++keyHops < (keyDetails.keyCount ?? 1)) continue;
+            if ((keyDetails.keyUsable ?? 0) === 0 && keyDetails.keyFailure !== 'quota') {
+              throw this.allKeysFailedError(error.message, error.httpStatus, error.geminiErrorStatus);
+            }
+          }
+        }
+        // A retired pinned id fails here, before any chunk: serve the whole
+        // stream from its alias (its chunks carry the alias as modelId).
+        const alias = this.retiredModelAlias(modelId, error);
+        if (!alias) throw error;
+        yield* this.generateCompletionStream(alias, messages, options);
+        return;
+      }
     }
 
     // Accumulators for building the complete response
@@ -2153,16 +2181,23 @@ export class GeminiProvider implements IProvider {
    *
    * @param {string} endpoint - API endpoint (e.g., "/models/gemini-2.5-flash:streamGenerateContent").
    * @param {Record<string, unknown>} body - Request body.
+   * @param {AbortSignal} [abortSignal] - The caller's signal, which ends a wait on the pool's probes.
    * @returns {Promise<ReadableStream<Uint8Array>>} The response body stream.
-   * @throws {GeminiProviderError} On connection errors.
+   * @throws {GeminiProviderError} On connection errors; a key-scoped failure carries `keyFailure`,
+   *   `keyUsable` and `keyCount` on its details, which the stream's hop loop reads; `REQUEST_ABORTED`
+   *   when the caller's signal ended the draw.
    * @private
    */
   private async makeStreamRequest(
     endpoint: string,
     body: Record<string, unknown>,
     requestTimeoutOverride?: number,
+    abortSignal?: AbortSignal,
   ): Promise<ReadableStream<Uint8Array>> {
-    const apiKey = await this.drawApiKey();
+    const apiKey = await this.drawApiKey(abortSignal);
+    if (abortSignal?.aborted) {
+      throw new GeminiProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+    }
     if (apiKey === '') throw this.allKeysFailedError();
     const startedAt = Date.now();
     const url = `${this.config.baseURL}${endpoint}?alt=sse`;
@@ -2188,18 +2223,22 @@ export class GeminiProvider implements IProvider {
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({})) as Partial<GeminiAPIError>;
         const errorMessage = errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`;
-        // A key-scoped failure takes the key out, so the next request draws another.
+        // A key-scoped failure takes the key out; the stream's hop loop reads the kind and what is left of the pool
+        // on the error's details to move to the next usable key before any event reaches the caller.
         const streamKeyFailure = classifyKeyFailure(response.status, JSON.stringify(errorData));
         if (streamKeyFailure) {
           const serverRetryAfterMs = retryAfterMs(response.headers.get('retry-after'), undefined, this.config.keyPool?.maxRetryAfterMs);
           this.keyPool?.markFailed(apiKey, streamKeyFailure, { status: response.status, at: startedAt, ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}) });
         }
+        const keyDetails: StreamKeyFailureDetails = streamKeyFailure
+          ? { keyFailure: streamKeyFailure, keyUsable: this.keyPool ? this.keyPool.usable() : 1, keyCount: this.keyPool?.size ?? 1 }
+          : {};
         throw new GeminiProviderError(
           errorMessage,
           'STREAM_CONNECTION_FAILED',
           response.status,
           errorData.error?.status,
-          errorData,
+          { ...errorData, ...keyDetails },
         );
       }
 

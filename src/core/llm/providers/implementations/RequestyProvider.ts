@@ -917,69 +917,83 @@ export class RequestyProvider implements IProvider {
     expectStream: boolean = false,
     perRequest?: { apiKeyOverride?: string; signal?: AbortSignal }
   ): Promise<T> {
-    const apiKey = await this.resolveApiKey(perRequest?.apiKeyOverride, perRequest?.signal);
-    const attemptStartedAt = Date.now();
-    try {
-      const response = await this.client.request<T>({
-        url: endpoint,
-        method,
-        data: body,
-        timeout: timeout,
-        headers: { Authorization: `Bearer ${apiKey}` },
-        // Forward the caller's AbortSignal so an abort settles the request
-        // while Axios is still waiting for headers or the next body chunk.
-        ...(perRequest?.signal ? { signal: perRequest.signal } : {}),
-        responseType: expectStream ? 'stream' as ResponseType : 'json' as ResponseType,
-      });
-      if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, attemptStartedAt);
-      return response.data;
-    } catch (error: unknown) {
-      let statusCode: number | undefined;
-      let errorData: any;
-      let errorMessage = 'Unknown Requesty API error';
-      let errorType = 'UNKNOWN_API_ERROR';
-      let retryAfterHeader: unknown;
-
-      if (axios.isAxiosError(error)) {
-        statusCode = error.response?.status;
-        errorData = error.response?.data;
-        retryAfterHeader = error.response?.headers?.['retry-after'];
-        if (errorData?.error && typeof errorData.error === 'object') {
-          errorMessage = errorData.error.message || errorMessage;
-          errorType = errorData.error.type || errorType;
-        } else if (typeof errorData === 'string') {
-          errorMessage = errorData;
-        } else if ((error as Error).message) {
-          errorMessage = (error as Error).message;
-        }
-      } else if (error instanceof Error) {
-        errorMessage = error.message;
-      }
-
-      // A key-scoped failure (a bad or revoked key, an unpaid account, a
-      // throttle) takes this key out of rotation, so the next request draws
-      // another; this single-shot path does not re-send.
-      const keyFailure = typeof statusCode === 'number' ? classifyKeyFailure(statusCode, typeof errorData === 'string' ? errorData : JSON.stringify(errorData ?? {})) : null;
-      if (keyFailure && this.keyPool?.has(apiKey)) {
-        const serverRetryAfterMs = retryAfterMs(typeof retryAfterHeader === 'string' ? retryAfterHeader : null, undefined, this.config.keyPool?.maxRetryAfterMs);
-        this.keyPool.markFailed(apiKey, keyFailure, {
-          status: statusCode,
-          at: attemptStartedAt,
-          ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
+    let apiKey = await this.resolveApiKey(perRequest?.apiKeyOverride, perRequest?.signal);
+    // Key hops this request has made: a key-scoped failure on a pool of several keys re-sends the request with the
+    // next usable key at once, at most once per key. A per-request override is the caller's choice and is never
+    // hopped; a single key and a failure that is not the key's leave the request as it was.
+    let keyHops = 0;
+    for (;;) {
+      const attemptStartedAt = Date.now();
+      try {
+        const response = await this.client.request<T>({
+          url: endpoint,
+          method,
+          data: body,
+          timeout: timeout,
+          headers: { Authorization: `Bearer ${apiKey}` },
+          // Forward the caller's AbortSignal so an abort settles the request
+          // while Axios is still waiting for headers or the next body chunk.
+          ...(perRequest?.signal ? { signal: perRequest.signal } : {}),
+          responseType: expectStream ? 'stream' as ResponseType : 'json' as ResponseType,
         });
-      }
+        if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, attemptStartedAt);
+        return response.data;
+      } catch (error: unknown) {
+        let statusCode: number | undefined;
+        let errorData: any;
+        let errorMessage = 'Unknown Requesty API error';
+        let errorType = 'UNKNOWN_API_ERROR';
+        let retryAfterHeader: unknown;
 
-      // Prefix the status code into the message so downstream retry/fallback
-      // logic (e.g. isRetryableError, which greps for \b402\b) can route on it
-      // even when the Requesty API body provides a friendlier description.
-      const decoratedMessage = statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage;
-      throw new RequestyProviderError(
-        decoratedMessage,
-        'API_REQUEST_FAILED',
-        statusCode,
-        errorType,
-        { requestEndpoint: endpoint, requestBodyKeys: body ? Object.keys(body) : undefined, responseData: errorData, underlyingError: this.sanitizeUnderlyingError(error) }
-      );
+        if (axios.isAxiosError(error)) {
+          statusCode = error.response?.status;
+          errorData = error.response?.data;
+          retryAfterHeader = error.response?.headers?.['retry-after'];
+          if (errorData?.error && typeof errorData.error === 'object') {
+            errorMessage = errorData.error.message || errorMessage;
+            errorType = errorData.error.type || errorType;
+          } else if (typeof errorData === 'string') {
+            errorMessage = errorData;
+          } else if ((error as Error).message) {
+            errorMessage = (error as Error).message;
+          }
+        } else if (error instanceof Error) {
+          errorMessage = error.message;
+        }
+
+        // A key-scoped failure (a bad or revoked key, an unpaid account, a
+        // throttle) takes this key out of rotation; with another usable key the
+        // request is sent again at once with it, so the caller gets an answer
+        // instead of the key's error.
+        const keyFailure = typeof statusCode === 'number' ? classifyKeyFailure(statusCode, typeof errorData === 'string' ? errorData : JSON.stringify(errorData ?? {})) : null;
+        if (keyFailure && this.keyPool?.has(apiKey)) {
+          const serverRetryAfterMs = retryAfterMs(typeof retryAfterHeader === 'string' ? retryAfterHeader : null, undefined, this.config.keyPool?.maxRetryAfterMs);
+          this.keyPool.markFailed(apiKey, keyFailure, {
+            status: statusCode,
+            at: attemptStartedAt,
+            ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
+          });
+          if (!perRequest?.apiKeyOverride && this.keyPool.size > 1 && this.keyPool.usable() > 0 && ++keyHops < this.keyPool.size && !perRequest?.signal?.aborted) {
+            const nextKey = this.keyPool.next();
+            if (nextKey !== '') {
+              apiKey = nextKey;
+              continue;
+            }
+          }
+        }
+
+        // Prefix the status code into the message so downstream retry/fallback
+        // logic (e.g. isRetryableError, which greps for \b402\b) can route on it
+        // even when the Requesty API body provides a friendlier description.
+        const decoratedMessage = statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage;
+        throw new RequestyProviderError(
+          decoratedMessage,
+          'API_REQUEST_FAILED',
+          statusCode,
+          errorType,
+          { requestEndpoint: endpoint, requestBodyKeys: body ? Object.keys(body) : undefined, responseData: errorData, underlyingError: this.sanitizeUnderlyingError(error) }
+        );
+      }
     }
   }
 

@@ -1,11 +1,11 @@
 /**
  * @file RequestyProvider.key-failover.test.ts
- * Several Requesty keys in one provider (the key pool v2 design). Requesty's
- * request path sends once, so a key the router rejects (its HTTP 403
- * "Invalid authorization token") is marked and the request fails as before;
- * the next request draws the next usable key; every key out throws
- * ALL_KEYS_FAILED before anything is sent. The axios client is mocked;
- * nothing leaves the process.
+ * Several Requesty keys in one provider (the key pool v2 design): a key the
+ * router rejects (its HTTP 403 "Invalid authorization token"), an unpaid key
+ * (402) or a throttled key (429) is marked and the request is sent again at
+ * once with the next usable key; every key out throws ALL_KEYS_FAILED before
+ * anything is sent; a per-request override is never hopped. The axios client
+ * is mocked; nothing leaves the process.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RequestyProvider } from '../implementations/RequestyProvider.js';
@@ -59,12 +59,10 @@ describe('RequestyProvider key failover', () => {
     vi.restoreAllMocks();
   });
 
-  it('marks a rejected key and draws the next usable one for the next request', async () => {
+  it('moves from a rejected key to the next usable one inside the request, and records the success', async () => {
     const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002');
-    client.request.mockRejectedValueOnce(axiosError(403, badToken));
-    await expect(ask(provider)).rejects.toMatchObject({ code: 'API_REQUEST_FAILED', httpStatus: 403 });
-
-    client.request.mockResolvedValueOnce({ data: okResponse });
+    client.request.mockRejectedValueOnce(axiosError(403, badToken)).mockResolvedValueOnce({ data: okResponse });
+    // One call, two sends: the caller gets the answer, not the rejected key's error.
     const answer = await ask(provider);
     expect(answer.choices[0]?.message?.content).toBe('hi');
     expect(bearers(client)).toEqual(['Bearer key_alpha_0001', 'Bearer key_beta_0002']);
@@ -79,7 +77,7 @@ describe('RequestyProvider key failover', () => {
   it('throws ALL_KEYS_FAILED before sending once every key is out', async () => {
     const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002');
     client.request.mockRejectedValueOnce(axiosError(403, badToken)).mockRejectedValueOnce(axiosError(402, { error: { message: 'Insufficient credits' } }));
-    await expect(ask(provider)).rejects.toMatchObject({ code: 'API_REQUEST_FAILED', httpStatus: 403 });
+    // The request hops from the rejected key to the unpaid one and ends on that key's answer.
     await expect(ask(provider)).rejects.toMatchObject({ code: 'API_REQUEST_FAILED', httpStatus: 402 });
     expect(bearers(client)).toEqual(['Bearer key_alpha_0001', 'Bearer key_beta_0002']);
 
@@ -90,15 +88,19 @@ describe('RequestyProvider key failover', () => {
     expect(client.request).toHaveBeenCalledTimes(2);
   });
 
-  it("rests a throttled key for the server's Retry-After", async () => {
+  it("rests a throttled key for the server's Retry-After and moves the request to the next key", async () => {
     const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002');
-    client.request.mockRejectedValueOnce({
-      isAxiosError: true,
-      message: 'Request failed with status code 429',
-      response: { status: 429, data: { error: { message: 'Too many requests' } }, headers: { 'retry-after': '7' } },
-    });
+    client.request
+      .mockRejectedValueOnce({
+        isAxiosError: true,
+        message: 'Request failed with status code 429',
+        response: { status: 429, data: { error: { message: 'Too many requests' } }, headers: { 'retry-after': '7' } },
+      })
+      .mockResolvedValueOnce({ data: okResponse });
     const before = Date.now();
-    await expect(ask(provider)).rejects.toMatchObject({ code: 'API_REQUEST_FAILED', httpStatus: 429 });
+    const answer = await ask(provider);
+    expect(answer.choices[0]?.message?.content).toBe('hi');
+    expect(bearers(client)).toEqual(['Bearer key_alpha_0001', 'Bearer key_beta_0002']);
     const pool = (provider as unknown as { keyPool: { snapshot(): Array<Record<string, unknown>> } }).keyPool;
     const [a] = pool.snapshot();
     expect(a).toMatchObject({ status: 'resting', kind: 'quota' });
@@ -134,6 +136,17 @@ describe('RequestyProvider key failover', () => {
     await expect(ask(provider)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED' });
     expect(client.request).not.toHaveBeenCalled();
     await provider.shutdown();
+  });
+
+  it('never hops a per-request override, though it marks one that is also a pool key', async () => {
+    const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002');
+    client.request.mockRejectedValueOnce(axiosError(403, badToken));
+    await expect(
+      provider.generateCompletion('openai/gpt-4o-mini', [{ role: 'user', content: 'hi' }], { apiKeyOverride: 'key_alpha_0001' }),
+    ).rejects.toMatchObject({ code: 'API_REQUEST_FAILED', httpStatus: 403 });
+    expect(bearers(client)).toEqual(['Bearer key_alpha_0001']);
+    const pool = (provider as unknown as { keyPool: { snapshot(): Array<Record<string, unknown>> } }).keyPool;
+    expect(pool.snapshot().map((s) => s.status)).toEqual(['failed', 'ok']);
   });
 
   it("keeps a 400 as the request's fault: no mark", async () => {

@@ -127,6 +127,35 @@ describe('GeminiProvider key failover', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('hops keys on a stream too, before any chunk has reached the caller', async () => {
+    const p = await provider('key_alpha_0001,key_beta_0002');
+    const encoder = new TextEncoder();
+    const sse = {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers(),
+      json: () => Promise.reject(new Error('SSE body, not JSON')),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(okContent)}\n\n`));
+          controller.close();
+        },
+      }),
+    } as unknown as Response;
+    fetchMock.mockResolvedValueOnce(jsonResponse(400, invalidKey)).mockResolvedValueOnce(sse);
+    const started = Date.now();
+    const chunks: Array<{ responseTextDelta?: string; isFinal?: boolean }> = [];
+    for await (const chunk of p.generateCompletionStream('gemini-2.5-flash', [{ role: 'user', content: 'hi' }], {})) chunks.push(chunk);
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(callsOf().map(keyOf)).toEqual(['key_alpha_0001', 'key_beta_0002']);
+    expect(chunks.map((chunk) => chunk.responseTextDelta ?? '').join('')).toBe('hello');
+    expect(chunks.some((chunk) => chunk.isFinal)).toBe(true);
+    const pool = (p as unknown as { keyPool: { snapshot(): Array<Record<string, unknown>> } }).keyPool;
+    expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', kind: 'auth' });
+    expect(pool.snapshot()[1]).toMatchObject({ status: 'ok' });
+  });
+
   it('records a success, so an older failure cannot take a working key out', async () => {
     const p = await provider('key_alpha_0001,key_beta_0002');
     fetchMock.mockResolvedValueOnce(jsonResponse(200, okContent));
