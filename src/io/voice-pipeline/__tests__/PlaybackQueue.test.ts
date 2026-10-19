@@ -71,31 +71,34 @@ describe('PlaybackQueue played text', () => {
     let work = q.enqueue(chunk(first));
     await vi.waitFor(() => expect(f.t.waitForPlayback).toHaveBeenCalledTimes(1));
     expect(vi.mocked(f.t.sendAudio).mock.calls[0]![0]).toMatchObject({ sequence: 1, textBoundary: first });
-    expect(q.stats().playedText).toBe('');
+    expect(q.playedText).toBe('');
     f.ack(1);
     await work;
-    expect(q.stats().playedText).toBe('Hello there.');
+    expect(q.playedText).toBe('Hello there.');
 
     // The second segment follows the first exactly: the prefix grows by its text.
     work = q.enqueue(chunk(second));
     await vi.waitFor(() => expect(f.t.waitForPlayback).toHaveBeenCalledTimes(2));
     f.ack(2);
     await work;
-    expect(q.stats()).toMatchObject({ playedMs: 40, playedText: 'Hello there. How are you?' });
+    expect(q.stats().playedMs).toBe(40);
+    expect(q.playedText).toBe('Hello there. How are you?');
 
     // The third segment's last frame carries no boundary: its terminal response never came, so it is never proven.
     work = q.enqueue(chunk());
     await vi.waitFor(() => expect(f.t.waitForPlayback).toHaveBeenCalledTimes(3));
     f.ack(3);
     await work;
-    expect(q.stats()).toMatchObject({ playedMs: 60, playedText: 'Hello there. How are you?' });
+    expect(q.stats().playedMs).toBe(60);
+    expect(q.playedText).toBe('Hello there. How are you?');
 
     // The fourth is acknowledged, but the prefix stops at the gap before it.
     work = q.enqueue(chunk(fourth));
     await vi.waitFor(() => expect(f.t.waitForPlayback).toHaveBeenCalledTimes(4));
     f.ack(4);
     await work;
-    expect(q.stats()).toMatchObject({ playedMs: 80, playedText: 'Hello there. How are you?' });
+    expect(q.stats().playedMs).toBe(80);
+    expect(q.playedText).toBe('Hello there. How are you?');
   });
 
   it('advances nothing for a chunk a cancel discarded, even on a late receipt', async () => {
@@ -110,7 +113,8 @@ describe('PlaybackQueue played text', () => {
     f.ack(1);
     await cancelling;
     await rejected;
-    expect(q.stats()).toMatchObject({ playedMs: 0, playedText: '' });
+    expect(q.stats().playedMs).toBe(0);
+    expect(q.playedText).toBe('');
   });
 
   it('a chunk without a boundary adds its samples to playedMs and nothing to playedText', async () => {
@@ -120,7 +124,8 @@ describe('PlaybackQueue played text', () => {
     await vi.waitFor(() => expect(f.t.waitForPlayback).toHaveBeenCalledOnce());
     f.ack(1);
     await work;
-    expect(q.stats()).toEqual({ bytes: 0, durationMs: 0, playedMs: 20, playedText: '' });
+    expect(q.stats()).toEqual({ bytes: 0, durationMs: 0, playedMs: 20 });
+    expect(q.playedText).toBe('');
   });
 
   it('keeps the played text out of stats(), whose numbers alone a host may log', async () => {
@@ -130,6 +135,7 @@ describe('PlaybackQueue played text', () => {
     await vi.waitFor(() => expect(f.t.waitForPlayback).toHaveBeenCalledOnce());
     f.ack(1);
     await work;
+    expect(q.playedText).toBe('Your table for two is booked.');
     // Occupancy and the acknowledged duration only: the reply's words, which can repeat what a caller said, are not in it.
     expect(q.stats()).toEqual({ bytes: 0, durationMs: 0, playedMs: 20 });
   });

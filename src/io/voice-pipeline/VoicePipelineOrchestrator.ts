@@ -2880,7 +2880,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
       this.replyText = '';
       // The played text is the contiguous prefix of the sentence segments whose last frame the transport acknowledged
       // (the text boundaries the TTS chunks carry); empty while none is proven, never a guess from bytes sent.
-      if (text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text, playedText: this.queue?.stats().playedText ?? '', interrupted: true }, createdAt: Date.now() });
+      if (text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text, playedText: this.queue?.playedText ?? '', interrupted: true }, createdAt: Date.now() });
     }
     this.agent.abort?.();
     const tts = this.tts;

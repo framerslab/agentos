@@ -120,12 +120,17 @@ export class PlaybackQueue {
     return this.failure !== undefined && !this.cancelled;
   }
 
+  /** Content-free occupancy and acknowledged duration only. */
+  stats(): { bytes: number; durationMs: number; playedMs: number } {
+    return { bytes: this.bytes, durationMs: this.durationMs, playedMs: this.playedMs };
+  }
+
   /**
-   * Occupancy, acknowledged duration, and the text proven played: the contiguous prefix of the segments whose last
-   * frame the transport acknowledged, exactly as submitted, empty while none is. The numbers are content-free; the
-   * text is the reply's and belongs in its conversation item, never in a log line.
+   * The text proven played: the contiguous prefix of the segments whose last frame the transport acknowledged, exactly
+   * as submitted, empty while none is. It is the reply's text, which can repeat what a caller said, so it belongs in
+   * the reply's conversation item and never in a log line; {@link PlaybackQueue.stats} keeps to numbers.
    */
-  stats(): { bytes: number; durationMs: number; playedMs: number; playedText: string } {
-    return { bytes: this.bytes, durationMs: this.durationMs, playedMs: this.playedMs, playedText: this.tracker.playedText };
+  get playedText(): string {
+    return this.tracker.playedText;
   }
 }

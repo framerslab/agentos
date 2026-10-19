@@ -59,7 +59,7 @@ describe('acknowledged playback', () => {
     f.ack();
     await work;
     await q.drain();
-    expect(q.stats()).toEqual({ bytes: 0, durationMs: 0, playedMs: 20, playedText: '' });
+    expect(q.stats()).toEqual({ bytes: 0, durationMs: 0, playedMs: 20 });
   });
 
   it('rejects oversized audio and supervises send rejection', async () => {
