@@ -27,7 +27,9 @@ import {
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
+  maskedMessageOf,
 } from './shared.js';
+import { lazyLogger } from '../lazyLogger.js';
 import type { SeatedRoster, SeatedConfig } from '../pool/seating.js';
 import { vendorOf, makerOfHostedModel, isHostProvider } from '../pool/vendor.js';
 import { seatHealthId } from '../pool/resolve.js';
@@ -39,6 +41,8 @@ import {
   type ApprovalSlot,
 } from '../approval-gate.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+
+const agencyLogger = lazyLogger('agency');
 
 type Usage = {
   promptTokens: number;
@@ -138,7 +142,8 @@ function freshError(error: unknown, mask: (error: unknown) => unknown): Error {
 
 /**
  * The callbacks the panel and its gates fire. Each runs inside a try/catch,
- * so a callback that throws is logged and changes no status, and every
+ * so a callback that throws is written to the host's logger, masked, and
+ * changes no status, and every
  * `error` event carries a new Error built from the redacted message and stack.
  */
 function panelCallbacks(on: AgencyOptions['on'], mask: (error: unknown) => unknown): Callbacks {
@@ -151,7 +156,8 @@ function panelCallbacks(on: AgencyOptions['on'], mask: (error: unknown) => unkno
           name === 'error' && isRecord(event) ? { ...event, error: freshError(event.error, mask) } : event;
         (fn as Notify).call(on, payload);
       } catch (err) {
-        console.warn(`[AgentOS][Panel] ${name} callback threw:`, err);
+        // To the host's logger, with the message through the call's mask: a callback's error can quote what the call sent.
+        agencyLogger.warn(`${name} callback threw`, { event: 'agency_callback_threw', callback: name, error: maskedMessageOf(err, mask) });
       }
     };
   }
@@ -169,24 +175,73 @@ function droppedOnceSettled(on: Callbacks, settled: () => boolean): Callbacks {
   return out as Callbacks;
 }
 
-/** Races `work` against a deadline; with none, waits for it. A late settlement is swallowed. */
-async function withDeadline<T>(
-  work: Promise<T>,
-  ms: number | undefined,
-): Promise<{ timedOut: true } | { timedOut: false; value: T } | { timedOut: false; error: unknown }> {
+/** How {@link withDeadline} ended: the deadline, the signal, or the work's own settlement. */
+type Raced<T> =
+  | { timedOut: true }
+  | { timedOut: false; aborted: true; reason: unknown }
+  | { timedOut: false; value: T }
+  | { timedOut: false; error: unknown };
+
+/**
+ * Races `work` against a deadline and an abort signal; with neither, waits for
+ * it. A signal that has already aborted ends the race at once. A late
+ * settlement is swallowed.
+ */
+/** The members an abort signal is read and listened to by, whatever realm or polyfill built it. */
+type AbortSignalLike = Pick<AbortSignal, 'aborted' | 'reason'> & {
+  addEventListener(type: 'abort', listener: () => void): void;
+  removeEventListener(type: 'abort', listener: () => void): void;
+};
+
+/** Whether `value` says whether it has aborted and fires `abort`: an AbortSignal of this realm, of another, or a polyfill's. */
+const isAbortSignalLike = (value: unknown): value is AbortSignalLike =>
+  isRecord(value) && typeof value.aborted === 'boolean' && typeof value.addEventListener === 'function' && typeof value.removeEventListener === 'function';
+
+/**
+ * Aborts `stop` with `signal`'s reason when `signal` aborts, at once when it
+ * already has. Returns what unlinks them, for when the seat has settled, so a
+ * long-lived caller signal keeps no listener per seat.
+ */
+function linkAbort(signal: AbortSignalLike | undefined, stop: AbortController): () => void {
+  if (!signal) return () => undefined;
+  const relay = (): void => stop.abort(signal.reason);
+  if (signal.aborted) {
+    relay();
+    return () => undefined;
+  }
+  signal.addEventListener('abort', relay);
+  return () => signal.removeEventListener('abort', relay);
+}
+
+async function withDeadline<T>(work: Promise<T>, ms: number | undefined, signal?: AbortSignal): Promise<Raced<T>> {
   const settled = work.then(
-    (value) => ({ timedOut: false as const, value }),
-    (error: unknown) => ({ timedOut: false as const, error }),
+    (value): Raced<T> => ({ timedOut: false, value }),
+    (error: unknown): Raced<T> => ({ timedOut: false, error }),
   );
-  if (ms === undefined) return settled;
+  if (ms === undefined && !signal) return settled;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<{ timedOut: true }>((resolve) => {
-    timer = setTimeout(() => resolve({ timedOut: true }), Math.max(0, ms));
-  });
+  let onAbort: (() => void) | undefined;
+  const racers: Array<Promise<Raced<T>>> = [settled];
+  if (ms !== undefined) {
+    racers.push(new Promise<Raced<T>>((resolve) => {
+      timer = setTimeout(() => resolve({ timedOut: true }), Math.max(0, ms));
+    }));
+  }
+  if (signal) {
+    racers.push(new Promise<Raced<T>>((resolve) => {
+      const aborted = (): void => resolve({ timedOut: false, aborted: true, reason: signal.reason });
+      if (signal.aborted) aborted();
+      else {
+        onAbort = aborted;
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    }));
+  }
   try {
-    return await Promise.race([settled, deadline]);
+    return await Promise.race(racers);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
   }
 }
 
@@ -333,6 +388,11 @@ export function compilePanel(
     delete callOpts.__approvalGate;
     const requested = callOpts.requestTimeout;
     const callTimeout = typeof requested === 'number' ? requested : undefined;
+    // The caller's abort signal, which every seat's own stop is linked to by
+    // its `abort` event: a signal from another realm or a polyfill's, which no
+    // `instanceof` check of this realm recognizes, links the same way. A value
+    // that fires no such event is no signal, and the seats run on their own stops.
+    const callerSignal = isAbortSignalLike(callOpts.abortSignal) ? callOpts.abortSignal : undefined;
     const sem = semaphore(panelOpts.concurrency ?? Number.POSITIVE_INFINITY);
     const seatNames = Object.keys(agencyConfig.agents);
     const records = new Map<string, PanelSeatRecord>();
@@ -362,7 +422,13 @@ export function compilePanel(
         ? createApprovalGate({ hitl: agencyConfig.hitl, agentName: owner, on: ownerOn, slot, received })
         : received;
 
-    /** Runs one seat or the chair: its `beforeAgent` gate, then its model call, under its deadline. */
+    /**
+     * Runs one seat or the chair: its `beforeAgent` gate, then its model call,
+     * under its deadline. The call carries the seat's own stop, which its
+     * deadline aborts, so a call that outlives the seat starts no further
+     * step, retry or fallback hop; the caller's abort reaches it through the
+     * same signal, and settles the seat at once, a pending approval included.
+     */
     const runAgent = async (
       owner: string,
       target: SeatedConfig | Agent,
@@ -376,10 +442,21 @@ export function compilePanel(
         deadlineMs === undefined ? undefined : Math.max(0, deadlineMs - elapsed());
       // Once this seat has settled, the notifications of its gates are dropped.
       const ownerOn = droppedOnceSettled(on, () => slot.settled);
+      const stop = new AbortController();
+      const signal = stop.signal;
+      // The seat is settled the moment its stop aborts, the caller's abort
+      // relayed or its deadline: a gate that returns afterwards skips its
+      // tool, and an approval that returns afterwards starts nothing.
+      signal.addEventListener('abort', () => { slot.settled = true; }, { once: true });
+      const unlink = linkAbort(callerSignal, stop);
       // An async boundary of its own: a generate that throws synchronously
       // rejects this promise, and cannot escape the seat or keep its slot.
       const work = (async (): Promise<Outcome> => {
+        // A seat that takes its slot after the caller's abort asks no approval and sends nothing.
+        if (signal.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
         const decision = await checkBeforeAgent(owner, input, agentCalls.slice(), { ...agencyConfig, on: ownerOn });
+        // An abort that landed while the approval was pending: the seat sends nothing, whatever the handler said.
+        if (signal.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
         if (decision && !decision.approved) {
           return { kind: 'rejected', reason: decision.reason ?? 'rejected by HITL', durationMs: elapsed() };
         }
@@ -411,6 +488,7 @@ export function compilePanel(
         const gate = gateFor(owner, slot, ownerOn);
         if (gate) agentOpts.__approvalGate = gate;
         if (requestTimeout !== undefined) agentOpts.requestTimeout = requestTimeout;
+        agentOpts.abortSignal = signal;
         // Our deadline is the smallest bound: a timeout then says nothing about
         // the provider, and the flag keeps it off the breaker. A received flag
         // rides on only with the received requestTimeout it was set for.
@@ -421,11 +499,17 @@ export function compilePanel(
         return { kind: 'returned', result: isRecord(result) ? result : {}, durationMs: elapsed() };
       })();
       work.catch(() => undefined);
-      const raced = await withDeadline(work, remaining());
+      const raced = await withDeadline(work, remaining(), signal).finally(unlink);
       if (raced.timedOut) {
         // Settled first: from here on the seat's gates drop their notifications and skip every tool.
         slot.settled = true;
+        // Then stopped: the call in flight ends, and nothing it would send next is sent.
+        stop.abort(new DOMException(`${owner} timed out after ${deadlineMs}ms`, 'TimeoutError'));
         return { kind: 'timeout', durationMs: elapsed() };
+      }
+      if ('aborted' in raced) {
+        slot.settled = true;
+        return { kind: 'threw', error: raced.reason, durationMs: elapsed() };
       }
       if ('error' in raced) return { kind: 'threw', error: raced.error, durationMs: elapsed() };
       return raced.value;
@@ -436,6 +520,17 @@ export function compilePanel(
       (Array.isArray(value) ? (value as AgentCallRecord['toolCalls']) : []).map((t) =>
         isRecord(t) && typeof t.error === 'string' ? { ...t, error: redacted(t.error) } : t,
       );
+
+    /**
+     * A seat that failed, timed out or found no entry to sit on, written
+     * through the host's logger with its message masked: the run can meet its
+     * quorum without it, and a host that sets no `on.error` reads the failure
+     * nowhere else, as `parallel_seat_failed` writes a parallel seat's.
+     */
+    const logSeatFailed = (name: string, status: 'error' | 'timeout' | 'unseated', error: string): void => {
+      const what = status === 'error' ? 'failed' : status === 'timeout' ? 'timed out' : 'was not seated';
+      agencyLogger.warn(`panel seat "${name}" ${what}`, { event: 'panel_seat_failed', agent: name, status, error: redacted(error) });
+    };
 
     /** The record of a seat whose call ended, and the callbacks its status fires. */
     const settleSeat = (
@@ -452,6 +547,8 @@ export function compilePanel(
         // A tool approval that failed during the call makes the seat an error,
         // whatever text it returned. The gate reported that error to on.error.
         const failed = slot.error !== undefined;
+        const failure = failed ? redacted(slot.error) : undefined;
+        if (failure !== undefined) logSeatFailed(name, 'error', failure);
         const status: PanelSeatRecord['status'] = failed ? 'error' : nonWhitespace(answered.text) >= minChars ? 'ok' : 'empty';
         addUsage(outcome.result.usage);
         callRecords.set(name, {
@@ -470,19 +567,23 @@ export function compilePanel(
           status,
           truncated: status === 'ok' && (answered.finishReason === 'length' || answered.finishReason === 'tool-calls') ? true : undefined,
           durationMs,
-          error: failed ? redacted(slot.error) : undefined,
+          error: failure,
         });
       }
       if (outcome.kind === 'threw') {
+        const error = redacted(outcome.error);
+        logSeatFailed(name, 'error', error);
         on.error?.({ agent: name, error: freshError(outcome.error, mask), timestamp: Date.now() });
-        return seatRecord({ ...base, status: 'error', text: '', durationMs, error: redacted(outcome.error) });
+        return seatRecord({ ...base, status: 'error', text: '', durationMs, error });
       }
       if (outcome.kind === 'timeout') {
         const error = `seat "${name}" timed out after ${seatDeadlineMs}ms`;
+        logSeatFailed(name, 'timeout', error);
         on.error?.({ agent: name, error: new Error(error), timestamp: Date.now() });
         return seatRecord({ ...base, status: 'timeout', text: '', durationMs, error });
       }
       if (outcome.kind === 'error') {
+        logSeatFailed(name, 'error', outcome.message);
         on.error?.({ agent: name, error: new Error(outcome.message), timestamp: Date.now() });
         return seatRecord({ ...base, status: 'error', text: '', durationMs, error: outcome.message });
       }
@@ -496,7 +597,9 @@ export function compilePanel(
         const assigned: SeatingSeatRecord | undefined = seating.record.seats[name];
         const seat: SeatedConfig | Agent | undefined = agents[name];
         if (assigned?.unseated || seat === undefined) {
-          records.set(name, seatRecord({ seat: name, status: 'unseated', text: '', durationMs: 0, error: assigned?.reason ?? 'not seated' }));
+          const reason = assigned?.reason ?? 'not seated';
+          logSeatFailed(name, 'unseated', reason);
+          records.set(name, seatRecord({ seat: name, status: 'unseated', text: '', durationMs: 0, error: reason }));
           return;
         }
         // The deadline starts when the seat takes its slot, and the slot is
@@ -538,12 +641,19 @@ export function compilePanel(
       vendors,
       ...(shortfalls.length > 0 ? { shortfall: `panel quorum shortfall: ${shortfalls.join(', ')}` } : {}),
     };
+    // Zero healthy seats always throws, whatever onShortfall says.
+    if (!quorum.met && (healthy.length === 0 || (q.onShortfall ?? 'error') === 'error')) {
+      throw new AgencyQuorumError(quorum.shortfall ?? 'panel quorum shortfall', ledger(quorum));
+    }
+    // A caller's abort that landed after some seats answered: the call
+    // rejects with the ledger, as it does when the abort ends every seat, so
+    // no chair starts and a caller that stopped waiting is handed no answer,
+    // with a chair or without one.
+    if (callerSignal?.aborted) {
+      throw new AgencyPanelError(`panel aborted: ${redacted(callerSignal.reason ?? 'the caller aborted')}`, ledger(quorum));
+    }
     if (!quorum.met) {
-      // Zero healthy seats always throws, whatever onShortfall says.
-      if (healthy.length === 0 || (q.onShortfall ?? 'error') === 'error') {
-        throw new AgencyQuorumError(quorum.shortfall ?? 'panel quorum shortfall', ledger(quorum));
-      }
-      console.warn(`[AgentOS][Panel] ${quorum.shortfall}: proceeding (onShortfall=proceed)`);
+      agencyLogger.warn(`${quorum.shortfall}: proceeding (onShortfall=proceed)`, { event: 'panel_quorum_shortfall', shortfall: quorum.shortfall });
     }
 
     // ---- chair ----

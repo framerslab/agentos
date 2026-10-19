@@ -21,14 +21,15 @@ import {
   mergeRequiredCapabilities,
   type HostLLMPolicy,
 } from './runtime/hostPolicy.js';
-import { adaptTools, type AdaptableToolInput } from './runtime/toolAdapter.js';
+import { adaptTools, isSingleUseToolInput, toolInputNames, type AdaptableToolInput } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
 import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from './runtime/approval-gate.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
-import { createLogger } from '../core/logging/loggerFactory.js';
+import { lazyLogger } from './runtime/lazyLogger.js';
+import { isCallMask } from './runtime/pool/redact.js';
 import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
@@ -53,7 +54,12 @@ import {
 } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
 
-const fallbackLogger = createLogger('fallback');
+/**
+ * The `fallback` component's lines, to the logger the host's factory makes when
+ * each line is written: a factory set with `setLoggerFactory` after this module
+ * was imported still receives every failover line.
+ */
+const fallbackLogger = lazyLogger('fallback');
 
 /**
  * Invoke a caller-supplied per-leg responseFormat builder without letting a
@@ -2178,6 +2184,45 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     const masked = opts.__maskError?.(text);
     return typeof masked === 'string' ? masked : text;
   };
+  /**
+   * A tool's successful output as the next request carries it. Under an
+   * agency's call mask the listed values alone are replaced, so a URL the tool
+   * returns keeps its query and its credentials as the tool gave them; a bare
+   * mask is applied as it is. A failed tool's text takes the error mask.
+   */
+  const maskToolOutput = (text: string): string => (isCallMask(opts.__maskError) ? opts.__maskError.text(text) : maskToolText(text));
+  /**
+   * A tool's output as a value, masked before it is serialized: under an
+   * agency's call mask each string, and each number whose digits hold a listed
+   * value, is replaced, so a secret JSON escaping would change (one with a
+   * quote or a backslash) is masked whole, and the call record holds the
+   * masked output. A bare mask reads text only and leaves the value as it is.
+   */
+  const maskToolValue = (output: unknown): unknown => (isCallMask(opts.__maskError) ? opts.__maskError.strings(output, true) : output);
+  /** A masked turn as the request carries it: the JSON it still is, else (a replacement inside what a class wrote through toJSON) the masked text as a JSON string. */
+  const asJsonText = (sent: string, turn: string): string => {
+    if (sent === turn) return sent;
+    try {
+      JSON.parse(sent);
+      return sent;
+    } catch {
+      return JSON.stringify(sent);
+    }
+  };
+  /**
+   * A tool turn's JSON: the output's, else `absent`'s, for an output that is
+   * absent or that JSON leaves out (a function, a symbol, a toJSON that
+   * returns nothing). A tool that succeeded with such an output is sent as one
+   * that returned nothing, never as a failure. When the mask made a copy of
+   * the output, `returned` (the output as the tool gave it) is written first:
+   * the copy reads a getter that throws as undefined, so an output no
+   * serializer can write (such a getter, a toJSON that throws) fails the tool
+   * here as it does without a mask.
+   */
+  const toolTurnJson = (output: unknown, absent: unknown, returned: unknown = output): string => {
+    if (returned !== output && returned != null) JSON.stringify(returned);
+    return (output == null ? undefined : (JSON.stringify(output) as string | undefined)) ?? (JSON.stringify(absent) as string | undefined) ?? '""';
+  };
 
   try {
     const successResult: GenerateTextResult = await withAgentOSSpan('agentos.api.generate_text', async (span) => {
@@ -2294,8 +2339,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       span?.setAttribute('llm.provider', resolved.providerId);
       span?.setAttribute('llm.model', resolved.modelId);
 
-      const tools = adaptTools(opts.tools);
-      const toolMap = new Map<string, ITool>();
+      let tools = adaptTools(opts.tools);
+      // The names the table held when it was last adapted.
+      let adaptedNames = toolInputNames(opts.tools);
+      let toolMap = new Map<string, ITool>();
       for (const t of tools) toolMap.set(t.name, t);
 
       // Build messages
@@ -2368,13 +2415,34 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
       span?.setAttribute('agentos.api.tool_count', tools.length);
 
-      const toolSchemas =
-        tools.length > 0
-          ? tools.map((t) => ({
+      const toolSchemasOf = (list: ITool[]) =>
+        list.length > 0
+          ? list.map((t) => ({
               type: 'function' as const,
               function: { name: t.name, description: t.description, parameters: t.inputSchema },
             }))
          : undefined;
+      let toolSchemas = toolSchemasOf(tools);
+      // A table that grew since the call started is read again before a later
+      // step: a hierarchical manager's spawn_specialist writes delegate_to_<role>
+      // into the table the manager was given, and the manager's next step
+      // sends the new tool and runs it when the model calls it. The names are
+      // read first, which converts no schema: a table whose names are
+      // unchanged keeps the tools of the first read and is not adapted again,
+      // and a table given as a single-use iterable (a generator), which the
+      // first read exhausted, is not read again.
+      const reusableTools = !isSingleUseToolInput(opts.tools);
+      const refreshTools = (): void => {
+        if (!reusableTools) return;
+        const names = toolInputNames(opts.tools);
+        if (names.length === adaptedNames.length && names.every((name, i) => name === adaptedNames[i])) return;
+        adaptedNames = names;
+        const current = adaptTools(opts.tools);
+        if (current.length === tools.length && current.every((t, i) => t.name === tools[i].name)) return;
+        tools = current;
+        toolMap = new Map(current.map((t) => [t.name, t]));
+        toolSchemas = toolSchemasOf(current);
+      };
 
       // A catalog model is sent only a request it can hold: otherwise the
       // call throws in place of the send and the walk moves on. Checked on
@@ -2476,6 +2544,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       const runShim = async (): Promise<GenerateTextResult> => {
         const loopResult = await runEmulatedToolLoop({
           tools: Array.from(toolMap.values()),
+          // The table is read again before each later round, as on the native
+          // loop, so a tool added mid-call (a spawned specialist's delegate
+          // tool) is listed and runs.
+          currentTools: () => {
+            refreshTools();
+            return Array.from(toolMap.values());
+          },
           onToolExecute: () => {
             toolProgress.shimRanTool = true;
           },
@@ -2484,8 +2559,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
-          // A seat's mask reaches the shim's tool errors too.
+          // A seat's mask reaches the shim's tool errors too, and a successful
+          // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
+          maskToolOutput: opts.__maskError ? maskToolOutput : undefined,
+          maskToolValue: opts.__maskError ? maskToolValue : undefined,
           // Native tool turns (session history, a failover continuation)
           // become the shim's own <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -2643,6 +2721,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       for (let step = 0; step < maxSteps; step++) {
         // No step starts once the caller's signal has aborted.
         opts.abortSignal?.throwIfAborted();
+        if (step > 0) refreshTools();
         // The step's index in the whole call: a fallback leg that continues
         // after completed tool rounds numbers on from them.
         const runStep = stepOffset + step;
@@ -3033,15 +3112,29 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                     tcId || undefined,
                   ),
                 );
-                // One masked string serves the record and the tool turn: the
-                // seat's next request carries no key.
+                // One masked output serves the record and the tool turn: the
+                // seat's next request carries no key. The output is masked as
+                // a value before it is serialized, then the whole turn passes
+                // the text mask: a tool that returns a credential of the call
+                // (a config read, an echo of the environment) would otherwise
+                // send it to the seat's provider, and the call's list holds no
+                // value a model is meant to read. A successful output passes
+                // the listed values alone, so a URL it returns is sent as the
+                // tool gave it; a failed tool's turn takes the error mask, URL
+                // patterns included. A turn a replacement left as no JSON is
+                // sent as a JSON string, and an output JSON leaves out (a
+                // function, a symbol) as an absent one is, so a tool that
+                // succeeded never reaches the mask as no text and fails there.
+                // An output no serializer can write fails here, masked or not.
                 const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
-                record.result = result.output;
+                const output = maskToolValue(result.output);
+                record.result = output;
                 record.error = result.success ? undefined: errorText;
+                const turn = toolTurnJson(output, errorText ?? '', result.output);
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: JSON.stringify(result.output ?? errorText ?? ''),
+                  content: asJsonText(result.success ? maskToolOutput(turn) : maskToolText(turn), turn),
                 } as any);
               } catch (err: any) {
                 record.error = maskToolText(err?.message ?? String(err));
@@ -3344,7 +3437,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             errorType: lastErr.name,
             errorCode: (lastErr as { code?: unknown }).code,
             keyKinds: (lastErr as { details?: { kinds?: unknown } }).details?.kinds,
-            errorMessage: lastErr.message.slice(0, 200),
+            // A seat's mask first: a provider's message can echo the key it was sent.
+            errorMessage: maskToolText(lastErr.message).slice(0, 200),
             attempt,
             // Live signal that per-leg rebuild is active (2026-07-07 spec
             // rollout verification): absent for legacy verbatim-carry callers.
@@ -3352,7 +3446,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               ? { rebuiltResponseFormatType: describeResponseFormatShape(rebuiltResponseFormat) }
               : {}),
           });
-          opts.onFallback?.(lastErr, fb.provider);
+          // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
+          opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastErr) as Error) : lastErr, fb.provider);
           // Build a new options object targeting the fallback provider.
           const fallbackResult = await generateText({
             ...opts,
@@ -3494,7 +3589,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         primaryProvider: metricProviderId,
         attempts: attempt,
         errorType: lastErr.name,
-        errorMessage: lastErr.message.slice(0, 200),
+        errorMessage: maskToolText(lastErr.message).slice(0, 200),
       });
       metricStatus = 'error';
       throw markChainWalked(

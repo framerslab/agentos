@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { enforceQuorum } from '../runtime/strategies/shared.js';
 import { compileParallel } from '../runtime/strategies/parallel.js';
 import { AgencyQuorumError, type Agent, type AgencyOptions } from '../types.js';
+import { setLoggerFactory, resetLoggerFactory } from '../../core/logging/loggerFactory.js';
 
 const ok = (name: string, provider: string) => ({
   name,
@@ -27,13 +28,24 @@ describe('enforceQuorum', () => {
     expect(() => enforceQuorum({ minAgents: 2, minProviders: 2 }, settled, 6)).not.toThrow();
   });
 
-  it("onShortfall 'proceed' warns instead of throwing", () => {
+  it("onShortfall 'proceed' writes the shortfall through the host's logger instead of throwing, and to no console", () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    expect(() =>
-      enforceQuorum({ minAgents: 3, onShortfall: 'proceed' }, [ok('a', 'openai')], 6),
-    ).not.toThrow();
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('quorum shortfall'));
-    warn.mockRestore();
+    const lines: Array<{ level: string; message: unknown; meta: unknown }> = [];
+    const write = (level: string) => (message: unknown, meta?: unknown) => { lines.push({ level, message, meta }); };
+    const logger = { info: write('info'), warn: write('warn'), error: write('error'), debug: write('debug'), child: () => logger };
+    setLoggerFactory(() => logger as never);
+    try {
+      expect(() =>
+        enforceQuorum({ minAgents: 3, onShortfall: 'proceed' }, [ok('a', 'openai')], 6),
+      ).not.toThrow();
+      expect(lines).toEqual([
+        { level: 'warn', message: expect.stringContaining('quorum shortfall'), meta: { event: 'parallel_quorum_shortfall', shortfall: expect.stringContaining('1/6 agents succeeded (need 3)') } },
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      resetLoggerFactory();
+      warn.mockRestore();
+    }
   });
 
   it('ignores empty provider strings when counting diversity', () => {
