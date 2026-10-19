@@ -34,6 +34,7 @@ vi.mock('ws', () => {
 });
 
 import { ElevenLabsStreamingTTS } from '../providers/ElevenLabsStreamingTTS.js';
+import { PlayedTextTracker } from '../ttsTextBoundaries.js';
 // Default import: the 'ws' types only expose WebSocket as the default export under this tsconfig.
 import MockedWs from 'ws';
 
@@ -379,6 +380,38 @@ describe('ElevenLabsStreamingTTS', () => {
     expect(flushes).toHaveBeenCalledOnce();
     await flushed;
     expect(flushes).toHaveBeenCalledOnce();
+  });
+
+  it('proves a sentence played only with its isFinal and the acknowledgement of its last frame, never with an earlier one', async () => {
+    const session = await tts.startSession();
+    const [first] = sockets();
+    // A consumer that records each chunk under its place in the stream, as a transport's playback sequence names it.
+    const played = new PlayedTextTracker();
+    const chunks: EncodedAudioChunk[] = [];
+    session.on('audio', (chunk: EncodedAudioChunk) => {
+      chunks.push(chunk);
+      played.sent(chunks.length, chunk.textBoundary);
+    });
+
+    session.pushTokens('Your order shipped.');
+    const flushed = session.flush();
+    expect(texts(first)).toEqual([{ text: 'Your order shipped.' }, { text: '' }]);
+    audio(first, 1);
+    audio(first, 2);
+    audio(first, 3);
+    // Two frames are out, each with the whole sentence as its legacy text, and the first is acknowledged as played:
+    // no sentence is proven, so the whole sentence stays unheard.
+    expect(chunks.map((chunk) => chunk.text)).toEqual(['Your order shipped.', 'Your order shipped.']);
+    played.acknowledged(1);
+    expect(played.playedText).toBe('');
+    // The isFinal puts the boundary on the last frame alone; acknowledging the frames before it still proves nothing.
+    final(first);
+    await flushed;
+    expect(chunks.map((chunk) => chunk.textBoundary?.text)).toEqual([undefined, undefined, 'Your order shipped.']);
+    played.acknowledged(2);
+    expect(played.playedText).toBe('');
+    played.acknowledged(3);
+    expect(played.playedText).toBe('Your order shipped.');
   });
 
   it('reopens the socket for the next segment after the server closes it on isFinal', async () => {

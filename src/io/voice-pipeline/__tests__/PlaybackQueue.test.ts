@@ -122,4 +122,15 @@ describe('PlaybackQueue played text', () => {
     await work;
     expect(q.stats()).toEqual({ bytes: 0, durationMs: 0, playedMs: 20, playedText: '' });
   });
+
+  it('keeps the played text out of stats(), whose numbers alone a host may log', async () => {
+    const f = transport();
+    const q = new PlaybackQueue(f.t, generation, limits);
+    const work = q.enqueue(chunk(boundary('seg-1', 0, 'Your table for two is booked.')));
+    await vi.waitFor(() => expect(f.t.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack(1);
+    await work;
+    // Occupancy and the acknowledged duration only: the reply's words, which can repeat what a caller said, are not in it.
+    expect(q.stats()).toEqual({ bytes: 0, durationMs: 0, playedMs: 20 });
+  });
 });

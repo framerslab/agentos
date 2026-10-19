@@ -2187,4 +2187,36 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     expect(s.errors).toEqual([]);
     await s.orchestrator.stopSession('done');
   });
+
+  it("ends the agent's line with the played prefix alone when the reply's playout wait fails on a stalled track", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const s = await converse(room, 'user-1', { conventions: true });
+    await s.reply();
+    // The reply's two sentences reach the track, each ending with its boundary.
+    s.tts.emit('audio', spoken(1, 'seg-1', 0, 'Your order shipped.'));
+    s.tts.emit('audio', spoken(2, 'seg-2', 19, ' It arrives Monday.'));
+    await vi.waitFor(() => expect(capturedTones()).toEqual([1, 2]));
+    const source = FakeAudioSource.created[0]!;
+    // The track has taken the reply and never reports that it played out.
+    source.waitForPlayout = () => new Promise<void>(() => {});
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      s.tts.emit('flush_complete');
+      await settle();
+      // receiptTimeoutMs plus maxDurationMs pass: the wait fails, what the track held is discarded, and the reply ends.
+      await vi.advanceTimersByTimeAsync(3_000);
+      await settle();
+      expect(s.orchestrator.state).toBe('listening');
+    } finally {
+      vi.useRealTimers();
+    }
+    await settle();
+    // The session sends agent_done with the reply's text, and adds the reply as interrupted with nothing known heard:
+    // the room is shown none of it either, where a final of the whole reply would claim it played.
+    expect(controlTypes(room)).toContain('agent_done');
+    expect(lines(room).filter(([, id]) => id === `${s.transport.id}:agent-1`)).toEqual([]);
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
 });

@@ -9,8 +9,16 @@
  * the segment's text boundary, and no earlier frame does.
  */
 
+import { EventEmitter } from 'node:events';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { EncodedAudioChunk, StreamingTTSSession } from '../types.js';
+import type {
+  EncodedAudioChunk,
+  IEndpointDetector,
+  IStreamTransport,
+  StreamingSTTSession,
+  StreamingTTSConfig,
+  StreamingTTSSession,
+} from '../types.js';
 
 vi.mock('ws', () => {
   const { EventEmitter: EE } = require('node:events');
@@ -52,6 +60,8 @@ vi.mock('ws', () => {
 });
 
 import { DeepgramAuraStreamingTTS } from '../providers/DeepgramAuraStreamingTTS.js';
+import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
+import { PlayedTextTracker } from '../ttsTextBoundaries.js';
 // Default import: the 'ws' types only expose WebSocket as the default export
 // under this tsconfig (TS2595 on a named import). vi.mock supplies the same
 // mock class for both the default and named bindings.
@@ -365,30 +375,36 @@ describe('DeepgramAuraStreamingTTS', () => {
     // The held frame is dropped, and Clear discards what the server still holds.
     expect(chunks).toHaveLength(0);
     expect(sent(ws)).toEqual([{ type: 'Speak', text: 'Hello there.' }, { type: 'Flush' }, { type: 'Clear' }]);
-    // A frame that still arrives goes out without a boundary and with no segment's text.
+    // A frame that still arrives before the Cleared is audio of the cleared text: it is dropped.
     frame(ws, 2);
-    expect(chunks).toHaveLength(1);
-    expect(chunks[0].textBoundary).toBeUndefined();
-    expect(chunks[0].text).toBe('');
-    // The next segment waits until the server has answered for the cancelled one.
+    expect(chunks).toHaveLength(0);
+    // The next segment waits until the server has answered the Clear.
     session.pushTokens('Next one. ');
     expect(sent(ws)).toHaveLength(3);
-    // The cancelled segment's Flushed completes nothing and ends that wait.
+    // The cancelled segment's Flushed, which comes before the Cleared, completes nothing and ends no wait.
     control(ws, { type: 'Flushed', sequence_id: 0 });
-    expect(chunks).toHaveLength(1);
+    expect(chunks).toHaveLength(0);
     expect(flushes).not.toHaveBeenCalled();
+    expect(sent(ws)).toHaveLength(3);
+    // The Cleared ends the wait: the next segment goes out, and the audio that follows is the session's again.
+    control(ws, { type: 'Cleared', sequence_id: 0 });
     expect(sent(ws).slice(3)).toEqual([{ type: 'Speak', text: 'Next one.' }, { type: 'Flush' }]);
+    frame(ws, 3);
+    frame(ws, 4);
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary, chunk.text])).toEqual([[3, undefined, 'Next one.']]);
     // The flush that the cancel cut resolved without flush_complete.
     await flushed;
     expect(flushes).not.toHaveBeenCalled();
 
-    // A cancel with a segment in flight, then Cleared alone: it ends the wait too.
+    // A cancel with a segment in flight, then Cleared alone: it ends the wait too, and the frames before it are dropped.
     session.cancel();
     expect(sent(ws).slice(5)).toEqual([{ type: 'Clear' }]);
+    frame(ws, 5);
     session.pushTokens('Again. ');
     expect(sent(ws)).toHaveLength(6);
     control(ws, { type: 'Cleared', sequence_id: 2 });
     expect(sent(ws).slice(6)).toEqual([{ type: 'Speak', text: 'Again.' }, { type: 'Flush' }]);
+    expect(chunks).toHaveLength(1);
   });
 
   it('emits flush_complete once per flush, not once per segment', async () => {
@@ -408,6 +424,37 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(flushes).toHaveBeenCalledOnce();
     await flushed;
     expect(flushes).toHaveBeenCalledOnce();
+  });
+
+  it('proves a sentence played only with its Flushed and the acknowledgement of its last frame, never with an earlier one', async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    // A consumer that records each chunk under its place in the stream, as a transport's playback sequence names it.
+    const played = new PlayedTextTracker();
+    const chunks: EncodedAudioChunk[] = [];
+    session.on('audio', (chunk: EncodedAudioChunk) => {
+      chunks.push(chunk);
+      played.sent(chunks.length, chunk.textBoundary);
+    });
+
+    session.pushTokens('Your order shipped.');
+    const flushed = session.flush();
+    frame(ws, 1);
+    frame(ws, 2);
+    frame(ws, 3);
+    // Two frames are out, each with the whole sentence as its legacy text, and the first is acknowledged as played:
+    // no sentence is proven, so the whole sentence stays unheard.
+    expect(chunks.map((chunk) => chunk.text)).toEqual(['Your order shipped.', 'Your order shipped.']);
+    played.acknowledged(1);
+    expect(played.playedText).toBe('');
+    // The Flushed puts the boundary on the last frame alone; acknowledging the frames before it still proves nothing.
+    control(ws, { type: 'Flushed', sequence_id: 0 });
+    await flushed;
+    expect(chunks.map((chunk) => chunk.textBoundary?.text)).toEqual([undefined, undefined, 'Your order shipped.']);
+    played.acknowledged(2);
+    expect(played.playedText).toBe('');
+    played.acknowledged(3);
+    expect(played.playedText).toBe('Your order shipped.');
   });
 
   /** How many Flush messages the session has sent on the socket. */
@@ -541,5 +588,83 @@ describe('DeepgramAuraStreamingTTS', () => {
     ws.emit('close');
     expect(errors).not.toHaveBeenCalled();
     expect(closes).toHaveBeenCalledOnce();
+  });
+
+  it("sends the transport none of what Deepgram still delivers for a reply typed text cut, as the typed text's reply", async () => {
+    // A transport that reports no playout, and an STT session and an endpoint detector the test drives.
+    const transport = Object.assign(new EventEmitter(), {
+      id: 'transport-1',
+      state: 'open' as const,
+      sendAudio: vi.fn(async (_chunk: EncodedAudioChunk) => undefined),
+      sendControl: vi.fn(async (_message: unknown) => undefined),
+      close: vi.fn(),
+    });
+    const stt = Object.assign(new EventEmitter(), { pushAudio: vi.fn(), flush: vi.fn(async () => undefined), close: vi.fn() });
+    const endpoint = Object.assign(new EventEmitter(), { mode: 'heuristic' as const, pushVadEvent: vi.fn(), pushTranscript: vi.fn(), reset: vi.fn() });
+    // The agent's answer to the spoken question streams until its request is aborted; its answer to the text is one
+    // sentence.
+    let unwind: (() => void) | undefined;
+    const agent = {
+      sendText: vi.fn((text: string) =>
+        (async function* () {
+          if (text !== 'Where is my order?') {
+            yield 'Cancelled.';
+            return;
+          }
+          yield 'Your order shipped. ';
+          yield 'It arrives';
+          await new Promise<void>((resolve) => {
+            unwind = resolve;
+          });
+        })()
+      ),
+      abort: vi.fn(() => unwind?.()),
+    };
+    let session!: StreamingTTSSession;
+    const orchestrator = new VoicePipelineOrchestrator({ stt: 'fake-stt', tts: tts.providerId, format: 'pcm' });
+    await orchestrator.startSession(transport as unknown as IStreamTransport, agent, {
+      streamingSTT: { providerId: 'fake-stt', isStreaming: true, startSession: async () => stt as unknown as StreamingSTTSession },
+      streamingTTS: {
+        providerId: tts.providerId,
+        startSession: async (config?: StreamingTTSConfig) => (session = await tts.startSession(config)),
+      },
+      endpointDetector: endpoint as unknown as IEndpointDetector,
+      bargeinHandler: { mode: 'hard-cut', handleBargein: () => ({ type: 'cancel' }) },
+    });
+    const ws = socketOf(session);
+    ws.send.mockClear();
+    /** The frames the transport was sent, by the value the server gave each. */
+    const heard = (): number[] => transport.sendAudio.mock.calls.map(([chunk]) => chunk.audio[0]!);
+
+    try {
+      endpoint.emit('turn_complete', { transcript: 'Where is my order?', confidence: 0.9, durationMs: 800, reason: 'silence_timeout' });
+      await vi.waitFor(() => expect(sent(ws)).toEqual([{ type: 'Speak', text: 'Your order shipped.' }, { type: 'Flush' }]));
+      frame(ws, 1);
+      frame(ws, 2);
+      // The first frame goes to the transport; the second is held for the sentence's boundary.
+      expect(heard()).toEqual([1]);
+
+      // The user types while the sentence plays: the reply is cut, Clear goes out, and the agent answers the text.
+      transport.emit('message', { type: 'text_input', text: 'Cancel it.' });
+      await vi.waitFor(() => expect(agent.sendText).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(orchestrator.state).toBe('speaking'));
+      expect(sent(ws).slice(2)).toEqual([{ type: 'Clear' }]);
+
+      // Deepgram sent more of the cut sentence before it read the Clear, and answers that sentence's Flush: none of it
+      // reaches the transport as the new reply, whose sentence waits for the Cleared.
+      frame(ws, 3);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(heard()).toEqual([1]);
+      expect(sent(ws)).toHaveLength(3);
+
+      control(ws, { type: 'Cleared', sequence_id: 0 });
+      expect(sent(ws).slice(3)).toEqual([{ type: 'Speak', text: 'Cancelled.' }, { type: 'Flush' }]);
+      frame(ws, 4);
+      control(ws, { type: 'Flushed', sequence_id: 1 });
+      await vi.waitFor(() => expect(heard()).toEqual([1, 4]));
+    } finally {
+      await orchestrator.stopSession('done');
+    }
   });
 });
