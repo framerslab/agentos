@@ -111,8 +111,9 @@ describe("agent({ runtime: 'gmi' }) keeps what agent() does", () => {
     const r = await session.send('Where?', { responseSchema: z.object({ city: z.string() }), schemaName: 'place' });
     expect(r.object).toEqual({ city: 'Lyon' });
     expect(s.seen).toHaveLength(1);
-    // Claude Sonnet 5.5 takes no forced tool, so no payload carries the schema: the prompt did, and the hook took it out.
-    expect(s.seen[0].options.responseFormat).toBeUndefined();
+    // Claude Sonnet 5.5 takes the JSON output format: the payload carries the schema, so the prompt never did, and the
+    // hook's system message is the only one sent.
+    expect(s.seen[0].options.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema', tool: { name: 'place' } });
     const sent = s.seen[0].messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
     expect(sent).toContain('Be brief.');
     expect(sent).not.toContain('The JSON MUST conform to this JSON Schema:');
@@ -138,7 +139,8 @@ describe("agent({ runtime: 'gmi' }) keeps what agent() does", () => {
     const r = await session.send('Where?', { responseSchema: z.object({ city: z.string() }), schemaName: 'place' });
     expect(r.object).toEqual({ city: 'Lyon' });
     expect([primary.seen.length, s.seen.length]).toEqual([1, 1]);
-    // The Anthropic leg's payload carries no schema, so its prompt did, before the hook, which took it out.
+    // The Anthropic leg's payload carries the schema (the JSON output format), so its prompt never did; the hook's
+    // system message is the only one sent.
     const sent = s.seen[0].messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
     expect(sent).toContain('Be brief.');
     expect(sent).not.toContain('The JSON MUST conform to this JSON Schema:');

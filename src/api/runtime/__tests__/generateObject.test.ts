@@ -868,11 +868,12 @@ describe('generateObject fallback-leg responseFormat rebuild (2026-07-07)', () =
 
       expect(result.object).toEqual({ palette: { primary: '#aabbcc' } });
       const calls = hoisted.generateCompletion.mock.calls as unknown[][];
-      // Primary call carried the anthropic forced-tool marker…
+      // The primary carried no payload: a record schema is outside the JSON output format, and Opus 4.8 has the
+      // format, so the forced tool is not its route either (the schema rode the prompt)…
       const primaryOptions = (calls.find((c) => c[0] === 'claude-opus-4-8')?.[2] ?? {}) as {
         responseFormat?: Record<string, unknown>;
       };
-      expect(primaryOptions.responseFormat?._agentosUseToolForStructuredOutput).toBe(true);
+      expect(primaryOptions.responseFormat).toBeUndefined();
       // …and the openai LEG was rebuilt to json_object (record schema fails
       // the strict gate), NOT the verbatim anthropic marker.
       const legOptions = (calls.find((c) => c[0] === 'gpt-4o-mini')?.[2] ?? {}) as {
@@ -1040,7 +1041,7 @@ describe('generateObject — the schema text carries the Zod size checks (2026-1
     return typeof content === 'string' ? content : JSON.stringify(content);
   }
 
-  it('prompt-only path: the limits are in the system prompt and no payload carries them', async () => {
+  it('the JSON output format path: the limits are in the system prompt and the payload schema is free of them', async () => {
     const { resolveModelOption } = await import('../../model.js');
     vi.mocked(resolveModelOption).mockReturnValueOnce({
       providerId: 'anthropic',
@@ -1058,7 +1059,12 @@ describe('generateObject — the schema text carries the Zod size checks (2026-1
 
     expect(object).toEqual({ title: 'T', tags: ['a'] });
     const args = hoisted.generateCompletion.mock.calls[0][2];
-    expect(args.responseFormat).toBeUndefined();
+    // Claude Fable 5 takes the JSON output format; the lowering drops the size checks, so the payload's schema has none.
+    expect(args.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
+    const payloadSchema = JSON.stringify(args.responseFormat.tool.input_schema);
+    expect(payloadSchema).not.toContain('maxLength');
+    expect(payloadSchema).not.toContain('minItems');
+    expect(payloadSchema).not.toContain('maxItems');
     const text = systemText();
     expect(text).toContain('"maxLength": 40');
     expect(text).toContain('"minItems": 1');
@@ -1131,7 +1137,11 @@ describe('enum casing repair', () => {
   });
 
   it('when the repaired candidate still fails, the retry is told the issue that remains, not the casing', async () => {
-    const schema = z.object({ verdict: z.enum(['red', 'green']), score: z.number().max(10) });
+    // Zod runs an object's refinement only once its fields parse, so the casing is the sole issue of the first
+    // parse, the repair runs, and the revalidation reaches the refinement: that failure is the one to report.
+    const schema = z
+      .object({ verdict: z.enum(['red', 'green']), score: z.number() })
+      .refine((v) => v.score <= 10, { message: 'score must be at most 10', path: ['score'] });
     hoisted.generateCompletion
       .mockResolvedValueOnce(mockResponse('{"verdict":"RED","score":42}'))
       .mockResolvedValueOnce(mockResponse('{"verdict":"red","score":7}'));

@@ -633,7 +633,8 @@ describe('structured calls carry thinking and effort to the wire', () => {
     expect(result.object).toEqual({ answer: 'ok' });
     const [body] = postedBodies();
     expect(body.thinking).toEqual({ type: 'between_tools' });
-    expect(body.output_config).toEqual({ effort: 'low' });
+    // The JSON output format rides beside the effort in the same output_config.
+    expect(body.output_config).toMatchObject({ effort: 'low', format: { type: 'json_schema' } });
   });
 
   it('streamObject on Sonnet 5.5 with thinking off sends between_tools at the given effort', async () => {

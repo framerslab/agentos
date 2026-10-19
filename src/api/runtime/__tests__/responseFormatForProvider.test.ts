@@ -151,7 +151,7 @@ describe('describeResponseFormatShape', () => {
 
 describe('responseFormatCarriesSchema', () => {
   // A payload that carries no schema leaves the schema to the prompt (session.send, the completion gateway).
-  it('a strict json_schema, the Anthropic schema tool and Gemini responseSchema carry the schema; no payload and JSON mode do not', () => {
+  it('a strict json_schema, the Anthropic marker (the format or the tool) and Gemini responseSchema carry the schema; no payload and JSON mode do not', () => {
     const carries = (providerId: string, modelId: string, schema: z.ZodTypeAny) =>
       responseFormatCarriesSchema(buildResponseFormatForProvider(inputs(providerId, modelId, schema)));
     expect(carries('openai', 'gpt-4o', plainSchema)).toBe(true);
@@ -159,7 +159,9 @@ describe('responseFormatCarriesSchema', () => {
     expect(carries('gemini', 'gemini-2.5-pro', plainSchema)).toBe(true);
     expect(carries('openai', 'gpt-4o-mini', recordSchema)).toBe(false);
     expect(carries('openrouter', 'openai/gpt-4o', recordSchema)).toBe(false);
-    expect(carries('anthropic', 'claude-sonnet-5-5', plainSchema)).toBe(false);
+    // Claude Sonnet 5.5 takes the JSON output format for a plain schema; a record is outside it, so no payload carries that one.
+    expect(carries('anthropic', 'claude-sonnet-5-5', plainSchema)).toBe(true);
+    expect(carries('anthropic', 'claude-sonnet-5-5', recordSchema)).toBe(false);
     expect(carries('ollama', 'llama3', plainSchema)).toBe(false);
   });
 });
