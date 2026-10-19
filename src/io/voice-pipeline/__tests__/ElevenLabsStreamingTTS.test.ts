@@ -268,21 +268,69 @@ describe('ElevenLabsStreamingTTS', () => {
     expect(chunks[0].audio[0]).toBe(1);
     expect(chunks[0].textBoundary).toBeUndefined();
     expect(flushes).not.toHaveBeenCalled();
-    // The next segment opens a new socket at once; whatever the first socket still sends is dropped.
+    // The first socket stays open and no second one opens yet: the sentence's isFinal, and the rest of its audio, may
+    // still come, and the next segment waits for them so the audio arrives whole and in order.
     await opened();
+    expect(first.close).not.toHaveBeenCalled();
+    expect(sockets()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(sockets()).toHaveLength(1);
+    // The late frames go out at once, in order, without a boundary.
+    audio(first, 9);
+    audio(first, 10);
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary])).toEqual([
+      [1, undefined],
+      [9, undefined],
+      [10, undefined],
+    ]);
+    // The late isFinal completes nothing, and lets the next segment open its socket; the spent one is closed then.
+    final(first);
+    expect(chunks).toHaveLength(3);
+    expect(flushes).not.toHaveBeenCalled();
+    await opened();
+    expect(first.close).toHaveBeenCalledWith(1000, expect.any(String));
     expect(sockets()).toHaveLength(2);
     const [, second] = sockets();
     expect(texts(second)).toEqual([{ text: ' Second' }, { text: '' }]);
+    audio(second, 2);
+    final(second);
+    expect(chunks).toHaveLength(4);
+    expect(chunks[3].audio[0]).toBe(2);
+    expect(chunks[3].textBoundary).toEqual({ segmentId: expect.any(String), start: 10, end: 17, text: ' Second', final: true });
+    expect(flushes).toHaveBeenCalledOnce();
+    await flushed;
+  });
+
+  it('starts the next segment once the bounded wait for the late isFinal of a timed-out segment ends', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const session = await tts.startSession();
+    const [first] = sockets();
+    const chunks = recorded(session);
+
+    session.pushTokens('First one. Second');
+    const flushed = session.flush();
+    audio(first, 1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(chunks).toHaveLength(1);
+    // No isFinal comes for five more seconds: the next segment goes out anyway, on a socket of its own, and the spent
+    // socket is closed.
+    await vi.advanceTimersByTimeAsync(4_999);
+    await opened();
+    expect(sockets()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await opened();
+    expect(sockets()).toHaveLength(2);
+    expect(first.close).toHaveBeenCalledWith(1000, expect.any(String));
+    const [, second] = sockets();
+    expect(texts(second)).toEqual([{ text: ' Second' }, { text: '' }]);
+    // What the first socket still sends is no longer the session's.
     audio(first, 9);
     final(first);
     expect(chunks).toHaveLength(1);
-    expect(flushes).not.toHaveBeenCalled();
     audio(second, 2);
     final(second);
     expect(chunks).toHaveLength(2);
-    expect(chunks[1].audio[0]).toBe(2);
     expect(chunks[1].textBoundary).toEqual({ segmentId: expect.any(String), start: 10, end: 17, text: ' Second', final: true });
-    expect(flushes).toHaveBeenCalledOnce();
     await flushed;
   });
 
