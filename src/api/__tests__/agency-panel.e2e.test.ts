@@ -1689,6 +1689,51 @@ describe('22-23. rotation, copies, retries, empty text', () => {
     expect(userText).toBe('User: first\nUser: second');
     expect(session.messages()).toEqual([{ role: 'user', content: 'first' }, { role: 'user', content: 'second' }, { role: 'assistant', content: 'B' }]);
   });
+  it("parallel rejects when no seat is left and a seat failed: an outage is the seats' failure, not a run no seat answered, so the call throws the first failed seat's error, masked, after each failure is logged, and asks no synthesizer", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    // A synthesizer that ran over no answer would be answered, and the call would resolve with its text.
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('a synthesis of no answer')], [ANTHROPIC, anthropicText('A')]]);
+    const failing = (what: string) => ({ generate: async () => { throw new Error(`${what} rejected ${K.oaiEnv}`); }, stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} }) as unknown as Agent;
+    const lines = await logLines(async () => {
+      const err = await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: { opus: POOL().opus }, agents: { a: failing('first'), b: failing('second') }, strategy: 'parallel' } as never).generate('go').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe('first rejected [redacted]');
+    });
+    expect(lines.filter((l) => l.meta?.event === 'parallel_seat_failed').map((l) => l.meta?.agent)).toEqual(['a', 'b']);
+    expect(lines.filter((l) => l.meta?.event === 'agency_no_seat_answered')).toEqual([]);
+    expect(JSON.stringify(lines)).not.toContain(K.oaiEnv);
+    // A seat its approver rejected beside one that failed: no seat is left, and the failure is the call's.
+    const mixed = await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { a: { instructions: 'x' }, b: failing('only') }, strategy: 'parallel', hitl: { approvals: { beforeAgent: ['a'] }, handler: hitl.autoReject('no') } } as never).generate('go').catch((e: unknown) => e);
+    expect(mixed).toBeInstanceOf(Error);
+    expect((mixed as Error).message).toContain('only rejected');
+    // No synthesizer was asked in either run.
+    expect(calls(OPENAI_CHAT, 'POST')).toEqual([]);
+    expect(calls(ANTHROPIC, 'POST')).toEqual([]);
+  });
+  it("a plain seat that answers with no text on a provider that reports no tokens answered: parallel counts it toward the quorum and hands it to the synthesizer, and debate records its turn", async () => {
+    // A CLI provider reports 0 tokens when it reads no usage; a reply with no text from it is still the seat's answer.
+    const emptyAnswer = () => json({ id: 'c', object: 'chat.completion', created: 1, model: 'gpt-4.1', choices: [{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } });
+    for (const strategy of ['parallel', 'debate']) {
+      fetchMock.mockClear();
+      route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, (req) => {
+        const sent = JSON.stringify(req.body?.messages ?? []);
+        return sent.includes('seat-b') ? emptyAnswer() : sent.includes('seat-a') ? openaiText('A')(req) : openaiText('synth')(req);
+      }]]);
+      const r = (await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { a: { instructions: 'seat-a' }, b: { instructions: 'seat-b' } }, strategy, maxRounds: 1, ...(strategy === 'parallel' ? { quorum: { minAgents: 2 } } : {}) } as never).generate('go')) as AgencyResult;
+      expect(r.agentCalls.map((c) => [c.agent, c.output])).toEqual([['a', 'A'], ['b', '']]);
+      expect(r.text).toBe('synth');
+    }
+  });
+  it("a manager that answers with no text on a provider that reports no tokens ran: the run is not logged as one no seat answered, and an output schema retries it", async () => {
+    const emptyAnswer = () => json({ id: 'c', object: 'chat.completion', created: 1, model: 'gpt-4.1', choices: [{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } });
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [emptyAnswer, openaiText('{"ok":true}')]]]);
+    const lines = await logLines(async () => {
+      const r = (await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { worker: { instructions: 'w' } }, strategy: 'hierarchical', output: z.object({ ok: z.boolean() }) } as never).generate('go')) as AgencyResult;
+      expect(r.parsed).toEqual({ ok: true });
+    });
+    expect(lines.filter((l) => l.meta?.event === 'agency_no_seat_answered')).toEqual([]);
+    expect(calls(OPENAI_CHAT, 'POST')).toHaveLength(2);
+  });
 });
 
 describe('25-26. approvals under panel and nested agencies', () => {
@@ -1928,6 +1973,51 @@ describe('24. a tool table that grows mid-call', () => {
     expect(managerRequests.map((c) => toolNames(c).includes('delegate_to_helper'))).toEqual([false, true, true]);
     expect(JSON.stringify(managerRequests[2].body!.messages)).toContain('helped');
     expect(JSON.stringify(managerRequests[2].body!.messages)).not.toContain('not found');
+    expect(r.agentCalls.map((c) => [c.agent, c.output])).toEqual([['helper', 'helped']]);
+  });
+  /** The tool names the prompt shim lists in a request's tool block, or none. */
+  const shimToolNames = (c: Captured): string[] => {
+    const textOf = (content: unknown): string => (Array.isArray(content) ? content.map((p: Json) => String(p?.text ?? '')).join('') : String(content ?? ''));
+    const block = ((c.body?.messages ?? []) as Json[]).map((m) => textOf(m.content)).find((t) => t.includes('<tools>'));
+    const manifest = block ? /<tools>\n([\s\S]*?)\n<\/tools>/.exec(block)?.[1] : undefined;
+    return manifest ? (JSON.parse(manifest) as Json[]).map((t) => t.name as string) : [];
+  };
+  it.each(['generate', 'stream'] as const)("under the prompt shim, a tool that a tool's execute adds to the table is in the next round's tool block and runs when the model calls it, in %s()", async (api) => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const ran: string[] = [];
+    const table: Record<string, unknown> = {
+      add_tool: { description: 'adds second', parameters: { type: 'object', properties: {} }, execute: async () => {
+        table.second = { description: 'second', parameters: { type: 'object', properties: {} }, execute: async () => { ran.push('second'); return 'second ran'; } };
+        return 'added';
+      } },
+    };
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiText('<tool_call>{"name":"add_tool","arguments":{}}</tool_call>'), openaiText('<tool_call>{"name":"second","arguments":{}}</tool_call>'), openaiText('done')]]]);
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', instructions: 'x', tools: table as never, maxSteps: 5 });
+    const text = api === 'generate' ? (await a.generate('go', { toolMode: 'prompt' })).text : await drained(a.stream('go', { toolMode: 'prompt' }));
+    expect(text).toBe('done');
+    expect(ran).toEqual(['second']);
+    expect(calls(OPENAI_CHAT, 'POST').map(shimToolNames)).toEqual([['add_tool'], ['add_tool', 'second'], ['add_tool', 'second']]);
+  });
+  it("under the prompt shim, a specialist spawn_specialist adds mid-run is in the manager's next tool block and runs when the manager calls it", async () => {
+    vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
+    const isManager = (c: Captured) => shimToolNames(c).includes('spawn_specialist');
+    let managerTurn = 0;
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, (req) => {
+      if (!isManager(req)) return openaiText('helped')(req);
+      managerTurn += 1;
+      return managerTurn === 1 ? openaiText('<tool_call>{"name":"spawn_specialist","arguments":{"role":"helper","instructions":"Help."}}</tool_call>')(req)
+        : managerTurn === 2 ? openaiText('<tool_call>{"name":"delegate_to_helper","arguments":{"task":"v"}}</tool_call>')(req)
+        : openaiText('manager done')(req);
+    }]]);
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', agents: { worker: { instructions: 'w' } }, strategy: 'hierarchical', emergent: { enabled: true } } as never);
+    const r = await team.generate('go', { toolMode: 'prompt' });
+    expect(r.text).toBe('manager done');
+    const managerRequests = calls(OPENAI_CHAT, 'POST').filter(isManager);
+    // The spawned specialist's delegate tool is in the manager's next tool block, and its answer, not an "unknown
+    // tool", is the tool response the round after it carries.
+    expect(managerRequests.map((c) => shimToolNames(c).includes('delegate_to_helper'))).toEqual([false, true, true]);
+    expect(JSON.stringify(managerRequests[2].body!.messages)).toContain('helped');
+    expect(JSON.stringify(managerRequests[2].body!.messages)).not.toContain('unknown tool');
     expect(r.agentCalls.map((c) => [c.agent, c.output])).toEqual([['helper', 'helped']]);
   });
 });
