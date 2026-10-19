@@ -302,10 +302,12 @@ Every provider reports each call's token usage. Whether the result also carries 
 
 | Provider | `usage.costUSD` |
 |----------|-----------------|
-| OpenAI, Anthropic, Gemini | Priced from the provider's own table of the vendor's list prices ([`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), [`AnthropicProvider.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/AnthropicProvider.ts), [`GeminiProvider.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiProvider.ts)). A model the table has no row for reports no cost. |
+| OpenAI, Anthropic, Gemini | Priced from the provider's own table of the vendor's list prices ([`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), [`anthropicCatalog.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/anthropicCatalog.ts), [`GeminiProvider.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiProvider.ts)). A model the table has no row for reports no cost. |
 | OpenRouter, Requesty | The cost the gateway returns with the response |
 | Ollama, Claude Code CLI, Gemini CLI | `0` |
 | Groq, Together, Mistral, xAI, LiteLLM | These providers send their calls through the OpenAI provider, which prices a call from OpenAI's table ([`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts)) by the model id the response names, exact or with a trailing `-YYYY-MM-DD` removed; an id the table has no row for reports no cost. The table lists only OpenAI's models, so a call to the default model of Groq, Together, Mistral or xAI reports no cost, and a LiteLLM call whose response names an OpenAI model, such as `gpt-4o-mini`, is priced at OpenAI's list price. |
+
+Prices for a host: `openAIModelPricing(modelId)` and `anthropicModelPricing(modelId)`, exported from `@framers/agentos/safety/runtime` and from the package root with the types `OpenAIModelPrice` and `AnthropicModelPrice`, give a spend guard a call's list price in USD per 1K tokens before the call is made, without loading a provider: `{ input, output }` for OpenAI and `{ input, output, cacheRead, longContext? }` for Claude. `anthropicModelPricing` resolves an exact catalog id, a dated snapshot of a bare id (`claude-sonnet-5-5-20261001`) and the bare alias of a dated row (`claude-opus-4-5`), and answers `undefined` for any other id (`claude-opus-4`, `claude`), never a prefix guess. `longContext` is present on a model priced by prompt length (Claude Haiku 5.5: `{ fromTokens: 100000, input, output }`) and names the prompt size above which its long `input` and `output` rates apply; `estimateAnthropicCostUSD` bills a response whose prompt, cached tokens included, is over that size at the same long rates.
 
 The list prices of the default text models, in USD per 1M tokens, as each vendor's page gave them on 2026-10-12. Each vendor's other models cost more or less; the linked pages list them.
 
@@ -688,11 +690,37 @@ The Structured Output column is the provider-side enforcement that
 also writes the schema into the system prompt on every provider. A session's
 `responseSchema`, on either agent runtime, writes it there only when the
 provider-side format carries no schema: on a provider whose entry is "None",
-on an Anthropic model that rejects a forced tool choice, and in JSON-object
-mode. Each fallback provider is checked for its own format. `streamObject()`
-sends no provider-side format on any provider: its schema travels in the system
-prompt only. All three validate the reply against the caller's Zod schema, and
-`send()` throws an `ObjectGenerationError` when the reply is not matching JSON.
+on an Anthropic model whose schema neither the JSON output format nor a forced
+tool carries, and in JSON-object mode. Each fallback provider is checked for its
+own format. `streamObject()` sends no provider-side format on any provider: its
+schema travels in the system prompt only. All three validate the reply against
+the caller's Zod schema, and `send()` throws an `ObjectGenerationError` when the
+reply is not matching JSON.
+
+On Anthropic, `anthropicSchemaRoute(modelId, schema)`
+([`model-strict-tool-use.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/model-strict-tool-use.ts))
+picks one of three routes for the model and the schema. The native JSON output
+format (`output_config.format` with `type: json_schema`) goes to every model
+that has it (Opus 4.5 and later, Sonnet 4.5 and later, Haiku 4.5 and later,
+Fable, Mythos) when the schema fits the vendor's limits: an object root with
+properties, `additionalProperties: false` on every object (stamped on the wire
+copy), no `$ref`, `oneOf`, `not` or record, at most 16 union-typed and 24
+optional properties. `minLength`, `maxLength` and `pattern` go out as written;
+`minItems` above 1, `maxItems`, numeric bounds and a `format` outside the
+vendor's list are stripped from the wire copy, and the caller's Zod schema
+re-validates the answer with every constraint. The model answers JSON in its
+text block; the format rides with adaptive thinking and beside a direct
+caller's tools, with no beta header. Claude Opus 4 and Claude Sonnet 4 (the
+May 2025 ids) have no JSON output format and get a forced tool call whose input
+is the schema. When neither carries the schema, the provider puts it into the
+system prompt itself as one block after the caller's ("Answer with JSON only,
+matching this schema: ...") and warns once per model and reason; a request that
+enables citations takes this route too, since the API refuses citations beside
+the format. Two cautions from the vendor's page: a schema property that asks
+for the model's reasoning may draw a refusal, and the capitalization of `enum`
+and `const` values is not guaranteed, so `generateObject()` repairs an enum or
+literal value that differs from the schema's only by case once before it spends
+a retry.
 
 The Tool Choice column is what the provider does with the `toolChoice` option
 (`'auto'`, `'none'`, `'required'`, or `{ type: 'function', function: { name } }`).
@@ -700,7 +728,7 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 | Provider | Structured Output | Tool Choice |
 |----------|-------------------|-------------|
 | OpenAI | `json_schema` with `strict: true` when the schema fits OpenAI's strict rules, otherwise JSON-object mode | Sent as `tool_choice` |
-| Anthropic | A forced tool call whose input is the schema; none on a model that rejects a forced tool choice | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
+| Anthropic | The native JSON output format (`output_config.format`) on every model that has it and whose schema fits its limits; a forced tool call whose input is the schema on Claude Opus 4 and Sonnet 4; the provider's own schema block in the system prompt when neither carries the schema | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
 | Gemini | `responseSchema` with JSON output | Not sent; the API default applies |
 | OpenRouter | Strict `json_schema` when the schema fits, otherwise JSON-object mode. When OpenRouter finds no endpoint that serves the strict schema (HTTP 404, "No endpoints found"), the request is sent once more in JSON-object mode with the schema written into its system prompt, unless the system prompt states a schema already | Sent as `tool_choice`; the routed model decides |
 | Requesty | None | Sent as `tool_choice`; the routed model decides |

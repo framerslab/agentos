@@ -367,12 +367,24 @@ export function repairEnumCasing(
   value: unknown,
   error: ZodError,
 ): { value: unknown; repaired: boolean } {
-  type ValueIssue = { code?: string; values?: unknown[]; path?: PropertyKey[] };
+  type ValueIssue = { code?: string; values?: unknown[]; options?: unknown[]; expected?: unknown; path?: PropertyKey[] };
+  /**
+   * The values an enum or literal issue allows: Zod 4's `invalid_value.values`,
+   * Zod 3's `invalid_enum_value.options` and `invalid_literal.expected`. Any
+   * other issue is not a casing difference.
+   */
+  const allowedValues = (issue: ValueIssue): unknown[] | undefined => {
+    if (issue.code === 'invalid_value' && Array.isArray(issue.values)) return issue.values;
+    if (issue.code === 'invalid_enum_value' && Array.isArray(issue.options)) return issue.options;
+    if (issue.code === 'invalid_literal' && issue.expected !== undefined) return [issue.expected];
+    return undefined;
+  };
   const issues = error.issues as unknown as ValueIssue[];
   if (issues.length === 0) return { value, repaired: false };
   const fixes: Array<{ path: PropertyKey[]; to: string }> = [];
   for (const issue of issues) {
-    if (issue.code !== 'invalid_value' || !Array.isArray(issue.values)) return { value, repaired: false };
+    const allowed = allowedValues(issue);
+    if (!allowed) return { value, repaired: false };
     const path = issue.path ?? [];
     let node: unknown = value;
     for (const key of path) {
@@ -384,7 +396,7 @@ export function repairEnumCasing(
     }
     if (typeof node !== 'string') return { value, repaired: false };
     const lowered = node.toLowerCase();
-    const matches = issue.values.filter(
+    const matches = allowed.filter(
       (option): option is string => typeof option === 'string' && option !== node && option.toLowerCase() === lowered,
     );
     if (matches.length !== 1) return { value, repaired: false };

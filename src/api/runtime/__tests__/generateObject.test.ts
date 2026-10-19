@@ -670,13 +670,12 @@ describe('generateObject', () => {
       });
     });
 
-    it('routes Fable to the prompt-JSON path (no forced tool_use) since Fable rejects forced tool_choice', async () => {
+    it('routes Fable to the JSON output format marker (route json_schema), never a forced tool', async () => {
       // Claude Fable rejects a forced tool_choice at the API level
-      // ("tool_choice forces tool use is not compatible with this model").
-      // generateObject must detect that and fall through to the prompt-only
-      // JSON path (schema already lives in the system prompt; the result text
-      // is extractJson + safeParse'd in the retry loop) instead of sending a
-      // forced tool the model 400s on.
+      // ("tool_choice forces tool use is not compatible with this model") and
+      // has the native JSON output format, so the marker rides with route
+      // json_schema and the provider sends output_config.format; the result
+      // text is extractJson + safeParse'd in the retry loop as on every provider.
       const { resolveModelOption } = await import('../../model.js');
       vi.mocked(resolveModelOption).mockReturnValueOnce({
         providerId: 'anthropic',
@@ -694,10 +693,8 @@ describe('generateObject', () => {
         prompt: 'Extract',
       });
 
-      // No forced tool payload — falls through to prompt-only JSON.
       const args = hoisted.generateCompletion.mock.calls[0][2];
-      expect(args.responseFormat).toBeUndefined();
-      // The prompt-JSON path still produces a validated object.
+      expect(args.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
       expect(object).toEqual({ name: 'F', age: 5 });
     });
 

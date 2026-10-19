@@ -94,14 +94,21 @@ describe('AnthropicProvider request shape for the refreshed models', () => {
     expect(sentBody()).not.toHaveProperty('temperature');
   });
 
-  it('sends the structured-output tool without forcing it on Claude Sonnet 5.5', async () => {
+  it('sends the JSON output format on Claude Sonnet 5.5, with no tool and no tool_choice', async () => {
     await provider.generateCompletion('claude-sonnet-5-5', [{ role: 'user', content: 'answer' }], {
       responseFormat: {
         _agentosUseToolForStructuredOutput: true,
-        tool: { name: 'out', input_schema: { type: 'object', properties: {} } },
+        tool: { name: 'out', input_schema: { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] } },
       },
     });
-    expect(sentBody().tool_choice).toEqual({ type: 'auto' });
+    expect(sentBody().output_config).toEqual({
+      format: {
+        type: 'json_schema',
+        schema: { type: 'object', properties: { a: { type: 'string' } }, required: ['a'], additionalProperties: false },
+      },
+    });
+    expect(sentBody().tools).toBeUndefined();
+    expect(sentBody().tool_choice).toBeUndefined();
   });
 
   it('sends only the adaptive thinking form and effort max on Claude Sonnet 5.5', async () => {

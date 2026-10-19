@@ -43,29 +43,44 @@ describe('buildResponseFormatForProvider', () => {
     expect(rf).toEqual({ type: 'json_object' });
   });
 
-  it('anthropic + forced-tool-capable model -> tool marker', () => {
+  it('anthropic + a model with the JSON output format (Sonnet 4.6) -> marker with route json_schema', () => {
     const rf = buildResponseFormatForProvider(
       inputs('anthropic', 'claude-sonnet-4-6', plainSchema),
     );
-    expect((rf as any)._agentosUseToolForStructuredOutput).toBe(true);
+    expect(rf).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
     expect((rf as any).tool.input_schema).toBeTruthy();
   });
 
-  it('anthropic + Fable -> undefined (prompt-only)', () => {
+  it('anthropic + Fable -> marker with route json_schema (the format, never a forced tool)', () => {
     expect(
       buildResponseFormatForProvider(inputs('anthropic', 'claude-fable-5', plainSchema)),
-    ).toBeUndefined();
+    ).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
   });
 
-  it('anthropic + Sonnet 5.5 -> undefined (prompt-only; the API rejects a forced tool_choice)', () => {
+  it('anthropic + Sonnet 5.5 -> marker with route json_schema', () => {
     expect(
       buildResponseFormatForProvider(inputs('anthropic', 'claude-sonnet-5-5', plainSchema)),
+    ).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
+  });
+
+  it('anthropic + Sonnet 5.5 + record schema -> undefined (the format cannot carry it; the schema rides the prompt)', () => {
+    expect(
+      buildResponseFormatForProvider(inputs('anthropic', 'claude-sonnet-5-5', recordSchema)),
     ).toBeUndefined();
   });
 
-  it('anthropic + empty modelId (default-model fallback entry) -> tool marker', () => {
-    const rf = buildResponseFormatForProvider(inputs('anthropic', '', plainSchema));
-    expect((rf as any)._agentosUseToolForStructuredOutput).toBe(true);
+  it('anthropic + Claude Sonnet 4 (May 2025) -> marker with route forced_tool', () => {
+    expect(
+      buildResponseFormatForProvider(inputs('anthropic', 'claude-sonnet-4-20250514', plainSchema)),
+    ).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'forced_tool', tool: { name: 'testSchema' } });
+  });
+
+  it('anthropic + empty modelId (default-model fallback entry) -> routed by the schema alone', () => {
+    expect(buildResponseFormatForProvider(inputs('anthropic', '', plainSchema))).toMatchObject({
+      _agentosUseToolForStructuredOutput: true,
+      route: 'json_schema',
+    });
+    expect(buildResponseFormatForProvider(inputs('anthropic', '', recordSchema))).toBeUndefined();
   });
 
   it('gemini -> _gemini responseSchema payload', () => {
@@ -110,9 +125,19 @@ describe('buildResponseFormatForProvider', () => {
 describe('describeResponseFormatShape', () => {
   it('maps the four shapes + none', () => {
     expect(describeResponseFormatShape(undefined)).toBe('none');
+    // An Anthropic marker answers by its route; one without a route is the forced tool.
     expect(
       describeResponseFormatShape({ _agentosUseToolForStructuredOutput: true }),
     ).toBe('anthropic_tool');
+    expect(
+      describeResponseFormatShape({ _agentosUseToolForStructuredOutput: true, route: 'forced_tool' }),
+    ).toBe('anthropic_tool');
+    expect(
+      describeResponseFormatShape({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' }),
+    ).toBe('anthropic_json_schema');
+    expect(
+      describeResponseFormatShape({ _agentosUseToolForStructuredOutput: true, route: 'none' }),
+    ).toBe('none');
     expect(describeResponseFormatShape({ type: 'json_object', _gemini: {} })).toBe(
       'gemini_response_schema',
     );
@@ -136,5 +161,15 @@ describe('responseFormatCarriesSchema', () => {
     expect(carries('openrouter', 'openai/gpt-4o', recordSchema)).toBe(false);
     expect(carries('anthropic', 'claude-sonnet-5-5', plainSchema)).toBe(false);
     expect(carries('ollama', 'llama3', plainSchema)).toBe(false);
+  });
+});
+
+describe('responseFormatCarriesSchema by an Anthropic marker route', () => {
+  it('the JSON output format and the forced tool carry the schema; a none marker and no payload do not', () => {
+    const plain = buildResponseFormatForProvider(inputs('anthropic', 'claude-sonnet-5-5', plainSchema));
+    expect(responseFormatCarriesSchema(plain)).toBe(true);
+    expect(responseFormatCarriesSchema(buildResponseFormatForProvider(inputs('anthropic', 'claude-sonnet-4-20250514', plainSchema)))).toBe(true);
+    expect(responseFormatCarriesSchema(buildResponseFormatForProvider(inputs('anthropic', 'claude-sonnet-5-5', recordSchema)))).toBe(false);
+    expect(responseFormatCarriesSchema({ _agentosUseToolForStructuredOutput: true, route: 'none', tool: { name: 'x', input_schema: {} } })).toBe(false);
   });
 });

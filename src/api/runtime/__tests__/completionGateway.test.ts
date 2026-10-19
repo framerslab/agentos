@@ -482,7 +482,7 @@ describe('CompletionGateway.stream', () => {
     expect(chunks.at(-1)?.choices[0].message.tool_calls).toBeUndefined();
   });
 
-  it('on a model that refuses a forced tool, the schema rides the prompt only: no response format, no tools, the answer stays text', async () => {
+  it('on Claude Sonnet 5.5 the marker takes the JSON output format: no tools, and the JSON text answer is lifted into structuredOutput', async () => {
     let seen: Record<string, unknown> = {};
     const res = resolutionWith(async function* (options) {
       seen = options;
@@ -490,10 +490,26 @@ describe('CompletionGateway.stream', () => {
       yield stop('{"city":"Lyon"}');
     }, { providerId: 'anthropic', modelId: 'claude-sonnet-5-5', toolFormat: 'anthropic_tools' });
     const chunks = await drain(createCompletionGateway().stream(res, [], { tools: [{ type: 'function', function: { name: 'lookup' } }], toolChoice: 'auto' }, z.object({ city: z.string() }), 'answer'));
+    expect(seen.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema', tool: { name: 'answer' } });
+    expect(seen.tools).toBeUndefined();
+    expect(seen.toolChoice).toBeUndefined();
+    // The text still streams; the final chunk carries the parsed answer, as the forced tool's lift does.
+    expect(chunks.map((c) => c.responseTextDelta).filter(Boolean)).toEqual(['{"city":"Lyon"}']);
+    expect(chunks.at(-1)).toMatchObject({ structuredOutput: { city: 'Lyon' } });
+  });
+
+  it('on Claude Sonnet 5.5 a record schema (outside the JSON output format) rides the prompt only: no response format, no tools, the answer stays text', async () => {
+    let seen: Record<string, unknown> = {};
+    const res = resolutionWith(async function* (options) {
+      seen = options;
+      yield { responseTextDelta: '{"city":"Lyon","scores":{"a":1}}' };
+      yield stop('{"city":"Lyon","scores":{"a":1}}');
+    }, { providerId: 'anthropic', modelId: 'claude-sonnet-5-5', toolFormat: 'anthropic_tools' });
+    const chunks = await drain(createCompletionGateway().stream(res, [], { tools: [{ type: 'function', function: { name: 'lookup' } }], toolChoice: 'auto' }, z.object({ city: z.string(), scores: z.record(z.string(), z.number()) }), 'answer'));
     expect(seen.responseFormat).toBeUndefined();
     expect(seen.tools).toBeUndefined();
     expect(seen.toolChoice).toBeUndefined();
-    expect(chunks.map((c) => c.responseTextDelta).filter(Boolean)).toEqual(['{"city":"Lyon"}']);
+    expect(chunks.map((c) => c.responseTextDelta).filter(Boolean)).toEqual(['{"city":"Lyon","scores":{"a":1}}']);
     expect(chunks.some((c) => c.structuredOutput !== undefined)).toBe(false);
   });
 
