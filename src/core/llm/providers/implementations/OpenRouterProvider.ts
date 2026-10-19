@@ -707,7 +707,9 @@ export class OpenRouterProvider implements IProvider {
         'POST',
         // CR8: honor a per-call requestTimeout override over the provider default.
         options.requestTimeout ?? this.config.requestTimeout,
-        payload
+        payload,
+        false,
+        options.abortSignal
       );
     } catch (error: unknown) {
       const degraded = this.degradeSchemaPayloadOnNoEndpoints(payload, error);
@@ -716,7 +718,9 @@ export class OpenRouterProvider implements IProvider {
         '/chat/completions',
         'POST',
         options.requestTimeout ?? this.config.requestTimeout,
-        payload
+        payload,
+        false,
+        options.abortSignal
       );
     }
     this.throwOnInBodyError(apiResponseData, modelId);
@@ -871,34 +875,6 @@ export class OpenRouterProvider implements IProvider {
     this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
 
-    let stream: NodeJS.ReadableStream;
-    // True once the request goes again without its schema payload (the
-    // json_object retry below); the answer's chunks then say so.
-    let schemaLeftPayload = false;
-    try {
-      stream = await this.makeApiRequest<NodeJS.ReadableStream>(
-        '/chat/completions',
-        'POST',
-        // CR8: honor a per-call requestTimeout override over the stream default.
-        options.requestTimeout ?? this.config.streamRequestTimeout,
-        payload,
-        true
-      );
-    } catch (error: unknown) {
-      const degraded = this.degradeSchemaPayloadOnNoEndpoints(payload, error);
-      if (!degraded) throw error;
-      schemaLeftPayload = true;
-      stream = await this.makeApiRequest<NodeJS.ReadableStream>(
-        '/chat/completions',
-        'POST',
-        options.requestTimeout ?? this.config.streamRequestTimeout,
-        payload,
-        true
-      );
-    }
-
-    const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
-
     const abortSignal = options.abortSignal;
     // `usage` is what a refused turn billed before the abort; a consumer
     // metering final chunks would otherwise lose it.
@@ -912,6 +888,52 @@ export class OpenRouterProvider implements IProvider {
       isFinal: true,
       ...(usage ? { usage } : {}),
     });
+    if (abortSignal?.aborted) {
+      // The caller aborted before the call: no request is sent.
+      yield abortChunk('Stream aborted prior to first chunk');
+      return;
+    }
+
+    let stream: NodeJS.ReadableStream;
+    // True once the request goes again without its schema payload (the
+    // json_object retry below); the answer's chunks then say so.
+    let schemaLeftPayload = false;
+    try {
+      try {
+        stream = await this.makeApiRequest<NodeJS.ReadableStream>(
+          '/chat/completions',
+          'POST',
+          // CR8: honor a per-call requestTimeout override over the stream default.
+          options.requestTimeout ?? this.config.streamRequestTimeout,
+          payload,
+          true,
+          abortSignal
+        );
+      } catch (error: unknown) {
+        const degraded = !abortSignal?.aborted && this.degradeSchemaPayloadOnNoEndpoints(payload, error);
+        if (!degraded) throw error;
+        schemaLeftPayload = true;
+        stream = await this.makeApiRequest<NodeJS.ReadableStream>(
+          '/chat/completions',
+          'POST',
+          options.requestTimeout ?? this.config.streamRequestTimeout,
+          payload,
+          true,
+          abortSignal
+        );
+      }
+    } catch (error: unknown) {
+      // An abort while the draw waits on the pool's probes (or between attempts) ends the stream with the abort
+      // chunk, as an abort before the first chunk does; nothing was sent after it.
+      if (abortSignal?.aborted) {
+        yield abortChunk('Stream aborted prior to first chunk');
+        return;
+      }
+      throw error;
+    }
+
+    const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
+
     if (abortSignal?.aborted) {
       // The response is already open, and parseSseStream, which closes it,
       // never runs on this path.
@@ -1476,13 +1498,18 @@ export class OpenRouterProvider implements IProvider {
    *  - 408/429/5xx and transport-level failures (no HTTP response) retry
    *    with the response's Retry-After when present (capped), else
    *    jittered exponential backoff; 4xx request errors throw immediately.
+   *
+   * The caller's `signal` ends a draw that waits on the pool's probes, and
+   * no attempt is sent once it has fired: the request throws
+   * `REQUEST_ABORTED` instead.
    */
   private async makeApiRequest<T = unknown>(
     endpoint: string,
     method: 'GET' | 'POST',
     timeout?: number,
     body?: Record<string, unknown>,
-    expectStream: boolean = false
+    expectStream: boolean = false,
+    signal?: AbortSignal
   ): Promise<T> {
     let lastError: OpenRouterProviderError | null = null;
 
@@ -1492,8 +1519,12 @@ export class OpenRouterProvider implements IProvider {
     let keyHops = 0;
     for (let attempt = 0; attempt < OpenRouterProvider.MAX_REQUEST_ATTEMPTS; attempt++) {
       // With no usable key while a probe of a failed key is in flight (its recheck came due), the draw waits for that
-      // probe, bounded by the pool's probe timeout, so the first request after a recheck is served by a key that came back.
-      const apiKey = this.keyPool?.hasKeys ? await this.keyPool.nextAfterProbes() : this.config.apiKey;
+      // probe, bounded by the pool's probe timeout, so the first request after a recheck is served by a key that came
+      // back; the caller's signal ends that wait at once, and nothing is sent after it.
+      const apiKey = this.keyPool?.hasKeys ? await this.keyPool.nextAfterProbes(signal) : this.config.apiKey;
+      if (signal?.aborted) {
+        throw new OpenRouterProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       if (apiKey === '') throw this.allKeysFailedError();
       const attemptStartedAt = Date.now();
       try {

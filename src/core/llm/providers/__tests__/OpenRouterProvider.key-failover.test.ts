@@ -346,6 +346,52 @@ describe('OpenRouterProvider key failover', () => {
     }
   });
 
+  it("ends a draw that waits on the probes when the caller aborts: a stream ends with its abort chunk, a completion with REQUEST_ABORTED, and no request goes out", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002', catalog);
+      client.request.mockRejectedValueOnce(axiosError(401, noAuth)).mockRejectedValueOnce(axiosError(401, noAuth));
+      await expect(provider.generateCompletion(MODEL, messages, {})).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED' });
+      client.request.mockClear();
+
+      // At the recheck the stream's draw starts both probes (GET /key), which hang; it waits on them until its
+      // caller aborts, then ends with the abort chunk instead of sending the request.
+      vi.setSystemTime(new Date(Date.now() + 1001));
+      fetchMock.mockImplementation(() => new Promise<Response>(() => undefined));
+      const controller = new AbortController();
+      const reading = (async () => {
+        const chunks: unknown[] = [];
+        for await (const chunk of provider.generateCompletionStream(MODEL, messages, { abortSignal: controller.signal })) {
+          chunks.push(chunk);
+        }
+        return chunks;
+      })();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://openrouter.ai/api/v1/key', 'https://openrouter.ai/api/v1/key']);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(1);
+      const chunks = await reading;
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]).toMatchObject({ isFinal: true, choices: [], error: { type: 'abort', message: 'Stream aborted prior to first chunk' } });
+      expect(client.request).not.toHaveBeenCalled();
+
+      // A completion that waits on the same probes rejects with REQUEST_ABORTED, and sends nothing either.
+      const second = new AbortController();
+      const asking = provider.generateCompletion(MODEL, messages, { abortSignal: second.signal }).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1);
+      second.abort();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await asking).toMatchObject({ code: 'REQUEST_ABORTED' });
+      expect(client.request).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the first version's behaviour for a single key: a 401 fails the request at once", async () => {
     const request = vi.fn().mockRejectedValueOnce(axiosError(401, noAuth));
     const { provider } = makeProvider(request, 'key_only_0001');
