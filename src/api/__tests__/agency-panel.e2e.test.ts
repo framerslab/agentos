@@ -1816,6 +1816,31 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       consoleWarn.mockRestore();
     }
   });
+  it("a callback a strategy fires that throws fails no call of an agency without a pool and is written through the host's logger, and that agency's trail records what its strategy fires", async () => {
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('Merged')]]);
+    const seat = (generate: () => Promise<unknown>) => ({ generate, stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} }) as unknown as Agent;
+    const answering = seat(async () => ({ text: 'B', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }));
+    const failing = seat(async () => { throw new Error('seat down'); });
+    const lines = await logLines(async () => {
+      // parallel fires on.error for its failed seat itself; the handler throws, and the other seat's answer is still synthesized.
+      const parallel = await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { a: failing, b: answering }, strategy: 'parallel', on: { error: () => { throw new Error('error handler down'); } } } as never).generate('go');
+      expect(parallel.text).toBe('Merged');
+      // sequential fires a beforeAgent approval's approvalRequested and approvalDecided itself; both throw, and the approved seat still answers.
+      const sequential = await agency({
+        provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { b: answering }, strategy: 'sequential', provenance: { enabled: true },
+        hitl: { approvals: { beforeAgent: ['b'] }, handler: hitl.autoApprove(), guardrailOverride: false },
+        on: { approvalRequested: () => { throw new Error('requested handler down'); }, approvalDecided: () => { throw new Error('decided handler down'); } },
+      } as never).generate('go');
+      expect(sequential.text).toBe('B');
+      // The decision the strategy fired is in the trail, as the agency's own events are.
+      expect(sequential.provenanceTrail!.events.filter((e) => e.kind === 'approvalDecided').map((e) => e.payload.approved)).toEqual([true]);
+    });
+    expect(lines.filter((l) => l.meta?.event === 'agency_callback_threw').map((l) => [l.level, l.meta?.callback, l.meta?.error])).toEqual([
+      ['warn', 'error', 'error handler down'],
+      ['warn', 'approvalRequested', 'requested handler down'],
+      ['warn', 'approvalDecided', 'decided handler down'],
+    ]);
+  });
   it('a run no seat answered adds no assistant turn to its session: messages() keeps the user turn alone, in send() and in stream(), and the next prompt carries no empty answer', async () => {
     let decide: (r: ApprovalRequest) => Promise<ApprovalDecision> = hitl.autoReject('no');
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')]]);
