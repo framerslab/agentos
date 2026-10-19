@@ -2122,13 +2122,14 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(transport.close).toHaveBeenCalledWith(1000, 'done');
   });
 
-  it("creates the speech a host says through pushToTTS, with source 'say', without a call profile", async () => {
+  it("creates the speech a host says through pushToTTS while a reply speaks, with source 'say', without a call profile", async () => {
     await start();
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
     const created: { source: string; userInitiated: boolean }[] = [];
     orchestrator.on('speech_created', (event) => created.push({ source: event.source, userInitiated: event.userInitiated }));
-    await orchestrator.pushToTTS('Thanks for calling.');
-    expect(ttsSession.pushTokens).toHaveBeenCalledWith('Thanks for calling.');
-    expect(ttsSession.flush).toHaveBeenCalledOnce();
+    await orchestrator.pushToTTS('One moment.');
+    expect(ttsSession.pushTokens).toHaveBeenLastCalledWith('One moment.');
     expect(created).toEqual([{ source: 'say', userInitiated: true }]);
   });
 

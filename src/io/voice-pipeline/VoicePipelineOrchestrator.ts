@@ -2032,8 +2032,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Sends graph output through the same profile-specific producer path.
    *
    * Without a call profile, a string or each token of an `AsyncIterable<string>` goes to the TTS session's
-   * `pushTokens()`, then `flush()` signals the end of the utterance. Under a call profile the text is a reply of its
-   * own: a new generation, synthesized into acknowledged playback while the call is listening.
+   * `pushTokens()`, then `flush()` signals the end of the utterance. The session sends its TTS session's audio only
+   * while it is `speaking`: the prompt's first word pushed then is `speech_created` with `source: 'say'`, and a prompt
+   * pushed at another time creates none. Under a call profile the text is a reply of its own: a new generation,
+   * synthesized into acknowledged playback while the call is listening.
    *
    * @param text - A complete string, or an async iterable of string tokens.
    *
@@ -2053,9 +2055,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (this.call) return this.call.speak(text);
     if (!this.tts || this.current === 'closed') throw new Error('No active TTS session');
     // The host's own speech is created at its first word, with source 'say', as the call runtime's speak() creates it.
+    // The session sends its TTS session's audio only while it speaks: a word pushed then goes out with the reply's
+    // audio, and a prompt pushed at another time creates no speech, since none of it reaches the transport.
     let created = false;
     const create = (): void => {
-      if (created) return;
+      if (created || this.current !== 'speaking') return;
       created = true;
       this.events.emit('speech_created', { source: 'say', userInitiated: true, createdAt: Date.now() });
     };

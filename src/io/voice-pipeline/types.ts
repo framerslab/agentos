@@ -1966,8 +1966,9 @@ export interface VoiceSessionEventMap {
   /** A reply or a host prompt began to speak: its first word; LiveKit Agents' `speech_created`. */
   speech_created: {
     /**
-     * `'reply'` for the agent's answer to a turn, `'say'` for a prompt the host speaks through `pushToTTS()`, which a
-     * call profile speaks as a reply of its own.
+     * `'reply'` for the agent's answer to a turn, `'say'` for a prompt the host speaks through `pushToTTS()`: under a
+     * call profile each one, which it speaks as a reply of its own, and without one a prompt pushed while a reply is
+     * speaking, whose audio goes out with the reply's.
      */
     source: 'reply' | 'say';
     /** Whether the host asked for the speech (`true` for a prompt) rather than the session (`false` for a reply). */
