@@ -2171,8 +2171,9 @@ export type ServerTextMessage =
       sessionId: string;
       /**
        * The effective configuration (may differ from the client's request).
-       * `VoicePipelineOrchestrator` leaves out `sttOptions` and `ttsOptions`,
-       * the provider options, which can hold what a host keeps from its client.
+       * `VoicePipelineOrchestrator` sends the fields `VoicePipelineConfig`
+       * declares, less `sttOptions` and `ttsOptions`, the provider options,
+       * which can hold what a host keeps from its client.
        */
       config: VoicePipelineConfig;
     }

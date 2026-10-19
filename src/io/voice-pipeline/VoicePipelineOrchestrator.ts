@@ -340,15 +340,40 @@ function transcribedEvent(heard: HeardTranscript): VoiceSessionEventMap['user_in
 }
 
 /**
- * The configuration a session's `session_started` message carries: the session's own, without the provider options,
- * which can hold what a host keeps from its client.
+ * The fields of a session's configuration its `session_started` message carries: every field `VoicePipelineConfig`
+ * declares but the provider options, `sttOptions` and `ttsOptions`, which can hold what a host keeps from its client.
+ * One `true` per field, so the compiler checks that a field the type gains is named here or among the provider options.
+ */
+const CLIENT_CONFIG_FIELDS: Readonly<Record<Exclude<keyof VoicePipelineConfig, 'sttOptions' | 'ttsOptions'>, true>> = {
+  stt: true,
+  tts: true,
+  endpointing: true,
+  diarization: true,
+  bargeIn: true,
+  voice: true,
+  format: true,
+  language: true,
+  maxTurnDurationMs: true,
+  falseInterruptionMs: true,
+  maxPlayoutWaitMs: true,
+  userAwayTimeoutMs: true,
+  ttsExpressiveness: true,
+};
+
+/**
+ * The configuration a session's `session_started` message carries: the fields of the session's own that
+ * {@link CLIENT_CONFIG_FIELDS} names. The provider options are left out, and so is any property the host's
+ * configuration object carries that the type does not declare.
  *
  * @param config - The session's configuration.
- * @returns A copy without `sttOptions` and `ttsOptions`.
+ * @returns A copy of its declared fields, without `sttOptions` and `ttsOptions`.
  */
 function clientConfig(config: VoicePipelineConfig): VoicePipelineConfig {
-  const { sttOptions: _sttOptions, ttsOptions: _ttsOptions, ...rest } = config;
-  return rest;
+  const sent: Partial<Record<keyof VoicePipelineConfig, unknown>> = {};
+  for (const field of Object.keys(CLIENT_CONFIG_FIELDS) as (keyof typeof CLIENT_CONFIG_FIELDS)[]) {
+    if (config[field] !== undefined) sent[field] = config[field];
+  }
+  return sent as VoicePipelineConfig;
 }
 
 /**
