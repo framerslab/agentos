@@ -2335,6 +2335,30 @@ describe('VoicePipelineOrchestrator session events', () => {
     }
   });
 
+  it("names a failed listener's error by a fixed label, though the listener set the error's name to what it was handed", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await start();
+      // A listener that names its error after the transcript, a built-in error type and a plain Error.
+      session.on('user_input_transcribed', ({ transcript }) => {
+        const error = transcript.startsWith('Hello') ? new TypeError('could not read it') : new Error('could not read it');
+        error.name = transcript;
+        throw error;
+      });
+
+      sttSession.emit('transcript', { text: 'Hello there', confidence: 0.9, words: [], isFinal: true });
+      sttSession.emit('transcript', { text: 'Book a table', confidence: 0.9, words: [], isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
+        '[voice-pipeline-orchestrator] a user_input_transcribed listener failed: TypeError',
+        '[voice-pipeline-orchestrator] a user_input_transcribed listener failed: Error',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("drops what a cut reply's agent stream yields after the next reply has started speaking", async () => {
     // An agent with no abort(): the cut reply's stream goes on until it ends by itself, as a slow tool call can hold it.
     let releaseFirst!: () => void;
