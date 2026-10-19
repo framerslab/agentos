@@ -2128,6 +2128,63 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(orchestrator.state).toBe('speaking');
   });
 
+  it("takes the text two seconds after the cut when the agent's stream does not end, holds no later message behind it, and keeps a late token of the cut reply out of the next", async () => {
+    // An agent whose abort() is a no-op and whose stream, after its first token, yields nothing until the test lets it.
+    let release!: (token: string) => void;
+    const stalled = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    agentSession = {
+      sendText: vi.fn((text: string) => ({
+        [Symbol.asyncIterator]: async function* () {
+          if (text === 'Hello there') {
+            yield 'Hello';
+            yield await stalled;
+          } else yield `Reply to ${text}`;
+        },
+      })),
+      abort: vi.fn(),
+    };
+    const session = await start();
+    const log = recordSessionEvents(session);
+
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    await typeText('Book a table.');
+    // The reply is cut at once; the agent's request for it has not ended, so the text waits for it.
+    expect(log.slice(4)).toEqual(['barge_in cancel', 'item assistant interrupted Hello|', 'agent speaking>listening']);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    // A second text waits behind the first.
+    transport.emit('message', { type: 'text_input', text: 'By the window.' });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    // Two seconds after the cut the agent receives the first text anyway; its reply ends, and the second text cuts that
+    // reply and is taken in its turn.
+    expect(vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text)).toEqual(['Hello there', 'Book a table.', 'By the window.']);
+    expect(log.slice(7)).toEqual([
+      'item user text Book a table.',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+      'barge_in cancel',
+      'item assistant interrupted Reply to Book a table.|',
+      'agent speaking>listening',
+      'item user text By the window.',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+    ]);
+    expect(orchestrator.state).toBe('speaking');
+    // The cut reply's stream yields at last: its token belongs to no reply that speaks now.
+    release(' late');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(ttsSession.pushTokens).mock.calls.map(([token]) => token)).toEqual(['Hello', 'Reply to Book a table.', 'Reply to By the window.']);
+    expect(orchestrator.state).toBe('speaking');
+    // The bound's timer is cleared once the wait ends, and the watchdog is cleared while the agent speaks.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('preserves Error on error and emits metadata on session_error before close', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
