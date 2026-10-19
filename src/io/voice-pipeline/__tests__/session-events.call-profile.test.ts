@@ -234,6 +234,38 @@ describe('session events under a call profile', () => {
     await f.runtime.stopSession();
   });
 
+  it('adds a reply whose playback was acknowledged as heard, though speech comes while its agent_done goes out', async () => {
+    const f = await call();
+    const cut: string[] = [];
+    f.session.on('barge_in', (event) => cut.push(event.interruptedText));
+    // The reply's agent_done is still going out when the user speaks.
+    let sent!: () => void;
+    const held = new Promise<void>((resolve) => {
+      sent = resolve;
+    });
+    vi.mocked(f.transport.sendControl).mockImplementation(async (message) => {
+      if (message.type === 'agent_done') await held;
+    });
+
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack();
+    await vi.waitFor(() => expect(f.transport.sendControl).toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_done' })));
+    for (let i = 0; i < 6; i++) {
+      f.audio();
+      await vi.waitFor(() => expect(f.endpoint.pushAudio).toHaveBeenCalledTimes(i + 1));
+    }
+    await vi.waitFor(() => expect(f.log).toContain('barge_in cancel'));
+    sent();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    // Its whole playback was acknowledged: the reply was heard, and the speech after it cut none of its text.
+    expect(f.log).toContain('item assistant played hello|hello');
+    expect(f.log).not.toContain('item assistant interrupted hello|');
+    expect(cut).toEqual(['']);
+    await f.runtime.stopSession();
+  });
+
   it('speaks a prompt as speech the host created', async () => {
     const f = await call();
     const prompt = f.runtime.pushToTTS('Thanks for calling.');
