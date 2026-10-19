@@ -36,7 +36,7 @@ import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
 import { redactUrlSecrets } from '../url-secrets';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, retryAfterMs, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
@@ -815,6 +815,10 @@ export class GeminiProvider implements IProvider {
    * @throws {GeminiProviderError} If the API key is missing.
    */
   public async initialize(config: GeminiProviderConfig): Promise<void> {
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     if (!config.apiKey) {
       throw new GeminiProviderError(
         'API key is required for GeminiProvider initialization. Set GEMINI_API_KEY.',
@@ -831,12 +835,15 @@ export class GeminiProvider implements IProvider {
     };
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('gemini')),
       probe: (key) => this.probeKey(key),
     });
     await this.keyPool.ready();
     this.defaultModelId = this.config.defaultModelId;
     this.isInitialized = true;
+    // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
+    // breaker holds still gets its keys back; the interval never keeps the process alive.
+    if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
 
     console.log(
       `GeminiProvider initialized. Default model: ${this.defaultModelId || 'Not set'}.`,
@@ -1300,7 +1307,8 @@ export class GeminiProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
-    await this.keyPool?.flush();
+    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    await this.keyPool?.close();
     this.isInitialized = false;
     console.log('GeminiProvider shutdown complete.');
   }
@@ -1936,7 +1944,7 @@ export class GeminiProvider implements IProvider {
     return new GeminiProviderError(
       message ?? `Every Gemini API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
       'ALL_KEYS_FAILED',
-      status,
+      status ?? statusOfKinds(kinds),
       errorStatus,
       { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
     );

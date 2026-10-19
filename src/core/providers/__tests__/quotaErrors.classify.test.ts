@@ -58,6 +58,15 @@ describe('classifyKeyFailure', () => {
     expect(classifyKeyFailure(401, JSON.stringify({ error: { message: 'Missing Authentication header', code: 401 } }))).toBe('auth');
   });
 
+  it("reads Anthropic's spend-limit answers as billing: the operator's limit (400) and the tier's monthly cap (429)", () => {
+    // platform.claude.com/docs/en/api/rate-limits, read 18 October 2026.
+    expect(classifyKeyFailure(400, anthropic('invalid_request_error', 'You have reached your specified API usage limits. Access resumes on 1 November.'))).toBe('billing');
+    expect(classifyKeyFailure(400, anthropic('invalid_request_error', 'You have reached your specified workspace API usage limits.'))).toBe('billing');
+    const capped = JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'You have reached your API usage limits: your organization has crossed its monthly API usage threshold.', details: { error_code: 'enforced_spend_limit_reached' } } });
+    expect(classifyKeyFailure(429, capped)).toBe('billing');
+    expect(classifyKeyFailure(429, anthropic('rate_limit_error', 'Number of requests exceeded'))).toBe('quota');
+  });
+
   it('never classifies 404, 5xx or a success', () => {
     expect(classifyKeyFailure(404, anthropic('not_found_error'))).toBeNull();
     expect(classifyKeyFailure(500, anthropic('api_error'))).toBeNull();

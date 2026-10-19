@@ -36,7 +36,7 @@ import {
 import { stripForeignVendorParams } from '../openrouter-only-params';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, retryAfterMs, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { resolveThinkingOff, resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import {
@@ -823,6 +823,10 @@ export class AnthropicProvider implements IProvider {
    * @throws {AnthropicProviderError} If the API key is missing.
    */
   public async initialize(config: AnthropicProviderConfig): Promise<void> {
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     if (!config.apiKey) {
       throw new AnthropicProviderError(
         'API key is required for AnthropicProvider initialization. Set ANTHROPIC_API_KEY.',
@@ -856,12 +860,15 @@ export class AnthropicProvider implements IProvider {
     };
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('anthropic')),
       probe: (key, kind) => this.probeKey(key, kind),
     });
     await this.keyPool.ready();
     this.defaultModelId = config.defaultModelId;
     this.isInitialized = true;
+    // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
+    // breaker holds still gets its keys back; the interval never keeps the process alive.
+    if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
 
     const env = typeof process !== 'undefined' ? process.env : undefined;
     const debugOn = env && (env.AGENTOS_DEBUG === '1' || env.AGENTOS_DEBUG === 'true' || (env.AGENTOS_LOG_LEVEL ?? '').toLowerCase() === 'debug');
@@ -1749,7 +1756,8 @@ export class AnthropicProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
-    await this.keyPool?.flush();
+    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    await this.keyPool?.close();
     this.isInitialized = false;
     console.log('AnthropicProvider shutdown complete.');
   }
@@ -2943,7 +2951,7 @@ export class AnthropicProvider implements IProvider {
     return new AnthropicProviderError(
       message ?? `Every Anthropic API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
       'ALL_KEYS_FAILED',
-      httpStatus,
+      httpStatus ?? statusOfKinds(kinds),
       errorType,
       { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
     );

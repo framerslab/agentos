@@ -37,7 +37,7 @@ import { stripForeignVendorParams } from '../openrouter-only-params';
 import { resolveOpenAiCacheRetentionParams, resolvePromptCacheKey } from '../openai-cache-params';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, retryAfterMs, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { toOpenAiResponseFormat, toOpenAiResponsesTextFormat } from './openai-response-format-guard';
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
@@ -941,6 +941,10 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async initialize(config: OpenAIProviderConfig): Promise<void> {
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     if (!config.apiKey && !config.oauthFlow) {
       throw new OpenAIProviderError(
         'API key or OAuth flow is required for OpenAIProvider initialization.',
@@ -956,7 +960,7 @@ export class OpenAIProvider implements IProvider {
     };
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openai')),
       probe: (key, kind) => this.probeKey(key, kind),
     });
     await this.keyPool.ready();
@@ -966,6 +970,9 @@ export class OpenAIProvider implements IProvider {
       // Attempt to list models to verify API key and connectivity.
       await this.refreshAvailableModels();
       this.isInitialized = true;
+      // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
+      // breaker holds still gets its keys back; the interval never keeps the process alive.
+      if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
       const env = typeof process !== 'undefined' ? process.env : undefined;
       const debugOn = !!env && (env.AGENTOS_DEBUG === '1' || env.AGENTOS_DEBUG === 'true' || (env.AGENTOS_LOG_LEVEL ?? '').toLowerCase() === 'debug');
       if (debugOn) {
@@ -1207,7 +1214,7 @@ export class OpenAIProvider implements IProvider {
       'ALL_KEYS_FAILED',
       errorCode,
       errorType,
-      status,
+      status ?? statusOfKinds(kinds),
       { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
     );
   }
@@ -1784,7 +1791,8 @@ export class OpenAIProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
-    await this.keyPool?.flush();
+    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    await this.keyPool?.close();
     // For OpenAIProvider, using stateless HTTP requests, there might not be
     // persistent connections to close. If connection pooling or WebSockets
     // were used, they would be closed here.

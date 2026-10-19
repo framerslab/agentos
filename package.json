@@ -45,6 +45,11 @@
       "default": "./dist/api/generateText.js",
       "types": "./dist/api/generateText.d.ts"
     },
+    "./api/keyPoolDefaults": {
+      "import": "./dist/api/keyPoolDefaults.js",
+      "default": "./dist/api/keyPoolDefaults.js",
+      "types": "./dist/api/keyPoolDefaults.d.ts"
+    },
     "./api/streamText": {
       "import": "./dist/api/streamText.js",
       "default": "./dist/api/streamText.js",

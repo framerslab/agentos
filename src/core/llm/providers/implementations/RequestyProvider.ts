@@ -22,7 +22,7 @@ import {
 } from '../IProvider';
 import { RequestyProviderError } from '../errors/RequestyProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, retryAfterMs, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
@@ -182,6 +182,10 @@ export class RequestyProvider implements IProvider {
   constructor() {}
 
   public async initialize(config: RequestyProviderConfig): Promise<void> {
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     if (!config.apiKey) {
       throw new RequestyProviderError(
         'Requesty API key (apiKey) is required for initialization.',
@@ -201,7 +205,7 @@ export class RequestyProvider implements IProvider {
     });
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('requesty')),
       probe: (key) => this.probeKey(key),
     });
     await this.keyPool.ready();
@@ -229,6 +233,9 @@ export class RequestyProvider implements IProvider {
     try {
       await this.refreshAvailableModels();
       this.isInitialized = true;
+      // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
+      // breaker holds still gets its keys back; the interval never keeps the process alive.
+      if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
       console.log(`RequestyProvider initialized. Default Model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models via Requesty.`);
     } catch (error: unknown) {
       this.isInitialized = false;
@@ -634,7 +641,8 @@ export class RequestyProvider implements IProvider {
   }
 
   public async shutdown(): Promise<void> {
-    await this.keyPool?.flush();
+    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    await this.keyPool?.close();
     this.isInitialized = false;
     this.availableModelsCache.clear();
     console.log('RequestyProvider shutdown: Instance marked as uninitialized and cache cleared.');
@@ -858,7 +866,7 @@ export class RequestyProvider implements IProvider {
     return new RequestyProviderError(
       message ?? `Every Requesty API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
       'ALL_KEYS_FAILED',
-      status,
+      status ?? statusOfKinds(kinds),
       errorType,
       { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
     );

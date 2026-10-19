@@ -3336,6 +3336,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             fallbackProvider: fb.provider,
             fallbackModel: fb.model,
             errorType: lastErr.name,
+            errorCode: (lastErr as { code?: unknown }).code,
+            keyKinds: (lastErr as { details?: { kinds?: unknown } }).details?.kinds,
             errorMessage: lastErr.message.slice(0, 200),
             attempt,
             // Live signal that per-leg rebuild is active (2026-07-07 spec
