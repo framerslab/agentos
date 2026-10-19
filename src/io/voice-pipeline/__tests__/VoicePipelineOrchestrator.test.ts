@@ -1955,6 +1955,49 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(orchestrator.state).toBe('listening');
   });
 
+  it("drops what a cut reply's agent stream yields after the next reply has started speaking", async () => {
+    // An agent with no abort(): the cut reply's stream goes on until it ends by itself, as a slow tool call can hold it.
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const replies = [
+      (async function* () {
+        await firstHeld;
+        yield 'stale';
+      })(),
+      (async function* () {
+        yield 'Booked.';
+      })(),
+    ];
+    agentSession = { sendText: vi.fn(() => replies.shift()!) };
+    const session = await start(createMockBargeinHandler({ type: 'cancel' }));
+    const created: string[] = [];
+    session.on('speech_created', ({ source }) => created.push(source));
+
+    // The first reply has no word yet when the user's speech cuts it.
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+    sttSession.emit('speech_end');
+
+    // The next turn's reply speaks its word; then the cut reply's stream yields one.
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    releaseFirst();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The cut reply's word reaches neither the TTS session nor the reply speaking, and does not end it early.
+    expect(vi.mocked(ttsSession.pushTokens).mock.calls).toEqual([['Booked.']]);
+    expect(ttsSession.flush).toHaveBeenCalledOnce();
+    expect(created).toEqual(['reply']);
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'Booked.', durationMs: 0 });
+  });
+
   it('preserves Error on error and emits metadata on session_error before close', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
