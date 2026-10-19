@@ -428,6 +428,42 @@ describe('session events under a call profile', () => {
     expect(f.transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_speaking' }));
   });
 
+  it('emits close once, and cleans up once, though a listener of the close stops the session again', async () => {
+    const f = await call();
+    const reasons: string[] = [];
+    // A host's "make sure it stopped" handler. Capped, so a close that goes out again and again ends.
+    f.runtime.on('close', ({ reason }: VoiceSessionEventMap['close']) => {
+      reasons.push(reason);
+      if (reasons.length < 3) void f.runtime.stopSession();
+    });
+    const own: string[] = [];
+    f.session.on('close', ({ reason }) => own.push(reason));
+
+    await f.runtime.stopSession('done');
+    await f.runtime.stopSession();
+
+    expect(reasons).toEqual(['done']);
+    expect(own).toEqual(['done']);
+    expect(f.profile.fenceInference).toHaveBeenCalledOnce();
+    expect(f.transport.close).toHaveBeenCalledOnce();
+  });
+
+  it('emits no second close when a stop follows a cleanup that failed, and cleans up again', async () => {
+    const f = await call();
+    const reasons: string[] = [];
+    f.session.on('close', ({ reason }) => reasons.push(reason));
+    vi.mocked(f.profile.fenceInference).mockRejectedValueOnce(new Error('the fence failed'));
+
+    await expect(f.runtime.stopSession('done')).rejects.toThrow('the fence failed');
+    expect(f.transport.close).not.toHaveBeenCalled();
+    await f.runtime.stopSession('again');
+
+    // The call closed once, as the first stop said; the second stop ran the cleanup the first could not finish.
+    expect(reasons).toEqual(['done']);
+    expect(f.profile.fenceInference).toHaveBeenCalledTimes(2);
+    expect(f.transport.close).toHaveBeenCalledOnce();
+  });
+
   it('names the transport as the source of a reply whose audio the transport refuses', async () => {
     const f = await call();
     f.transport.sendAudio = vi.fn(async () => {
