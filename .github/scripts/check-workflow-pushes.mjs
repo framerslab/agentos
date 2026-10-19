@@ -25,9 +25,15 @@
  *   runs on the default branch unless its triggers keep it off: pull_request, pull_request_review(_comment),
  *   merge_group and release never run on a branch, and push filters are read as GitHub reads them. A pull_request
  *   trigger whose types include closed runs on the branch a merged pull request went into (GITHUB_REF is that
- *   branch), so its branches filters are read as a push's are. A step that
- *   checks out a branch (actions/checkout with ref, git checkout, git switch) changes the checked-out branch, and
- *   git switch - or git checkout - (@{-1}, @{-N}) returns to the one checked out before it;
+ *   branch), so its branches filters are read as a push's are; pull_request_target and workflow_run run on the
+ *   default branch whatever their branches filters name (those pick the pull requests and the runs that trigger
+ *   them). A step that checks out a branch (actions/checkout with ref, git checkout, git switch) changes the
+ *   checked-out branch: git checkout <branch> -- with no paths after it and git switch -- <branch> check a branch
+ *   out, git checkout [<tree-ish>] -- <paths> restores files, and git switch - or git checkout - (@{-1}, @{-N})
+ *   returns to the one checked out before it. A command after && or ||, a branch of an if or a case and a loop's
+ *   body may not run, so after them the checked-out branch is any branch they can leave checked out
+ *   (git checkout master; false && git checkout feature can leave master); a command that runs is taken to do
+ *   what it names (a checkout that fails is not followed), and a loop's body is read once;
  * - an action that pushes there: peaceiris/actions-gh-pages (publish_branch), JamesIves/github-pages-deploy-action
  *   (branch) and ad-m/github-push-action (branch; with none it pushes the default branch: the input defaulted to
  *   master through v0.6.0, and later versions look the repository's default branch up), each unless its repository
@@ -43,8 +49,10 @@
  * exec, sudo, nohup, time, nice and timeout, inside $( ) and backticks (also within double quotes), in an sh -c or
  * bash -c string, an eval, a heredoc or a here-string fed to a shell or to a cat piped into one, the words an echo or
  * a printf pipes into a shell, and the substitutions in a ${ } (${CACHE:-$(...)}) and in an unquoted heredoc's body,
- * which run whatever program reads it. A word that is only printed (echo git push ...), a quoted heredoc fed to
- * another program, a comment and a dry run are not pushes. Not read: a branch held in a shell variable, a job's or
+ * which run whatever program reads it. git push's options are read as git reads them: --no-<option> undoes an
+ * option (--dry-run --no-dry-run pushes) and a long option can be cut to a prefix only it has (--mir is --mirror).
+ * A word that is only printed (echo git push ...), a quoted heredoc fed to another program, a comment and a dry run
+ * are not pushes. Not read: a branch held in a shell variable, a job's or
  * step's if: condition, a script a shell reads from a file, a variable or a download (curl ... | bash), a git
  * setting made through GIT_CONFIG_* variables, a config file or another repository's configuration, the repository a
  * remote URL or another checkout names (a git push there is read as one here), and a push made by a script file or
@@ -116,7 +124,19 @@ const WRAPPERS = {
   timeout: ['-k', '--kill-after', '-s', '--signal'],
 };
 const GIT_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix']);
-const PUSH_VALUED = new Set(['--repo', '--receive-pack', '--exec', '--push-option', '-o']);
+// git push's long options (builtin/push.c) and what each means here. parse-options reads --no-<option> as undoing
+// one and a prefix that only one option has as that option; a value option takes the next word unless the value is
+// given with =, and an optional one takes a value only with =.
+const PUSH_OPTIONS = new Map([
+  ['repo', 'value'], ['all', 'all'], ['branches', 'all'], ['mirror', 'mirror'], ['delete', 'delete'], ['tags', 'tags'],
+  ['dry-run', 'dry-run'], ['porcelain', ''], ['force', ''], ['force-with-lease', 'optional'], ['force-if-includes', ''],
+  ['recurse-submodules', 'value'], ['thin', ''], ['receive-pack', 'value'], ['exec', 'value'], ['set-upstream', ''],
+  ['progress', ''], ['prune', ''], ['no-verify', ''], ['follow-tags', ''], ['signed', 'optional'], ['atomic', ''],
+  ['push-option', 'value'], ['ipv4', ''], ['ipv6', ''], ['verbose', ''], ['quiet', ''],
+]);
+// How far each push.default sends a push with no refspec, for the setting that covers two: none, the checked-out
+// branch (simple, current and any other value), the branch it tracks, every branch.
+const PUSH_DEFAULT_REACH = new Map([['nothing', 0], ['upstream', 2], ['tracking', 2], ['matching', 3]]);
 const RUNNER_VALUED = new Set(['--filter', '-F', '-C', '--dir', '--prefix', '--workspace', '--cwd', '-p', '--package', '-c', '--call', '--registry', '--loglevel']);
 const RELEASE_CONFIGS = ['.releaserc', '.releaserc.json', '.releaserc.yaml', '.releaserc.yml', '.releaserc.js', '.releaserc.cjs', '.releaserc.mjs', 'release.config.js', 'release.config.cjs', 'release.config.mjs', 'release.config.ts', 'release.config.cts', 'release.config.mts'];
 const SEMANTIC_RELEASE = /^semantic-release(?:@\S*)?$/;
@@ -212,16 +232,33 @@ export function invoked(words) {
  */
 
 /**
- * The simple commands of a shell script, each as its words with quotes and escapes removed, in the order they end.
- * A command substitution's commands come out on their own and its text stays in its word; a heredoc's body is read
- * as a script when it feeds a shell, directly or through a cat piped into one, and otherwise its substitutions are
- * read when its delimiter is unquoted. A here-string fed so, and what an echo or a printf pipes into a shell, is read
- * as a script too.
+ * A list being read: the script, a { } group, a ( ) subshell, or the inside of an if, a loop or a case. open counts
+ * the parts of its and-or list that its && and || began; begun says a branch has begun, otherwise that an if has
+ * an else or a case a * pattern (so one of its branches always runs), head that a for's names are being read and
+ * mode where a case stands.
+ * @typedef {{ kind: 'list' | 'group' | 'subshell' | 'if' | 'loop' | 'case', open: number, begun?: boolean,
+ *   otherwise?: boolean, head?: boolean, mode?: 'subject' | 'pattern' | 'arm' }} Frame
+ */
+
+/**
+ * A point in a script past which the commands may not run: open begins a part that can be skipped (what follows an
+ * && or an ||, the branches of an if, a loop's body, the arms of a case), or begins its next alternative from where
+ * the part began (elif, else, the next arm), and close ends it, where skip says whether the job can also take none
+ * of its alternatives.
+ * @typedef {{ branch: 'open' | 'or' | 'close', skip?: boolean }} Branch
+ */
+
+/**
+ * The simple commands of a shell script, each as its words with quotes and escapes removed, in the order they end,
+ * with the branch points of the lists and compound commands around them. A command substitution's commands come out
+ * on their own and its text stays in its word; a heredoc's body is read as a script when it feeds a shell, directly
+ * or through a cat piped into one, and otherwise its substitutions are read when its delimiter is unquoted. A
+ * here-string fed so, and what an echo or a printf pipes into a shell, is read as a script too.
  * @param {string} src
- * @returns {string[][]}
+ * @returns {(string[] | Branch)[]}
  */
 export function shellCommands(src) {
-  /** @type {string[][]} */
+  /** @type {(string[] | Branch)[]} */
   const out = [];
   const n = src.length;
   let i = 0;
@@ -360,7 +397,8 @@ export function shellCommands(src) {
   };
 
   /**
-   * Reads simple commands up to `stop` (')' or '`'; '' for none) or the end, adding them to out.
+   * Reads simple commands up to `stop` (')' or '`'; '' for none) or the end, adding them to out with the branch
+   * points of the lists and compound commands around them.
    * @param {string} stop
    * @returns {string} the text read
    */
@@ -370,6 +408,8 @@ export function shellCommands(src) {
     let words = [];
     /** @type {string | null} */
     let word = null;
+    // Whether a quote, an escape or an expansion is in the word, which keeps it from being a reserved word.
+    let quoted = false;
     /** @type {Heredoc[]} */
     let heredocs = [];
     let depth = 0;
@@ -377,13 +417,92 @@ export function shellCommands(src) {
     let piped = null;
     /** @type {{ words: string[], text: string }[]} the here-strings (<<<) of the line, with their commands */
     let strings = [];
+    // Whether an &&, || or | still waits for its command, which can come after a line break.
+    let operand = false;
+    // Whether the next word is the name in function <name> { ... }.
+    let functionName = false;
+    /** @type {Frame[]} the lists being read, the innermost last */
+    const frames = [{ kind: 'list', open: 0 }];
+    const top = () => frames[frames.length - 1];
+    const inPattern = () => top().kind === 'case' && top().mode === 'pattern';
+    /** Ends the and-or list being read: the parts its && and || began end with it. */
+    const endList = () => {
+      const f = top();
+      for (; f.open > 0; f.open--) out.push({ branch: 'close', skip: true });
+    };
+    /** Ends the innermost group or compound command, with its list and its branches. */
+    const closeFrame = () => {
+      endList();
+      if (frames.length === 1) return;
+      const f = /** @type {Frame} */ (frames.pop());
+      // A loop's body, an if without an else and a case without a * pattern can also be passed by.
+      if (f.begun) out.push({ branch: 'close', skip: !f.otherwise });
+    };
+    /**
+     * Reads a word at command position that opens, divides or closes a group or a compound command.
+     * @param {string} text
+     * @returns {boolean} whether the word was one here
+     */
+    const reserved = (text) => {
+      const f = top();
+      if (text === '{') {
+        frames.push({ kind: 'group', open: 0 });
+      } else if (text === 'if') {
+        frames.push({ kind: 'if', open: 0, begun: false, otherwise: false });
+      } else if (text === 'while' || text === 'until' || text === 'for' || text === 'select') {
+        frames.push({ kind: 'loop', open: 0, begun: false, otherwise: false, head: text === 'for' || text === 'select' });
+      } else if (text === 'case') {
+        frames.push({ kind: 'case', open: 0, begun: false, otherwise: false, mode: 'subject' });
+      } else if (text === 'function') {
+        functionName = true;
+      } else if ((text === '}' && f.kind === 'group') || (text === 'fi' && f.kind === 'if') || (text === 'done' && f.kind === 'loop') || (text === 'esac' && f.kind === 'case')) {
+        closeFrame();
+      } else if ((text === 'then' || text === 'elif' || text === 'else') && f.kind === 'if') {
+        // then begins the first branch; elif and else begin the next one from where the first began.
+        endList();
+        if (text === 'then' && !f.begun) out.push({ branch: 'open' });
+        else if (text !== 'then' && f.begun) out.push({ branch: 'or' });
+        if (text === 'then') f.begun = true;
+        if (text === 'else') f.otherwise = true;
+      } else if (text === 'do' && f.kind === 'loop') {
+        endList();
+        f.head = false;
+        if (!f.begun) out.push({ branch: 'open' });
+        f.begun = true;
+      } else {
+        return false;
+      }
+      return true;
+    };
     /** @param {string} text */
     const add = (text) => {
       word = (word ?? '') + text;
+      operand = false;
     };
     const endWord = () => {
-      if (word !== null) words.push(word);
+      const text = word;
+      const bare = !quoted;
       word = null;
+      quoted = false;
+      if (text === null) return;
+      const f = top();
+      if (functionName) {
+        functionName = false;
+      } else if (f.kind === 'case' && f.mode === 'subject') {
+        // The word a case matches is not a command; in ends it.
+        if (bare && text === 'in' && words.length > 0) {
+          f.mode = 'pattern';
+          words = [];
+        } else {
+          words.push(text);
+        }
+      } else if (f.kind === 'case' && f.mode === 'pattern') {
+        if (bare && text === 'esac' && words.length === 0) closeFrame();
+        else words.push(text);
+        if (bare && text === '*') f.otherwise = true;
+      } else if (!(bare && words.length === 0 && reserved(text))) {
+        words.push(text);
+      }
     };
     /**
      * A shell that reads its script from its standard input runs what the command before it writes there: the
@@ -407,6 +526,13 @@ export function shellCommands(src) {
     /** @param {boolean} [pipe] whether a | ends the command, feeding its output to the next one */
     const endCommand = (pipe = false) => {
       endWord();
+      const f = top();
+      // A case's word and patterns, and a for's names, are not commands.
+      if (f.kind === 'case' && f.mode !== 'arm') return;
+      if (f.kind === 'loop' && f.head) {
+        words = [];
+        return;
+      }
       // An empty command (the & of |&, a line break after |) leaves a pipe as it is.
       if (words.length > 0) {
         out.push(words);
@@ -417,26 +543,43 @@ export function shellCommands(src) {
       }
       words = [];
     };
+    /**
+     * Ends what is still open where the reading stops.
+     * @param {boolean} docs whether to read the heredocs still waiting
+     */
+    const finish = (docs) => {
+      endCommand();
+      if (docs) for (const heredoc of heredocs) readHeredoc(heredoc);
+      while (frames.length > 1) closeFrame();
+      endList();
+    };
     while (i < n) {
       const c = src[i];
-      if (c === stop && (stop === '`' || depth === 0)) {
+      if (c === stop && (stop === '`' || (depth === 0 && !inPattern()))) {
         i++;
-        endCommand();
+        finish(false);
         return src.slice(start, i - 1);
       }
       if (c === '\\') {
-        if (src[i + 1] !== '\n') add(src[i + 1] ?? '');
+        if (src[i + 1] !== '\n') {
+          quoted = true;
+          add(src[i + 1] ?? '');
+        }
         i += 2;
       } else if (c === "'") {
         i++;
+        quoted = true;
         add(single());
       } else if (c === '"') {
         i++;
+        quoted = true;
         add(double());
       } else if (c === '$') {
+        quoted = true;
         add(dollar());
       } else if (c === '`') {
         i++;
+        quoted = true;
         add(`\`${commandsUntil('`')}\``);
       } else if (c === '#' && word === null) {
         while (i < n && src[i] !== '\n') i++;
@@ -449,6 +592,8 @@ export function shellCommands(src) {
         for (const heredoc of heredocs) readHeredoc(heredoc);
         heredocs = [];
         strings = [];
+        // A line break ends the and-or list, unless an operator still waits for its command.
+        if (!operand) endList();
       } else if (c === '<' || c === '>' || (c === '&' && src[i + 1] === '>')) {
         if (word !== null && /^\d+$/.test(word)) word = null; // the descriptor of 2>&1
         endWord();
@@ -467,24 +612,65 @@ export function shellCommands(src) {
           while (i < n && '<>&|'.includes(src[i])) i++;
           target();
         }
-      } else if (c === ';' || c === '&' || c === '|') {
-        endCommand(c === '|' && src[i + 1] !== '|' && src[i - 1] !== '|');
+      } else if (c === '|' && inPattern()) {
+        // a | between a case's patterns
+        endWord();
+        i++;
+      } else if ((c === '&' || c === '|') && src[i + 1] === c) {
+        // What follows && or || runs only on the success or the failure of what came before: it may not run.
+        endCommand();
+        out.push({ branch: 'open' });
+        top().open++;
+        operand = true;
+        i += 2;
+      } else if (c === '|') {
+        endCommand(true);
+        operand = true;
+        i++;
+      } else if (c === '&' && src[i - 1] === '|') {
+        i++; // the & of |&
+      } else if (c === ';' && top().kind === 'case' && top().mode === 'arm' && (src[i + 1] === ';' || src[i + 1] === '&')) {
+        // ;;, ;& and ;;& end a case's arm.
+        endCommand();
+        endList();
+        top().mode = 'pattern';
+        i += src.startsWith(';;&', i) ? 3 : 2;
+      } else if (c === ';' || c === '&') {
+        endCommand();
+        endList();
         i++;
       } else if (c === '(') {
-        endCommand();
-        depth++;
+        // A ( before a case's pattern is only punctuation.
+        if (!inPattern()) {
+          endCommand();
+          frames.push({ kind: 'subshell', open: 0 });
+          depth++;
+        }
         i++;
       } else if (c === ')') {
-        endCommand();
-        if (depth > 0) depth--;
+        if (inPattern()) {
+          // The patterns end and their arm begins, an alternative to the other arms.
+          endWord();
+          words = [];
+          const f = top();
+          out.push({ branch: f.begun ? 'or' : 'open' });
+          f.begun = true;
+          f.mode = 'arm';
+        } else {
+          endCommand();
+          if (depth > 0) {
+            depth--;
+            while (frames.length > 1 && top().kind !== 'subshell') closeFrame();
+            closeFrame();
+          }
+        }
         i++;
       } else {
         add(c);
         i++;
       }
     }
-    endCommand();
-    for (const heredoc of heredocs) readHeredoc(heredoc);
+    finish(true);
     return src.slice(start, i);
   }
 
@@ -626,6 +812,24 @@ function lastColon(spec) {
 }
 
 /**
+ * A long option of git push as parse-options reads it (the word past its --): the option, whether a --no- undid it,
+ * and a value given with =. The option is '' when the word names none or begins more than one, which git refuses.
+ * @param {string} word
+ */
+function pushOption(word) {
+  const eq = word.indexOf('=');
+  let name = eq < 0 ? word : word.slice(0, eq);
+  const value = eq < 0 ? undefined : word.slice(eq + 1);
+  const negated = !PUSH_OPTIONS.has(name) && name.startsWith('no-');
+  if (negated) name = name.slice(3);
+  if (!PUSH_OPTIONS.has(name)) {
+    const begun = [...PUSH_OPTIONS.keys()].filter((option) => option.startsWith(name));
+    name = name !== '' && begun.length === 1 ? begun[0] : '';
+  }
+  return { name, negated, value };
+}
+
+/**
  * Reports a git push (its arguments after push) that reaches the default branch.
  * @param {string[]} args
  * @param {Step} step
@@ -635,7 +839,8 @@ function checkPush(args, { state, ctx, report }, given = {}) {
   const command = `git push ${args.map(unhold).join(' ')}`.trim();
   const branch = ctx.branch;
   let dryRun = false;
-  let every = '';
+  let all = false;
+  let mirror = false;
   let tags = false;
   let remove = false;
   /** @type {string[]} */
@@ -646,13 +851,19 @@ function checkPush(args, { state, ctx, report }, given = {}) {
       positional.push(...args.slice(k + 1));
       break;
     }
-    if (!a.startsWith('-') || a === '-') positional.push(a);
-    else if (PUSH_VALUED.has(a)) k++;
-    else if (a === '--dry-run') dryRun = true;
-    else if (a === '--all' || a === '--branches' || a === '--mirror') every = a;
-    else if (a === '--tags') tags = true;
-    else if (a === '--delete') remove = true;
-    else if (/^-[^-]/.test(a)) {
+    if (!a.startsWith('-') || a === '-') {
+      positional.push(a);
+    } else if (a.startsWith('--')) {
+      // The options are read in order, so a later --no-dry-run undoes a --dry-run.
+      const { name, negated, value } = pushOption(a.slice(2));
+      const kind = PUSH_OPTIONS.get(name) ?? '';
+      if (kind === 'value' && !negated && value === undefined) k++;
+      else if (kind === 'dry-run') dryRun = !negated;
+      else if (kind === 'all') all = !negated;
+      else if (kind === 'mirror') mirror = !negated;
+      else if (kind === 'tags') tags = !negated;
+      else if (kind === 'delete') remove = !negated;
+    } else {
       // bundled short options: -n dry run, -d delete, -o takes the rest of the word or the next one
       for (let j = 1; j < a.length; j++) {
         if (a[j] === 'n') dryRun = true;
@@ -665,7 +876,7 @@ function checkPush(args, { state, ctx, report }, given = {}) {
     }
   }
   if (dryRun) return;
-  if (every) {
+  if (all || mirror) {
     report(`"${command}" pushes every branch, ${branch} among them`);
     return;
   }
@@ -786,15 +997,23 @@ function moveHead(state, head) {
 function checkout(sub, args, { state, ctx }) {
   const create = sub === 'checkout' ? ['-b', '-B', '--orphan'] : ['-c', '-C', '--create', '--force-create', '--orphan'];
   const creating = args.some((a) => create.includes(a) || /^--(?:create|force-create|orphan)=/.test(a));
-  // git checkout <tree-ish> -- <paths> restores files and leaves the branch as it is.
-  if (sub === 'checkout' && args.includes('--') && !creating) return;
+  // git checkout [<tree-ish>] -- <paths> restores files and leaves the branch as it is; with nothing after its --,
+  // git checkout <branch> -- checks the branch out (builtin/checkout.c, parse_branchname_arg).
+  const dash = args.indexOf('--');
+  if (sub === 'checkout' && dash >= 0 && dash < args.length - 1 && !creating) return;
   // --track with no name for the new branch names it for the remote-tracking branch past the remote's part, so
   // git switch --track origin/master makes and checks out master (git-checkout(1), -t).
   const track = args.some((a) => a === '-t' || a === '--track' || a.startsWith('--track=')) && !creating;
   for (let k = 0; k < args.length; k++) {
-    const a = args[k];
-    if (a === '--') return;
-    if (a === '--detach' || (sub === 'switch' && a === '-d')) {
+    let a = args[k];
+    // git switch reads the word after its -- as the branch, whatever it looks like; git checkout reads none there.
+    const plain = a === '--';
+    if (plain) {
+      if (sub === 'checkout' || k + 1 === args.length) return;
+      k++;
+      a = args[k];
+    }
+    if (!plain && (a === '--detach' || (sub === 'switch' && a === '-d'))) {
       moveHead(state, false);
       return;
     }
@@ -805,9 +1024,10 @@ function checkout(sub, args, { state, ctx }) {
       moveHead(state, state.prev.length >= back ? state.prev[state.prev.length - back] : state.run);
       return;
     }
-    const attached = /^--(?:create|force-create|orphan)=(.+)$/.exec(a);
-    const creates = create.includes(a) || attached !== null;
-    const operand = create.includes(a) ? args[k + 1] : attached ? attached[1] : a.startsWith('-') ? undefined : a;
+    const attached = plain ? null : /^--(?:create|force-create|orphan)=(.+)$/.exec(a);
+    const named = !plain && create.includes(a);
+    const creates = named || attached !== null;
+    const operand = named ? args[k + 1] : attached ? attached[1] : !plain && a.startsWith('-') ? undefined : a;
     if (operand === undefined) continue;
     const name = track ? operand.replace(/^(?:refs\/)?(?:remotes\/)?[^/]+\//, '') : operand;
     // A branch made here is a new one unless it is named for the default branch (-B master resets it). A branch
@@ -878,7 +1098,7 @@ function runsSemanticRelease({ name, args }, dir, ctx, depth) {
     const body = scripts[s];
     if (typeof body !== 'string') return false;
     return shellCommands(hold(body)).some((words) => {
-      const run = invoked(words);
+      const run = Array.isArray(words) ? invoked(words) : null;
       return run !== null && runsSemanticRelease(run, dir, ctx, depth + 1);
     });
   });
@@ -944,6 +1164,66 @@ function gitPluginConfig(dir, ctx) {
 }
 
 /**
+ * A copy of a state, to come back to or to merge.
+ * @param {State} s
+ * @returns {State}
+ */
+const copyState = (s) => ({ ...s, prev: [...s.prev], pushRefspecs: [...s.pushRefspecs] });
+
+/**
+ * The state that covers two: a branch can be the default branch after them when it can after either, and a push with
+ * no refspec reaches as far as it does after either.
+ * @param {State | null} a
+ * @param {State} b
+ * @returns {State}
+ */
+function mergeStates(a, b) {
+  if (a === null) return copyState(b);
+  const reach = (/** @type {string} */ mode) => PUSH_DEFAULT_REACH.get(mode) ?? 1;
+  /** @type {boolean[]} */
+  const prev = [];
+  // The earlier branches line up from the newest; where one has none, the job's starting branch stands in.
+  for (let k = Math.max(a.prev.length, b.prev.length); k >= 1; k--) prev.push((a.prev[a.prev.length - k] ?? a.run) || (b.prev[b.prev.length - k] ?? b.run));
+  return {
+    ...a,
+    head: a.head || b.head,
+    prev,
+    pushDefault: reach(b.pushDefault) > reach(a.pushDefault) ? b.pushDefault : a.pushDefault,
+    pushRefspecs: [...new Set([...a.pushRefspecs, ...b.pushRefspecs])],
+  };
+}
+
+/**
+ * Checks a script's commands in order through its branch points: a part that may not run leaves the job where it
+ * began as well as where it ends, and each alternative of an if or a case starts from where the first one did.
+ * @param {(string[] | Branch)[]} items
+ * @param {Step} step
+ * @param {number} depth
+ */
+function runCommands(items, step, depth) {
+  const { state } = step;
+  /** @type {{ start: State, end: State | null }[]} */
+  const parts = [];
+  for (const item of items) {
+    if (Array.isArray(item)) {
+      checkCommand(item, step, depth);
+    } else if (item.branch === 'open') {
+      parts.push({ start: copyState(state), end: null });
+    } else if (parts.length > 0) {
+      const part = parts[parts.length - 1];
+      part.end = mergeStates(part.end, state);
+      if (item.branch === 'or') {
+        Object.assign(state, copyState(part.start));
+      } else {
+        parts.pop();
+        Object.assign(state, item.skip === false ? part.end : mergeStates(part.end, part.start));
+      }
+    }
+  }
+  for (let part = parts.pop(); part; part = parts.pop()) Object.assign(state, mergeStates(mergeStates(part.end, state), part.start));
+}
+
+/**
  * Reports a simple command of a run step that pushes to the default branch, and follows the ones that change the
  * checked-out branch.
  * @param {string[]} words
@@ -957,9 +1237,9 @@ function checkCommand(words, step, depth) {
   if (SHELLS.has(name)) {
     // -c runs the first operand, after every option and its value (bash -co pipefail 'git push ...').
     const { options, operands } = shellArgs(args);
-    if (options.some(isCommandOption) && operands.length > 0) for (const inner of shellCommands(operands[0])) checkCommand(inner, step, depth + 1);
+    if (options.some(isCommandOption) && operands.length > 0) runCommands(shellCommands(operands[0]), step, depth + 1);
   } else if (name === 'eval') {
-    for (const inner of shellCommands(args.join(' '))) checkCommand(inner, step, depth + 1);
+    runCommands(shellCommands(args.join(' ')), step, depth + 1);
   } else if (name === 'git') {
     let k = 0;
     /** @type {{ pushDefault?: string, pushRefspecs: string[] }} */
@@ -1063,7 +1343,7 @@ function checkAction(uses, inputs, step) {
     const push = 'push' in given ? input('push') : 'true';
     if (push === 'false') return;
     if (push !== 'true') {
-      for (const words of shellCommands(hold(push)).slice(0, 1)) checkPush(words, step);
+      for (const words of shellCommands(hold(push)).filter((item) => Array.isArray(item)).slice(0, 1)) checkPush(/** @type {string[]} */ (words), step);
     } else if (input('new_branch') !== '') {
       destination(input('new_branch'), 'EndBug/add-and-commit pushes to');
     } else if (state.head) {
@@ -1100,7 +1380,7 @@ function checkSteps(file, steps, path, state, ctx, findings) {
       report: (message) => findings.push({ file, path: at, line: 0, message: `${label}: ${message}` }),
     };
     if (typeof s.uses === 'string') checkAction(s.uses, s.with, step);
-    if (s.run != null) for (const words of shellCommands(hold(String(s.run)))) checkCommand(words, step, 0);
+    if (s.run != null) runCommands(shellCommands(hold(String(s.run))), step, 0);
   });
 }
 
@@ -1129,7 +1409,8 @@ function checkDocument(file, doc, ctx, findings) {
   }
   if (!d.jobs || typeof d.jobs !== 'object') return;
   const events = triggers(d);
-  // A pull request closed by its merge runs on the branch it went into (GitHub's events reference, pull_request).
+  // A pull request closed by its merge runs on the branch it went into (GitHub's events reference, pull_request);
+  // pull_request_target and workflow_run run on the default branch whatever branches they filter.
   const closes = (/** @type {unknown} */ filters) => !!filters && typeof filters === 'object' && strings(/** @type {Record<string, unknown>} */ (filters).types).includes('closed');
   const run = events === null || Object.entries(events).some(([event, filters]) => (event === 'push' || (event === 'pull_request' && closes(filters)) ? pushRunsOn(filters, ctx.names) : !OFF_BRANCH_EVENTS.has(event)));
   const names = events === null ? [] : Object.keys(events);

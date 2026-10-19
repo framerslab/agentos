@@ -277,6 +277,63 @@ describe('refused: a workflow that pushes to master', () => {
     `) }, [/^jobs\.j\.steps\[1\]: "git push origin HEAD" pushes the checked-out branch/, /^jobs\.j\.steps\[2\]: "git push" pushes the checked-out branch/, /^jobs\.j\.steps\[3\]: "git push origin HEAD" pushes the checked-out branch/]);
   });
 
+  test('a checkout that may not run leaves the branch before it: after && or ||, in an if, a case or a loop', () => {
+    // Bash skips git checkout feature after false &&, so the push sends master.
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+      - run: git checkout master; false && git checkout feature; git push origin HEAD
+      - run: |
+          git checkout master
+          if [ -n "$FEATURE" ]; then
+            git checkout feature
+          fi
+          git push origin HEAD
+      - run: |
+          git checkout master
+          case "$MODE" in
+            a|b) git checkout feature ;;
+            (c) git checkout -b next ;;
+          esac
+          git push origin HEAD
+      - run: |
+          git checkout master
+          while false; do git checkout feature; done
+          git push origin HEAD
+      - run: |
+          git checkout master
+          test -n "$FEATURE" &&
+            git checkout feature
+          git push origin HEAD
+      - run: |
+          git checkout master
+          [ -n "$KEEP" ] || git checkout feature
+          git push origin HEAD
+      - run: bash -c 'git checkout master; false && git checkout feature; git push origin HEAD'
+    `) }, Array(7).fill(/"git push origin HEAD" pushes the checked-out branch, master on a run on master$/));
+  });
+
+  test('git switch -- master and git checkout master --, which check master out, and git push options as git reads them', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+      - run: |
+          git switch -- master
+          git push origin HEAD
+      - run: |
+          git checkout -b feature
+          git checkout master --
+          git push origin HEAD
+      - run: |
+          git checkout -b feature
+          git push --dry-run --no-dry-run origin HEAD:master
+          git push -n --no-dry origin HEAD:master
+          git push --mir origin
+    `) }, [
+      /^jobs\.j\.steps\[0\]: "git push origin HEAD" pushes the checked-out branch, master on a run on master$/,
+      /^jobs\.j\.steps\[1\]: "git push origin HEAD" pushes the checked-out branch, master on a run on master$/,
+      /^jobs\.j\.steps\[2\]: "git push --dry-run --no-dry-run origin HEAD:master" pushes to master$/,
+      /^jobs\.j\.steps\[2\]: "git push -n --no-dry origin HEAD:master" pushes to master$/,
+      /^jobs\.j\.steps\[2\]: "git push --mir origin" pushes every branch, master among them$/,
+    ]);
+  });
+
   test('a push with no refspec under push.default=matching or upstream, or with remote.<name>.push set', () => {
     expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
       - uses: actions/checkout@v5
@@ -306,6 +363,15 @@ describe('refused: a workflow that pushes to master', () => {
       - run: git push origin "HEAD:$GITHUB_REF"
       - run: git push
     `) }, [/^jobs\.j\.steps\[1\]: "git push origin HEAD:\$GITHUB_REF" pushes to the run's own branch, master on a run on master$/, /^jobs\.j\.steps\[2\]: "git push" pushes the checked-out branch, master on a run on master$/]);
+  });
+
+  test('a pull_request_target run, which is on the default branch whatever base branches it filters', () => {
+    // GITHUB_REF of a pull_request_target run is the default branch (GitHub's events reference, pull_request_target);
+    // its branches filter picks the pull requests by their base branch.
+    expectFindings({ '.github/workflows/w.yml': workflow('pull_request_target:\n  branches: [develop]', text`
+      - uses: actions/checkout@v5
+      - run: git push origin "HEAD:$GITHUB_REF"
+    `) }, [/^jobs\.j\.steps\[1\]: "git push origin HEAD:\$GITHUB_REF" pushes to the run's own branch, master on a run on master$/]);
   });
 
   test('a deploy action whose repository input names this repository', () => {
@@ -425,6 +491,50 @@ describe('allowed: a workflow that does not push to master', () => {
           git push
           git switch - -c three
           git push -u origin HEAD
+    `) }, []);
+  });
+
+  test('a checkout every path takes: an && chain, an if with an else, a case with a * pattern, || exit 1, a group or a subshell after &&', () => {
+    expectFindings({
+      '.github/workflows/a.yml': workflow(ON_MASTER, '- run: git fetch origin && git checkout -b registry-update && git push origin HEAD'),
+      '.github/workflows/b.yml': workflow(ON_MASTER, text`
+        - run: |
+            if [ -n "$NEXT" ]; then
+              git checkout -b next
+            elif [ -n "$DOCS" ]; then
+              git checkout -b docs-update
+            else
+              git checkout -b registry-update
+            fi
+            git push origin HEAD
+      `),
+      '.github/workflows/c.yml': workflow(ON_MASTER, text`
+        - run: |
+            case "$KIND" in
+              docs) git checkout -b docs-update ;;
+              *) git checkout -b registry-update ;;
+            esac
+            git push -u origin HEAD
+      `),
+      '.github/workflows/d.yml': workflow(ON_MASTER, text`
+        - run: |
+            git checkout -b registry-update || exit 1
+            git push origin HEAD
+      `),
+      '.github/workflows/e.yml': workflow(ON_MASTER, '- run: git fetch origin && { git checkout -b registry-update; git push origin HEAD; }'),
+      '.github/workflows/f.yml': workflow(ON_MASTER, '- run: git fetch origin && (git checkout -b registry-update; git push origin HEAD)'),
+    }, []);
+  });
+
+  test('git checkout -- <paths> and <tree-ish> -- <paths> restore files, and git push options undone or cut short', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - run: |
+          git checkout -b feature
+          git checkout -- master
+          git checkout master -- registry.json
+          git push origin HEAD
+          git push --dry origin HEAD:master
+          git push --no-tags --mirror --no-mirror origin HEAD:feature
     `) }, []);
   });
 
