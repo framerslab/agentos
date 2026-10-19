@@ -504,7 +504,9 @@ supported, `adaptive: true` is rejected, a seat named `chair` is rejected, and
 Through the host's logger factory (`setLoggerFactory`), with every message
 masked: `agency_no_seat_answered` (info; a run whose every seat was rejected
 returns `text: ''` and runs no validation retry), `parallel_seat_failed`
-(warn), `panel_quorum_shortfall` and `parallel_quorum_shortfall` (warn; a
+(warn), `panel_seat_failed` (warn; a panel seat that failed, timed out or found
+no entry to sit on, with its `status`, written whether or not the run meets its
+quorum), `panel_quorum_shortfall` and `parallel_quorum_shortfall` (warn; a
 shortfall the call goes on from under `onShortfall: 'proceed'`),
 `agency_callback_threw` (warn; the callback's name, its message masked), and
 `fallback_fired` and `fallback_exhausted` from the `fallback` component.
