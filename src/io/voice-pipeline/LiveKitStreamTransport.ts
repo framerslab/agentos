@@ -186,13 +186,13 @@ interface AgentLine {
 }
 
 /**
- * The topic of a text input or output option: the one it names when it is on, `topic` when it is on and names none,
- * `undefined` when it is off. Unset, the option is on when `on` is.
+ * The topic of a text input or output option: the one it names when it is on, `topic` when it is on and names none or
+ * an empty one, `undefined` when it is off. Unset, the option is on when `on` is.
  */
 function optionTopic(option: boolean | { topic?: string } | undefined, on: boolean, topic: string): string | undefined {
   const value = option ?? on;
   if (value === false) return undefined;
-  return value === true ? topic : value.topic ?? topic;
+  return value === true ? topic : value.topic || topic;
 }
 
 /** Options of {@link LiveKitStreamTransport}: the connected room, the participant it links and optional call-scoped publishing. */
@@ -225,19 +225,19 @@ export interface LiveKitStreamTransportOptions {
    */
   closeOnDisconnect?: boolean;
   /**
-   * Read the text streams the linked participant sends on `topic` (`'lk.chat'` unless given) as `text_input` messages.
-   * Default `true` with `participant`, `false` with `participantIdentity`. A stream is read with bounds (12000 bytes,
-   * five seconds) when its reader has an async iterator, and a text `isClientTextInputMessage()` refuses emits
-   * `livekit text input refused` while the transport stays open. A room that already handles the topic keeps it:
-   * text input is off, and one warning line says so.
+   * Read the text streams the linked participant sends on `topic` (`'lk.chat'` unless it names one; an empty one names
+   * none) as `text_input` messages. Default `true` with `participant`, `false` with `participantIdentity`. A stream is
+   * read with bounds (12000 bytes, five seconds) when its reader has an async iterator, and a text
+   * `isClientTextInputMessage()` refuses emits `livekit text input refused` while the transport stays open. A room
+   * that already handles the topic keeps it: text input is off, and one warning line says so.
    */
   textInput?: boolean | { topic?: string };
   /**
    * Write the user's transcripts and the agent's played text as transcription text streams on `topic`
-   * (`'lk.transcription'` unless given). Default `true` with `participant`, `false` with `participantIdentity`. The
-   * user's lines come from the `transcript` messages the session sends and name the microphone track the transport
-   * reads, while it reads one; with `publisher`, the agent's line of each reply names the published track and holds
-   * the text its chunks' boundaries prove played until `agent_done` gives its final.
+   * (`'lk.transcription'` unless it names one; an empty one names none). Default `true` with `participant`, `false`
+   * with `participantIdentity`. The user's lines come from the `transcript` messages the session sends and name the
+   * microphone track the transport reads, while it reads one; with `publisher`, the agent's line of each reply names
+   * the published track and holds the text its chunks' boundaries prove played until `agent_done` gives its final.
    */
   transcriptionOutput?: boolean | { topic?: string };
   /**
