@@ -133,21 +133,27 @@ const CALLBACK_NAMES: Record<keyof AgencyCallbacks, true> = {
 };
 
 /**
- * The callbacks `on` holds, each run through `fire`, which catches what it
- * throws and what the promise of an async one rejects with. Each is read by
- * name, so a method an instance inherits is wrapped as an own one is, and a
- * name `on` does not hold stays absent.
+ * A callback for every name the agency fires, each run through `fire`, which
+ * catches what it throws and what the promise of an async one rejects with.
+ * Each reads `on` by name when the run fires it, not when the agency is
+ * built: a callback the host sets, replaces or deletes on its `on` object
+ * after `agency()` returns is the one that runs, or none runs, and a method
+ * an instance inherits runs as an own one does, with `on` as `this`. The read
+ * runs inside `fire`, so a getter that throws is caught as a callback that
+ * throws is.
  *
- * @param on - The callbacks as the host gave them.
+ * @param on - The callbacks object as the host gave it, read at each event.
  * @param fire - Runs one callback and writes what it throws or rejects with to the host's logger.
- * @returns The same callbacks, none of which throws.
+ * @returns A callback for every name, none of which throws.
  */
 function guardedCallbacks(on: AgencyCallbacks, fire: (name: string, call: () => unknown) => void): AgencyCallbacks {
   const out: Record<string, unknown> = { ...on };
   for (const name of Object.keys(CALLBACK_NAMES) as Array<keyof AgencyCallbacks>) {
-    const fn: unknown = on[name];
-    if (typeof fn !== 'function') continue;
-    out[name] = (event: unknown) => fire(name, () => (fn as (event: unknown) => unknown).call(on, event));
+    out[name] = (event: unknown) =>
+      fire(name, () => {
+        const fn: unknown = on[name];
+        return typeof fn === 'function' ? (fn as (event: unknown) => unknown).call(on, event) : undefined;
+      });
   }
   return out as AgencyCallbacks;
 }
@@ -274,9 +280,11 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   // Every callback runs through `fire`, whichever part of a run fires it:
   // this agency, its strategy, a gate or a HITL check. One that throws is
   // written to the host's logger with its message through the call's mask,
-  // and never fails the call or changes what it returns. Wrapped before the
-  // trail's and the masks' wrappers below, so the guard holds the host's own
-  // functions alone and those wrappers run whatever the host's callback does.
+  // and never fails the call or changes what it returns. The guard reads the
+  // host's `on` object at each event, so a callback set, replaced or deleted
+  // there after construction is the one that runs. Wrapped before the trail's
+  // and the masks' wrappers below, which copy the guard's callbacks, every
+  // name present: those wrappers run whatever the host's callback does.
   if (opts.on) opts = { ...opts, on: guardedCallbacks(opts.on, fire) };
 
   // 3b. Provenance recorder (in-memory event trail with optional hash chain).
