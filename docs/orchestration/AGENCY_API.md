@@ -464,9 +464,13 @@ starts, and the timeout does not count against the provider's breaker. The
 caller's `abortSignal` settles every seat at once, a seat waiting on its
 approval included (an approval that resolves as the abort lands starts
 nothing), and the call rejects with the panel's ledger error carrying
-the abort's reason. A signal from another realm or a polyfill's, which no
-`instanceof` check of this realm recognizes, is linked to each seat's stop by
-its `abort` event the same way.
+the abort's reason. The quorum below is read first, over the seats that had
+answered: a shortfall it throws on is `AgencyQuorumError`; any other run
+ends in `AgencyPanelError` (`panel aborted: <reason>`), with a chair or with
+`chair: false`, so no chair starts and no answer is returned after the
+abort. A signal from another realm or a polyfill's, which no `instanceof`
+check of this realm recognizes, is linked to each seat's stop by its `abort`
+event the same way.
 
 The quorum counts the healthy seats (status `ok`): `minAgents` defaults to 2
 for a roster of two or more and to 0 for a roster of one; `minProviders` counts
