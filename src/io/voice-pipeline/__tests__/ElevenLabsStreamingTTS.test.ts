@@ -461,4 +461,46 @@ describe('ElevenLabsStreamingTTS', () => {
     expect(sockets()).toHaveLength(3);
     expect(texts(sockets()[2])).toEqual([{ text: ' Three.' }, { text: '' }]);
   });
+
+  it('reports a socket that fails before it opens for a later segment, ends the segment without a boundary, and goes on', async () => {
+    const session = await tts.startSession();
+    const [first] = sockets();
+    const chunks = recorded(session);
+    const errors = vi.fn();
+    session.on('error', errors);
+    const closes = vi.fn();
+    session.on('close', closes);
+
+    session.pushTokens('One. Two. Three. ');
+    audio(first, 1);
+    // The second segment's socket is refused: ws reports the error, then the close.
+    mock().behavior = 'hang';
+    final(first);
+    expect(chunks).toHaveLength(1);
+    expect(sockets()).toHaveLength(2);
+    const [, second] = sockets();
+    second.emit('error', new Error('connect ECONNREFUSED'));
+    second.emit('close');
+    await opened();
+    // The segment ends without a boundary, the error reaches the listener, the session stays open, and the third
+    // segment opens a socket of its own.
+    expect(errors).toHaveBeenCalledOnce();
+    expect((errors.mock.calls[0][0] as Error).message).toBe('connect ECONNREFUSED');
+    expect(chunks).toHaveLength(1);
+    expect(closes).not.toHaveBeenCalled();
+    expect(sockets()).toHaveLength(3);
+    // A socket that closes before it opens, with no error event, is reported as well.
+    sockets()[2].emit('close');
+    await opened();
+    expect(errors).toHaveBeenCalledTimes(2);
+    expect((errors.mock.calls[1][0] as Error).message).toBe('elevenlabs ws closed before it opened');
+    expect(chunks).toHaveLength(1);
+    expect(closes).not.toHaveBeenCalled();
+    // The next segment's socket opens, and the segment goes out on it.
+    mock().behavior = 'open';
+    session.pushTokens('Four. ');
+    await opened();
+    expect(sockets()).toHaveLength(4);
+    expect(texts(sockets()[3])).toEqual([{ text: ' Four.' }, { text: '' }]);
+  });
 });

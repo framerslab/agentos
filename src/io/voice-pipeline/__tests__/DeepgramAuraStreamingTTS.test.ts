@@ -492,4 +492,54 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(sent(ws).slice(-2)).toEqual([{ type: 'Speak', text: 'Next one.' }, { type: 'Flush' }]);
     expect(flushCount(ws)).toBe(21);
   });
+
+  it("reports the socket closing at the server's hand while a segment is in flight, ends it without a boundary, completes the flush, and closes once", async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const chunks = recorded(session);
+    const flushes = vi.fn();
+    const errors = vi.fn();
+    const closes = vi.fn();
+    session.on('flush_complete', flushes);
+    session.on('error', errors);
+    session.on('close', closes);
+    ws.send.mockClear();
+
+    session.pushTokens('Hello there. How are');
+    const flushed = session.flush();
+    frame(ws, 1);
+    expect(sent(ws)).toEqual([{ type: 'Speak', text: 'Hello there.' }, { type: 'Flush' }]);
+    ws.emit('close');
+    // The loss is reported, the held frame goes out without a boundary, the queued segment is dropped, and the flush
+    // completes without a Flushed, so the reply ends.
+    expect(errors).toHaveBeenCalledOnce();
+    expect((errors.mock.calls[0][0] as Error).message).toBe('deepgram aura ws closed');
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary])).toEqual([[1, undefined]]);
+    expect(flushes).toHaveBeenCalledOnce();
+    await flushed;
+    expect(closes).toHaveBeenCalledOnce();
+    // The session is closed: nothing more is sent, and a flush resolves at once without flush_complete.
+    session.pushTokens('Again. ');
+    await session.flush();
+    expect(sent(ws)).toHaveLength(2);
+    expect(flushes).toHaveBeenCalledOnce();
+    expect(closes).toHaveBeenCalledOnce();
+  });
+
+  it('closes without an error when the socket closes between replies', async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const errors = vi.fn();
+    const closes = vi.fn();
+    session.on('error', errors);
+    session.on('close', closes);
+
+    session.pushTokens('Done.');
+    const flushed = session.flush();
+    control(ws, { type: 'Flushed', sequence_id: 0 });
+    await flushed;
+    ws.emit('close');
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).toHaveBeenCalledOnce();
+  });
 });

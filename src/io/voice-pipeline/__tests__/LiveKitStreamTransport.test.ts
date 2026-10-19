@@ -2142,6 +2142,20 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     transport.close();
   });
 
+  it('an empty topic in textInput or transcriptionOutput takes the default', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const { transport, messages, errors } = conventions(room, { participant: 'user-1', textInput: { topic: '' }, transcriptionOutput: { topic: '' } });
+    expect([...room.textHandlers.keys()]).toEqual(['agentos.voice', 'lk.chat']);
+    room.chat('user-1', 'Hello?');
+    await transport.sendControl({ type: 'transcript', text: 'Hello?', isFinal: true, confidence: 0.9 });
+    await settle();
+    expect(messages).toEqual([{ type: 'text_input', text: 'Hello?' }]);
+    expect(lines(room).map(([text]) => text)).toEqual(['Hello?']);
+    expect(errors).toEqual([]);
+    transport.close();
+  });
+
   it("runs under VoicePipelineOrchestrator: the user's transcripts and the agent's played reply reach lk.transcription", async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
