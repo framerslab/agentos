@@ -5,17 +5,16 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
-  # bump-framers-deps.yml dispatches this workflow on its pull request branch: a pull request
-  # opened with GITHUB_TOKEN starts no pull_request run. A dispatched run can read any secret a
-  # step references, and that branch carries dependency updates nobody has read yet, so no step
-  # that runs on workflow_dispatch may reference a repository secret.
+  # A dispatched run can read any secret a step references, and the ref it runs on can carry
+  # changes nobody has read yet, so no step that runs on workflow_dispatch may reference a
+  # repository secret.
   workflow_dispatch: {}
 
 # A newer push to a pull request cancels the run of the commit it replaces. Every
 # other run keys a group of its own, its run id, so it never waits behind another run
 # and nothing cancels it: each push to master, whose run the release workflow follows,
-# and a dispatched run, such as the one bump-framers-deps.yml starts. A re-run keys its
-# own group too, so re-running an older commit's run never cancels the newest one.
+# and a dispatched run. A re-run keys its own group too, so re-running an older
+# commit's run never cancels the newest one.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
