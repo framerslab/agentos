@@ -22,7 +22,7 @@ import {
 } from '../IProvider';
 import { OpenRouterProviderError } from '../errors/OpenRouterProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
@@ -434,6 +434,10 @@ export class OpenRouterProvider implements IProvider {
   constructor() {}
 
   public async initialize(config: OpenRouterProviderConfig): Promise<void> {
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     if (!config.apiKey) {
       throw new OpenRouterProviderError(
         'OpenRouter API key (apiKey) is required for initialization.',
@@ -453,7 +457,7 @@ export class OpenRouterProvider implements IProvider {
     });
     this.keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv()),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openrouter')),
       probe: (key) => this.probeKey(key),
     });
     await this.keyPool.ready();
@@ -481,6 +485,9 @@ export class OpenRouterProvider implements IProvider {
     try {
       await this.refreshAvailableModels();
       this.isInitialized = true;
+      // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
+      // breaker holds still gets its keys back; the interval never keeps the process alive.
+      if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
       console.log(`OpenRouterProvider initialized. Default Model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models via OpenRouter.`);
     } catch (error: unknown) {
       this.isInitialized = false;
@@ -1327,7 +1334,8 @@ export class OpenRouterProvider implements IProvider {
   }
 
   public async shutdown(): Promise<void> {
-    await this.keyPool?.flush();
+    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    await this.keyPool?.close();
     this.isInitialized = false;
     this.availableModelsCache.clear();
     console.log('OpenRouterProvider shutdown: Instance marked as uninitialized and cache cleared.');
@@ -1699,7 +1707,7 @@ export class OpenRouterProvider implements IProvider {
     return new OpenRouterProviderError(
       message ?? `Every OpenRouter API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
       'ALL_KEYS_FAILED',
-      status,
+      status ?? statusOfKinds(kinds),
       errorType,
       { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
     );

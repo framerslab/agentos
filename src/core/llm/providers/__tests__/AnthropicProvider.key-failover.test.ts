@@ -159,8 +159,9 @@ describe('AnthropicProvider key failover', () => {
     expect((error as AnthropicProviderError).details).toMatchObject({ kinds: expect.arrayContaining(['auth', 'billing']) });
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    // The next request sends nothing until a key returns.
-    await expect(ask(p)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED' });
+    // The next request sends nothing until a key returns; the error carries the status of the kind that took the
+    // keys out (402 here), so the provider health breaker treats the pool as it treats that answer.
+    await expect(ask(p)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED', httpStatus: 402 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -172,9 +173,9 @@ describe('AnthropicProvider key failover', () => {
     await ask(p);
     expect(callsOf().map(keyOf)).toEqual(['sk_a', 'sk_b']);
 
-    vi.advanceTimersByTime(1001);
     // The probe: GET /v1/models with the failed key answers 200.
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { data: [] }));
+    vi.advanceTimersByTime(1001);
     const pool = (p as unknown as { keyPool: { recheck(): Promise<void>; snapshot(): Array<Record<string, unknown>> } }).keyPool;
     await pool.recheck();
     const probe = callsOf()[2];
@@ -194,8 +195,8 @@ describe('AnthropicProvider key failover', () => {
     const p = await provider('sk_a,sk_b', { keyPool: { strategy: 'ordered', recheckMs: 1000 } });
     fetchMock.mockResolvedValueOnce(jsonResponse(400, creditGone)).mockResolvedValueOnce(jsonResponse(200, okMessage));
     await ask(p);
-    vi.advanceTimersByTime(1001);
     fetchMock.mockResolvedValueOnce(jsonResponse(400, creditGone));
+    vi.advanceTimersByTime(1001);
     const pool = (p as unknown as { keyPool: { recheck(): Promise<void>; snapshot(): Array<Record<string, unknown>> } }).keyPool;
     await pool.recheck();
     const probe = callsOf()[2];

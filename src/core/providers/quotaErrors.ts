@@ -39,6 +39,14 @@ export type KeyFailureKind = 'quota' | 'auth' | 'billing';
 
 /** Anthropic's message when an organization's credit is gone (HTTP 400, type invalid_request_error). */
 const CREDIT_BALANCE_PREFIX = 'your credit balance is too low';
+/**
+ * Anthropic's message when usage reaches a spend limit the operator set on the organization or a workspace (HTTP 400,
+ * type invalid_request_error; "You have reached your specified API usage limits" or "... specified workspace API
+ * usage limits"; platform.claude.com/docs/en/api/rate-limits, read 18 October 2026).
+ */
+const SPEND_LIMIT_PREFIX = 'you have reached your specified';
+/** Anthropic's `error.details.error_code` when the organization's tier has reached its monthly spend cap (HTTP 429, no Retry-After). */
+const ENFORCED_SPEND_LIMIT = 'enforced_spend_limit_reached';
 
 interface ErrorEnvelope {
   type?: string;
@@ -48,6 +56,8 @@ interface ErrorEnvelope {
   status?: string;
   /** The `reason` of each entry of Google's `error.details` (API_KEY_INVALID, ...). */
   reasons?: string[];
+  /** Anthropic's `error.details.error_code` (enforced_spend_limit_reached, ...). */
+  errorCode?: string;
 }
 
 function lower(value: unknown): string {
@@ -66,7 +76,9 @@ function envelopeOf(body: string): ErrorEnvelope | null {
     const reasons = details
       .map((detail) => (detail && typeof detail === 'object' ? lower((detail as Record<string, unknown>).reason) : ''))
       .filter((reason) => reason.length > 0);
-    return { type: lower(inner.type), code: lower(inner.code), message: lower(inner.message), status: lower(inner.status), reasons };
+    const detailsObject = inner.details && typeof inner.details === 'object' && !Array.isArray(inner.details) ? (inner.details as Record<string, unknown>) : null;
+    const errorCode = detailsObject ? lower(detailsObject.error_code) : '';
+    return { type: lower(inner.type), code: lower(inner.code), message: lower(inner.message), status: lower(inner.status), reasons, errorCode };
   } catch {
     return null;
   }
@@ -84,10 +96,14 @@ function envelopeOf(body: string): ErrorEnvelope | null {
  *   resource the key may not use (a model, a feature, a region), not a revoked
  *   key, and leaves the key in rotation.
  * - 402: `billing`. 429: `billing` when the envelope's type or code is
- *   `insufficient_quota` (OpenAI bills that way), else `quota`. 456: `quota`.
+ *   `insufficient_quota` (OpenAI bills that way) or Anthropic's `details.error_code`
+ *   is `enforced_spend_limit_reached` (the tier's monthly spend cap, no
+ *   Retry-After, until the next month), else `quota`. 456: `quota`.
  * - 400: `billing` for Anthropic's credit-balance envelope (type
  *   `invalid_request_error`, a message starting "Your credit balance is too
- *   low"); `auth` for Google's invalid-key envelope (a `details` entry with
+ *   low") and for a spend limit the operator set on the organization or a
+ *   workspace (the same type, a message starting "You have reached your
+ *   specified API usage limits" or "... specified workspace API usage limits"); `auth` for Google's invalid-key envelope (a `details` entry with
  *   reason `API_KEY_INVALID`, or the message "API key not valid", which the
  *   Gemini API answers with HTTP 400, read 17 Oct 2026); every other 400 is
  *   null.
@@ -99,6 +115,7 @@ export function classifyKeyFailure(status: number, body: string): KeyFailureKind
   const code = envelope?.code ?? '';
   const message = envelope?.message ?? '';
   const reasons = envelope?.reasons ?? [];
+  const errorCode = envelope?.errorCode ?? '';
   switch (status) {
     case 401:
       return 'auth';
@@ -109,16 +126,27 @@ export function classifyKeyFailure(status: number, body: string): KeyFailureKind
     case 402:
       return 'billing';
     case 429:
-      return type === 'insufficient_quota' || code === 'insufficient_quota' ? 'billing' : 'quota';
+      return type === 'insufficient_quota' || code === 'insufficient_quota' || errorCode === ENFORCED_SPEND_LIMIT ? 'billing' : 'quota';
     case 456:
       return 'quota';
     case 400:
-      if (type === 'invalid_request_error' && message.startsWith(CREDIT_BALANCE_PREFIX)) return 'billing';
+      if (type === 'invalid_request_error' && (message.startsWith(CREDIT_BALANCE_PREFIX) || message.startsWith(SPEND_LIMIT_PREFIX))) return 'billing';
       if (reasons.includes('api_key_invalid') || message.startsWith('api key not valid')) return 'auth';
       return null;
     default:
       return null;
   }
+}
+
+/**
+ * The HTTP status an all-keys-failed error carries when it is thrown before a request goes out: the status of the
+ * kind that took the keys out, so the provider health breaker treats a dead pool as it treats that answer (401 for
+ * `auth`, 402 for `billing`, 429 for `quota`).
+ */
+export function statusOfKinds(kinds: readonly KeyFailureKind[]): number {
+  if (kinds.includes('billing')) return 402;
+  if (kinds.includes('auth')) return 401;
+  return 429;
 }
 
 /** The longest rest a Retry-After header may ask for, one hour. */

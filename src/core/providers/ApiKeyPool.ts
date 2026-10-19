@@ -92,12 +92,31 @@ export function keyFingerprint(key: string): string {
 
 /**
  * The pool strategy the environment asks for when a provider's config names
- * none: `AGENTOS_KEY_POOL_STRATEGY=ordered` prefers the earliest usable key
- * (a cost order: credited keys first, the paid key last).
+ * none: `AGENTOS_KEY_POOL_STRATEGY_<PROVIDER>` (ANTHROPIC, OPENAI, GEMINI,
+ * OPENROUTER, REQUESTY) for one provider, else `AGENTOS_KEY_POOL_STRATEGY` for
+ * every provider; `ordered` prefers the earliest usable key (a cost order:
+ * credited keys first, the paid key last), `round-robin` spreads load.
  */
-export function keyPoolStrategyFromEnv(): Pick<ApiKeyPoolConfig, 'strategy'> {
-  const value = typeof process !== 'undefined' ? process.env.AGENTOS_KEY_POOL_STRATEGY : undefined;
-  return value === 'ordered' ? { strategy: 'ordered' } : {};
+export function keyPoolStrategyFromEnv(providerId?: string): Pick<ApiKeyPoolConfig, 'strategy'> {
+  if (typeof process === 'undefined') return {};
+  const own = providerId ? process.env[`AGENTOS_KEY_POOL_STRATEGY_${providerId.replace(/[^a-z0-9]+/gi, '_').toUpperCase()}`] : undefined;
+  const value = own || process.env.AGENTOS_KEY_POOL_STRATEGY;
+  if (value === 'ordered') return { strategy: 'ordered' };
+  if (value === 'round-robin') return { strategy: 'round-robin' };
+  return {};
+}
+
+/**
+ * A timing option as a positive, finite number of milliseconds, or the default when it is not given. Anything else
+ * is refused: a zero or negative recheck makes every failed key due at once and an interval of zero fires without
+ * pause, so a probe would follow a probe; a zero probe timeout makes every probe unknown.
+ */
+function positiveMs(name: string, value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`ApiKeyPool: ${name} must be a positive number of milliseconds (got ${String(value)})`);
+  }
+  return value;
 }
 
 function parseKeys(keys: string | string[]): string[] {
@@ -129,6 +148,8 @@ export class ApiKeyPool {
   private readonly configuredLogger?: ILogger;
   private readyPromise?: Promise<void>;
   private readonly inFlightProbes = new Map<string, Promise<void>>();
+  /** The interval `startRechecks()` runs, if any: one per pool. */
+  private recheckTimer: ReturnType<typeof setInterval> | undefined;
   private readonly pendingSaves = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlightSaves = new Set<Promise<void>>();
   private readonly lastLogged = new Map<string, number>();
@@ -137,10 +158,10 @@ export class ApiKeyPool {
   constructor(keys: string | string[], config?: ApiKeyPoolConfig) {
     this.cooldownMs = config?.cooldownMs ?? DEFAULT_COOLDOWN_MS;
     this.strategy = config?.strategy ?? 'round-robin';
-    this.recheckMs = config?.recheckMs ?? DEFAULT_RECHECK_MS;
-    this.maxRecheckMs = config?.maxRecheckMs ?? DEFAULT_MAX_RECHECK_MS;
+    this.recheckMs = positiveMs('recheckMs', config?.recheckMs, DEFAULT_RECHECK_MS);
+    this.maxRecheckMs = positiveMs('maxRecheckMs', config?.maxRecheckMs, DEFAULT_MAX_RECHECK_MS);
     this.maxRetryAfterMs = config?.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
-    this.probeTimeoutMs = config?.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+    this.probeTimeoutMs = positiveMs('probeTimeoutMs', config?.probeTimeoutMs, DEFAULT_PROBE_TIMEOUT_MS);
     this.probe = config?.probe;
     this.id = config?.id ?? '';
     this.store = config?.id ? config?.store : undefined;
@@ -262,15 +283,17 @@ export class ApiKeyPool {
     const at = detail?.at ?? now;
     const { state } = entry;
     if (at < (state.lastOkAt ?? 0) || at < (state.lastFailAt ?? 0)) return;
+    const usableBefore = this.usable();
 
     const previous = state.status;
     state.lastFailAt = at;
     state.kind = kind;
     if (kind === 'quota') {
       // A Retry-After of zero (or none) rests the key for the cooldown: the
-      // point of the rest is that the next draw prefers another key.
+      // point of the rest is that the next draw prefers another key. The bound
+      // applies to what the server asked, never to the configured cooldown.
       const asked = detail?.retryAfterMs;
-      const rest = Math.min(asked !== undefined && asked > 0 ? asked : this.cooldownMs, this.maxRetryAfterMs);
+      const rest = asked !== undefined && asked > 0 ? Math.min(asked, this.maxRetryAfterMs) : this.cooldownMs;
       state.status = 'resting';
       state.until = now + rest;
       state.nextRecheckAt = undefined;
@@ -289,7 +312,9 @@ export class ApiKeyPool {
       failures: state.failures,
       nextRecheckAt: state.nextRecheckAt,
     });
-    if (this.usable() === 0) {
+    // One line when the last usable key goes out, never for a single-key pool
+    // (which keeps sending its key) and never again while the pool stays out.
+    if (this.entries.length > 1 && usableBefore > 0 && this.usable() === 0) {
       this.log('warn', 'key_pool.all_keys_failed', undefined, true, { kinds: this.kindsSeen(), retryAfterMs: this.soonestReturnMs(now) });
     }
     this.scheduleSave(entry);
@@ -335,14 +360,53 @@ export class ApiKeyPool {
     await Promise.all(started);
   }
 
-  /** Runs `recheck()` on an interval that never keeps the process alive; returns the function that stops it. */
+  /**
+   * Runs `recheck()` on an interval that never keeps the process alive, one
+   * interval per pool (a second call replaces the first); returns the function
+   * that stops it. The interval holds the pool weakly where the runtime has
+   * `WeakRef`: a pool nothing else holds (a provider dropped without
+   * `shutdown()`, a manager evicted from `createProviderManager()`'s cache)
+   * ends its interval on the next tick instead of being kept alive by it.
+   */
   startRechecks(intervalMs: number = this.recheckMs): () => void {
-    const timer = setInterval(() => {
-      void this.recheck().catch(() => undefined);
-    }, intervalMs);
+    const every = positiveMs('the recheck interval', intervalMs, this.recheckMs);
+    this.stopRechecks();
+    const ref = typeof WeakRef === 'function' ? new WeakRef<ApiKeyPool>(this) : undefined;
+    const strong = ref ? undefined : this;
+    const timer: ReturnType<typeof setInterval> = setInterval(() => {
+      const pool = ref ? ref.deref() : strong;
+      if (!pool) {
+        clearInterval(timer);
+        return;
+      }
+      void pool.recheck().catch(() => undefined);
+    }, every);
     const maybeUnref = timer as unknown as { unref?: () => void };
     if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
-    return () => clearInterval(timer);
+    this.recheckTimer = timer;
+    return () => {
+      if (this.recheckTimer === timer) this.stopRechecks();
+      else clearInterval(timer);
+    };
+  }
+
+  /** Stops the interval `startRechecks()` started, if any. Probes already running finish. */
+  stopRechecks(): void {
+    if (this.recheckTimer === undefined) return;
+    clearInterval(this.recheckTimer);
+    this.recheckTimer = undefined;
+  }
+
+  /**
+   * Ends the pool's work for a host that is shutting down: stops the recheck
+   * interval, waits for the probes in flight (each bounded by the probe
+   * timeout), then writes every pending state change, so what a probe found
+   * during shutdown is kept. The providers' `shutdown()` calls it.
+   */
+  async close(): Promise<void> {
+    this.stopRechecks();
+    await Promise.allSettled(Array.from(this.inFlightProbes.values()));
+    await this.flush();
   }
 
   /** A copy of every key's state, for hosts and tests. */

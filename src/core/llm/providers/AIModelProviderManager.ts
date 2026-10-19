@@ -104,11 +104,16 @@ export class AIModelProviderManager {
   public async initialize(config: AIModelProviderManagerConfig): Promise<void> {
     if (this.isInitialized) {
       console.warn("AIModelProviderManager: Manager is already initialized. Re-initializing will reset providers.");
+      // The replaced providers leave routing at once, then end their work: a provider's shutdown() closes its key
+      // pool, so its recheck interval stops and what its probes found is written before the new providers read the
+      // same store, and no call reaches a provider while it shuts down.
+      const replaced = Array.from(this.providers.values());
       this.providers.clear();
       this.modelToProviderMap.clear();
       this.providerInitErrors.clear();
       this.allModelsCache = null;
       this.defaultProviderId = undefined;
+      await Promise.allSettled(replaced.map((provider) => provider.shutdown()));
     }
 
     if (!config || !Array.isArray(config.providers)) {
