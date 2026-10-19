@@ -284,24 +284,40 @@ export function maskedMessageOf(error: unknown, mask: ((error: unknown) => unkno
 
 /**
  * Whether no seat answered a result: it carries no text, no call record and
- * no tokens, as when every seat was rejected and no model was called. Such a
- * result's text is `''`, which is no answer: the agency logs it and runs no
- * validation retry on it, and a parallel or debate strategy counts a nested
- * agency's such run as a seat that gave no answer, as a rejected one. A
- * manager or a synthesizer that ran and returned no text spent tokens, and is
- * not such a run.
+ * no tokens, and no model returned it, as when every seat was rejected and no
+ * model was called. Such a result's text is `''`, which is no answer: the
+ * agency logs it and runs no validation retry on it, and a parallel or debate
+ * strategy counts a nested agency's such run as a seat that gave no answer, as
+ * a rejected one ({@link nestedRunUnanswered}). A manager or a synthesizer that
+ * ran and returned no text is not such a run: a model's result carries its
+ * `finishReason`, whatever its provider reports for usage (a CLI provider
+ * reports 0 tokens when it reads none).
  *
  * @param result - A strategy's result, or a seat's.
- * @returns Whether the result holds no answer and cost nothing.
+ * @returns Whether the result holds no answer, cost nothing and came from no model.
  */
 export function noSeatAnswered(result: Record<string, unknown>): boolean {
-  const { text, agentCalls, usage } = result;
+  const { text, agentCalls, usage, finishReason } = result;
   const tokens = usage && typeof usage === 'object' ? (usage as { totalTokens?: unknown }).totalTokens : undefined;
   return (
+    finishReason === undefined &&
     (typeof text !== 'string' || text === '') &&
     (!Array.isArray(agentCalls) || agentCalls.length === 0) &&
     (typeof tokens !== 'number' || tokens === 0)
   );
+}
+
+/**
+ * Whether a seat's result is a nested agency's run that no seat of its own
+ * answered. An agency's result always carries `agentCalls`, and a plain
+ * agent's never does, so a plain seat's reply with no text is the seat's
+ * answer: it counts toward the quorum and takes its debate turn.
+ *
+ * @param result - A seat's result.
+ * @returns Whether the seat is a nested agency that gave no answer.
+ */
+export function nestedRunUnanswered(result: Record<string, unknown>): boolean {
+  return Array.isArray(result.agentCalls) && noSeatAnswered(result);
 }
 
 /**

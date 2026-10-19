@@ -52,7 +52,7 @@ import {
   buildAgentCallUsage,
   callRecordExtras,
   ownAgentInternals,
-  noSeatAnswered,
+  nestedRunUnanswered,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -177,7 +177,7 @@ export function compileDebate(
 
           // A nested agency's run that no seat of its own answered made no
           // argument: the agent sits the turn out, as a rejected one does.
-          if (noSeatAnswered(result)) continue;
+          if (nestedRunUnanswered(result)) continue;
 
           const resultText = (result.text as string) ?? '';
           const resultUsage = (result.usage as ResultUsageSnapshot) ?? {};

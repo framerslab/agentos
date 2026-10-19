@@ -47,7 +47,7 @@ import {
   enforceQuorum,
   ownAgentInternals,
   maskedMessageOf,
-  noSeatAnswered,
+  nestedRunUnanswered,
 } from './shared.js';
 import { lazyLogger } from '../lazyLogger.js';
 
@@ -172,7 +172,7 @@ export function compileParallel(
         // that no seat of its own answered: it gave no answer, as a rejected
         // agent gives none, so it neither meets the quorum nor reaches the
         // synthesizer.
-        if (outcome.value !== null && !noSeatAnswered(outcome.value.result)) {
+        if (outcome.value !== null && !nestedRunUnanswered(outcome.value.result)) {
           settled.push(outcome.value);
         }
       }
