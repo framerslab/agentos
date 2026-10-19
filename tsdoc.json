@@ -104,6 +104,10 @@
     {
       "tagName": "@protected",
       "syntaxKind": "modifier"
+    },
+    {
+      "tagName": "@category",
+      "syntaxKind": "block"
     }
   ],
   "supportForTags": {
@@ -132,6 +136,7 @@
     "@private": true,
     "@yields": true,
     "@abstract": true,
-    "@protected": true
+    "@protected": true,
+    "@category": true
   }
 }

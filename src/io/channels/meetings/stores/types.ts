@@ -246,6 +246,8 @@ export type DispatchAllowance = { ok: true; maxSeconds: number } | { ok: false }
  * (`reserveOnce`), meters every minute, settles at the end, releases an unbilled run. `settle` and `release` are
  * idempotent per reservation: the manager retries them until they resolve, and a repeated call after a success changes
  * nothing.
+ *
+ * `checkRun`, `recover` and `finalize` are an optional lifecycle extension for hosts opting into persisted funding.
  */
 export interface IEntitlementHook {
   /** Optional whole-run eviction for in-memory hosts after terminal cleanup and the retention grace. Durable stores omit it to retain their records. Call only after producers have stopped; forgetting removes fences too. */
@@ -284,10 +286,6 @@ export interface IEntitlementHook {
    * at the next reconcile. Absent, nothing is recorded, and `meter`, `settle` and `release` behave as they do without it.
    */
   recordSupplierUsage?(reservationId: string, usage: SupplierUsage): Promise<void>;
-}
-
-/** Optional lifecycle extension for hosts opting into persisted funding. */
-export interface IEntitlementHook {
   /** Checks original funding and current authority without selecting a new source. */
   checkRun?(runId: string, phase: MeetingFundingPhase): Promise<DispatchAllowance>;
   /** Resumes a durable terminal settlement intent; never derives a new source from current plans. */
