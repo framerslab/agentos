@@ -202,6 +202,21 @@ describe('ApiKeyPool v2', () => {
       expect(vi.getTimerCount()).toBe(before);
     });
 
+    it('refuses a cooldown or Retry-After bound that is not a positive number of milliseconds, and a primary weight that is not a positive whole number', () => {
+      // A cooldown of zero made a throttled key usable at once, so an ordered pool re-sent the request to the key
+      // that had just answered 429 and the other key never served; a primary weight of zero left the first key no
+      // rotation slot, so round-robin never returned it.
+      for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => new ApiKeyPool('sk_a,sk_b', { cooldownMs: bad })).toThrow(RangeError);
+        expect(() => new ApiKeyPool('sk_a,sk_b', { maxRetryAfterMs: bad })).toThrow(RangeError);
+      }
+      for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => new ApiKeyPool('sk_a,sk_b', { primaryWeight: bad })).toThrow(RangeError);
+      }
+      const equal = new ApiKeyPool('sk_a,sk_b', { primaryWeight: 1 });
+      expect([equal.next(), equal.next(), equal.next()]).toEqual(['sk_a', 'sk_b', 'sk_a']);
+    });
+
     it('keeps one interval per pool: a second start replaces the first, and either stop ends it', () => {
       const pool = new ApiKeyPool('sk_a,sk_b', { recheckMs: 1000 });
       const before = vi.getTimerCount();

@@ -41,9 +41,9 @@ export type ProbeResult = 'ok' | KeyFailureKind | 'unknown';
 
 /** Configuration for an ApiKeyPool instance. */
 export interface ApiKeyPoolConfig {
-  /** Cooldown before retrying a quota-exhausted key. Default: 15 minutes. */
+  /** Cooldown before retrying a quota-exhausted key, a positive number of milliseconds. Default: 15 minutes. */
   cooldownMs?: number;
-  /** Weight multiplier for the first key under round-robin. Default: 2. Set to 1 for equal weighting. */
+  /** Weight multiplier for the first key under round-robin, a positive whole number. Default: 2. Set to 1 for equal weighting. */
   primaryWeight?: number;
   /** `round-robin` (default, the first version's behaviour) or `ordered` (the earliest usable key in the configured order). */
   strategy?: 'round-robin' | 'ordered';
@@ -51,7 +51,7 @@ export interface ApiKeyPoolConfig {
   recheckMs?: number;
   /** The recheck delay's ceiling. Default: 6 hours. */
   maxRecheckMs?: number;
-  /** The longest rest a Retry-After may ask for. Default: 1 hour. */
+  /** The longest rest a Retry-After may ask for, a positive number of milliseconds. Default: 1 hour. */
   maxRetryAfterMs?: number;
   /** How long a probe may run before it counts as `unknown`. Default: 10 seconds. */
   probeTimeoutMs?: number;
@@ -156,17 +156,24 @@ export class ApiKeyPool {
   private lastStoreFailureLog = 0;
 
   constructor(keys: string | string[], config?: ApiKeyPoolConfig) {
-    this.cooldownMs = config?.cooldownMs ?? DEFAULT_COOLDOWN_MS;
+    // A cooldown of zero makes a throttled key usable at once, so an ordered pool re-sends to the key that has just
+    // answered 429 and the other key never serves; a Retry-After bound of zero does the same for a key the server
+    // asked to rest. Both are refused with the other timings.
+    this.cooldownMs = positiveMs('cooldownMs', config?.cooldownMs, DEFAULT_COOLDOWN_MS);
     this.strategy = config?.strategy ?? 'round-robin';
     this.recheckMs = positiveMs('recheckMs', config?.recheckMs, DEFAULT_RECHECK_MS);
     this.maxRecheckMs = positiveMs('maxRecheckMs', config?.maxRecheckMs, DEFAULT_MAX_RECHECK_MS);
-    this.maxRetryAfterMs = config?.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
+    this.maxRetryAfterMs = positiveMs('maxRetryAfterMs', config?.maxRetryAfterMs, DEFAULT_MAX_RETRY_AFTER_MS);
     this.probeTimeoutMs = positiveMs('probeTimeoutMs', config?.probeTimeoutMs, DEFAULT_PROBE_TIMEOUT_MS);
     this.probe = config?.probe;
     this.id = config?.id ?? '';
     this.store = config?.id ? config?.store : undefined;
     this.configuredLogger = config?.logger;
     const primaryWeight = config?.primaryWeight ?? DEFAULT_PRIMARY_WEIGHT;
+    // The first key's rotation slots: zero or a fraction leaves it none, so round-robin never returns it.
+    if (!Number.isInteger(primaryWeight) || primaryWeight < 1) {
+      throw new RangeError(`ApiKeyPool: primaryWeight must be a positive whole number (got ${String(primaryWeight)})`);
+    }
 
     const now = Date.now();
     this.entries = parseKeys(keys).map((key, index) => ({
