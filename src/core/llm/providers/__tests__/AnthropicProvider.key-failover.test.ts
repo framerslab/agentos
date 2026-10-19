@@ -209,6 +209,27 @@ describe('AnthropicProvider key failover', () => {
     expect(after.map(keyOf)).toEqual(['sk_a', 'sk_b', 'sk_a']);
   });
 
+  it('ends a draw that waits on the probes when the caller aborts, and reports the abort', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const p = await provider('sk_a,sk_b', { keyPool: { strategy: 'ordered', recheckMs: 60_000 } });
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, authError)).mockResolvedValueOnce(jsonResponse(401, authError));
+    await expect(ask(p)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED' });
+    // At the recheck the request starts both probes, which hang; it waits on them until its caller aborts.
+    vi.setSystemTime(new Date(Date.now() + 60_000));
+    fetchMock.mockImplementation(() => new Promise<Response>(() => undefined));
+    const controller = new AbortController();
+    const asking = p
+      .generateCompletion('claude-opus-5-5', [{ role: 'user', content: 'hi' }], { abortSignal: controller.signal })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await asking).toMatchObject({ code: 'REQUEST_ABORTED' });
+    // Only the two probes went out; the request sent nothing.
+    expect(callsOf().slice(2).map((call) => call.url.includes('/v1/models'))).toEqual([true, true]);
+  });
+
   it('a re-initialize that is refused leaves the provider as it was, its pool and its recheck timer included', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));

@@ -2789,7 +2789,10 @@ export class AnthropicProvider implements IProvider {
       }
       // Rotate the key per attempt so a retry after a 429 fails over to a
       // different key from the pool instead of hammering the throttled one.
-      const apiKey = await this.drawApiKey();
+      const apiKey = await this.drawApiKey(abortSignal);
+      if (abortSignal?.aborted) {
+        throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       if (apiKey === '') throw this.allKeysFailedError();
       const attemptStartedAt = Date.now();
       const headers = this.buildHeaders(apiKey);
@@ -2964,7 +2967,10 @@ export class AnthropicProvider implements IProvider {
     attemptOut?: { apiKey?: string; startedAt?: number },
   ): Promise<ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
-    const apiKey = await this.drawApiKey();
+    const apiKey = await this.drawApiKey(abortSignal);
+    if (abortSignal?.aborted) {
+      throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+    }
     if (apiKey === '') throw this.allKeysFailedError();
     const startedAt = Date.now();
     if (attemptOut) {
@@ -3092,10 +3098,11 @@ export class AnthropicProvider implements IProvider {
    * than reusing the throttled one. When no key is usable while a probe of a
    * failed key is in flight (its recheck came due), it waits for that probe,
    * bounded by the pool's probe timeout, and draws again, so the first request
-   * after a recheck is served by a key that came back.
+   * after a recheck is served by a key that came back; the caller's signal
+   * ends that wait at once, and the request then reports the abort.
    */
-  private async drawApiKey(): Promise<string> {
-    return this.keyPool?.hasKeys ? this.keyPool.nextAfterProbes() : this.config.apiKey;
+  private async drawApiKey(abortSignal?: AbortSignal): Promise<string> {
+    return this.keyPool?.hasKeys ? this.keyPool.nextAfterProbes(abortSignal) : this.config.apiKey;
   }
 
   private buildHeaders(apiKey: string): Record<string, string> {

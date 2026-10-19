@@ -220,7 +220,49 @@ describe('ApiKeyPool v2', () => {
       for (const answer of answers) answer('ok');
       await drawing;
       expect(drawn).toBe('sk_a');
+      await pool.recheck();
       expect(pool.snapshot().map((s) => s.status)).toEqual(['ok', 'ok']);
+    });
+
+    it('nextAfterProbes() draws the first key that comes back, without waiting for the probe of another key that hangs', async () => {
+      const probe = vi.fn((key: string) => (key === 'sk_b' ? Promise.resolve<ProbeResult>('ok') : new Promise<ProbeResult>(() => undefined)));
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, probe, probeTimeoutMs: 10_000 });
+      pool.markFailed('sk_a', 'auth');
+      pool.markFailed('sk_b', 'auth');
+      vi.advanceTimersByTime(1001);
+      let drawn: string | undefined;
+      const drawing = pool.nextAfterProbes().then((key) => {
+        drawn = key;
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(drawn).toBe('sk_b');
+      await drawing;
+      // sk_a's probe is still out; it ends at the probe timeout as unknown and the key stays out.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', failures: 2 });
+    });
+
+    it('nextAfterProbes() stops waiting when the caller aborts', async () => {
+      const probe = vi.fn(() => new Promise<ProbeResult>(() => undefined));
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, probe, probeTimeoutMs: 10_000 });
+      pool.markFailed('sk_a', 'auth');
+      pool.markFailed('sk_b', 'auth');
+      vi.advanceTimersByTime(1001);
+      const controller = new AbortController();
+      let drawn: string | undefined;
+      const drawing = pool.nextAfterProbes(controller.signal).then((key) => {
+        drawn = key;
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(drawn).toBeUndefined();
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(drawn).toBe('');
+      await drawing;
+      // A signal that has already fired: no wait at all, though the probes are still out.
+      expect(await pool.nextAfterProbes(controller.signal)).toBe('');
+      expect(probe).toHaveBeenCalledTimes(2);
     });
 
     it('nextAfterProbes() answers \'\' once the probes it waited for fail, and a usable key at once', async () => {

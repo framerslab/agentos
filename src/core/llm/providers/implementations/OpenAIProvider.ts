@@ -1140,19 +1140,23 @@ export class OpenAIProvider implements IProvider {
    * Resolves the API key to use for a request, prioritizing per-request override, then OAuth flow, then system default.
    * A pool with no usable key while a probe of a failed key is in flight (its recheck came due) waits for that probe,
    * bounded by the pool's probe timeout, and draws again, so the first request after a recheck is served by a key that
-   * came back.
+   * came back; the caller's signal ends that wait at once.
    * @private
    * @param {string | undefined} apiKeyOverride - API key provided directly in request options.
+   * @param {AbortSignal | undefined} abortSignal - The caller's signal, which ends a wait on the pool's probes.
    * @returns {Promise<string>} The API key to use.
-   * @throws {OpenAIProviderError} If no API key is available.
+   * @throws {OpenAIProviderError} If no API key is available; `REQUEST_ABORTED` when the signal ended the draw.
    */
-  private async getApiKey(apiKeyOverride?: string): Promise<string> {
+  private async getApiKey(apiKeyOverride?: string, abortSignal?: AbortSignal): Promise<string> {
     if (apiKeyOverride) return apiKeyOverride;
     if (this.config.oauthFlow) {
       return await this.config.oauthFlow.getAccessToken();
     }
     if (this.keyPool?.hasKeys) {
-      const key = await this.keyPool.nextAfterProbes();
+      const key = await this.keyPool.nextAfterProbes(abortSignal);
+      if (abortSignal?.aborted) {
+        throw new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       if (key === '') throw this.allKeysFailedError();
       return key;
     }
@@ -1243,7 +1247,7 @@ export class OpenAIProvider implements IProvider {
     options: ModelCompletionOptions
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
-    const apiKey = await this.getApiKey(options.apiKeyOverride);
+    const apiKey = await this.getApiKey(options.apiKeyOverride, options.abortSignal);
 
     // Responses-only models, GPT-6 tool calls and GPT-5/6 tool calls that
     // carry an effort go to /v1/responses; every other call takes the chat
@@ -1296,7 +1300,17 @@ export class OpenAIProvider implements IProvider {
       yield this.abortedStreamChunk(modelId, 'Stream aborted prior to first chunk');
       return;
     }
-    const apiKey = await this.getApiKey(options.apiKeyOverride);
+    let apiKey: string;
+    try {
+      apiKey = await this.getApiKey(options.apiKeyOverride, abortSignal);
+    } catch (error: unknown) {
+      // An abort while the draw waits on the pool's probes surfaces as the abort chunk, not a throw.
+      if (abortSignal?.aborted) {
+        yield this.abortedStreamChunk(modelId, 'Stream aborted prior to first chunk');
+        return;
+      }
+      throw error;
+    }
 
     // The routing rule generateCompletion uses, so a streamed call reaches the
     // same endpoint with the same effort as its non-streamed twin.

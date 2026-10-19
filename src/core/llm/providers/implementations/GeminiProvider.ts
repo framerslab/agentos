@@ -1920,10 +1920,11 @@ export class GeminiProvider implements IProvider {
    * is usable while a probe of a failed key is in flight (its recheck came
    * due), it waits for that probe, bounded by the pool's probe timeout, and
    * draws again, so the first request after a recheck is served by a key that
-   * came back.
+   * came back; the caller's signal ends that wait at once, and the request
+   * then reports the abort.
    */
-  private async drawApiKey(): Promise<string> {
-    return this.keyPool?.hasKeys ? this.keyPool.nextAfterProbes() : this.config.apiKey;
+  private async drawApiKey(abortSignal?: AbortSignal): Promise<string> {
+    return this.keyPool?.hasKeys ? this.keyPool.nextAfterProbes(abortSignal) : this.config.apiKey;
   }
 
   /** Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. */
@@ -2015,7 +2016,10 @@ export class GeminiProvider implements IProvider {
       if (abortSignal?.aborted) {
         throw new GeminiProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
       }
-      const apiKey = await this.drawApiKey();
+      const apiKey = await this.drawApiKey(abortSignal);
+      if (abortSignal?.aborted) {
+        throw new GeminiProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       if (apiKey === '') throw this.allKeysFailedError();
       const attemptStartedAt = Date.now();
       const controller = new AbortController();

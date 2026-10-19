@@ -847,12 +847,14 @@ export class RequestyProvider implements IProvider {
    * otherwise the next key from the pool (weighted rotation). With no usable
    * key while a probe of a failed key is in flight (its recheck came due), the
    * draw waits for that probe, bounded by the pool's probe timeout, so the
-   * first request after a recheck is served by a key that came back.
+   * first request after a recheck is served by a key that came back; the
+   * caller's signal ends that wait at once.
    */
-  private async resolveApiKey(apiKeyOverride?: string): Promise<string> {
+  private async resolveApiKey(apiKeyOverride?: string, signal?: AbortSignal): Promise<string> {
     if (apiKeyOverride) return apiKeyOverride;
     if (this.keyPool?.hasKeys) {
-      const key = await this.keyPool.nextAfterProbes();
+      const key = await this.keyPool.nextAfterProbes(signal);
+      if (signal?.aborted) throw new RequestyProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
       if (key === '') throw this.allKeysFailedError();
       return key;
     }
@@ -915,7 +917,7 @@ export class RequestyProvider implements IProvider {
     expectStream: boolean = false,
     perRequest?: { apiKeyOverride?: string; signal?: AbortSignal }
   ): Promise<T> {
-    const apiKey = await this.resolveApiKey(perRequest?.apiKeyOverride);
+    const apiKey = await this.resolveApiKey(perRequest?.apiKeyOverride, perRequest?.signal);
     const attemptStartedAt = Date.now();
     try {
       const response = await this.client.request<T>({

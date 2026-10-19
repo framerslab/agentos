@@ -292,18 +292,42 @@ export class ApiKeyPool {
   /**
    * `next()`, and when it finds no key to hand out while a probe of a failed
    * key is in flight (one this draw just started because its recheck came
-   * due, or the timer's), waits for those probes, each bounded by
-   * `probeTimeoutMs`, and draws once more. So the first request after a
-   * recheck comes due is served by a key that came back, instead of failing
+   * due, or the timer's), waits for the next probe to settle and draws again,
+   * for as long as no key can be drawn and a probe is still running, each
+   * probe bounded by `probeTimeoutMs`. So the first request after a recheck
+   * comes due is served by the first key that came back, instead of failing
    * on a probe that was about to pass and re-opening the provider health
-   * breaker for another window. The providers draw their first key of a
-   * request through it.
+   * breaker for another window, and without waiting for the probe of another
+   * key that hangs. The caller's `signal` ends the wait at once; the draw
+   * then answers `''`, and the provider reports the abort. The providers
+   * draw their first key of a request through it.
    */
-  async nextAfterProbes(): Promise<string> {
-    const key = this.next();
-    if (key !== '' || this.inFlightProbes.size === 0) return key;
-    await Promise.allSettled(Array.from(this.inFlightProbes.values()));
-    return this.next();
+  async nextAfterProbes(signal?: AbortSignal): Promise<string> {
+    let key = this.next();
+    // Each round waits for one probe to settle. A settled probe leaves the map and one that failed pushed its key's
+    // recheck out, so the rounds end within one per key; the bound is a guard.
+    for (let round = 0; key === '' && this.inFlightProbes.size > 0 && round <= this.entries.length; round++) {
+      if (signal?.aborted) return '';
+      const oneSettled = Promise.race(Array.from(this.inFlightProbes.values(), (probe) => probe.then(() => undefined, () => undefined)));
+      if (signal) {
+        let resolveAbort: (() => void) | undefined;
+        const aborted = new Promise<void>((resolve) => {
+          resolveAbort = resolve;
+        });
+        const onAbort = (): void => resolveAbort?.();
+        signal.addEventListener('abort', onAbort, { once: true });
+        try {
+          await Promise.race([oneSettled, aborted]);
+        } finally {
+          signal.removeEventListener('abort', onAbort);
+        }
+        if (signal.aborted) return '';
+      } else {
+        await oneSettled;
+      }
+      key = this.next();
+    }
+    return key;
   }
 
   /** How many keys `next()` may hand out now. */
