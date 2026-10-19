@@ -511,8 +511,9 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
   (`Promise<PanelResult>` under `panel`) where it was `Promise<unknown>`. A
   cast of the result to an unrelated type needs `as unknown as` first.
 - `result.text` is `''`, not missing, when every seat was rejected; under
-  `parallel` and `debate` no synthesizer runs then, and a nested agency that
-  no seat of its own answered counts as a rejected seat. A `parallel` run left
+  `parallel` and `debate` no synthesizer runs then. A nested agency that no
+  seat of its own answered counts as a rejected seat (under `panel`, an
+  `empty` one). A `parallel` run left
   with no seat because a seat failed rejects with the first failed seat's
   error, or, when a `quorum` it does not meet throws `AgencyQuorumError`,
   with that error as the quorum error's `cause`. A session
@@ -546,7 +547,9 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
 
 Agents run one after another. The first receives the prompt; each later agent
 receives the original task followed by the previous agent's output, forming a
-progressive refinement chain.
+progressive refinement chain. An agent its approver rejects is skipped, as is
+a nested agency that no seat of its own answered: neither adds a call record,
+and the next agent's input and the run's text stay as they were.
 
 ```typescript
 const pipeline = agency({
@@ -663,7 +666,10 @@ const { text } = await debaters.generate('Is remote work better than in-office?'
 One agent produces output; another reviews it and requests revisions.  The loop
 continues until the reviewer is satisfied or `maxRounds` is reached.  The first
 roster entry is the producer and the second the reviewer; each runs on its own
-model, so the reviewer can come from a different vendor than the drafter.
+model, so the reviewer can come from a different vendor than the drafter. A
+producer that is rejected, or is a nested agency that no seat of its own
+answered, ends the loop on the current draft, and no reviewer is sent an empty
+one; such a reviewer leaves the current draft standing.
 
 ```typescript
 const loop = agency({
@@ -684,7 +690,9 @@ const { text } = await loop.generate('Announce our new product launch.');
 
 A coordinator agent dispatches sub-tasks to specialist agents via tool calls.
 The coordinator decides which agents to invoke and in what order at runtime.
-Required for emergent agent synthesis.
+Required for emergent agent synthesis. A delegate its approver rejects, or a
+nested agency that no seat of its own answered, returns a refusal the
+coordinator reads ("gave no answer" for the latter) and adds no call record.
 
 ```typescript
 const team = agency({
@@ -731,7 +739,9 @@ Outputs from dependencies:
 ```
 
 There is no expression language (no `$steps.<name>` references).  Each agent
-simply receives plain text from its predecessors.
+receives plain text from its predecessors. A dependency its approver
+rejected, or a nested agency that no seat of its own answered, is passed on as
+`[skipped by HITL]` and adds no call record.
 
 #### Agent config — `dependsOn`
 
