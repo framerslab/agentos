@@ -436,8 +436,9 @@ export interface StepFinishedChunkPayload {
   /**
    * The step's schema answer when the turn asked for structured output and a completion-gateway hop
    * on Anthropic returned it, as JSON text on the JSON output format or as a forced schema tool call,
-   * and it parsed; other hops return the JSON as the step's text. An answer that does not parse (a
-   * `max_tokens` cut-off) is not set here: it stays the step's text, with the step's own finish reason.
+   * and it parsed; other hops return the JSON as the step's text. An answer that does not parse, and any
+   * answer the output limit stopped (`max_tokens`), whose JSON can parse though it was cut, is not set
+   * here: it stays the step's text, with the step's own finish reason.
    */
   structuredOutput?: unknown;
   /** The step's extended-thinking blocks (Anthropic), so a session store can replay the step. */
