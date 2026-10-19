@@ -2240,6 +2240,59 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("flushes nothing of the text's reply when the cut reply's stream ends after the bound, and that reply ends whole", async () => {
+    // An agent whose abort() is a no-op: the cut reply's stream ends only when the test lets it, once the text's reply
+    // speaks, and the text's reply holds its last token until the test lets it.
+    let endFirst!: () => void;
+    const firstHeld = new Promise<void>((resolve) => {
+      endFirst = resolve;
+    });
+    let sendRest!: () => void;
+    const restHeld = new Promise<void>((resolve) => {
+      sendRest = resolve;
+    });
+    agentSession = {
+      sendText: vi.fn((text: string) => ({
+        [Symbol.asyncIterator]: async function* () {
+          if (text === 'Hello there') {
+            yield 'Hello';
+            await firstHeld;
+          } else {
+            yield 'Booked';
+            await restHeld;
+            yield ' for two.';
+          }
+        },
+      })),
+      abort: vi.fn(),
+    };
+    // The TTS session completes each flush at once, so the reply a flush belongs to ends with it.
+    vi.mocked(ttsSession.flush).mockImplementation(async () => {
+      ttsSession.emit('flush_complete');
+    });
+    await start();
+
+    await takeTurn();
+    await typeText('Book a table.');
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(orchestrator.state).toBe('speaking');
+    expect(vi.mocked(ttsSession.pushTokens).mock.calls.map(([token]) => token)).toEqual(['Hello', 'Booked']);
+
+    // The cut reply's stream ends while the text's reply speaks: the TTS session it shares is not flushed for it.
+    endFirst();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ttsSession.flush).not.toHaveBeenCalled();
+    expect(orchestrator.state).toBe('speaking');
+
+    // The text's reply ends with its own last token, whole.
+    sendRest();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(ttsSession.pushTokens).mock.calls.map(([token]) => token)).toEqual(['Hello', 'Booked', ' for two.']);
+    expect(ttsSession.flush).toHaveBeenCalledOnce();
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'Booked for two.', durationMs: 0 });
+    expect(orchestrator.state).toBe('listening');
+  });
+
   it('preserves Error on error and emits metadata on session_error before close', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
