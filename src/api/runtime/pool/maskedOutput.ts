@@ -263,7 +263,13 @@ export function maskedPrebuilt(seat: Agent, mask: CallMask): Agent {
     return maskedResult(result, mask);
   };
   const stream = (...args: Parameters<Agent['stream']>): unknown => {
-    const streamed = seat.stream(...args) as unknown;
+    let streamed: unknown;
+    try {
+      streamed = seat.stream(...args) as unknown;
+    } catch (error) {
+      // An error the seat throws while building its stream leaves it masked, as a rejected generate() does.
+      throw mask(error);
+    }
     return isRecord(streamed) ? maskStreamMembers(streamed, mask) : streamed;
   };
   const own = (key: PropertyKey): unknown => (key === 'generate' ? generate : key === 'stream' ? stream : undefined);
