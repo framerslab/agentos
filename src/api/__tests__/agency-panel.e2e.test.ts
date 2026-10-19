@@ -1816,6 +1816,27 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       consoleWarn.mockRestore();
     }
   });
+  it("an async callback that rejects is written through the host's logger as agency_callback_threw with its message masked, and leaves no rejection unhandled", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      threeProviders();
+      const lines = await logLines(async () => {
+        const r = await panel({ on: { agentEnd: async () => { throw new Error(`callback saw ${K.ant}`); } } }).generate('review');
+        expect(r.text).toBe('Merged findings');
+        // A callback's rejection settles after the call that fired it: let it land before the host's factory is reset.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      const threw = lines.filter((l) => l.meta?.event === 'agency_callback_threw');
+      expect(threw.length).toBeGreaterThanOrEqual(2);
+      for (const line of threw) expect(line).toEqual({ level: 'warn', message: expect.any(String), meta: { event: 'agency_callback_threw', callback: 'agentEnd', error: 'callback saw [redacted]' } });
+      expect(JSON.stringify(lines)).not.toContain(K.ant);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
   it("a callback a strategy fires that throws fails no call of an agency without a pool and is written through the host's logger, and that agency's trail records what its strategy fires", async () => {
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('Merged')]]);
     const seat = (generate: () => Promise<unknown>) => ({ generate, stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} }) as unknown as Agent;
