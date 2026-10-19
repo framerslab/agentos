@@ -1854,8 +1854,9 @@ export interface VoicePipelineSession extends EventEmitterLike {
  * - `'idle'`: input is turned off, so the agent hears nothing. `VoicePipelineOrchestrator` never reports it; a host
  *   API that can turn a session's input off does.
  * - `'listening'`: the agent waits for the user's turn.
- * - `'thinking'`: the user's turn has completed and the agent's reply has no word yet.
- * - `'speaking'`: the reply has its first word, until its audio has played out or a barge-in cuts it.
+ * - `'thinking'`: the user's turn has completed and the agent's reply has no word yet, or, under a call profile, a
+ *   prompt `pushToTTS()` speaks has no word yet.
+ * - `'speaking'`: the reply or the prompt has its first word, until its audio has played out or a barge-in cuts it.
  */
 export type VoiceAgentState = 'initializing' | 'idle' | 'listening' | 'thinking' | 'speaking';
 

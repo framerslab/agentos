@@ -2212,8 +2212,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
 
   /**
    * Moves the call to `state`; the agent's state follows as without a call profile: listening as the call listens,
-   * thinking as it processes a turn, speaking from the first word of a reply or a prompt (`synthesize`), an
-   * interruption keeping the state it came from.
+   * thinking as it processes a turn or readies a prompt (`speak`), speaking from the first word of a reply or a prompt
+   * (`synthesize`), an interruption keeping the state it came from.
    *
    * @param state - The new state.
    */
