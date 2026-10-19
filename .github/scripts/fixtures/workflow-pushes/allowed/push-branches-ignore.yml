@@ -1,0 +1,12 @@
+# branches-ignore that takes master keeps the trigger off it.
+name: not master
+on:
+  push:
+    branches-ignore:
+      - master
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: git push origin HEAD

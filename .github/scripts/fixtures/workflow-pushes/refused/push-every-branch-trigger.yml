@@ -1,0 +1,13 @@
+# A push trigger whose filter takes master, so a push of the checked-out branch can push master.
+name: any branch
+on:
+  push:
+    branches:
+      - '**'
+      - '!release/**'
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: git push # lint-expect

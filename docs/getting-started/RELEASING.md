@@ -43,6 +43,7 @@ A breaking change needs a maintainer's approval before it merges. The `Breaking 
 
 - Edit `CHANGELOG.md` or the `version` field by hand, or read that field as the released version.
 - Push to `master` directly: its branch rules refuse it; every change merges through a pull request.
+- Add a workflow step that pushes a commit to `master`. Its rules refuse the push (GH006), so the step fails after everything before it has run. A step that changes the repository pushes a branch of its own and opens a pull request, or writes to another branch, as `docs.yml` publishes to `agentos-live-docs`. The `Test & Lint` job runs `.github/scripts/check-workflow-pushes.mjs`, which fails the pull request that adds such a push: a `git push` to `master`, or to the branch the run is on from a workflow that runs on `master`, an action that pushes there, or a semantic-release run while `release.config.js` lists `@semantic-release/git`.
 - Run `npm publish`.
 - Push a code change to `master` with `[skip ci]` in the message.
 

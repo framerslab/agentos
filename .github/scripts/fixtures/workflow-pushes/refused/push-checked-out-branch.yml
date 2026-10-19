@@ -1,0 +1,23 @@
+# Pushes of the checked-out branch from a workflow that runs on master: on such a run that branch is master.
+name: push the checked-out branch
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Commit the badge
+        run: |
+          git add badge.json
+          git commit -m "chore: refresh the badge" && git push # lint-expect
+          git push origin # lint-expect
+          git push --follow-tags # lint-expect
+          git push origin HEAD # lint-expect
+          git push origin "HEAD:${GITHUB_REF_NAME}" # lint-expect
+          git push origin HEAD:${{ github.ref }} # lint-expect
+          git push origin "HEAD:refs/heads/${{ github.ref_name }}" # lint-expect
+          NO_COLOR=1 git push >/dev/null 2>&1 # lint-expect
+      - run: git push # lint-expect
