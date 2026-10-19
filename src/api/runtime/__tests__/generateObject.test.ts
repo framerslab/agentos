@@ -868,12 +868,12 @@ describe('generateObject fallback-leg responseFormat rebuild (2026-07-07)', () =
 
       expect(result.object).toEqual({ palette: { primary: '#aabbcc' } });
       const calls = hoisted.generateCompletion.mock.calls as unknown[][];
-      // The primary carried no payload: a record schema is outside the JSON output format, and Opus 4.8 has the
-      // format, so the forced tool is not its route either (the schema rode the prompt)…
+      // The primary carried the forced-tool marker: a record schema is outside the JSON output format, and Opus 4.8
+      // accepts a forced tool choice, so the non-strict forced tool carries it as it did before the format…
       const primaryOptions = (calls.find((c) => c[0] === 'claude-opus-4-8')?.[2] ?? {}) as {
         responseFormat?: Record<string, unknown>;
       };
-      expect(primaryOptions.responseFormat).toBeUndefined();
+      expect(primaryOptions.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'forced_tool' });
       // …and the openai LEG was rebuilt to json_object (record schema fails
       // the strict gate), NOT the verbatim anthropic marker.
       const legOptions = (calls.find((c) => c[0] === 'gpt-4o-mini')?.[2] ?? {}) as {

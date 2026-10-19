@@ -451,14 +451,22 @@ function messagesEnableCitations(messages: unknown): boolean {
 }
 
 /**
- * Appends the schema to the request's system prompt as one block after the
- * caller's, for a schema request neither the JSON output format nor a forced
- * tool carries on this model: a string system gets the block joined on, a block
- * array gets a text block, and a request without a system prompt gets the
- * block alone.
+ * The block the prompt-only route adds to the system prompt, for a schema
+ * request neither the JSON output format nor a forced tool carries.
  */
-function appendSchemaSystemBlock(payload: Record<string, unknown>, schema: unknown): void {
-  const text = `Answer with JSON only, matching this schema: ${JSON.stringify(schema)}`;
+function schemaPromptText(schema: unknown): string {
+  return `Answer with JSON only, matching this schema: ${JSON.stringify(schema)}`;
+}
+
+/**
+ * Appends the prompt-only route's schema block to a system prompt the caller's
+ * passthrough set (`customModelParams.system`): a string gets the block joined
+ * on, a block array gets a text block in a new array, and an empty one gets
+ * the block alone. The provider's own system blocks take the block in the
+ * payload builder instead, so the auto-cache's re-emission of those blocks
+ * keeps it.
+ */
+function appendSchemaSystemBlock(payload: Record<string, unknown>, text: string): void {
   const system = payload.system;
   if (Array.isArray(system)) {
     // A new array: a passthrough `system` is the caller's own array, reused
@@ -473,17 +481,63 @@ function appendSchemaSystemBlock(payload: Record<string, unknown>, schema: unkno
 
 /**
  * The route a built payload's schema took, read by the paths that send it:
- * `none` says the schema rode the prompt, not the payload.
+ * `forced_tool` names the schema tool for the response mapper, and `none`
+ * says the schema rode the prompt, not the payload.
  */
 const schemaRouteOfPayload = new WeakMap<object, AnthropicSchemaRoute>();
 
 /**
- * A passthrough `model` replaces the given one on the wire; the schema route
- * and the forced-choice clamp follow the model sent to.
+ * The forced schema tool's name when the built payload sent the schema as that
+ * tool, so the mapper surfaces the tool call's input as the answer. The other
+ * routes name none: on the JSON output format the answer is the text block, so
+ * a caller tool that shares the schema's name stays a tool call.
  */
-function passthroughModel(options: ModelCompletionOptions): string | undefined {
-  const model = (options.customModelParams as Record<string, unknown> | undefined)?.model;
-  return typeof model === 'string' && model ? model : undefined;
+function forcedSchemaToolName(payload: object, options: ModelCompletionOptions): string | undefined {
+  if (schemaRouteOfPayload.get(payload) !== 'forced_tool') return undefined;
+  const name = (options.responseFormat as { tool?: { name?: unknown } } | undefined)?.tool?.name;
+  return typeof name === 'string' && name ? name : undefined;
+}
+
+/** True when the payload turns thinking on (`adaptive` or `enabled`); the off shapes (`disabled`, `between_tools`) do not. */
+function payloadThinkingActive(payload: Record<string, unknown>): boolean {
+  const type = (payload.thinking as { type?: unknown } | undefined)?.type;
+  return type === 'adaptive' || type === 'enabled';
+}
+
+/**
+ * The `input_schema` of every `strict: true` tool on the wire. Only a
+ * passthrough `tools` array carries one (the provider's own tool conversion
+ * never sets `strict`), and the vendor counts it with the JSON output format
+ * toward the union-typed and optional parameter limits.
+ */
+function strictToolInputSchemas(tools: unknown): unknown[] {
+  if (!Array.isArray(tools)) return [];
+  return tools
+    .filter((tool) => tool !== null && typeof tool === 'object' && (tool as { strict?: unknown }).strict === true)
+    .map((tool) => (tool as { input_schema?: unknown }).input_schema ?? {});
+}
+
+/** True when a wire `tools` array holds a tool named `name`. */
+function toolsInclude(tools: unknown, name: string): boolean {
+  return (
+    Array.isArray(tools) &&
+    tools.some((tool) => tool !== null && typeof tool === 'object' && (tool as { name?: unknown }).name === name)
+  );
+}
+
+/**
+ * True when a wire `tool_choice` makes the model call the schema tool `name`:
+ * a choice that names it, or `any` when the schema tool is the one tool the
+ * request offers. `passthroughTools` is a passthrough `tools` array, or
+ * undefined when the provider sends the schema tool alone.
+ */
+function toolChoiceForcesSchemaTool(toolChoice: unknown, passthroughTools: unknown, name: string): boolean {
+  if (!toolChoice || typeof toolChoice !== 'object') return false;
+  const choice = toolChoice as { type?: unknown; name?: unknown };
+  if (choice.type === 'tool') return choice.name === name;
+  if (choice.type !== 'any') return false;
+  if (passthroughTools === undefined) return true;
+  return Array.isArray(passthroughTools) && passthroughTools.length === 1 && toolsInclude(passthroughTools, name);
 }
 
 /**
@@ -501,13 +555,20 @@ function dropOutputConfigFormat(payload: Record<string, unknown>): void {
 }
 
 /**
- * Marks a completion whose request put the schema in the prompt itself
- * (`schemaInPayload: false`, as OpenRouter's json_object retry does), so a
- * gateway lifts no text into a structured answer and the session checks the
- * text as prompt-only.
+ * Marks a completion or stream chunk of a schema request with the route the
+ * built payload took (`schemaRoute`), so a completion gateway lifts the answer
+ * from where this request put it: the text on the JSON output format, the
+ * schema tool's call on the forced tool. A request that put the schema in the
+ * prompt itself also says `schemaInPayload: false`, as OpenRouter's
+ * json_object retry does, so a gateway lifts nothing and the session checks
+ * the text as prompt-only. A request without a schema is left as it is.
  */
-function withSchemaInPayload<T extends ModelCompletionResponse>(completion: T, payload: object): T {
-  return schemaRouteOfPayload.get(payload) === 'none' ? { ...completion, schemaInPayload: false } : completion;
+function withSchemaRoute<T extends ModelCompletionResponse>(completion: T, payload: object): T {
+  const schemaRoute = schemaRouteOfPayload.get(payload);
+  if (!schemaRoute) return completion;
+  return schemaRoute === 'none'
+    ? { ...completion, schemaRoute, schemaInPayload: false }
+    : { ...completion, schemaRoute };
 }
 
 /**
@@ -647,26 +708,17 @@ export class AnthropicProvider implements IProvider {
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
 
-    // The forced schema tool's name, so the response mapper can surface the
-    // matching tool_use block's input as the message's JSON text. Only the
-    // forced_tool route names one: on the json_schema route the answer is the
-    // text block itself, so a caller tool that happens to share the schema's
-    // name stays a tool call and is never mistaken for the answer.
-    const sf = options.responseFormat as
-      | { _agentosUseToolForStructuredOutput?: boolean; tool?: { name: string; input_schema?: Record<string, unknown> } }
-      | undefined;
-    const structuredOutputName =
-      sf?._agentosUseToolForStructuredOutput &&
-      sf.tool &&
-      anthropicSchemaRoute(passthroughModel(options) ?? modelId, sf.tool.input_schema ?? {}) === 'forced_tool'
-        ? sf.tool.name
-        : undefined;
+    // The response mapper surfaces the forced schema tool's input as the
+    // message's JSON text, named from the route the built payload took
+    // (forcedSchemaToolName): the payload builder decides it for the model on
+    // the wire, after thinking and citations have had their say.
 
     // Escape hatch: single-shot JSON transport for SSE-hostile proxies.
     // On both transports the caller's signal aborts the request in flight and
     // stops its retries.
     if (this.config.streamCompletions === false) {
       const payload = this.buildRequestPayload(modelId, messages, options, false);
+      const structuredOutputName = forcedSchemaToolName(payload, options);
       const apiResponse = await this.makeApiRequest<AnthropicMessagesResponse>(
         '/v1/messages',
         'POST',
@@ -675,7 +727,7 @@ export class AnthropicProvider implements IProvider {
         options.abortSignal,
       );
       this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
-      return withSchemaInPayload(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
+      return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
     }
 
     // Default: ride the SSE path so parseSseStream's idle watchdog bounds
@@ -686,9 +738,15 @@ export class AnthropicProvider implements IProvider {
     // streamIdleTimeoutMs means the connection is dead — fail fast and
     // let the caller (or the retry loop below) recover in seconds.
     const payload = this.buildRequestPayload(modelId, messages, options, true);
-    const apiResponse = await this.streamMessagesToResponse(payload, options.requestTimeout, options.abortSignal);
+    const structuredOutputName = forcedSchemaToolName(payload, options);
+    const apiResponse = await this.streamMessagesToResponse(
+      payload,
+      options.requestTimeout,
+      options.abortSignal,
+      structuredOutputName,
+    );
     this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
-    return withSchemaInPayload(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
+    return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
   }
 
   /**
@@ -748,6 +806,8 @@ export class AnthropicProvider implements IProvider {
    *   extend how long a dead connection can sit silent.
    * @param abortSignal Caller's signal. It aborts the request in flight, its
    *   body read included, and once it has fired no further attempt is sent.
+   * @param schemaToolName The forced schema tool's name when the payload sent
+   *   the schema as that tool ({@link accumulateMessagesStream}).
    * @throws {AnthropicProviderError} `REQUEST_ABORTED` when the caller's signal
    *   ends the request.
    * @private
@@ -756,6 +816,7 @@ export class AnthropicProvider implements IProvider {
     payload: Record<string, unknown>,
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
+    schemaToolName?: string,
   ): Promise<AnthropicMessagesResponse> {
     let lastError: AnthropicProviderError = new AnthropicProviderError(
       'Streaming completion failed after all retries.',
@@ -774,7 +835,7 @@ export class AnthropicProvider implements IProvider {
       const attemptInfo: { apiKey?: string; startedAt?: number } = {};
       try {
         const stream = await this.makeStreamRequest('/v1/messages', payload, requestTimeoutOverride, abortSignal, attemptInfo);
-        const accumulated = await this.accumulateMessagesStream(stream);
+        const accumulated = await this.accumulateMessagesStream(stream, schemaToolName);
         if (attemptInfo.apiKey) this.keyPool?.markSuccess(attemptInfo.apiKey, attemptInfo.startedAt);
         return accumulated;
       } catch (error: unknown) {
@@ -874,14 +935,25 @@ export class AnthropicProvider implements IProvider {
    * {@link mapResponseToCompletion} raises it as a content-policy error, and
    * a transport error here would be retried instead.
    *
+   * A forced schema tool call whose input an output limit cut off
+   * (`max_tokens`, or the context window) returns normally too: its raw
+   * input becomes a text block, so {@link mapResponseToCompletion} reports
+   * the cut text with finish reason `length`, the answer generateObject
+   * raises its budget for, where a transport error would be retried at the
+   * same budget and then thrown past the escalation.
+   *
+   * @param schemaToolName The forced schema tool's name when the request sent
+   *   the schema as that tool; a cut call of any other name still throws.
    * @throws {AnthropicProviderError} `STREAM_ERROR_EVENT` on an SSE error
    *   event, `STREAM_INCOMPLETE` when the stream ends before `message_delta`
-   *   or a tool_use input JSON is truncated, plus whatever
-   *   {@link parseSseStream} throws (`STREAM_IDLE_TIMEOUT`, parse errors).
+   *   or a tool_use input JSON is truncated (other than the schema call's at
+   *   an output limit), plus whatever {@link parseSseStream} throws
+   *   (`STREAM_IDLE_TIMEOUT`, parse errors).
    * @private
    */
   private async accumulateMessagesStream(
     stream: ReadableStream<Uint8Array>,
+    schemaToolName?: string,
   ): Promise<AnthropicMessagesResponse> {
     type AccumBlock = {
       type: 'text' | 'tool_use' | 'thinking' | 'redacted_thinking';
@@ -1008,6 +1080,16 @@ export class AnthropicProvider implements IProvider {
           try {
             input = block.argsJson ? (JSON.parse(block.argsJson) as Record<string, unknown>) : {};
           } catch {
+            if (
+              schemaToolName !== undefined &&
+              block.name === schemaToolName &&
+              (stopReason === 'max_tokens' || stopReason === 'model_context_window_exceeded')
+            ) {
+              // The answer stopped at an output limit while its JSON was still
+              // being written: the turn ended there, the stream did not drop.
+              // The raw input is the answer's text, reported with the stop.
+              return { type: 'text', text: block.argsJson ?? '' };
+            }
             throw new AnthropicProviderError(
               `Tool input JSON for "${block.name}" truncated mid-stream — response incomplete.`,
               'STREAM_INCOMPLETE',
@@ -1075,15 +1157,16 @@ export class AnthropicProvider implements IProvider {
     this.ensureInitialized();
 
     const payload = this.buildRequestPayload(modelId, messages, options, true);
-    if (schemaRouteOfPayload.get(payload) !== 'none') {
+    if (!schemaRouteOfPayload.has(payload)) {
       yield* this.streamRequest(modelId, options, payload);
       return;
     }
-    // The schema rode the prompt, not the payload: every chunk says so (as
-    // OpenRouter's json_object retry does), so a gateway lifts no text into a
-    // structured answer and the session checks the text as prompt-only.
+    // A schema request: every chunk names the route the payload took, and one
+    // whose schema rode the prompt says `schemaInPayload: false` (as
+    // OpenRouter's json_object retry does), so a gateway lifts the answer from
+    // where this request put it, or lifts nothing.
     for await (const chunk of this.streamRequest(modelId, options, payload)) {
-      yield { ...chunk, schemaInPayload: false };
+      yield withSchemaRoute(chunk, payload);
     }
   }
 
@@ -1809,38 +1892,47 @@ export class AnthropicProvider implements IProvider {
     // The marker from structuredOutputFormat.ts carries one object schema under
     // `tool.input_schema`. anthropicSchemaRoute decides, for the model going on
     // the wire (a passthrough `model` included, so it runs after the passthrough
-    // below) and that schema, which surface carries it (the builder ran the same
-    // function on the same object for the model it was built for, so the two
-    // agree whenever the wire model is that model):
+    // below) and that schema, which surface carries it; the builder ran the same
+    // function on the same object for the model it was built for. The payload
+    // then has its say, once the passthrough has run:
     //
-    //   json_schema  `output_config.format` with the schema, set AFTER the
-    //                customModelParams passthrough below so a passthrough
-    //                `output_config` (an effort, say) is merged with the format
-    //                rather than wiping it. No tool and no tool_choice for the
-    //                schema; a direct caller's tools stay, since the format
-    //                works beside tools. The model answers JSON in its text
-    //                block. Every current Claude model takes this route.
-    //   forced_tool  Claude Opus 4 and Sonnet 4 (no JSON output format, a
-    //                forced tool_choice accepted): one tool whose input_schema
-    //                is the schema, with tool_choice forced on it; the answer
-    //                is the tool call's input. The caller's tools are dropped
-    //                as before (mixing them needs a multi-turn protocol the
-    //                session path does not speak). Never strict: no model has
-    //                strict tool use without the JSON output format, so a
-    //                stamped forced tool is unreachable.
-    //   none         Neither carries the schema on this model (a record, an
-    //                untyped node, a $ref or oneOf, more union-typed or
-    //                optional properties than the format takes, or a request
-    //                that enables citations, which the format refuses). The
-    //                schema goes into the prompt itself, as a system block
-    //                after the caller's, with one warning per model and
-    //                reason, so a direct caller still gets the shape asked for.
+    //   json_schema  `output_config.format` with the schema, merged over a
+    //                passthrough `output_config` (an effort, say) rather than
+    //                wiped by it. No tool and no tool_choice for the schema; a
+    //                direct caller's tools stay, since the format works beside
+    //                tools, and the format's parameter limits are counted with
+    //                their strict schemas. The model answers JSON in its text
+    //                block. A request that enables citations leaves this route
+    //                (the API refuses the pair) for the forced tool, which
+    //                rides beside citations, or the prompt where it cannot.
+    //   forced_tool  A model without the JSON output format, or a schema the
+    //                format cannot carry (a record, an untyped node, a $ref or
+    //                oneOf, more union-typed or optional properties than it
+    //                takes), on a model that accepts a forced tool_choice: one
+    //                tool whose input_schema is the schema, with tool_choice
+    //                forced on it; the answer is the tool call's input. The
+    //                caller's tools are dropped as before (mixing them needs a
+    //                multi-turn protocol the session path does not speak).
+    //                Never strict: a schema strict mode carries takes the format
+    //                on every model with strict tool use, and beside citations,
+    //                which refuse structured outputs, the tool goes out plain.
+    //                Never clamped: a payload that turns thinking on takes the
+    //                prompt instead, and so do a passthrough `tools` that
+    //                replaces the tool and a passthrough `tool_choice` that
+    //                does not force it.
+    //   none         Neither carries the schema. The schema goes into the
+    //                prompt itself, as a system block after the caller's, with
+    //                one warning per model and reason, so a direct caller still
+    //                gets the shape asked for; every completion and stream
+    //                chunk of the request says `schemaInPayload: false`.
+    //
+    // Every completion and stream chunk of a schema request names the route it
+    // took (`schemaRoute`), so a completion gateway lifts the answer from where
+    // this request put it, not from where the marker's builder expected it.
     const sf = options.responseFormat as
       | { _agentosUseToolForStructuredOutput?: boolean; tool?: { name: string; input_schema: Record<string, unknown> } }
       | undefined;
     const schemaMarker = sf?._agentosUseToolForStructuredOutput && sf.tool ? sf.tool : undefined;
-    // Decided after the passthrough below, for the model going on the wire.
-    let schemaRoute: AnthropicSchemaRoute | undefined;
 
     // Pass through any custom model params — minus OpenRouter's routing
     // controls and Gemini's request fields, which only those vendors' bodies
@@ -1882,42 +1974,111 @@ export class AnthropicProvider implements IProvider {
     // be lost to a passthrough `system`. The messages read here for citations
     // are the ones going on the wire, a passthrough `messages` included.
     if (schemaMarker) {
-      schemaRoute = anthropicSchemaRoute(wireModelId, schemaMarker.input_schema);
-      if (schemaRoute === 'json_schema' && messagesEnableCitations(payload.messages)) {
-        // Structured outputs are incompatible with citations (the API answers
-        // 400), so this request carries the schema in the prompt instead, and a
-        // passthrough format would carry the same incompatible pair to the wire.
-        schemaRoute = 'none';
+      // The format's union-typed and optional parameter limits are the
+      // request's: a strict tool beside it counts toward them (only a
+      // passthrough `tools` array carries one).
+      let schemaRoute: AnthropicSchemaRoute = anthropicSchemaRoute(
+        wireModelId,
+        schemaMarker.input_schema,
+        strictToolInputSchemas(payload.tools),
+      );
+      // Why the request takes the prompt route, when the payload rather than
+      // the model and the schema sent it there.
+      let promptOnlyReason: string | undefined;
+      if (messagesEnableCitations(payload.messages)) {
+        // Citations and the JSON output format answer 400 together, so a
+        // passthrough format goes (the rest of output_config stays), and the
+        // format route gives way to the non-strict forced tool, which rides
+        // beside citations (live-probed 2026-10-19 on claude-sonnet-4-6, 200
+        // with a tool_use stop), or to the prompt on a model that refuses a
+        // forced choice.
         dropOutputConfigFormat(payload);
+        if (schemaRoute === 'json_schema') {
+          schemaRoute = modelSupportsForcedToolChoice(wireModelId) ? 'forced_tool' : 'none';
+          if (schemaRoute === 'none') {
+            promptOnlyReason =
+              'the request enables citations, which the JSON output format refuses, and the model refuses a forced tool choice';
+          }
+        }
+      }
+      if (schemaRoute === 'forced_tool' && payloadThinkingActive(payload)) {
+        // A forced choice cannot ride with thinking on, and the clamp below
+        // would send the schema tool under `auto` with no guarantee: the
+        // prompt is the honest route.
+        schemaRoute = 'none';
+        promptOnlyReason = 'thinking is on, and a forced tool choice cannot be sent beside it';
+      }
+      if (schemaRoute === 'forced_tool' && customToolsOverride && !toolsInclude(payload.tools, schemaMarker.name)) {
+        // A passthrough `tools` array keeps precedence; forcing a tool it does
+        // not hold would answer 400.
+        schemaRoute = 'none';
+        promptOnlyReason = 'a passthrough tools array replaces the schema tool';
+      }
+      if (
+        schemaRoute === 'forced_tool' &&
+        customToolChoiceOverride &&
+        !toolChoiceForcesSchemaTool(payload.tool_choice, customToolsOverride ? payload.tools : undefined, schemaMarker.name)
+      ) {
+        // A passthrough `tool_choice` keeps precedence too; one that does not
+        // force the schema tool (`auto`, `none`, another tool's name) leaves
+        // the call to the model, which may answer in prose, so the schema
+        // rides the prompt rather than a tool the model need not call.
+        schemaRoute = 'none';
+        promptOnlyReason = 'a passthrough tool_choice does not force the schema tool';
       }
       schemaRouteOfPayload.set(payload, schemaRoute);
-    }
-    if (schemaMarker && schemaRoute === 'forced_tool') {
-      // The forced schema tool, for Claude Opus 4 and Sonnet 4. A passthrough
-      // `tools` or `tool_choice` keeps precedence, as it did when the schema
-      // tool was set before the passthrough.
-      if (!customToolsOverride) payload.tools = [{ name: schemaMarker.name, input_schema: schemaMarker.input_schema }];
-      if (!customToolChoiceOverride) payload.tool_choice = { type: 'tool', name: schemaMarker.name };
-    } else if (schemaMarker && schemaRoute === 'json_schema') {
-      const existing = payload.output_config;
-      payload.output_config = {
-        ...(existing && typeof existing === 'object' && !Array.isArray(existing)
-          ? (existing as Record<string, unknown>)
-          : {}),
-        format: { type: 'json_schema', schema: anthropicJsonOutputSchema(schemaMarker.input_schema) },
-      };
-    } else if (schemaMarker && schemaRoute === 'none') {
-      const reason = !modelSupportsJsonOutputs(wireModelId)
-        ? 'the model has neither the JSON output format nor a forced tool choice'
-        : messagesEnableCitations(payload.messages)
-          ? 'the request enables citations, which the JSON output format refuses'
-          : 'the schema is outside the limits of the JSON output format (a record, a $ref or oneOf, an untyped node, or more union-typed or optional properties than it takes)';
-      appendSchemaSystemBlock(payload, schemaMarker.input_schema);
-      warnOnce(
-        `structured-output-prompt-only:${wireModelId}:${reason}`,
-        `[agentos] AnthropicProvider: structured output for '${schemaMarker.name}' on model ${wireModelId} rides the ` +
-          `prompt alone: ${reason}. The schema was added to the system prompt; the caller's schema validates the answer.`,
-      );
+
+      if (schemaRoute === 'json_schema') {
+        const existing = payload.output_config;
+        payload.output_config = {
+          ...(existing && typeof existing === 'object' && !Array.isArray(existing)
+            ? (existing as Record<string, unknown>)
+            : {}),
+          format: { type: 'json_schema', schema: anthropicJsonOutputSchema(schemaMarker.input_schema) },
+        };
+      } else if (schemaRoute === 'forced_tool') {
+        // The non-strict forced schema tool. A passthrough `tool_choice` keeps
+        // precedence, as it did when the schema tool was set before the
+        // passthrough; a passthrough `tools` array that holds the schema tool
+        // is sent as given.
+        if (!customToolsOverride) payload.tools = [{ name: schemaMarker.name, input_schema: schemaMarker.input_schema }];
+        if (!customToolChoiceOverride) payload.tool_choice = { type: 'tool', name: schemaMarker.name };
+      } else {
+        const reason =
+          promptOnlyReason ??
+          (!modelSupportsJsonOutputs(wireModelId)
+            ? 'the model has neither the JSON output format nor a forced tool choice'
+            : 'the schema is outside the limits of the JSON output format (a record, a $ref or oneOf, an untyped node, ' +
+              'or more union-typed or optional properties than it takes, a strict tool beside it counted), and the model ' +
+              'refuses a forced tool choice');
+        const text = schemaPromptText(schemaMarker.input_schema);
+        if (customSystemOverride) {
+          appendSchemaSystemBlock(payload, text);
+        } else {
+          // The provider's own system blocks take the schema block, so the
+          // auto-cache below, which re-emits them as a block array to place
+          // its marker, sends it too.
+          systemBlocks.push({ type: 'text', text });
+          payload.system = systemBlocks.some((b) => b.cache_control)
+            ? systemBlocks
+            : systemBlocks.map((b) => b.text).join('\n\n');
+        }
+        warnOnce(
+          `structured-output-prompt-only:${wireModelId}:${reason}`,
+          `[agentos] AnthropicProvider: structured output for '${schemaMarker.name}' on model ${wireModelId} rides the ` +
+            `prompt alone: ${reason}. The schema was added to the system prompt; the caller's schema validates the answer.`,
+        );
+      }
+      if (
+        schemaRoute !== 'forced_tool' &&
+        payload.tool_choice !== undefined &&
+        !(Array.isArray(payload.tools) && payload.tools.length > 0)
+      ) {
+        // The format and prompt routes send no schema tool, so a passthrough
+        // tool_choice can be left with no tool on the wire; a choice with
+        // nothing to choose from says nothing, and it goes.
+        delete payload.tool_choice;
+      }
     }
 
     // --- Forced tool_choice reconciliation ---
@@ -1931,9 +2092,11 @@ export class AnthropicProvider implements IProvider {
     // letting the request 400. The model still chooses tools on 'auto' —
     // strongest with prescriptive tool descriptions — but forced tool use is no
     // longer guaranteed. Centralizing this means no caller has to special-case
-    // the thinking or Fable quirks. Catches the convertToolChoice path, the
-    // structured-output forced tool, AND a tool_choice injected via
-    // customModelParams (which is why this runs after the passthrough above).
+    // the thinking or Fable quirks. Catches the convertToolChoice path AND a
+    // tool_choice injected via customModelParams (which is why this runs after
+    // the passthrough above). The structured-output forced tool never reaches
+    // it: the schema route above sends the schema in the prompt where thinking
+    // is on or the model refuses a forced choice, rather than a clamped tool.
     {
       const tc = payload.tool_choice as { type?: string } | undefined;
       if (tc && (tc.type === 'any' || tc.type === 'tool')) {
@@ -2521,9 +2684,28 @@ export class AnthropicProvider implements IProvider {
       throw this.refusalError(pricedModelId, apiResponse.stop_details, fullText, usage);
     }
 
-    // Collect tool_use blocks and convert to OpenAI-style tool_calls
+    // Schema-driven structured output: when the request forced the schema
+    // tool, the matching tool_use block is the answer. Its input becomes the
+    // message's JSON text, which keeps result.text uniform with OpenAI's
+    // json_schema response for callers that read result.text directly, and
+    // the block leaves the tool calls: a tool loop (generateText's) would
+    // otherwise run it as a tool it does not have and ask the model again.
+    // A call the output limit stopped keeps the `length` stop below, so
+    // generateObject raises the budget when its JSON does not parse or
+    // validate; one cut mid-JSON arrives here as a text block holding its raw
+    // input (accumulateMessagesStream), which is then the answer's text.
+    const schemaToolBlock = structuredOutputName
+      ? apiResponse.content.find(
+          b => b.type === 'tool_use' && b.name === structuredOutputName && b.input !== undefined,
+        )
+      : undefined;
+    if (schemaToolBlock) {
+      fullText = JSON.stringify(schemaToolBlock.input);
+    }
+
+    // Collect the other tool_use blocks and convert to OpenAI-style tool_calls
     const toolCalls = apiResponse.content
-      .filter(block => block.type === 'tool_use')
+      .filter(block => block.type === 'tool_use' && block !== schemaToolBlock)
       .map(block => ({
         id: block.id!,
         type: 'function' as const,
@@ -2551,22 +2733,12 @@ export class AnthropicProvider implements IProvider {
       return [];
     });
 
-    // Schema-driven structured output: if the request set a forced tool
-    // for structured output, find the matching tool_use block and surface
-    // its input as JSON-string content. This keeps result.text uniform
-    // with OpenAI's json_schema response (text is valid JSON) for
-    // session.send callers that consume result.text directly.
-    if (structuredOutputName) {
-      const toolBlock = apiResponse.content.find(
-        b => b.type === 'tool_use' && b.name === structuredOutputName,
-      );
-      if (toolBlock?.input !== undefined) {
-        fullText = JSON.stringify(toolBlock.input);
-      }
-    }
-
     const hasToolCalls = toolCalls.length > 0;
-    const finishReason = this.mapStopReason(apiResponse.stop_reason);
+    // A tool_use stop whose only call was the schema answer finished the answer.
+    const finishReason =
+      schemaToolBlock && !hasToolCalls && apiResponse.stop_reason === 'tool_use'
+        ? 'stop'
+        : this.mapStopReason(apiResponse.stop_reason);
 
     const choice: ModelCompletionChoice = {
       index: 0,

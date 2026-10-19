@@ -33,6 +33,8 @@ import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.j
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
 import type { SeatInternals } from './runtime/pool/seating.js';
+import { isCallMask } from './runtime/pool/redact.js';
+import { maskStreamMembers } from './runtime/pool/maskedOutput.js';
 import type { HostLLMPolicy } from './runtime/hostPolicy.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
@@ -364,14 +366,15 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
   /**
    * Zod schema describing the expected shape of the assistant reply. When
    * present, agentos converts the schema to JSON Schema, routes through
-   * the provider's native structured-output API (OpenAI json_schema,
-   * Anthropic forced tool-use, Gemini responseSchema), and returns a
+   * the provider's native structured-output API (OpenAI json_schema;
+   * Anthropic's JSON output format, or a forced tool call for a schema
+   * the format cannot carry; Gemini responseSchema), and returns a
    * Zod-validated typed object on `result.object` alongside the JSON
    * string in `result.text`. A call whose provider payload carries no
-   * schema (a provider with none, an Anthropic model that rejects a
-   * forced tool choice, JSON-object mode) gets the schema in its system
-   * prompt, in the words `generateObject` uses; each fallback provider is
-   * checked for its own payload.
+   * schema (a provider with none, a record schema on an Anthropic model
+   * that refuses a forced tool choice, JSON-object mode) gets the schema
+   * in its system prompt, in the words `generateObject` uses; each
+   * fallback provider is checked for its own payload.
    *
    * The agent's tools are left out of a schema request, and with them the
    * chain-of-thought instruction; `runtime: 'legacy'` (the default) warns
@@ -668,13 +671,18 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
 /**
  * Passes every error that leaves a stream result through `mask`: thrown by
  * the iterables, carried by an error part, or rejecting any of the result's
- * promises. The result's other members are returned as they are.
+ * promises. With an agency's call mask, what the seat answers leaves masked
+ * too: its streamed text, a secret split between two pieces included, its
+ * other parts and every value its promises settle to
+ * ({@link maskStreamMembers}). With a bare error mask the result's other
+ * members are returned as they are.
  *
  * @param result - The stream result `streamText` returned for a seated config.
- * @param mask - The seat's error mask.
+ * @param mask - The seat's mask.
  * @returns A stream result with the same members, whose errors come out masked.
  */
 function maskStreamResult(result: StreamTextResult, mask: (error: unknown) => unknown): StreamTextResult {
+  if (isCallMask(mask)) return maskStreamMembers(result, mask);
   const wrapIterable = <T>(iterable: AsyncIterable<T>, mapPart: (part: T) => T): AsyncIterable<T> => ({
     async *[Symbol.asyncIterator]() {
       try {
@@ -1044,7 +1052,10 @@ export function agent(opts: AgentOptions): Agent {
             opts.verifyCitations,
           );
         }
-        return result;
+        // A seated config's answer leaves the seat masked, its text and tool
+        // calls included: the next seat, a synthesizer, a manager and the
+        // chair are sent only what came out of the mask.
+        return isCallMask(maskError) ? maskError.strings(result) : result;
       } catch (error) {
         // A seated config's error leaves the seat masked.
         throw maskError ? maskError(error) : error;
@@ -1168,8 +1179,9 @@ export function agent(opts: AgentOptions): Agent {
           // Schema-aware calls disable tools. Mixing native structured
           // output with tool-calling requires a multi-turn schema+tool
           // protocol that this overload doesn't speak. Anthropic's
-          // forced tool-use mode reserves the tool slot for the schema
-          // tool, and OpenAI's json_schema mode forbids tools alongside.
+          // forced schema tool (a schema its JSON output format cannot
+          // carry) reserves the tool slot, and OpenAI's json_schema mode
+          // forbids tools alongside.
           // Strip caller-provided tools when responseSchema is set;
           // surface a console.warn so the caller can adjust if they
           // meant to pass both. (toolChoice is not part of

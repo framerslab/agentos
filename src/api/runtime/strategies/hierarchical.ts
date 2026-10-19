@@ -39,6 +39,7 @@ import type {
 import type { ToolDefinitionMap } from '../toolAdapter.js';
 import { AgencyConfigError } from '../types.js';
 import {
+  isAgent,
   seatMetadataOf,
   resolveAgent,
   checkBeforeAgentInput,
@@ -46,7 +47,11 @@ import {
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
+  ownAgentInternals,
+  nestedRunUnanswered,
 } from './shared.js';
+import { isCallMask } from '../pool/redact.js';
+import { resolveSeatCredentials } from '../pool/resolve.js';
 
 type StrategyTotalUsage = {
   promptTokens: number;
@@ -168,9 +173,10 @@ function refusal(reason: string): { success: false; output: string; error: strin
  * the delegate's text, a spawn's outcome and a refusal's reason.
  *
  * With `mask` (a pooled agency's call mask), what a tool returns reaches the
- * manager's provider masked: a delegate's error, whether the delegate is a
- * roster config, a pre-built agent or a spawned specialist, and every text
- * the spawn tool returns.
+ * manager's provider masked: a delegate's answer and its error, whether the
+ * delegate is a roster config, a pre-built agent or a spawned specialist, and
+ * every text the spawn tool returns. A spawned specialist and the judge run as
+ * a seat does ({@link ownAgentInternals}).
  *
  * @internal Exported so tests can drive the spawn_specialist tool directly
  *   without spinning up a manager LLM.
@@ -187,6 +193,11 @@ export function buildHierarchicalTools(
     const masked = mask(text);
     return typeof masked === 'string' ? masked : text;
   };
+  // A delegate's answer through the mask's listed values, which leave the
+  // URLs a reply quotes as they are.
+  const answer = (text: string): string => (isCallMask(mask) ? mask.text(text) : say(text));
+  // A spawned specialist resolves its keys and masks what it answers as a seated delegate does.
+  const internals = ownAgentInternals(mask);
   const roster: Record<string, BaseAgentConfig | Agent> = { ...initialRoster };
   const tools: ToolDefinitionMap = {};
   const agentCalls: AgentCallRecord[] = [];
@@ -220,7 +231,9 @@ export function buildHierarchicalTools(
           return refusal(`Agent "${name}" execution was rejected by HITL.`);
         }
 
-        const a = resolveAgent(agentOrConfig, agencyConfig);
+        // A roster config is seated already; a specialist the forge built is
+        // given the call's strict rule and mask here.
+        const a = resolveAgent(isAgent(agentOrConfig) ? agentOrConfig : { ...agentOrConfig, ...internals }, agencyConfig);
 
         const effectiveTask = gate.input;
 
@@ -235,8 +248,15 @@ export function buildHierarchicalTools(
           throw mask ? mask(err) : err;
         }
         const durationMs = Date.now() - start;
+        // A nested agency that no seat of its own answered gave no answer, as a
+        // rejected delegate gives none: the manager is told so, and no record
+        // is kept.
+        if (nestedRunUnanswered(result)) {
+          return refusal(`Agent "${name}" gave no answer: no seat of its own answered.`);
+        }
 
-        const resultText = (result.text as string) ?? '';
+        // The answer the manager's provider is sent, and the call record keeps.
+        const resultText = answer((result.text as string) ?? '');
         const resultUsage = (result.usage as ResultUsageSnapshot) ?? {};
         const resultToolCalls =
           (result.toolCalls as Array<{
@@ -382,11 +402,24 @@ export function buildHierarchicalTools(
           const { generateText } = await import('../../generateText.js');
           const judge = new EmergentAgentJudge({
             judgeModel,
+            // The judge's provider, model, key and URL resolve as a fixed
+            // seat's do: its own provider (a small model's, else the
+            // agency's), the agency-level key and URL only on the agency's own
+            // provider, as the manager carries them, else a default that names
+            // the provider, else its variable. In an agency with a pool the
+            // call is strict too: never a default that names no provider.
+            // Without a pool the variables are left to generateText, whose
+            // usual order reads a nameless default ahead of them, as the
+            // manager's and the specialists' calls do.
             generateText: async (model, prompt) => {
+              const provider = judgeProviderFor(judgeModel) ?? agencyConfig.provider;
+              const resolved = resolveSeatCredentials({ provider, model, inherits: true, variables: internals.__strictCredentials === true }, agencyConfig);
               const r = await generateText({
-                model,
-                provider: judgeProviderFor(judgeModel) ?? agencyConfig.provider,
+                ...(resolved.ok
+                  ? { provider: resolved.value.provider, model: resolved.value.model, apiKey: resolved.value.apiKey, baseUrl: resolved.value.baseUrl }
+                  : { provider, model }),
                 prompt,
+                ...internals,
               });
               return r.text ?? '';
             },
@@ -444,8 +477,10 @@ export function buildHierarchicalTools(
  * @param agents - Named roster of agent configs or pre-built `Agent` instances.
  * @param agencyConfig - Agency-level configuration; must include `model` or `provider`
  *   for the manager agent.
- * @param mask - The call's error mask in a pooled agency; the delegate and
- *   spawn tools pass what they return to the manager through it.
+ * @param mask - The call's mask in a pooled agency: the delegate and spawn
+ *   tools pass what they return to the manager through it, and the manager
+ *   runs as a seat does ({@link ownAgentInternals}), so an agency-level tool's
+ *   error reaches its next request masked.
  * @returns A {@link CompiledStrategy} with `execute` and `stream` methods.
  * @throws {AgencyConfigError} When no agency-level model/provider is available
  *   for the manager agent.
@@ -494,9 +529,14 @@ export function compileHierarchical(
         `Use the delegate_to_<name> tools to assign work. Synthesize their outputs into a final answer.` +
         (agencyConfig.instructions ? `\n\n${agencyConfig.instructions}` : '');
 
-      // Merge agency-level tools with the delegation tools. Agency tools
-      // (e.g. shared search, calculator) are available alongside delegation.
+      // The agency's tools (a shared search, a calculator) join the
+      // delegation table itself, a delegate winning a name clash, and the
+      // manager is given that table, not a copy: spawn_specialist writes
+      // delegate_to_<role> into it mid-run, and the manager's next step reads
+      // the table again, so a copy taken here would hide every spawned
+      // specialist from the manager.
       const mergedTools = mergeAdaptableTools(agencyConfig.tools, agentTools);
+      if (mergedTools) Object.assign(agentTools, mergedTools);
 
       const manager = createAgent({
         model: agencyConfig.model,
@@ -504,10 +544,11 @@ export function compileHierarchical(
         apiKey: agencyConfig.apiKey,
         baseUrl: agencyConfig.baseUrl,
         instructions: managerInstructions,
-        tools: mergedTools,
+        tools: mergedTools ? agentTools : undefined,
         // Higher maxSteps than default because the manager needs room to
         // call multiple delegation tools before synthesizing.
         maxSteps: agencyConfig.maxSteps ?? 10,
+        ...ownAgentInternals(mask),
       });
 
       const result = (await manager.generate(prompt, opts)) as unknown as Record<string, unknown>;

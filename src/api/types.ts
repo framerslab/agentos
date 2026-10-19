@@ -998,10 +998,16 @@ export type AgencyTraceEvent =
 
 /**
  * Event callbacks registered on `BaseAgentConfig.on`. Each returns `void`.
- * Most are called directly, so an error thrown inside one propagates into
- * the run: an `agentStart` callback that throws ends the call with its
- * error. The callbacks of a `beforeTool` approval and the `guardrailResult`
- * calls catch the error and log a warning instead.
+ * An agency runs every one inside a try/catch, whichever part of a run fires
+ * it (the agency, its strategy, a tool approval or a HITL check): a callback
+ * that throws, or an async one whose promise rejects, is written through the
+ * host's logger as `agency_callback_threw` (in an agency with a pool or a
+ * panel, with every key the agency can send masked in its message), and never
+ * fails the call, changes what it returns or leaves a rejection unhandled. An
+ * agency reads each one from the `on` object when the run fires it, and none
+ * when it is built, so a callback set, replaced or deleted there after
+ * `agency()` returns is the one that runs, and a getter there that throws is
+ * written as a callback that throws is, at its event.
  */
 export interface AgencyCallbacks {
   /** Called immediately before an agent starts. */
@@ -1958,7 +1964,7 @@ export class AgencyQuorumError extends Error implements PanelLedger {
 
 /** One model a seat can sit on. The record key is the entry's name. */
 export interface ModelPoolEntry {
-  /** One of the eleven text provider ids the provider manager builds, checked against its list and never against `PROVIDER_DEFAULTS`, which also holds media providers. */
+  /** One of the twelve text provider ids the provider manager builds and the resolver can resolve by name (every one but `litellm`), checked against that list and never against `PROVIDER_DEFAULTS`, which also holds media providers. */
   provider: string;
   /** A plain model id for that provider. A known `provider:` prefix is rejected. */
   model: string;
@@ -2122,7 +2128,10 @@ export interface AgencyInstance<R extends AgencyResult = AgencyResult> extends A
 }
 
 /**
- * Thrown when a panel's chair fails: it threw, timed out or returned no text.
+ * Thrown when a panel's chair fails: it threw, timed out or returned no text;
+ * and when the caller's abort lands after some seats answered and the quorum
+ * did not throw first (`panel aborted: <reason>`), with a chair or with
+ * `chair: false`.
  * Carries the ledger. `agency()` also throws it, with no ledger, for a panel
  * whose roster names a seat `'chair'`, the name the chair's record, approval
  * requests and callbacks carry.

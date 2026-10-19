@@ -17,6 +17,13 @@ import {
   resolveAnthropicModelEntry as resolveFromProvider,
 } from '../implementations/AnthropicProvider';
 import { anthropicModelPricing as fromRuntime, openAIModelPricing } from '../../../../safety/runtime';
+// Type-only: the price types a host's spend guard names, from the runtime index and the package root (tsc checks them).
+import type { AnthropicModelPrice, OpenAIModelPrice } from '../../../../safety/runtime';
+import type {
+  AnthropicModelPrice as RootAnthropicModelPrice,
+  OpenAIModelPrice as RootOpenAIModelPrice,
+  anthropicModelPricing as RootAnthropicModelPricing,
+} from '../../../../index';
 
 describe('anthropicModelPricing (prices for a host, USD per 1K tokens)', () => {
   it('prices Claude Sonnet 5.5 with its own cache-read rate', () => {
@@ -69,6 +76,18 @@ describe('anthropicModelPricing (prices for a host, USD per 1K tokens)', () => {
     expect(estimateFromProvider).toBe(estimateAnthropicCostUSD);
     expect(resolveFromProvider).toBe(resolveAnthropicModelEntry);
   });
+
+  it('names both price types where a host imports them: the runtime index and the package root', () => {
+    // The annotations are the assertion: the type check fails if either export goes missing.
+    const claude: AnthropicModelPrice | undefined = anthropicModelPricing('claude-sonnet-5-5');
+    const openai: OpenAIModelPrice | undefined = openAIModelPricing('gpt-4o');
+    const claudeAtRoot: RootAnthropicModelPrice | undefined = claude;
+    const openaiAtRoot: RootOpenAIModelPrice | undefined = openai;
+    const pricingAtRoot: typeof RootAnthropicModelPricing = fromRuntime;
+    expect(claudeAtRoot?.cacheRead).toBe(0.0001);
+    expect(openaiAtRoot?.input).toBeGreaterThan(0);
+    expect(pricingAtRoot).toBe(anthropicModelPricing);
+  });
 });
 
 describe('estimateAnthropicCostUSD with a long-context tier', () => {
@@ -77,6 +96,19 @@ describe('estimateAnthropicCostUSD with a long-context tier', () => {
     expect(estimateAnthropicCostUSD('claude-haiku-5-5', { input_tokens: 200000, output_tokens: 1000 })).toBeCloseTo(0.1025, 9);
     // 50,000 input at $0.10/M + 1,000 output at $0.50/M.
     expect(estimateAnthropicCostUSD('claude-haiku-5-5', { input_tokens: 50000, output_tokens: 1000 })).toBeCloseTo(0.0055, 9);
+  });
+
+  it('bills a prompt of exactly 100,000 tokens at the base rates: the tier starts beyond it', () => {
+    // The pricing page's "up to 100K" and "beyond": 100,000 at $0.10/M + 1 output at $0.50/M.
+    expect(estimateAnthropicCostUSD('claude-haiku-5-5', { input_tokens: 100000, output_tokens: 1 })).toBeCloseTo(
+      (100000 * 0.1 + 1 * 0.5) / 1e6,
+      12,
+    );
+    // One token more is the long tier: 100,001 at $0.50/M + 1 output at $2.50/M.
+    expect(estimateAnthropicCostUSD('claude-haiku-5-5', { input_tokens: 100001, output_tokens: 1 })).toBeCloseTo(
+      (100001 * 0.5 + 1 * 2.5) / 1e6,
+      12,
+    );
   });
 
   it('counts cached tokens toward the prompt size that picks the tier, and reads them at the tier rate', () => {

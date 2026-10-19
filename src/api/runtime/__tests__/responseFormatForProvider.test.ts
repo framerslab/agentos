@@ -63,10 +63,16 @@ describe('buildResponseFormatForProvider', () => {
     ).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
   });
 
-  it('anthropic + Sonnet 5.5 + record schema -> undefined (the format cannot carry it; the schema rides the prompt)', () => {
+  it('anthropic + Sonnet 5.5 + record schema -> undefined (the format cannot carry it and the model refuses a forced tool; the schema rides the prompt)', () => {
     expect(
       buildResponseFormatForProvider(inputs('anthropic', 'claude-sonnet-5-5', recordSchema)),
     ).toBeUndefined();
+  });
+
+  it('anthropic + Sonnet 4.6 + record schema -> marker with route forced_tool (the non-strict forced tool it gets today)', () => {
+    expect(
+      buildResponseFormatForProvider(inputs('anthropic', 'claude-sonnet-4-6', recordSchema)),
+    ).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'forced_tool', tool: { name: 'testSchema' } });
   });
 
   it('anthropic + Claude Sonnet 4 (May 2025) -> marker with route forced_tool', () => {
@@ -75,12 +81,15 @@ describe('buildResponseFormatForProvider', () => {
     ).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'forced_tool', tool: { name: 'testSchema' } });
   });
 
-  it('anthropic + empty modelId (default-model fallback entry) -> routed by the schema alone', () => {
+  it('anthropic + empty modelId (default-model fallback entry) -> routed by the schema: the format, else the forced tool', () => {
     expect(buildResponseFormatForProvider(inputs('anthropic', '', plainSchema))).toMatchObject({
       _agentosUseToolForStructuredOutput: true,
       route: 'json_schema',
     });
-    expect(buildResponseFormatForProvider(inputs('anthropic', '', recordSchema))).toBeUndefined();
+    expect(buildResponseFormatForProvider(inputs('anthropic', '', recordSchema))).toMatchObject({
+      _agentosUseToolForStructuredOutput: true,
+      route: 'forced_tool',
+    });
   });
 
   it('gemini -> _gemini responseSchema payload', () => {

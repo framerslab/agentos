@@ -430,15 +430,37 @@ describe('modelSupportsJsonOutputs and anthropicSchemaRoute (the JSON output for
     expect(anthropicSchemaRoute('claude-opus-4-20250514', plain)).toBe('forced_tool');
   });
 
-  it('routes a schema the format cannot carry on a current model to none, never to a forced tool', () => {
-    expect(anthropicSchemaRoute('claude-sonnet-5-5', record)).toBe('none');
-    expect(anthropicSchemaRoute('claude-opus-5', record)).toBe('none');
-    expect(anthropicSchemaRoute('claude-haiku-5-5', { type: 'object', properties: { any: {} } })).toBe('none');
+  it('routes a schema the format cannot carry to the prompt on a model that refuses a forced choice', () => {
+    for (const id of ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1']) {
+      expect(anthropicSchemaRoute(id, record)).toBe('none');
+    }
   });
 
-  it('routes an empty model id by the schema alone', () => {
+  it('routes a schema the format cannot carry to the non-strict forced tool on every model that accepts a forced choice', () => {
+    // The route the repository built for such schemas, unclamped unless the request turns thinking on (the
+    // provider decides that on its payload). Claude Sonnet 4.6 is the provider's default text model.
+    for (const id of ['claude-sonnet-4-6', 'claude-opus-4-8', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-5-5']) {
+      expect(anthropicSchemaRoute(id, record)).toBe('forced_tool');
+    }
+    expect(anthropicSchemaRoute('claude-haiku-5-5', { type: 'object', properties: { any: {} } })).toBe('forced_tool');
+  });
+
+  it('routes an empty model id by the schema: the format when it carries it, else the forced tool', () => {
     expect(anthropicSchemaRoute('', plain)).toBe('json_schema');
-    expect(anthropicSchemaRoute('', record)).toBe('none');
+    expect(anthropicSchemaRoute('', record)).toBe('forced_tool');
+  });
+
+  it('counts the strict tools beside the format toward its union-typed limit (live-probed 2026-10-19: 10 and 10 answered 400)', () => {
+    const unionsOf = (n: number) => {
+      const properties = Object.fromEntries(Array.from({ length: n }, (_, i) => [`u${i}`, { type: ['string', 'null'] }]));
+      return { type: 'object', properties, required: Object.keys(properties) };
+    };
+    // Each schema alone is within the limit of 16; together they are 20.
+    expect(anthropicSchemaRoute('claude-haiku-5-5', unionsOf(10))).toBe('json_schema');
+    expect(anthropicSchemaRoute('claude-haiku-5-5', unionsOf(10), [unionsOf(10)])).toBe('forced_tool');
+    expect(anthropicSchemaRoute('claude-opus-5-5', unionsOf(10), [unionsOf(10)])).toBe('none');
+    // 8 and 8 are 16, the limit itself.
+    expect(anthropicSchemaRoute('claude-opus-5-5', unionsOf(8), [unionsOf(8)])).toBe('json_schema');
   });
 });
 
@@ -470,6 +492,15 @@ describe('jsonOutputSchemaSupported', () => {
   it('refuses a record and an untyped node, as the strict gate does (a lowered z.lazy is such a node)', () => {
     expect(jsonOutputSchemaSupported({ type: 'object', properties: { m: { type: 'object', additionalProperties: { type: 'string' } } } })).toBe(false);
     expect(jsonOutputSchemaSupported({ type: 'object', properties: { any: {} } })).toBe(false);
+  });
+
+  it('sums the optional parameters of the strict tools beside it with its own, against the limit of 24', () => {
+    const optionalOf = (n: number) => ({
+      type: 'object',
+      properties: Object.fromEntries(Array.from({ length: n }, (_, i) => [`o${i}`, { type: 'string' }])),
+    });
+    expect(jsonOutputSchemaSupported(optionalOf(12), [optionalOf(12)])).toBe(true);
+    expect(jsonOutputSchemaSupported(optionalOf(12), [optionalOf(13)])).toBe(false);
   });
 });
 

@@ -40,6 +40,8 @@ import {
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
+  nestedRunUnanswered,
+  nestedStreamUnanswered,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -107,6 +109,10 @@ export function compileSequential(
         const start = Date.now();
         const result = (await a.generate(effectiveContext, opts)) as Record<string, unknown>;
         const durationMs = Date.now() - start;
+        // A nested agency that no seat of its own answered gave no answer, as
+        // a rejected agent gives none: it adds no record, and the next agent's
+        // input and the run's text stay as they were.
+        if (nestedRunUnanswered(result)) continue;
 
         const resultText = (result.text as string) ?? '';
         const resultUsage = (result.usage as {
@@ -200,6 +206,8 @@ export function compileSequential(
           let recordExtras: ReturnType<typeof callRecordExtras>;
           // The error the seat's stream ended on, when it reported one as a part.
           let seatError: Error | undefined;
+          // A nested agency that no seat of its own answered, as under execute().
+          let unanswered = false;
           try {
             const agentStream = a.stream(effectivePrompt, opts) as {
               textStream?: AsyncIterable<string>;
@@ -218,6 +226,7 @@ export function compileSequential(
               model?: Promise<string>;
               finishReason?: Promise<string>;
               fallback?: Promise<FallbackSignal | undefined>;
+              agentCalls?: Promise<unknown>;
             } | null;
 
             if (agentStream?.textStream) {
@@ -263,6 +272,7 @@ export function compileSequential(
                 finishReason: streamFinish,
                 fallback: streamFallback,
               });
+              unanswered = await nestedStreamUnanswered(agentStream, agentText, resultUsage, streamFinish);
             } else {
               // Fallback: non-streaming generate() call.
               const result = (await a.generate(effectivePrompt, opts)) as Record<string, unknown>;
@@ -273,22 +283,25 @@ export function compileSequential(
               resultUsage = (result.usage as typeof resultUsage) ?? {};
               resultToolCalls = (result.toolCalls as Array<{ name: string; args: unknown; result?: unknown; error?: string }>) ?? [];
               recordExtras = callRecordExtras(result);
+              unanswered = nestedRunUnanswered(result);
             }
 
-            agentCalls.push({
-              agent: name,
-              input: currentPrompt,
-              output: agentText,
-              toolCalls: resultToolCalls,
-              usage: buildAgentCallUsage(resultUsage),
-              durationMs: Date.now() - agentStart,
-              ...recordExtras,
-            });
+            if (!unanswered) {
+              agentCalls.push({
+                agent: name,
+                input: currentPrompt,
+                output: agentText,
+                toolCalls: resultToolCalls,
+                usage: buildAgentCallUsage(resultUsage),
+                durationMs: Date.now() - agentStart,
+                ...recordExtras,
+              });
 
-            totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
-            totalUsage.completionTokens += resultUsage.completionTokens ?? 0;
-            totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
-            accumulateExtraUsage(totalUsage, resultUsage);
+              totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
+              totalUsage.completionTokens += resultUsage.completionTokens ?? 0;
+              totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
+              accumulateExtraUsage(totalUsage, resultUsage);
+            }
 
             // A seat whose stream ended on an error: the error is a part of
             // this stream too, and the run goes on to the next seat, as it
@@ -303,6 +316,7 @@ export function compileSequential(
 
           const durationMs = Date.now() - agentStart;
           yield { type: 'agent-end' as const, agent: name, output: agentText, durationMs };
+          if (unanswered) continue;
 
           finalText = agentText;
           currentPrompt = `Original task: ${prompt}\n\nPrevious agent (${name}) output:\n${agentText}`;
