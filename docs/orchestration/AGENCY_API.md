@@ -485,7 +485,12 @@ distinct providers one assignment of the seats can answer with (each seat one
 provider of its own reach, so a seat that reaches three providers beside two
 seats on one makes two, not three; one more per pre-built seat), a
 `minVendors` above the vendors the config seats can answer with the same way,
-and `minVendors` with a pool entry whose vendor is unknown. A pool entry, a
+a `minProviders` and a `minVendors` that no one assignment meets together
+(both are counted over the same answers, so seat a on OpenRouter for Meta or
+on Together for Mistral, beside seat b on OpenRouter for Mistral or on
+Together for Meta, gives two providers or two vendors in a run, never both; a
+pre-built seat may add a provider, never a vendor), and `minVendors` with a
+pool entry whose vendor is unknown. A pool entry, a
 fixed seat and a fixed seat's hop are within reach only when their key, URL or
 binary is present at construction, since seating leaves the rest out at the
 call: a fixed seat with no key of its own adds nothing, its keyed hops

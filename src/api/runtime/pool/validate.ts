@@ -144,6 +144,8 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
   // Each config seat's providers and vendors within reach: a seat answers once, with one of each.
   const seatProviders: Array<Set<string>> = [];
   const seatVendors: Array<Set<string>> = [];
+  // And the answers themselves: each pairs a provider with the vendor answering there, so the two floors can be read together.
+  const seatAnswers: SeatAnswer[][] = [];
   for (const [name, seat] of configSeats) {
     const pooled = isPooledSeat(seat, opts);
     if (seat.from !== undefined) {
@@ -171,6 +173,7 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       if (!resolved.ok) fail(`seat "${name}": ${resolved.reason}`);
       const providers = new Set<string>();
       const vendors = new Set<string>();
+      const answers: SeatAnswer[] = [];
       const v = vendorOf(resolved.value.provider, resolved.value.model, { vendor: seat.vendor, baseUrl: resolved.value.baseUrl });
       if (!v && opts.quorum?.minVendors !== undefined) fail(`seat "${name}": its vendor is unknown; declare vendor on the seat or drop quorum.minVendors`);
       const unmet = availabilityOf(resolved.value, ruleOnly);
@@ -180,6 +183,7 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
         providers.add(resolved.value.provider);
         reachableProviders.add(resolved.value.provider);
         if (v) vendors.add(v);
+        answers.push({ provider: resolved.value.provider, vendor: v });
         // A hop of the seat's own chain can answer for it, and the record then names the hop's provider and vendor.
         // Only a hop seating keeps counts: one whose key, URL or binary is unmet is dropped for the call and answers
         // nothing. Named as seating's record names it.
@@ -196,15 +200,18 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
           reachableProviders.add(hopResolved.value.provider);
           const hopVendor = vendorOf(hopResolved.value.provider, hopResolved.value.model, { vendor: hop.vendor, baseUrl: hopResolved.value.baseUrl });
           if (hopVendor) vendors.add(hopVendor);
+          answers.push({ provider: hopResolved.value.provider, vendor: hopVendor });
         });
       }
       vendors.forEach((vendor) => reachableVendors.add(vendor));
       seatProviders.push(providers);
       seatVendors.push(vendors);
+      seatAnswers.push(answers);
     } else if (pooled) {
       const candidates = seat.from ?? Object.keys(pool!);
       const providers = new Set<string>();
       const vendors = new Set<string>();
+      const answers: SeatAnswer[] = [];
       for (const c of candidates) {
         const v = entryVendor.get(c);
         if (!v && opts.quorum?.minVendors !== undefined) fail(`modelPool entry "${c}": its vendor is unknown; declare vendor on the entry or drop quorum.minVendors`);
@@ -213,10 +220,12 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
         providers.add(pool![c].provider);
         reachableProviders.add(pool![c].provider);
         if (v) vendors.add(v);
+        answers.push({ provider: pool![c].provider, vendor: v });
       }
       vendors.forEach((vendor) => reachableVendors.add(vendor));
       seatProviders.push(providers);
       seatVendors.push(vendors);
+      seatAnswers.push(answers);
     }
   }
   // Named in a bound's message, so a quorum the environment leaves out of reach says what is missing.
@@ -262,7 +271,29 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       `(${seats.length} seat(s); ${reachableProviders.size} provider(s) within the config seats' reach, plus the ${prebuiltSeats} pre-built seat(s))${leftOutNote}`,
     );
   }
+  // The panel counts both floors over the same answers, one per healthy seat, so each bound above can hold on an
+  // assignment of its own while no one assignment meets both: seat a on OpenRouter for Meta or on Together for Mistral,
+  // beside seat b on OpenRouter for Mistral or on Together for Meta, gives two providers or two vendors, never both.
+  // A pre-built seat may add a provider, never a vendor.
+  const minVendors = opts.quorum?.minVendors;
+  if (isPanel && minProviders !== undefined && minVendors !== undefined) {
+    const needProviders = Math.max(0, minProviders - prebuiltSeats);
+    if (!bothAtOnce(seatAnswers, needProviders, minVendors)) {
+      const beside = prebuiltSeats > 0 ? ` beside the ${prebuiltSeats} pre-built seat(s)` : '';
+      fail(
+        `quorum.minProviders (${minProviders}) and quorum.minVendors (${minVendors}) cannot both be met in one run: no assignment of one answer ` +
+        `per config seat (a pool entry, or a fixed seat's own model or one of its hops) gives ${needProviders} distinct provider(s)${beside} ` +
+        `and ${minVendors} distinct vendor(s) at once, though each floor alone is within reach${leftOutNote}`,
+      );
+    }
+  }
   if (pool && strategy === 'hierarchical' && !opts.model && !opts.provider) fail('Hierarchical strategy requires an agency-level model or provider for the manager agent.');
+}
+
+/** One way a config seat can answer: the provider its record then names, and that answer's vendor when it is known. */
+interface SeatAnswer {
+  provider: string;
+  vendor?: string;
 }
 
 /**
@@ -291,4 +322,58 @@ function distinctAtOnce(options: ReadonlyArray<ReadonlySet<string>>): number {
   let matched = 0;
   for (let seat = 0; seat < options.length; seat += 1) if (assign(seat, new Set())) matched += 1;
   return matched;
+}
+
+/**
+ * Whether one assignment of the seats, each answering once with one of its
+ * own answers, gives `needProviders` distinct providers and `needVendors`
+ * distinct vendors at once, as the panel counts both floors over the same
+ * answers. The two matchings of {@link distinctAtOnce} can each reach a floor
+ * on assignments that differ, and then no run meets both.
+ *
+ * A depth-first search over the seats. A branch ends where the seats still to
+ * place cannot close a gap (a matching each, over the values not yet held);
+ * once one floor is met, the other is a matching of the seats still to place;
+ * and a state found to fail is not searched again. The general question is a
+ * three-dimensional matching, so the search stops after `budget` steps and
+ * answers true: what it cannot decide is left to each run's quorum check.
+ *
+ * @param answers - For each config seat, the answers within its reach; a seat with none adds nothing.
+ * @param needProviders - The distinct providers the config seats must give.
+ * @param needVendors - The distinct known vendors the config seats must give.
+ * @param budget - The steps the search may take.
+ * @returns False only when no assignment gives both.
+ */
+function bothAtOnce(answers: ReadonlyArray<ReadonlyArray<SeatAnswer>>, needProviders: number, needVendors: number, budget = 10_000): boolean {
+  const seats = answers.filter((own) => own.length > 0);
+  // The most values not in `held` the seats from `from` on can add at once, each seat one value of its own.
+  const reach = (from: number, held: ReadonlySet<string>, valueOf: (answer: SeatAnswer) => string | undefined): number =>
+    distinctAtOnce(seats.slice(from).map((own) => new Set(own.map(valueOf).filter((v): v is string => v !== undefined && !held.has(v)))));
+  const failed = new Set<string>();
+  let steps = 0;
+  const search = (i: number, providers: ReadonlySet<string>, vendors: ReadonlySet<string>): boolean => {
+    const needP = needProviders - providers.size;
+    const needV = needVendors - vendors.size;
+    if (needP <= 0 && needV <= 0) return true;
+    steps += 1;
+    if (steps > budget) return true;
+    if (needP <= 0) return reach(i, vendors, (a) => a.vendor) >= needV;
+    if (needV <= 0) return reach(i, providers, (a) => a.provider) >= needP;
+    if (reach(i, providers, (a) => a.provider) < needP || reach(i, vendors, (a) => a.vendor) < needV) return false;
+    const state = JSON.stringify([i, [...providers].sort(), [...vendors].sort()]);
+    if (failed.has(state)) return false;
+    const tried = new Set<string>();
+    for (const answer of seats[i]) {
+      const p = providers.has(answer.provider) ? undefined : answer.provider;
+      const v = answer.vendor === undefined || vendors.has(answer.vendor) ? undefined : answer.vendor;
+      // Answers that add the same values lead to the same state.
+      const adds = JSON.stringify([p ?? null, v ?? null]);
+      if (tried.has(adds)) continue;
+      tried.add(adds);
+      if (search(i + 1, p === undefined ? providers : new Set(providers).add(p), v === undefined ? vendors : new Set(vendors).add(v))) return true;
+    }
+    failed.add(state);
+    return false;
+  };
+  return search(0, new Set(), new Set());
 }
