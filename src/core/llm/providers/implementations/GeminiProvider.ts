@@ -68,7 +68,7 @@ export interface GeminiProviderConfig {
    * default; `AGENTOS_KEY_POOL_STRATEGY=ordered` changes it when this is
    * absent); `store` and `id` persist the keys' standing across restarts.
    */
-  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'store' | 'id'>;
+  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'loadTimeoutMs' | 'storeTimeoutMs' | 'store' | 'id'>;
   /**
    * Base URL for the Gemini API.
    * @default "https://generativelanguage.googleapis.com/v1beta"

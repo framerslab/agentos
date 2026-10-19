@@ -9,11 +9,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
-import { createProviderManager, resolveProvider } from '../model.js';
+import { cachedProviderManagerCount, createProviderManager, resolveProvider, shutdownProviderManagers } from '../model.js';
 import { getKeyPoolDefaults, setKeyPoolDefaults } from '../keyPoolDefaults.js';
 import { InMemoryKeyPoolStateStore } from '../../core/providers/KeyPoolStateStore.js';
 
 const modelList = () => new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+const okChat = { id: 'c1', object: 'chat.completion', created: 1, model: 'gpt-4o', choices: [{ index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } };
+const invalidKey = { error: { message: 'Incorrect API key provided.', type: 'invalid_request_error', param: null, code: 'invalid_api_key' } };
+
+/** The key a request carried in its Authorization header. */
+const keyOf = (init?: RequestInit) => new Headers(init?.headers).get('authorization')?.replace(/^Bearer /, '') ?? '';
 
 describe('key pool defaults on the generateText path', () => {
   beforeEach(() => {
@@ -21,9 +27,35 @@ describe('key pool defaults on the generateText path', () => {
     fetchMock.mockImplementation(async () => modelList());
     vi.unstubAllEnvs();
   });
-  afterEach(() => {
+  afterEach(async () => {
+    await shutdownProviderManagers();
     setKeyPoolDefaults(null);
     vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  it("shutdownProviderManagers() writes the pools' pending state at once, so a short-lived host keeps a key's standing", async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.stubEnv('OPENAI_API_KEY', 'sk_pooltest_gamma_0007,sk_pooltest_delta_0008');
+    const store = new InMemoryKeyPoolStateStore();
+    setKeyPoolDefaults({ strategy: 'ordered', store });
+    const manager = await createProviderManager(resolveProvider('openai', 'gpt-4o'));
+    const provider = manager.getProvider('openai')!;
+    // The first key is refused and the request moves to the second; the first key's failure is saved a quarter of a
+    // second later, which a host that exits now would lose.
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => (keyOf(init) === 'sk_pooltest_gamma_0007' ? json(invalidKey, 401) : json(okChat)));
+    const answer = await provider.generateCompletion('gpt-4o', [{ role: 'user', content: 'hi' }], {});
+    expect(answer.choices[0]?.message?.content).toBe('hi');
+    expect(await store.load('openai:OPENAI_API_KEY')).toBeNull();
+    await shutdownProviderManagers();
+    expect((await store.load('openai:OPENAI_API_KEY'))?.map((row) => row.status)).toEqual(['failed']);
+    expect(cachedProviderManagerCount()).toBe(0);
+    // The next call builds a new manager as the first call did.
+    fetchMock.mockImplementation(async () => modelList());
+    const again = await createProviderManager(resolveProvider('openai', 'gpt-4o'));
+    expect(again).not.toBe(manager);
+    log.mockRestore();
   });
 
   it('names the pool after the environment variable and forwards the defaults into the provider', async () => {

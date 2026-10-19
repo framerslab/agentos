@@ -615,6 +615,32 @@ export function cachedProviderManagerCount(): number {
 }
 
 /**
+ * Shuts down every provider manager {@link createProviderManager} has cached
+ * and empties the cache. Each provider's `shutdown()` closes its key pool,
+ * which stops the pool's recheck timer and writes the keys' standing at once,
+ * so a short-lived host (a CLI, a job) that calls this before it exits keeps
+ * the last quarter second of key state its pools would otherwise lose to the
+ * save debounce. A manager still initializing is awaited first; one whose
+ * initialization failed is skipped. Calls after this one build new managers
+ * as the first call did.
+ */
+export async function shutdownProviderManagers(): Promise<void> {
+  const pending = Array.from(managerCache.values());
+  managerCache.clear();
+  await Promise.all(
+    pending.map(async (initializing) => {
+      let manager: AIModelProviderManager;
+      try {
+        manager = await initializing;
+      } catch {
+        return;
+      }
+      await manager.shutdown().catch(() => undefined);
+    }),
+  );
+}
+
+/**
  * Thrown by {@link createProviderManager} when the requested provider did not
  * initialize: a rejected or revoked API key (the provider's model listing
  * answers 401), an unreachable endpoint, or a provider id the manager does

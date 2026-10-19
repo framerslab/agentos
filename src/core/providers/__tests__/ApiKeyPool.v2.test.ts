@@ -344,6 +344,73 @@ describe('ApiKeyPool v2', () => {
       expect(await store.load('')).toBeNull();
     });
 
+    it('a load that does not answer within loadTimeoutMs leaves a fresh state and logs once; a late answer changes nothing', async () => {
+      const { logger, lines } = recordingLogger();
+      let answer: (rows: KeyState[] | null) => void = () => undefined;
+      const store = {
+        load: vi.fn(() => new Promise<KeyState[] | null>((resolve) => {
+          answer = resolve;
+        })),
+        save: vi.fn(async () => undefined),
+      };
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:slow', store, logger, loadTimeoutMs: 1000 });
+      let ready = false;
+      const readying = pool.ready().then(() => {
+        ready = true;
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(ready).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      await readying;
+      expect(pool.snapshot().map((s) => s.status)).toEqual(['ok', 'ok']);
+      const failed = lines.filter((l) => l.event === 'key_pool.store_failed');
+      expect(failed).toHaveLength(1);
+      expect(failed[0].meta).toMatchObject({ op: 'load', reason: 'timeout' });
+      answer([{ fingerprint: keyFingerprint('sk_alpha_0001'), label: 'k00001', status: 'failed', kind: 'auth', failures: 1, updatedAt: Date.now() + 5000, version: 1 }]);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(pool.snapshot()[0].status).toBe('ok');
+      expect(lines.filter((l) => l.event === 'key_pool.store_failed')).toHaveLength(1);
+    });
+
+    it('a store whose load throws before it returns a promise leaves a fresh state and logs once', async () => {
+      const { logger, lines } = recordingLogger();
+      const store = {
+        load: vi.fn((): Promise<KeyState[] | null> => {
+          throw new Error('not connected');
+        }),
+        save: vi.fn(async () => undefined),
+      };
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:sync', store, logger });
+      await pool.ready();
+      expect(pool.snapshot().map((s) => s.status)).toEqual(['ok', 'ok']);
+      expect(lines.filter((l) => l.event === 'key_pool.store_failed' && l.meta?.op === 'load')).toHaveLength(1);
+    });
+
+    it('flush() and close() wait at most storeTimeoutMs for the store and log once when it does not answer', async () => {
+      const { logger, lines } = recordingLogger();
+      const store = { load: vi.fn(async () => null), save: vi.fn(() => new Promise<void>(() => undefined)) };
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:hang', store, logger, storeTimeoutMs: 1000 });
+      await pool.ready();
+      pool.markFailed('sk_alpha_0001', 'auth');
+      let closed = false;
+      const closing = pool.close().then(() => {
+        closed = true;
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      await closing;
+      expect(store.save).toHaveBeenCalledTimes(1);
+      expect(lines.filter((l) => l.event === 'key_pool.store_failed' && l.meta?.reason === 'timeout')).toHaveLength(1);
+    });
+
+    it('refuses a load or store deadline that is not a positive number of milliseconds', () => {
+      for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => new ApiKeyPool('sk_a,sk_b', { loadTimeoutMs: bad })).toThrow(RangeError);
+        expect(() => new ApiKeyPool('sk_a,sk_b', { storeTimeoutMs: bad })).toThrow(RangeError);
+      }
+    });
+
     it('keeps a result recorded before the load lands: an old failed row does not undo a fresh success', async () => {
       let answer: (rows: KeyState[] | null) => void = () => undefined;
       const store = {

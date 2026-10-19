@@ -160,7 +160,7 @@ export interface AnthropicProviderConfig {
    * `store` and `id` persist the keys' standing across restarts. A key the
    * pool took out is probed off the request path before it returns.
    */
-  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'store' | 'id'>;
+  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'loadTimeoutMs' | 'storeTimeoutMs' | 'store' | 'id'>;
 }
 
 /** The kind of key failure an in-stream `error` event names, or null when it is not the key's fault. */

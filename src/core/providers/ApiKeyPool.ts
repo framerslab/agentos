@@ -55,6 +55,10 @@ export interface ApiKeyPoolConfig {
   maxRetryAfterMs?: number;
   /** How long a probe may run before it counts as `unknown`. Default: 10 seconds. */
   probeTimeoutMs?: number;
+  /** How long `ready()` waits for the store's load before it carries on with a fresh state. Default: 10 seconds. */
+  loadTimeoutMs?: number;
+  /** How long `flush()` and `close()` wait for the store's writes. Default: 5 seconds. */
+  storeTimeoutMs?: number;
   /** Probes a failed key off the request path, told the kind of its last failure; without one, failed keys return by time. */
   probe?: (key: string, kind: KeyFailureKind | undefined) => Promise<ProbeResult>;
   /** Persists the pool's state; used only with `id`. */
@@ -70,12 +74,17 @@ interface Entry {
   state: KeyState;
 }
 
+/** What a store call came to: its value, its rejection, or the deadline. */
+type StoreOutcome<T> = { outcome: 'ok'; value: T } | { outcome: 'error'; error: unknown } | { outcome: 'timeout' };
+
 const DEFAULT_COOLDOWN_MS = 15 * 60_000;
 const DEFAULT_PRIMARY_WEIGHT = 2;
 const DEFAULT_RECHECK_MS = 30 * 60_000;
 const DEFAULT_MAX_RECHECK_MS = 6 * 60 * 60_000;
 const DEFAULT_MAX_RETRY_AFTER_MS = 60 * 60_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
+const DEFAULT_LOAD_TIMEOUT_MS = 10_000;
+const DEFAULT_STORE_TIMEOUT_MS = 5_000;
 const SAVE_DEBOUNCE_MS = 250;
 const STORE_FAILURE_LOG_INTERVAL_MS = 60_000;
 
@@ -119,6 +128,12 @@ function positiveMs(name: string, value: number | undefined, fallback: number): 
   return value;
 }
 
+/** A timer that never keeps the process alive. */
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  const maybeUnref = timer as unknown as { unref?: () => void };
+  if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
+}
+
 function parseKeys(keys: string | string[]): string[] {
   const list = Array.isArray(keys) ? keys.map((k) => k.trim()) : keys.split(',').map((k) => k.trim());
   const seen = new Set<string>();
@@ -141,6 +156,8 @@ export class ApiKeyPool {
   private readonly maxRecheckMs: number;
   private readonly maxRetryAfterMs: number;
   private readonly probeTimeoutMs: number;
+  private readonly loadTimeoutMs: number;
+  private readonly storeTimeoutMs: number;
   private readonly probe?: (key: string, kind: KeyFailureKind | undefined) => Promise<ProbeResult>;
   private readonly store?: KeyPoolStateStore;
   private readonly id: string;
@@ -165,6 +182,8 @@ export class ApiKeyPool {
     this.maxRecheckMs = positiveMs('maxRecheckMs', config?.maxRecheckMs, DEFAULT_MAX_RECHECK_MS);
     this.maxRetryAfterMs = positiveMs('maxRetryAfterMs', config?.maxRetryAfterMs, DEFAULT_MAX_RETRY_AFTER_MS);
     this.probeTimeoutMs = positiveMs('probeTimeoutMs', config?.probeTimeoutMs, DEFAULT_PROBE_TIMEOUT_MS);
+    this.loadTimeoutMs = positiveMs('loadTimeoutMs', config?.loadTimeoutMs, DEFAULT_LOAD_TIMEOUT_MS);
+    this.storeTimeoutMs = positiveMs('storeTimeoutMs', config?.storeTimeoutMs, DEFAULT_STORE_TIMEOUT_MS);
     this.probe = config?.probe;
     this.id = config?.id ?? '';
     this.store = config?.id ? config?.store : undefined;
@@ -216,8 +235,9 @@ export class ApiKeyPool {
   /**
    * Loads the persisted state once, when the pool has a store and an id; the
    * providers await it in `initialize()` before the first `next()`. Resolves
-   * at once without a store. A load that throws leaves a fresh state and
-   * logs one warning.
+   * at once without a store. A load that throws, or that does not answer
+   * within `loadTimeoutMs`, leaves a fresh state and logs one warning; rows
+   * that arrive after the deadline are ignored.
    */
   ready(): Promise<void> {
     this.readyPromise ??= this.loadState();
@@ -414,8 +434,10 @@ export class ApiKeyPool {
   /**
    * Ends the pool's work for a host that is shutting down: stops the recheck
    * interval, waits for the probes in flight (each bounded by the probe
-   * timeout), then writes every pending state change, so what a probe found
-   * during shutdown is kept. The providers' `shutdown()` calls it.
+   * timeout), then writes every pending state change (bounded by
+   * `storeTimeoutMs`), so what a probe found during shutdown is kept and a
+   * store that does not answer cannot hold the host. The providers'
+   * `shutdown()` calls it.
    */
   async close(): Promise<void> {
     this.stopRechecks();
@@ -430,8 +452,10 @@ export class ApiKeyPool {
 
   /**
    * Writes every pending state change now and waits for the writes in
-   * flight, so a host that is shutting down keeps the keys' standing; the
-   * providers' `shutdown()` calls it. Resolves at once without a store.
+   * flight, at most `storeTimeoutMs`, so a host that is shutting down keeps
+   * the keys' standing without hanging on a store that does not answer (one
+   * warning when the deadline passes); the providers' `shutdown()` calls it.
+   * Resolves at once without a store.
    */
   async flush(): Promise<void> {
     const pending = Array.from(this.pendingSaves.keys());
@@ -441,7 +465,11 @@ export class ApiKeyPool {
       const entry = this.entries.find((e) => e.key === key);
       if (entry) void this.saveNow(entry);
     }
-    await Promise.all(Array.from(this.inFlightSaves));
+    if (this.inFlightSaves.size === 0) return;
+    const settled = await this.withinDeadline(Promise.all(Array.from(this.inFlightSaves)), this.storeTimeoutMs);
+    if (settled.outcome === 'timeout') {
+      this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'flush', reason: 'timeout', timeoutMs: this.storeTimeoutMs, pending: this.inFlightSaves.size });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -551,15 +579,40 @@ export class ApiKeyPool {
     this.scheduleSave(entry);
   }
 
+  /** A store call raced against a deadline; what settles after the deadline is ignored, a late rejection included. */
+  private withinDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<StoreOutcome<T>> {
+    return new Promise<StoreOutcome<T>>((resolve) => {
+      const timer = setTimeout(() => resolve({ outcome: 'timeout' }), timeoutMs);
+      unrefTimer(timer);
+      work.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve({ outcome: 'ok', value });
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          resolve({ outcome: 'error', error });
+        },
+      );
+    });
+  }
+
   private async loadState(): Promise<void> {
-    if (!this.store || !this.id || this.entries.length === 0) return;
-    let rows: KeyState[] | null = null;
-    try {
-      rows = await this.store.load(this.id);
-    } catch (error) {
+    const store = this.store;
+    if (!store || !this.id || this.entries.length === 0) return;
+    // The call itself inside the promise, so a store whose load throws before it returns one is handled as a
+    // rejection; a load that never settles ends at the deadline, and its late rows are ignored.
+    const loaded = await this.withinDeadline(Promise.resolve().then(() => store.load(this.id)), this.loadTimeoutMs);
+    if (loaded.outcome === 'timeout') {
+      this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'load', reason: 'timeout', timeoutMs: this.loadTimeoutMs });
+      return;
+    }
+    if (loaded.outcome === 'error') {
+      const error = loaded.error;
       this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'load', error: error instanceof Error ? error.message : String(error) });
       return;
     }
+    const rows = loaded.value;
     if (!rows) return;
     let applied = 0;
     let otherVersion: number | undefined;
@@ -603,8 +656,7 @@ export class ApiKeyPool {
       this.pendingSaves.delete(entry.key);
       void this.saveNow(entry);
     }, SAVE_DEBOUNCE_MS);
-    const maybeUnref = timer as unknown as { unref?: () => void };
-    if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
+    unrefTimer(timer);
     this.pendingSaves.set(entry.key, timer);
   }
 
