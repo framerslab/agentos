@@ -320,6 +320,32 @@ describe('Anthropic catalog and pricing through the public API', () => {
     expect(bodies[0].output_config?.format).toBeUndefined();
   });
 
+  it('generateObject with a record schema on Claude Sonnet 4.6 raises the output budget after max_tokens cuts the forced tool call mid-JSON, and completes on the second request', async () => {
+    // The cut call's input does not parse. The provider answers with that raw
+    // input and the length stop, which generateObject raises its budget for;
+    // an incomplete-stream error was retried at the same budget, then thrown.
+    route({
+      'claude-sonnet-4-6': [
+        cutToolTurn('claude-sonnet-4-6', 'scores', '{"scores":{"a":1,"b'),
+        toolTurn('claude-sonnet-4-6', 'scores', { scores: { a: 1, b: 2 } }),
+      ],
+    });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-sonnet-4-6',
+      schema: z.object({ scores: z.record(z.string(), z.number()) }),
+      schemaName: 'scores',
+      prompt: 'Score a and b.',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ scores: { a: 1, b: 2 } });
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].max_tokens).toBeGreaterThan(bodies[0].max_tokens);
+    for (const body of bodies) expect(body.tool_choice).toEqual({ type: 'tool', name: 'scores' });
+  });
+
   it('a session send with a record schema on Claude Sonnet 4.6 (the default runtime) takes one request: the forced schema call is the answer, not a tool round', async () => {
     // agent() runs up to five steps by default; a schema call left in tool_calls
     // ran as a missing tool and asked the model again on each of them.
