@@ -2122,7 +2122,10 @@ export interface AgencyInstance<R extends AgencyResult = AgencyResult> extends A
 }
 
 /**
- * Thrown when a panel's chair fails: it threw, timed out or returned no text.
+ * Thrown when a panel's chair fails: it threw, timed out or returned no text;
+ * and when the caller's abort lands after some seats answered and the quorum
+ * did not throw first (`panel aborted: <reason>`), with a chair or with
+ * `chair: false`.
  * Carries the ledger. `agency()` also throws it, with no ledger, for a panel
  * whose roster names a seat `'chair'`, the name the chair's record, approval
  * requests and callbacks carry.

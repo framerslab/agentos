@@ -622,11 +622,18 @@ export function compilePanel(
       vendors,
       ...(shortfalls.length > 0 ? { shortfall: `panel quorum shortfall: ${shortfalls.join(', ')}` } : {}),
     };
+    // Zero healthy seats always throws, whatever onShortfall says.
+    if (!quorum.met && (healthy.length === 0 || (q.onShortfall ?? 'error') === 'error')) {
+      throw new AgencyQuorumError(quorum.shortfall ?? 'panel quorum shortfall', ledger(quorum));
+    }
+    // A caller's abort that landed after some seats answered: the call
+    // rejects with the ledger, as it does when the abort ends every seat, so
+    // no chair starts and a caller that stopped waiting is handed no answer,
+    // with a chair or without one.
+    if (callerSignal?.aborted) {
+      throw new AgencyPanelError(`panel aborted: ${redacted(callerSignal.reason ?? 'the caller aborted')}`, ledger(quorum));
+    }
     if (!quorum.met) {
-      // Zero healthy seats always throws, whatever onShortfall says.
-      if (healthy.length === 0 || (q.onShortfall ?? 'error') === 'error') {
-        throw new AgencyQuorumError(quorum.shortfall ?? 'panel quorum shortfall', ledger(quorum));
-      }
       agencyLogger.warn(`${quorum.shortfall}: proceeding (onShortfall=proceed)`, { event: 'panel_quorum_shortfall', shortfall: quorum.shortfall });
     }
 
