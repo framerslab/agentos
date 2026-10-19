@@ -31,9 +31,10 @@ permissions:
 # there) a run queued during another waits for it to finish, so a later run
 # never cancels the run in progress. At most one run waits: a run that starts
 # waiting cancels the one already waiting, which shows as cancelled without
-# having run.
+# having run. A re-run keys a group of its own, its run id, so re-running an
+# older commit's run never cancels the newest one.
 concurrency:
-  group: vision-models-${{ github.ref }}
+  group: vision-models-${{ github.run_attempt == '1' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
