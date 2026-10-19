@@ -4,850 +4,978 @@
  * Fails when a GitHub Actions workflow pushes a commit to the default branch.
  *
  * master's rules refuse a direct push (GH006, "required status checks are expected"), so a step that pushes there
- * fails at the push, after everything before it has run: a release step that pushed registry.json to master failed
- * that way after its packages were published, and read the refusal as a race and tried again. A workflow that has
- * to change the repository pushes a branch of its own and opens a pull request, or writes to a branch the rules
- * leave open.
+ * fails at the push, after everything before it has run: the registry step of agentos-extensions' release workflow
+ * pushed registry.json to master after its packages were published, was refused, read the refusal as a race and
+ * tried again (run 39191821853). A workflow that changes the repository pushes a branch of its own and opens a pull
+ * request, or writes to a branch the rules leave open.
  *
- * It reads the workflows in .github/workflows and the composite actions in .github/actions, or the files named on
- * the command line, and reports with its line:
- * - a git push whose destination is the default branch, master or main, written out (HEAD:master,
- *   refs/heads/master, ${{ github.event.repository.default_branch }}, the pull request's base branch), to any
- *   remote, and a push with --all, --branches or --mirror;
- * - in a workflow that can run on the default branch (any trigger but pull_request, and push unless its filters
- *   keep it off that branch), a git push with no destination, or with the run's own branch as its destination
- *   (HEAD, ${{ github.ref }}, $GITHUB_REF, $GITHUB_REF_NAME): on a run on master that branch is master;
- * - an action that pushes there: peaceiris/actions-gh-pages or JamesIves/github-pages-deploy-action publishing to
- *   it, ad-m/github-push-action with no branch (it then pushes to the default branch), and, in a workflow that can
- *   run on the default branch, stefanzweifel/git-auto-commit-action with no branch and EndBug/add-and-commit with
- *   no new_branch (both then push the checked-out branch);
- * - a semantic-release run while the repository's semantic-release configuration lists @semantic-release/git,
- *   which commits the release to the branch the run is on.
- * A dry run is not a push. A push inside a heredoc, an eval or a `sh -c` string is not read.
+ * mikefarah's yq v4 (on GitHub's Ubuntu runners) reads the YAML, so every valid spelling of a key or a value reads
+ * as GitHub reads it. The check reads each workflow in .github/workflows and each composite action in
+ * .github/actions, or the files named on the command line, and reports:
+ * - a git push to master, main or the default branch, from any workflow: the branch written out (HEAD:master,
+ *   refs/heads/master), an expression that resolves to it (${{ github.event.repository.default_branch }}, the base
+ *   branch, a 'master' fallback, ${BRANCH:-master}), a wildcard destination that matches it, the matching refspec
+ *   ":", --all, --branches and --mirror;
+ * - a git push of the checked-out branch (no destination, HEAD) while that branch can be the default branch, and a
+ *   push to the run's own branch (${{ github.ref_name }}, $GITHUB_REF) from a workflow that runs on it. A workflow
+ *   runs on the default branch unless its triggers keep it off: pull_request, pull_request_review(_comment),
+ *   merge_group and release never run on a branch, and push filters are read as GitHub reads them. A step that
+ *   checks out a branch (actions/checkout with ref, git checkout, git switch) changes the checked-out branch;
+ * - an action that pushes there: peaceiris/actions-gh-pages (publish_branch), JamesIves/github-pages-deploy-action
+ *   (branch), ad-m/github-push-action (branch; with none it pushes master on v0.6.0 and earlier),
+ *   stefanzweifel/git-auto-commit-action (branch, else the pull request's head branch on a pull request event and
+ *   the checked-out branch on any other) and EndBug/add-and-commit (new_branch, else the checked-out branch; a push
+ *   input other than true or false is read as git push arguments);
+ * - semantic-release run on the default branch (the program, through npx, bunx, npm exec, pnpm exec or dlx, yarn or
+ *   bun, a package script that runs it, or cycjimmy/semantic-release-action) while a release configuration lists
+ *   @semantic-release/git, which commits the release to the branch the run is on.
+ * Commands are read where the shell runs them: at command position, past variable assignments and env, command,
+ * exec, sudo, nohup, time, nice and timeout, inside $( ) and backticks (also within double quotes), in an sh -c or
+ * bash -c string, an eval, and a heredoc fed to a shell. A word that is only printed (echo git push ...), a heredoc
+ * fed to another program, a comment and a dry run are not pushes. Not read: a branch held in a shell variable, a
+ * job's or step's if: condition, and a push made by a script file or by an action not named above.
  *
  * Usage: node .github/scripts/check-workflow-pushes.mjs [--root <dir>] [file ...]
- * DEFAULT_BRANCH names the default branch (master when unset); master and main are refused whatever it is.
- * Exit status: 0 when nothing pushes to it, 1 when something does, 2 on a usage or read error.
+ * DEFAULT_BRANCH names the default branch (master when unset); master and main are refused whatever it is. YQ names
+ * the yq binary (yq when unset). Exit status: 0 when nothing pushes there, 1 when something does, 2 on a usage or
+ * read error.
  */
+import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** @typedef {{ file: string, line: number, message: string }} Finding */
-/** @typedef {{ text: string, line: number }} Word */
-/** @typedef {(line: number, message: string) => void} Report */
 /**
  * @typedef {object} Context
+ * @property {string} root the repository
  * @property {string} branch the default branch
- * @property {Set<string>} protectedNames the branches no workflow pushes to
- * @property {boolean} onDefault whether the workflow can run with the default branch checked out
- * @property {string} releaseGit the semantic-release configuration that lists @semantic-release/git, or ''
- * @property {Set<string>} releaseScripts the package scripts that run semantic-release
+ * @property {Set<string>} names the branches no workflow pushes to
+ * @property {string} yq the yq binary
+ * @property {Map<string, Record<string, unknown>>} scripts each directory's package scripts, as read
  */
+/**
+ * Where a job, or a composite action, stands as its steps run.
+ * @typedef {object} State
+ * @property {boolean} run whether the run's own branch can be the default branch
+ * @property {boolean} head whether the checked-out branch can be the default branch
+ * @property {boolean} pullRequestOnly whether every trigger is a pull request event, on which github.head_ref is set
+ * @property {string} dir the directory run steps start in, relative to the root
+ */
+/**
+ * @typedef {object} Step
+ * @property {State} state
+ * @property {Context} ctx
+ * @property {string} dir the step's directory, relative to the root
+ * @property {(message: string) => void} report
+ */
+
+/** A file or a tool this check needs could not be read. */
+export class ReadError extends Error {}
 
 const USAGE = 'Usage: node .github/scripts/check-workflow-pushes.mjs [--root <dir>] [file ...]';
-const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix']);
-const PUSH_OPTIONS_WITH_VALUE = new Set(['--push-option', '--repo', '--receive-pack', '--exec']);
-const PACKAGE_RUNNERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
-// The default branch spelled as an expression: the repository's, or a pull request's base.
-const DEFAULT_REF = /^\$\{\{\s*github\.(?:event\.repository\.default_branch|base_ref|event\.pull_request\.base\.ref)\s*\}\}$|^\$\{?GITHUB_BASE_REF\}?$/;
-// The branch the run is on: master on a run on master.
-const RUN_REF = /^\$\{\{\s*github\.(?:ref|ref_name|event\.workflow_run\.head_branch)\s*\}\}$|^\$\{?GITHUB_REF(?:_NAME)?(?:[#%][^}]*)?\}?$|^(?:HEAD|@)$/;
-const RELEASE_CONFIGS = ['.releaserc', '.releaserc.json', '.releaserc.yaml', '.releaserc.yml', '.releaserc.js', '.releaserc.cjs', '.releaserc.mjs', 'release.config.js', 'release.config.cjs', 'release.config.mjs', 'release.config.ts'];
-const GIT_PLUGIN = /@semantic-release\/git(?![\w-])/;
-const SEMANTIC_RELEASE = /(?:^|\/)semantic-release(?:@\S*)?$/;
-const ON_KEY = /^(?:on|"on"|'on'|true)\s*:(.*)$/;
-
-/** @param {string} line */
-const indentOf = (line) => line.length - line.trimStart().length;
-/** @param {string} line */
-const isBlankOrComment = (line) => line.trim() === '' || line.trim().startsWith('#');
-/** @param {string} line */
-const isItem = (line) => /^\s*-\s/.test(line);
-/**
- * The column where a line's key starts, past a sequence item's dash.
- * @param {string} line
- */
-const keyColumn = (line) => {
-  const item = /^(\s*-\s+)\S/.exec(line);
-  return item ? item[1].length : indentOf(line);
+// Events whose runs are never on a branch: a pull request's merge ref, a merge queue's ref, a release's tag.
+const OFF_BRANCH_EVENTS = new Set(['pull_request', 'pull_request_review', 'pull_request_review_comment', 'merge_group', 'release']);
+const PULL_REQUEST_EVENTS = new Set(['pull_request', 'pull_request_target', 'pull_request_review', 'pull_request_review_comment']);
+// Words that open a compound command; the command after them is at command position.
+const RESERVED = new Set(['!', '{', '}', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
+const SHELLS = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh']);
+/** @type {Record<string, string[]>} Programs that run the command after them, with their options that take a value. */
+const WRAPPERS = {
+  env: ['-u', '--unset', '-C', '--chdir'],
+  command: [],
+  builtin: [],
+  exec: ['-a'],
+  sudo: ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-r', '--role', '-t', '--type', '-T', '--command-timeout', '-U', '--other-user'],
+  nohup: [],
+  time: ['-f', '--format', '-o', '--output'],
+  nice: ['-n', '--adjustment'],
+  timeout: ['-k', '--kill-after', '-s', '--signal'],
 };
+const GIT_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix']);
+const PUSH_VALUED = new Set(['--repo', '--receive-pack', '--exec', '--push-option', '-o']);
+const RUNNER_VALUED = new Set(['--filter', '-F', '-C', '--dir', '--prefix', '--workspace', '--cwd', '-p', '--package', '-c', '--call', '--registry', '--loglevel']);
+const RELEASE_CONFIGS = ['.releaserc', '.releaserc.json', '.releaserc.yaml', '.releaserc.yml', '.releaserc.js', '.releaserc.cjs', '.releaserc.mjs', 'release.config.js', 'release.config.cjs', 'release.config.mjs', 'release.config.ts', 'release.config.cts', 'release.config.mts'];
+const SEMANTIC_RELEASE = /^semantic-release(?:@\S*)?$/;
+const EXPRESSION = /\$\{\{([\s\S]*?)\}\}/g;
 
 /**
- * A YAML value without its trailing comment. A quote opens a quoted scalar only as the value's first character.
- * @param {string} value
+ * The GitHub expressions of the scripts read so far. GitHub replaces an expression before the shell runs, so a
+ * script holds each as <index> while its words are read, and a word gets its expressions back when a
+ * branch is read from it.
+ * @type {string[]}
  */
-function stripYamlComment(value) {
-  const v = value.trim();
-  let quote = '';
-  for (let i = 0; i < v.length; i++) {
-    const c = v[i];
-    if (quote === "'") {
-      if (c === "'" && v[i + 1] === "'") i++;
-      else if (c === "'") quote = '';
-    } else if (quote === '"') {
-      if (c === '\\') i++;
-      else if (c === '"') quote = '';
-    } else if (i === 0 && (c === '"' || c === "'")) {
-      quote = c;
-    } else if (c === '#' && (i === 0 || /\s/.test(v[i - 1]))) {
-      return v.slice(0, i).trimEnd();
+const expressions = [];
+/** @param {string} text */
+const hold = (text) => text.replace(EXPRESSION, (_, inner) => `${expressions.push(String(inner).trim()) - 1}`);
+/** @param {string} text */
+const unhold = (text) => text.replace(/(\d+)/g, (_, k) => `\${{ ${expressions[Number(k)]} }}`);
+/** @param {string} word */
+const base = (word) => word.slice(word.lastIndexOf('/') + 1);
+/** @param {string} word */
+const isAssignment = (word) => /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word);
+/** @param {string} word an option of sh or bash that makes it run its next argument (-c, -ec, -xc) */
+const isCommandOption = (word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word);
+/** @param {string} text */
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The program a simple command runs and its arguments, past assignments and wrappers, or null when it runs none.
+ * @param {string[]} words
+ * @returns {{ name: string, args: string[] } | null}
+ */
+export function invoked(words) {
+  let i = 0;
+  while (i < words.length && RESERVED.has(words[i])) i++;
+  for (;;) {
+    while (i < words.length && isAssignment(words[i])) i++;
+    if (i >= words.length) return null;
+    const name = base(words[i]);
+    if (!Object.hasOwn(WRAPPERS, name)) return { name, args: words.slice(i + 1) };
+    const valued = new Set(WRAPPERS[name]);
+    i++;
+    while (i < words.length && words[i].startsWith('-')) {
+      const option = words[i];
+      if (option === '--') {
+        i++;
+        break;
+      }
+      // command -v and -V print what would run instead of running it.
+      if (name === 'command' && /^-[pvV]+$/.test(option) && /[vV]/.test(option)) return null;
+      i += valued.has(option) ? 2 : 1;
     }
+    if (name === 'timeout') i++; // its duration
   }
-  return v;
 }
 
 /**
- * A one-line YAML scalar's value: its comment dropped and its quotes taken off.
- * @param {string} value
+ * The simple commands of a shell script, each as its words with quotes and escapes removed, in the order they end.
+ * A command substitution's commands come out on their own and its text stays in its word; a heredoc's body is read
+ * as a script when it feeds a shell, and skipped otherwise.
+ * @param {string} src
+ * @returns {string[][]}
  */
-function yamlScalar(value) {
-  const v = stripYamlComment(value);
-  if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1).replace(/''/g, "'");
-  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
-    return v.slice(1, -1).replace(/\\(.)/g, (_, c) => (c === 'n' ? '\n' : c === 't' ? '\t' : c));
-  }
-  return v;
-}
-
-/**
- * The lines inside block scalars (`key: |` or `key: >`): they hold text, not keys.
- * @param {string[]} src
- */
-function blockMask(src) {
-  const mask = src.map(() => false);
-  for (let i = 0; i < src.length; i++) {
-    if (mask[i]) continue;
-    const m = /^(\s*)(-\s+)?(?:[\w.-]+|"[^"]*"|'[^']*')\s*:\s+[|>][0-9+-]*\s*(?:#.*)?$/.exec(src[i]);
-    if (!m) continue;
-    const keyIndent = m[1].length + (m[2] ? m[2].length : 0);
-    for (let k = i + 1; k < src.length; k++) {
-      if (src[k].trim() !== '' && indentOf(src[k]) <= keyIndent) break;
-      mask[k] = true;
-    }
-  }
-  return mask;
-}
-
-/**
- * A block scalar's lines, each without the block's indentation and with its file line.
- * @param {string[]} src
- * @param {number} start
- * @param {number} keyIndent
- * @returns {Word[]}
- */
-function blockLines(src, start, keyIndent) {
-  /** @type {Word[]} */
+export function shellCommands(src) {
+  /** @type {string[][]} */
   const out = [];
-  let indent = -1;
-  for (let i = start; i < src.length; i++) {
-    const line = src[i];
-    if (line.trim() === '') {
-      out.push({ text: '', line: i + 1 });
-      continue;
-    }
-    const ind = indentOf(line);
-    if (ind <= keyIndent) break;
-    if (indent < 0) indent = ind;
-    out.push({ text: line.slice(Math.min(indent, ind)), line: i + 1 });
-  }
-  while (out.length > 0 && out[out.length - 1].text === '') out.pop();
-  return out;
-}
+  const n = src.length;
+  let i = 0;
 
-/**
- * A folded block scalar's lines: lines at the block's indentation join with a space, as YAML folds them.
- * @param {Word[]} lines
- * @returns {Word[]}
- */
-function fold(lines) {
-  /** @type {Word[]} */
-  const out = [];
-  for (const l of lines) {
-    const prev = out[out.length - 1];
-    if (prev && prev.text !== '' && l.text !== '' && !/^\s/.test(prev.text) && !/^\s/.test(l.text)) prev.text += ` ${l.text}`;
-    else out.push({ ...l });
-  }
-  return out;
-}
+  const single = () => {
+    const end = src.indexOf("'", i);
+    const text = src.slice(i, end < 0 ? n : end);
+    i = end < 0 ? n : end + 1;
+    return text;
+  };
 
-/**
- * A plain or quoted scalar from line `at`, with the lines below it that continue it, folded into one line.
- * @param {string[]} src
- * @param {number} at
- * @param {number} keyIndent
- * @param {string} first
- * @returns {Word[]}
- */
-function continuedScalar(src, at, keyIndent, first) {
-  const parts = [first];
-  for (let k = at + 1; k < src.length; k++) {
-    if (src[k].trim() === '' || indentOf(src[k]) <= keyIndent) break;
-    parts.push(src[k].trim());
-  }
-  return [{ text: yamlScalar(parts.join(' ')), line: at + 1 }];
-}
-
-/**
- * The run: scripts of a workflow or action file, as lines with their file lines.
- * @param {string[]} src
- * @param {boolean[]} mask
- * @returns {Word[][]}
- */
-function runScripts(src, mask) {
-  /** @type {Word[][]} */
-  const scripts = [];
-  for (let i = 0; i < src.length; i++) {
-    if (mask[i]) continue;
-    const m = /^(\s*)(-\s+)?run:(?:\s+(.*))?$/.exec(src[i]);
-    if (!m) continue;
-    const keyIndent = m[1].length + (m[2] ? m[2].length : 0);
-    const value = stripYamlComment(m[3] ?? '');
-    const header = /^([|>])[0-9+-]*$/.exec(value);
-    if (header) {
-      const body = blockLines(src, i + 1, keyIndent);
-      scripts.push(header[1] === '>' ? fold(body) : body);
-    } else if (value !== '') {
-      scripts.push(continuedScalar(src, i, keyIndent, value));
-    } else {
-      // The value sits on the lines below; a mapping there (defaults.run) holds no script.
-      let k = i + 1;
-      while (k < src.length && isBlankOrComment(src[k])) k++;
-      if (k < src.length && indentOf(src[k]) > keyIndent && !/^\s*[^\s:#][^:]*:(?:\s|$)/.test(src[k])) {
-        scripts.push(continuedScalar(src, k, keyIndent, stripYamlComment(src[k])));
+  const double = () => {
+    let text = '';
+    while (i < n && src[i] !== '"') {
+      const c = src[i];
+      if (c === '\\' && i + 1 < n) {
+        const d = src[i + 1];
+        i += 2;
+        if (d !== '\n') text += '"\\$`'.includes(d) ? d : c + d;
+      } else if (c === '$') {
+        text += dollar();
+      } else if (c === '`') {
+        i++;
+        text += `\`${commandsUntil('`')}\``;
+      } else {
+        text += c;
+        i++;
       }
     }
-  }
-  return scripts;
-}
-
-/**
- * The index of the double quote that closes the one at `start`.
- * @param {string} s
- * @param {number} start
- * @returns {number}
- */
-function doubleQuoteEnd(s, start) {
-  for (let i = start + 1; i < s.length; i++) {
-    const c = s[i];
-    if (c === '\\') i++;
-    else if (c === '"') return i;
-    else if (c === '$' && s[i + 1] === '(') i = parenEnd(s, i + 1);
-  }
-  return s.length;
-}
-
-/**
- * The index of the parenthesis that closes the one at `open`, past quoted text.
- * @param {string} s
- * @param {number} open
- * @returns {number}
- */
-function parenEnd(s, open) {
-  let depth = 0;
-  for (let i = open; i < s.length; i++) {
-    const c = s[i];
-    if (c === '\\') i++;
-    else if (c === "'") {
-      const close = s.indexOf("'", i + 1);
-      i = close < 0 ? s.length : close;
-    } else if (c === '"') i = doubleQuoteEnd(s, i);
-    else if (c === '(') depth++;
-    else if (c === ')' && --depth === 0) return i;
-  }
-  return s.length;
-}
-
-/**
- * The index past the word at `start`: a redirection's target.
- * @param {string} s
- * @param {number} start
- */
-function wordEnd(s, start) {
-  let i = start;
-  while (i < s.length && !' \t\n;&|()<>'.includes(s[i])) {
-    if (s[i] === '\\') i += 2;
-    else if (s[i] === "'") {
-      const close = s.indexOf("'", i + 1);
-      i = close < 0 ? s.length : close + 1;
-    } else if (s[i] === '"') i = doubleQuoteEnd(s, i) + 1;
-    else if (s.startsWith('${{', i)) {
-      const close = s.indexOf('}}', i);
-      i = close < 0 ? s.length : close + 2;
-    } else i++;
-  }
-  return i;
-}
-
-/**
- * The simple commands of a shell script: their words, quotes taken off and ${{ }} expressions kept whole, each with
- * its file line. Comments, redirections and heredoc bodies are dropped; $( ), backticks, pipes and lists split
- * commands.
- * @param {Word[]} script
- * @returns {Word[][]}
- */
-function shellCommands(script) {
-  const s = script.map((l) => l.text).join('\n');
-  /** @type {number[]} */
-  const starts = [];
-  let offset = 0;
-  for (const l of script) {
-    starts.push(offset);
-    offset += l.text.length + 1;
-  }
-  /** @param {number} pos */
-  const lineAt = (pos) => {
-    let k = 0;
-    while (k + 1 < starts.length && starts[k + 1] <= pos) k++;
-    return script[k].line;
-  };
-  /** @type {Word[][]} */
-  const commands = [];
-  /** @type {Word[]} */
-  let words = [];
-  /** @type {Word | null} */
-  let word = null;
-  /** @type {string[]} */
-  let heredocs = [];
-  const endWord = () => {
-    if (word) words.push(word);
-    word = null;
-  };
-  const endCommand = () => {
-    endWord();
-    if (words.length > 0) commands.push(words);
-    words = [];
-  };
-  /**
-   * @param {string} text
-   * @param {number} pos
-   */
-  const add = (text, pos) => {
-    if (!word) word = { text: '', line: lineAt(pos) };
-    word.text += text;
+    i++;
+    return text;
   };
 
-  let i = 0;
-  while (i < s.length) {
-    const c = s[i];
-    if (c === '\n') {
-      endCommand();
-      i++;
-      // A heredoc's body runs from the next line to the line that holds its delimiter.
-      for (const delimiter of heredocs) {
-        while (i < s.length) {
-          const eol = s.indexOf('\n', i);
-          const text = s.slice(i, eol < 0 ? s.length : eol);
-          i = eol < 0 ? s.length : eol + 1;
-          if (text.trim() === delimiter) break;
+  /** @returns {string} */
+  const dollar = () => {
+    const start = i;
+    if (src.startsWith('$((', i)) {
+      i += 3;
+      for (let depth = 2; i < n && depth > 0; i++) depth += src[i] === '(' ? 1 : src[i] === ')' ? -1 : 0;
+      return src.slice(start, i);
+    }
+    if (src.startsWith('$(', i)) {
+      i += 2;
+      return `$(${commandsUntil(')')})`;
+    }
+    if (src.startsWith('${', i)) {
+      i += 2;
+      for (let depth = 1; i < n && depth > 0; i++) depth += src[i] === '{' ? 1 : src[i] === '}' ? -1 : 0;
+      return src.slice(start, i);
+    }
+    if (src.startsWith("$'", i)) {
+      i += 2;
+      let text = '';
+      while (i < n && src[i] !== "'") {
+        if (src[i] === '\\' && i + 1 < n) {
+          const d = src[i + 1];
+          text += d === 'n' ? '\n' : d === 't' ? '\t' : d;
+          i += 2;
+        } else {
+          text += src[i++];
         }
       }
-      heredocs = [];
-    } else if (c === ' ' || c === '\t') {
-      endWord();
       i++;
-    } else if (c === '\\') {
-      if (s[i + 1] !== '\n') add(s[i + 1] ?? '', i);
+      return text;
+    }
+    if (src.startsWith('$"', i)) {
       i += 2;
-    } else if (c === '#' && !word) {
-      const eol = s.indexOf('\n', i);
-      i = eol < 0 ? s.length : eol;
-    } else if (c === "'") {
-      const close = s.indexOf("'", i + 1);
-      const end = close < 0 ? s.length : close;
-      add(s.slice(i + 1, end), i);
-      i = end + 1;
-    } else if (c === '"') {
-      const end = doubleQuoteEnd(s, i);
-      add(s.slice(i + 1, end), i);
-      i = end + 1;
-    } else if (s.startsWith('${{', i)) {
-      const close = s.indexOf('}}', i);
-      const end = close < 0 ? s.length : close + 2;
-      add(s.slice(i, end), i);
-      i = end;
-    } else if (c === '$' && s[i + 1] === '(') {
-      endCommand();
-      i += 2;
-    } else if (c === '$' && s[i + 1] === '{') {
-      const close = s.indexOf('}', i);
-      const end = close < 0 ? s.length : close + 1;
-      add(s.slice(i, end), i);
-      i = end;
-    } else if (s.startsWith('<<', i) && !s.startsWith('<<<', i)) {
-      const heredoc = /^<<-?[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()]+))/.exec(s.slice(i));
-      if (heredoc) heredocs.push(heredoc[1] ?? heredoc[2] ?? heredoc[3]);
+      return double();
+    }
+    i++;
+    return '$';
+  };
+
+  /** One word after a redirection operator: its target, or a heredoc's delimiter. */
+  const target = () => {
+    while (i < n && (src[i] === ' ' || src[i] === '\t')) i++;
+    let text = '';
+    while (i < n && !' \t\r\n;&|<>()'.includes(src[i])) {
+      const c = src[i];
+      if (c === '\\') {
+        text += src[i + 1] ?? '';
+        i += 2;
+      } else if (c === "'") {
+        i++;
+        text += single();
+      } else if (c === '"') {
+        i++;
+        text += double();
+      } else if (c === '$') {
+        text += dollar();
+      } else {
+        text += c;
+        i++;
+      }
+    }
+    return text;
+  };
+
+  /** @param {{ delimiter: string, tabs: boolean, words: string[] }} heredoc */
+  const readHeredoc = (heredoc) => {
+    /** @type {string[]} */
+    const lines = [];
+    while (i < n) {
+      const newline = src.indexOf('\n', i);
+      const end = newline < 0 ? n : newline;
+      let line = src.slice(i, end);
+      i = Math.min(end + 1, n);
+      if (heredoc.tabs) line = line.replace(/^\t+/, '');
+      if (line.replace(/\r$/, '') === heredoc.delimiter) break;
+      lines.push(line);
+    }
+    const run = invoked(heredoc.words);
+    if (run && SHELLS.has(run.name) && !run.args.some(isCommandOption)) out.push(...shellCommands(lines.join('\n')));
+  };
+
+  /**
+   * Reads simple commands up to `stop` (')' or '`'; '' for none) or the end, adding them to out.
+   * @param {string} stop
+   * @returns {string} the text read
+   */
+  function commandsUntil(stop) {
+    const start = i;
+    /** @type {string[]} */
+    let words = [];
+    /** @type {string | null} */
+    let word = null;
+    /** @type {{ delimiter: string, tabs: boolean, words: string[] }[]} */
+    let heredocs = [];
+    let depth = 0;
+    /** @param {string} text */
+    const add = (text) => {
+      word = (word ?? '') + text;
+    };
+    const endWord = () => {
+      if (word !== null) words.push(word);
+      word = null;
+    };
+    const endCommand = () => {
       endWord();
-      i += heredoc ? heredoc[0].length : 2;
-    } else if (c === '<' || c === '>' || (c === '&' && s[i + 1] === '>')) {
-      // A redirection: its file descriptor number, its operator and its target are not words of the command.
-      if (word && /^\d+$/.test(word.text)) word = null;
-      endWord();
-      const operator = /^(?:&>>?|<<<|<>|<&|>&|>>|>\||<|>)/.exec(s.slice(i));
-      i += operator ? operator[0].length : 1;
-      while (s[i] === ' ' || s[i] === '\t') i++;
-      i = wordEnd(s, i);
-    } else if (';&|()`'.includes(c)) {
-      endCommand();
-      i++;
+      if (words.length > 0) out.push(words);
+      words = [];
+    };
+    while (i < n) {
+      const c = src[i];
+      if (c === stop && (stop === '`' || depth === 0)) {
+        i++;
+        endCommand();
+        return src.slice(start, i - 1);
+      }
+      if (c === '\\') {
+        if (src[i + 1] !== '\n') add(src[i + 1] ?? '');
+        i += 2;
+      } else if (c === "'") {
+        i++;
+        add(single());
+      } else if (c === '"') {
+        i++;
+        add(double());
+      } else if (c === '$') {
+        add(dollar());
+      } else if (c === '`') {
+        i++;
+        add(`\`${commandsUntil('`')}\``);
+      } else if (c === '#' && word === null) {
+        while (i < n && src[i] !== '\n') i++;
+      } else if (c === ' ' || c === '\t' || c === '\r') {
+        endWord();
+        i++;
+      } else if (c === '\n') {
+        i++;
+        endCommand();
+        for (const heredoc of heredocs) readHeredoc(heredoc);
+        heredocs = [];
+      } else if (c === '<' || c === '>' || (c === '&' && src[i + 1] === '>')) {
+        if (word !== null && /^\d+$/.test(word)) word = null; // the descriptor of 2>&1
+        endWord();
+        if (src.startsWith('<<<', i)) {
+          i += 3;
+          target();
+        } else if (src.startsWith('<<', i)) {
+          i += 2;
+          const tabs = src[i] === '-';
+          if (tabs) i++;
+          heredocs.push({ delimiter: target(), tabs, words });
+        } else {
+          i++;
+          while (i < n && '<>&|'.includes(src[i])) i++;
+          target();
+        }
+      } else if (c === ';' || c === '&' || c === '|') {
+        endCommand();
+        i++;
+      } else if (c === '(') {
+        endCommand();
+        depth++;
+        i++;
+      } else if (c === ')') {
+        endCommand();
+        if (depth > 0) depth--;
+        i++;
+      } else {
+        add(c);
+        i++;
+      }
+    }
+    endCommand();
+    for (const heredoc of heredocs) readHeredoc(heredoc);
+    return src.slice(start, i);
+  }
+
+  commandsUntil('');
+  return out;
+}
+
+/**
+ * A git refspec glob (one * that matches any text) as a regular expression.
+ * @param {string} pattern
+ */
+const refGlob = (pattern) => new RegExp(`^${pattern.split('*').map(escapeRegExp).join('.*')}$`);
+
+/**
+ * A branch filter pattern as GitHub reads it: * matches any text but /, ** any text, ? and + repeat the character
+ * before them, [ ] is a character class.
+ * @param {string} pattern
+ */
+function filterGlob(pattern) {
+  let source = '';
+  for (let k = 0; k < pattern.length; k++) {
+    const c = pattern[k];
+    if (c === '*') {
+      source += pattern[k + 1] === '*' ? '.*' : '[^/]*';
+      if (pattern[k + 1] === '*') k++;
+    } else if ((c === '?' || c === '+') && source !== '') {
+      source += c;
+    } else if (c === '[' && pattern.indexOf(']', k) > k) {
+      const end = pattern.indexOf(']', k);
+      source += pattern.slice(k, end + 1);
+      k = end;
     } else {
-      add(c, i);
-      i++;
+      source += escapeRegExp(c);
     }
   }
-  endCommand();
-  return commands;
+  try {
+    return new RegExp(`^${source}$`);
+  } catch {
+    return new RegExp(`^${escapeRegExp(pattern)}$`);
+  }
 }
 
 /**
- * Where a refspec pushes: 'default' for a protected branch, 'run' for the branch the run is on, '' elsewhere.
+ * Whether a list of branch patterns lets a branch through: the last pattern that matches it decides, and a pattern
+ * that starts with ! keeps it out.
+ * @param {string[]} patterns
+ * @param {string} branch
+ */
+function filterAllows(patterns, branch) {
+  let allowed = false;
+  for (const pattern of patterns) {
+    const negated = pattern.startsWith('!');
+    if (filterGlob(negated ? pattern.slice(1) : pattern).test(branch)) allowed = !negated;
+  }
+  return allowed;
+}
+
+/** @param {unknown} value */
+const strings = (value) => (Array.isArray(value) ? value : value == null ? [] : [value]).map(String);
+
+/**
+ * Whether a push trigger can run on one of the named branches. A trigger with only tags or tags-ignore never runs
+ * for a branch push; one with neither branch nor tag filters runs on every branch.
+ * @param {unknown} filters
+ * @param {Set<string>} names
+ */
+function pushRunsOn(filters, names) {
+  if (!filters || typeof filters !== 'object' || Array.isArray(filters)) return true;
+  const f = /** @type {Record<string, unknown>} */ (filters);
+  if ('branches' in f) return [...names].some((branch) => filterAllows(strings(f.branches), branch));
+  if ('branches-ignore' in f) return [...names].some((branch) => !strings(f['branches-ignore']).some((p) => filterGlob(p).test(branch)));
+  return !('tags' in f || 'tags-ignore' in f);
+}
+
+/**
+ * The workflow's triggers as event names and their settings, or null when it has none.
+ * @param {Record<string, unknown>} doc
+ * @returns {Record<string, unknown> | null}
+ */
+function triggers(doc) {
+  // YAML 1.1 reads a bare on as true; yq reads YAML 1.2, which keeps it a string.
+  const on = 'on' in doc ? doc.on : doc.true;
+  if (typeof on === 'string') return { [on]: null };
+  if (Array.isArray(on)) return Object.fromEntries(on.map((event) => [String(event), null]));
+  return on && typeof on === 'object' ? /** @type {Record<string, unknown>} */ (on) : null;
+}
+
+/**
+ * What a destination branch names: 'protected' (master, main, the default branch, or an expression, pattern or
+ * default value that resolves to one), 'run' (the run's own branch), 'head' (the checked-out branch), 'other'
+ * (another branch, a tag, a pull request's head) or '' (one this check cannot tell).
+ * @param {string} name
+ * @param {Context} ctx
+ * @returns {'protected' | 'run' | 'head' | 'other' | ''}
+ */
+export function classify(name, ctx) {
+  const s = unhold(name).trim().replace(/^refs\/heads\//, '');
+  if (s === '') return '';
+  if (s === 'HEAD' || s === '@') return 'head';
+  const whole = /^\$\{\{([\s\S]*)\}\}$/.exec(s);
+  if (whole && !whole[1].includes('}}')) {
+    const e = whole[1];
+    if (/\bgithub\.(?:event\.repository\.(?:default|master)_branch|base_ref|event\.pull_request\.base\.ref)\b/.test(e)) return 'protected';
+    if ([...e.matchAll(/'([^']*)'/g)].some((m) => ctx.names.has(m[1].replace(/^refs\/heads\//, '')))) return 'protected';
+    if (/\bgithub\.ref(?:_name)?\b|\bgithub\.event\.workflow_run\.head_branch\b|\benv\.GITHUB_REF(?:_NAME)?\b/.test(e)) return 'run';
+    if (/\bgithub\.head_ref\b|\bgithub\.event\.pull_request\.head\.(?:ref|sha)\b/.test(e)) return 'other';
+    return '';
+  }
+  if (/^\$\{?GITHUB_BASE_REF\}?$/.test(s)) return 'protected';
+  if (/^\$\{?GITHUB_REF(?:_NAME)?(?:[#%]{1,2}[^}]*)?\}?$/.test(s)) return 'run';
+  if (/^\$\{?GITHUB_HEAD_REF\}?$/.test(s)) return 'other';
+  const fallback = /^\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=]([^}]*)\}$/.exec(s);
+  if (fallback) return classify(fallback[1], ctx) === 'protected' ? 'protected' : '';
+  if (s.includes('*')) return [...ctx.names].some((branch) => refGlob(s).test(branch)) ? 'protected' : 'other';
+  if (/[$`]/.test(s)) return '';
+  return ctx.names.has(s) ? 'protected' : 'other';
+}
+
+/**
+ * The last colon of a refspec outside ${ }, or -1.
  * @param {string} spec
- * @param {Set<string>} protectedNames
  */
-function destination(spec, protectedNames) {
-  const s = spec.replace(/^\+/, '');
-  let colon = -1;
-  for (let i = 0; i < s.length; i++) {
-    if (s.startsWith('${{', i)) {
-      const close = s.indexOf('}}', i);
-      if (close < 0) break;
-      i = close + 1;
-    } else if (s.startsWith('${', i)) {
-      const close = s.indexOf('}', i);
-      if (close < 0) break;
-      i = close;
-    } else if (s[i] === ':') {
-      colon = i;
-      break;
+function lastColon(spec) {
+  let depth = 0;
+  let at = -1;
+  for (let k = 0; k < spec.length; k++) {
+    if (spec.startsWith('${', k)) {
+      depth++;
+      k++;
+    } else if (spec[k] === '}' && depth > 0) {
+      depth--;
+    } else if (spec[k] === ':' && depth === 0) {
+      at = k;
     }
   }
-  const target = colon < 0 ? s : s.slice(colon + 1);
-  if (target.startsWith('refs/tags/')) return '';
-  const name = target.replace(/^refs\/heads\//, '');
-  if (protectedNames.has(name) || DEFAULT_REF.test(name)) return 'default';
-  if (RUN_REF.test(name)) return 'run';
-  return '';
+  return at;
 }
 
 /**
- * A git push's arguments: its refspecs (the words after the remote), whether it is a dry run, and whether it pushes
- * every branch or only tags.
- * @param {Word[]} args
+ * Reports a git push (its arguments after push) that reaches the default branch.
+ * @param {string[]} args
+ * @param {Step} step
  */
-function parsePush(args) {
-  /** @type {Word[]} */
-  const positional = [];
+function checkPush(args, { state, ctx, report }) {
+  const command = `git push ${args.map(unhold).join(' ')}`.trim();
+  const branch = ctx.branch;
+  let repository = false;
   let dryRun = false;
   let every = '';
   let tags = false;
+  let remove = false;
+  /** @type {string[]} */
+  const positional = [];
   for (let k = 0; k < args.length; k++) {
-    const a = args[k].text;
+    const a = args[k];
     if (a === '--') {
       positional.push(...args.slice(k + 1));
       break;
     }
-    if (a.startsWith('--')) {
-      const name = a.split('=')[0];
-      if (name === '--dry-run') dryRun = true;
-      else if (name === '--all' || name === '--branches' || name === '--mirror') every = name;
-      else if (name === '--tags') tags = true;
-      else if (!a.includes('=') && PUSH_OPTIONS_WITH_VALUE.has(name)) k++;
-    } else if (a.length > 1 && a.startsWith('-')) {
+    if (!a.startsWith('-') || a === '-') positional.push(a);
+    else if (a === '--repo') {
+      repository = true;
+      k++;
+    } else if (a.startsWith('--repo=')) repository = true;
+    else if (PUSH_VALUED.has(a)) k++;
+    else if (a === '--dry-run') dryRun = true;
+    else if (a === '--all' || a === '--branches' || a === '--mirror') every = a;
+    else if (a === '--tags') tags = true;
+    else if (a === '--delete') remove = true;
+    else if (/^-[^-]/.test(a)) {
+      // bundled short options: -n dry run, -d delete, -o takes the rest of the word or the next one
       for (let j = 1; j < a.length; j++) {
         if (a[j] === 'n') dryRun = true;
-        if (a[j] === 'o') {
+        else if (a[j] === 'd') remove = true;
+        else if (a[j] === 'o') {
           if (j === a.length - 1) k++;
           break;
         }
       }
-    } else {
-      positional.push(args[k]);
     }
   }
-  return { dryRun, every, tags, refspecs: positional.slice(1) };
-}
-
-/**
- * Reports a git push that reaches the default branch.
- * @param {Word[]} args the words after `push`
- * @param {number} line the line of `git`
- * @param {Context} ctx
- * @param {Report} report
- */
-function checkPush(args, line, ctx, report) {
-  const push = parsePush(args);
-  const b = ctx.branch;
-  if (push.dryRun) return;
-  if (push.every) {
-    report(line, `git push ${push.every} pushes every local branch, ${b} among them, and ${b} refuses a direct push (GH006). Push one branch of the workflow's own: git push origin HEAD:refs/heads/<branch>.`);
+  if (dryRun) return;
+  if (every) {
+    report(`"${command}" pushes every branch, ${branch} among them`);
     return;
   }
-  if (push.refspecs.length === 0) {
-    if (!push.tags && ctx.onDefault) {
-      report(line, `git push with no destination pushes the checked-out branch, which is ${b} on a run on ${b}, and ${b} refuses a direct push (GH006). Name a branch of the workflow's own: git push origin HEAD:refs/heads/<branch>.`);
-    }
-    return;
-  }
-  for (const spec of push.refspecs) {
-    const where = destination(spec.text, ctx.protectedNames);
-    if (where === 'default') {
-      report(spec.line, `git push ${spec.text} pushes to a protected branch, whose rules refuse a direct push (GH006). Push a branch of the workflow's own and open a pull request, or write to an unprotected branch.`);
-    } else if (where === 'run' && ctx.onDefault) {
-      report(spec.line, `git push ${spec.text} pushes the branch the run is on, which is ${b} on a run on ${b}, and ${b} refuses a direct push (GH006). Name a branch of the workflow's own: git push origin HEAD:refs/heads/<branch>.`);
-    }
-  }
-}
-
-/**
- * Reports the pushes in one simple command, and a semantic-release run that commits to the branch.
- * @param {Word[]} words
- * @param {Context} ctx
- * @param {Report} report
- */
-function checkCommand(words, ctx, report) {
-  const texts = words.map((w) => w.text);
-  for (let k = 0; k < words.length; k++) {
-    if (texts[k] !== 'git' && !texts[k].endsWith('/git')) continue;
-    let j = k + 1;
-    while (j < texts.length && texts[j].startsWith('-')) j += GIT_OPTIONS_WITH_VALUE.has(texts[j]) ? 2 : 1;
-    if (texts[j] === 'push') {
-      checkPush(words.slice(j + 1), words[k].line, ctx, report);
-      return;
-    }
-  }
-  if (!ctx.releaseGit || texts.includes('--dry-run') || texts.includes('-d')) return;
-  const program = texts.find((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) ?? '';
-  const run = words.find((w) => SEMANTIC_RELEASE.test(w.text))
-    ?? (PACKAGE_RUNNERS.has(program) ? words.find((w) => ctx.releaseScripts.has(w.text)) : undefined);
-  if (run) report(run.line, semanticReleaseMessage(ctx));
-}
-
-/** @param {Context} ctx */
-function semanticReleaseMessage(ctx) {
-  return `semantic-release runs here with @semantic-release/git in ${ctx.releaseGit}, which commits the release to the branch it runs on, and ${ctx.branch} refuses a direct push (GH006). Take the git plugin out: the tag, the package and the GitHub release carry the version.`;
-}
-
-/**
- * A step's `with:` inputs that fit on one line, each with its line, read from the step's keys around `uses:`.
- * @param {string[]} src
- * @param {boolean[]} mask
- * @param {number} at the index of the uses: line
- * @param {number} keyIndent the column of the step's keys
- * @returns {Record<string, Word>}
- */
-function stepInputs(src, mask, at, keyIndent) {
-  /** @type {Record<string, Word>} */
-  const inputs = {};
-  /** @param {number} i */
-  const readWith = (i) => {
-    const inline = stripYamlComment(src[i].slice(src[i].indexOf('with:') + 5));
-    if (inline.startsWith('{')) {
-      for (const pair of inline.slice(1, inline.lastIndexOf('}')).split(',')) {
-        const m = /^\s*([\w-]+)\s*:\s*(.*)$/.exec(pair);
-        if (m) inputs[m[1]] = { text: yamlScalar(m[2]), line: i + 1 };
-      }
-      return;
-    }
-    let child = -1;
-    for (let k = i + 1; k < src.length; k++) {
-      if (mask[k] || isBlankOrComment(src[k])) continue;
-      const ind = indentOf(src[k]);
-      if (ind <= keyIndent) break;
-      if (child < 0) child = ind;
-      if (ind !== child) continue;
-      const m = /^\s*([\w-]+)\s*:(?:\s+(.*))?$/.exec(src[k]);
-      if (m) inputs[m[1]] = { text: yamlScalar(m[2] ?? ''), line: k + 1 };
-    }
-  };
-  if (!isItem(src[at])) {
-    // The step's keys above uses:, up to the dash that starts the step.
-    for (let i = at - 1; i >= 0; i--) {
-      if (mask[i] || isBlankOrComment(src[i])) continue;
-      const col = keyColumn(src[i]);
-      if (col < keyIndent) break;
-      if (col > keyIndent) continue;
-      if (/^\s*(?:-\s+)?with\s*:/.test(src[i])) readWith(i);
-      if (isItem(src[i])) break;
-    }
-  }
-  for (let i = at + 1; i < src.length; i++) {
-    if (mask[i] || isBlankOrComment(src[i])) continue;
-    const col = keyColumn(src[i]);
-    if (col < keyIndent || (col === keyIndent && isItem(src[i]))) break;
-    if (col === keyIndent && /^\s*with\s*:/.test(src[i])) readWith(i);
-  }
-  return inputs;
-}
-
-/**
- * Reports an action step that pushes to the default branch.
- * @param {string[]} src
- * @param {boolean[]} mask
- * @param {Context} ctx
- * @param {Report} report
- */
-function checkActions(src, mask, ctx, report) {
-  const b = ctx.branch;
-  for (let i = 0; i < src.length; i++) {
-    if (mask[i]) continue;
-    const m = /^(\s*)(-\s+)?uses:\s*(.+)$/.exec(src[i]);
-    if (!m) continue;
-    const action = yamlScalar(m[3]);
-    const name = action.split('@')[0].toLowerCase();
-    const line = i + 1;
-    const inputs = stepInputs(src, mask, i, m[1].length + (m[2] ? m[2].length : 0));
-    /**
-     * @param {string} input
-     * @param {string} fallback the action's default for the input
-     */
-    const toward = (input, fallback) => {
-      const target = inputs[input]?.text || fallback;
-      const where = destination(target, ctx.protectedNames);
-      const at = inputs[input]?.line ?? line;
-      if (where === 'default') {
-        report(at, `${action} pushes to ${target} (${input}), a protected branch whose rules refuse a direct push (GH006). Set ${input} to a branch of the workflow's own.`);
-      } else if (where === 'run' && ctx.onDefault) {
-        report(at, `${action} pushes to ${target} (${input}), the branch the run is on, which is ${b} on a run on ${b} and refuses a direct push (GH006). Set ${input} to a branch of the workflow's own.`);
-      }
-    };
-    /** @param {string} input */
-    const checkedOut = (input) => {
-      if (ctx.onDefault) {
-        report(line, `${action} with no ${input} pushes the checked-out branch, which is ${b} on a run on ${b}, and ${b} refuses a direct push (GH006). Set ${input} to a branch of the workflow's own.`);
-      }
-    };
-    if (name === 'peaceiris/actions-gh-pages') toward('publish_branch', 'gh-pages');
-    else if (name === 'jamesives/github-pages-deploy-action') toward('branch', 'gh-pages');
-    else if (name === 'ad-m/github-push-action') {
-      if (inputs.branch?.text) toward('branch', '');
-      else report(line, `${action} with no branch pushes to the default branch, which refuses a direct push (GH006). Set branch to a branch of the workflow's own.`);
-    } else if (name === 'stefanzweifel/git-auto-commit-action') {
-      if (inputs.branch?.text) toward('branch', '');
-      else checkedOut('branch');
-    } else if (name === 'endbug/add-and-commit') {
-      const push = inputs.push?.text ?? 'true';
-      if (push === 'false') continue;
-      if (push !== 'true' && push !== '') {
-        // push holds the arguments the action gives git push.
-        const args = push.split(/\s+/).filter(Boolean).map((text) => ({ text, line: inputs.push.line }));
-        checkPush(args, inputs.push.line, ctx, report);
-      } else if (inputs.new_branch?.text) toward('new_branch', '');
-      else checkedOut('new_branch');
-    } else if (name === 'cycjimmy/semantic-release-action') {
-      if (ctx.releaseGit && inputs.dry_run?.text !== 'true') report(line, semanticReleaseMessage(ctx));
-    }
-  }
-}
-
-/**
- * Whether a push trigger's filters let it run on the branch: a branches list whose last pattern to take it is not a
- * negation, a branches-ignore list that does not take it, or no branch filter and no tag filter.
- * @param {string[]} src
- * @param {number} at the index of the push: line
- * @param {string} branch
- */
-function pushReaches(src, at, branch) {
-  const inline = stripYamlComment(src[at].slice(src[at].indexOf(':') + 1));
-  if (inline !== '' && inline !== '{}' && inline !== 'null' && inline !== '~') return true;
-  const indent = indentOf(src[at]);
-  /** @type {string[] | null} */
-  let branches = null;
-  /** @type {string[] | null} */
-  let ignore = null;
-  let tags = false;
-  for (let i = at + 1; i < src.length; i++) {
-    if (isBlankOrComment(src[i])) continue;
-    if (indentOf(src[i]) <= indent) break;
-    const m = /^\s*(branches|branches-ignore|tags|tags-ignore)\s*:(.*)$/.exec(src[i]);
-    if (!m) continue;
-    if (m[1].startsWith('tags')) tags = true;
-    else if (m[1] === 'branches') branches = yamlList(src, i, m[2]);
-    else ignore = yamlList(src, i, m[2]);
-  }
-  if (branches) {
-    let taken = false;
-    for (const pattern of branches) {
-      if (pattern.startsWith('!')) {
-        if (globMatch(pattern.slice(1), branch)) taken = false;
-      } else if (globMatch(pattern, branch)) taken = true;
-    }
-    return taken;
-  }
-  if (ignore) return !ignore.some((pattern) => globMatch(pattern, branch));
-  return !tags;
-}
-
-/**
- * A YAML list after a key: a flow list on the key's line, or the block list below it.
- * @param {string[]} src
- * @param {number} at
- * @param {string} rest the text after the key's colon
- * @returns {string[]}
- */
-function yamlList(src, at, rest) {
-  const inline = stripYamlComment(rest);
-  if (inline.startsWith('[')) {
-    return inline.slice(1, inline.lastIndexOf(']')).split(',').map((item) => yamlScalar(item)).filter(Boolean);
-  }
-  if (inline !== '') return [yamlScalar(inline)];
+  // With --repo every operand is a refspec; without, the first names the repository. "tag <name>" is a tag.
+  const operands = repository ? positional : positional.slice(1);
   /** @type {string[]} */
-  const out = [];
-  const indent = indentOf(src[at]);
-  for (let i = at + 1; i < src.length; i++) {
-    if (isBlankOrComment(src[i])) continue;
-    const m = /^(\s*)-\s*(.*)$/.exec(src[i]);
-    if (!m || m[1].length < indent) break;
-    out.push(yamlScalar(m[2]));
+  const refspecs = [];
+  for (let k = 0; k < operands.length; k++) {
+    if (operands[k] === 'tag') k++;
+    else refspecs.push(operands[k]);
   }
-  return out;
-}
-
-/**
- * GitHub's branch filter match: * takes any characters but /, ** takes any characters, and ?, + and [ ] work as in
- * a regular expression.
- * @param {string} pattern
- * @param {string} name
- */
-function globMatch(pattern, name) {
-  let re = '';
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === '*' && pattern[i + 1] === '*') {
-      re += '.*';
-      i++;
-    } else if (c === '*') re += '[^/]*';
-    else if ('?+[]'.includes(c)) re += c;
-    else re += c.replace(/[.^$(){}|\\]/g, '\\$&');
+  if (refspecs.length === 0) {
+    if (!tags && state.head) report(`"${command}" pushes the checked-out branch, ${branch} on a run on ${branch}`);
+    return;
   }
-  try {
-    return new RegExp(`^${re}$`).test(name);
-  } catch {
-    return true;
+  for (const refspec of refspecs) {
+    const spec = refspec.replace(/^\+/, '');
+    if (spec === ':') {
+      report(`"${command}" pushes every branch the remote also has, ${branch} among them`);
+      continue;
+    }
+    const colon = lastColon(spec);
+    const destination = colon < 0 ? spec : colon === spec.length - 1 ? spec.slice(0, colon) : spec.slice(colon + 1);
+    const kind = classify(destination, ctx);
+    if (kind === 'protected') report(`"${command}" ${remove || colon === 0 ? 'deletes' : 'pushes to'} ${unhold(destination)}`);
+    else if (kind === 'head' && state.head) report(`"${command}" pushes the checked-out branch, ${branch} on a run on ${branch}`);
+    else if (kind === 'run' && state.run) report(`"${command}" pushes to the run's own branch, ${branch} on a run on ${branch}`);
   }
 }
 
 /**
- * Whether a workflow can run with the branch checked out: any trigger but pull_request, and push unless its filters
- * keep it off the branch. A file with no `on:` (a composite action) can.
- * @param {string[]} src
- * @param {string} branch
+ * Follows git checkout and git switch: the branch they check out is the checked-out branch from then on.
+ * @param {string} sub
+ * @param {string[]} args
+ * @param {Step} step
  */
-function canRunOn(src, branch) {
-  const at = src.findIndex((l) => ON_KEY.test(l));
-  if (at < 0) return true;
-  const inline = stripYamlComment(/** @type {RegExpExecArray} */ (ON_KEY.exec(src[at]))[1]);
-  /** @type {{ name: string, line: number }[]} */
-  const events = [];
-  if (inline.startsWith('{')) return true;
-  if (inline.startsWith('[')) {
-    for (const e of inline.slice(1, inline.lastIndexOf(']')).split(',')) events.push({ name: yamlScalar(e), line: -1 });
-  } else if (inline !== '') {
-    events.push({ name: yamlScalar(inline), line: -1 });
-  } else {
-    let child = -1;
-    for (let i = at + 1; i < src.length; i++) {
-      if (isBlankOrComment(src[i])) continue;
-      const ind = indentOf(src[i]);
-      if (ind === 0) break;
-      if (child < 0) child = ind;
-      if (ind !== child) continue;
-      const m = /^\s*(?:-\s*)?([A-Za-z_]+)/.exec(src[i]);
-      if (m) events.push({ name: m[1], line: i });
+function checkout(sub, args, { state, ctx }) {
+  const create = sub === 'checkout' ? ['-b', '-B', '--orphan'] : ['-c', '-C', '--create', '--force-create', '--orphan'];
+  // git checkout <tree-ish> -- <paths> restores files and leaves the branch as it is.
+  if (sub === 'checkout' && args.includes('--') && !args.some((a) => create.includes(a))) return;
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    if (a === '--') return;
+    if (a === '--detach' || (sub === 'switch' && a === '-d')) {
+      state.head = false;
+      return;
+    }
+    const attached = /^--(?:create|force-create|orphan)=(.+)$/.exec(a);
+    const creates = create.includes(a) || attached !== null;
+    const name = create.includes(a) ? args[k + 1] : attached ? attached[1] : a.startsWith('-') ? undefined : a;
+    if (name === undefined) continue;
+    // A branch made here is a new one unless it is named for the default branch (-B master resets it).
+    const kind = classify(name, ctx);
+    if (kind === 'protected') state.head = true;
+    else if (kind === 'other' || creates) state.head = false;
+    else if (kind === 'run') state.head = state.run;
+    return;
+  }
+}
+
+/**
+ * The package scripts of a directory's package.json.
+ * @param {string} dir
+ * @param {Context} ctx
+ * @returns {Record<string, unknown>}
+ */
+function packageScripts(dir, ctx) {
+  const cached = ctx.scripts.get(dir);
+  if (cached) return cached;
+  const file = join(dir, 'package.json');
+  let scripts = {};
+  if (existsSync(file)) {
+    try {
+      scripts = JSON.parse(readFileSync(file, 'utf8')).scripts ?? {};
+    } catch (error) {
+      throw new ReadError(`${relative(ctx.root, file)}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  return events.some(({ name, line }) => {
-    if (name === 'pull_request') return false;
-    if (name !== 'push' || line < 0) return true;
-    return pushReaches(src, line, branch);
+  ctx.scripts.set(dir, scripts);
+  return scripts;
+}
+
+/**
+ * Whether a command runs semantic-release, other than as a dry run.
+ * @param {{ name: string, args: string[] }} run
+ * @param {string} dir the directory it runs in
+ * @param {Context} ctx
+ * @param {number} depth
+ * @returns {boolean}
+ */
+function runsSemanticRelease({ name, args }, dir, ctx, depth) {
+  if (depth > 4 || args.includes('--dry-run')) return false;
+  if (SEMANTIC_RELEASE.test(name)) return !args.includes('-d');
+  /** @type {string[]} */
+  const operands = [];
+  for (let k = 0; k < args.length; k++) {
+    if (args[k] === '--') {
+      operands.push(...args.slice(k + 1));
+      break;
+    }
+    if (!args[k].startsWith('-')) operands.push(args[k]);
+    else if (RUNNER_VALUED.has(args[k])) k++;
+  }
+  const [sub, next] = operands;
+  if (name === 'npx' || name === 'bunx') return SEMANTIC_RELEASE.test(base(sub ?? ''));
+  if (!['npm', 'pnpm', 'yarn', 'bun'].includes(name) || sub === undefined) return false;
+  if (['exec', 'dlx', 'x'].includes(sub)) return SEMANTIC_RELEASE.test(base(next ?? ''));
+  const script = ['run', 'run-script'].includes(sub) ? next : name !== 'npm' || ['test', 'start', 'stop', 'restart'].includes(sub) ? sub : undefined;
+  if (script === undefined) return false;
+  const scripts = packageScripts(dir, ctx);
+  // pnpm, yarn and bun run a package's binary by its name when no script has that name.
+  if (!Object.hasOwn(scripts, script)) return name !== 'npm' && script === sub && SEMANTIC_RELEASE.test(script);
+  return [`pre${script}`, script, `post${script}`].some((s) => {
+    const body = scripts[s];
+    if (typeof body !== 'string') return false;
+    return shellCommands(hold(body)).some((words) => {
+      const run = invoked(words);
+      return run !== null && runsSemanticRelease(run, dir, ctx, depth + 1);
+    });
   });
 }
 
 /**
- * The semantic-release configuration under root that lists @semantic-release/git (a commented-out entry counts), and
- * the package scripts that run semantic-release.
- * @param {string} root
+ * JavaScript without its comments.
+ * @param {string} text
  */
-function semanticRelease(root) {
-  let file = '';
-  for (const name of RELEASE_CONFIGS) {
-    const path = join(root, name);
-    if (existsSync(path) && GIT_PLUGIN.test(readFileSync(path, 'utf8'))) {
-      file = name;
-      break;
+function stripComments(text) {
+  let out = '';
+  let quote = '';
+  for (let k = 0; k < text.length; k++) {
+    const c = text[k];
+    if (quote) {
+      out += c;
+      if (c === '\\') out += text[++k] ?? '';
+      else if (c === quote) quote = '';
+    } else if (c === '/' && text[k + 1] === '/') {
+      while (k < text.length && text[k] !== '\n') k++;
+      out += '\n';
+    } else if (c === '/' && text[k + 1] === '*') {
+      const end = text.indexOf('*/', k + 2);
+      k = end < 0 ? text.length : end + 1;
+    } else {
+      if (c === '"' || c === "'" || c === '`') quote = c;
+      out += c;
     }
   }
-  /** @type {Set<string>} */
-  const scripts = new Set();
-  const manifest = join(root, 'package.json');
-  if (existsSync(manifest)) {
-    const pkg = JSON.parse(readFileSync(manifest, 'utf8'));
-    if (!file && pkg.release && GIT_PLUGIN.test(JSON.stringify(pkg.release))) file = 'package.json (release)';
-    for (const [name, body] of Object.entries(pkg.scripts ?? {})) {
-      if (typeof body === 'string' && /(?:^|[\s/&;|])semantic-release(?=\s|$|@)/.test(body) && !/--dry-run|\s-d(?:\s|$)/.test(body)) {
-        scripts.add(name);
+  return out;
+}
+
+/** @param {unknown} plugins */
+const listsGitPlugin = (plugins) => Array.isArray(plugins) && plugins.some((p) => (Array.isArray(p) ? p[0] : p) === '@semantic-release/git');
+
+/**
+ * The release configuration, in the step's directory or the root, that lists @semantic-release/git, or ''.
+ * @param {string} dir
+ * @param {Context} ctx
+ */
+function gitPluginConfig(dir, ctx) {
+  for (const at of new Set([dir, ctx.root])) {
+    const pkg = join(at, 'package.json');
+    if (existsSync(pkg)) {
+      try {
+        if (listsGitPlugin(JSON.parse(readFileSync(pkg, 'utf8')).release?.plugins)) return relative(ctx.root, pkg);
+      } catch (error) {
+        throw new ReadError(`${relative(ctx.root, pkg)}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    for (const name of RELEASE_CONFIGS) {
+      const file = join(at, name);
+      if (!existsSync(file)) continue;
+      if (/\.[cm]?[jt]s$/.test(name)) {
+        if (/(['"`])@semantic-release\/git\1/.test(stripComments(readFileSync(file, 'utf8')))) return relative(ctx.root, file);
+      } else {
+        const config = readYaml(file, ctx);
+        if (config && typeof config === 'object' && listsGitPlugin(/** @type {Record<string, unknown>} */ (config).plugins)) return relative(ctx.root, file);
       }
     }
   }
-  return { file, scripts };
+  return '';
 }
 
 /**
- * The workflow files and composite actions under root's .github directory.
+ * Reports a simple command of a run step that pushes to the default branch, and follows the ones that change the
+ * checked-out branch.
+ * @param {string[]} words
+ * @param {Step} step
+ * @param {number} depth
+ */
+function checkCommand(words, step, depth) {
+  const run = invoked(words);
+  if (!run || depth > 4) return;
+  const { name, args } = run;
+  if (SHELLS.has(name)) {
+    const k = args.findIndex(isCommandOption);
+    if (k >= 0 && k + 1 < args.length) for (const inner of shellCommands(args[k + 1])) checkCommand(inner, step, depth + 1);
+  } else if (name === 'eval') {
+    for (const inner of shellCommands(args.join(' '))) checkCommand(inner, step, depth + 1);
+  } else if (name === 'git') {
+    let k = 0;
+    while (k < args.length && args[k].startsWith('-')) k += GIT_VALUED.has(args[k]) ? 2 : 1;
+    if (args[k] === 'push') checkPush(args.slice(k + 1), step);
+    else if (args[k] === 'checkout' || args[k] === 'switch') checkout(args[k], args.slice(k + 1), step);
+  } else if (step.state.run) {
+    const dir = join(step.ctx.root, step.dir);
+    if (runsSemanticRelease(run, dir, step.ctx, 0)) {
+      const config = gitPluginConfig(dir, step.ctx);
+      const branch = step.ctx.branch;
+      if (config) step.report(`"${words.map(unhold).join(' ')}" runs semantic-release on a run on ${branch} while ${config} lists @semantic-release/git, which commits the release to ${branch}`);
+    }
+  }
+}
+
+/**
+ * Reports an action step that pushes to the default branch, and follows actions/checkout.
+ * @param {string} uses
+ * @param {unknown} inputs
+ * @param {Step} step
+ */
+function checkAction(uses, inputs, step) {
+  const { state, ctx, report } = step;
+  const action = uses.trim().toLowerCase().split('@')[0].split('/').slice(0, 2).join('/');
+  const given = inputs && typeof inputs === 'object' ? /** @type {Record<string, unknown>} */ (inputs) : {};
+  /** @param {string} key */
+  const input = (key) => (given[key] == null ? '' : String(given[key]).trim());
+  const branch = ctx.branch;
+  /**
+   * @param {string} value
+   * @param {string} what
+   */
+  const destination = (value, what) => {
+    const kind = classify(value, ctx);
+    if (kind === 'protected') report(`${what} ${value}`);
+    else if (kind === 'run' && state.run) report(`${what} the run's own branch, ${branch} on a run on ${branch}`);
+    else if (kind === 'head' && state.head) report(`${what} the checked-out branch, ${branch} on a run on ${branch}`);
+  };
+  if (action === 'actions/checkout') {
+    const ref = input('ref');
+    const kind = ref === '' ? 'run' : classify(ref, ctx);
+    state.head = kind === 'protected' || (kind !== 'other' && state.run);
+  } else if (action === 'peaceiris/actions-gh-pages') {
+    destination(input('publish_branch') || 'gh-pages', 'peaceiris/actions-gh-pages publishes to');
+  } else if (action === 'jamesives/github-pages-deploy-action') {
+    destination(input('branch') || 'gh-pages', 'JamesIves/github-pages-deploy-action publishes to');
+  } else if (action === 'ad-m/github-push-action') {
+    if (input('branch') === '') report(`ad-m/github-push-action with no branch input pushes ${branch} on v0.6.0 and earlier, and fails on later versions; give it a branch of its own`);
+    else destination(input('branch'), 'ad-m/github-push-action pushes to');
+  } else if (action === 'stefanzweifel/git-auto-commit-action') {
+    if (input('skip_push') === 'true') return;
+    // Its branch input defaults to github.head_ref: a pull request event pushes the head branch, any other event
+    // pushes the checked-out branch.
+    if (input('branch') !== '') destination(input('branch'), 'stefanzweifel/git-auto-commit-action pushes to');
+    else if (state.head && !state.pullRequestOnly) report(`stefanzweifel/git-auto-commit-action with no branch input pushes the checked-out branch, ${branch} on a run on ${branch}`);
+  } else if (action === 'endbug/add-and-commit') {
+    const push = 'push' in given ? input('push') : 'true';
+    if (push === 'false') return;
+    if (push !== 'true') {
+      for (const words of shellCommands(hold(push)).slice(0, 1)) checkPush(words, step);
+    } else if (input('new_branch') !== '') {
+      destination(input('new_branch'), 'EndBug/add-and-commit pushes to');
+    } else if (state.head) {
+      report(`EndBug/add-and-commit with no new_branch input pushes the checked-out branch, ${branch} on a run on ${branch}`);
+    }
+  } else if (action === 'cycjimmy/semantic-release-action') {
+    if (input('dry_run') === 'true' || !state.run) return;
+    const config = gitPluginConfig(join(ctx.root, input('working_directory') || step.dir), ctx);
+    if (config) report(`cycjimmy/semantic-release-action runs semantic-release on a run on ${branch} while ${config} lists @semantic-release/git, which commits the release to ${branch}`);
+  }
+}
+
+/**
+ * Reports the steps of a job or a composite action, in order.
+ * @param {string} file
+ * @param {unknown} steps
+ * @param {string} path the yq path of the job or the action
+ * @param {State} state
+ * @param {Context} ctx
+ * @param {(Finding & { path: string })[]} findings
+ */
+function checkSteps(file, steps, path, state, ctx, findings) {
+  if (!Array.isArray(steps)) return;
+  steps.forEach((raw, index) => {
+    if (!raw || typeof raw !== 'object') return;
+    const s = /** @type {Record<string, unknown>} */ (raw);
+    const at = `${path}.steps[${index}]`;
+    const label = `${at.slice(1).replace(/\["([^"]*)"\]/g, '.$1')}${s.name == null ? '' : ` (${String(s.name)})`}`;
+    /** @type {Step} */
+    const step = {
+      state,
+      ctx,
+      dir: s['working-directory'] == null ? state.dir : String(s['working-directory']),
+      report: (message) => findings.push({ file, path: at, line: 0, message: `${label}: ${message}` }),
+    };
+    if (typeof s.uses === 'string') checkAction(s.uses, s.with, step);
+    if (s.run != null) for (const words of shellCommands(hold(String(s.run)))) checkCommand(words, step, 0);
+  });
+}
+
+/** @param {unknown} defaults */
+const workingDirectory = (defaults) => {
+  const run = defaults && typeof defaults === 'object' ? /** @type {Record<string, unknown>} */ (defaults).run : undefined;
+  const dir = run && typeof run === 'object' ? /** @type {Record<string, unknown>} */ (run)['working-directory'] : undefined;
+  return dir == null ? '' : String(dir);
+};
+
+/**
+ * Reports one workflow or composite action.
+ * @param {string} file
+ * @param {unknown} doc
+ * @param {Context} ctx
+ * @param {(Finding & { path: string })[]} findings
+ */
+function checkDocument(file, doc, ctx, findings) {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return;
+  const d = /** @type {Record<string, unknown>} */ (doc);
+  const runs = d.runs && typeof d.runs === 'object' ? /** @type {Record<string, unknown>} */ (d.runs) : null;
+  if (runs && runs.using === 'composite') {
+    // A composite action runs in the job that calls it, which may be on the default branch.
+    checkSteps(file, runs.steps, '.runs', { run: true, head: true, pullRequestOnly: false, dir: '.' }, ctx, findings);
+    return;
+  }
+  if (!d.jobs || typeof d.jobs !== 'object') return;
+  const events = triggers(d);
+  const run = events === null || Object.entries(events).some(([event, filters]) => (event === 'push' ? pushRunsOn(filters, ctx.names) : !OFF_BRANCH_EVENTS.has(event)));
+  const names = events === null ? [] : Object.keys(events);
+  const pullRequestOnly = names.length > 0 && names.every((event) => PULL_REQUEST_EVENTS.has(event));
+  for (const [id, job] of Object.entries(/** @type {Record<string, unknown>} */ (d.jobs))) {
+    if (!job || typeof job !== 'object') continue;
+    const j = /** @type {Record<string, unknown>} */ (job);
+    const dir = workingDirectory(j.defaults) || workingDirectory(d.defaults) || '.';
+    checkSteps(file, j.steps, `.jobs[${JSON.stringify(id)}]`, { run, head: run, pullRequestOnly, dir }, ctx, findings);
+  }
+}
+
+/**
+ * A YAML file as yq reads it, anchors and aliases expanded, or null when it is empty.
+ * @param {string} file
+ * @param {Context} ctx
+ * @returns {unknown}
+ */
+function readYaml(file, ctx) {
+  const result = spawnSync(ctx.yq, ['--output-format=json', '--indent=0', 'explode(.)', file], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const name = relative(ctx.root, file) || file;
+  if (result.error) throw new ReadError(`${name}: ${ctx.yq} did not start (${result.error.message})`);
+  if (result.status !== 0) throw new ReadError(`${name}: ${result.stderr.trim() || `${ctx.yq} exited with status ${result.status}`}`);
+  const text = result.stdout.trim();
+  if (text === '' || text === 'null') return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ReadError(`${name}: more than one YAML document`);
+  }
+}
+
+/**
+ * The line of a node, by its yq path, or 0.
+ * @param {string} file
+ * @param {string} path
+ * @param {Context} ctx
+ */
+function lineOf(file, path, ctx) {
+  const result = spawnSync(ctx.yq, [`${path} | line`, file], { encoding: 'utf8' });
+  const line = Number.parseInt(result.stdout, 10);
+  return result.status === 0 && line > 0 ? line : 0;
+}
+
+/**
+ * Fails unless the yq this check runs is mikefarah's v4.
+ * @param {string} yq
+ */
+function requireYq(yq) {
+  const result = spawnSync(yq, ['--version'], { encoding: 'utf8' });
+  const printed = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();
+  if (result.error || result.status !== 0 || !/mikefarah\/yq/.test(printed) || !/version v?4\./.test(printed)) {
+    const why = result.error ? `did not start (${result.error.message})` : `printed ${JSON.stringify(printed)}`;
+    throw new ReadError(`This check reads YAML with mikefarah's yq v4 (https://github.com/mikefarah/yq), which GitHub's Ubuntu runners carry; ${yq} ${why}. Install it, or set YQ to its path.`);
+  }
+}
+
+/**
+ * The workflows in .github/workflows and the composite actions in .github/actions of a repository.
  * @param {string} root
- * @returns {string[]}
  */
 export function workflowFiles(root) {
   /** @type {string[]} */
-  const out = [];
+  const files = [];
   const workflows = join(root, '.github', 'workflows');
-  if (existsSync(workflows)) {
-    for (const name of readdirSync(workflows).sort()) if (/\.ya?ml$/.test(name)) out.push(join(workflows, name));
-  }
+  if (existsSync(workflows)) for (const name of readdirSync(workflows).sort()) if (/\.ya?ml$/.test(name)) files.push(join(workflows, name));
   /** @param {string} dir */
   const walk = (dir) => {
     for (const name of readdirSync(dir).sort()) {
       const path = join(dir, name);
       if (statSync(path).isDirectory()) walk(path);
-      else if (/^action\.ya?ml$/.test(name)) out.push(path);
+      else if (/^action\.ya?ml$/.test(name)) files.push(path);
     }
   };
   const actions = join(root, '.github', 'actions');
   if (existsSync(actions)) walk(actions);
-  return out;
+  return files;
 }
 
 /**
- * The pushes to the default branch in workflow and action files.
+ * The pushes to the default branch in the files.
  * @param {string[]} files
- * @param {{ root?: string, defaultBranch?: string }} [options] root holds the semantic-release configuration
+ * @param {{ root?: string, branch?: string, yq?: string }} [options]
  * @returns {Finding[]}
  */
 export function checkFiles(files, options = {}) {
-  const root = resolve(options.root ?? '.');
-  const branch = options.defaultBranch || 'master';
-  const protectedNames = new Set([branch, 'master', 'main']);
-  const release = semanticRelease(root);
-  /** @type {Finding[]} */
+  const branch = options.branch || 'master';
+  /** @type {Context} */
+  const ctx = {
+    root: resolve(options.root ?? '.'),
+    branch,
+    names: new Set(['master', 'main', branch]),
+    yq: options.yq || process.env.YQ || 'yq',
+    scripts: new Map(),
+  };
+  requireYq(ctx.yq);
+  /** @type {(Finding & { path: string })[]} */
   const findings = [];
   for (const file of files) {
-    const src = readFileSync(file, 'utf8').replace(/\r\n?/g, '\n').split('\n');
-    const mask = blockMask(src);
-    /** @type {Context} */
-    const ctx = { branch, protectedNames, onDefault: canRunOn(src, branch), releaseGit: release.file, releaseScripts: release.scripts };
-    /** @type {Report} */
-    const report = (line, message) => findings.push({ file, line, message });
-    for (const script of runScripts(src, mask)) {
-      for (const words of shellCommands(script)) checkCommand(words, ctx, report);
-    }
-    checkActions(src, mask, ctx, report);
+    const before = findings.length;
+    checkDocument(file, readYaml(file, ctx), ctx, findings);
+    for (const finding of findings.slice(before)) finding.line = lineOf(file, finding.path, ctx);
   }
-  return findings.sort((a, b) => (a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1));
+  return findings.map(({ file, line, message }) => ({ file: relative(ctx.root, file), line, message }));
 }
 
 /** @param {string} text */
-const escapeData = (text) => text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
-/** @param {string} text */
-const escapeProperty = (text) => escapeData(text).replace(/:/g, '%3A').replace(/,/g, '%2C');
+const annotation = (text) => text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 
 /**
  * @param {string[]} argv
@@ -857,47 +985,39 @@ function main(argv) {
   let root = '.';
   /** @type {string[]} */
   const files = [];
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--help' || argv[i] === '-h') {
+  for (let k = 0; k < argv.length; k++) {
+    const a = argv[k];
+    if (a === '-h' || a === '--help') {
       console.log(USAGE);
       return 0;
     }
-    if (argv[i] === '--root' && argv[i + 1] !== undefined) root = argv[++i];
-    else if (argv[i].startsWith('-')) {
-      console.error(`check-workflow-pushes: ${argv[i] === '--root' ? '--root needs a directory' : `unknown option ${argv[i]}`}\n${USAGE}`);
+    if (a === '--root' && argv[k + 1] !== undefined) root = argv[++k];
+    else if (a.startsWith('-')) {
+      console.error(USAGE);
       return 2;
-    } else files.push(argv[i]);
+    } else files.push(a);
   }
   const branch = process.env.DEFAULT_BRANCH || 'master';
-  /** @type {Finding[]} */
-  let findings;
-  let count = files.length;
   try {
-    const list = files.length > 0 ? files : workflowFiles(resolve(root));
-    count = list.length;
-    if (count === 0) {
-      console.error(`check-workflow-pushes: no workflow files under ${join(resolve(root), '.github')}`);
+    const list = files.length > 0 ? files.map((file) => resolve(file)) : workflowFiles(resolve(root));
+    const findings = checkFiles(list, { root, branch });
+    for (const f of findings) {
+      console.log(`${f.file}:${f.line}: ${f.message}`);
+      if (process.env.GITHUB_ACTIONS === 'true') console.log(`::error file=${annotation(f.file)},line=${f.line}::${annotation(f.message)}`);
+    }
+    if (findings.length > 0) {
+      console.error(`${findings.length} workflow ${findings.length === 1 ? 'step pushes' : 'steps push'} to ${branch}. Its rules refuse a direct push (GH006), so the step fails after everything before it has run. Push a branch of its own and open a pull request, or write to a branch the rules leave open.`);
+      return 1;
+    }
+    console.log(`No workflow pushes to ${branch} (${list.length} files read).`);
+    return 0;
+  } catch (error) {
+    if (error instanceof ReadError) {
+      console.error(error.message);
       return 2;
     }
-    findings = checkFiles(list, { root, defaultBranch: branch });
-  } catch (error) {
-    console.error(`check-workflow-pushes: ${error instanceof Error ? error.message : String(error)}`);
-    return 2;
+    throw error;
   }
-  const annotate = process.env.GITHUB_ACTIONS === 'true';
-  for (const f of findings) {
-    const file = relative(process.cwd(), f.file) || f.file;
-    if (annotate) console.log(`::error file=${escapeProperty(file)},line=${f.line}::${escapeData(f.message)}`);
-    else console.log(`${file}:${f.line}: ${f.message}`);
-  }
-  if (findings.length > 0) {
-    console.log(`${findings.length} push${findings.length === 1 ? '' : 'es'} to ${branch} in ${count} workflow file${count === 1 ? '' : 's'}.`);
-    return 1;
-  }
-  console.log(`Read ${count} workflow file${count === 1 ? '' : 's'}: none pushes to ${branch}.`);
-  return 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  process.exitCode = main(process.argv.slice(2));
-}
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) process.exitCode = main(process.argv.slice(2));

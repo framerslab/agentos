@@ -1,171 +1,416 @@
 // @ts-check
-// check-workflow-pushes.mjs against its fixtures: a refused fixture reports exactly the lines it marks with
-// `lint-expect`, an allowed fixture reports nothing, and the command exits 1 on a push to master, 0 without one and
-// 2 when it finds no workflow to read.
-// Run: node --test .github/scripts/check-workflow-pushes.test.mjs
+// Runs in CI (node --test); it needs mikefarah's yq v4, which GitHub's Ubuntu runners carry.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { dirname, join, resolve } from 'node:path';
+import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { checkFiles, workflowFiles } from './check-workflow-pushes.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const fixtures = join(here, 'fixtures', 'workflow-pushes');
-const script = join(here, 'check-workflow-pushes.mjs');
+const script = fileURLToPath(new URL('./check-workflow-pushes.mjs', import.meta.url));
+const repository = resolve(dirname(script), '..', '..');
 
 /**
- * The lines a fixture marks as reported.
- * @param {string} file
+ * YAML or a script written at any indentation. A template literal reads ${ itself, so %{{ stands for ${{ and $\{
+ * for ${; \` stands for a backtick.
+ * @param {TemplateStringsArray} strings
  */
-const marked = (file) =>
-  readFileSync(file, 'utf8').split('\n').flatMap((line, i) => (line.includes('lint-expect') ? [i + 1] : []));
+const text = (strings) => {
+  const raw = strings.raw.join('').replaceAll('%{{', '${{').replaceAll('$\\{', '${').replaceAll('\\`', '`');
+  const lines = raw.replace(/^\n/, '').replace(/\n\s*$/, '').split('\n');
+  const margin = Math.min(...lines.filter((line) => line.trim() !== '').map((line) => line.length - line.trimStart().length));
+  return `${lines.map((line) => line.slice(margin)).join('\n')}\n`;
+};
 
 /**
- * The workflow fixtures in a directory.
- * @param {string} dir
+ * A workflow with one job: its triggers and its steps, each written at column 0.
+ * @param {string} on
+ * @param {string} steps
  */
-const yamlIn = (dir) => readdirSync(dir).filter((name) => name.endsWith('.yml')).sort().map((name) => join(dir, name));
+const workflow = (on, steps) => {
+  const indent = (/** @type {string} */ block, /** @type {number} */ n) => block.trimEnd().split('\n').map((line) => (line ? ' '.repeat(n) + line : line)).join('\n');
+  return `on:\n${indent(on, 2)}\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n${indent(steps, 6)}\n`;
+};
+
+const ON_MASTER = 'push:\n  branches: [master]';
+const ON_PULL_REQUEST = 'pull_request:';
 
 /**
- * @param {string[]} args
- * @param {Record<string, string>} env
+ * The checker's findings for a repository holding the files.
+ * @param {Record<string, string>} files
  */
-const run = (args, env = {}) =>
-  spawnSync(process.execPath, [script, ...args], {
-    encoding: 'utf8',
-    env: { ...process.env, GITHUB_ACTIONS: '', DEFAULT_BRANCH: 'master', ...env },
-  });
+function check(files) {
+  const root = mkdtempSync(join(tmpdir(), 'workflow-pushes-'));
+  try {
+    for (const [path, body] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), body);
+    }
+    return checkFiles(workflowFiles(root), { root, branch: 'master' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
-const refusedCases = [
-  ...yamlIn(join(fixtures, 'refused')).map((file) => ({ file, root: join(fixtures, 'refused') })),
-  { file: join(fixtures, 'refused', 'semantic-release', 'release.yml'), root: join(fixtures, 'refused', 'semantic-release') },
-];
-const allowedCases = [
-  ...yamlIn(join(fixtures, 'allowed')).map((file) => ({ file, root: join(fixtures, 'allowed') })),
-  { file: join(fixtures, 'allowed', 'semantic-release', 'release.yml'), root: join(fixtures, 'allowed', 'semantic-release') },
-];
+/**
+ * Asserts the findings' messages match the patterns, one for one and in order.
+ * @param {Record<string, string>} files
+ * @param {RegExp[]} patterns
+ */
+function expectFindings(files, patterns) {
+  const messages = check(files).map((f) => f.message);
+  assert.equal(messages.length, patterns.length, `findings:\n${messages.join('\n')}`);
+  patterns.forEach((pattern, k) => assert.match(messages[k], pattern));
+}
 
-for (const { file, root } of refusedCases) {
-  test(`reports each marked line of ${file.slice(fixtures.length + 1)}`, () => {
-    const expected = marked(file);
-    assert.ok(expected.length > 0, 'a refused fixture marks the lines it expects reported');
-    const findings = checkFiles([file], { root, defaultBranch: 'master' });
-    assert.deepEqual(
-      findings.map((f) => f.line),
-      expected,
-      findings.map((f) => `${f.line}: ${f.message}`).join('\n'),
+const RELEASE_CONFIG_WITH_GIT = text`
+  module.exports = {
+    branches: ['master'],
+    plugins: ['@semantic-release/commit-analyzer', '@semantic-release/npm', ['@semantic-release/git', { assets: ['package.json'] }]],
+  };
+`;
+
+describe('refused: a workflow that pushes to master', () => {
+  test('the registry step of agentos-extensions run 39191821853, which pushed to the run\'s branch and retried the refusal', () => {
+    expectFindings(
+      {
+        '.github/workflows/release.yml': text`
+          name: Release & Publish
+          on:
+            push:
+              branches: [master]
+            workflow_dispatch:
+          jobs:
+            release:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v5
+                - name: Update registry after publish
+                  run: |
+                    node scripts/update-registry.js
+                    cp registry.json "$RUNNER_TEMP/registry.json"
+                    for attempt in 1 2 3 4 5; do
+                      if ! git fetch --quiet origin "$GITHUB_REF"; then
+                        echo "fetching $GITHUB_REF_NAME failed (attempt $attempt of 5); trying again."
+                        sleep $(( attempt * 10 ))
+                        continue
+                      fi
+                      git reset --quiet --hard FETCH_HEAD
+                      cp "$RUNNER_TEMP/registry.json" registry.json
+                      git add registry.json
+                      git commit --quiet -m "chore: update extension registry [skip ci]"
+                      if git push origin "HEAD:$GITHUB_REF"; then
+                        exit 0
+                      fi
+                      echo "$GITHUB_REF_NAME moved before the push (attempt $attempt of 5); trying again."
+                      sleep $(( attempt * 10 ))
+                    done
+                    echo "::error::registry.json was not pushed after 5 attempts."
+                    exit 1
+        `,
+      },
+      [/^jobs\.release\.steps\[1\] \(Update registry after publish\): "git push origin HEAD:\$GITHUB_REF" pushes to the run's own branch, master on a run on master$/],
     );
   });
-}
 
-for (const { file, root } of allowedCases) {
-  test(`reports nothing in ${file.slice(fixtures.length + 1)}`, () => {
-    const findings = checkFiles([file], { root, defaultBranch: 'master' });
-    assert.deepEqual(findings.map((f) => `${f.line}: ${f.message}`), []);
+  test('master named in the push, from a pull request workflow', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+      - run: |
+          git push origin HEAD:master
+          git push origin HEAD:refs/heads/main
+          git push -f origin main:main
+          git push origin --delete master
+    `) }, [/"git push origin HEAD:master" pushes to master$/, /pushes to refs\/heads\/main$/, /"git push -f origin main:main" pushes to main$/, /"git push origin --delete master" deletes master$/]);
   });
-}
 
-test('the default branch is the one DEFAULT_BRANCH names, and master and main stay refused', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'workflow-pushes-'));
-  try {
-    const file = join(dir, 'trunk.yml');
-    writeFileSync(file, [
-      'on:',
-      '  pull_request:',
-      'jobs:',
-      '  push:',
-      '    runs-on: ubuntu-latest',
-      '    steps:',
-      '      - run: git push origin HEAD:trunk',
-      '      - run: git push origin HEAD:main',
-      '',
-    ].join('\n'));
-    assert.deepEqual(checkFiles([file], { root: dir, defaultBranch: 'trunk' }).map((f) => f.line), [7, 8]);
-    assert.deepEqual(checkFiles([file], { root: dir, defaultBranch: 'master' }).map((f) => f.line), [8]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  test('--repo names the repository, so the next word is a refspec', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+      - run: |
+          git push --repo=origin HEAD:master
+          git push --repo origin master
+    `) }, [/pushes to master$/, /pushes to master$/]);
+  });
+
+  test('every branch: --all, --mirror, a wildcard destination, the matching refspec', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+      - run: |
+          git push --all origin
+          git push --mirror
+          git push origin 'refs/heads/*:refs/heads/*'
+          git push origin :
+          git push origin +:
+    `) }, [/pushes every branch, master among them$/, /pushes every branch, master among them$/, /pushes to refs\/heads\/\*$/, /pushes every branch the remote also has/, /pushes every branch the remote also has/]);
+  });
+
+  test('expressions and defaults that resolve to the default branch', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+      - run: git push origin "HEAD:%{{ github.event.repository.default_branch || 'master' }}"
+      - run: git push origin "HEAD:%{{ github.base_ref }}"
+      - run: git push origin "HEAD:$GITHUB_BASE_REF"
+      - run: git push origin "HEAD:$\{TARGET:-master}"
+    `) }, [/pushes to \$\{\{ github\.event\.repository\.default_branch \|\| 'master' \}\}$/, /pushes to \$\{\{ github\.base_ref \}\}$/, /pushes to \$GITHUB_BASE_REF$/, /pushes to \$\{TARGET:-master\}$/]);
+  });
+
+  test('every YAML spelling reads the same: quoted keys, an escaped line break, a block scalar, a flow mapping, an alias', () => {
+    expectFindings({
+      '.github/workflows/w.yml': text`
+        on: pull_request
+        jobs:
+          j:
+            runs-on: ubuntu-latest
+            steps:
+              - "run": git push origin HEAD:master
+              - run: "git push origin HEAD:ma\
+                  ster"
+              - uses: peaceiris/actions-gh-pages@v4
+                with:
+                  publish_branch: >-
+                    master
+              - uses: peaceiris/actions-gh-pages@v4
+                with: { "publish_branch": "master" }
+              - &push
+                run: git push origin HEAD:master
+          k:
+            runs-on: ubuntu-latest
+            steps:
+              - *push
+      `,
+    }, [/^jobs\.j\.steps\[0\]: "git push origin HEAD:master" pushes to master$/, /^jobs\.j\.steps\[1\]: "git push origin HEAD:master" pushes to master$/, /^jobs\.j\.steps\[2\]: peaceiris\/actions-gh-pages publishes to master$/, /^jobs\.j\.steps\[3\]: peaceiris\/actions-gh-pages publishes to master$/, /^jobs\.j\.steps\[4\]: /, /^jobs\.k\.steps\[0\]: /]);
+  });
+
+  test('the checked-out branch, from workflows whose triggers reach master however they are written', () => {
+    expectFindings({
+      '.github/workflows/a.yml': workflow("'push':\n  branches: [master]", '- run: git push'),
+      '.github/workflows/b.yml': `on: { push: { branches: [master] } }\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: git push\n`,
+      '.github/workflows/c.yml': `on: [push]\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: git push origin HEAD\n`,
+      '.github/workflows/d.yml': workflow("push:\n  paths: ['src/**']", '- run: git push'),
+      '.github/workflows/e.yml': workflow("workflow_dispatch:\nschedule:\n  - cron: '0 0 * * *'", '- run: git push origin "HEAD:${{ github.ref_name }}"'),
+    }, [/"git push" pushes the checked-out branch, master on a run on master$/, /"git push" pushes the checked-out branch/, /"git push origin HEAD" pushes the checked-out branch/, /"git push" pushes the checked-out branch/, /pushes to the run's own branch, master on a run on master$/]);
+  });
+
+  test('a push the shell runs: in a substitution, behind a wrapper, in sh -c, eval, an if, a heredoc fed to bash', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+      - run: |
+          out="$(git push origin HEAD:master 2>&1)"
+          echo "\`git push origin HEAD:master\`"
+          env GIT_TRACE=1 git -C repo push origin master
+          sudo -E git push origin master
+          bash -c "git push origin HEAD:master"
+          eval "git push origin HEAD:master"
+          if git push origin master; then echo pushed; fi
+          bash <<'EOF'
+          git push origin master
+          EOF
+    `) }, Array(8).fill(/pushes to master$/));
+  });
+
+  test('a step that checks out master makes a pull request job push it', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+      - run: git push
+      - run: |
+          git switch feature
+          git checkout main
+          git push origin HEAD
+    `) }, [/^jobs\.j\.steps\[1\]: "git push" pushes the checked-out branch/, /^jobs\.j\.steps\[2\]: "git push origin HEAD" pushes the checked-out branch/]);
+  });
+
+  test('actions that push to master', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - uses: ad-m/github-push-action@v0.6.0
+        with: { github_token: x }
+      - uses: JamesIves/github-pages-deploy-action@v4
+        with: { branch: master, folder: build }
+      - uses: stefanzweifel/git-auto-commit-action@v5
+      - uses: EndBug/add-and-commit@v9
+      - uses: EndBug/add-and-commit@v9
+        with:
+          push: origin HEAD:master --force
+    `) }, [/ad-m\/github-push-action with no branch input pushes master on v0\.6\.0 and earlier/, /JamesIves\/github-pages-deploy-action publishes to master$/, /git-auto-commit-action with no branch input pushes the checked-out branch, master on a run on master$/, /EndBug\/add-and-commit with no new_branch input pushes the checked-out branch/, /"git push origin HEAD:master --force" pushes to master$/]);
+  });
+
+  test('semantic-release on master while the configuration lists @semantic-release/git', () => {
+    expectFindings({
+      'release.config.js': RELEASE_CONFIG_WITH_GIT,
+      'package.json': JSON.stringify({ scripts: { release: 'semantic-release --ci', ship: 'npm run release' } }),
+      '.github/workflows/w.yml': workflow(ON_MASTER, text`
+        - run: npx semantic-release
+        - run: pnpm exec semantic-release
+        - run: npm run ship
+        - uses: cycjimmy/semantic-release-action@v4
+      `),
+    }, [/"npx semantic-release" runs semantic-release on a run on master while release\.config\.js lists @semantic-release\/git/, /"pnpm exec semantic-release" runs semantic-release/, /"npm run ship" runs semantic-release/, /cycjimmy\/semantic-release-action runs semantic-release on a run on master while release\.config\.js lists/]);
+  });
+
+  test('a composite action, which runs in whichever job calls it', () => {
+    expectFindings({ '.github/actions/push/action.yml': text`
+      name: push
+      runs:
+        using: composite
+        steps:
+          - run: git push
+            shell: bash
+    ` }, [/^runs\.steps\[0\]: "git push" pushes the checked-out branch/]);
+  });
 });
 
-test('a semantic-release package script with @semantic-release/git in package.json is a run that commits', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'workflow-pushes-'));
-  try {
-    writeFileSync(join(dir, 'package.json'), JSON.stringify({
-      scripts: { release: 'semantic-release', 'release:check': 'semantic-release --dry-run' },
-      release: { plugins: ['@semantic-release/npm', '@semantic-release/git'] },
-    }));
-    const file = join(dir, 'release.yml');
-    writeFileSync(file, [
-      'on:',
-      '  push:',
-      '    branches: [master]',
-      'jobs:',
-      '  release:',
-      '    runs-on: ubuntu-latest',
-      '    steps:',
-      '      - run: NPM_CONFIG_PROVENANCE=true pnpm run release',
-      '      - run: pnpm run release:check',
-      '',
-    ].join('\n'));
-    const findings = checkFiles([file], { root: dir, defaultBranch: 'master' });
-    assert.deepEqual(findings.map((f) => f.line), [8]);
-    assert.match(findings[0].message, /package\.json \(release\)/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+describe('allowed: a workflow that does not push to master', () => {
+  test('a push that is printed, commented, fed to cat, or a dry run', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - run: |
+          echo git push origin HEAD:master
+          printf '%s\n' "git push origin master"
+          # git push origin master
+          cat <<EOF > notes.txt
+          git push origin master
+          EOF
+          git push --dry-run origin HEAD:master
+          git push -n origin master
+          command -v git
+    `) }, []);
+  });
+
+  test('a branch of its own, tags, and a token URL as the repository', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - run: |
+          git checkout -b "chore/update-$GITHUB_RUN_ID"
+          git push -u origin HEAD
+          git push origin HEAD:refs/heads/chore/x
+          git push --tags
+          git push origin v1.2.3
+          git push origin tag v1.2.4
+          git push "https://x-access-token:%{{ secrets.TOKEN }}@github.com/o/r.git" HEAD:refs/heads/feature
+          git switch -c other
+          git push
+    `) }, []);
+  });
+
+  test('actions that publish elsewhere or do not push', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - uses: peaceiris/actions-gh-pages@v4
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          publish_branch: agentos-live-docs
+      - uses: JamesIves/github-pages-deploy-action@v4
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          skip_push: true
+      - uses: EndBug/add-and-commit@v9
+        with:
+          push: false
+      - uses: EndBug/add-and-commit@v9
+        with:
+          new_branch: chore/generated
+    `) }, []);
+  });
+
+  test('triggers that keep the workflow off master', () => {
+    const steps = '- run: git push';
+    expectFindings({
+      '.github/workflows/a.yml': workflow('push:\n  branches: [release]', steps),
+      '.github/workflows/b.yml': `on: { push: { branches: [develop] } }\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: git push\n`,
+      // A push trigger with only tags or tags-ignore runs for no branch push (GitHub's workflow syntax).
+      '.github/workflows/c.yml': workflow("push:\n  tags: ['v*']", steps),
+      '.github/workflows/d.yml': workflow("push:\n  tags-ignore: ['v*']", steps),
+      '.github/workflows/e.yml': workflow('push:\n  branches-ignore: [master, main]', steps),
+      '.github/workflows/f.yml': workflow("push:\n  branches: ['**', '!master', '!main']", steps),
+      '.github/workflows/g.yml': `on: [pull_request, merge_group, release]\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: git push origin "HEAD:$GITHUB_REF_NAME"\n`,
+    }, []);
+  });
+
+  test('a pull request\'s head branch', () => {
+    expectFindings({
+      '.github/workflows/a.yml': workflow('pull_request_target:', text`
+        - uses: actions/checkout@v5
+          with:
+            ref: %{{ github.head_ref }}
+        - run: git push
+        - uses: stefanzweifel/git-auto-commit-action@v5
+      `),
+      // On a pull request event the action's branch input defaults to github.head_ref, the head branch.
+      '.github/workflows/b.yml': workflow(ON_PULL_REQUEST, text`
+        - uses: actions/checkout@v5
+          with:
+            ref: master
+        - uses: stefanzweifel/git-auto-commit-action@v5
+      `),
+    }, []);
+  });
+
+  test('semantic-release that commits nothing to master', () => {
+    expectFindings({
+      'release.config.js': text`
+        module.exports = {
+          branches: ['master'],
+          plugins: [
+            '@semantic-release/npm',
+            // ['@semantic-release/git', { assets: ['package.json'] }],
+            /* '@semantic-release/git', */
+          ],
+        };
+      `,
+      '.github/workflows/w.yml': workflow(ON_MASTER, '- run: npx semantic-release'),
+    }, []);
+    expectFindings({
+      'release.config.js': RELEASE_CONFIG_WITH_GIT,
+      'package.json': JSON.stringify({ scripts: { print: 'echo semantic-release' } }),
+      '.github/workflows/a.yml': workflow(ON_MASTER, text`
+        - run: |
+            npm install -D semantic-release
+            pnpm add -D semantic-release
+            npm uninstall semantic-release
+            npm run print
+            npx semantic-release --dry-run
+            echo semantic-release
+      `),
+      '.github/workflows/b.yml': workflow(ON_PULL_REQUEST, '- run: npx semantic-release'),
+    }, []);
+  });
+
+  test("this repository's own workflows", () => {
+    const branch = process.env.DEFAULT_BRANCH || 'master';
+    assert.deepEqual(checkFiles(workflowFiles(repository), { root: repository, branch }), []);
+  });
 });
 
-test('workflowFiles reads .github/workflows and the composite actions under .github/actions', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'workflow-pushes-'));
-  try {
-    mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
-    mkdirSync(join(dir, '.github', 'actions', 'publish'), { recursive: true });
-    writeFileSync(join(dir, '.github', 'workflows', 'ci.yml'), 'on: [push]\n');
-    writeFileSync(join(dir, '.github', 'workflows', 'notes.md'), '# not a workflow\n');
-    writeFileSync(join(dir, '.github', 'actions', 'publish', 'action.yml'), 'runs:\n  using: composite\n  steps:\n    - run: git push\n      shell: bash\n');
-    const files = workflowFiles(dir).map((f) => f.slice(dir.length + 1));
-    assert.deepEqual(files, [join('.github', 'workflows', 'ci.yml'), join('.github', 'actions', 'publish', 'action.yml')]);
-    // A composite action has no trigger of its own, so it is read as one that can run on master.
-    assert.deepEqual(checkFiles(workflowFiles(dir), { root: dir }).map((f) => f.line), [4]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+describe('the command', () => {
+  /**
+   * @param {Record<string, string>} files
+   * @param {Record<string, string>} [env]
+   */
+  const run = (files, env = {}) => {
+    const root = mkdtempSync(join(tmpdir(), 'workflow-pushes-'));
+    try {
+      for (const [path, body] of Object.entries(files)) {
+        mkdirSync(dirname(join(root, path)), { recursive: true });
+        writeFileSync(join(root, path), body);
+      }
+      return spawnSync(process.execPath, [script, '--root', root], { encoding: 'utf8', env: { ...process.env, GITHUB_ACTIONS: '', ...env } });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
 
-test('the command exits 1 and names the file and line of each push to master', () => {
-  const file = join(fixtures, 'refused', 'registry-retry.yml');
-  const result = run(['--root', dirname(file), file]);
-  assert.equal(result.status, 1, result.stdout + result.stderr);
-  assert.match(result.stdout, new RegExp(`registry-retry\\.yml:${marked(file)[0]}: git push HEAD:\\$GITHUB_REF pushes the branch the run is on`));
-  assert.match(result.stdout, /^1 push to master in 1 workflow file\.$/m);
-});
+  test('exits 1 and names the file, line and step of a push to master', () => {
+    const result = run({ '.github/workflows/w.yml': workflow(ON_MASTER, '- run: echo build\n- name: Push\n  run: git push origin HEAD:master') });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /^\.github\/workflows\/w\.yml:9: jobs\.j\.steps\[1\] \(Push\): "git push origin HEAD:master" pushes to master$/m);
+    assert.match(result.stderr, /Its rules refuse a direct push \(GH006\)/);
+  });
 
-test('the command writes a GitHub error annotation for each finding when it runs in Actions', () => {
-  const file = join(fixtures, 'refused', 'push-actions.yml');
-  const result = run(['--root', dirname(file), file], { GITHUB_ACTIONS: 'true' });
-  assert.equal(result.status, 1, result.stdout + result.stderr);
-  const annotations = result.stdout.split('\n').filter((line) => line.startsWith('::error file='));
-  assert.equal(annotations.length, marked(file).length);
-  assert.match(annotations[0], /^::error file=[^,]*push-actions\.yml,line=\d+::peaceiris\/actions-gh-pages@v4 pushes to master \(publish_branch\)/);
-});
+  test('exits 0 when nothing pushes to master', () => {
+    const result = run({ '.github/workflows/w.yml': workflow(ON_MASTER, '- run: git push origin HEAD:refs/heads/chore/x') });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /No workflow pushes to master \(1 files read\)/);
+  });
 
-test('the command exits 0 on workflows that push only elsewhere', () => {
-  const result = run(['--root', join(fixtures, 'allowed'), ...yamlIn(join(fixtures, 'allowed'))]);
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /none pushes to master\.$/m);
-});
-
-test('the command exits 2 when it finds no workflow to read', () => {
-  const result = run(['--root', join(fixtures, 'allowed')]);
-  assert.equal(result.status, 2, result.stdout + result.stderr);
-  assert.match(result.stderr, /no workflow files under/);
-});
-
-test('the command exits 2 on an unknown option', () => {
-  const result = run(['--fix']);
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /unknown option --fix/);
+  test('exits 2 when yq is not there', () => {
+    const result = run({ '.github/workflows/w.yml': workflow(ON_MASTER, '- run: git push') }, { YQ: join(tmpdir(), 'no-such-yq') });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /mikefarah's yq v4/);
+  });
 });
