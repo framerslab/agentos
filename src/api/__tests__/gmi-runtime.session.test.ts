@@ -229,7 +229,7 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
       ...base(k),
       provider: 'anthropic',
       model: 'claude-fable-5-1',
-      onAfterGeneration: async () => ({ text: 'Rewritten by a hook.' }),
+      onAfterGeneration: async (result) => ({ ...result, text: 'Rewritten by a hook.' }),
     }).session('s').send('where?', { responseSchema: z.object({ city: z.string() }) });
     // The gateway lifts the JSON text answer into structuredOutput, so the hook's text does not replace it.
     expect(r.object).toEqual({ city: 'Lyon' });
