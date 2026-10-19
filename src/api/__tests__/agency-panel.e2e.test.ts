@@ -1905,6 +1905,33 @@ describe('22-23. rotation, copies, retries, empty text', () => {
     expect((await team.generate('review')).text).toBe('Merged findings');
     expect([...ended].sort()).toEqual(['__agency__', 'chair', 'correctness', 'failure', 'security']);
   });
+  it("a callback getter on the host's on object is read when its event fires, never by agency(): one that throws fails no construction and is written as agency_callback_threw at its event, and one whose event never fires is never read, in an agency without a pool and in a panel", async () => {
+    const answering = { generate: async () => ({ text: 'B', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }), stream: () => { throw new Error('unused'); }, session: () => ({}), usage: async () => ({}), close: async () => {} } as unknown as Agent;
+    const read: string[] = [];
+    /** An on object whose agentStart and emergentForge are enumerable getters that throw when read. */
+    const gettersOn = (): AgencyCallbacks => {
+      const on: AgencyCallbacks = {};
+      for (const name of ['agentStart', 'emergentForge'] as const) {
+        Object.defineProperty(on, name, { enumerable: true, configurable: true, get: () => { read.push(name); throw new Error(`${name} getter down`); } });
+      }
+      return on;
+    };
+    const plain = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { b: answering }, strategy: 'sequential', on: gettersOn() } as never);
+    threeProviders();
+    const team = panel({ on: gettersOn() });
+    // Neither construction read a getter.
+    expect(read).toEqual([]);
+    const lines = await logLines(async () => {
+      expect((await plain.generate('go')).text).toBe('B');
+      expect((await team.generate('review')).text).toBe('Merged findings');
+    });
+    // agentStart fired for each agency (and the panel's seats and chair) and was read at each event; emergentForge never fired.
+    expect(read.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(read)).toEqual(new Set(['agentStart']));
+    const threw = lines.filter((l) => l.meta?.event === 'agency_callback_threw');
+    expect(threw.length).toBe(read.length);
+    for (const line of threw) expect(line.meta).toEqual({ event: 'agency_callback_threw', callback: 'agentStart', error: 'agentStart getter down' });
+  });
   it('a run no seat answered adds no assistant turn to its session: messages() keeps the user turn alone, in send() and in stream(), and the next prompt carries no empty answer', async () => {
     let decide: (r: ApprovalRequest) => Promise<ApprovalDecision> = hitl.autoReject('no');
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')]]);
