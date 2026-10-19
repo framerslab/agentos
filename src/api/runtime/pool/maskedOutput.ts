@@ -85,11 +85,24 @@ export function maskedResult<T>(result: T, mask: CallMask): T {
   return { ...masked, toolCalls: mask.strings(result.toolCalls, true) } as T;
 }
 
-/** One agent's text in flight: its redactor, the last text part's other strings (what held text is released with) and the parts waiting behind the held tail, each with the count of held characters before it. */
+/**
+ * One agent's text in flight: its redactor, the last text part's other strings
+ * (what held text is released with), the held text by the part that brought
+ * it, and the parts waiting behind the held tail, each with the count of held
+ * characters before it and its place in the stream.
+ */
 interface TextLane {
   redactor: ChunkRedactor;
   template?: Record<string, unknown>;
-  waiting: Array<{ part: unknown; at: number }>;
+  /** The held text, first to last, as runs of the characters one part brought: that part's place in the stream and how many. */
+  runs: Array<{ seq: number; length: number }>;
+  waiting: Array<{ part: unknown; at: number; seq: number }>;
+}
+
+/** What a lane releases, a part or a piece of text, with the place in the stream of the part it came from. */
+interface Released {
+  item: unknown;
+  seq: number;
 }
 
 /**
@@ -102,9 +115,12 @@ interface TextLane {
  * is masked whole. Those parts wait behind the tail and come out in their
  * place once the text around them is settled: between the characters that
  * were held before and after them when no secret ran through the place they
- * waited at, after the text before the first masked secret and ahead of the
- * masked text when one did, and the same at the end of the stream and before
- * a stream error. Another agent's parts pass meanwhile.
+ * waited at, and after the text before the first masked secret and ahead of
+ * the masked text when one did. Another agent's parts pass meanwhile. At the
+ * end of the stream, and before a stream error, every agent's held text and
+ * waiting parts come out the same way, merged in the order the stream brought
+ * them: an agent's own in their order, and between agents whichever arrived
+ * first.
  *
  * @param parts - A `fullStream`.
  * @param mask - The call's mask.
@@ -114,24 +130,48 @@ export function maskPartStream(parts: AsyncIterable<unknown>, mask: CallMask): A
   return {
     async *[Symbol.asyncIterator]() {
       const lanes = new Map<unknown, TextLane>();
+      // The place in the stream of the next part to arrive.
+      let arrived = 0;
       const laneOf = (agent: unknown): TextLane => {
         let lane = lanes.get(agent);
         if (!lane) {
-          lane = { redactor: mask.chunks(), waiting: [] };
+          lane = { redactor: mask.chunks(), runs: [], waiting: [] };
           lanes.set(agent, lane);
         }
         return lane;
       };
+      /** The place in the stream of the part that brought the held character at `offset`, or `past` beyond the held text. */
+      const arrivalAt = (lane: TextLane, offset: number, past: number): number => {
+        let left = offset;
+        for (const run of lane.runs) {
+          if (left < run.length) return run.seq;
+          left -= run.length;
+        }
+        return past;
+      };
+      /** Drops the runs of the characters a push released, so the runs cover what is still held. */
+      const keepHeldRuns = (lane: TextLane): void => {
+        let drop = lane.runs.reduce((total, run) => total + run.length, 0) - lane.redactor.held().length;
+        while (drop > 0 && lane.runs.length > 0) {
+          const first = lane.runs[0];
+          if (first.length > drop) {
+            lane.runs[0] = { seq: first.seq, length: first.length - drop };
+            return;
+          }
+          drop -= first.length;
+          lane.runs.shift();
+        }
+      };
       /**
        * The released text between two offsets of what was held and then
        * pushed: what was held goes out with the template it was held with,
-       * the rest with this piece's.
+       * the rest with this piece's, which arrived at `seq`.
        */
-      const textBetween = function* (lane: TextLane, template: Record<string, unknown>, released: string, heldLength: number, from: number, to: number): Generator<unknown> {
+      const textBetween = function* (lane: TextLane, template: Record<string, unknown>, released: string, heldLength: number, from: number, to: number, seq: number): Generator<Released> {
         if (from >= to) return;
         const heldEnd = Math.min(to, heldLength);
-        if (from < heldEnd) yield { ...(lane.template ?? template), text: released.slice(from, heldEnd) };
-        if (to > heldLength) yield { ...template, text: released.slice(Math.max(from, heldLength), to) };
+        if (from < heldEnd) yield { item: { ...(lane.template ?? template), text: released.slice(from, heldEnd) }, seq: arrivalAt(lane, from, seq) };
+        if (to > heldLength) yield { item: { ...template, text: released.slice(Math.max(from, heldLength), to) }, seq };
       };
       /**
        * What `out`, the masked form of `released` (the first characters of the
@@ -140,9 +180,10 @@ export function maskPartStream(parts: AsyncIterable<unknown>, mask: CallMask): A
        * so a waiting part that arrived inside it comes out in its place among
        * that text, and a part that arrived from the first masked secret on
        * comes out after it and before the rest of `out`. A part behind text
-       * still held stays, its offset moved up.
+       * still held stays, its offset moved up. `seq` is the place in the
+       * stream of the piece just pushed.
        */
-      const release = function* (lane: TextLane, template: Record<string, unknown>, released: string, out: string, heldLength: number): Generator<unknown> {
+      const release = function* (lane: TextLane, template: Record<string, unknown>, released: string, out: string, heldLength: number, seq: number): Generator<Released> {
         const cut = released.length;
         // Where the first masked secret starts: `out` and `released` agree up to there, and from there `out` reads
         // `[redacted]`. A secret is masked only by that marker, so it starts at the last marker in `out` that begins
@@ -151,30 +192,51 @@ export function maskPartStream(parts: AsyncIterable<unknown>, mask: CallMask): A
         while (same < released.length && same < out.length && released[same] === out[same]) same += 1;
         const masked = out === released ? cut : Math.max(0, out.lastIndexOf('[redacted]', same));
         const staying: TextLane['waiting'] = [];
-        const inside: unknown[] = [];
+        const inside: TextLane['waiting'] = [];
         let from = 0;
         for (const entry of lane.waiting) {
-          if (entry.at > cut) staying.push({ part: entry.part, at: entry.at - cut });
-          else if (entry.at > masked) inside.push(entry.part);
+          if (entry.at > cut) staying.push({ ...entry, at: entry.at - cut });
+          else if (entry.at > masked) inside.push(entry);
           else {
-            yield* textBetween(lane, template, released, heldLength, from, entry.at);
+            yield* textBetween(lane, template, released, heldLength, from, entry.at, seq);
             from = entry.at;
-            yield entry.part;
+            yield { item: entry.part, seq: entry.seq };
           }
         }
-        yield* textBetween(lane, template, released, heldLength, from, masked);
-        yield* inside;
-        if (out.length > masked) yield { ...template, text: out.slice(masked) };
+        yield* textBetween(lane, template, released, heldLength, from, masked, seq);
+        for (const entry of inside) yield { item: entry.part, seq: entry.seq };
+        if (out.length > masked) yield { item: { ...template, text: out.slice(masked) }, seq: arrivalAt(lane, masked, seq) };
         lane.waiting = staying;
       };
       /** What a lane releases when the stream ends: its held tail, masked, with the parts that waited in their place. */
-      const settle = function* (lane: TextLane): Generator<unknown> {
+      const settle = (lane: TextLane): Released[] => {
         const held = lane.redactor.held();
         const rest = lane.redactor.flush();
-        yield* release(lane, lane.template ?? {}, held, rest, held.length);
+        const settled = [...release(lane, lane.template ?? {}, held, rest, held.length, arrived)];
+        lane.runs = [];
+        return settled;
+      };
+      /**
+       * What every lane releases when the stream ends, in the order the stream
+       * brought it: each lane's text and parts in their own order, and between
+       * lanes whichever arrived first, so a part that waited behind one
+       * agent's tail never comes out ahead of one that arrived before it
+       * behind another's.
+       */
+      const settleAll = function* (): Generator<unknown> {
+        const queues = [...lanes.values()].map(settle).filter((queue) => queue.length > 0);
+        while (queues.length > 0) {
+          let first = 0;
+          for (let i = 1; i < queues.length; i += 1) if (queues[i][0].seq < queues[first][0].seq) first = i;
+          const head = queues[first].shift() as Released;
+          if (queues[first].length === 0) queues.splice(first, 1);
+          yield head.item;
+        }
       };
       try {
         for await (const part of parts) {
+          const seq = arrived;
+          arrived += 1;
           if (!isRecord(part)) {
             yield mask.strings(part);
             continue;
@@ -188,22 +250,24 @@ export function maskPartStream(parts: AsyncIterable<unknown>, mask: CallMask): A
               if (lane.waiting.length === 0) yield { ...template, text: out };
               else {
                 const released = (held + part.text).slice(0, held.length + part.text.length - lane.redactor.held().length);
-                yield* release(lane, template, released, out, held.length);
+                for (const { item } of release(lane, template, released, out, held.length, seq)) yield item;
               }
             }
             lane.template = template;
+            if (part.text.length > 0) lane.runs.push({ seq, length: part.text.length });
+            keepHeldRuns(lane);
             continue;
           }
           const masked = part.type === 'error' ? { ...mask.strings(part), error: mask(part.error) } : maskedPart(part, mask);
           const heldLength = lane.redactor.held().length;
-          if (heldLength > 0) lane.waiting.push({ part: masked, at: heldLength });
+          if (heldLength > 0) lane.waiting.push({ part: masked, at: heldLength, seq });
           else yield masked;
         }
       } catch (error) {
-        for (const lane of lanes.values()) yield* settle(lane);
+        yield* settleAll();
         throw mask(error);
       }
-      for (const lane of lanes.values()) yield* settle(lane);
+      yield* settleAll();
     },
   };
 }
