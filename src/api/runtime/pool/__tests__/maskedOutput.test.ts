@@ -227,6 +227,40 @@ describe('maskedPrebuilt', () => {
       { type: 'text', text: '[redacted] end', agent: 'a' },
     ]);
   });
+
+  it("at the end of the stream, and before a stream error, the parts that waited behind two agents' held tails come out in the order they arrived, each after its own agent's held text", async () => {
+    // Each agent holds 'sk-' when b's tool call and then a's arrive; nothing settles either tail before the stream ends.
+    const arriving = [
+      { type: 'text', text: 'a says sk-', agent: 'a' },
+      { type: 'text', text: 'b says sk-', agent: 'b' },
+      { type: 'tool-call', toolName: 'tb', args: {}, agent: 'b' },
+      { type: 'tool-call', toolName: 'ta', args: {}, agent: 'a' },
+    ];
+    const expected = [
+      { type: 'text', text: 'a says ', agent: 'a' },
+      { type: 'text', text: 'b says ', agent: 'b' },
+      { type: 'text', text: 'sk-', agent: 'a' },
+      { type: 'text', text: 'sk-', agent: 'b' },
+      { type: 'tool-call', toolName: 'tb', args: {}, agent: 'b' },
+      { type: 'tool-call', toolName: 'ta', args: {}, agent: 'a' },
+    ];
+    const crossed = { ...seat, stream: () => ({ fullStream: pieces(...arriving) }) } as unknown as Agent;
+    expect(await drain((maskedPrebuilt(crossed, mask).stream('go') as unknown as Streamed).fullStream)).toEqual(expected);
+    async function* failing(): AsyncGenerator<unknown> {
+      yield* arriving;
+      throw new Error(`stream died ${SECRET}`);
+    }
+    const dying = { ...seat, stream: () => ({ fullStream: failing() }) } as unknown as Agent;
+    const seen: Record<string, unknown>[] = [];
+    let thrown: Error | undefined;
+    try {
+      for await (const part of (maskedPrebuilt(dying, mask).stream('go') as unknown as Streamed).fullStream) seen.push(part);
+    } catch (error) {
+      thrown = error as Error;
+    }
+    expect(seen).toEqual(expected);
+    expect(thrown?.message).toBe('stream died [redacted]');
+  });
 });
 
 describe('maskStreamMembers', () => {
