@@ -291,17 +291,30 @@ function emitEach(
   }
 }
 
+/** The built-in error types a console warning names, each by a label of its own (`kindOf`). */
+const BUILT_IN_ERRORS: ReadonlyArray<readonly [new (...args: never[]) => Error, string]> = [
+  [TypeError, 'TypeError'],
+  [RangeError, 'RangeError'],
+  [SyntaxError, 'SyntaxError'],
+  [ReferenceError, 'ReferenceError'],
+  [EvalError, 'EvalError'],
+  [URIError, 'URIError'],
+  [AggregateError, 'AggregateError'],
+];
+
 /**
  * A failure named by its type alone, without throwing, for a console warning that must not carry the failure's text:
- * a listener's own error can quote the event it was handed, such as a transcript.
+ * a listener's own error can quote the event it was handed, such as a transcript. The label is fixed, never read from
+ * the error, whose `name` the listener sets as it likes.
  *
  * @param reason - What was thrown or rejected with.
- * @returns An `Error`'s `name`, such as `Error` or `SyntaxError`, or else the value's type.
+ * @returns A built-in error type's label, such as `TypeError`; `Error` for any other `Error`; or else the value's type.
  */
 function kindOf(reason: unknown): string {
   try {
     if (!isError(reason)) return `a thrown ${typeof reason}`;
-    return typeof reason.name === 'string' && reason.name ? reason.name : 'Error';
+    for (const [type, label] of BUILT_IN_ERRORS) if (reason instanceof type) return label;
+    return 'Error';
   } catch {
     return `an unprintable ${typeof reason}`;
   }
