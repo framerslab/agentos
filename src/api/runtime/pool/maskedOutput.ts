@@ -77,7 +77,8 @@ export function maskedPart<T>(part: T, mask: CallMask): T {
  */
 export function maskedResult<T>(result: T, mask: CallMask): T {
   const masked = mask.strings(result);
-  if (!isRecord(result) || Array.isArray(result) || !Array.isArray(result.toolCalls) || !isRecord(masked)) return masked;
+  // A result the mask kept as it was (no list, or an instance of a class with no listed value) keeps its class.
+  if (masked === result || !isRecord(result) || Array.isArray(result) || !Array.isArray(result.toolCalls) || !isRecord(masked)) return masked;
   return { ...masked, toolCalls: mask.strings(result.toolCalls, true) } as T;
 }
 
