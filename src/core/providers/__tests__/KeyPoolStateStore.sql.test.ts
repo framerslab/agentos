@@ -43,6 +43,36 @@ describe('SqlKeyPoolStateStore', () => {
     expect((await store.load('p'))?.find((r) => r.fingerprint === 'aaaaaaaaaaaa')?.status).toBe('ok');
   });
 
+  it('skips a row of another version, and one that does not parse, with one warning per load', async () => {
+    const adapter = await db();
+    const lines: Array<{ event: string; meta?: Record<string, unknown> }> = [];
+    const logger = {
+      info: () => undefined,
+      warn: (event: string, meta?: Record<string, unknown>) => {
+        lines.push({ event, meta });
+      },
+      error: () => undefined,
+    };
+    const store = new SqlKeyPoolStateStore({ db: adapter, tablePrefix: 'kpv', logger });
+    await store.save('p', state({ fingerprint: 'aaaaaaaaaaaa', status: 'failed', kind: 'auth', failures: 1, updatedAt: 10 }));
+    // Rows a later version of the library wrote, and one whose state is not JSON.
+    await adapter.run('INSERT INTO kpv_key_pool_state (pool_id, fingerprint, state, version, updated_at) VALUES (?, ?, ?, 2, ?)', [
+      'p',
+      'bbbbbbbbbbbb',
+      JSON.stringify({ ...state({ fingerprint: 'bbbbbbbbbbbb' }), version: 2 }),
+      20,
+    ]);
+    await adapter.run('INSERT INTO kpv_key_pool_state (pool_id, fingerprint, state, version, updated_at) VALUES (?, ?, ?, 1, ?)', ['p', 'cccccccccccc', 'not json', 30]);
+    const rows = await store.load('p');
+    expect(rows?.map((r) => r.fingerprint)).toEqual(['aaaaaaaaaaaa']);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ event: 'key_pool.store_failed', meta: { poolId: 'p', op: 'load', reason: 'version', skipped: 2, version: 2 } });
+    expect(JSON.stringify(lines)).not.toContain('not json');
+    // A load with nothing to skip writes nothing.
+    expect(await store.load('none')).toBeNull();
+    expect(lines).toHaveLength(1);
+  });
+
   it('leaves the schema to host migrations when told to', async () => {
     const adapter = await db();
     const store = new SqlKeyPoolStateStore({ db: adapter, tablePrefix: 'manual', ensureSchema: false });

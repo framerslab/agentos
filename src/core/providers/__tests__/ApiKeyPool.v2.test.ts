@@ -344,6 +344,78 @@ describe('ApiKeyPool v2', () => {
       expect(await store.load('')).toBeNull();
     });
 
+    it('keeps a result recorded before the load lands: an old failed row does not undo a fresh success', async () => {
+      let answer: (rows: KeyState[] | null) => void = () => undefined;
+      const store = {
+        load: vi.fn(() => new Promise<KeyState[] | null>((resolve) => {
+          answer = resolve;
+        })),
+        save: vi.fn(async () => undefined),
+      };
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:late', store });
+      const readying = pool.ready();
+      // A request served while the load is still out (a second initialize on a live provider, a cold database).
+      const key = pool.next();
+      expect(key).toBe('sk_alpha_0001');
+      pool.markSuccess(key);
+      const okAt = pool.snapshot()[0].lastOkAt;
+      expect(typeof okAt).toBe('number');
+      answer([{
+        fingerprint: keyFingerprint('sk_alpha_0001'),
+        label: 'k00001',
+        status: 'failed',
+        kind: 'billing',
+        failures: 1,
+        lastFailAt: Date.now() - 60_000,
+        nextRecheckAt: Date.now() + 60_000,
+        updatedAt: Date.now() - 60_000,
+        version: 1,
+      }]);
+      await readying;
+      expect(pool.snapshot()[0]).toMatchObject({ status: 'ok', failures: 0, lastOkAt: okAt });
+      expect(pool.next()).toBe('sk_alpha_0001');
+    });
+
+    it('takes a row newer than the result recorded before the load', async () => {
+      let answer: (rows: KeyState[] | null) => void = () => undefined;
+      const store = {
+        load: vi.fn(() => new Promise<KeyState[] | null>((resolve) => {
+          answer = resolve;
+        })),
+        save: vi.fn(async () => undefined),
+      };
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:newer', store });
+      const readying = pool.ready();
+      pool.markSuccess('sk_alpha_0001', Date.now() - 10_000);
+      // Another instance recorded a failure on the key after that success.
+      answer([{
+        fingerprint: keyFingerprint('sk_alpha_0001'),
+        label: 'k00001',
+        status: 'failed',
+        kind: 'auth',
+        failures: 1,
+        lastFailAt: Date.now() - 5_000,
+        nextRecheckAt: Date.now() + 60_000,
+        updatedAt: Date.now() - 5_000,
+        version: 1,
+      }]);
+      await readying;
+      expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', kind: 'auth' });
+      expect(pool.next()).toBe('sk_beta_0002');
+    });
+
+    it('skips a row of another version with one warning', async () => {
+      const { logger, lines } = recordingLogger();
+      const store = new InMemoryKeyPoolStateStore();
+      await store.save('p:v', { fingerprint: keyFingerprint('sk_alpha_0001'), label: 'k00001', status: 'failed', kind: 'auth', failures: 1, updatedAt: Date.now(), version: 2 as unknown as 1 });
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:v', store, logger });
+      await pool.ready();
+      expect(pool.snapshot()[0].status).toBe('ok');
+      const warned = lines.filter((l) => l.event === 'key_pool.store_failed');
+      expect(warned).toHaveLength(1);
+      expect(warned[0]).toMatchObject({ level: 'warn', meta: { op: 'load', reason: 'version', version: 2 } });
+    });
+
     it('a store that throws on load leaves a fresh pool and logs once; a failing save logs at most once a minute', async () => {
       const { logger, lines } = recordingLogger();
       const store = {

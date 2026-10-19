@@ -562,15 +562,37 @@ export class ApiKeyPool {
     }
     if (!rows) return;
     let applied = 0;
+    let otherVersion: number | undefined;
     for (const row of rows) {
-      if (row.version !== 1) continue;
+      const version: number = row.version;
+      if (version !== 1) {
+        otherVersion = version;
+        continue;
+      }
       const entry = this.entries.find((e) => e.state.fingerprint === row.fingerprint);
       if (!entry) continue;
-      if (row.updatedAt <= entry.state.updatedAt && entry.state.status !== 'ok') continue;
+      if (!ApiKeyPool.rowIsNewer(row, entry.state)) continue;
       entry.state = { ...row, label: entry.state.label };
       applied += 1;
     }
+    if (otherVersion !== undefined) {
+      this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'load', reason: 'version', version: otherVersion });
+    }
     this.logger().debug?.('key_pool.state_loaded', { poolId: this.id, rows: rows.length, applied });
+  }
+
+  /**
+   * Whether a stored row replaces the in-memory state: a key with no recorded
+   * result (nothing has succeeded or failed on it in this process) takes its
+   * row; otherwise the row wins only when its newest time (a success, a
+   * failure or its last change) is later than the newest result recorded
+   * here, so a result recorded before a slow load lands is kept.
+   */
+  private static rowIsNewer(row: KeyState, state: KeyState): boolean {
+    if (state.lastOkAt === undefined && state.lastFailAt === undefined) return true;
+    const rowNewest = Math.max(row.lastOkAt ?? 0, row.lastFailAt ?? 0, row.updatedAt);
+    const stateNewest = Math.max(state.lastOkAt ?? 0, state.lastFailAt ?? 0);
+    return rowNewest > stateNewest;
   }
 
   private scheduleSave(entry: Entry): void {
