@@ -526,18 +526,22 @@ function toolsInclude(tools: unknown, name: string): boolean {
 }
 
 /**
- * True when a wire `tool_choice` makes the model call the schema tool `name`:
- * a choice that names it, or `any` when the schema tool is the one tool the
- * request offers. `passthroughTools` is a passthrough `tools` array, or
- * undefined when the provider sends the schema tool alone.
+ * True when a wire `tool_choice` keeps the forced route for the schema tool
+ * `name`: a choice that names it, or `any` with the schema tool on the wire.
+ * `any` makes the model call a tool and write no text (live-probed 2026-10-19
+ * with the schema in the system prompt and two tools: Claude Haiku 5.5 called
+ * the schema tool, Claude Sonnet 4.6 the other one, neither wrote a text
+ * block), so beside other tools the prompt route has no answer to give, while
+ * on the forced route a call to the schema tool is the answer.
+ * `passthroughTools` is a passthrough `tools` array, or undefined when the
+ * provider sends the schema tool alone.
  */
-function toolChoiceForcesSchemaTool(toolChoice: unknown, passthroughTools: unknown, name: string): boolean {
+function toolChoiceKeepsSchemaTool(toolChoice: unknown, passthroughTools: unknown, name: string): boolean {
   if (!toolChoice || typeof toolChoice !== 'object') return false;
   const choice = toolChoice as { type?: unknown; name?: unknown };
   if (choice.type === 'tool') return choice.name === name;
   if (choice.type !== 'any') return false;
-  if (passthroughTools === undefined) return true;
-  return Array.isArray(passthroughTools) && passthroughTools.length === 1 && toolsInclude(passthroughTools, name);
+  return passthroughTools === undefined || toolsInclude(passthroughTools, name);
 }
 
 /**
@@ -937,7 +941,9 @@ export class AnthropicProvider implements IProvider {
    * input becomes a text block, so {@link mapResponseToCompletion} reports
    * the cut text with finish reason `length`, the answer generateObject
    * raises its budget for, where a transport error would be retried at the
-   * same budget and then thrown past the escalation.
+   * same budget and then thrown past the escalation. A call the limit
+   * stopped before any of its input arrived parses as `{}` here, which
+   * {@link mapResponseToCompletion} reports as no text.
    *
    * @param schemaToolName The forced schema tool's name when the request sent
    *   the schema as that tool; a cut call of any other name still throws.
@@ -1158,20 +1164,27 @@ export class AnthropicProvider implements IProvider {
       yield* this.streamRequest(modelId, options, payload);
       return;
     }
+    const schemaToolName = forcedSchemaToolName(payload, options);
     // A schema request: every chunk names the route the payload took, and one
     // whose schema rode the prompt says `schemaInPayload: false` (as
     // OpenRouter's json_object retry does), so a gateway lifts the answer from
     // where this request put it, or lifts nothing.
-    for await (const chunk of this.streamRequest(modelId, options, payload)) {
+    for await (const chunk of this.streamRequest(modelId, options, payload, schemaToolName)) {
       yield withSchemaRoute(chunk, payload);
     }
   }
 
-  /** The stream of one built request: the abort handling, the SSE parse, the retries and the chunk mapping. */
+  /**
+   * The stream of one built request: the abort handling, the SSE parse, the retries and the chunk mapping.
+   *
+   * @param schemaToolName The forced schema tool's name when the payload sent the schema as that tool: on a turn that
+   *   stopped at an output limit, the final chunk gives that call its raw input ({@link assembleToolCalls}).
+   */
   private async *streamRequest(
     modelId: string,
     options: ModelCompletionOptions,
     payload: Record<string, unknown>,
+    schemaToolName?: string,
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     // Handle pre-aborted signals
     const abortSignal = options.abortSignal;
@@ -1366,8 +1379,13 @@ export class AnthropicProvider implements IProvider {
             outputTokens = event.usage?.output_tokens ?? outputTokens;
             const stopReason = this.mapStopReason(event.delta.stop_reason);
 
-            // Assemble final tool_calls array from accumulated blocks
-            const toolCalls = this.assembleToolCalls(toolCallAccum);
+            // Assemble final tool_calls array from accumulated blocks. The
+            // forced schema tool's call on a turn stopped at an output limit
+            // keeps its raw input, empty when the limit came before any of it
+            // arrived, for the completion gateway to make the step's text.
+            const stoppedAtLimit =
+              event.delta.stop_reason === 'max_tokens' || event.delta.stop_reason === 'model_context_window_exceeded';
+            const toolCalls = this.assembleToolCalls(toolCallAccum, stoppedAtLimit ? schemaToolName : undefined);
             const hasToolCalls = toolCalls.length > 0;
 
             // Assemble thinking blocks in content-block index order so they
@@ -1902,8 +1920,10 @@ export class AnthropicProvider implements IProvider {
     //                which refuse structured outputs, the tool goes out plain.
     //                Never clamped: a payload that turns thinking on takes the
     //                prompt instead, and so do a passthrough `tools` that
-    //                replaces the tool and a passthrough `tool_choice` that
-    //                does not force it.
+    //                replaces the tool and a passthrough `tool_choice` under
+    //                which the model need not call it (`auto`, `none`, another
+    //                tool's name). `any` keeps the route: it admits no text
+    //                answer, so a call to the schema tool is the answer.
     //   none         Neither carries the schema. The schema goes into the
     //                prompt itself, as a system block after the caller's, with
     //                one warning per model and reason, so a direct caller still
@@ -2001,12 +2021,14 @@ export class AnthropicProvider implements IProvider {
       if (
         schemaRoute === 'forced_tool' &&
         customToolChoiceOverride &&
-        !toolChoiceForcesSchemaTool(payload.tool_choice, customToolsOverride ? payload.tools : undefined, schemaMarker.name)
+        !toolChoiceKeepsSchemaTool(payload.tool_choice, customToolsOverride ? payload.tools : undefined, schemaMarker.name)
       ) {
-        // A passthrough `tool_choice` keeps precedence too; one that does not
-        // force the schema tool (`auto`, `none`, another tool's name) leaves
-        // the call to the model, which may answer in prose, so the schema
-        // rides the prompt rather than a tool the model need not call.
+        // A passthrough `tool_choice` keeps precedence too; one under which the
+        // model need not call the schema tool (`auto`, `none`, another tool's
+        // name) leaves the call to the model, which may answer in prose, so the
+        // schema rides the prompt rather than a tool the model need not call.
+        // `any` stays on this route: the model must call a tool and can write
+        // no text, so the prompt would leave it nothing to answer with.
         schemaRoute = 'none';
         promptOnlyReason = 'a passthrough tool_choice does not force the schema tool';
       }
@@ -2684,7 +2706,18 @@ export class AnthropicProvider implements IProvider {
         )
       : undefined;
     if (schemaToolBlock) {
-      fullText = JSON.stringify(schemaToolBlock.input);
+      // A call the output limit stopped comes with an empty input: the API
+      // sends none of it, whatever the model wrote (live-probed 2026-10-19 on
+      // Claude Sonnet 4.6 and Haiku 5.5: input {} on the single-shot response,
+      // one empty input_json_delta on the stream, at 1 to 200 output tokens).
+      // That is no answer, so the message has no text: a `{}` would pass for
+      // one under a schema whose fields are all optional.
+      const stoppedAtLimit =
+        apiResponse.stop_reason === 'max_tokens' || apiResponse.stop_reason === 'model_context_window_exceeded';
+      const input = schemaToolBlock.input;
+      const noInput =
+        input !== null && typeof input === 'object' && !Array.isArray(input) && Object.keys(input).length === 0;
+      fullText = stoppedAtLimit && noInput ? '' : JSON.stringify(input);
     }
 
     // Collect the other tool_use blocks and convert to OpenAI-style tool_calls
@@ -2814,14 +2847,21 @@ export class AnthropicProvider implements IProvider {
   }
 
   /**
-   * Assembles completed tool calls from the streaming accumulator.
+   * Assembles completed tool calls from the streaming accumulator. A call with
+   * no input gets `{}`, except the one `rawInputFor` names, which keeps its
+   * raw input: the forced schema tool's call on a turn that stopped at an
+   * output limit, where an empty input means none of it arrived (the API's
+   * shape for every such call, {@link mapResponseToCompletion}) and a `{}`
+   * would pass for an answer.
    *
    * @param {Map<number, { id: string; name: string; argsJson: string }>} accum - Tool call accumulators.
+   * @param rawInputFor The forced schema tool's name on a turn stopped at an output limit.
    * @returns {NonNullable<ChatMessage['tool_calls']>} Assembled tool calls array.
    * @private
    */
   private assembleToolCalls(
     accum: Map<number, { id: string; name: string; argsJson: string }>,
+    rawInputFor?: string,
   ): NonNullable<ChatMessage['tool_calls']> {
     if (accum.size === 0) return [];
     return Array.from(accum.values()).map(tc => ({
@@ -2829,7 +2869,7 @@ export class AnthropicProvider implements IProvider {
       type: 'function' as const,
       function: {
         name: tc.name,
-        arguments: tc.argsJson || '{}',
+        arguments: tc.argsJson || (rawInputFor !== undefined && tc.name === rawInputFor ? '' : '{}'),
       },
     }));
   }

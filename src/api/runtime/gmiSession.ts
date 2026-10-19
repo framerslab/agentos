@@ -518,9 +518,9 @@ export async function* runGmiTurn(
  * Parses a structured send's answer: the schema tool's arguments when a step carried them, else the reply text. A
  * turn whose last step stopped at the output limit (finish reason `length`) was cut off and rejects whatever its JSON,
  * with an error that says so and the raw text attached, since the session path does not escalate the budget as
- * generateObject does: JSON that does not parse, and JSON that parses, which a cut can leave too (Anthropic's provider
- * sends `{}` for a forced schema call cut before its input began, and an answer the limit stops just after its closing
- * brace parses whole). When the JSON parses and does not match the schema, the error carries the issues.
+ * generateObject does: JSON that does not parse, and JSON that parses, which a cut can leave too (an answer the limit
+ * stops just after its closing brace parses whole). When the JSON parses and does not match the schema, the error
+ * carries the issues.
  *
  * @param maxTokens - The turn's `maxTokens`, named in the cut-off's message when the turn set one.
  */
