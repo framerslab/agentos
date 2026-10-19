@@ -836,6 +836,30 @@ describe('10-12. vendors, shortfalls, truncation and pre-built seats', () => {
     // A pre-built seat can add one provider at most (C6): the bound counts it, and minProviders 3 still fails.
     expect(() => agency({ strategy: 'panel', modelPool: { astra: POOL().astra }, agents: { a: { instructions: 'x' }, pre: agent({ provider: 'anthropic', model: 'claude-opus-5-5', apiKey: K.ant, fallbackProviders: [] }) }, chair: false, quorum: { minProviders: 3 } } as never)).toThrow(/minProviders/);
   });
+  it('a provider floor and a vendor floor that no one seating meets together fail construction, though each alone is within reach; a pre-built seat may add the provider the config seats lack', () => {
+    const orKey = 'sk-or-pool-00000016';
+    const tgKey = 'tog-pool-00000017';
+    const pool = {
+      orMeta: { provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct', apiKey: orKey },
+      orMistral: { provider: 'openrouter', model: 'mistralai/mistral-large-2411', apiKey: orKey },
+      tgMeta: { provider: 'together', model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', apiKey: tgKey },
+      tgMistral: { provider: 'together', model: 'mistralai/Mixtral-8x7B-Instruct-v0.1', apiKey: tgKey },
+    };
+    // Seat a sits on OpenRouter for Meta or on Together for Mistral, seat b on OpenRouter for Mistral or on Together for
+    // Meta: two providers, or two vendors, in one run, never both, and the panel counts both floors over the same answers.
+    const crossed: Json = { a: { instructions: 'x', from: ['orMeta', 'tgMistral'] }, b: { instructions: 'y', from: ['orMistral', 'tgMeta'] } };
+    const build = (agents: Json, quorum: Json) => () => agency({ strategy: 'panel', modelPool: pool, agents, chair: false, quorum } as never);
+    expect(build(crossed, { minProviders: 2, minVendors: 2 })).toThrow(AgencyConfigError);
+    expect(build(crossed, { minProviders: 2, minVendors: 2 })).toThrow(/minProviders \(2\) and quorum\.minVendors \(2\) cannot both be met/);
+    // Each floor alone is met by some seating.
+    expect(build(crossed, { minProviders: 2 })).not.toThrow();
+    expect(build(crossed, { minVendors: 2 })).not.toThrow();
+    // A third candidate for b lets a sit on OpenRouter for Meta and b on Together for Mistral.
+    expect(build({ ...crossed, b: { instructions: 'y', from: ['orMistral', 'tgMeta', 'tgMistral'] } }, { minProviders: 2, minVendors: 2 })).not.toThrow();
+    // A pre-built seat may answer on a provider of its own, so the config seats need one provider beside two vendors.
+    const pre = agent({ provider: 'anthropic', model: 'claude-opus-5-5', apiKey: K.ant, fallbackProviders: [] });
+    expect(build({ ...crossed, pre }, { minProviders: 2, minVendors: 2 })).not.toThrow();
+  });
   it("a fixed seat with no key of its own adds no provider and no vendor at construction, its keyed hop's included, since seating leaves it out before its chain is read; a pool entry with no key adds none either", () => {
     vi.stubEnv('OPENAI_API_KEY', '');
     vi.stubEnv('ANTHROPIC_API_KEY', '');

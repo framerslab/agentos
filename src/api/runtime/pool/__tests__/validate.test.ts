@@ -64,4 +64,22 @@ describe('validatePoolOptions', () => {
     const assignable = { ...wide, b: { ...openai, instructions: 'y', fallbackProviders: [anthropicHop] } };
     expect(() => validatePoolOptions(opts({ agents: assignable, chair: false, quorum: { minProviders: 3, minVendors: 3 } }), 'panel')).not.toThrow();
   });
+  it('with both floors set, one assignment of the seats must meet both: a fixed seat answers with its own model or one hop, each with its own vendor, and a hop of unknown vendor adds its provider alone', () => {
+    const orKey = 'sk-or-00000016';
+    const tgKey = 'tog-00000017';
+    // Seat a answers on OpenRouter for Meta or through its hop on Together for Mistral, seat b on OpenRouter for Mistral
+    // or through its hop on Together for Meta: two providers, or two vendors, in one run, never both.
+    const crossed = {
+      a: { provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct', apiKey: orKey, instructions: 'x', fallbackProviders: [{ provider: 'together', model: 'mistralai/Mixtral-8x7B-Instruct-v0.1', apiKey: tgKey }] },
+      b: { provider: 'openrouter', model: 'mistralai/mistral-large-2411', apiKey: orKey, instructions: 'y', fallbackProviders: [{ provider: 'together', model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', apiKey: tgKey }] },
+    };
+    expect(() => validatePoolOptions(opts({ agents: crossed, chair: false, quorum: { minProviders: 2, minVendors: 2 } }), 'panel')).toThrow(/minProviders \(2\) and quorum\.minVendors \(2\) cannot both be met/);
+    // Each floor alone is met by some assignment.
+    expect(() => validatePoolOptions(opts({ agents: crossed, chair: false, quorum: { minProviders: 2 } }), 'panel')).not.toThrow();
+    expect(() => validatePoolOptions(opts({ agents: crossed, chair: false, quorum: { minVendors: 2 } }), 'panel')).not.toThrow();
+    // Seat a's hop is a local Ollama model, whose vendor is unknown: a answers on a second provider with no vendor, or for
+    // Meta beside b on OpenRouter for Mistral.
+    const localHop = { ...crossed, a: { ...crossed.a, fallbackProviders: [{ provider: 'ollama', model: 'llama3.2', baseUrl: 'http://127.0.0.1:11434' }] }, b: { ...crossed.b, fallbackProviders: [] } };
+    expect(() => validatePoolOptions(opts({ agents: localHop, chair: false, quorum: { minProviders: 2, minVendors: 2 } }), 'panel')).toThrow(/cannot both be met/);
+  });
 });
