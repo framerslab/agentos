@@ -2,7 +2,9 @@
  * @file key-pool-defaults.e2e.test.ts
  * A host's key pool defaults (a store, a strategy) reach the pools that `createProviderManager()` builds, and a key
  * read from the environment names its pool `<provider>:<ENV_VAR>`, so the pool's state persists under that name; an
- * override names no pool. Drives the real resolver, manager and OpenAIProvider; only fetch is stubbed.
+ * override names no pool. The providers that send through an OpenAIProvider (Groq, Mistral, Together, xAI) hand it
+ * the same defaults and pool id, with their own strategy variable. Drives the real resolver, manager and
+ * OpenAIProvider; only fetch is stubbed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,6 +22,13 @@ const invalidKey = { error: { message: 'Incorrect API key provided.', type: 'inv
 
 /** The key a request carried in its Authorization header. */
 const keyOf = (init?: RequestInit) => new Headers(init?.headers).get('authorization')?.replace(/^Bearer /, '') ?? '';
+
+/** The OpenAIProvider a Groq, Mistral, Together or xAI provider sends through, with the config it was given and its pool. */
+function delegateOf(manager: Awaited<ReturnType<typeof createProviderManager>>, providerId: string) {
+  return (manager.getProvider(providerId) as unknown as {
+    delegate: { config: { keyPool?: { id?: string; strategy?: string; store?: unknown; recheckMs?: number } }; keyPool: { next(): string } };
+  }).delegate;
+}
 
 describe('key pool defaults on the generateText path', () => {
   beforeEach(() => {
@@ -126,6 +135,45 @@ describe('key pool defaults on the generateText path', () => {
     const afterChange = await createProviderManager(resolveProvider('openai', 'gpt-4o'));
     expect(afterChange).not.toBe(fromEnv);
     expect(configOf(afterChange).keyPool).toMatchObject({ id: 'openai:OPENAI_API_KEY', strategy: 'ordered' });
+  });
+
+  it.each([
+    ['groq', 'GROQ_API_KEY', 'llama-3.3-70b-versatile'],
+    ['mistral', 'MISTRAL_API_KEY', 'mistral-large-latest'],
+    ['together', 'TOGETHER_API_KEY', 'meta-llama/Llama-3.3-70B-Instruct-Turbo'],
+    ['xai', 'XAI_API_KEY', 'grok-2'],
+  ])("forwards the defaults and the pool id into the OpenAIProvider that %s sends through", async (providerId, envVar, modelId) => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.stubEnv(envVar, `${providerId}_pooltest_a_0011,${providerId}_pooltest_b_0012`);
+    const store = new InMemoryKeyPoolStateStore();
+    setKeyPoolDefaults({ strategy: 'ordered', store, recheckMs: 5_000 });
+    const resolved = resolveProvider(providerId, modelId);
+    expect(resolved.poolId).toBe(`${providerId}:${envVar}`);
+    const delegate = delegateOf(await createProviderManager(resolved), providerId);
+    // The pool that sends this provider's keys is named after its variable and carries the host's store and timings.
+    expect(delegate.config.keyPool).toMatchObject({ id: `${providerId}:${envVar}`, strategy: 'ordered', recheckMs: 5_000 });
+    expect(delegate.config.keyPool?.store).toBe(store);
+    log.mockRestore();
+  });
+
+  it("takes a delegating provider's strategy from its own variable, never from OpenAI's", async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const draws = (pool: { next(): string }) => new Set([pool.next(), pool.next(), pool.next(), pool.next()]);
+    vi.stubEnv('GROQ_API_KEY', 'gsk_pooltest_c_0013,gsk_pooltest_d_0014');
+    vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY_GROQ', 'ordered');
+    let delegate = delegateOf(await createProviderManager(resolveProvider('groq', 'llama-3.3-70b-versatile')), 'groq');
+    expect(delegate.config.keyPool).toMatchObject({ id: 'groq:GROQ_API_KEY', strategy: 'ordered' });
+    expect(draws(delegate.keyPool)).toEqual(new Set(['gsk_pooltest_c_0013']));
+    await shutdownProviderManagers();
+
+    // OpenAI's own variable orders OpenAI's keys alone: Groq's keys keep spreading load.
+    vi.unstubAllEnvs();
+    vi.stubEnv('GROQ_API_KEY', 'gsk_pooltest_c_0013,gsk_pooltest_d_0014');
+    vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY_OPENAI', 'ordered');
+    delegate = delegateOf(await createProviderManager(resolveProvider('groq', 'llama-3.3-70b-versatile')), 'groq');
+    expect(delegate.config.keyPool).toMatchObject({ id: 'groq:GROQ_API_KEY', strategy: 'round-robin' });
+    expect(draws(delegate.keyPool)).toEqual(new Set(['gsk_pooltest_c_0013', 'gsk_pooltest_d_0014']));
+    log.mockRestore();
   });
 
   it('names no pool for an override, so the store does not apply to it', () => {

@@ -102,7 +102,8 @@ export function keyFingerprint(key: string): string {
 /**
  * The pool strategy the environment asks for when a provider's config names
  * none: `AGENTOS_KEY_POOL_STRATEGY_<PROVIDER>` (ANTHROPIC, OPENAI, GEMINI,
- * OPENROUTER, REQUESTY) for one provider, else `AGENTOS_KEY_POOL_STRATEGY` for
+ * OPENROUTER, REQUESTY, and GROQ, MISTRAL, TOGETHER, XAI and LITELLM, which
+ * send through an OpenAIProvider) for one provider, else `AGENTOS_KEY_POOL_STRATEGY` for
  * every provider; `ordered` prefers the earliest usable key (a cost order:
  * credited keys first, the paid key last), `round-robin` spreads load.
  */

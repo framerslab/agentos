@@ -33,7 +33,7 @@ await provider.initialize({
 
 ## How It Works
 
-**Strategies.** `round-robin` (the default) is weighted: the first key fills two rotation slots and every other key one, so in a 3-key pool the selection frequency is 50% / 25% / 25%. `ordered` prefers the earliest usable key in the configured order, so a working key keeps being used until it fails. The strategy comes from the provider's `keyPool.strategy`, else from `AGENTOS_KEY_POOL_STRATEGY_<PROVIDER>` for that provider alone (`AGENTOS_KEY_POOL_STRATEGY_ANTHROPIC`, `_OPENAI`, `_GEMINI`, `_OPENROUTER`, `_REQUESTY`), else from `AGENTOS_KEY_POOL_STRATEGY` for every provider (`ordered` or `round-robin`), else round-robin; so a product can order its Anthropic keys and keep spreading load over its OpenAI keys. A single key is used as given, whatever the strategy.
+**Strategies.** `round-robin` (the default) is weighted: the first key fills two rotation slots and every other key one, so in a 3-key pool the selection frequency is 50% / 25% / 25%. `ordered` prefers the earliest usable key in the configured order, so a working key keeps being used until it fails. The strategy comes from the provider's `keyPool.strategy`, else from `AGENTOS_KEY_POOL_STRATEGY_<PROVIDER>` for that provider alone (`AGENTOS_KEY_POOL_STRATEGY_ANTHROPIC`, `_OPENAI`, `_GEMINI`, `_OPENROUTER`, `_REQUESTY`, `_GROQ`, `_MISTRAL`, `_TOGETHER`, `_XAI`, `_LITELLM`), else from `AGENTOS_KEY_POOL_STRATEGY` for every provider (`ordered` or `round-robin`), else round-robin; so a product can order its Anthropic keys and keep spreading load over its OpenAI keys. Groq, Mistral, Together, xAI and LiteLLM send through an `OpenAIProvider` but read their own variable, never `AGENTOS_KEY_POOL_STRATEGY_OPENAI`. A single key is used as given, whatever the strategy.
 
 **Failure kinds.** `classifyKeyFailure()` in [`quotaErrors.ts`](https://github.com/framerslab/agentos/blob/master/src/core/providers/quotaErrors.ts) names what an HTTP answer says about the key, by the status first and by the parsed error envelope second, never by a search of the raw body, so a request that was itself invalid never takes a working key out:
 
@@ -89,7 +89,7 @@ await provider.initialize({
 
 ## Products That Call `generateText()`
 
-`generateText()`, `streamText()` and the completion gateway build their providers through `createProviderManager()` from the key in the environment (`ANTHROPIC_API_KEY` and the rest). Their pools take the strategy from the environment variables above, and a host that wants the keys' standing kept across restarts sets the defaults once at boot, before the first call:
+`generateText()`, `streamText()` and the completion gateway build their providers through `createProviderManager()` from the key in the environment (`ANTHROPIC_API_KEY` and the rest). Their pools take the strategy from the environment variables above, and a host that wants the keys' standing kept across restarts sets the defaults once at boot, before the first call; Groq, Mistral, Together and xAI hand the defaults and the pool id (`groq:GROQ_API_KEY` and the rest) to the `OpenAIProvider` pool that sends their keys:
 
 ```ts
 import { createDatabase } from '@framers/sql-storage-adapter';
@@ -110,11 +110,11 @@ ANTHROPIC_API_KEY=sk-ant-max-1,sk-ant-max-2,sk-ant-max-3,sk-ant-paid
 AGENTOS_KEY_POOL_STRATEGY_ANTHROPIC=ordered
 ```
 
-The variable names Anthropic alone, so a product that also holds a list of OpenAI or Gemini keys for load spreading keeps them round-robin; `AGENTOS_KEY_POOL_STRATEGY=ordered` orders every provider's keys.
+The variable names Anthropic alone, so a product that also holds a list of OpenAI or Gemini keys for load spreading keeps them round-robin; `AGENTOS_KEY_POOL_STRATEGY=ordered` orders every provider's keys. Groq, Mistral, Together and xAI read their own variable (`AGENTOS_KEY_POOL_STRATEGY_GROQ` and the rest), so ordering OpenAI's keys leaves theirs as they were.
 
 ## Supported Providers
 
-- **LLM:** OpenAI, Anthropic, Gemini, OpenRouter and Requesty; Groq, Mistral, Together and xAI, each of which sends its requests through an `OpenAIProvider` instance and draws its key from that instance's pool
+- **LLM:** OpenAI, Anthropic, Gemini, OpenRouter and Requesty; Groq, Mistral, Together and xAI, each of which sends its requests through an `OpenAIProvider` instance and draws its key from that instance's pool, built with the provider's own pool options, pool id and strategy variable
 - **Speech TTS:** ElevenLabs, OpenAI TTS, Deepgram, MiniMax
 - **Speech STT:** OpenAI Whisper, Deepgram, AssemblyAI
 - **Voice Pipeline:** OpenAI batch TTS, Realtime TTS and Realtime transcription STT, ElevenLabs batch and streaming TTS and streaming STT, Cartesia batch and streaming TTS, Hume batch and streaming TTS, Deepgram Aura batch and streaming TTS and Deepgram streaming STT
