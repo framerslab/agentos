@@ -1658,6 +1658,51 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     }
   });
+  it("sequential and graph take a nested agency that no seat of its own answered as a rejected seat: no call record, no empty answer handed on, and the run's text is the answer a seat gave, in generate() and in stream()", async () => {
+    const quiet = () => agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { only: { instructions: 'x' } }, strategy: 'sequential', hitl: { approvals: { beforeAgent: ['only'] }, handler: hitl.autoReject('no') } } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('draft')]]);
+    const seq = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { writer: { instructions: 'w' }, quiet: quiet() }, strategy: 'sequential' } as never);
+    const generated = await seq.generate('go');
+    expect(generated.text).toBe('draft');
+    expect(generated.agentCalls.map((c) => c.agent)).toEqual(['writer']);
+    const streamed = seq.stream('go');
+    const parts: unknown[] = [];
+    for await (const part of streamed.fullStream) parts.push(part);
+    const final = await streamed.result;
+    expect(final.text).toBe('draft');
+    expect(final.agentCalls.map((c) => c.agent)).toEqual(['writer']);
+    // A graph node that depends on such an agency is sent the rejected seat's marker, not an empty output.
+    for (const mode of ['generate', 'stream'] as const) {
+      fetchMock.mockClear();
+      const graph = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { quiet: quiet(), user: { instructions: 'u', dependsOn: ['quiet'] } }, strategy: 'graph' } as never);
+      let result: AgencyResult;
+      if (mode === 'generate') result = await graph.generate('go');
+      else {
+        const graphStream = graph.stream('go');
+        for await (const part of graphStream.fullStream) parts.push(part);
+        result = await graphStream.result;
+      }
+      expect(result.agentCalls.map((c) => c.agent)).toEqual(['user']);
+      const sent = calls(OPENAI_CHAT, 'POST').map((c) => JSON.stringify(c.body?.messages ?? []));
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toContain('[skipped by HITL]');
+    }
+  });
+  it("review-loop and hierarchical take a nested agency that no seat of its own answered as a rejected seat: no reviewer reads an empty draft, and a manager is told its delegate gave no answer", async () => {
+    const quiet = () => agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { only: { instructions: 'x' } }, strategy: 'sequential', hitl: { approvals: { beforeAgent: ['only'] }, handler: hitl.autoReject('no') } } as never);
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('{"approved":false,"feedback":"write something"}')]]);
+    const loop = await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { producer: quiet(), reviewer: { instructions: 'r' } }, strategy: 'review-loop' } as never).generate('go');
+    expect(loop.text).toBe('');
+    expect(loop.agentCalls).toEqual([]);
+    expect(calls(OPENAI_CHAT, 'POST')).toEqual([]);
+    fetchMock.mockClear();
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('delegate_to_quiet', { task: 't' }), openaiText('done')]]]);
+    const managed = await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { quiet: quiet() }, strategy: 'hierarchical' } as never).generate('go');
+    expect(managed.text).toBe('done');
+    expect(managed.agentCalls.map((c) => c.agent)).not.toContain('quiet');
+    const second = calls(OPENAI_CHAT, 'POST')[1];
+    expect(JSON.stringify(second?.body?.messages ?? [])).toContain('gave no answer');
+  });
   it("a pooled parallel agency logs a failed pre-built seat through the host's logger with its message masked, and writes it to no console", async () => {
     vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
