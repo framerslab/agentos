@@ -30,7 +30,12 @@
  * `Clear`, before it starts: a `Flushed` of a segment that timed out or was
  * cleared must never complete the segment after it, and Deepgram's
  * `sequence_id` is documented only as "The sequence ID of the response", so the
- * session does not read it. Deepgram takes at most 20 `Flush` messages in 60
+ * session does not read it. After a `cancel()` that cut a segment, Deepgram
+ * stops sending audio "as soon as possible" and answers the `Clear` with
+ * `Cleared`: what arrives before the `Cleared` is the cleared text's, so its
+ * audio is dropped and its `Flushed` completes nothing, and the next segment
+ * starts at the `Cleared`, or one second after the cancel without it.
+ * Deepgram takes at most 20 `Flush` messages in 60
  * seconds and answers the rest with a `Warning`: a segment that would pass that
  * limit is spoken without a `Flush`, the segments after it join it, each as its
  * own `Speak`, and one `Flush` once the window has passed completes them
@@ -159,6 +164,13 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * timer bounds the wait.
    */
   private stale?: ReturnType<typeof setTimeout>;
+  /**
+   * Whether the session waits for the `Cleared` that answers a `Clear` it sent
+   * while a segment was outstanding: until then Deepgram may still send audio
+   * and a `Flushed` of the cleared text, which are dropped. The wait for a
+   * stale response bounds it.
+   */
+  private clearing = false;
   /** When each `Flush` of the last {@link FLUSH_WINDOW_MS} was sent, oldest first. */
   private readonly flushes: number[] = [];
   /** Whether the segment in flight waits for a `Flush` slot: a new segment then joins it. */
@@ -309,15 +321,18 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   /**
    * Drops the queued segments, the held frame and the segment in flight, and
    * sends `Clear`, which discards the server's buffered text and audio without
-   * tearing down the socket. The session stays usable: when a segment was in
-   * flight, the next one waits for the `Cleared`, so that segment's late
-   * `Flushed` cannot complete it.
+   * tearing down the socket. The session stays usable: when a segment was
+   * outstanding, what Deepgram sends before the `Cleared` that answers the
+   * `Clear` belongs to the cleared text, so its audio is dropped and its
+   * `Flushed` completes nothing, and the next segment starts at the `Cleared`,
+   * or after one second without it.
    */
   cancel(): void {
     const outstanding = this.segments.hasInFlight || this.stale !== undefined;
     this.segments.cancel();
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'Clear' }));
+      if (outstanding) this.clearing = true;
     }
     if (outstanding) this.holdFor(CLEARED_MS);
   }
@@ -408,8 +423,9 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     this.stale = setTimeout(() => this.release(), ms);
   }
 
-  /** The stale response arrived, or its wait ran out: the next segment may start. */
+  /** The stale response arrived, or its wait ran out: the next segment may start, and Deepgram's audio is the session's again. */
   private release(): void {
+    this.clearing = false;
     if (this.stale === undefined) return;
     clearTimeout(this.stale);
     this.stale = undefined;
@@ -418,6 +434,8 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
 
   private _handleMessage(data: Buffer, isBinary: boolean): void {
     if (isBinary) {
+      // Audio sent before Deepgram read the Clear is the cleared text's: no reply plays it.
+      if (this.clearing) return;
       const pcmBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
       // The wire is always linear16 (see toDeepgramEncoding): uncompressed
       // 16-bit mono at sampleRate * 2 bytes/sec — duration derives from the
@@ -449,6 +467,8 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
       return;
     }
     if (msg.type === 'Flushed') {
+      // A Flushed before the Cleared answers a Flush of the cleared text: it completes nothing and ends no wait.
+      if (this.clearing) return;
       // A Flushed while the queue waits for a stale response is that response: it completes nothing.
       if (this.stale !== undefined) this.release();
       else this.segments.completed();
