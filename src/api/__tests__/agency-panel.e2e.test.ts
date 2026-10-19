@@ -292,6 +292,26 @@ describe('5. no chair', () => {
     expect(result.text).toBe('--- correctness ---\nA finds a bug\n\n--- security ---\nB finds a bug\n\n--- failure ---\nC finds a bug');
     expect(result.chair).toBeUndefined();
   });
+  it("a caller's abort that lands after two seats answered rejects the call with the panel's ledger and starts no chair; with chair: false no labelled block is returned", async () => {
+    for (const chair of [false, { from: ['opus'], instructions: 'Merge.' }]) {
+      fetchMock.mockReset();
+      globalLLMProviderHealth.reset();
+      // opus and gemini answer at once; astra's request hangs until its signal aborts.
+      route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, abortable], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
+      const ended: string[] = [];
+      const controller = new AbortController();
+      const pending = panel({ chair, on: { agentEnd: (e: Json) => ended.push(e.agent) } }).generate('review', { abortSignal: controller.signal }).catch((e) => e);
+      await vi.waitFor(() => expect([...ended].sort()).toEqual(['correctness', 'failure']));
+      controller.abort(new Error('caller stopped'));
+      const err = await pending;
+      expect(err, `chair ${JSON.stringify(chair)}`).toBeInstanceOf(AgencyPanelError);
+      expect(err.message).toBe('panel aborted: caller stopped');
+      expect(err.seats.map((s: Json) => [s.seat, s.status, s.error])).toEqual([['correctness', 'ok', undefined], ['security', 'error', 'caller stopped'], ['failure', 'ok', undefined]]);
+      expect(err.quorum).toMatchObject({ met: true, healthy: 2 });
+      // The one Anthropic request is the correctness seat's: no chair was sent.
+      expect(calls(ANTHROPIC, 'POST')).toHaveLength(1);
+    }
+  });
 });
 
 describe('6. deadlines (fake timers)', () => {
