@@ -135,6 +135,44 @@ describe('OpenAIProvider key failover', () => {
     expect(outcomes).toEqual([{ attempt: 1, status: 401, ok: false }]);
   });
 
+  it("bounds its own wait after a 429 the way the pool bounds a key's rest, reads an HTTP-date, and ends the wait on the caller's abort", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const p = await provider('sk_alpha_0001', { keyPool: { maxRetryAfterMs: 5_000 } });
+    // A Retry-After far past the bound (an OpenAI-compatible gateway asking for 27 hours) waits for the bound.
+    fetchMock.mockResolvedValueOnce(jsonResponse(429, rateLimited, { 'retry-after': '100000' })).mockResolvedValueOnce(jsonResponse(200, okChat));
+    const bounded = ask(p);
+    await vi.advanceTimersByTimeAsync(4_990);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect((await bounded).choices[0]?.message?.content).toBe('hello');
+
+    // An HTTP-date a few seconds ahead waits until that date (2.99 seconds here), where parseInt read it as no wait.
+    fetchMock.mockClear();
+    const retryAt = new Date(Math.ceil((Date.now() + 2_000) / 1000) * 1000);
+    fetchMock.mockResolvedValueOnce(jsonResponse(429, rateLimited, { 'retry-after': retryAt.toUTCString() })).mockResolvedValueOnce(jsonResponse(200, okChat));
+    const dated = ask(p);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_600);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await dated;
+
+    // The caller's abort ends the wait at once.
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValueOnce(jsonResponse(429, rateLimited, { 'retry-after': '60' }));
+    const controller = new AbortController();
+    const aborted = p
+      .generateCompletion('gpt-4o', [{ role: 'user', content: 'hi' }], { abortSignal: controller.signal })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(10);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await aborted).toMatchObject({ code: 'REQUEST_ABORTED' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("reads OpenAI's insufficient_quota 429 as a billing failure, not a throttle", async () => {
     const p = await provider('sk_alpha_0001,sk_beta_0002');
     fetchMock.mockResolvedValueOnce(jsonResponse(429, insufficientQuota)).mockResolvedValueOnce(jsonResponse(200, okChat));

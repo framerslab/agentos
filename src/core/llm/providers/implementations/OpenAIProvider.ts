@@ -41,7 +41,7 @@ import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } 
 import { toOpenAiResponseFormat, toOpenAiResponsesTextFormat } from './openai-response-format-guard';
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
-import { computeRetryBackoffMs } from './retry-backoff.js';
+import { computeRetryBackoffMs, waitForRetry } from './retry-backoff.js';
 import { redactUrlSecrets } from '../url-secrets.js';
 import { OPENAI_MODEL_PRICING, openAIModelPricing } from './openaiPricing.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
@@ -2833,16 +2833,19 @@ export class OpenAIProvider implements IProvider {
             lastError = new OpenAIProviderError(errorMessage, 'RATE_LIMIT_EXCEEDED', errorCode || undefined, errorType, response.status, errorData);
             // On the last attempt the loop goes on to the budget's refusal, which ends it with lastError.
             if (!last) {
-              const retryAfter = response.headers.get('retry-after'); // seconds
-              // Retry-After is authoritative when present; otherwise jittered backoff.
-              const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : computeRetryBackoffMs(attempt);
-              await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+              // Retry-After is authoritative when present, as delay-seconds or an HTTP-date, bounded the way the
+              // pool bounds a key's rest (maxRetryAfterMs, one hour); otherwise jittered backoff. The caller's
+              // abort ends the wait, and the loop's check then reports it.
+              const waitMs =
+                retryAfterMs(response.headers.get('retry-after'), undefined, this.config.keyPool?.maxRetryAfterMs) ??
+                computeRetryBackoffMs(attempt);
+              await waitForRetry(waitMs, abortSignal);
             }
             continue; // Retry
           }
           // Other retryable server errors
           if (response.status >= 500) {
-            if (!last) await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt))); // jittered exponential backoff
+            if (!last) await waitForRetry(computeRetryBackoffMs(attempt), abortSignal); // jittered exponential backoff
             continue; // Retry
           }
           throw lastError; // If not explicitly handled for retry, throw
@@ -2890,7 +2893,7 @@ export class OpenAIProvider implements IProvider {
         const isNetwork = lastError instanceof OpenAIProviderError && lastError.code === 'NETWORK_ERROR';
         const shortMsg = isNetwork ? 'Network unreachable' : lastError.message;
         console.warn(`[LLM] Retry ${attempt + 1}/${allowed - 1} in ${(delay / 1000).toFixed(1)}s: ${shortMsg}`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await waitForRetry(delay, abortSignal);
       } finally {
         abortSignal?.removeEventListener('abort', abortAttempt);
       }

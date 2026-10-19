@@ -22,7 +22,7 @@ import {
 } from '../IProvider';
 import { OpenRouterProviderError } from '../errors/OpenRouterProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
@@ -1578,7 +1578,8 @@ export class OpenRouterProvider implements IProvider {
         let errorData: any;
         let errorMessage = 'Unknown OpenRouter API error';
         let errorType = 'UNKNOWN_API_ERROR';
-        let retryAfterSec: number | undefined;
+        // The server's Retry-After (delay-seconds or an HTTP-date), bounded as the pool bounds a key's rest.
+        let serverRetryAfterMs: number | null = null;
         let transportFailure = false;
 
         if (axios.isAxiosError(error)) {
@@ -1597,11 +1598,7 @@ export class OpenRouterProvider implements IProvider {
           }
           transportFailure = error.response === undefined;
           const retryAfterRaw = error.response?.headers?.['retry-after'];
-          const parsedRetryAfter =
-            typeof retryAfterRaw === 'string' ? parseInt(retryAfterRaw, 10) : NaN;
-          if (Number.isFinite(parsedRetryAfter) && parsedRetryAfter > 0) {
-            retryAfterSec = parsedRetryAfter;
-          }
+          serverRetryAfterMs = retryAfterMs(typeof retryAfterRaw === 'string' ? retryAfterRaw : null, undefined, this.config.keyPool?.maxRetryAfterMs);
           if (errorData?.error && typeof errorData.error === 'object') {
             errorMessage = errorData.error.message || errorMessage;
             const metaType = errorData.error.metadata?.error_type;
@@ -1634,7 +1631,7 @@ export class OpenRouterProvider implements IProvider {
           this.keyPool.markFailed(apiKey, keyFailure, {
             status: statusCode,
             at: attemptStartedAt,
-            ...(retryAfterSec !== undefined ? { retryAfterMs: retryAfterSec * 1000 } : {}),
+            ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
           });
           if (this.keyPool.size > 1) {
             if (this.keyPool.usable() > 0 && ++keyHops < this.keyPool.size) {
@@ -1680,8 +1677,8 @@ export class OpenRouterProvider implements IProvider {
         }
 
         const sleepMs = Math.min(
-          retryAfterSec !== undefined
-            ? retryAfterSec * 1000
+          serverRetryAfterMs !== null && serverRetryAfterMs > 0
+            ? serverRetryAfterMs
             : 300 * 2 ** attempt + Math.floor(Math.random() * 200),
           OpenRouterProvider.MAX_RETRY_SLEEP_MS,
         );

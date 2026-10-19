@@ -106,6 +106,37 @@ describe('OpenRouterProvider key failover', () => {
     expect(keyPool.snapshot().map((s) => s.status)).toEqual(['ok', 'ok']);
   });
 
+  it('reads a Retry-After given as an HTTP-date for the key\'s rest and for its own wait', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    try {
+      const rateLimited = (retryAfter: string) => ({
+        isAxiosError: true,
+        message: 'Request failed with status code 429',
+        response: { status: 429, data: { error: { message: 'Rate limit exceeded', code: 429 } }, headers: { 'retry-after': retryAfter } },
+      });
+      const twoSecondsAhead = () => new Date(Date.now() + 2_000).toUTCString();
+      // Two keys: the throttled key rests until the date, not the 15-minute cooldown, and the request moves on.
+      const request = vi.fn().mockRejectedValueOnce(rateLimited(twoSecondsAhead())).mockResolvedValueOnce({ data: okResponse() });
+      const { provider, keyPool } = makeProvider(request);
+      await provider.generateCompletion(MODEL, messages, {});
+      expect(bearers(request)).toEqual(['Bearer key_alpha_0001', 'Bearer key_beta_0002']);
+      expect(keyPool.snapshot()[0]).toMatchObject({ status: 'resting', kind: 'quota', until: Date.now() + 2_000 });
+
+      // One key: the request waits for the date before it tries again, not the short backoff.
+      const single = vi.fn().mockRejectedValueOnce(rateLimited(twoSecondsAhead())).mockResolvedValueOnce({ data: okResponse() });
+      const { provider: one } = makeProvider(single, 'key_only_0001');
+      const answering = one.generateCompletion(MODEL, messages, {});
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(single).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(600);
+      expect(single).toHaveBeenCalledTimes(2);
+      expect((await answering).choices[0]?.message?.content).toBe('hi');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the first version's behaviour for a single key: a 401 fails the request at once", async () => {
     const request = vi.fn().mockRejectedValueOnce(axiosError(401, noAuth));
     const { provider } = makeProvider(request, 'key_only_0001');
