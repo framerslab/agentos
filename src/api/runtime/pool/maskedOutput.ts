@@ -101,9 +101,10 @@ interface TextLane {
  * tool call and its result between two steps), so a secret split around them
  * is masked whole. Those parts wait behind the tail and come out in their
  * place once the text around them is settled: between the characters that
- * were held before and after them when the tail was no secret, before the
- * text masked whole when a secret ran through it, and the same at the end of
- * the stream and before a stream error. Another agent's parts pass meanwhile.
+ * were held before and after them when no secret ran through the place they
+ * waited at, after the text before the first masked secret and ahead of the
+ * masked text when one did, and the same at the end of the stream and before
+ * a stream error. Another agent's parts pass meanwhile.
  *
  * @param parts - A `fullStream`.
  * @param mask - The call's mask.
@@ -135,32 +136,35 @@ export function maskPartStream(parts: AsyncIterable<unknown>, mask: CallMask): A
       /**
        * What `out`, the masked form of `released` (the first characters of the
        * held text and the piece just pushed, up to what is still held), comes
-       * out as: with the waiting parts in their place among the text when no
-       * secret was masked, after the parts that arrived inside the masked text
-       * when one was. A part behind text still held stays, its offset moved up.
+       * out as: the text before the first masked secret is the same in both,
+       * so a waiting part that arrived inside it comes out in its place among
+       * that text, and a part that arrived from the first masked secret on
+       * comes out after it and before the rest of `out`. A part behind text
+       * still held stays, its offset moved up.
        */
       const release = function* (lane: TextLane, template: Record<string, unknown>, released: string, out: string, heldLength: number): Generator<unknown> {
         const cut = released.length;
+        // Where the first masked secret starts: `out` and `released` agree up to there, and from there `out` reads
+        // `[redacted]`. A secret is masked only by that marker, so it starts at the last marker in `out` that begins
+        // no later than the first character where the two differ.
+        let same = 0;
+        while (same < released.length && same < out.length && released[same] === out[same]) same += 1;
+        const masked = out === released ? cut : Math.max(0, out.lastIndexOf('[redacted]', same));
         const staying: TextLane['waiting'] = [];
-        if (out === released) {
-          let from = 0;
-          for (const entry of lane.waiting) {
-            if (entry.at > cut) {
-              staying.push({ part: entry.part, at: entry.at - cut });
-              continue;
-            }
+        const inside: unknown[] = [];
+        let from = 0;
+        for (const entry of lane.waiting) {
+          if (entry.at > cut) staying.push({ part: entry.part, at: entry.at - cut });
+          else if (entry.at > masked) inside.push(entry.part);
+          else {
             yield* textBetween(lane, template, released, heldLength, from, entry.at);
             from = entry.at;
             yield entry.part;
           }
-          yield* textBetween(lane, template, released, heldLength, from, cut);
-        } else {
-          for (const entry of lane.waiting) {
-            if (entry.at > cut) staying.push({ part: entry.part, at: entry.at - cut });
-            else yield entry.part;
-          }
-          if (out) yield { ...template, text: out };
         }
+        yield* textBetween(lane, template, released, heldLength, from, masked);
+        yield* inside;
+        if (out.length > masked) yield { ...template, text: out.slice(masked) };
         lane.waiting = staying;
       };
       /** What a lane releases when the stream ends: its held tail, masked, with the parts that waited in their place. */
