@@ -836,6 +836,24 @@ describe('10-12. vendors, shortfalls, truncation and pre-built seats', () => {
     // A pre-built seat can add one provider at most (C6): the bound counts it, and minProviders 3 still fails.
     expect(() => agency({ strategy: 'panel', modelPool: { astra: POOL().astra }, agents: { a: { instructions: 'x' }, pre: agent({ provider: 'anthropic', model: 'claude-opus-5-5', apiKey: K.ant, fallbackProviders: [] }) }, chair: false, quorum: { minProviders: 3 } } as never)).toThrow(/minProviders/);
   });
+  it("a fixed seat with no key of its own adds no provider and no vendor at construction, its keyed hop's included, since seating leaves it out before its chain is read; a pool entry with no key adds none either", () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    const hop = { provider: 'anthropic', model: 'claude-opus-5-5', apiKey: K.ant };
+    const seats = (aKey?: string) => ({
+      a: { provider: 'openai', model: 'gpt-4.1', ...(aKey ? { apiKey: aKey } : {}), instructions: 'x', fallbackProviders: [hop] },
+      b: { provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, instructions: 'y' },
+    });
+    // Seat a is unseated at every call, so its Anthropic hop never runs: b alone answers, on one provider and one vendor.
+    expect(() => agency({ strategy: 'panel', agents: seats(), chair: false, quorum: { minProviders: 2 } } as never)).toThrow(/minProviders \(2\) is above the 1 .*seat "a": no key \(OPENAI_API_KEY\)/);
+    expect(() => agency({ strategy: 'panel', agents: seats(), chair: false, quorum: { minVendors: 2 } } as never)).toThrow(/minVendors \(2\) is above the 1 .*seat "a": no key \(OPENAI_API_KEY\)/);
+    // With a key of its own, a answers on OpenAI or through its hop on Anthropic.
+    expect(() => agency({ strategy: 'panel', agents: seats(K.fixed), chair: false, quorum: { minProviders: 2, minVendors: 2 } } as never)).not.toThrow();
+    // An entry with no key is skipped at seating and seats nobody: both pooled seats answer on OpenAI.
+    const pool = { opus: { provider: 'anthropic', model: 'claude-opus-5-5' }, astra: POOL().astra };
+    expect(() => agency({ strategy: 'panel', modelPool: pool, agents: { a: { instructions: 'x' }, b: { instructions: 'y' } }, chair: false, quorum: { minProviders: 2 } } as never)).toThrow(/minProviders \(2\) is above the 1 .*entry "opus": no key \(ANTHROPIC_API_KEY\)/);
+    expect(() => agency({ strategy: 'panel', modelPool: POOL(), agents: { a: { instructions: 'x' }, b: { instructions: 'y' } }, chair: false, quorum: { minProviders: 2 } } as never)).not.toThrow();
+  });
   it('a vendor quorum is not met by two hosts of one maker; a pre-built seat adds nothing to it', async () => {
     // The pre-built seat answers on OpenAI, so the vendor count is the only thing that keeps it out of the quorum.
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('P')], [/api\.groq\.com\/openai\/v1\/models/, openaiListing], [/api\.groq\.com\/openai\/v1\/chat\/completions/, openaiText('G')], [/api\.together\.xyz\/v1\/models/, openaiListing], [/api\.together\.xyz\/v1\/chat\/completions/, openaiText('T')], [ANTHROPIC, anthropicError(500, 'down', 'api_error')]]);
