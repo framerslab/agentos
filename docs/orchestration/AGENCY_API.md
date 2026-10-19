@@ -412,7 +412,8 @@ a pre-built seat's own key, URL and hops, a nested agency's level, pool, seats
 and chair included) is replaced with `[redacted]` in the result's text,
 `agentCalls` (outputs, tool arguments and results, an Error a tool returned
 as its output included, and a class instance it returned held as its JSON,
-masked, as the tool turn carried it), `toolCalls`, `transcriptDelta`, seat records, thrown
+masked, as the tool turn carried it; an object's keys are masked as its
+values are), `toolCalls`, `transcriptDelta`, seat records, thrown
 errors (message, stack, cause and details), `on.error` and `agentEnd`
 payloads, the provenance trail (an approval decision's reason and
 modifications, its numbers included), stream parts (a secret split between two text

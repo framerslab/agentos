@@ -524,7 +524,8 @@ export function createErrorMask(holder: { list: readonly string[] }): CallMask {
 
 /**
  * A copy of `value` with every string redacted, at any depth of plain objects
- * and arrays (a conversation delta, a tool-call list), and, with `numbers`,
+ * and arrays (a conversation delta, a tool-call list), an object's keys
+ * included, and, with `numbers`,
  * every number whose digits hold a secret replaced by the string `[redacted]`. An Error inside it from
  * which a secret can be reached (one a tool returned as its output, its
  * message or cause holding a key) is replaced by its masked stand-in
@@ -563,11 +564,11 @@ export function maskStrings<T>(value: T, secrets: readonly string[], numbers = f
 
 /**
  * A copy of `value` with every string passed through `redact`, at any depth
- * of plain objects and arrays, with `numbers` every number whose digits hold a
- * secret replaced by the string `[redacted]`, every Error from which a secret
- * can be reached replaced by its masked stand-in, one copy per Error, and every
- * other class instance from which a secret can be reached replaced by its JSON,
- * masked.
+ * of plain objects and arrays, an object's keys included, with `numbers` every
+ * number whose digits hold a secret replaced by the string `[redacted]`, every
+ * Error from which a secret can be reached replaced by its masked stand-in, one
+ * copy per Error, and every other class instance from which a secret can be
+ * reached replaced by its JSON, masked.
  */
 function copyStrings<T>(value: T, secrets: readonly string[], redact: (text: string) => string, numbers: boolean): T {
   const copies = new WeakMap<object, object>();
@@ -628,6 +629,15 @@ function copyStrings<T>(value: T, secrets: readonly string[], redact: (text: str
     return copy;
   };
   const root = copyOf(value);
-  for (let next = pending.pop(); next !== undefined; next = pending.pop()) fill(next[0], next[1], Object.keys(next[0]), copyOf);
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    const [source, copy] = next;
+    if (Array.isArray(source)) {
+      fill(source, copy, Object.keys(source), copyOf);
+      continue;
+    }
+    // A key is data too: a tool that returns a status map keyed by a key would keep it in the record. Each key passes
+    // `redact` as a value does; two keys that mask alike leave the later one's value.
+    for (const key of Object.keys(source)) define(copy, redact(key), copyOf(read(source, key)), true);
+  }
   return root as T;
 }
