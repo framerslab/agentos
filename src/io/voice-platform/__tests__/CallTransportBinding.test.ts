@@ -46,6 +46,17 @@ describe('logical call transport', () => {
     await expect(f.binding.reattach({ token: c.token, origin: f.seed.clientOrigin, participantId: f.seed.participantId, transportEpoch: c.transportEpoch, transport: 'websocket', physical: physicalTransport().transport })).rejects.toThrow('binding busy');
     await vi.waitFor(() => expect(release).toBeTypeOf('function')); release(); f.setFence(async () => {}); await detach; await f.binding.end('client_stop'); await f.runtime.stopSession();
   });
+  it('hands typed text to the call as a turn and drops a text the check refuses, without ending the call', async () => {
+    const f = await transportFixture(); const a = await f.connect(); const closed = vi.fn(); f.binding.on('close', closed);
+    const items: unknown[] = []; f.runtime.on('conversation_item_added', ({ item }: { item: unknown }) => items.push(item));
+    // A room transport with text input sends each chat text of its linked participant as a text_input message.
+    a.physical.emit('message', { type: 'text_input', text: '   ' });
+    a.physical.emit('message', { type: 'text_input', text: 'Book a table.' });
+    await vi.waitFor(() => expect(f.runtime.state).toBe('speaking'));
+    expect(items).toEqual([{ role: 'user', text: 'Book a table.', source: 'text', endpointReason: 'manual' }]);
+    expect(f.binding.state).toBe('open'); expect(closed).not.toHaveBeenCalled();
+    await f.binding.end('client_stop'); await f.runtime.stopSession();
+  });
   it('keeps a generation the pipeline records while the attachment is still completing', async () => {
     const f = await transportFixture(); const connected = f.manager.connected.bind(f.manager);
     vi.spyOn(f.manager, 'connected').mockImplementationOnce(async (...args) => {
