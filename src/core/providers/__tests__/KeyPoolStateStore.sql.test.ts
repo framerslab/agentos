@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
+import { createDatabase, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { KEY_POOL_STATE_DDL, SqlKeyPoolStateStore, keyPoolStateDdl, type KeyState } from '../KeyPoolStateStore.js';
 import { ApiKeyPool } from '../ApiKeyPool.js';
 
@@ -71,6 +71,17 @@ describe('SqlKeyPoolStateStore', () => {
     // A load with nothing to skip writes nothing.
     expect(await store.load('none')).toBeNull();
     expect(lines).toHaveLength(1);
+  });
+
+  it('works over createDatabase({ file }), the call the docs show', async () => {
+    // createDatabase() takes `file`; `filePath` is the resolver's own option and createDatabase() ignores it, so the
+    // docs' call shape is pinned here against the adapter the package depends on (the type check refuses an unknown
+    // option in this literal), and a row goes through it.
+    const adapter = await createDatabase({ file: ':memory:', priority: ['better-sqlite3', 'sqljs'] });
+    databases.push(adapter);
+    const store = new SqlKeyPoolStateStore({ db: adapter });
+    await store.save('anthropic:ANTHROPIC_API_KEY', state({ fingerprint: 'aaaaaaaaaaaa', status: 'failed', kind: 'billing', failures: 1, updatedAt: 10 }));
+    expect((await store.load('anthropic:ANTHROPIC_API_KEY'))?.map((r) => [r.fingerprint, r.status, r.kind])).toEqual([['aaaaaaaaaaaa', 'failed', 'billing']]);
   });
 
   it('leaves the schema to host migrations when told to', async () => {

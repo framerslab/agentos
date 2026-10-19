@@ -70,7 +70,7 @@ A pool's `startRechecks()` runs the probes on one timer per pool that never keep
 import { createDatabase } from '@framers/sql-storage-adapter';
 import { AnthropicProvider, SqlKeyPoolStateStore } from '@framers/agentos';
 
-const db = await createDatabase({ filePath: './agentos.sqlite' });
+const db = await createDatabase({ file: './agentos.sqlite' });
 // The store creates its table on first use; pass `ensureSchema: false` and run
 // `keyPoolStateDdl('agentos')` in the host's migrations to own the schema.
 const store = new SqlKeyPoolStateStore({ db, tablePrefix: 'agentos' });
@@ -95,7 +95,7 @@ await provider.initialize({
 import { createDatabase } from '@framers/sql-storage-adapter';
 import { setKeyPoolDefaults, SqlKeyPoolStateStore } from '@framers/agentos';
 
-const db = await createDatabase({ filePath: './agentos.sqlite' });
+const db = await createDatabase({ file: './agentos.sqlite' });
 setKeyPoolDefaults({ strategy: 'ordered', store: new SqlKeyPoolStateStore({ db, tablePrefix: 'agentos' }) });
 ```
 
