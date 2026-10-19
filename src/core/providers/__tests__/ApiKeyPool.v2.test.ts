@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiKeyPool, keyFingerprint, keyPoolStrategyFromEnv, type ProbeResult } from '../ApiKeyPool.js';
-import { InMemoryKeyPoolStateStore } from '../KeyPoolStateStore.js';
+import { InMemoryKeyPoolStateStore, type KeyState } from '../KeyPoolStateStore.js';
 import type { ILogger } from '../../logging/index.js';
 
 function recordingLogger(): { logger: ILogger; lines: Array<{ level: string; event: string; meta?: Record<string, unknown> }> } {

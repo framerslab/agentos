@@ -657,9 +657,15 @@ export class ApiKeyPool {
   private async loadState(): Promise<void> {
     const store = this.store;
     if (!store || !this.id || this.entries.length === 0) return;
-    // The call itself inside the promise, so a store whose load throws before it returns one is handled as a
-    // rejection; a load that never settles ends at the deadline, and its late rows are ignored.
-    const loaded = await this.withinDeadline(Promise.resolve().then(() => store.load(this.id)), this.loadTimeoutMs);
+    // The load starts now, as ready() is called; a store whose load throws before it returns a promise is handled
+    // as a rejection, and a load that never settles ends at the deadline, its late rows ignored.
+    let work: Promise<KeyState[] | null>;
+    try {
+      work = Promise.resolve(store.load(this.id));
+    } catch (error) {
+      work = Promise.reject(error);
+    }
+    const loaded = await this.withinDeadline(work, this.loadTimeoutMs);
     if (loaded.outcome === 'timeout') {
       this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'load', reason: 'timeout', timeoutMs: this.loadTimeoutMs });
       return;
