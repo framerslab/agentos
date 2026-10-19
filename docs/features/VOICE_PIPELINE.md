@@ -927,11 +927,11 @@ The executor reads the node's `mode`, `speakText`, `maxTurns`, `exitOn` and `exi
 
 | `exitReason` | Trigger |
 |---|---|
-| `hangup` | the transport emits `close` or `disconnected`, or the started session emits `close` |
+| `hangup` | the transport emits `close` or `disconnected`, or the started session emits `close`; at once when the transport or the started session already reads `closed` as the node starts |
 | `turns-exhausted` | a user turn, a user item of `conversation_item_added` or a relayed `turn_complete`, brings the turn count to `maxTurns` (`0` or unset: no limit) |
 | `keyword:<word>` | with `exitOn: 'keyword'`, a final transcript, a final `user_input_transcribed` or a relayed `final_transcript`, contains one of `exitKeywords` (case-insensitive substring) |
 | `silence-timeout` | with `exitOn: 'silence-timeout'`, 30 s pass without the user starting to speak or a turn completing |
-| `interrupted` | the node's abort signal fires, including through a [`VoiceInterruptError`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoiceInterruptError.ts) |
+| `interrupted` | the node's abort signal fires, at once when `state.scratch.abortSignal` was aborted before the node started, including through a [`VoiceInterruptError`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoiceInterruptError.ts) |
 | `completed` | a `speak-only` node finished |
 | `error` | the session threw |
 
