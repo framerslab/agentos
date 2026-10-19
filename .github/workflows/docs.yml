@@ -1,5 +1,6 @@
 name: Generate & Deploy Docs to agentos-live-docs
-# Triggered on push to master, releases, or manually via workflow_dispatch
+# Triggered on push to master, releases, or manually via workflow_dispatch; a
+# manual run publishes only from master.
 
 on:
   push:
@@ -20,14 +21,17 @@ on:
 permissions:
   contents: write
 
-# One build at a time. A run queued during a build waits for it to finish, so
-# a later run never cancels the build in progress. At most one run waits: a run
-# that starts waiting cancels the one already waiting, which shows as cancelled
-# without having built, and the last run to start waiting builds next.
-# Cancelling the build in progress instead would let merges that land faster
-# than a build takes cancel every build until they stop.
+# A run that publishes (a push to master, a release, or a manual run on master)
+# joins the one group `docs`, one build at a time. A run queued during a build
+# waits for it to finish, so a later run never cancels the build in progress.
+# At most one run waits: a run that starts waiting cancels the one already
+# waiting, which shows as cancelled without having built, and the last run to
+# start waiting builds next. Cancelling the build in progress instead would let
+# merges that land faster than a build takes cancel every build until they
+# stop. A manual run on another branch builds the reference without publishing
+# it, in a group of its own, so it never replaces a waiting run that publishes.
 concurrency:
-  group: "docs"
+  group: ${{ (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master') && 'docs' || format('docs-{0}', github.ref) }}
   cancel-in-progress: false
 
 jobs:
@@ -111,7 +115,10 @@ jobs:
           # Create .nojekyll to prevent GitHub Pages from ignoring _* files
           touch docs-deploy/.nojekyll
 
+      # Only a run in the `docs` group publishes; a manual run on another branch
+      # stops after the build.
       - name: Deploy to agentos-live-docs branch
+        if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
