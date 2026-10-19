@@ -213,15 +213,39 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(session.messages().at(-1)).toEqual({ role: 'assistant', content: '{"city":"Lyon"}' });
   });
 
-  it('a structured send on Claude Sonnet 5.5 (no forced tool): the schema rides the system prompt, and the JSON text answer is parsed', async () => {
+  it('a structured send on Claude Sonnet 5.5: the JSON output format marker carries the schema, the system prompt does not repeat it, and the JSON text answer is parsed', async () => {
     const k = key(); const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon"}')] });
     const r = await agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s')
       .send('where?', { responseSchema: z.object({ city: z.string() }) });
     expect(r.object).toEqual({ city: 'Lyon' });
+    expect(r.text).toBe('{"city":"Lyon"}');
+    expect(s.seen[0].options.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
+    expect(systemText(s.seen[0])).not.toContain(SCHEMA_LINE);
+  });
+
+  it('a structured send on Claude Fable 5.1 keeps the schema answer when an onAfterGeneration hook returns other text', async () => {
+    const k = key(); const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon"}')] });
+    const r = await agent({
+      ...base(k),
+      provider: 'anthropic',
+      model: 'claude-fable-5-1',
+      onAfterGeneration: async (result) => ({ ...result, text: 'Rewritten by a hook.' }),
+    }).session('s').send('where?', { responseSchema: z.object({ city: z.string() }) });
+    // The gateway lifts the JSON text answer into structuredOutput, so the hook's text does not replace it.
+    expect(r.object).toEqual({ city: 'Lyon' });
+    expect(r.text).toBe('{"city":"Lyon"}');
+    expect(s.seen[0].options.responseFormat).toMatchObject({ route: 'json_schema' });
+  });
+
+  it('a structured send on Claude Sonnet 5.5 with a record schema (outside the JSON output format): the schema rides the system prompt, and the JSON text answer is parsed', async () => {
+    const k = key(); const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon","scores":{"a":1}}')] });
+    const r = await agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s')
+      .send('where?', { responseSchema: z.object({ city: z.string(), scores: z.record(z.string(), z.number()) }) });
+    expect(r.object).toEqual({ city: 'Lyon', scores: { a: 1 } });
     expect(s.seen[0].options.responseFormat).toBeUndefined();
-    // No payload carries the schema to this model, so the request's system prompt does.
+    // No payload carries this schema to the model, so the request's system prompt does.
     expect(systemText(s.seen[0])).toContain(SCHEMA_LINE);
-    expect(systemText(s.seen[0])).toContain('"city"');
+    expect(systemText(s.seen[0])).toContain('"scores"');
   });
 
   it('a structured send in OpenAI JSON mode (a schema strict mode cannot take) carries the schema in its system prompt; a strict one does not repeat it', async () => {

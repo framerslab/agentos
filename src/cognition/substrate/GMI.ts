@@ -1621,6 +1621,8 @@ export class GMI implements IGMI {
         // Whether the answering attempt's provider payload carried the response schema (the gateway says).
         // Initialised through the assertion, so tsc does not narrow it to undefined where it is read.
         let stepSchemaInPayload = undefined as boolean | undefined;
+        // The route the gateway's Anthropic hop took, read with it once the stream has ended.
+        let stepSchemaRoute = undefined as CompletionAttempt['schemaRoute'];
         let modelTargetInfo!: ModelTargetInfo;
 
         // One attempt per hop. A failure before any output moves to the next
@@ -1818,6 +1820,7 @@ export class GMI implements IGMI {
           // Read once the stream has ended: a provider that sent the request again without the
           // schema payload (OpenRouter's json_object retry) has said so by then.
           stepSchemaInPayload = gatewayAttempt?.schemaInPayload;
+          stepSchemaRoute = gatewayAttempt?.schemaRoute;
 
           if (gateway && route && resolution && attemptOutcome) {
             const outcome = await attemptOutcome;
@@ -1850,6 +1853,7 @@ export class GMI implements IGMI {
               stepFinishReason = null;
               stepFinalChunk = undefined;
               stepStructuredOutput = undefined;
+              stepSchemaRoute = undefined;
               resolution = next;
               continue hopLoop;
             }
@@ -1895,9 +1899,16 @@ export class GMI implements IGMI {
           structuredAttempts += 1;
           const lifted = stepStructuredOutput !== undefined;
           const check = lifted ? structuredReply.checkValue(stepStructuredOutput) : checkStructuredReply(currentIterationTextResponse, structuredReply);
-          // 'provider_schema' only when the answering hop's payload carried the schema; a hop that sent it in the
-          // prompt alone reports 'prompt_only'. A gateway that does not say keeps the earlier report.
-          const enforcement = lifted ? 'forced_tool' : gateway && stepSchemaInPayload !== false ? 'provider_schema' : 'prompt_only';
+          // 'forced_tool' when the gateway lifted a forced schema tool call; a JSON text answer the gateway lifted
+          // from an Anthropic hop on the JSON output format is 'provider_schema', as any payload that carried the
+          // schema; a hop that sent it in the prompt alone reports 'prompt_only'. A gateway that does not say keeps
+          // the earlier report.
+          const enforcement =
+            lifted && stepSchemaRoute !== 'json_schema'
+              ? 'forced_tool'
+              : gateway && stepSchemaInPayload !== false
+                ? 'provider_schema'
+                : 'prompt_only';
           if (check.ok) {
             structuredResult = { value: check.value, meta: { schemaName: structuredReply.name, valid: true, attempts: structuredAttempts, enforcement, stage: 'model' } };
             if (lifted && !currentIterationTextResponse) {

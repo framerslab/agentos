@@ -8,7 +8,11 @@
  * payload to its native structured-output API surface:
  *
  *   - openai     → response_format: { type: 'json_schema', json_schema: {...} }
- *   - anthropic  → forced tool_use (single tool with input_schema, tool_choice forced)
+ *   - anthropic  → a marker carrying one object schema and its route
+ *                  ({@link AnthropicStructuredOutputMarker}): the native JSON
+ *                  output format (`output_config.format`) on every model that
+ *                  has it, a forced tool call on Claude Opus 4 and Sonnet 4, or
+ *                  none when neither carries the schema
  *   - gemini     → generationConfig.responseMimeType + responseSchema
  *   - openrouter → degrades to json_object (OpenRouter has no schema enforcement)
  *   - requesty   → degrades to json_object (aggregator; no cross-upstream schema enforcement)
@@ -17,6 +21,26 @@
  */
 import type { ZodType } from 'zod';
 import { lowerZodToJsonSchema } from '../../../orchestration/compiler/SchemaLowering.js';
+import { anthropicSchemaRoute, type AnthropicSchemaRoute } from './model-strict-tool-use.js';
+
+/**
+ * The payload {@link buildResponseFormat} builds for Anthropic: one object
+ * schema under a tool-shaped `tool` field, and the route AnthropicProvider
+ * takes with it for the model the marker was built for (see
+ * {@link anthropicSchemaRoute}). The provider computes the route again for the
+ * model it sends to, on this same `input_schema`.
+ */
+export type AnthropicStructuredOutputMarker = {
+  _agentosUseToolForStructuredOutput: true;
+  /** `json_schema`, `forced_tool` or `none`, for the model id the builder was given. */
+  route: AnthropicSchemaRoute;
+  tool: {
+    /** The schema's name: the forced tool's name, when that route is taken. */
+    name: string;
+    /** The object schema, after {@link ensureAnthropicObjectSchema}. */
+    input_schema: Record<string, unknown>;
+  };
+};
 
 /**
  * Input to {@link buildResponseFormat}.
@@ -24,6 +48,12 @@ import { lowerZodToJsonSchema } from '../../../orchestration/compiler/SchemaLowe
 export interface BuildResponseFormatInput {
   /** Provider id (e.g., 'openai', 'anthropic', 'gemini'). */
   provider: string;
+  /**
+   * Provider-side model id, read for `anthropic` to compute the marker's
+   * route. `''` or absent when it is not known yet (a fallback entry that
+   * names no model): the route is then decided on the schema alone.
+   */
+  modelId?: string;
   /** Zod schema describing the desired response shape. */
   schema: ZodType;
   /**
@@ -128,8 +158,15 @@ function mergePropertySchemas(schemas: unknown[]): unknown {
  *     it at the TOP level.
  *  2. **No top-level `type` (e.g. `{}` or a non-object union) → `{ type: 'object' }`**
  *     (mirrors the `?? { type: 'object' }` fallback AnthropicProvider's regular
- *     tool-conversion path applies). An object schema already carrying a `type`
- *     passes through unchanged.
+ *     tool-conversion path applies). A schema already carrying a `type`
+ *     passes through unchanged, a `{ type: 'string' }` root included: the
+ *     route then turns on whether the root has `properties`
+ *     (`jsonOutputSchemaSupported`), not on this wrap.
+ *
+ * The JSON output format itself takes a root `anyOf` of objects (live-probed
+ * 2026-10-18 on claude-haiku-5-5), so the merge is not the API's demand there;
+ * it is kept so one object schema decides one route for both the format and
+ * the forced tool, whose `input_schema` does need it.
  *
  * @internal Exported for tests: {@link lowerZodToJsonSchema} gives an enum no
  *   other fields, so some merge rules can only be reached with a hand-written
@@ -199,10 +236,13 @@ export function ensureAnthropicObjectSchema(jsonSchema: unknown): Record<string,
 /**
  * Build a provider-specific structured-output payload from a Zod schema.
  *
- * @param input - Provider id, Zod schema, schema display name.
+ * @param input - Provider id, Zod schema, schema display name, and for
+ *          `anthropic` the model id the route is computed for.
  * @returns Object suitable for `GenerateTextOptions._responseFormat`. The
  *          per-provider implementation routes the payload to its native
- *          structured-output API surface.
+ *          structured-output API surface. For `anthropic` it is an
+ *          {@link AnthropicStructuredOutputMarker}, whose `route` says which
+ *          surface the model given takes with this schema.
  *
  * @example
  * ```ts
@@ -230,14 +270,20 @@ export function buildResponseFormat(
           schema: jsonSchema,
         },
       };
-    case 'anthropic':
-      return {
+    case 'anthropic': {
+      // One object schema decides the route, and the provider decides again on
+      // the very same object for the model it sends to.
+      const inputSchema = ensureAnthropicObjectSchema(jsonSchema);
+      const marker: AnthropicStructuredOutputMarker = {
         _agentosUseToolForStructuredOutput: true,
+        route: anthropicSchemaRoute(input.modelId ?? '', inputSchema),
         tool: {
           name: schemaName,
-          input_schema: ensureAnthropicObjectSchema(jsonSchema),
+          input_schema: inputSchema,
         },
       };
+      return marker;
+    }
     case 'gemini':
     case 'gemini-cli':
       return {

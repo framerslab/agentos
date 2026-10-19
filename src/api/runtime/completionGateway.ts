@@ -166,6 +166,13 @@ export interface CompletionAttempt extends AsyncIterable<ModelCompletionResponse
    * so read it once the attempt's stream has ended.
    */
   schemaInPayload?: boolean;
+  /**
+   * For an attempt with a response schema on an Anthropic hop: the route the
+   * hop's marker took, `json_schema` (the JSON output format; the text answer
+   * is lifted into `structuredOutput`), `forced_tool` (the schema tool call
+   * is lifted) or `none`. Unset on other providers and without a schema.
+   */
+  schemaRoute?: 'json_schema' | 'forced_tool' | 'none';
 }
 
 /**
@@ -568,13 +575,21 @@ function billedUsage(buffered: ReadonlyArray<ModelCompletionResponse>, error: Er
  * The provider-native schema payload for this hop, built as session.send builds
  * it, and, when that payload carries no schema (no payload for the provider or
  * model, or a JSON mode without one), the schema instructions for the hop's
- * system prompt, in generateObject's words.
+ * system prompt, in generateObject's words. For an Anthropic hop, `route` is
+ * the marker's route and `toolName` is set only for the forced tool, so a
+ * caller tool that shares the schema's name is never lifted on the other
+ * routes.
  */
 function lowerForHop(
   resolution: CompletionResolution,
   schema: ZodType,
   schemaName: string,
-): { responseFormat: Record<string, unknown> | undefined; toolName?: string; schemaInstruction?: string } {
+): {
+  responseFormat: Record<string, unknown> | undefined;
+  route?: 'json_schema' | 'forced_tool' | 'none';
+  toolName?: string;
+  schemaInstruction?: string;
+} {
   const jsonSchema = lowerZodToJsonSchema(schema);
   const responseFormat = buildResponseFormatForProvider({
     providerId: resolution.providerId,
@@ -583,10 +598,14 @@ function lowerForHop(
     effectiveSchema: schema,
     schemaName,
   });
-  const marker = responseFormat as { _agentosUseToolForStructuredOutput?: boolean; tool?: { name?: string } } | undefined;
+  const marker = responseFormat as
+    | { _agentosUseToolForStructuredOutput?: boolean; route?: 'json_schema' | 'forced_tool' | 'none'; tool?: { name?: string } }
+    | undefined;
+  const route = marker?._agentosUseToolForStructuredOutput ? marker.route ?? 'forced_tool' : undefined;
   return {
     responseFormat,
-    toolName: marker?._agentosUseToolForStructuredOutput ? marker.tool?.name : undefined,
+    ...(route ? { route } : {}),
+    toolName: route === 'forced_tool' ? marker?.tool?.name : undefined,
     ...(responseFormatCarriesSchema(responseFormat) ? {} : { schemaInstruction: buildSchemaInstructionText(jsonSchema, schemaName) }),
   };
 }
@@ -619,6 +638,23 @@ function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): M
     choices: [{ ...choice, message: { ...choice.message, tool_calls: rest.length > 0 ? rest : undefined } }, ...chunk.choices.slice(1)],
     structuredOutput,
   } as ModelCompletionResponse & { structuredOutput: unknown };
+}
+
+/**
+ * A JSON text answer (an Anthropic hop on the JSON output format, which puts
+ * the JSON in the text block) becomes `structuredOutput` on the chunk, as
+ * {@link liftSchemaToolCall} lifts a forced tool call: parsed when it parses,
+ * the text itself when it does not, so the session's protection of a schema
+ * answer and its parse see the same field on both routes.
+ */
+function liftSchemaText(chunk: ModelCompletionResponse, text: string): ModelCompletionResponse {
+  let structuredOutput: unknown = text;
+  try {
+    structuredOutput = JSON.parse(text);
+  } catch {
+    // Kept as the raw string; the session reports the parse failure.
+  }
+  return { ...chunk, structuredOutput } as ModelCompletionResponse & { structuredOutput: unknown };
 }
 
 export function createCompletionGateway(defaults: Partial<CompletionRoute> = {}): CompletionGateway {
@@ -803,6 +839,23 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       stream: true,
     };
 
+    /** The text of a JSON-output-format answer so far, lifted once on the final chunk. */
+    let answerText = '';
+    let answerLifted = false;
+    const liftJsonText = (raw: ModelCompletionResponse): ModelCompletionResponse => {
+      // A hop whose provider put the schema in the prompt itself (its chunks say
+      // schemaInPayload false) answered as prompt-only text: nothing is lifted, and
+      // the session extracts the JSON from the text as it does for any prompt-only hop.
+      if (schemaInPayload === false) return raw;
+      if (raw.responseTextDelta) answerText += raw.responseTextDelta;
+      if (answerLifted || !raw.isFinal) return raw;
+      const content = raw.choices?.[0]?.message?.content;
+      const text = typeof content === 'string' && content ? content : answerText;
+      if (!text) return raw;
+      answerLifted = true;
+      return liftSchemaText(raw, text);
+    };
+
     async function* run(): AsyncGenerator<ModelCompletionResponse, void, undefined> {
       let delivered = false;
       let completed = false;
@@ -826,7 +879,11 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         const signal = callOptions.abortSignal;
         for await (const raw of signal ? untilAborted(chunks, signal, resolution, onLateUsage) : chunks) {
           if (structured && raw.schemaInPayload === false) schemaInPayload = false;
-          const chunk = structured?.toolName ? liftSchemaToolCall(raw, structured.toolName) : raw;
+          const chunk = structured?.toolName
+            ? liftSchemaToolCall(raw, structured.toolName)
+            : structured?.route === 'json_schema'
+              ? liftJsonText(raw)
+              : raw;
           if (chunk.error) {
             // An abort is the caller's own stop: it is never walked to another
             // hop and says nothing about the provider's health (as in streamText).
@@ -883,7 +940,10 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     }
 
     const attempt: CompletionAttempt = { [Symbol.asyncIterator]: () => run(), outcome };
-    if (structured) Object.defineProperty(attempt, 'schemaInPayload', { enumerable: true, get: () => schemaInPayload });
+    if (structured) {
+      Object.defineProperty(attempt, 'schemaInPayload', { enumerable: true, get: () => schemaInPayload });
+      if (structured.route) Object.defineProperty(attempt, 'schemaRoute', { enumerable: true, value: structured.route });
+    }
     return attempt;
   }
 

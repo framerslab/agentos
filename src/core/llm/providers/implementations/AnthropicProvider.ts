@@ -40,10 +40,22 @@ import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } 
 import { resolveThinkingOff, resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import {
-  modelSupportsStrictToolUse,
-  toolInputSchemaSupportsStrict,
-  toolInputSchemaWithExplicitNoExtraProps,
+  anthropicJsonOutputSchema,
+  anthropicSchemaRoute,
+  modelSupportsJsonOutputs,
+  type AnthropicSchemaRoute,
 } from '../model-strict-tool-use.js';
+import {
+  ANTHROPIC_MODELS,
+  anthropicModelPricing,
+  estimateAnthropicCostUSD,
+  resolveAnthropicModelEntry,
+  resolveModelCatalogEntry,
+  type AnthropicCacheCreationBreakdown,
+  type AnthropicModelInfo,
+  type AnthropicModelPrice,
+  type AnthropicUsageForCost,
+} from './anthropicCatalog.js';
 import { resolveAnthropicEffort } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
@@ -56,6 +68,21 @@ import { contentSafeConsole as console } from '../../../logging/contentSafeConso
 // it, even though its source of truth is the pure model-forced-tool-choice
 // module.
 export { modelSupportsForcedToolChoice };
+
+// The model catalog, its lookups and its prices live in anthropicCatalog.ts,
+// which imports nothing of this provider, so `@framers/agentos/safety/runtime`
+// can carry `anthropicModelPricing` without loading the provider. Re-exported
+// here so every import that reached them through this module keeps working.
+export {
+  anthropicModelPricing,
+  estimateAnthropicCostUSD,
+  resolveAnthropicModelEntry,
+  resolveModelCatalogEntry,
+  type AnthropicCacheCreationBreakdown,
+  type AnthropicModelInfo,
+  type AnthropicModelPrice,
+  type AnthropicUsageForCost,
+};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -218,18 +245,6 @@ interface AnthropicContentBlock {
 }
 
 /**
- * Prompt-cache writes on one response, split by cache TTL: the
- * `usage.cache_creation` object of the Messages API. The two counts add up to
- * `cache_creation_input_tokens`.
- */
-export interface AnthropicCacheCreationBreakdown {
-  /** Tokens written with the default 5-minute TTL. */
-  ephemeral_5m_input_tokens?: number;
-  /** Tokens written with the 1-hour TTL (`cache_control.ttl: '1h'`). */
-  ephemeral_1h_input_tokens?: number;
-}
-
-/**
  * Why the model declined, sent beside `stop_reason: 'refusal'`. Kept verbatim
  * on the content-policy error the provider raises.
  */
@@ -383,254 +398,6 @@ type AnthropicStreamEvent =
   | { type: 'ping' }
   | { type: 'error'; error: { type: string; message: string } };
 
-// ---------------------------------------------------------------------------
-// Known model catalog — used by listAvailableModels / getModelInfo
-// ---------------------------------------------------------------------------
-
-/**
- * Static catalog of well-known Anthropic models and their metadata.
- *
- * Prices are USD per 1M tokens, verified against Anthropic's pricing page and
- * model pages on 2026-09-30. A cache hit costs 0.1x the input price except
- * where a row sets `pricePer1MTokensCacheRead`: Opus 5.5 (0.05x) and Fable 5.1
- * (0.025x) differ, and Fable 5 states its standard 0.1x rate explicitly so
- * the Fable 5.1 rate is not mistaken for it. Cache writes cost 1.25x the input
- * price at the 5-minute TTL and 2x at the 1-hour TTL on every model; see
- * {@link estimateAnthropicCostUSD}.
- *
- * `outputTokenLimit` is the model's real max output ceiling, surfaced via
- * getModelInfo for callers that want to size requests. It is informational,
- * not the per-request default: when a caller omits `maxTokens`, the request
- * falls back to `config.defaultMaxTokens`, but a per-call `maxTokens` is
- * clamped to it via {@link clampAnthropicMaxTokens}. Anthropic's limits:
- * Opus 5.5, Opus 5, Opus 4.6-4.8, Fable 5.1, Fable 5, Sonnet 5.5, Sonnet 5 and
- * Sonnet 4.6 take 128K output with a 1M context; Opus 4.5, Sonnet 4.5 and
- * Haiku 4.5 take 64K output with a 200K context.
- */
-const ANTHROPIC_MODELS: ModelInfo[] = [
-  {
-    modelId: 'claude-opus-5-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 5.5',
-    description: "Anthropic's recommended starting model for most workloads. Frontier Opus for agents and coding, priced below Claude Opus 5.",
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 4,
-    pricePer1MTokensOutput: 20,
-    // Cache hits and refreshes bill at 0.05x the input price.
-    pricePer1MTokensCacheRead: 0.2,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-fable-5-1',
-    providerId: 'anthropic',
-    displayName: 'Claude Fable 5.1',
-    description: "Anthropic's most capable model, for demanding reasoning and long-horizon agentic work.",
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 10,
-    pricePer1MTokensOutput: 50,
-    // Cache hits and refreshes bill at 0.025x the input price.
-    pricePer1MTokensCacheRead: 0.25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-fable-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Fable 5',
-    description: 'Previous Fable generation, superseded by Claude Fable 5.1.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 10,
-    pricePer1MTokensOutput: 50,
-    // The standard 0.1x rate. Fable 5.1's 0.025x does not apply to Fable 5.
-    pricePer1MTokensCacheRead: 1,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-opus-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 5',
-    description: 'Frontier Opus for agents and coding; drop-in successor to Claude Opus 4.8 at the same pricing.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 5,
-    pricePer1MTokensOutput: 25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-opus-4-8',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 4.8',
-    description: 'Most intelligent model for agents and coding.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 5,
-    pricePer1MTokensOutput: 25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-opus-4-7',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 4.7',
-    description: 'Prior Opus generation.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 5,
-    pricePer1MTokensOutput: 25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-opus-4-6',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 4.6',
-    description: 'Previous-generation Opus with same pricing as 4.7.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 5,
-    pricePer1MTokensOutput: 25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    // The dated id is the canonical row: the bare alias `claude-opus-4-5`
-    // resolves to it through the prefix fallback in resolveModelCatalogEntry,
-    // as `claude-haiku-4-5` resolves to the dated Haiku row.
-    modelId: 'claude-opus-4-5-20251101',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 4.5',
-    description: 'Legacy Opus, still served. Superseded by Claude Opus 5.5.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 64000,
-    pricePer1MTokensInput: 5,
-    pricePer1MTokensOutput: 25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-sonnet-5-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Sonnet 5.5',
-    description: 'Current Sonnet for everyday coding, agent and enterprise work; adaptive thinking on by default.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 2,
-    pricePer1MTokensOutput: 10,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-sonnet-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Sonnet 5',
-    description: 'Near-Opus coding/agentic Sonnet; adaptive thinking on by default.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    // $2/$10 is the standard price: Anthropic kept its launch pricing and
-    // cancelled the increase to $3/$15 scheduled for 2026-09-01 (pricing
-    // page, 2026-09-30). The row must stay in this table: without it the
-    // model prices as costUSD undefined, which turned the 2026-07-20..26
-    // quota-outage fallback traffic (thousands of sonnet-5 leg calls a day)
-    // into unmetered spend.
-    pricePer1MTokensInput: 2,
-    pricePer1MTokensOutput: 10,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-sonnet-4-6',
-    providerId: 'anthropic',
-    displayName: 'Claude Sonnet 4.6',
-    description: 'Optimal balance of intelligence, cost, and speed.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    // 128K per current Anthropic specs (every current-generation model
-    // streams to 128K; only Haiku 4.5 and legacy Sonnet 4.5 cap at 64K).
-    // The old 64000 silently halved caller budgets via the clamp.
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 3,
-    pricePer1MTokensOutput: 15,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-sonnet-4-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Sonnet 4.5',
-    description: 'Previous-generation Sonnet with same pricing as 4.6.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 64000,
-    pricePer1MTokensInput: 3,
-    pricePer1MTokensOutput: 15,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-haiku-4-5-20251001',
-    providerId: 'anthropic',
-    displayName: 'Claude Haiku 4.5',
-    description: 'Fastest, most cost-efficient model for lightweight tasks.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 64000,
-    pricePer1MTokensInput: 1,
-    pricePer1MTokensOutput: 5,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  // Legacy entries retained for model-ID back-compat. Prices reflect the
-  // original rate card for those specific snapshots.
-  // Claude Opus 4 and Claude Sonnet 4 (the 2025-05-14 snapshots) were retired
-  // by Anthropic on 2026-06-15. Both ids return HTTP 404 not_found_error on the
-  // Messages API (probed 2026-09-29, with a claude-sonnet-5 control returning
-  // 200). They stay in the catalog as `deprecated` so a caller still holding
-  // one of them gets limits, a price and a status from the catalog. Anthropic's
-  // documented replacements are claude-opus-4-8 and claude-sonnet-4-6.
-  {
-    modelId: 'claude-opus-4-20250514',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 4 (2025-05-14)',
-    description: 'Retired 2026-06-15 and no longer served. Use claude-opus-4-8.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 32000,
-    pricePer1MTokensInput: 15,
-    pricePer1MTokensOutput: 75,
-    supportsStreaming: true,
-    status: 'deprecated',
-  },
-  {
-    modelId: 'claude-sonnet-4-20250514',
-    providerId: 'anthropic',
-    displayName: 'Claude Sonnet 4 (2025-05-14)',
-    description: 'Retired 2026-06-15 and no longer served. Use claude-sonnet-4-6.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 64000,
-    pricePer1MTokensInput: 3,
-    pricePer1MTokensOutput: 15,
-    supportsStreaming: true,
-    status: 'deprecated',
-  },
-];
-
 /**
  * Clamp a requested `max_tokens` to the target model's real output ceiling from
  * {@link ANTHROPIC_MODELS}. Anthropic returns HTTP 400 when `max_tokens` exceeds
@@ -643,118 +410,6 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
 export function clampAnthropicMaxTokens(modelId: string, requested: number): number {
   const ceiling = resolveAnthropicModelEntry(modelId)?.outputTokenLimit;
   return typeof ceiling === 'number' && ceiling > 0 ? Math.min(requested, ceiling) : requested;
-}
-
-/**
- * Resolves a caller-supplied model id to its ANTHROPIC_MODELS catalog row.
- * Exact id match wins; otherwise a dated snapshot (`claude-sonnet-5-20260101`)
- * or bare alias is matched by prefix — the SAME resolution the max-tokens
- * clamp uses, shared so pricing ({@link estimateAnthropicCostUSD}) and
- * clamping can never disagree about which row a model id means (an
- * exact-only match prices every dated snapshot id as costUSD undefined:
- * unmetered spend).
- *
- * The longest catalog id that prefixes `modelId` wins. Catalog ids nest:
- * `claude-opus-5` is a prefix of `claude-opus-5-5`. A first-match scan makes
- * the answer depend on array order and can resolve a dated
- * `claude-opus-5-5-…` snapshot to Opus 5's row, pricing it at $5/$25 instead
- * of $4/$20. An id that is itself a prefix of a catalog id, such as the bare
- * alias `claude-haiku-4-5`, resolves to the first catalog id it prefixes.
- */
-export function resolveAnthropicModelEntry(modelId: string): ModelInfo | undefined {
-  return resolveModelCatalogEntry(ANTHROPIC_MODELS, modelId);
-}
-
-/**
- * Catalog lookup behind {@link resolveAnthropicModelEntry}, taking the catalog
- * as a parameter so the ordering behavior can be tested against a catalog
- * whose shorter id comes first.
- *
- * @param catalog Model rows to search, in any order.
- * @param modelId Caller-supplied model id, bare or dated.
- * @returns The exact row, else the row with the longest id that prefixes
- *   `modelId`, else the first row whose id starts with `modelId`. An empty id
- *   resolves to nothing: every catalog id starts with `''`, so the last rule
- *   would otherwise price a response with no model echo as the first row.
- */
-export function resolveModelCatalogEntry(
-  catalog: readonly ModelInfo[],
-  modelId: string,
-): ModelInfo | undefined {
-  if (!modelId) return undefined;
-  const exact = catalog.find((m) => m.modelId === modelId);
-  if (exact) return exact;
-  let longest: ModelInfo | undefined;
-  for (const m of catalog) {
-    if (modelId.startsWith(m.modelId) && (!longest || m.modelId.length > longest.modelId.length)) {
-      longest = m;
-    }
-  }
-  return longest ?? catalog.find((m) => m.modelId.startsWith(modelId));
-}
-
-/**
- * Token counts that decide what one Messages API call costs, under the API's
- * own `usage` field names.
- */
-export interface AnthropicUsageForCost {
-  /** Input tokens billed at the full input price (cache reads and writes excluded). */
-  input_tokens: number;
-  /** Output tokens, thinking included. */
-  output_tokens: number;
-  /** Tokens read from the prompt cache. */
-  cache_read_input_tokens?: number;
-  /** Tokens written to the prompt cache, both TTLs together. */
-  cache_creation_input_tokens?: number;
-  /** The same writes split by TTL, when the response reports the split. */
-  cache_creation?: AnthropicCacheCreationBreakdown | null;
-}
-
-/**
- * Estimates the USD cost of one Anthropic Messages API call from its usage.
- *
- * | Tokens | Price |
- * | --- | --- |
- * | `input_tokens` | the input price |
- * | `cache_read_input_tokens` | the row's `pricePer1MTokensCacheRead`, else 0.1x the input price |
- * | 5-minute cache writes | 1.25x the input price |
- * | 1-hour cache writes | 2x the input price |
- * | `output_tokens` | the output price |
- *
- * `input_tokens` excludes cached tokens, so the input components add up
- * without double counting. The 1-hour share of the writes comes from
- * `cache_creation.ephemeral_1h_input_tokens`: a response without that split
- * is priced as 5-minute writes only, and a 1-hour count above the write total
- * is capped at the total.
- *
- * @param modelId Model id, bare or dated, resolved with
- *   {@link resolveAnthropicModelEntry}.
- * @param usage Token counts from the response.
- * @returns The cost in USD, or `undefined` when the catalog has no price for
- *   the model (unknown, empty or unpriced id).
- */
-export function estimateAnthropicCostUSD(
-  modelId: string,
-  usage: AnthropicUsageForCost,
-): number | undefined {
-  const info = resolveAnthropicModelEntry(modelId);
-  const inputPrice = info?.pricePer1MTokensInput;
-  const outputPrice = info?.pricePer1MTokensOutput;
-  if (!inputPrice || !outputPrice) return undefined;
-  const cacheReadPrice = info?.pricePer1MTokensCacheRead ?? inputPrice * 0.1;
-  const split = usage.cache_creation ?? undefined;
-  const written =
-    usage.cache_creation_input_tokens
-    ?? ((split?.ephemeral_5m_input_tokens ?? 0) + (split?.ephemeral_1h_input_tokens ?? 0));
-  const writtenOneHour = Math.min(Math.max(split?.ephemeral_1h_input_tokens ?? 0, 0), written);
-  // Tokens times USD per 1M tokens: the sum is in millionths of a dollar.
-  const microDollars =
-    usage.input_tokens * inputPrice
-    + (usage.cache_read_input_tokens ?? 0) * cacheReadPrice
-    + (written - writtenOneHour) * inputPrice * 1.25
-    + writtenOneHour * inputPrice * 2
-    + usage.output_tokens * outputPrice;
-  return microDollars / 1_000_000;
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +428,86 @@ function warnOnce(key: string, message: string): void {
   if (warnedKeys.has(key)) return;
   warnedKeys.add(key);
   console.warn(message);
+}
+
+/**
+ * True when any content block of the wire `messages` enables citations
+ * (`citations: { enabled: true }` on a document block). Structured outputs are
+ * incompatible with citations: the API answers 400 to a request carrying both.
+ */
+function messagesEnableCitations(messages: unknown): boolean {
+  if (!Array.isArray(messages)) return false;
+  for (const message of messages) {
+    const content = (message as { content?: unknown } | null)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      const citations = (block as { citations?: unknown } | null)?.citations;
+      if (citations && typeof citations === 'object' && (citations as { enabled?: unknown }).enabled === true) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Appends the schema to the request's system prompt as one block after the
+ * caller's, for a schema request neither the JSON output format nor a forced
+ * tool carries on this model: a string system gets the block joined on, a block
+ * array gets a text block, and a request without a system prompt gets the
+ * block alone.
+ */
+function appendSchemaSystemBlock(payload: Record<string, unknown>, schema: unknown): void {
+  const text = `Answer with JSON only, matching this schema: ${JSON.stringify(schema)}`;
+  const system = payload.system;
+  if (Array.isArray(system)) {
+    // A new array: a passthrough `system` is the caller's own array, reused
+    // across calls, and must not grow a block per call.
+    payload.system = [...system, { type: 'text', text }];
+  } else if (typeof system === 'string' && system) {
+    payload.system = `${system}\n\n${text}`;
+  } else {
+    payload.system = text;
+  }
+}
+
+/**
+ * The route a built payload's schema took, read by the paths that send it:
+ * `none` says the schema rode the prompt, not the payload.
+ */
+const schemaRouteOfPayload = new WeakMap<object, AnthropicSchemaRoute>();
+
+/**
+ * A passthrough `model` replaces the given one on the wire; the schema route
+ * and the forced-choice clamp follow the model sent to.
+ */
+function passthroughModel(options: ModelCompletionOptions): string | undefined {
+  const model = (options.customModelParams as Record<string, unknown> | undefined)?.model;
+  return typeof model === 'string' && model ? model : undefined;
+}
+
+/**
+ * Removes a passthrough `output_config.format`, keeping the rest of
+ * `output_config`, for a request whose messages enable citations: the format
+ * and citations together answer 400.
+ */
+function dropOutputConfigFormat(payload: Record<string, unknown>): void {
+  const config = payload.output_config;
+  if (!config || typeof config !== 'object' || Array.isArray(config) || !('format' in config)) return;
+  const rest: Record<string, unknown> = { ...(config as Record<string, unknown>) };
+  delete rest.format;
+  if (Object.keys(rest).length > 0) payload.output_config = rest;
+  else delete payload.output_config;
+}
+
+/**
+ * Marks a completion whose request put the schema in the prompt itself
+ * (`schemaInPayload: false`, as OpenRouter's json_object retry does), so a
+ * gateway lifts no text into a structured answer and the session checks the
+ * text as prompt-only.
+ */
+function withSchemaInPayload<T extends ModelCompletionResponse>(completion: T, payload: object): T {
+  return schemaRouteOfPayload.get(payload) === 'none' ? { ...completion, schemaInPayload: false } : completion;
 }
 
 /**
@@ -909,15 +644,20 @@ export class AnthropicProvider implements IProvider {
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
 
-    // Capture the structured-output tool name from the request options
-    // so the response mapper can surface the matching tool_use block's
-    // input as JSON-string content (uniform API across providers).
+    // The forced schema tool's name, so the response mapper can surface the
+    // matching tool_use block's input as the message's JSON text. Only the
+    // forced_tool route names one: on the json_schema route the answer is the
+    // text block itself, so a caller tool that happens to share the schema's
+    // name stays a tool call and is never mistaken for the answer.
     const sf = options.responseFormat as
-      | { _agentosUseToolForStructuredOutput?: boolean; tool?: { name: string } }
+      | { _agentosUseToolForStructuredOutput?: boolean; tool?: { name: string; input_schema?: Record<string, unknown> } }
       | undefined;
-    const structuredOutputName = sf?._agentosUseToolForStructuredOutput
-      ? sf.tool?.name
-      : undefined;
+    const structuredOutputName =
+      sf?._agentosUseToolForStructuredOutput &&
+      sf.tool &&
+      anthropicSchemaRoute(passthroughModel(options) ?? modelId, sf.tool.input_schema ?? {}) === 'forced_tool'
+        ? sf.tool.name
+        : undefined;
 
     // Escape hatch: single-shot JSON transport for SSE-hostile proxies.
     // On both transports the caller's signal aborts the request in flight and
@@ -932,7 +672,7 @@ export class AnthropicProvider implements IProvider {
         options.abortSignal,
       );
       this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
-      return this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId);
+      return withSchemaInPayload(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
     }
 
     // Default: ride the SSE path so parseSseStream's idle watchdog bounds
@@ -945,7 +685,7 @@ export class AnthropicProvider implements IProvider {
     const payload = this.buildRequestPayload(modelId, messages, options, true);
     const apiResponse = await this.streamMessagesToResponse(payload, options.requestTimeout, options.abortSignal);
     this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
-    return this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId);
+    return withSchemaInPayload(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
   }
 
   /**
@@ -1332,7 +1072,24 @@ export class AnthropicProvider implements IProvider {
     this.ensureInitialized();
 
     const payload = this.buildRequestPayload(modelId, messages, options, true);
+    if (schemaRouteOfPayload.get(payload) !== 'none') {
+      yield* this.streamRequest(modelId, options, payload);
+      return;
+    }
+    // The schema rode the prompt, not the payload: every chunk says so (as
+    // OpenRouter's json_object retry does), so a gateway lifts no text into a
+    // structured answer and the session checks the text as prompt-only.
+    for await (const chunk of this.streamRequest(modelId, options, payload)) {
+      yield { ...chunk, schemaInPayload: false };
+    }
+  }
 
+  /** The stream of one built request: the abort handling, the SSE parse, the retries and the chunk mapping. */
+  private async *streamRequest(
+    modelId: string,
+    options: ModelCompletionOptions,
+    payload: Record<string, unknown>,
+  ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     // Handle pre-aborted signals
     const abortSignal = options.abortSignal;
     if (abortSignal?.aborted) {
@@ -2031,78 +1788,43 @@ export class AnthropicProvider implements IProvider {
       }
     }
 
-    // --- Schema-driven structured output via forced tool-use ---
-    // Anthropic doesn't have an OpenAI-style response_format with
-    // json_schema. The equivalent is a single forced tool whose
-    // input_schema matches the desired output shape; the model returns
-    // a tool_use block whose input is JSON-validated by Anthropic's
-    // own enforcement.
+
+    // --- Schema-driven structured output ---
+    // The marker from structuredOutputFormat.ts carries one object schema under
+    // `tool.input_schema`. anthropicSchemaRoute decides, for the model going on
+    // the wire (a passthrough `model` included, so it runs after the passthrough
+    // below) and that schema, which surface carries it (the builder ran the same
+    // function on the same object for the model it was built for, so the two
+    // agree whenever the wire model is that model):
     //
-    // The provider-format adapter (structuredOutputFormat.ts) signals
-    // this mode by setting _agentosUseToolForStructuredOutput on the
-    // responseFormat option. The downstream response-mapper detects the
-    // matching block by the tool's name and surfaces its input as the
-    // JSON-string body of the choice's message.
+    //   json_schema  `output_config.format` with the schema, set AFTER the
+    //                customModelParams passthrough below so a passthrough
+    //                `output_config` (an effort, say) is merged with the format
+    //                rather than wiping it. No tool and no tool_choice for the
+    //                schema; a direct caller's tools stay, since the format
+    //                works beside tools. The model answers JSON in its text
+    //                block. Every current Claude model takes this route.
+    //   forced_tool  Claude Opus 4 and Sonnet 4 (no JSON output format, a
+    //                forced tool_choice accepted): one tool whose input_schema
+    //                is the schema, with tool_choice forced on it; the answer
+    //                is the tool call's input. The caller's tools are dropped
+    //                as before (mixing them needs a multi-turn protocol the
+    //                session path does not speak). Never strict: no model has
+    //                strict tool use without the JSON output format, so a
+    //                stamped forced tool is unreachable.
+    //   none         Neither carries the schema on this model (a record, an
+    //                untyped node, a $ref or oneOf, more union-typed or
+    //                optional properties than the format takes, or a request
+    //                that enables citations, which the format refuses). The
+    //                schema goes into the prompt itself, as a system block
+    //                after the caller's, with one warning per model and
+    //                reason, so a direct caller still gets the shape asked for.
     const sf = options.responseFormat as
       | { _agentosUseToolForStructuredOutput?: boolean; tool?: { name: string; input_schema: Record<string, unknown> } }
       | undefined;
-    if (sf?._agentosUseToolForStructuredOutput && sf.tool) {
-      // Schema-aware mode reserves the tool slot for the schema tool;
-      // mixing structured output with caller-provided tools requires a
-      // multi-turn protocol the session.send overload doesn't speak.
-      // The caller path (AgentSession.send) already strips its tools
-      // before reaching us; this drop is the second line of defense
-      // against a direct provider.generateCompletion call that
-      // accidentally passes both responseFormat (structured-output
-      // marker) and a tools array.
-      // Guaranteed schema conformance where the model supports strict tool
-      // use (structured-outputs surface, 4.5+ generations): the API
-      // validates the tool input against input_schema server-side instead
-      // of best-effort adherence, so long/adversarial generations can no
-      // longer drift from the schema and fail the caller's Zod parse.
-      // Older models reject the unknown field ("tools.0.strict: Extra
-      // inputs are not permitted"), hence the capability gate. The
-      // matching `structured-outputs-2025-11-13` beta header is emitted by
-      // betaHeaders() whenever a payload's tools carry the flag.
-      //
-      // TWO gates, both required. The schema-shape gate
-      // (toolInputSchemaSupportsStrict) exists because strict mode rejects
-      // any object node whose `additionalProperties` is present and not
-      // exactly `false` — which is how `z.record(...)` lowers, so a
-      // record-bearing schema under `strict: true` 400s deterministically
-      // on every attempt ("tools.0.custom: For 'object' type,
-      // 'additionalProperties' must be explicitly set to false"; 77
-      // provider rejections across four codegen tools the day strict
-      // shipped without it). Such schemas degrade to the non-strict forced
-      // tool — best-effort adherence + caller-side Zod validation, the
-      // pre-strict behavior — mirroring the canUseStrictJsonSchema gate on
-      // the OpenAI / OpenRouter strict paths.
-      //
-      // The gates alone are NOT sufficient: the validator ALSO requires
-      // `additionalProperties: false` PRESENT on every object node
-      // (live-API verified 2026-07-07 — the key absent 400s identically,
-      // nested nodes included; optional properties left out of `required`
-      // are accepted). Zod-lowered schemas omit the key, so the eligible
-      // path sends a stamped COPY of the schema: the wire payload is
-      // strict-valid while the caller's schema object is never mutated.
-      // The copy also STRIPS constraint keywords the validator rejects
-      // (maxItems / uniqueItems / number bounds / object property counts —
-      // live-API mapped 2026-07-07); Zod re-validates caller-side, so the
-      // constraints are still enforced after parse.
-      const strictEligible =
-        modelSupportsStrictToolUse(modelId) &&
-        toolInputSchemaSupportsStrict(sf.tool.input_schema);
-      payload.tools = [{
-        name: sf.tool.name,
-        input_schema: strictEligible
-          ? (toolInputSchemaWithExplicitNoExtraProps(
-              sf.tool.input_schema,
-            ) as Record<string, unknown>)
-          : sf.tool.input_schema,
-        ...(strictEligible ? { strict: true } : {}),
-      }];
-      payload.tool_choice = { type: 'tool', name: sf.tool.name };
-    }
+    const schemaMarker = sf?._agentosUseToolForStructuredOutput && sf.tool ? sf.tool : undefined;
+    // Decided after the passthrough below, for the model going on the wire.
+    let schemaRoute: AnthropicSchemaRoute | undefined;
 
     // Pass through any custom model params — minus OpenRouter's routing
     // controls and Gemini's request fields, which only those vendors' bodies
@@ -2121,13 +1843,65 @@ export class AnthropicProvider implements IProvider {
     // message array never reaches the wire.
     let customSystemOverride = false;
     let customMessagesOverride = false;
+    let customToolsOverride = false;
+    let customToolChoiceOverride = false;
     {
       const passthrough = stripForeignVendorParams(options.customModelParams);
       if (passthrough) {
         customSystemOverride = Object.prototype.hasOwnProperty.call(passthrough, 'system');
         customMessagesOverride = Object.prototype.hasOwnProperty.call(passthrough, 'messages');
+        customToolsOverride = Object.prototype.hasOwnProperty.call(passthrough, 'tools');
+        customToolChoiceOverride = Object.prototype.hasOwnProperty.call(passthrough, 'tool_choice');
         Object.assign(payload, passthrough);
       }
+    }
+    // The model on the wire: a passthrough `model` replaces the one given, and
+    // the schema route, the forced-choice clamp and the warnings follow it.
+    const wireModelId = typeof payload.model === 'string' && payload.model ? payload.model : modelId;
+
+    // The JSON output format and the prompt-only schema block, after the
+    // passthrough: the passthrough assigns whole top-level keys, so a format
+    // set before it under `output_config` would be wiped by a passthrough
+    // `output_config`, and a schema block appended to `system` before it would
+    // be lost to a passthrough `system`. The messages read here for citations
+    // are the ones going on the wire, a passthrough `messages` included.
+    if (schemaMarker) {
+      schemaRoute = anthropicSchemaRoute(wireModelId, schemaMarker.input_schema);
+      if (schemaRoute === 'json_schema' && messagesEnableCitations(payload.messages)) {
+        // Structured outputs are incompatible with citations (the API answers
+        // 400), so this request carries the schema in the prompt instead, and a
+        // passthrough format would carry the same incompatible pair to the wire.
+        schemaRoute = 'none';
+        dropOutputConfigFormat(payload);
+      }
+      schemaRouteOfPayload.set(payload, schemaRoute);
+    }
+    if (schemaMarker && schemaRoute === 'forced_tool') {
+      // The forced schema tool, for Claude Opus 4 and Sonnet 4. A passthrough
+      // `tools` or `tool_choice` keeps precedence, as it did when the schema
+      // tool was set before the passthrough.
+      if (!customToolsOverride) payload.tools = [{ name: schemaMarker.name, input_schema: schemaMarker.input_schema }];
+      if (!customToolChoiceOverride) payload.tool_choice = { type: 'tool', name: schemaMarker.name };
+    } else if (schemaMarker && schemaRoute === 'json_schema') {
+      const existing = payload.output_config;
+      payload.output_config = {
+        ...(existing && typeof existing === 'object' && !Array.isArray(existing)
+          ? (existing as Record<string, unknown>)
+          : {}),
+        format: { type: 'json_schema', schema: anthropicJsonOutputSchema(schemaMarker.input_schema) },
+      };
+    } else if (schemaMarker && schemaRoute === 'none') {
+      const reason = !modelSupportsJsonOutputs(wireModelId)
+        ? 'the model has neither the JSON output format nor a forced tool choice'
+        : messagesEnableCitations(payload.messages)
+          ? 'the request enables citations, which the JSON output format refuses'
+          : 'the schema is outside the limits of the JSON output format (a record, a $ref or oneOf, an untyped node, or more union-typed or optional properties than it takes)';
+      appendSchemaSystemBlock(payload, schemaMarker.input_schema);
+      warnOnce(
+        `structured-output-prompt-only:${wireModelId}:${reason}`,
+        `[agentos] AnthropicProvider: structured output for '${schemaMarker.name}' on model ${wireModelId} rides the ` +
+          `prompt alone: ${reason}. The schema was added to the system prompt; the caller's schema validates the answer.`,
+      );
     }
 
     // --- Forced tool_choice reconciliation ---
@@ -2151,14 +1925,14 @@ export class AnthropicProvider implements IProvider {
         // off shapes (disabled, between_tools) do not.
         const thinkingType = (payload.thinking as { type?: string } | undefined)?.type;
         const thinkingActive = thinkingType === 'adaptive' || thinkingType === 'enabled';
-        const modelRejectsForced = !modelSupportsForcedToolChoice(modelId);
+        const modelRejectsForced = !modelSupportsForcedToolChoice(wireModelId);
         if (thinkingActive || modelRejectsForced) {
           const reason = thinkingActive
             ? 'extended thinking is incompatible with a forced tool_choice'
-            : `model ${modelId} rejects a forced tool_choice`;
+            : `model ${wireModelId} rejects a forced tool_choice`;
           console.warn(
             `[agentos] AnthropicProvider: ${reason} (type='${tc.type}'); clamping to ` +
-              `'auto' for model ${modelId}. The model decides whether to call a tool — ` +
+              `'auto' for model ${wireModelId}. The model decides whether to call a tool — ` +
               `forced tool use is not guaranteed.`,
           );
           payload.tool_choice = { type: 'auto' };
@@ -3386,8 +3160,14 @@ export class AnthropicProvider implements IProvider {
     // found 2026-07-08). Match the umbrella prefix so the tripwire catches
     // the whole class, present and future, instead of a hand-maintained
     // message list that already missed the empty-schema case.
+    // The JSON output format's rejections are prefixed `output_config.format`
+    // (`output_config.format.schema: For 'array' type, 'minItems' values other
+    // than 0 or 1 are not supported`, live-probed 2026-10-19), the same class
+    // of schema rejection on the route every current model takes.
     const strictRejection =
-      /tools\.\d+\.custom:/.test(message) || message.includes('additionalProperties');
+      /tools\.\d+\.custom:/.test(message) ||
+      /output_config\.format/.test(message) ||
+      message.includes('additionalProperties');
     if (!strictRejection) return;
     try {
       console.warn(
@@ -3400,6 +3180,7 @@ export class AnthropicProvider implements IProvider {
           payloadUsesStrictTools: this.payloadUsesStrictTools(body),
           message: message.slice(0, 300),
           tools: body.tools ?? [],
+          outputConfigFormat: (body.output_config as { format?: unknown } | undefined)?.format ?? null,
         }),
       );
     } catch {

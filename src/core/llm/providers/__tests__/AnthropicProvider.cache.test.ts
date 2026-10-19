@@ -243,9 +243,9 @@ describe('AnthropicProvider cache-aware cost estimation', () => {
     expect(estimateAnthropicCostUSD('claude-fable-5-20260601', reads)).toBeCloseTo(1, 6);
   });
 
-  it('prices Sonnet 5.5 and Opus 4.5 cache reads at the standard 0.1x', () => {
+  it('prices Sonnet 5.5 cache reads at its own rate (0.10 per million, the pricing page) and Opus 4.5 at the standard 0.1x', () => {
     const reads = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1_000_000 };
-    expect(estimateAnthropicCostUSD('claude-sonnet-5-5', reads)).toBeCloseTo(0.2, 6);
+    expect(estimateAnthropicCostUSD('claude-sonnet-5-5', reads)).toBeCloseTo(0.1, 6);
     expect(estimateAnthropicCostUSD('claude-opus-4-5', reads)).toBeCloseTo(0.5, 6);
   });
 
