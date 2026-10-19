@@ -125,12 +125,15 @@ describe('refused: a workflow that pushes to master', () => {
     `) }, [/"git push origin HEAD:master" pushes to master$/, /pushes to refs\/heads\/main$/, /"git push -f origin main:main" pushes to main$/, /"git push origin --delete master" deletes master$/]);
   });
 
-  test('--repo names the repository, so the next word is a refspec', () => {
-    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
-      - run: |
-          git push --repo=origin HEAD:master
-          git push --repo origin master
-    `) }, [/pushes to master$/, /pushes to master$/]);
+  test('the first operand names the repository even after --repo, which git reads only when no operand does', () => {
+    expectFindings({
+      '.github/workflows/m.yml': workflow(ON_MASTER, '- run: git push --repo=origin'),
+      '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+        - run: |
+            git push --repo=fork origin HEAD:master
+            git push --repo fork origin master
+      `),
+    }, [/"git push --repo=origin" pushes the checked-out branch, master on a run on master$/, /"git push --repo=fork origin HEAD:master" pushes to master$/, /"git push --repo fork origin master" pushes to master$/]);
   });
 
   test('every branch: --all, --mirror, a wildcard destination, the matching refspec', () => {

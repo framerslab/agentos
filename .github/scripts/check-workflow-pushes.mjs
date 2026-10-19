@@ -510,7 +510,6 @@ function lastColon(spec) {
 function checkPush(args, { state, ctx, report }) {
   const command = `git push ${args.map(unhold).join(' ')}`.trim();
   const branch = ctx.branch;
-  let repository = false;
   let dryRun = false;
   let every = '';
   let tags = false;
@@ -524,10 +523,6 @@ function checkPush(args, { state, ctx, report }) {
       break;
     }
     if (!a.startsWith('-') || a === '-') positional.push(a);
-    else if (a === '--repo') {
-      repository = true;
-      k++;
-    } else if (a.startsWith('--repo=')) repository = true;
     else if (PUSH_VALUED.has(a)) k++;
     else if (a === '--dry-run') dryRun = true;
     else if (a === '--all' || a === '--branches' || a === '--mirror') every = a;
@@ -550,8 +545,10 @@ function checkPush(args, { state, ctx, report }) {
     report(`"${command}" pushes every branch, ${branch} among them`);
     return;
   }
-  // With --repo every operand is a refspec; without, the first names the repository. "tag <name>" is a tag.
-  const operands = repository ? positional : positional.slice(1);
+  // The first operand names the repository even after --repo, which git reads only when no operand is given
+  // (builtin/push.c sets the repository from the first operand), so every refspec comes after it. "tag <name>" is a
+  // tag.
+  const operands = positional.slice(1);
   /** @type {string[]} */
   const refspecs = [];
   for (let k = 0; k < operands.length; k++) {
