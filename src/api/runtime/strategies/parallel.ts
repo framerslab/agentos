@@ -21,7 +21,9 @@
  * Each agent is gated by {@link checkBeforeAgentInput} before invocation.
  * Rejected agents, and agents whose input the post-approval check blocks (the
  * approver's instructions included), return `null` and are filtered out
- * before synthesis.
+ * before synthesis, as is a nested agency's run that no seat of its own
+ * answered. When every agent was rejected, blocked or failed, no synthesis
+ * runs and the text is `''`.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileSequential} -- the simpler alternative for ordered pipelines.
@@ -43,7 +45,14 @@ import {
   buildAgentCallUsage,
   callRecordExtras,
   enforceQuorum,
+  ownAgentInternals,
+  maskedMessageOf,
+  nestedRunUnanswered,
 } from './shared.js';
+import { lazyLogger } from '../lazyLogger.js';
+
+/** The agency's own lines, to the host's logger factory. */
+const agencyLogger = lazyLogger('agency');
 
 type StrategyTotalUsage = {
   promptTokens: number;
@@ -74,6 +83,9 @@ type ResultUsageSnapshot = {
  * @param agents - Named roster of agent configs or pre-built `Agent` instances.
  * @param agencyConfig - Agency-level configuration; must include `model` or `provider`
  *   for the synthesis step.
+ * @param mask - The call's mask in an agency with a pool: the synthesizer runs
+ *   as a seat does ({@link ownAgentInternals}), and a failed seat's message is
+ *   logged through it.
  * @returns A {@link CompiledStrategy} with `execute` and `stream` methods.
  * @throws {AgencyConfigError} When no agency-level model/provider is available
  *   for the synthesis step. The synthesis agent needs an LLM to combine the
@@ -91,6 +103,7 @@ type ResultUsageSnapshot = {
 export function compileParallel(
   agents: Record<string, BaseAgentConfig | Agent>,
   agencyConfig: AgencyOptions,
+  mask?: (error: unknown) => unknown,
 ): CompiledStrategy {
   if (!agencyConfig.model && !agencyConfig.provider) {
     throw new AgencyConfigError(
@@ -132,12 +145,22 @@ export function compileParallel(
       // This two-pass approach lets us collect error telemetry while still
       // producing a valid synthesis from the successful agents.
       const settled: Array<{ name: string; result: Record<string, unknown>; durationMs: number }> = [];
+      // The first seat that failed, in roster order: the run's error when no
+      // seat is left.
+      let firstFailure: Error | undefined;
       for (let i = 0; i < allSettled.length; i++) {
         const outcome = allSettled[i];
         if (outcome.status === 'rejected') {
           const agentName = entries[i][0];
           const error = outcome.reason instanceof Error ? outcome.reason : new Error(String(outcome.reason));
-          console.error(`[AgentOS][Parallel] Agent "${agentName}" failed:`, error.message);
+          firstFailure ??= error;
+          // To the host's logger, with the message through the call's mask: a
+          // provider's message can echo the key it was sent.
+          agencyLogger.warn(`parallel seat "${agentName}" failed`, {
+            event: 'parallel_seat_failed',
+            agent: agentName,
+            error: maskedMessageOf(error, mask),
+          });
           agencyConfig.on?.error?.({
             agent: agentName,
             error,
@@ -145,16 +168,34 @@ export function compileParallel(
           });
           continue;
         }
-        // Skip null results (HITL-rejected agents).
-        if (outcome.value !== null) {
+        // Skip null results (HITL-rejected agents), and a nested agency's run
+        // that no seat of its own answered: it gave no answer, as a rejected
+        // agent gives none, so it neither meets the quorum nor reaches the
+        // synthesizer.
+        if (outcome.value !== null && !nestedRunUnanswered(outcome.value.result)) {
           settled.push(outcome.value);
         }
       }
 
       // Quorum enforcement (optional): a panel that lost too many seats — or
       // collapsed to a single provider — must not synthesize a false
-      // consensus. Throws AgencyQuorumError before any synthesis spend.
-      enforceQuorum(agencyConfig.quorum, settled, entries.length);
+      // consensus. Throws AgencyQuorumError before any synthesis spend, with
+      // the first failed seat's error as its cause when a seat failed.
+      enforceQuorum(agencyConfig.quorum, settled, entries.length, firstFailure);
+
+      // No agent is left: there is nothing to synthesize, and a synthesizer
+      // sent no answer would make one up. When a seat failed, the run is the
+      // seats' failure (an outage, a key every provider refused) and rejects
+      // with the first failed seat's error, each failure logged and passed to
+      // on.error above; an empty text would resolve it as an answer. A quorum
+      // the run does not meet has thrown above, carrying that error. When
+      // each was rejected or blocked, the run returns no text, no call record
+      // and no usage, which the agency logs as a run no seat answered and runs
+      // no validation retry on.
+      if (settled.length === 0) {
+        if (firstFailure) throw firstFailure;
+        return { text: '', agentCalls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } };
+      }
 
       // Collect agent call records and aggregate usage.
       const agentCalls: AgentCallRecord[] = [];
@@ -198,12 +239,15 @@ export function compileParallel(
 
       // Create a fresh single-step synthesizer agent. maxSteps: 1 because
       // the synthesis should be a single LLM call, not an agentic loop.
+      // In an agency with a pool, the synthesizer resolves every hop's key and
+      // masks what it answers as a seat does.
       const synthesizer = createAgent({
         model: agencyConfig.model,
         provider: agencyConfig.provider,
         apiKey: agencyConfig.apiKey,
         baseUrl: agencyConfig.baseUrl,
         maxSteps: 1,
+        ...ownAgentInternals(mask),
       });
 
       const synthesis = (await synthesizer.generate(synthPrompt, opts)) as unknown as Record<string, unknown>;

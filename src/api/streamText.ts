@@ -13,7 +13,7 @@ import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities } from './runtime/hostPolicy.js';
-import { adaptTools } from './runtime/toolAdapter.js';
+import { adaptTools, isSingleUseToolInput, toolInputNames } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
 import { APPROVAL_GRANTED, askApprovalGate } from './runtime/approval-gate.js';
 import {
@@ -61,10 +61,16 @@ import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstructor.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
-import { createLogger } from '../core/logging/loggerFactory.js';
+import { lazyLogger } from './runtime/lazyLogger.js';
+import { isCallMask } from './runtime/pool/redact.js';
 import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 
-const fallbackLogger = createLogger('fallback');
+/**
+ * The `fallback` component's lines, to the logger the host's factory makes when
+ * each line is written: a factory set with `setLoggerFactory` after this module
+ * was imported still receives every failover line.
+ */
+const fallbackLogger = lazyLogger('fallback');
 
 async function recordAgentOSUsageLazy(
   input: Parameters<typeof import('./runtime/usageLedger.js')['recordAgentOSUsage']>[0]
@@ -194,9 +200,9 @@ export function normalizeStreamFinishReason(
 /**
  * The object returned immediately by {@link streamText}.
  *
- * Consumers may iterate `textStream` for raw token deltas, `fullStream` for
- * all event types, or simply `await` the promise properties for aggregated
- * results once the stream has drained.
+ * Consumers iterate `textStream` for raw token deltas or `fullStream` for
+ * all event types; the promise properties settle once that iteration has
+ * drained the stream, and awaiting one of them alone starts no request.
  */
 export interface StreamTextResult {
   /** Citation verdicts after text completes, when enabled on a default-runtime session. */
@@ -328,8 +334,12 @@ function formatPlanForPrompt(plan: Plan): string {
  * Stateless streaming text generation with optional multi-step tool calling.
  *
  * Returns a {@link StreamTextResult} immediately; the underlying provider call
- * begins lazily when a consumer starts iterating `textStream` or `fullStream`.
- * Awaiting `text`, `usage`, or `toolCalls` will also drain the stream.
+ * begins when a consumer starts iterating `textStream` or `fullStream`, and
+ * `text`, `usage`, `toolCalls` and the other promises settle once that
+ * iteration has run the stream to its end or the consumer stopped reading.
+ * Awaiting a promise alone starts no request and never settles it: a caller
+ * that wants only the assembled text calls {@link generateText}, or reads the
+ * stream to its end first.
  *
  * @param opts - Generation options (same shape as {@link generateText}).
  * @returns A {@link StreamTextResult} with async iterables and awaitable promises.
@@ -439,6 +449,45 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     const maskToolText = (text: string): string => {
       const masked = opts.__maskError?.(text);
       return typeof masked === 'string' ? masked : text;
+    };
+    /**
+     * A tool's successful output as the next request carries it. Under an
+     * agency's call mask the listed values alone are replaced, so a URL the
+     * tool returns keeps its query and its credentials as the tool gave them;
+     * a bare mask is applied as it is. A failed tool's text takes the error mask.
+     */
+    const maskToolOutput = (text: string): string => (isCallMask(opts.__maskError) ? opts.__maskError.text(text) : maskToolText(text));
+    /**
+     * A tool's output as a value, masked before it is serialized: under an
+     * agency's call mask each string, and each number whose digits hold a
+     * listed value, is replaced, so a secret JSON escaping would change (one
+     * with a quote or a backslash) is masked whole, and the call record and
+     * the tool-result part hold the masked output. A bare mask reads text only.
+     */
+    const maskToolValue = (output: unknown): unknown => (isCallMask(opts.__maskError) ? opts.__maskError.strings(output, true) : output);
+    /** A masked turn as the request carries it: the JSON it still is, else (a replacement inside what a class wrote through toJSON) the masked text as a JSON string. */
+    const asJsonText = (sent: string, turn: string): string => {
+      if (sent === turn) return sent;
+      try {
+        JSON.parse(sent);
+        return sent;
+      } catch {
+        return JSON.stringify(sent);
+      }
+    };
+    /**
+     * A tool turn's JSON: the output's, else `absent`'s, for an output that
+     * is absent or that JSON leaves out (a function, a symbol, a toJSON that
+     * returns nothing). A tool that succeeded with such an output is sent as
+     * one that returned nothing, never as a failure. When the mask made a copy
+     * of the output, `returned` (the output as the tool gave it) is written
+     * first: the copy reads a getter that throws as undefined, so an output no
+     * serializer can write (such a getter, a toJSON that throws) fails the tool
+     * here as it does without a mask.
+     */
+    const toolTurnJson = (output: unknown, absent: unknown, returned: unknown = output): string => {
+      if (returned !== output && returned != null) JSON.stringify(returned);
+      return (output == null ? undefined : (JSON.stringify(output) as string | undefined)) ?? (JSON.stringify(absent) as string | undefined) ?? '""';
     };
     const startedAt = Date.now();
     const rootSpan = startAgentOSSpan('agentos.api.stream_text');
@@ -622,8 +671,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       rootSpan?.setAttribute('llm.provider', resolved.providerId);
       rootSpan?.setAttribute('llm.model', resolved.modelId);
 
-      const tools = adaptTools(opts.tools);
-      const toolMap = new Map<string, ITool>();
+      let tools = adaptTools(opts.tools);
+      // The names the table held when it was last adapted.
+      let adaptedNames = toolInputNames(opts.tools);
+      let toolMap = new Map<string, ITool>();
       for (const tool of tools) toolMap.set(tool.name, tool);
       const helperToolRunId = randomUUID();
 
@@ -667,9 +718,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
       rootSpan?.setAttribute('agentos.api.tool_count', tools.length);
 
-      const toolSchemas =
-        tools.length > 0
-          ? tools.map((tool) => ({
+      const toolSchemasOf = (list: ITool[]) =>
+        list.length > 0
+          ? list.map((tool) => ({
               type: 'function' as const,
               function: {
                 name: tool.name,
@@ -678,6 +729,27 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               },
             }))
          : undefined;
+      let toolSchemas = toolSchemasOf(tools);
+      // A table that grew since the call started is read again before a later
+      // step: a hierarchical manager's spawn_specialist writes delegate_to_<role>
+      // into the table the manager was given, and the manager's next step
+      // sends the new tool and runs it when the model calls it. The names are
+      // read first, which converts no schema: a table whose names are
+      // unchanged keeps the tools of the first read and is not adapted again,
+      // and a table given as a single-use iterable (a generator), which the
+      // first read exhausted, is not read again.
+      const reusableTools = !isSingleUseToolInput(opts.tools);
+      const refreshTools = (): void => {
+        if (!reusableTools) return;
+        const names = toolInputNames(opts.tools);
+        if (names.length === adaptedNames.length && names.every((name, i) => name === adaptedNames[i])) return;
+        adaptedNames = names;
+        const current = adaptTools(opts.tools);
+        if (current.length === tools.length && current.every((tool, i) => tool.name === tools[i].name)) return;
+        tools = current;
+        toolMap = new Map(current.map((tool) => [tool.name, tool]));
+        toolSchemas = toolSchemasOf(current);
+      };
 
       // A catalog model is sent only a request it can hold: otherwise the
       // call throws in place of the send and the walk moves on. Checked on
@@ -759,6 +831,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       async function* runShimStream(): AsyncGenerator<StreamPart> {
         const loopResult = await runEmulatedToolLoop({
           tools: Array.from(toolMap.values()),
+          // The table is read again before each later round, as on the native
+          // loop, so a tool added mid-call (a spawned specialist's delegate
+          // tool) is listed and runs.
+          currentTools: () => {
+            refreshTools();
+            return Array.from(toolMap.values());
+          },
           onToolExecute: () => {
             shimRanTool = true;
           },
@@ -767,8 +846,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
-          // A seat's mask reaches the shim's tool errors too.
+          // A seat's mask reaches the shim's tool errors too, and a successful
+          // output passes the listed values alone.
           maskToolError: opts.__maskError ? maskToolText : undefined,
+          maskToolOutput: opts.__maskError ? maskToolOutput : undefined,
+          maskToolValue: opts.__maskError ? maskToolValue : undefined,
           // Native tool turns in the history become the shim's own
           // <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -888,6 +970,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       for (let step = 0; step < maxSteps; step++) {
         // No step starts once the caller's signal has aborted.
         opts.abortSignal?.throwIfAborted();
+        if (step > 0) refreshTools();
         stepUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
         // --- onBeforeGeneration hook ---
         let effectiveMessages = messages;
@@ -1375,24 +1458,47 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 toolCallId || undefined,
               ),
             );
-            // One masked string serves the record, the tool-result part and
-            // the tool turn: the seat's next request carries no key.
+            // One masked output serves the record, the tool-result part and
+            // the tool turn: the seat's next request carries no key. The
+            // output is masked as a value before it is serialized, then the
+            // whole turn passes the text mask: a tool that returns a
+            // credential of the call would otherwise send it to the seat's
+            // provider. A successful output passes the listed values alone, so
+            // a URL it returns is sent as the tool gave it; a failed tool's
+            // turn takes the error mask, URL patterns included. A turn a
+            // replacement left as no JSON is sent as a JSON string, and the
+            // part is read back from a turn the text mask changed. An output
+            // that is absent or that JSON leaves out (a function, a symbol)
+            // is sent as generateText sends it: a successful tool's as the
+            // empty string's JSON, never as an error, a failed one's as its
+            // error. An output no serializer can write fails here, masked or
+            // not.
             const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
-            toolCallRecord.result = result.output;
+            const output = maskToolValue(result.output);
+            toolCallRecord.result = output;
             toolCallRecord.error = result.success ? undefined: errorText;
+            const turn = toolTurnJson(output, result.success ? (errorText ?? '') : { error: errorText ?? 'Tool execution failed.' }, result.output);
+            const sentTurn = asJsonText(result.success ? maskToolOutput(turn) : maskToolText(turn), turn);
+            let partResult: unknown = output ?? { error: errorText };
+            if (sentTurn !== turn) {
+              try {
+                partResult = JSON.parse(sentTurn);
+              } catch {
+                // Not reached: asJsonText sends JSON. Kept so a part is never lost to a parse.
+                partResult = sentTurn;
+              }
+            }
             const resultPart: StreamPart = {
               type: 'tool-result',
               toolName: fnName,
-              result: result.output ?? { error: errorText },
+              result: partResult,
             };
             parts.push(resultPart);
             yield resultPart;
             messages.push({
               role: 'tool',
               tool_call_id: toolCallId,
-              content: JSON.stringify(
-                result.output ?? { error: errorText ?? 'Tool execution failed.' }
-              ),
+              content: sentTurn,
             } as any);
           } catch (err: any) {
             toolCallRecord.error = maskToolText(err?.message ?? String(err));
@@ -1609,10 +1715,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               fallbackProvider: fb.provider,
               fallbackModel: fb.model,
               errorType: lastFallbackError.name,
-              errorMessage: lastFallbackError.message.slice(0, 200),
+              // A seat's mask first: a provider's message can echo the key it was sent.
+              errorMessage: maskToolText(lastFallbackError.message).slice(0, 200),
               attempt,
             });
-            opts.onFallback?.(lastFallbackError, fb.provider);
+            // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
+            opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastFallbackError) as Error) : lastFallbackError, fb.provider);
             const fallbackResult = streamText({
               ...opts,
               provider: fb.provider,
@@ -1807,7 +1915,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               primaryProvider: recordedProviderId,
               attempts: attempt,
               errorType: lastFallbackError.name,
-              errorMessage: lastFallbackError.message.slice(0, 200),
+              errorMessage: maskToolText(lastFallbackError.message).slice(0, 200),
             });
           }
           metricStatus = 'error';

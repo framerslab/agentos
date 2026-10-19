@@ -51,6 +51,8 @@ import {
   buildAgentCallUsage,
   callRecordExtras,
   seatMetadataOf,
+  nestedRunUnanswered,
+  nestedStreamUnanswered,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -190,6 +192,13 @@ export function compileGraph(
             const start = Date.now();
             const result = (await a.generate(gate.input, opts)) as Record<string, unknown>;
             const durationMs = Date.now() - start;
+            // A nested agency that no seat of its own answered gave no answer,
+            // as a rejected agent gives none: its dependents read the same
+            // marker, and it adds no record.
+            if (nestedRunUnanswered(result)) {
+              outputs.set(name, '[skipped by HITL]');
+              return null;
+            }
 
             const resultText = (result.text as string) ?? '';
             const resultUsage = (result.usage as ResultUsageSnapshot) ?? {};
@@ -284,7 +293,10 @@ export function compileGraph(
               model?: Promise<string>;
               finishReason?: Promise<string>;
               fallback?: Promise<FallbackSignal | undefined>;
+              agentCalls?: Promise<unknown>;
             } | null;
+            // A nested agency that no seat of its own answered, as under execute().
+            let unanswered = false;
 
             if (agentStream?.textStream) {
               for await (const chunk of agentStream.textStream) {
@@ -312,6 +324,7 @@ export function compileGraph(
                 finishReason: streamFinish,
                 fallback: streamFallback,
               });
+              unanswered = await nestedStreamUnanswered(agentStream, agentText, resultUsage, streamFinish);
             } else {
               const result = (await a.generate(agentInput, opts)) as Record<string, unknown>;
               agentText = (result.text as string) ?? '';
@@ -321,23 +334,26 @@ export function compileGraph(
               resultUsage = (result.usage as ResultUsageSnapshot) ?? {};
               resultToolCalls = (result.toolCalls as Array<{ name: string; args: unknown; result?: unknown; error?: string }>) ?? [];
               recordExtras = callRecordExtras(result);
+              unanswered = nestedRunUnanswered(result);
             }
 
-            outputs.set(name, agentText);
-            agentCalls.push({
-              agent: name,
-              input: context,
-              output: agentText,
-              toolCalls: resultToolCalls,
-              usage: buildAgentCallUsage(resultUsage),
-              durationMs: Date.now() - agentStart,
-              ...recordExtras,
-            });
+            outputs.set(name, unanswered ? '[skipped by HITL]' : agentText);
+            if (!unanswered) {
+              agentCalls.push({
+                agent: name,
+                input: context,
+                output: agentText,
+                toolCalls: resultToolCalls,
+                usage: buildAgentCallUsage(resultUsage),
+                durationMs: Date.now() - agentStart,
+                ...recordExtras,
+              });
 
-            totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
-            totalUsage.completionTokens += resultUsage.completionTokens ?? 0;
-            totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
-            accumulateExtraUsage(totalUsage, resultUsage);
+              totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
+              totalUsage.completionTokens += resultUsage.completionTokens ?? 0;
+              totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
+              accumulateExtraUsage(totalUsage, resultUsage);
+            }
 
             yield {
               type: 'agent-end' as const,
