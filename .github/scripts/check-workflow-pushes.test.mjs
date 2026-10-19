@@ -40,15 +40,16 @@ const ON_PULL_REQUEST = 'pull_request:';
 /**
  * The checker's findings for a repository holding the files.
  * @param {Record<string, string>} files
+ * @param {{ repository?: string }} [options]
  */
-function check(files) {
+function check(files, options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'workflow-pushes-'));
   try {
     for (const [path, body] of Object.entries(files)) {
       mkdirSync(dirname(join(root, path)), { recursive: true });
       writeFileSync(join(root, path), body);
     }
-    return checkFiles(workflowFiles(root), { root, branch: 'master' });
+    return checkFiles(workflowFiles(root), { root, branch: 'master', ...options });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -58,9 +59,10 @@ function check(files) {
  * Asserts the findings' messages match the patterns, one for one and in order.
  * @param {Record<string, string>} files
  * @param {RegExp[]} patterns
+ * @param {{ repository?: string }} [options]
  */
-function expectFindings(files, patterns) {
-  const messages = check(files).map((f) => f.message);
+function expectFindings(files, patterns, options = {}) {
+  const messages = check(files, options).map((f) => f.message);
   assert.equal(messages.length, patterns.length, `findings:\n${messages.join('\n')}`);
   patterns.forEach((pattern, k) => assert.match(messages[k], pattern));
 }
@@ -210,7 +212,7 @@ describe('refused: a workflow that pushes to master', () => {
     `) }, Array(8).fill(/pushes to master$/));
   });
 
-  test('a push in text the shell expands or reads: a ${ } default, an unquoted heredoc, a heredoc or words piped to a shell', () => {
+  test('a push in text the shell expands or reads: a ${ } default, an unquoted heredoc, a heredoc or words piped to a shell, past -o values in an option cluster', () => {
     expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
       - run: |
           echo "$\{CACHE:-$(git push origin HEAD:master)}"
@@ -227,7 +229,12 @@ describe('refused: a workflow that pushes to master', () => {
           EOF
           bash <<< 'git push origin HEAD:master'
           cat <<< "git push origin master" | sh -e
-    `) }, Array(8).fill(/pushes to master$/));
+          bash -eo pipefail <<'EOF'
+          git push origin master
+          EOF
+          echo 'git push origin HEAD:master' | bash -eo pipefail
+          bash -co pipefail 'git push origin master'
+    `) }, Array(11).fill(/pushes to master$/));
   });
 
   test('a step that checks out master makes a pull request job push it', () => {
@@ -301,6 +308,17 @@ describe('refused: a workflow that pushes to master', () => {
     `) }, [/^jobs\.j\.steps\[1\]: "git push origin HEAD:\$GITHUB_REF" pushes to the run's own branch, master on a run on master$/, /^jobs\.j\.steps\[2\]: "git push" pushes the checked-out branch, master on a run on master$/]);
   });
 
+  test('a deploy action whose repository input names this repository', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - uses: peaceiris/actions-gh-pages@v4
+        with: { github_token: x, publish_dir: out, publish_branch: master, external_repository: '%{{ github.repository }}' }
+      - uses: JamesIves/github-pages-deploy-action@v4
+        with: { folder: out, branch: master, repository-name: Framerslab/This-Repo }
+      - uses: ad-m/github-push-action@v0.8.0
+        with: { github_token: x, repository: framerslab/this-repo }
+    `) }, [/peaceiris\/actions-gh-pages publishes to master$/, /JamesIves\/github-pages-deploy-action publishes to master$/, /ad-m\/github-push-action with no branch input pushes master, the repository's default branch/], { repository: 'framerslab/this-repo' });
+  });
+
   test('a pull request review run, on which git-auto-commit-action has no head branch and pushes the checked-out one', () => {
     // github.head_ref is set on pull_request and pull_request_target alone (GitHub's contexts reference).
     expectFindings({ '.github/workflows/w.yml': workflow('pull_request_review:', text`
@@ -326,7 +344,7 @@ describe('refused: a workflow that pushes to master', () => {
       - uses: EndBug/add-and-commit@v10
         with:
           dry_run: true
-    `) }, [/ad-m\/github-push-action with no branch input pushes master on v0\.6\.0 and earlier/, /JamesIves\/github-pages-deploy-action publishes to master$/, /git-auto-commit-action with no branch input pushes the checked-out branch, master on a run on master$/, /EndBug\/add-and-commit with no new_branch input pushes the checked-out branch/, /"git push origin HEAD:master --force" pushes to master$/, /EndBug\/add-and-commit with no new_branch input pushes the checked-out branch/]);
+    `) }, [/ad-m\/github-push-action with no branch input pushes master, the repository's default branch/, /JamesIves\/github-pages-deploy-action publishes to master$/, /git-auto-commit-action with no branch input pushes the checked-out branch, master on a run on master$/, /EndBug\/add-and-commit with no new_branch input pushes the checked-out branch/, /"git push origin HEAD:master --force" pushes to master$/, /EndBug\/add-and-commit with no new_branch input pushes the checked-out branch/]);
   });
 
   test('semantic-release on master while the configuration lists @semantic-release/git', () => {
@@ -436,6 +454,19 @@ describe('allowed: a workflow that does not push to master', () => {
         - run: git push origin "HEAD:$GITHUB_REF"
       `),
     }, []);
+  });
+
+  test('deploy actions that publish to another repository, whose own rules apply there', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - uses: peaceiris/actions-gh-pages@v4
+        with: { github_token: x, publish_dir: out, publish_branch: main, external_repository: org/org.github.io }
+      - uses: JamesIves/github-pages-deploy-action@v4
+        with: { folder: out, branch: master, repository-name: org/site }
+      - uses: ad-m/github-push-action@v0.8.0
+        with: { github_token: x, repository: org/mirror }
+      - uses: ad-m/github-push-action@v0.8.0
+        with: { github_token: x, repository: '%{{ secrets.MIRROR }}', branch: master }
+    `) }, [], { repository: 'framerslab/this-repo' });
   });
 
   test('git checkout - after a checkout of a branch held in a variable returns to the branch before it', () => {

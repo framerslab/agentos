@@ -29,7 +29,10 @@
  *   checks out a branch (actions/checkout with ref, git checkout, git switch) changes the checked-out branch, and
  *   git switch - or git checkout - (@{-1}, @{-N}) returns to the one checked out before it;
  * - an action that pushes there: peaceiris/actions-gh-pages (publish_branch), JamesIves/github-pages-deploy-action
- *   (branch), ad-m/github-push-action (branch; with none it pushes master on v0.6.0 and earlier),
+ *   (branch) and ad-m/github-push-action (branch; with none it pushes the default branch: the input defaulted to
+ *   master through v0.6.0, and later versions look the repository's default branch up), each unless its repository
+ *   input (external_repository, repository-name, repository) names another repository than this one (empty,
+ *   ${{ github.repository }} or $GITHUB_REPOSITORY), whose own rules apply there;
  *   stefanzweifel/git-auto-commit-action (branch, else the pull request's head branch on a pull request event and
  *   the checked-out branch on any other) and EndBug/add-and-commit (new_branch, else the checked-out branch; a push
  *   input other than true or false is read as git push arguments; dry_run, which came in v11.1.0, pushes nothing);
@@ -43,8 +46,9 @@
  * which run whatever program reads it. A word that is only printed (echo git push ...), a quoted heredoc fed to
  * another program, a comment and a dry run are not pushes. Not read: a branch held in a shell variable, a job's or
  * step's if: condition, a script a shell reads from a file, a variable or a download (curl ... | bash), a git
- * setting made through GIT_CONFIG_* variables, a config file or another repository's configuration, and a push
- * made by a script file or by an action not named above.
+ * setting made through GIT_CONFIG_* variables, a config file or another repository's configuration, the repository a
+ * remote URL or another checkout names (a git push there is read as one here), and a push made by a script file or
+ * by an action not named above.
  *
  * Usage: node .github/scripts/check-workflow-pushes.mjs [--root <dir>] [file ...]
  * DEFAULT_BRANCH names the default branch (master when unset); master and main are refused whatever it is. YQ names
@@ -61,6 +65,7 @@ import { pathToFileURL } from 'node:url';
  * @typedef {object} Context
  * @property {string} root the repository
  * @property {string} branch the default branch
+ * @property {string} repository this repository as owner/name ($GITHUB_REPOSITORY), '' when unknown
  * @property {Set<string>} names the branches no workflow pushes to
  * @property {string} yq the yq binary
  * @property {Map<string, Record<string, unknown>>} scripts each directory's package scripts, as read
@@ -135,20 +140,38 @@ const isAssignment = (word) => /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word);
 /** @param {string} word an option of sh or bash that makes it run its next argument (-c, -ec, -xc) */
 const isCommandOption = (word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word);
 /**
+ * A shell's arguments as bash reads them (shell.c, parse_shell_options): its options, where each o or O of a cluster
+ * takes the next word as its value in turn (bash -eo pipefail, bash -abouo emacs ignoreeof) and --rcfile and
+ * --init-file take one too, up to - or --; then its operands.
+ * @param {string[]} args
+ */
+const shellArgs = (args) => {
+  /** @type {string[]} */
+  const options = [];
+  let k = 0;
+  for (; k < args.length; k++) {
+    const a = args[k];
+    if (a === '--' || a === '-') {
+      k++;
+      break;
+    }
+    if (!/^[-+]/.test(a)) break;
+    options.push(a);
+    if (a === '--rcfile' || a === '--init-file') k++;
+    else if (/^[-+][A-Za-z]+$/.test(a)) k += (a.match(/[oO]/g) ?? []).length;
+  }
+  return { options, operands: args.slice(k) };
+};
+/**
  * Whether a command is a shell that reads its script from its standard input: no -c, and no script file operand
- * unless -s makes the operands its arguments (-o and -O take a value).
+ * unless -s makes the operands its arguments.
  * @param {{ name: string, args: string[] } | null} run
  */
 const readsScript = (run) => {
-  if (run === null || !SHELLS.has(run.name) || run.args.some(isCommandOption)) return false;
-  if (run.args.some((a) => /^-[A-Za-z]*s[A-Za-z]*$/.test(a))) return true;
-  for (let k = 0; k < run.args.length; k++) {
-    const a = run.args[k];
-    if (a === '--') return k + 1 === run.args.length;
-    if (/^[-+][oO]$/.test(a)) k++;
-    else if (!/^[-+]/.test(a)) return false;
-  }
-  return true;
+  if (run === null || !SHELLS.has(run.name)) return false;
+  const { options, operands } = shellArgs(run.args);
+  if (options.some(isCommandOption)) return false;
+  return operands.length === 0 || options.some((a) => /^-[A-Za-z]*s[A-Za-z]*$/.test(a));
 };
 /** @param {string} text */
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -932,8 +955,9 @@ function checkCommand(words, step, depth) {
   if (!run || depth > 4) return;
   const { name, args } = run;
   if (SHELLS.has(name)) {
-    const k = args.findIndex(isCommandOption);
-    if (k >= 0 && k + 1 < args.length) for (const inner of shellCommands(args[k + 1])) checkCommand(inner, step, depth + 1);
+    // -c runs the first operand, after every option and its value (bash -co pipefail 'git push ...').
+    const { options, operands } = shellArgs(args);
+    if (options.some(isCommandOption) && operands.length > 0) for (const inner of shellCommands(operands[0])) checkCommand(inner, step, depth + 1);
   } else if (name === 'eval') {
     for (const inner of shellCommands(args.join(' '))) checkCommand(inner, step, depth + 1);
   } else if (name === 'git') {
@@ -1002,16 +1026,30 @@ function checkAction(uses, inputs, step) {
     else if (kind === 'run' && state.run) report(`${what} the run's own branch, ${branch} on a run on ${branch}`);
     else if (kind === 'head' && state.head) report(`${what} the checked-out branch, ${branch} on a run on ${branch}`);
   };
+  /**
+   * Whether an action's repository input leaves it on this repository: empty (each action's default),
+   * ${{ github.repository }} or this repository's name. Another repository's branches are under its own rules.
+   * @param {string} key
+   */
+  const ownRepository = (key) => {
+    const value = input(key);
+    if (value === '') return true;
+    const whole = /^\$\{\{\s*([\s\S]*?)\s*\}\}$/.exec(value);
+    if (whole) return /^github\.(?:repository|event\.repository\.full_name)$/.test(whole[1]);
+    return ctx.repository !== '' && value.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '').toLowerCase() === ctx.repository.toLowerCase();
+  };
   if (action === 'actions/checkout') {
     const ref = input('ref');
     const kind = ref === '' ? 'run' : classify(ref, ctx);
     moveHead(state, kind === 'protected' || (kind !== 'other' && state.run));
   } else if (action === 'peaceiris/actions-gh-pages') {
-    destination(input('publish_branch') || 'gh-pages', 'peaceiris/actions-gh-pages publishes to');
+    if (ownRepository('external_repository')) destination(input('publish_branch') || 'gh-pages', 'peaceiris/actions-gh-pages publishes to');
   } else if (action === 'jamesives/github-pages-deploy-action') {
-    destination(input('branch') || 'gh-pages', 'JamesIves/github-pages-deploy-action publishes to');
+    if (ownRepository('repository-name')) destination(input('branch') || 'gh-pages', 'JamesIves/github-pages-deploy-action publishes to');
   } else if (action === 'ad-m/github-push-action') {
-    if (input('branch') === '') report(`ad-m/github-push-action with no branch input pushes ${branch} on v0.6.0 and earlier, and fails on later versions; give it a branch of its own`);
+    if (!ownRepository('repository')) return;
+    // Its branch input defaulted to master through v0.6.0; later versions read the repository's default branch.
+    if (input('branch') === '') report(`ad-m/github-push-action with no branch input pushes ${branch}, the repository's default branch (the input defaulted to master through v0.6.0; later versions look the default branch up); give it a branch of its own`);
     else destination(input('branch'), 'ad-m/github-push-action pushes to');
   } else if (action === 'stefanzweifel/git-auto-commit-action') {
     if (input('skip_push') === 'true') return;
@@ -1174,7 +1212,7 @@ export function workflowFiles(root) {
 /**
  * The pushes to the default branch in the files.
  * @param {string[]} files
- * @param {{ root?: string, branch?: string, yq?: string }} [options]
+ * @param {{ root?: string, branch?: string, repository?: string, yq?: string }} [options] repository is owner/name
  * @returns {Finding[]}
  */
 export function checkFiles(files, options = {}) {
@@ -1183,6 +1221,7 @@ export function checkFiles(files, options = {}) {
   const ctx = {
     root: resolve(options.root ?? '.'),
     branch,
+    repository: options.repository ?? '',
     names: new Set(['master', 'main', branch]),
     yq: options.yq || process.env.YQ || 'yq',
     scripts: new Map(),
@@ -1224,7 +1263,7 @@ function main(argv) {
   const branch = process.env.DEFAULT_BRANCH || 'master';
   try {
     const list = files.length > 0 ? files.map((file) => resolve(file)) : workflowFiles(resolve(root));
-    const findings = checkFiles(list, { root, branch });
+    const findings = checkFiles(list, { root, branch, repository: process.env.GITHUB_REPOSITORY ?? '' });
     for (const f of findings) {
       console.log(`${f.file}:${f.line}: ${f.message}`);
       if (process.env.GITHUB_ACTIONS === 'true') console.log(`::error file=${annotation(f.file)},line=${f.line}::${annotation(f.message)}`);
