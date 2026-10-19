@@ -1853,10 +1853,14 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * transport that does not publish audio, as `LiveKitStreamTransport` without a publisher does not, refuses every chunk
    * of every reply.
    *
-   * @param send - Calls `sendControl()` or `sendAudio()`; it is called at once.
+   * A closed session sends nothing: `session_ended`, which the stop sends itself, is the last message its client gets,
+   * though a listener that stopped the session returns into a step that would send more.
+   *
+   * @param send - Calls `sendControl()` or `sendAudio()`; it is called at once, unless the session has closed.
    * @param reply - For an audio chunk, the reply it belongs to (`_currentReply` when it was sent).
    */
   private _watchSend(send: () => Promise<void>, reply?: ReplyRecord): void {
+    if (this.current === 'closed') return;
     let sent: Promise<void>;
     try {
       // Promise.resolve() also takes a transport whose send returns no promise, as a plain JavaScript one may.
@@ -1952,8 +1956,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
             () => undefined,
             () => undefined
           );
-          // _watchSend() reports a send that failed.
-          this._watchSend(() => sending);
+          // A failed send is reported as _watchSend() reports one; _watchSend() itself sends nothing once closed.
+          sending.catch((err: unknown) => {
+            this._reportError(err, 'a transport send failed');
+          });
         }
       },
     ]) {
