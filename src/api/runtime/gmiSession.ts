@@ -516,16 +516,17 @@ export async function* runGmiTurn(
 
 /**
  * Parses a structured send's answer: the schema tool's arguments when a step carried them, else the reply text. A
- * turn whose last step stopped at the output limit (finish reason `length`) was cut off: JSON that does not parse,
- * or that parses and does not match the schema, rejects with an error that says so, the raw text attached, since the
- * session path does not escalate the budget as generateObject does. JSON that parses and matches is the answer: its
- * root object closed, so nothing was cut from it.
+ * turn whose last step stopped at the output limit (finish reason `length`) was cut off and rejects whatever its JSON,
+ * with an error that says so and the raw text attached, since the session path does not escalate the budget as
+ * generateObject does: JSON that does not parse, and JSON that parses, which a cut can leave too (Anthropic's provider
+ * sends `{}` for a forced schema call cut before its input began, and an answer the limit stops just after its closing
+ * brace parses whole). When the JSON parses and does not match the schema, the error carries the issues.
  *
  * @param maxTokens - The turn's `maxTokens`, named in the cut-off's message when the turn set one.
  */
 function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: number): unknown {
-  // The last step's own stop reason: the folder reports 'stop' for any step whose answer the gateway lifted, and the
-  // gateway lifts any JSON that parses.
+  // The last step's own stop reason, not the folder's: the folder reports 'stop' for any step whose answer a
+  // gateway lifted, and the turn's gateway is the host's to choose.
   const cutOff = normalizeStreamFinishReason(folder.steps.at(-1)?.finishReason ?? null) === 'length';
   const limit = typeof maxTokens === 'number' ? `maxTokens (${maxTokens})` : 'maxTokens';
   const structured = folder.structuredOutput();
@@ -548,14 +549,16 @@ function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: num
     }
   }
   const safe = schema.safeParse(raw);
+  if (cutOff) {
+    throw new ObjectGenerationError(
+      safe.success
+        ? `session.send: the answer was cut off at ${limit}; JSON that stopped at the limit is not taken as complete, though it parsed; raise maxTokens for this schema`
+        : `session.send: the answer was cut off at ${limit} and its JSON does not match the schema; raise maxTokens for this schema`,
+      folder.text(),
+      safe.success ? undefined : safe.error,
+    );
+  }
   if (!safe.success) {
-    if (cutOff) {
-      throw new ObjectGenerationError(
-        `session.send: the answer was cut off at ${limit} and its JSON does not match the schema; raise maxTokens for this schema`,
-        folder.text(),
-        safe.error,
-      );
-    }
     throw new ObjectGenerationError('session.send: provider-enforced JSON failed Zod validation', folder.text(), safe.error);
   }
   return safe.data;

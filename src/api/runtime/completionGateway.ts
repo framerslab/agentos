@@ -625,12 +625,23 @@ function withSystemMessage(messages: ChatMessage[], text: string): ChatMessage[]
 }
 
 /**
+ * True when a chunk stopped at the output limit: `length`, the providers'
+ * mapping of Anthropic's `max_tokens`, or the raw `max_tokens`.
+ */
+function stoppedAtOutputLimit(chunk: ModelCompletionResponse): boolean {
+  const reason = chunk.choices?.[0]?.finishReason;
+  return reason === 'length' || reason === 'max_tokens';
+}
+
+/**
  * A streamed forced schema tool call becomes `structuredOutput` on the chunk,
- * never a tool call the GMI would dispatch. Arguments that do not parse (a
- * `max_tokens` cut-off) are no answer: the call is still removed, its raw
- * arguments become the chunk's text and nothing goes into `structuredOutput`,
- * so the step keeps its finish reason (`length` for a cut-off) and the session
- * names the failure, and the GMI never parses or runs the cut call.
+ * never a tool call the GMI would dispatch. A call that is no answer is still
+ * removed, its raw arguments become the chunk's text and nothing goes into
+ * `structuredOutput`, so the step keeps its finish reason and the session
+ * names the failure, and the GMI never parses or runs the cut call: arguments
+ * that do not parse, and any call on a chunk that stopped at the output limit
+ * (`length`), whose arguments can parse though the call was cut (Anthropic's
+ * provider sends `{}` for a call cut before its input began).
  */
 function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): ModelCompletionResponse {
   const choice = chunk.choices?.[0];
@@ -641,13 +652,18 @@ function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): M
   const rest = calls.filter((call) => call !== schemaCall);
   const message = { ...choice.message, tool_calls: rest.length > 0 ? rest : undefined };
   const args: unknown = schemaCall.function.arguments;
+  const asText = (): ModelCompletionResponse => {
+    const raw = typeof args === 'string' ? args : JSON.stringify(args ?? null);
+    const text = typeof message.content === 'string' && message.content ? `${message.content}${raw}` : raw;
+    return { ...chunk, choices: [{ ...choice, message: { ...message, content: text } }, ...chunk.choices.slice(1)] };
+  };
+  if (stoppedAtOutputLimit(chunk)) return asText();
   let structuredOutput: unknown = args;
   if (typeof args === 'string') {
     try {
       structuredOutput = JSON.parse(args);
     } catch {
-      const text = typeof message.content === 'string' && message.content ? `${message.content}${args}` : args;
-      return { ...chunk, choices: [{ ...choice, message: { ...message, content: text } }, ...chunk.choices.slice(1)] };
+      return asText();
     }
   }
   return {
@@ -662,10 +678,13 @@ function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): M
  * the JSON in the text block) becomes `structuredOutput` on the chunk, as
  * {@link liftSchemaToolCall} lifts a forced tool call, so the session's
  * protection of a schema answer and its parse see the same field on both
- * routes. Only text that parses is lifted: a `max_tokens` cut-off or prose
- * keeps its text and its finish reason, so it never reads as a clean stop.
+ * routes. Only text that parses, on a chunk that did not stop at the output
+ * limit, is lifted: prose, and a `max_tokens` cut-off whether or not its text
+ * parses (the limit can fall just after the closing brace), keep their text
+ * and their finish reason, so a cut-off never reads as a clean stop.
  */
 function liftSchemaText(chunk: ModelCompletionResponse, text: string): ModelCompletionResponse {
+  if (stoppedAtOutputLimit(chunk)) return chunk;
   let structuredOutput: unknown;
   try {
     structuredOutput = JSON.parse(text);

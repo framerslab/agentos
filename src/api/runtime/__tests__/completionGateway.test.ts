@@ -549,6 +549,30 @@ describe('CompletionGateway.stream', () => {
     expect(last?.choices[0]).toMatchObject({ message: { content: cut }, finishReason: 'length' });
   });
 
+  it('a JSON-output-format answer stopped at the output limit is not lifted even when its text parses: the final chunk keeps its text and its length finish', async () => {
+    const whole = '{"city":"Lyon"}';
+    const res = resolutionWith(async function* () {
+      yield { responseTextDelta: whole };
+      yield { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: whole }, finishReason: 'length' }] };
+    }, { providerId: 'anthropic', modelId: 'claude-sonnet-5-5', toolFormat: 'anthropic_tools' });
+    const chunks = await drain(createCompletionGateway().stream(res, [], {}, z.object({ city: z.string() }), 'answer'));
+    expect(chunks.some((c) => c.structuredOutput !== undefined)).toBe(false);
+    expect(chunks.at(-1)?.choices[0]).toMatchObject({ message: { content: whole }, finishReason: 'length' });
+  });
+
+  it('a forced schema tool call on a chunk stopped at the output limit is no answer though its arguments parse ({} for a call cut before its input began): removed, its arguments the text, nothing lifted', async () => {
+    const res = resolutionWith(async function* () {
+      yield { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'answer', arguments: '{}' } }] }, finishReason: 'length' }] };
+    }, { providerId: 'anthropic', modelId: 'claude-sonnet-4-6', toolFormat: 'anthropic_tools' });
+    const attempt = createCompletionGateway().stream(res, [], {}, z.object({ scores: z.record(z.string(), z.number()).optional() }), 'answer');
+    const chunks = await drain(attempt);
+    expect(attempt.schemaRoute).toBe('forced_tool');
+    const last = chunks.at(-1);
+    expect(last?.structuredOutput).toBeUndefined();
+    expect(last?.choices[0].message.tool_calls).toBeUndefined();
+    expect(last?.choices[0]).toMatchObject({ message: { content: '{}' }, finishReason: 'length' });
+  });
+
   it('on Claude Sonnet 4.6 a record schema (outside the JSON output format) takes the forced tool, and its call is lifted into structuredOutput', async () => {
     let seen: Record<string, unknown> = {};
     const res = resolutionWith(async function* (options) {

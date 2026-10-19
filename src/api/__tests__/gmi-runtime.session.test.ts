@@ -286,8 +286,7 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
   });
 
   it('a structured send stopped at maxTokens whose JSON parses but misses a required field rejects naming the cut-off, not a schema mismatch', async () => {
-    // The gateway lifts JSON that parses, and a lifted answer reads as a clean stop in the result: the cut-off is
-    // read from the step's own finish reason.
+    // The cut-off is read from the step's own finish reason, and the error carries the issues.
     const k = key(); script('anthropic', k, { replies: [reply.cutOff('{"city":"Lyon"}')] });
     const session = agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s');
     const error = await session
@@ -299,11 +298,52 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(session.messages()).toEqual([]);
   });
 
-  it('a structured send stopped at maxTokens whose JSON parses and matches the schema keeps the answer: the closed object was written whole', async () => {
+  it('a structured send stopped at maxTokens whose JSON parses and matches the schema still rejects naming the cut-off: nothing is lifted from a cut-off, and the call reports length', async () => {
     const k = key(); script('anthropic', k, { replies: [reply.cutOff('{"city":"Lyon"}')] });
-    const r = await agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s')
-      .send('where?', { responseSchema: z.object({ city: z.string() }), maxTokens: 16 });
-    expect(r.object).toEqual({ city: 'Lyon' });
+    const events: LlmUsageEvent[] = [];
+    setGlobalLlmObserver((event) => { events.push(event); });
+    try {
+      const stepTexts: string[] = [];
+      const session = agent({
+        ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5',
+        onAfterGeneration: async (result) => { stepTexts.push(result.text); return result; },
+      }).session('s');
+      const error = await session
+        .send('where?', { responseSchema: z.object({ city: z.string() }), maxTokens: 16 })
+        .then(() => undefined, (e: unknown) => e);
+      expect(error).toBeInstanceOf(ObjectGenerationError);
+      expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (16)');
+      expect((error as ObjectGenerationError).rawText).toBe('{"city":"Lyon"}');
+      expect((error as ObjectGenerationError).validationErrors).toBeUndefined();
+      expect(stepTexts).toEqual(['{"city":"Lyon"}']);
+      expect(events.map((e) => e.finishReason)).toEqual(['length']);
+      expect(session.messages()).toEqual([]);
+    } finally {
+      setGlobalLlmObserver(null);
+    }
+  });
+
+  it('a structured send whose forced schema tool call was cut before its input began ({} from the provider) rejects naming the cut-off, though {} fits a schema whose fields are optional', async () => {
+    const k = key();
+    const s = script('anthropic', k, { replies: [reply.cutSchemaTool('scores', '{}')] });
+    const events: LlmUsageEvent[] = [];
+    setGlobalLlmObserver((event) => { events.push(event); });
+    try {
+      const session = agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-4-6' }).session('s');
+      const error = await session
+        .send('where?', { responseSchema: z.object({ scores: z.record(z.string(), z.number()).optional() }), schemaName: 'scores', maxTokens: 1 })
+        .then(() => undefined, (e: unknown) => e);
+      expect(error).toBeInstanceOf(ObjectGenerationError);
+      expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (1)');
+      expect((error as ObjectGenerationError).rawText).toBe('{}');
+      expect(events.map((e) => e.finishReason)).toEqual(['length']);
+      // The route was the forced tool, and the cut call was not run as a tool.
+      expect(s.seen[0].options.responseFormat).toMatchObject({ route: 'forced_tool', tool: { name: 'scores' } });
+      expect(s.seen).toHaveLength(1);
+      expect(session.messages()).toEqual([]);
+    } finally {
+      setGlobalLlmObserver(null);
+    }
   });
 
   it('a structured send whose forced schema tool call was cut off rejects naming the cut-off: the cut arguments are the step\'s text, never a tool the turn runs', async () => {
