@@ -108,12 +108,17 @@
  * grows the line is written as an interim holding it. `agent_done` writes the
  * final with the reply's text, or, when the transport's wait for the reply's
  * playout failed (a track that stalled), with the played text alone, as the
- * session's own item of that reply proves none of the rest heard. A
+ * session's own item of that reply counts none of the rest heard. A
  * `barge_in` `cancel` or a `clearPlayback()`
  * cuts the reply, and its final holds the played text alone, as LiveKit
  * Agents truncate an interrupted agent's transcription to its spoken output;
  * with none played it is empty, which takes back a line the room was shown. A
- * pause the track holds forgets what the track held.
+ * pause the track holds forgets what the track held. Under a call profile the
+ * session waits for each chunk's playback in turn, so the line grows sentence
+ * by sentence as the track plays them; a session without a call profile waits
+ * only for the reply's whole playout, once its synthesis has completed, so its
+ * line is written once the reply has played out, and a reply cut before then
+ * shows none.
  *
  * Line ids carry the transport's `id` (`<id>:user-1`, `<id>:agent-1`), so two
  * transports' lines never share one. Every stream is sent by the room's local
