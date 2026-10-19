@@ -71,6 +71,11 @@ describe('maskedPrebuilt', () => {
     await expect(maskedPrebuilt(failing, mask).generate('go')).rejects.toThrow('refused [redacted]');
   });
 
+  it('a stream() that throws as it is called leaves it masked, as a generate() that rejects does', () => {
+    const throwing = { ...seat, stream: () => { throw new Error(`no stream ${SECRET}`); } } as unknown as Agent;
+    expect(() => maskedPrebuilt(throwing, mask).stream('go')).toThrow('no stream [redacted]');
+  });
+
   it('its stream() masks the other strings of a text part and of an error part, on the text released at once and on the text held for a later piece', async () => {
     const chatty = {
       ...seat,
