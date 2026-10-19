@@ -2147,6 +2147,21 @@ describe('VoicePipelineOrchestrator session events', () => {
     });
   });
 
+  it('leaves no timer behind when a listener of the return to listening stops the session', async () => {
+    const session = await start();
+    // The host hangs up once the agent's reply has played and the agent listens again.
+    session.on('agent_state_changed', ({ newState }) => {
+      if (newState === 'listening') void session.close('bye');
+    });
+
+    await takeTurn();
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(orchestrator.state).toBe('closed');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("creates the speech a host says through pushToTTS while a reply speaks, with source 'say', without a call profile", async () => {
     await start();
     await takeTurn();
