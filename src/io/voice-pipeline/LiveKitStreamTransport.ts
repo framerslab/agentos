@@ -25,7 +25,7 @@
  *
  * ## Text (both ways)
  * Control messages travel as LiveKit text streams on one topic (default
- * `'agentos.voice'`), to and from the selected participant alone; another
+ * `'agentos.voice'`), to and from the linked participant alone; another
  * sender's stream on the topic is closed unread. `sendControl()` sends a JSON
  * {@link ServerTextMessage}; to a phone caller bridged by LiveKit SIP, which
  * reads no text streams, it sends nothing and resolves. Without a publisher,
@@ -121,14 +121,15 @@
  * out.
  *
  * ## Lifetime
- * The linked participant leaving the room closes the transport while
- * `closeOnDisconnect` is on: by default with `participant`, listen-only or
- * speaking, and with `participantIdentity` only with a publisher. With it off
- * the transport stays open, and the participant rejoining under the same
- * identity is heard again. Another participant leaving changes nothing.
- * `close()` stops reading audio, drops the frames a pause held, unregisters
- * the topic, closes the text streams still arriving and emits `'close'` at
- * once; the room stays connected, because it belongs to the caller.
+ * The linked participant leaving the room, for any disconnect reason, closes
+ * the transport while `closeOnDisconnect` is on: by default with
+ * `participant`, listen-only or speaking, and with `participantIdentity` only
+ * with a publisher. With it off the transport stays open, and the participant
+ * rejoining under the same identity is heard again. Another participant
+ * leaving changes nothing. `close()` stops reading audio, drops the frames a
+ * pause held, unregisters the topics the transport holds, closes the text
+ * streams still arriving and emits `'close'` at once; the room stays
+ * connected, because it belongs to the caller.
  * `whenClosed()` resolves once the native input reader has acknowledged its
  * cancellation, the input loop has ended, the text streams are closed and,
  * with a publisher, the track is unpublished and the track and its source are
@@ -299,17 +300,19 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * |-------------|---------------------------|-----------------------------------------------|
  * | `'audio'`   | `AudioFrame`              | The participant's audio, mono Float32.        |
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
- * | `'message'` | {@link ClientTextMessage} | A JSON message from the participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. With text input, also a `text_input` message for each text the linked participant sends on the text-input topic. |
+ * | `'message'` | {@link ClientTextMessage} | A JSON message from the linked participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. With text input, also a `text_input` message for each text the linked participant sends on the text-input topic. |
  * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting, the linked participant leaving while `closeOnDisconnect` is on or, with a publisher, a refused message or a capture that never returned. |
  * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), a text input refused (`livekit text input refused`, which leaves the transport open), a transcription write that failed (`livekit transcription failed`, which leaves it open too), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. |
  *
  * Without a publisher, an error that nothing listens for is written as a
- * console warning instead, since an `'error'` that nothing listens for would
- * throw. With a publisher, errors carry fixed messages (`livekit input
- * failed`, `livekit control refused`, `livekit text input refused`, `livekit
- * transcription failed`, `livekit output stalled`, `livekit cleanup
- * incomplete`), and one that nothing listens for is dropped. A room or selected participant loss
- * closes this physical path; `CallTransportBinding` interprets it as a detach.
+ * warning line instead, through `logger` when one is given, since an
+ * `'error'` that nothing listens for would throw. With a publisher, errors
+ * carry fixed messages (`livekit input failed`, `livekit control refused`,
+ * `livekit text input refused`, `livekit transcription failed`, `livekit
+ * output stalled`, `livekit cleanup incomplete`), and one that nothing
+ * listens for is dropped. A room loss, or the linked participant's departure
+ * while `closeOnDisconnect` is on, closes this physical path;
+ * `CallTransportBinding` interprets it as a detach.
  *
  * @example
  * ```typescript
@@ -320,6 +323,10 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * });
  * transport.on('audio', (frame) => sttSession.pushAudio(frame));
  * await transport.sendControl({ type: 'agent_thinking' });
+ *
+ * // LiveKit Agents' session defaults: the first STANDARD or SIP participant to join, its lk.chat text as
+ * // text_input messages, and the conversation written to lk.transcription.
+ * const linked = new LiveKitStreamTransport({ room, participant: 'first', sampleRate: 24_000 });
  * ```
  */
 export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTransport {
