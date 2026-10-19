@@ -324,9 +324,9 @@ export class ApiKeyPool {
    * result whose `at` is older than the key's last recorded result is
    * ignored, so an old answer never undoes a newer one. An auth or billing
    * failure counts toward the recheck delay only when its request started
-   * after the key's previous failure was recorded: the answers of requests
-   * that were in flight together (each drew the key while it was ok) count
-   * once.
+   * after the key's previous failure was recorded, strictly later: the
+   * answers of requests that were in flight together (each drew the key
+   * while it was ok, so each started no later than that record) count once.
    */
   markFailed(key: string, kind: KeyFailureKind, detail?: { retryAfterMs?: number; status?: number; at?: number }): void {
     const entry = this.entries.find((e) => e.key === key);
@@ -352,8 +352,10 @@ export class ApiKeyPool {
     } else {
       // One failure per piece of evidence: a request that started after the previous record. Eight concurrent
       // answers from requests that all drew the key while it was ok are one failure, so the first recheck stays at
-      // recheckMs instead of the delay's ceiling.
-      if (state.status !== 'failed' || at >= state.updatedAt) state.failures += 1;
+      // recheckMs instead of the delay's ceiling. A request that started in the same millisecond as that record drew
+      // the key before it was marked (a pool of several keys does not hand out a failed key before its recheck), so
+      // it counts with the others.
+      if (state.status !== 'failed' || at > state.updatedAt) state.failures += 1;
       state.status = 'failed';
       state.until = undefined;
       state.nextRecheckAt = now + this.recheckDelay(state.failures);
@@ -636,11 +638,15 @@ export class ApiKeyPool {
     this.armRecheckTimer();
   }
 
-  /** A store call raced against a deadline; what settles after the deadline is ignored, a late rejection included. */
+  /**
+   * A store call raced against a deadline; what settles after the deadline is ignored, a late rejection included.
+   * The deadline's timer keeps the process alive while it runs (it is cleared as soon as the call settles): a host
+   * that awaits `ready()` or `flush()` on a store whose call never settles and holds no handle of its own reaches
+   * the deadline and its warning, instead of exiting with the wait unfinished.
+   */
   private withinDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<StoreOutcome<T>> {
     return new Promise<StoreOutcome<T>>((resolve) => {
       const timer = setTimeout(() => resolve({ outcome: 'timeout' }), timeoutMs);
-      unrefTimer(timer);
       work.then(
         (value) => {
           clearTimeout(timer);
@@ -702,15 +708,19 @@ export class ApiKeyPool {
   /**
    * Whether a stored row replaces the in-memory state: a key with no recorded
    * result (nothing has succeeded or failed on it in this process) takes its
-   * row; otherwise the row wins only when its newest time (a success, a
-   * failure or its last change) is later than the newest result recorded
-   * here, so a result recorded before a slow load lands is kept.
+   * row; otherwise the row wins only when its latest result (a success or a
+   * failure, by the time its request started) is later than the latest
+   * result recorded here, the order the pool keeps its own results in. Both
+   * sides are compared by their requests' start times, never one side's
+   * write time against the other's start time, so a row written while a
+   * request was in flight, about an older request, cannot undo the result
+   * that request recorded when it answered.
    */
   private static rowIsNewer(row: KeyState, state: KeyState): boolean {
     if (state.lastOkAt === undefined && state.lastFailAt === undefined) return true;
-    const rowNewest = Math.max(row.lastOkAt ?? 0, row.lastFailAt ?? 0, row.updatedAt);
-    const stateNewest = Math.max(state.lastOkAt ?? 0, state.lastFailAt ?? 0);
-    return rowNewest > stateNewest;
+    const rowLatest = Math.max(row.lastOkAt ?? 0, row.lastFailAt ?? 0);
+    const stateLatest = Math.max(state.lastOkAt ?? 0, state.lastFailAt ?? 0);
+    return rowLatest > stateLatest;
   }
 
   private scheduleSave(entry: Entry): void {
