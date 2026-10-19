@@ -70,6 +70,37 @@ describe('isRetryableError', () => {
     expect(isRetryableError(new Error('credit balance exhausted'))).toBe(true);
   });
 
+  it("matches Anthropic's spend-limit answers as it matches the credit-balance 400", () => {
+    // What one Anthropic key answers when a spend limit is reached (platform.claude.com/docs/en/api/rate-limits, read
+    // 18 October 2026): HTTP 400 invalid_request_error for a limit the operator set on the organization or a workspace,
+    // HTTP 429 with error_code enforced_spend_limit_reached for the tier's monthly cap. The 400 leaves the SSE path as
+    // STREAM_CONNECTION_FAILED, a code and a status neither of which walks, so only its words carry it to the next
+    // provider.
+    const workspace = new AnthropicProviderError(
+      'You have reached your specified workspace API usage limits. You will regain access when the limit resets.',
+      'STREAM_CONNECTION_FAILED',
+      400,
+      'invalid_request_error',
+    );
+    const organization = new AnthropicProviderError(
+      'You have reached your specified API usage limits. You will regain access when the limit resets.',
+      'STREAM_CONNECTION_FAILED',
+      400,
+      'invalid_request_error',
+    );
+    const tierCap = new AnthropicProviderError(
+      'You have reached your API usage limits: your organization has crossed its monthly API usage threshold.',
+      'STREAM_CONNECTION_FAILED',
+      429,
+      'rate_limit_error',
+    );
+    expect(isRetryableError(workspace)).toBe(true);
+    expect(isRetryableError(organization)).toBe(true);
+    expect(isRetryableError(tierCap)).toBe(true);
+    // A wrapped copy that lost the typed fields walks on the same words.
+    expect(isRetryableError(new Error(workspace.message))).toBe(true);
+  });
+
   it('matches an overloaded provider (HTTP 529), typed, grepped or reported mid-stream', () => {
     // Anthropic answers 529 `overloaded_error` when it has no capacity: the
     // request is fine and another provider may serve it. Not retryable, an

@@ -221,6 +221,85 @@ describe('LLMProviderHealthRegistry — quota exhaustion wearing client-error st
     }
   });
 
+  it("trips the billing breaker after a SINGLE Anthropic spend-limit 400, as after the credit-balance 400", () => {
+    // A spend limit the operator set on the organization or a workspace (platform.claude.com/docs/en/api/rate-limits,
+    // read 18 October 2026): HTTP 400 invalid_request_error, the account's outage until the limit is raised.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (const message of [
+        'You have reached your specified workspace API usage limits. You will regain access when the limit resets.',
+        'You have reached your specified API usage limits. You will regain access when the limit resets.',
+      ]) {
+        const reg = new LLMProviderHealthRegistry();
+        reg.recordFailure('anthropic', { httpStatus: 400, type: 'invalid_request_error', message });
+        expect(reg.isOpen('anthropic')).toBe(true);
+      }
+      expect(errorSpy).toHaveBeenCalledTimes(2);
+      expect((errorSpy.mock.calls[0] as [string])[0]).toContain('quota exhausted');
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("trips the billing breaker on a single 429 for the tier's monthly spend cap instead of counting it toward the 429 streak", () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      reg.recordFailure('anthropic', {
+        httpStatus: 429,
+        anthropicErrorType: 'rate_limit_error',
+        message: 'You have reached your API usage limits: your organization has crossed its monthly API usage threshold.',
+      });
+      const stats = reg.getStats('anthropic');
+      expect(stats).toMatchObject({ state: 'open', totalTrips: 1 });
+      // The billing class's window (5 minutes), not the 429 class's 30 seconds after a third failure.
+      expect(stats!.cooldownRemainingMs).toBeGreaterThan(4 * 60_000);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('reads the error envelope a provider error carries, as the key pool does, whatever the message says', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // The answer body rides in `details` (AnthropicProviderError): a 429 whose error_code is the cap's is billing.
+      const capped = new LLMProviderHealthRegistry();
+      capped.recordFailure('anthropic', {
+        httpStatus: 429,
+        message: 'Request failed',
+        details: { type: 'error', error: { type: 'rate_limit_error', message: 'Request failed', details: { error_code: 'enforced_spend_limit_reached' } } },
+      });
+      expect(capped.isOpen('anthropic')).toBe(true);
+      // A throttle's 429 still counts toward the streak, and a request's own 400 is still the caller's.
+      const throttled = new LLMProviderHealthRegistry();
+      throttled.recordFailure('anthropic', {
+        httpStatus: 429,
+        message: 'Request failed',
+        details: { type: 'error', error: { type: 'rate_limit_error', message: 'Number of request tokens has exceeded your per-minute rate limit' } },
+      });
+      expect(throttled.isOpen('anthropic')).toBe(false);
+      const badRequest = new LLMProviderHealthRegistry();
+      for (let i = 0; i < 10; i++) {
+        badRequest.recordFailure('anthropic', {
+          httpStatus: 400,
+          message: 'Request failed',
+          details: { type: 'error', error: { type: 'invalid_request_error', message: 'max_tokens: 200000 is greater than the model maximum' } },
+        });
+      }
+      expect(badRequest.isOpen('anthropic')).toBe(false);
+      // A details object that cannot be serialized is no billing evidence and no crash.
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+      const odd = new LLMProviderHealthRegistry();
+      odd.recordFailure('anthropic', { httpStatus: 400, message: 'Request failed', details: circular });
+      expect(odd.isOpen('anthropic')).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
   it('still ignores a plain 400 bad-request carried in httpStatus (no quota shape)', () => {
     const reg = new LLMProviderHealthRegistry();
     for (let i = 0; i < 10; i++) {
