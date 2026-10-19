@@ -234,6 +234,38 @@ describe('session events under a call profile', () => {
     await f.runtime.stopSession();
   });
 
+  it('adds a reply whose playback was acknowledged as heard, though speech comes while its agent_done goes out', async () => {
+    const f = await call();
+    const cut: string[] = [];
+    f.session.on('barge_in', (event) => cut.push(event.interruptedText));
+    // The reply's agent_done is still going out when the user speaks.
+    let sent!: () => void;
+    const held = new Promise<void>((resolve) => {
+      sent = resolve;
+    });
+    vi.mocked(f.transport.sendControl).mockImplementation(async (message) => {
+      if (message.type === 'agent_done') await held;
+    });
+
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack();
+    await vi.waitFor(() => expect(f.transport.sendControl).toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_done' })));
+    for (let i = 0; i < 6; i++) {
+      f.audio();
+      await vi.waitFor(() => expect(f.endpoint.pushAudio).toHaveBeenCalledTimes(i + 1));
+    }
+    await vi.waitFor(() => expect(f.log).toContain('barge_in cancel'));
+    sent();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    // Its whole playback was acknowledged: the reply was heard, and the speech after it cut none of its text.
+    expect(f.log).toContain('item assistant played hello|hello');
+    expect(f.log).not.toContain('item assistant interrupted hello|');
+    expect(cut).toEqual(['']);
+    await f.runtime.stopSession();
+  });
+
   it('speaks a prompt as speech the host created', async () => {
     const f = await call();
     const prompt = f.runtime.pushToTTS('Thanks for calling.');
@@ -347,6 +379,123 @@ describe('session events under a call profile', () => {
     expect(own).toEqual(['item user speech hello', 'close done']);
     // A later stop has the first one's outcome: the call's cleanup finished.
     await f.runtime.stopSession();
+  });
+
+  it('hands the deprecated turn_complete to no listener after one of them closes the call', async () => {
+    const f = await call();
+    const heard: string[] = [];
+    f.runtime.on('turn_complete', () => {
+      heard.push('the listener that closes');
+      void f.runtime.stopSession('bye');
+    });
+    f.runtime.on('turn_complete', () => heard.push('a later orchestrator listener'));
+    f.session.on('turn_complete', () => heard.push('a call listener'));
+
+    f.turn();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+    await f.runtime.stopSession();
+
+    expect(heard).toEqual(['the listener that closes']);
+  });
+
+  it('takes the turn no further once a listener of the agent thinking closes the call', async () => {
+    const f = await call();
+    f.runtime.on('agent_state_changed', ({ newState }: VoiceSessionEventMap['agent_state_changed']) => {
+      if (newState === 'thinking') void f.runtime.stopSession('done');
+    });
+
+    f.turn();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+    await f.runtime.stopSession();
+
+    // The start fenced the call's first generation; the closed call fences none for a turn it did not take.
+    expect(f.profile.onGeneration).toHaveBeenCalledOnce();
+    expect(f.transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_thinking' }));
+  });
+
+  it('speaks no prompt once a listener of the agent thinking closes the call', async () => {
+    const f = await call();
+    f.runtime.on('agent_state_changed', ({ newState }: VoiceSessionEventMap['agent_state_changed']) => {
+      if (newState === 'thinking') void f.runtime.stopSession('done');
+    });
+
+    await f.runtime.pushToTTS('Thanks for calling.');
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+    await f.runtime.stopSession();
+
+    // The start fenced the call's first generation; the closed call fences none for a prompt it did not speak.
+    expect(f.profile.onGeneration).toHaveBeenCalledOnce();
+    expect(f.transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_speaking' }));
+  });
+
+  it('emits close once, and cleans up once, though a listener of the close stops the session again', async () => {
+    const f = await call();
+    const reasons: string[] = [];
+    // A host's "make sure it stopped" handler. Capped, so a close that goes out again and again ends.
+    f.runtime.on('close', ({ reason }: VoiceSessionEventMap['close']) => {
+      reasons.push(reason);
+      if (reasons.length < 3) void f.runtime.stopSession();
+    });
+    const own: string[] = [];
+    f.session.on('close', ({ reason }) => own.push(reason));
+
+    await f.runtime.stopSession('done');
+    await f.runtime.stopSession();
+
+    expect(reasons).toEqual(['done']);
+    expect(own).toEqual(['done']);
+    expect(f.profile.fenceInference).toHaveBeenCalledOnce();
+    expect(f.transport.close).toHaveBeenCalledOnce();
+  });
+
+  it('emits no second close when a stop follows a cleanup that failed, and cleans up again', async () => {
+    const f = await call();
+    const reasons: string[] = [];
+    f.session.on('close', ({ reason }) => reasons.push(reason));
+    vi.mocked(f.profile.fenceInference).mockRejectedValueOnce(new Error('the fence failed'));
+
+    await expect(f.runtime.stopSession('done')).rejects.toThrow('the fence failed');
+    expect(f.transport.close).not.toHaveBeenCalled();
+    await f.runtime.stopSession('again');
+
+    // The call closed once, as the first stop said; the second stop ran the cleanup the first could not finish.
+    expect(reasons).toEqual(['done']);
+    expect(f.profile.fenceInference).toHaveBeenCalledTimes(2);
+    expect(f.transport.close).toHaveBeenCalledOnce();
+  });
+
+  it("names the session, not the agent, for a host prompt stream that fails, and rejects the host's call with its own error", async () => {
+    const f = await call();
+    const failures: Array<[string, boolean]> = [];
+    f.session.on('session_error', (event) => failures.push([event.source, event.recoverable]));
+    // The host's own stream of a prompt's text, which fails before its first word.
+    const prompt = (async function* () {
+      throw new Error('the prompt source failed');
+    })();
+
+    await expect(f.runtime.pushToTTS(prompt)).rejects.toThrow('the prompt source failed');
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+
+    expect(failures).toEqual([['session', false]]);
+  });
+
+  it("writes a session event listener's failure as a console warning by its type, never by what its error quotes", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const f = await call();
+      // A listener whose own error quotes the transcript it was handed.
+      f.session.on('user_input_transcribed', ({ transcript }) => {
+        throw new Error(`could not read ${transcript}`);
+      });
+
+      f.final();
+      await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual(['[voice-pipeline-orchestrator] a user_input_transcribed listener failed: Error']);
+      await f.runtime.stopSession();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('names the transport as the source of a reply whose audio the transport refuses', async () => {
