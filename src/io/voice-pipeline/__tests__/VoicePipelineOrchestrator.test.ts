@@ -2159,6 +2159,7 @@ describe('VoicePipelineOrchestrator session events', () => {
     await vi.advanceTimersByTimeAsync(1_999);
     expect(agentSession.sendText).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
     // Two seconds after the cut the agent receives the first text anyway; its reply ends, and the second text cuts that
     // reply and is taken in its turn.
     expect(vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text)).toEqual(['Hello there', 'Book a table.', 'By the window.']);

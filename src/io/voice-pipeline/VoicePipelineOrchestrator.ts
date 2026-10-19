@@ -60,8 +60,9 @@
  *   speech heard so far is dropped. A text that comes while the session is `speaking` cuts the reply as a `cancel`
  *   barge-in does, with `speechDurationMs: 0`; one that comes while it is `processing` aborts the agent's request,
  *   with no `barge_in`. Without a call profile the text's turn starts once the agent's request for the cut reply has
- *   ended, since an agent answers one request at a time (`_onClientText`); a call profile cuts through `interrupt()`
- *   and its generation fence (`takeText`). A `text_input` message the check refuses is dropped.
+ *   ended, since an agent answers one request at a time, or `TEXT_TURN_UNWIND_MS` after the cut when that request has
+ *   not ended (`_onClientText`); a call profile cuts through `interrupt()` and its generation fence (`takeText`). A
+ *   `text_input` message the check refuses is dropped.
  * - A transport that plays one audio format alone (`IStreamTransport.playbackFormat`, `'pcm'` for
  *   `LiveKitStreamTransport` with a publisher) gets it: the TTS session is asked for that format, and a chunk in
  *   another one is reported once, naming the TTS provider, and not sent.
@@ -191,6 +192,12 @@ const DEFAULT_FALSE_INTERRUPTION_MS = 1_500;
  * by default (`VoicePipelineConfig.maxPlayoutWaitMs`).
  */
 const DEFAULT_MAX_PLAYOUT_WAIT_MS = 30_000;
+
+/**
+ * How long typed text waits for the agent's request for the reply it cut to end before the agent is asked anyway
+ * (`_onClientText`): an agent whose stream does not end after `abort()` holds no later message of the client's.
+ */
+const TEXT_TURN_UNWIND_MS = 2_000;
 
 /** The longest delay `setTimeout()` keeps; a longer one would fire at once. */
 const MAX_TIMER_MS = 2_147_483_647;
@@ -708,8 +715,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   private _currentReply: ReplyRecord = { audioRefusalReported: false, playsUntil: 0, started: false };
   /**
    * The agent's request for the latest reply: it settles once the reply's token loop has ended and the agent's stream
-   * has unwound with it (`_takeTurn`). Typed text that cuts a reply asks the agent only then (`_onClientText`): an
-   * agent answers one request at a time, and `AgentSessionVoiceAdapter` refuses a request while another is active.
+   * has unwound with it (`_takeTurn`). Typed text that cuts a reply asks the agent only then, or once
+   * `TEXT_TURN_UNWIND_MS` have passed without it ending (`_onClientText`): an agent answers one request at a time, and
+   * `AgentSessionVoiceAdapter` refuses a request while another is active.
    */
   private agentRequest: Promise<void> = Promise.resolve();
   private publicSession?: VoicePipelineSession;
@@ -1651,13 +1659,14 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       });
       try {
         for await (const token of fromPart('agent', tokens)) {
-          if (this.current !== 'speaking') break;
+          // A token of a reply that was cut, or that another reply replaced while its stream unwound, is nobody's.
+          if (this.current !== 'speaking' || this._currentReply !== reply) break;
           if (!reply.started) {
             // The reply has its first word: the agent's speech is created, and the agent speaks.
             reply.started = true;
             this.events.emit('speech_created', { source: 'reply', userInitiated: false, createdAt: Date.now() });
             this.events.agentTo('speaking');
-            if ((this.current as PipelineState) !== 'speaking') break;
+            if ((this.current as PipelineState) !== 'speaking' || this._currentReply !== reply) break;
           }
           this.text += token;
           inPart('tts', () => tts.pushTokens(token));
@@ -1872,11 +1881,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * its speech from. A reply being spoken is cut as a `cancel` barge-in cuts it, with no speech (`_cancelReply`): an
    * interruption of it ends with it, and the audio a pause held and the speech the detector was still to hear are
    * dropped. A turn the agent has yet to answer has its request aborted, with no `barge_in`, since no reply was cut.
-   * Then, once the agent's request for the cut reply has ended (`agentRequest`), a session that still listens resets
-   * the endpoint detector, dropping what it holds of the user's speech, with that speech's language and the client's
-   * finals joined for it, and takes the text as the user's turn (`_takeTurn`): no `turn_complete` and no
-   * `user_input_transcribed`, `source: 'text'`, `endpointReason: 'manual'`, no speech and full confidence. A text that
-   * finds the session closed or interrupting is dropped.
+   * Then, once the agent's request for the cut reply has ended (`agentRequest`), or `TEXT_TURN_UNWIND_MS` after the
+   * cut when it has not (`_unwound`), a session that still listens resets the endpoint detector, dropping what it
+   * holds of the user's speech, with that speech's language and the client's finals joined for it, and takes the text
+   * as the user's turn (`_takeTurn`): no `turn_complete` and no `user_input_transcribed`, `source: 'text'`,
+   * `endpointReason: 'manual'`, no speech and full confidence. A text that finds the session closed or interrupting
+   * is dropped.
    *
    * @param text - The text, as `isClientTextInputMessage()` accepted it.
    * @param parts - The session's parts.
@@ -1891,13 +1901,31 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       this.stateTo('listening');
       this.resetWatchdog();
     }
-    // An agent answers one request at a time: the text's starts once the cut reply's has ended.
-    await this.agentRequest;
+    // An agent answers one request at a time: the text's starts once the cut reply's has ended, or once the bound has
+    // passed, so a stream that does not end after abort() holds no later message of the client's.
+    await this._unwound(this.agentRequest);
     if (this.current !== 'listening') return;
     inPart('endpoint', () => parts.endpoint.reset());
     this.turnLanguage = undefined;
     lines.finals = [];
     this._takeTurn(parts, { text, source: 'text', reason: 'manual', durationMs: 0, confidence: 1 });
+  }
+
+  /**
+   * Waits for the agent's request for a cut reply to end, at most `TEXT_TURN_UNWIND_MS`. An agent answers one request
+   * at a time, and one whose stream does not end after `abort()` must not hold the client's later messages: once the
+   * bound has passed the next request goes to the agent anyway. An agent that refuses it as one still active
+   * (`AgentSessionVoiceAdapter` does) fails the session as the agent's failure, and a token the stale stream still
+   * yields never reaches the next reply (`_takeTurn`).
+   *
+   * @param request - The request to wait for (`agentRequest`).
+   */
+  private _unwound(request: Promise<void>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, TEXT_TURN_UNWIND_MS);
+    });
+    return Promise.race([request, bound]).finally(() => clearTimeout(timer));
   }
 
   /**
