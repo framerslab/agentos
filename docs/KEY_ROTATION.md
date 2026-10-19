@@ -12,9 +12,11 @@ ANTHROPIC_API_KEY=sk-ant-primary
 OPENAI_API_KEY=sk-key1,sk-key2
 
 # Several keys in cost order: the first usable key is used until it fails.
-# Credited keys first, the paid key last.
+# Credited keys first, the paid key last. The variable names the provider, so
+# the OpenAI keys above keep spreading load; AGENTOS_KEY_POOL_STRATEGY=ordered
+# would order every provider's keys.
 ANTHROPIC_API_KEY=sk-ant-credited-1,sk-ant-credited-2,sk-ant-paid
-AGENTOS_KEY_POOL_STRATEGY=ordered
+AGENTOS_KEY_POOL_STRATEGY_ANTHROPIC=ordered
 ```
 
 The same `apiKey` string works through the TypeScript API:
@@ -105,8 +107,10 @@ The case the pool is built for: an organization holds several Claude Max subscri
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-max-1,sk-ant-max-2,sk-ant-max-3,sk-ant-paid
-AGENTOS_KEY_POOL_STRATEGY=ordered
+AGENTOS_KEY_POOL_STRATEGY_ANTHROPIC=ordered
 ```
+
+The variable names Anthropic alone, so a product that also holds a list of OpenAI or Gemini keys for load spreading keeps them round-robin; `AGENTOS_KEY_POOL_STRATEGY=ordered` orders every provider's keys.
 
 ## Supported Providers
 
