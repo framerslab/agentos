@@ -3,9 +3,10 @@
  * Several Requesty keys in one provider (the key pool v2 design): a key the
  * router rejects (its HTTP 403 "Invalid authorization token"), an unpaid key
  * (402) or a throttled key (429) is marked and the request is sent again at
- * once with the next usable key; every key out throws ALL_KEYS_FAILED before
- * anything is sent; a per-request override is never hopped. The axios client
- * is mocked; nothing leaves the process.
+ * once with the next usable key; the answer that takes out the last usable
+ * key throws ALL_KEYS_FAILED, and so does every request while every key is
+ * out, before anything is sent; a per-request override is never hopped. The
+ * axios client is mocked; nothing leaves the process.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Readable } from 'node:stream';
@@ -129,11 +130,16 @@ describe('RequestyProvider key failover', () => {
     expect(typeof b.lastOkAt).toBe('number');
   });
 
-  it('throws ALL_KEYS_FAILED before sending once every key is out', async () => {
+  it('throws ALL_KEYS_FAILED once the last key is out, and before sending while every key is out', async () => {
     const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002');
     client.request.mockRejectedValueOnce(axiosError(403, badToken)).mockRejectedValueOnce(axiosError(402, { error: { message: 'Insufficient credits' } }));
-    // The request hops from the rejected key to the unpaid one and ends on that key's answer.
-    await expect(ask(provider)).rejects.toMatchObject({ code: 'API_REQUEST_FAILED', httpStatus: 402 });
+    // The request hops from the rejected key to the unpaid one; that key's answer takes out the last usable key, so
+    // the request ends as the other providers' do: ALL_KEYS_FAILED, with that answer's status and message.
+    const exhausted = await ask(provider).catch((e: unknown) => e);
+    expect(exhausted).toBeInstanceOf(RequestyProviderError);
+    expect(exhausted).toMatchObject({ code: 'ALL_KEYS_FAILED', httpStatus: 402, message: '[402] Insufficient credits' });
+    expect((exhausted as RequestyProviderError).details).toMatchObject({ kinds: expect.arrayContaining(['auth', 'billing']) });
+    expect(typeof ((exhausted as RequestyProviderError).details as { retryAfterMs?: unknown }).retryAfterMs).toBe('number');
     expect(bearers(client)).toEqual(['Bearer key_alpha_0001', 'Bearer key_beta_0002']);
 
     const error = await ask(provider).catch((e: unknown) => e);
@@ -141,6 +147,19 @@ describe('RequestyProvider key failover', () => {
     expect(error).toMatchObject({ code: 'ALL_KEYS_FAILED' });
     expect((error as RequestyProviderError).details).toMatchObject({ kinds: expect.arrayContaining(['auth', 'billing']) });
     expect(client.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a per-request override's failure its own, even when it takes out the last usable key", async () => {
+    const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002');
+    client.request.mockRejectedValueOnce(axiosError(403, badToken)).mockRejectedValueOnce(axiosError(403, badToken));
+    // The pool's request takes out the first key and hops to the second, which answers too: every key is out.
+    await expect(ask(provider)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED', httpStatus: 403 });
+    // An override is the caller's choice: its answer comes back as it is, never as the pool's.
+    client.request.mockRejectedValueOnce(axiosError(403, badToken));
+    await expect(
+      provider.generateCompletion('openai/gpt-4o-mini', [{ role: 'user', content: 'hi' }], { apiKeyOverride: 'key_beta_0002' }),
+    ).rejects.toMatchObject({ code: 'API_REQUEST_FAILED', httpStatus: 403 });
+    expect(bearers(client)).toEqual(['Bearer key_alpha_0001', 'Bearer key_beta_0002', 'Bearer key_beta_0002']);
   });
 
   it("rests a throttled key for the server's Retry-After and moves the request to the next key", async () => {

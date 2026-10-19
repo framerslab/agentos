@@ -1037,6 +1037,12 @@ export class RequestyProvider implements IProvider {
               continue;
             }
           }
+          // This answer took out the pool's last usable key for auth or billing: every key is out, and the request
+          // ends as the other providers' do, with ALL_KEYS_FAILED carrying this answer's status and the kinds seen.
+          // A throttle (quota) leaves the key resting, and an override's answer stays the caller's own.
+          if (!perRequest?.apiKeyOverride && this.keyPool.size > 1 && this.keyPool.usable() === 0 && keyFailure !== 'quota') {
+            throw this.allKeysFailedError(statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage, statusCode, errorType);
+          }
         }
 
         // Prefix the status code into the message so downstream retry/fallback
