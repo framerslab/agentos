@@ -91,14 +91,15 @@
  * `transcriptionOutput` option), writes the conversation into the room through
  * two {@link LiveKitTranscriptionOutput}s, as text streams on
  * `'lk.transcription'`, the topic LiveKit's transcriptions use, each carrying
- * `lk.segment_id`, `lk.transcription_final` and `lk.transcribed_track_id`.
- * The user's lines come from the `transcript` messages the session sends: the
- * first after a final opens a line, each interim is written to it and its
- * final closes it. They carry the SID of the microphone track the transport
- * reads, so they follow `setParticipant()`.
+ * `lk.segment_id` and `lk.transcription_final`, and `lk.transcribed_track_id`
+ * while the SID of the track it transcribes is known. The user's lines come
+ * from the `transcript` messages the session sends: the first after a final
+ * opens a line, each interim is written to it and its final closes it. Their
+ * track is the microphone the transport reads, so they follow
+ * `setParticipant()`.
  *
  * With a publisher, the agent's line of each reply opens at `agent_speaking`
- * and carries the published track's SID. It is written from the text
+ * and names the published track. It is written from the text
  * boundaries the reply's chunks carry (`EncodedAudioChunk.textBoundary`), never
  * from their legacy `text`: a chunk that ends a segment counts once the track
  * has played it, as `waitForPlayback()` resolving for it says, or outside
@@ -233,9 +234,9 @@ export interface LiveKitStreamTransportOptions {
   /**
    * Write the user's transcripts and the agent's played text as transcription text streams on `topic`
    * (`'lk.transcription'` unless given). Default `true` with `participant`, `false` with `participantIdentity`. The
-   * user's lines come from the `transcript` messages the session sends and carry the SID of the microphone track the
-   * transport reads; with `publisher`, the agent's line of each reply carries the published track's SID and holds the
-   * text its chunks' boundaries prove played until `agent_done` gives its final.
+   * user's lines come from the `transcript` messages the session sends and name the microphone track the transport
+   * reads, while it reads one; with `publisher`, the agent's line of each reply names the published track and holds
+   * the text its chunks' boundaries prove played until `agent_done` gives its final.
    */
   transcriptionOutput?: boolean | { topic?: string };
   /**
