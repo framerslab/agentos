@@ -640,8 +640,9 @@ function stoppedAtOutputLimit(chunk: ModelCompletionResponse): boolean {
  * `structuredOutput`, so the step keeps its finish reason and the session
  * names the failure, and the GMI never parses or runs the cut call: arguments
  * that do not parse, and any call on a chunk that stopped at the output limit
- * (`length`), whose arguments can parse though the call was cut (Anthropic's
- * provider sends `{}` for a call cut before its input began).
+ * (`length`), whose arguments can parse though the call was cut (the limit
+ * can fall just after the closing brace; Anthropic's provider gives a call
+ * none of whose input arrived empty arguments, never a `{}`).
  */
 function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): ModelCompletionResponse {
   const choice = chunk.choices?.[0];
