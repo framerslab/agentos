@@ -360,7 +360,6 @@ export class WorkflowBuilder {
    * 6. Wrap in a `CompiledWorkflow` with a `GraphRuntime` backed by the given store.
    *
    * @param options - Optional compilation options.
-   * @param options.checkpointStore - Custom checkpoint backend; defaults to `InMemoryCheckpointStore`.
    * @throws {Error} When `.input()` or `.returns()` was not called.
    * @throws {Error} When the compiled graph contains a cycle (should never happen via this API).
    */
