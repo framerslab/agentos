@@ -1323,6 +1323,12 @@ export class OpenRouterProvider implements IProvider {
     if (!this.client) {
       return { isHealthy: false, details: { message: "OpenRouterProvider not initialized (HTTP client missing)."}};
     }
+    // The key a request would send, drawn as a request draws it. With every key of the pool out there is no
+    // credential to send: the provider is unhealthy, and an empty bearer would only earn a 401.
+    const apiKey = this.keyPool?.hasKeys ? await this.keyPool.nextAfterProbes() : this.config.apiKey;
+    if (apiKey === '') {
+      return { isHealthy: false, details: { message: 'Every OpenRouter API key is out of rotation', error: this.allKeysFailedError() } };
+    }
     try {
       // Auth rides per-request since the key moved off the axios instance
       // (per-attempt pool rotation) — /models is public today, but keep the
@@ -1330,7 +1336,7 @@ export class OpenRouterProvider implements IProvider {
       await this.client.get('/models', {
         timeout: Math.min(this.config.requestTimeout || 10000, 10000),
         headers: {
-          Authorization: `Bearer ${this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
       });
       return { isHealthy: true, details: { message: "Successfully connected to OpenRouter /models endpoint." } };

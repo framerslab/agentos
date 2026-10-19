@@ -98,6 +98,31 @@ describe('OpenRouterProvider key failover', () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
+  it('reports unhealthy without a request when every key is out, instead of sending an empty bearer', async () => {
+    const request = vi.fn().mockRejectedValueOnce(axiosError(401, noAuth)).mockRejectedValueOnce(axiosError(401, noAuth));
+    const { provider } = makeProvider(request);
+    await expect(provider.generateCompletion(MODEL, messages, {})).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED' });
+    const get = vi.fn().mockResolvedValue({ data: { data: [] } });
+    Object.assign((provider as unknown as { client: Record<string, unknown> }).client, { get });
+    const health = await provider.checkHealth();
+    expect(health.isHealthy).toBe(false);
+    expect(health.details).toMatchObject({ message: 'Every OpenRouter API key is out of rotation', error: { code: 'ALL_KEYS_FAILED' } });
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it('sends the health check with a usable key of the pool', async () => {
+    const request = vi.fn().mockRejectedValueOnce(axiosError(401, noAuth)).mockResolvedValueOnce({ data: okResponse() });
+    const { provider } = makeProvider(request);
+    await provider.generateCompletion(MODEL, messages, {});
+    const get = vi.fn().mockResolvedValue({ data: { data: [] } });
+    Object.assign((provider as unknown as { client: Record<string, unknown> }).client, { get });
+    expect((await provider.checkHealth()).isHealthy).toBe(true);
+    // get('/models', { headers }): the bearer rides on the second argument.
+    expect(get.mock.calls.map(([, options]) => String((options as { headers: Record<string, string> }).headers.Authorization))).toEqual([
+      'Bearer key_beta_0002',
+    ]);
+  });
+
   it("keeps a 400 as the request's fault: no hop, no mark", async () => {
     const request = vi.fn().mockRejectedValueOnce(axiosError(400, { error: { code: 400, message: 'temperature must be at most 2' } }));
     const { provider, keyPool } = makeProvider(request);
