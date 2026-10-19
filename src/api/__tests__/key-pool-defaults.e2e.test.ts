@@ -11,7 +11,7 @@ vi.stubGlobal('fetch', fetchMock);
 
 import { cachedProviderManagerCount, createProviderManager, resolveProvider, shutdownProviderManagers } from '../model.js';
 import { getKeyPoolDefaults, setKeyPoolDefaults } from '../keyPoolDefaults.js';
-import { InMemoryKeyPoolStateStore } from '../../core/providers/KeyPoolStateStore.js';
+import { InMemoryKeyPoolStateStore, type KeyState } from '../../core/providers/KeyPoolStateStore.js';
 
 const modelList = () => new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -55,6 +55,46 @@ describe('key pool defaults on the generateText path', () => {
     fetchMock.mockImplementation(async () => modelList());
     const again = await createProviderManager(resolveProvider('openai', 'gpt-4o'));
     expect(again).not.toBe(manager);
+    log.mockRestore();
+  });
+
+  it('a manager built while shutdownProviderManagers() runs waits for it, so its pools load what the old pools wrote', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.stubEnv('OPENAI_API_KEY', 'sk_pooltest_eps_0009,sk_pooltest_zeta_0010');
+    // A store whose writes land only when the test lets them, like a slow database.
+    const inner = new InMemoryKeyPoolStateStore();
+    let releaseSaves: () => void = () => undefined;
+    const saveGate = new Promise<void>((resolve) => {
+      releaseSaves = resolve;
+    });
+    const store = {
+      load: (poolId: string) => inner.load(poolId),
+      save: async (poolId: string, state: KeyState) => {
+        await saveGate;
+        await inner.save(poolId, state);
+      },
+    };
+    setKeyPoolDefaults({ strategy: 'ordered', store });
+    const manager = await createProviderManager(resolveProvider('openai', 'gpt-4o'));
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => (keyOf(init) === 'sk_pooltest_eps_0009' ? json(invalidKey, 401) : json(okChat)));
+    await manager.getProvider('openai')!.generateCompletion('gpt-4o', [{ role: 'user', content: 'hi' }], {});
+
+    // The shutdown writes the first key's failure, slowly; a call that comes in meanwhile builds the next manager.
+    const shuttingDown = shutdownProviderManagers();
+    fetchMock.mockImplementation(async () => modelList());
+    let built = false;
+    const replacement = createProviderManager(resolveProvider('openai', 'gpt-4o')).then((next) => {
+      built = true;
+      return next;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(built).toBe(false);
+    releaseSaves();
+    await shuttingDown;
+    const next = await replacement;
+    expect(next).not.toBe(manager);
+    const pool = (next.getProvider('openai') as unknown as { keyPool: { snapshot(): Array<{ status: string }> } }).keyPool;
+    expect(pool.snapshot().map((s) => s.status)).toEqual(['failed', 'ok']);
     log.mockRestore();
   });
 
