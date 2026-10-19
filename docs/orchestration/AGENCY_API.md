@@ -542,9 +542,10 @@ shortfall the call goes on from under `onShortfall: 'proceed'`),
   or `strategy: 'panel'`, credentials are strict (above): a
   `setDefaultProvider()` key that names no provider no longer reaches a seat,
   Anthropic is not rerouted through OpenRouter, and a per-call `model`,
-  `provider`, `apiKey`, `baseUrl`, `fallbackProviders` or any other option the
-  per-call list above names is rejected. An agency without those options keeps
-  the earlier rules.
+  `provider`, `apiKey`, `baseUrl`, `fallbackProviders` or any other option on
+  the rejected list above is refused, as is, under `panel`, any option outside
+  the panel's accepted list. An agency without those options keeps the earlier
+  rules.
 
 ---
 
