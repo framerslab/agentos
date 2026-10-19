@@ -708,11 +708,14 @@ function checkout(sub, args, { state, ctx }) {
     const operand = create.includes(a) ? args[k + 1] : attached ? attached[1] : a.startsWith('-') ? undefined : a;
     if (operand === undefined) continue;
     const name = track ? operand.replace(/^(?:refs\/)?(?:remotes\/)?[^/]+\//, '') : operand;
-    // A branch made here is a new one unless it is named for the default branch (-B master resets it).
+    // A branch made here is a new one unless it is named for the default branch (-B master resets it). A branch
+    // this check cannot tell (a variable) leaves the checked-out branch as it was, but git still moved, so - after it
+    // returns to the branch before it.
     const kind = classify(name, ctx);
     if (kind === 'protected') moveHead(state, true);
     else if (kind === 'other' || creates || track) moveHead(state, false);
     else if (kind === 'run') moveHead(state, state.run);
+    else moveHead(state, state.head);
     return;
   }
 }

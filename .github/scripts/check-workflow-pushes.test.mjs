@@ -379,6 +379,17 @@ describe('allowed: a workflow that does not push to master', () => {
     `) }, []);
   });
 
+  test('git checkout - after a checkout of a branch held in a variable returns to the branch before it', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - uses: actions/checkout@v5
+      - run: |
+          git switch -c feature
+          git checkout "$BRANCH"
+          git checkout -
+          git push origin HEAD
+    `) }, []);
+  });
+
   test('actions that publish elsewhere or do not push', () => {
     expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
       - uses: peaceiris/actions-gh-pages@v4
