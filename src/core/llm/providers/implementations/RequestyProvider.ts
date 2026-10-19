@@ -27,6 +27,8 @@ import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
+import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream } from '../stream-error-body.js';
+import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 
 /**
  * Configuration specific to the RequestyProvider.
@@ -946,6 +948,14 @@ export class RequestyProvider implements IProvider {
     return { message: String(error) };
   }
 
+  /** Every configured secret: the raw key setting, each pooled key, and base-URL credentials. */
+  private configuredSecrets(): string[] {
+    const rawKeys = this.config?.apiKey ?? '';
+    return [rawKeys, ...rawKeys.split(',').map((key) => key.trim()), baseUrlCredentials(this.config?.baseURL) ?? ''].filter(
+      (secret) => secret.length > 0,
+    );
+  }
+
   private async makeApiRequest<T = unknown>(
     endpoint: string,
     method: 'GET' | 'POST',
@@ -985,6 +995,16 @@ export class RequestyProvider implements IProvider {
         if (axios.isAxiosError(error)) {
           statusCode = error.response?.status;
           errorData = error.response?.data;
+          // A streamed request's error body is the live response stream, whose `req` holds the request head with the
+          // Authorization header: serializing it for the classifier throws (the response and its request refer to
+          // each other), so the key was never marked and the request never moved on, and keeping it in the error's
+          // details kept the key. Read a bounded prefix with the configured keys masked, then drop the stream.
+          if (isReadableStream(errorData)) {
+            const { text, complete } = await readErrorStream(errorData);
+            const secrets = this.configuredSecrets();
+            const masked = redactUrlSecrets(text, this.config?.baseURL, secrets);
+            errorData = parseErrorBody(complete ? masked : maskCutSecretTail(masked, secrets));
+          }
           retryAfterHeader = error.response?.headers?.['retry-after'];
           if (errorData?.error && typeof errorData.error === 'object') {
             errorMessage = errorData.error.message || errorMessage;

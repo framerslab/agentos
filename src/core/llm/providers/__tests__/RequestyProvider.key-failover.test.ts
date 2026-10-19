@@ -8,6 +8,7 @@
  * is mocked; nothing leaves the process.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Readable } from 'node:stream';
 import { RequestyProvider } from '../implementations/RequestyProvider.js';
 import { RequestyProviderError } from '../errors/RequestyProviderError.js';
 import { InMemoryKeyPoolStateStore } from '../../../providers/KeyPoolStateStore.js';
@@ -61,6 +62,30 @@ interface PoolView {
   recheck(): Promise<void>;
   snapshot(): Array<Record<string, unknown>>;
 }
+
+/**
+ * A streamed request's error body as axios rejects a `responseType: 'stream'` request with it: the live response
+ * stream, whose `req` holds the request head with the Authorization header and refers back to the response, as
+ * Node's response and request do, so serializing it throws.
+ */
+function streamedErrorBody(body: unknown, bearer: string): NodeJS.ReadableStream {
+  const stream = Readable.from([Buffer.from(JSON.stringify(body))]);
+  const req: Record<string, unknown> = { headers: { authorization: bearer } };
+  req.res = stream;
+  return Object.assign(stream, { req });
+}
+
+function sse(lines: string[]): NodeJS.ReadableStream {
+  return Readable.from(lines.map((line) => Buffer.from(line)));
+}
+
+const contentChunk = {
+  id: 'gen-1',
+  object: 'chat.completion.chunk',
+  created: 1,
+  model: 'openai/gpt-4o-mini',
+  choices: [{ index: 0, delta: { role: 'assistant', content: 'hello' }, finish_reason: null }],
+};
 
 function axiosError(status: number, body: unknown) {
   return { isAxiosError: true, message: `Request failed with status code ${status}`, response: { status, data: body, headers: {} } };
@@ -327,6 +352,50 @@ describe('RequestyProvider key failover', () => {
       vi.unstubAllGlobals();
       vi.useRealTimers();
     }
+  });
+
+  it("reads a streamed request's error body, marks the rejected key and moves the stream to the next key", async () => {
+    const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002');
+    client.request
+      .mockRejectedValueOnce({
+        isAxiosError: true,
+        message: 'Request failed with status code 403',
+        response: { status: 403, data: streamedErrorBody(badToken, 'Bearer key_alpha_0001'), headers: {} },
+      })
+      .mockResolvedValueOnce({ data: sse([`data: ${JSON.stringify(contentChunk)}\n\n`, 'data: [DONE]\n\n']) });
+    const chunks = [];
+    for await (const chunk of provider.generateCompletionStream('openai/gpt-4o-mini', [{ role: 'user', content: 'hi' }], {})) chunks.push(chunk);
+    expect(chunks.filter((chunk) => chunk.error)).toEqual([]);
+    expect(chunks.map((chunk) => chunk.responseTextDelta).filter(Boolean)).toEqual(['hello']);
+    expect(bearers(client)).toEqual(['Bearer key_alpha_0001', 'Bearer key_beta_0002']);
+    const pool = (provider as unknown as { keyPool: { snapshot(): Array<Record<string, unknown>> } }).keyPool;
+    expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', kind: 'auth', failures: 1 });
+  });
+
+  it("ends a streamed request whose every key is rejected with the body's message, the configured keys masked", async () => {
+    const { provider, client } = await mountProvider('key_alpha_0001,key_beta_0002');
+    const echoing = (key: string) => ({ error: { origin: 'router', message: `Invalid authorization token ${key}` } });
+    client.request
+      .mockRejectedValueOnce({
+        isAxiosError: true,
+        message: 'Request failed with status code 403',
+        response: { status: 403, data: streamedErrorBody(echoing('key_alpha_0001'), 'Bearer key_alpha_0001'), headers: {} },
+      })
+      .mockRejectedValueOnce({
+        isAxiosError: true,
+        message: 'Request failed with status code 403',
+        response: { status: 403, data: streamedErrorBody(echoing('key_beta_0002'), 'Bearer key_beta_0002'), headers: {} },
+      });
+    const chunks = [];
+    for await (const chunk of provider.generateCompletionStream('openai/gpt-4o-mini', [{ role: 'user', content: 'hi' }], {})) chunks.push(chunk);
+    const final = chunks.at(-1);
+    expect(final).toMatchObject({ isFinal: true, error: { message: '[403] Invalid authorization token [redacted]' } });
+    expect(JSON.stringify(chunks)).not.toContain('key_beta_0002');
+    const pool = (provider as unknown as { keyPool: { snapshot(): Array<Record<string, unknown>> } }).keyPool;
+    expect(pool.snapshot().map((state) => [state.status, state.kind])).toEqual([
+      ['failed', 'auth'],
+      ['failed', 'auth'],
+    ]);
   });
 
   it("keeps a 400 as the request's fault: no mark", async () => {
