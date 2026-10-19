@@ -33,7 +33,12 @@
  * ({@link TtsTextBoundary}) rides on the last frame `isFinal` proves
  * complete; every earlier frame carries none. A segment with no `isFinal`
  * within five seconds of its end-of-stream message, or whose socket closes
- * first, ends without a boundary. A socket that does not open within eight
+ * first, ends without a boundary. After such a timeout the next segment
+ * waits, at most five seconds more, for that late `isFinal` or for the socket
+ * to close, and the audio the socket still delivers goes out as it comes,
+ * without a boundary, so a slow sentence arrives whole and in order; only
+ * then does the next segment open its own socket. A `cancel()` ends that
+ * wait with the socket. A socket that does not open within eight
  * seconds, or that errors or closes before it opens, is given up: the
  * session's first rejects `startSession()`, a later one ends its segment
  * without a boundary and reaches the session's `'error'` listener, and the
@@ -66,6 +71,8 @@ import { VoicePipelineError } from '../VoicePipelineError.js';
 
 /** How long a socket has to open before the open is given up. */
 const CONNECT_TIMEOUT_MS = 8_000;
+/** How long the next segment waits for the late `isFinal` of a segment that timed out, and for the audio before it. */
+const STALE_FINAL_MS = 5_000;
 
 async function defaultElevenLabsTtsProbe(apiKey: string) {
   const start = Date.now();
@@ -144,6 +151,12 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
   private ws: WebSocket | null = null;
   /** Whether the current socket has been sent the end-of-stream message: a spent socket takes no further text. */
   private spent = false;
+  /**
+   * Set while the next segment waits for the late `isFinal` of a segment that timed out: the spent socket stays the
+   * session's, and the audio it still delivers goes out as it comes, so a slow sentence arrives whole and in order
+   * before the next socket opens. The timer bounds the wait.
+   */
+  private stale?: ReturnType<typeof setTimeout>;
   private closed = false;
   private readonly segments: SegmentSynthesisQueue;
 
@@ -159,6 +172,8 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
       start: (segment, signal) => this.synthesize(segment.text, signal),
       emit: (chunk) => this.emit('audio', chunk),
       flushed: () => this.emit('flush_complete'),
+      // The segment's end-of-stream message is still outstanding: its isFinal, and the rest of its audio, may yet come.
+      timedOut: () => this.holdFor(STALE_FINAL_MS),
     });
   }
 
@@ -277,7 +292,10 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
         }
         if (this.ws !== ws) return;
         this.ws = null;
-        if (!this.closed) this.segments.abandon();
+        if (this.closed) return;
+        this.segments.abandon();
+        // A spent socket the next segment waited on is gone: nothing more of its audio can come.
+        this.release();
       });
     });
   }
@@ -355,6 +373,8 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
    */
   cancel(): void {
     this.segments.cancel();
+    // The socket closes with the cancel, a spent one the next segment waited on too: nothing late is waited for.
+    this.release();
     const ws = this.ws;
     this.ws = null;
     if (ws && ws.readyState === WebSocket.OPEN) ws.close(1000, 'cancelled');
@@ -367,6 +387,7 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
     if (this.closed) return;
     this.closed = true;
     this.segments.cancel();
+    this.release();
 
     const ws = this.ws;
     this.ws = null;
@@ -378,6 +399,21 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
   // -------------------------------------------------------------------------
   // Private
   // -------------------------------------------------------------------------
+
+  /** Keeps the next segment from starting until the spent socket's late `isFinal` or close arrives, or `ms` have passed. */
+  private holdFor(ms: number): void {
+    if (this.stale !== undefined) clearTimeout(this.stale);
+    this.segments.hold();
+    this.stale = setTimeout(() => this.release(), ms);
+  }
+
+  /** The late response arrived, or its wait ran out: the next segment may start, on a socket of its own. */
+  private release(): void {
+    if (this.stale === undefined) return;
+    clearTimeout(this.stale);
+    this.stale = undefined;
+    this.segments.release();
+  }
 
   /**
    * Parse and dispatch an ElevenLabs WebSocket message.
@@ -412,8 +448,12 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
       this.segments.frame(chunk);
     }
 
-    // The generation is complete: the held frame goes out with the segment's boundary.
-    if (msg.isFinal) this.segments.completed();
+    // The generation is complete: the held frame goes out with the segment's boundary. The late isFinal of a segment
+    // that timed out completes nothing: it ends the wait of the next segment, which opens its socket.
+    if (msg.isFinal) {
+      if (this.stale !== undefined) this.release();
+      else this.segments.completed();
+    }
   }
 }
 
