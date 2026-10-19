@@ -30,6 +30,7 @@ import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { cheapestPricedChatModel } from './billing-probe-model.js';
 
 /**
  * Configuration specific to the OpenRouterProvider.
@@ -445,7 +446,7 @@ export class OpenRouterProvider implements IProvider {
     const keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
       ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openrouter')),
-      probe: (key) => this.probeKey(key),
+      probe: (key, kind) => this.probeKey(key, kind),
     });
     // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
     // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
@@ -1701,15 +1702,54 @@ export class OpenRouterProvider implements IProvider {
     throw lastError ?? new OpenRouterProviderError('OpenRouter request failed.', 'API_REQUEST_FAILED');
   }
 
-  /** Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. */
-  private async probeKey(apiKey: string): Promise<ProbeResult> {
+  /**
+   * Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. An auth failure is probed
+   * with `GET /key`, the documented read of the calling key (https://openrouter.ai/docs/api-reference/limits). A
+   * billing failure is probed with the smallest billable completion, since that read reports the credit left rather
+   * than refusing for its lack: on the default model, else on the cheapest chat model the catalog lists with a
+   * price, never a free one, which need not refuse an account without credit (the same page names a negative
+   * balance, not an empty one, as what refuses free models). A
+   * provider that started without its catalog (every key was out) lists it with the probing key first and keeps it;
+   * with no priced model to send, the probe has no verdict and the key stays out. Every answer goes through the same
+   * classifier as a request's.
+   */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
-    try {
-      const response = await fetch(`${this.config.baseURL}/auth/key`, { method: 'GET', headers: { Authorization: `Bearer ${apiKey}` }, signal: controller.signal });
+    const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+    const verdict = async (response: Response): Promise<ProbeResult> => {
       if (response.ok) return 'ok';
       const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
       return classifyKeyFailure(response.status, text) ?? 'unknown';
+    };
+    try {
+      if (kind !== 'billing') {
+        return await verdict(await fetch(`${this.config.baseURL}/key`, { method: 'GET', headers, signal: controller.signal }));
+      }
+      let model = this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
+      if (!model && this.availableModelsCache.size === 0) {
+        const listed = await fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
+        if (!listed.ok) return await verdict(listed);
+        const body = (await listed.json().catch(() => ({}))) as Partial<OpenRouterListModelsAPIResponse>;
+        if (Array.isArray(body.data) && this.availableModelsCache.size === 0) {
+          for (const apiModel of body.data) {
+            const modelInfo = this.mapApiToModelInfo(apiModel);
+            this.availableModelsCache.set(modelInfo.modelId, modelInfo);
+          }
+        }
+        model = cheapestPricedChatModel(this.availableModelsCache.values());
+      }
+      if (!model) return 'unknown';
+      return await verdict(
+        await fetch(`${this.config.baseURL}/chat/completions`, {
+          method: 'POST',
+          headers,
+          // 16: OpenRouter's chat reference notes that some providers enforce a minimum of 16 for max_tokens
+          // (https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion.md, read 19 October 2026).
+          body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
+          signal: controller.signal,
+        }),
+      );
     } catch {
       return 'unknown';
     } finally {

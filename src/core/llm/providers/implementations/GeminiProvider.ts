@@ -833,7 +833,7 @@ export class GeminiProvider implements IProvider {
     const keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
       ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('gemini')),
-      probe: (key) => this.probeKey(key),
+      probe: (key, kind) => this.probeKey(key, kind),
     });
     // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
     // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
@@ -1955,12 +1955,26 @@ export class GeminiProvider implements IProvider {
     return this.keyPool?.hasKeys ? this.keyPool.nextAfterProbes(abortSignal) : this.config.apiKey;
   }
 
-  /** Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. */
-  private async probeKey(apiKey: string): Promise<ProbeResult> {
+  /**
+   * Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. An auth failure is probed
+   * with the models list; a billing failure with a one-token generateContent, since a list need not refuse a project
+   * that cannot pay: the request the health check sends, on the same model (the default model, else
+   * `gemini-2.5-flash`), so `checkHealth()` shows when that id stops being served. The answer goes through the same
+   * classifier as a request's.
+   */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const response = await fetch(`${this.config.baseURL}/models?pageSize=1`, { method: 'GET', headers: this.requestHeaders(apiKey), signal: controller.signal });
+      const response =
+        kind === 'billing'
+          ? await fetch(`${this.config.baseURL}/models/${this.defaultModelId || 'gemini-2.5-flash'}:generateContent`, {
+              method: 'POST',
+              headers: this.requestHeaders(apiKey),
+              body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 1 } }),
+              signal: controller.signal,
+            })
+          : await fetch(`${this.config.baseURL}/models?pageSize=1`, { method: 'GET', headers: this.requestHeaders(apiKey), signal: controller.signal });
       if (response.ok) return 'ok';
       const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
       return classifyKeyFailure(response.status, text) ?? 'unknown';

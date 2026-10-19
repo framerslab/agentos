@@ -187,6 +187,36 @@ describe('GeminiProvider key failover', () => {
     expect(keyOf(callsOf()[3])).toBe('key_alpha_0001');
   });
 
+  it('probes a billing failure with a one-token generateContent on the default model, not with the models list', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const p = await provider('key_alpha_0001,key_beta_0002', { keyPool: { strategy: 'ordered', recheckMs: 1000 } });
+    const pool = (p as unknown as {
+      keyPool: { markFailed(key: string, kind: 'billing'): void; recheck(): Promise<void>; snapshot(): Array<Record<string, unknown>> };
+    }).keyPool;
+    // Gemini documents no billing answer of its own; the kind reaches the probe from the pool, as a 402 would put it there.
+    pool.markFailed('key_alpha_0001', 'billing');
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(429, exhausted)).mockResolvedValueOnce(jsonResponse(200, okContent));
+    vi.advanceTimersByTime(1001);
+    await pool.recheck();
+    const probe = callsOf()[0];
+    expect(probe.url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent');
+    expect(probe.init.method).toBe('POST');
+    expect(keyOf(probe)).toBe('key_alpha_0001');
+    expect(JSON.parse(String(probe.init.body))).toMatchObject({ generationConfig: { maxOutputTokens: 1 } });
+    // A throttled probe rests the key for the cooldown instead of keeping it out.
+    expect(pool.snapshot()[0]).toMatchObject({ status: 'resting', kind: 'quota' });
+
+    pool.markFailed('key_alpha_0001', 'billing');
+    vi.advanceTimersByTime(2001);
+    await pool.recheck();
+    expect(callsOf()).toHaveLength(2);
+    expect(callsOf()[1].url).toContain(':generateContent');
+    expect(pool.snapshot()[0]).toMatchObject({ status: 'ok', failures: 0 });
+    await p.shutdown();
+  });
+
   it("keeps the first version's behaviour for a single key: the invalid-key 400 throws at once as a client error", async () => {
     const p = await provider('key_only_0001');
     fetchMock.mockResolvedValueOnce(jsonResponse(400, invalidKey));

@@ -26,6 +26,7 @@ import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } 
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { cheapestPricedChatModel } from './billing-probe-model.js';
 
 /**
  * Configuration specific to the RequestyProvider.
@@ -193,7 +194,7 @@ export class RequestyProvider implements IProvider {
     const keyPool = new ApiKeyPool(config.apiKey, {
       ...(config.keyPool ?? {}),
       ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('requesty')),
-      probe: (key) => this.probeKey(key),
+      probe: (key, kind) => this.probeKey(key, kind),
     });
     // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
     // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
@@ -861,15 +862,51 @@ export class RequestyProvider implements IProvider {
     return this.config.apiKey;
   }
 
-  /** Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. */
-  private async probeKey(apiKey: string): Promise<ProbeResult> {
+  /**
+   * Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. An auth failure is probed
+   * with the models list, which rejects a revoked key with 403 "Invalid authorization token". A billing failure is
+   * probed with the smallest billable completion, since a list need not refuse a key whose balance is spent: on the
+   * default model, else on the cheapest chat model the catalog lists with a price, never a free one. A provider that
+   * started without its catalog (every key was out) lists it with the probing key first and keeps it; with no priced
+   * model to send, the probe has no verdict and the key stays out. Every answer goes through the same classifier as
+   * a request's.
+   */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
-    try {
-      const response = await fetch(`${this.config.baseURL}/models`, { method: 'GET', headers: { Authorization: `Bearer ${apiKey}` }, signal: controller.signal });
+    const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+    const verdict = async (response: Response): Promise<ProbeResult> => {
       if (response.ok) return 'ok';
       const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
       return classifyKeyFailure(response.status, text) ?? 'unknown';
+    };
+    try {
+      const listModels = () => fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
+      if (kind !== 'billing') return await verdict(await listModels());
+      let model = this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
+      if (!model && this.availableModelsCache.size === 0) {
+        const listed = await listModels();
+        if (!listed.ok) return await verdict(listed);
+        const body = (await listed.json().catch(() => ({}))) as Partial<RequestyListModelsAPIResponse>;
+        if (Array.isArray(body.data) && this.availableModelsCache.size === 0) {
+          for (const apiModel of body.data) {
+            const modelInfo = this.mapApiToModelInfo(apiModel);
+            this.availableModelsCache.set(modelInfo.modelId, modelInfo);
+          }
+        }
+        model = cheapestPricedChatModel(this.availableModelsCache.values());
+      }
+      if (!model) return 'unknown';
+      return await verdict(
+        await fetch(`${this.config.baseURL}/chat/completions`, {
+          method: 'POST',
+          headers,
+          // 16: the router hands max_tokens to the model's own provider, and some providers enforce a minimum of 16
+          // (OpenRouter's chat reference says so of the providers it routes to; Requesty's names no floor).
+          body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
+          signal: controller.signal,
+        }),
+      );
     } catch {
       return 'unknown';
     } finally {
