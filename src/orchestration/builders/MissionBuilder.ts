@@ -302,8 +302,7 @@ export class MissionBuilder {
    * Required fields: `input`, `goal`, `returns`, `planner`.
    * Throws with a descriptive message if any required field is missing.
    *
-   * @param options                - Optional compilation overrides.
-   * @param options.checkpointStore - Custom checkpoint store; defaults to `InMemoryCheckpointStore`.
+   * @param options - Optional compilation overrides.
    * @returns A `CompiledMission` ready to `invoke()`, `stream()`, or `explain()`.
    * @throws {Error} When required builder fields are missing.
    */
