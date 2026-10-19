@@ -786,8 +786,9 @@ describe('VoicePipelineOrchestrator', () => {
       endpoint.emit('turn_complete', makeTurnComplete());
       await vi.advanceTimersByTimeAsync(0);
 
+      // Both rejections are written, each by its type: a listener's own error can quote the event it was handed.
       expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
-        expect.stringMatching(/the turn_complete listener rejected.*the error listener rejected/),
+        "[voice-pipeline-orchestrator] a turn_complete listener failed: Error (an 'error' listener failed: Error)",
       ]);
       expect(unhandled).toEqual([]);
     } finally {
@@ -2079,14 +2080,73 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(transport.close).toHaveBeenCalledWith(1000, 'done');
   });
 
-  it("creates the speech a host says through pushToTTS, with source 'say', without a call profile", async () => {
+  it('sends nothing after session_ended when a listener of the move to speaking stops the session', async () => {
     await start();
+    orchestrator.on('state_changed', ({ to }: { from: string; to: string }) => {
+      if (to === 'speaking') void orchestrator.stopSession('time_limit');
+    });
+
+    await takeTurn();
+
+    // session_ended is the last message before the transport closes: the reply's agent_speaking does not follow it.
+    expect(vi.mocked(transport.sendControl).mock.calls.map(([message]) => message.type)).toEqual(['session_started', 'agent_thinking', 'session_ended']);
+    expect(orchestrator.state).toBe('closed');
+  });
+
+  it("sends the client none of the host's configuration but the fields VoicePipelineConfig declares", async () => {
+    // A host's configuration object that carries a setting of the host's own, which the type does not declare.
+    orchestrator = new VoicePipelineOrchestrator({ ...makeConfig({ language: 'en' }), deepgramKey: 'not-a-real-key' } as VoicePipelineConfig);
+    const session = await start();
+
+    expect(transport.sendControl).toHaveBeenCalledWith({
+      type: 'session_started',
+      sessionId: session.sessionId,
+      config: { stt: 'mock-stt', tts: 'mock-tts', maxTurnDurationMs: 30_000, language: 'en' },
+    });
+  });
+
+  it('leaves no timer behind when a listener of the return to listening stops the session', async () => {
+    const session = await start();
+    // The host hangs up once the agent's reply has played and the agent listens again.
+    session.on('agent_state_changed', ({ newState }) => {
+      if (newState === 'listening') void session.close('bye');
+    });
+
+    await takeTurn();
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(orchestrator.state).toBe('closed');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("creates the speech a host says through pushToTTS while a reply speaks, with source 'say', without a call profile", async () => {
+    await start();
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
     const created: { source: string; userInitiated: boolean }[] = [];
     orchestrator.on('speech_created', (event) => created.push({ source: event.source, userInitiated: event.userInitiated }));
-    await orchestrator.pushToTTS('Thanks for calling.');
-    expect(ttsSession.pushTokens).toHaveBeenCalledWith('Thanks for calling.');
-    expect(ttsSession.flush).toHaveBeenCalledOnce();
+    await orchestrator.pushToTTS('One moment.');
+    expect(ttsSession.pushTokens).toHaveBeenLastCalledWith('One moment.');
     expect(created).toEqual([{ source: 'say', userInitiated: true }]);
+  });
+
+  it('creates no speech for a prompt pushed while the session listens, whose audio does not reach the transport', async () => {
+    await start();
+    const created: string[] = [];
+    orchestrator.on('speech_created', ({ source }: VoiceSessionEventMap['speech_created']) => created.push(source));
+    // The TTS session synthesizes the prompt, and its audio comes while the session listens.
+    vi.mocked(ttsSession.flush).mockImplementationOnce(async () => {
+      ttsSession.emit('audio', makeAudioChunk());
+      ttsSession.emit('flush_complete');
+    });
+
+    await orchestrator.pushToTTS('Thanks for calling.');
+
+    expect(ttsSession.pushTokens).toHaveBeenCalledWith('Thanks for calling.');
+    expect(transport.sendAudio).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
+    expect(orchestrator.state).toBe('listening');
   });
 
   it('sends no session_ended to a transport that closed itself', async () => {
@@ -2212,6 +2272,134 @@ describe('VoicePipelineOrchestrator session events', () => {
 
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])('refuses a userAwayTimeoutMs of %s', (userAwayTimeoutMs) => {
     expect(() => new VoicePipelineOrchestrator(makeConfig({ userAwayTimeoutMs }))).toThrow(RangeError);
+  });
+
+  it('closes the transport at once when its session_ended send throws', async () => {
+    await start();
+    const failures: unknown[] = [];
+    orchestrator.on('error', (error: unknown) => failures.push(error));
+    const gone = new Error('the socket is gone');
+    vi.mocked(transport.sendControl).mockImplementationOnce(() => {
+      throw gone;
+    });
+
+    const stopping = orchestrator.stopSession('done');
+    // The send has failed already: nothing is left to wait for, and no timer is left behind.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.close).toHaveBeenCalledWith(1000, 'done');
+    await stopping;
+    expect(failures).toEqual([gone]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('hands the deprecated turn_complete to no listener after one of them stops the session', async () => {
+    const session = await start();
+    const heard: string[] = [];
+    orchestrator.on('turn_complete', () => {
+      heard.push('the listener that stops');
+      void orchestrator.stopSession('bye');
+    });
+    orchestrator.on('turn_complete', () => heard.push('a later orchestrator listener'));
+    session.on('turn_complete', () => heard.push('a session listener'));
+    session.on('close', () => heard.push('close'));
+
+    await takeTurn();
+
+    expect(heard).toEqual(['the listener that stops', 'close']);
+    expect(orchestrator.state).toBe('closed');
+  });
+
+  it("writes a session event listener's failure as a console warning by its type, never by what its error quotes", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await start();
+      // A listener whose own error quotes the transcript it was handed.
+      session.on('user_input_transcribed', ({ transcript }) => {
+        throw new Error(`could not read ${transcript}`);
+      });
+
+      // Nothing listens for 'error': the warning names the event and the error's type, and nothing that was said.
+      sttSession.emit('transcript', { text: 'Hello there', confidence: 0.9, words: [], isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual(['[voice-pipeline-orchestrator] a user_input_transcribed listener failed: Error']);
+
+      // An 'error' listener gets the listener's own Error, the host's to read.
+      const errors: Error[] = [];
+      orchestrator.on('error', (error: Error) => errors.push(error));
+      sttSession.emit('transcript', { text: 'Hello again', confidence: 0.9, words: [], isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(errors.map((error) => error.message)).toEqual(['could not read Hello again']);
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("names a failed listener's error by a fixed label, though the listener set the error's name to what it was handed", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await start();
+      // A listener that names its error after the transcript, a built-in error type and a plain Error.
+      session.on('user_input_transcribed', ({ transcript }) => {
+        const error = transcript.startsWith('Hello') ? new TypeError('could not read it') : new Error('could not read it');
+        error.name = transcript;
+        throw error;
+      });
+
+      sttSession.emit('transcript', { text: 'Hello there', confidence: 0.9, words: [], isFinal: true });
+      sttSession.emit('transcript', { text: 'Book a table', confidence: 0.9, words: [], isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(warn.mock.calls.map((args) => args.join(' '))).toEqual([
+        '[voice-pipeline-orchestrator] a user_input_transcribed listener failed: TypeError',
+        '[voice-pipeline-orchestrator] a user_input_transcribed listener failed: Error',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("drops what a cut reply's agent stream yields after the next reply has started speaking", async () => {
+    // An agent with no abort(): the cut reply's stream goes on until it ends by itself, as a slow tool call can hold it.
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const replies = [
+      (async function* () {
+        await firstHeld;
+        yield 'stale';
+      })(),
+      (async function* () {
+        yield 'Booked.';
+      })(),
+    ];
+    agentSession = { sendText: vi.fn(() => replies.shift()!) };
+    const session = await start(createMockBargeinHandler({ type: 'cancel' }));
+    const created: string[] = [];
+    session.on('speech_created', ({ source }) => created.push(source));
+
+    // The first reply has no word yet when the user's speech cuts it.
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+    sttSession.emit('speech_end');
+
+    // The next turn's reply speaks its word; then the cut reply's stream yields one.
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    releaseFirst();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The cut reply's word reaches neither the TTS session nor the reply speaking, and does not end it early.
+    expect(vi.mocked(ttsSession.pushTokens).mock.calls).toEqual([['Booked.']]);
+    expect(ttsSession.flush).toHaveBeenCalledOnce();
+    expect(created).toEqual(['reply']);
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'Booked.', durationMs: 0 });
   });
 });
 
@@ -2371,5 +2559,21 @@ describe('VoicePipelineOrchestrator: the floor until playout', () => {
 
   it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])('refuses a maxPlayoutWaitMs of %s', (maxPlayoutWaitMs) => {
     expect(() => new VoicePipelineOrchestrator(makeConfig({ maxPlayoutWaitMs }))).toThrow(RangeError);
+  });
+
+  it('adds a reply whose playout wait failed to the conversation as interrupted, with none of it known heard', async () => {
+    // A LiveKit track that stalls discards what it had not played, and its wait rejects with publisher drain timeout.
+    (transport as any).waitForPlayout = vi.fn((_signal?: AbortSignal) => Promise.reject(new Error('publisher drain timeout')));
+    const session = await start();
+    const log = recordSessionEvents(session);
+
+    await reply();
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The reply ends as before: agent_done goes out and the session listens again.
+    expect(orchestrator.state).toBe('listening');
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'Hello world', durationMs: 0 });
+    expect(log.slice(-2)).toEqual(['item assistant interrupted Hello world|', 'agent speaking>listening']);
   });
 });
