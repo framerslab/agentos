@@ -1563,6 +1563,24 @@ describe('22-23. rotation, copies, retries, empty text', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     }
   });
+  it("parallel and debate call no synthesizer when every seat is a nested agency whose own seats were all rejected: such a seat gave no answer, as a rejected one, so text is '' and the parent asks no model", async () => {
+    for (const strategy of ['parallel', 'debate']) {
+      fetchMock.mockClear();
+      // A synthesizer that ran over the nested agencies' empty texts would be answered, and its text would be the result's.
+      route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('a synthesis of no answer')]]);
+      const nested = () => agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { only: { instructions: 'x' } }, strategy: 'sequential', hitl: { approvals: { beforeAgent: ['only'] }, handler: hitl.autoReject('no') } } as never);
+      const lines = await logLines(async () => {
+        const r = (await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, agents: { a: nested(), b: nested() }, strategy, maxRounds: 1 } as never).generate('go')) as AgencyResult;
+        expect(r.text).toBe('');
+        expect(r.agentCalls).toEqual([]);
+      });
+      // Each nested agency writes its own line; the parent writes one more, naming its two seats.
+      expect(lines.filter((l) => l.meta?.event === 'agency_no_seat_answered' && l.meta?.strategy === strategy)).toEqual([
+        { level: 'info', message: expect.any(String), meta: { event: 'agency_no_seat_answered', agency: '__agency__', strategy, seats: 2 } },
+      ]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  });
   it("a pooled parallel agency logs a failed pre-built seat through the host's logger with its message masked, and writes it to no console", async () => {
     vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
