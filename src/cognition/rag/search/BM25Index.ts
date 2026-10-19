@@ -112,8 +112,6 @@ export class BM25Index extends LexicalIndex {
    * Creates a new BM25 index.
    *
    * @param {BM25Config} [config] - Optional BM25 tuning parameters and tokenizer.
-   * @param {number} [config.k1=1.2] - Term saturation parameter.
-   * @param {number} [config.b=0.75] - Document length normalization.
    *
    * @example
    * ```typescript
