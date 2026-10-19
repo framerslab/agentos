@@ -526,6 +526,21 @@ function toolsInclude(tools: unknown, name: string): boolean {
 }
 
 /**
+ * True when a wire `tool_choice` makes the model call the schema tool `name`:
+ * a choice that names it, or `any` when the schema tool is the one tool the
+ * request offers. `passthroughTools` is a passthrough `tools` array, or
+ * undefined when the provider sends the schema tool alone.
+ */
+function toolChoiceForcesSchemaTool(toolChoice: unknown, passthroughTools: unknown, name: string): boolean {
+  if (!toolChoice || typeof toolChoice !== 'object') return false;
+  const choice = toolChoice as { type?: unknown; name?: unknown };
+  if (choice.type === 'tool') return choice.name === name;
+  if (choice.type !== 'any') return false;
+  if (passthroughTools === undefined) return true;
+  return Array.isArray(passthroughTools) && passthroughTools.length === 1 && toolsInclude(passthroughTools, name);
+}
+
+/**
  * Removes a passthrough `output_config.format`, keeping the rest of
  * `output_config`, for a request whose messages enable citations: the format
  * and citations together answer 400.
@@ -1857,8 +1872,9 @@ export class AnthropicProvider implements IProvider {
     //                on every model with strict tool use, and beside citations,
     //                which refuse structured outputs, the tool goes out plain.
     //                Never clamped: a payload that turns thinking on takes the
-    //                prompt instead, and so does a passthrough `tools` that
-    //                replaces the tool.
+    //                prompt instead, and so do a passthrough `tools` that
+    //                replaces the tool and a passthrough `tool_choice` that
+    //                does not force it.
     //   none         Neither carries the schema. The schema goes into the
     //                prompt itself, as a system block after the caller's, with
     //                one warning per model and reason, so a direct caller still
@@ -1953,6 +1969,18 @@ export class AnthropicProvider implements IProvider {
         schemaRoute = 'none';
         promptOnlyReason = 'a passthrough tools array replaces the schema tool';
       }
+      if (
+        schemaRoute === 'forced_tool' &&
+        customToolChoiceOverride &&
+        !toolChoiceForcesSchemaTool(payload.tool_choice, customToolsOverride ? payload.tools : undefined, schemaMarker.name)
+      ) {
+        // A passthrough `tool_choice` keeps precedence too; one that does not
+        // force the schema tool (`auto`, `none`, another tool's name) leaves
+        // the call to the model, which may answer in prose, so the schema
+        // rides the prompt rather than a tool the model need not call.
+        schemaRoute = 'none';
+        promptOnlyReason = 'a passthrough tool_choice does not force the schema tool';
+      }
       schemaRouteOfPayload.set(payload, schemaRoute);
 
       if (schemaRoute === 'json_schema') {
@@ -1995,6 +2023,16 @@ export class AnthropicProvider implements IProvider {
           `[agentos] AnthropicProvider: structured output for '${schemaMarker.name}' on model ${wireModelId} rides the ` +
             `prompt alone: ${reason}. The schema was added to the system prompt; the caller's schema validates the answer.`,
         );
+      }
+      if (
+        schemaRoute !== 'forced_tool' &&
+        payload.tool_choice !== undefined &&
+        !(Array.isArray(payload.tools) && payload.tools.length > 0)
+      ) {
+        // The format and prompt routes send no schema tool, so a passthrough
+        // tool_choice can be left with no tool on the wire; a choice with
+        // nothing to choose from says nothing, and it goes.
+        delete payload.tool_choice;
       }
     }
 
@@ -2607,6 +2645,8 @@ export class AnthropicProvider implements IProvider {
     // json_schema response for callers that read result.text directly, and
     // the block leaves the tool calls: a tool loop (generateText's) would
     // otherwise run it as a tool it does not have and ask the model again.
+    // A call the output limit stopped keeps the `length` stop below, so
+    // generateObject raises the budget when its JSON does not validate.
     const schemaToolBlock = structuredOutputName
       ? apiResponse.content.find(
           b => b.type === 'tool_use' && b.name === structuredOutputName && b.input !== undefined,

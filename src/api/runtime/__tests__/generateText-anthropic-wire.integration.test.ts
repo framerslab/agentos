@@ -84,6 +84,18 @@ function cutToolTurn(model: string, name: string, partialJson: string): Reply {
     ]);
 }
 
+/** A forced tool call to `name` cut off by `max_tokens` before any of its input was written. */
+function inputlessCutToolTurn(model: string, name: string): Reply {
+  return () =>
+    sse([
+      messageStart(model, { input_tokens: 10 }),
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name, input: {} } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: null }, usage: { output_tokens: 1 } },
+      { type: 'message_stop' },
+    ]);
+}
+
 /** A reply cut off by `max_tokens` after writing `text`. */
 function truncatedTurn(model: string, text: string): Reply {
   return () =>
@@ -594,6 +606,27 @@ describe('Structured sends on the GMI runtime through the real provider', () => 
     expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (16)');
     expect((error as ObjectGenerationError).rawText).toBe('{"scores":{"a":');
     expect(postedBodies()).toHaveLength(1);
+    expect(session.messages()).toEqual([]);
+  });
+
+  it('a send whose forced schema tool call on Claude Sonnet 4.6 was cut before its input began rejects naming the cut-off, though the {} the provider builds fits the schema', async () => {
+    route({ 'claude-sonnet-4-6': [inputlessCutToolTurn('claude-sonnet-4-6', 'scores')] });
+    const session = gmiSession('claude-sonnet-4-6', 'forced-cut-empty');
+
+    const error = await rejectionOf(
+      session.send('Score a.', {
+        responseSchema: z.object({ scores: z.record(z.string(), z.number()).optional() }),
+        schemaName: 'scores',
+        maxTokens: 1,
+      }),
+    );
+
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (1)');
+    expect((error as ObjectGenerationError).rawText).toBe('{}');
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].tool_choice).toEqual({ type: 'tool', name: 'scores' });
     expect(session.messages()).toEqual([]);
   });
 });
