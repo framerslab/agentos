@@ -258,4 +258,16 @@ describe('a number a tool returns', () => {
     expect(await streamed.toolCalls).toEqual([{ name: 'pin', args: {}, result: '[redacted]' }]);
     expect(await streamed.usage).toEqual({ totalTokens: 12345678 });
   });
+
+  it("is masked in a tool-call part's arguments too, as the toolCalls promise and generate() mask them, while a count stays a number", async () => {
+    const digits = createErrorMask({ list: ['12345678'] });
+    const caller = {
+      ...seat,
+      stream: () => ({ fullStream: pieces({ type: 'tool-call', toolName: 'pin', args: { pin: 912345678, label: 'x' } }, { type: 'finish', usage: { totalTokens: 12345678 } }) }),
+    } as unknown as Agent;
+    expect(await drain((maskedPrebuilt(caller, digits).stream('go') as unknown as { fullStream: AsyncIterable<unknown> }).fullStream)).toEqual([
+      { type: 'tool-call', toolName: 'pin', args: { pin: '[redacted]', label: 'x' } },
+      { type: 'finish', usage: { totalTokens: 12345678 } },
+    ]);
+  });
 });
