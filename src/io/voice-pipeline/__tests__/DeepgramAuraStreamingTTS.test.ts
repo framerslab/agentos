@@ -409,4 +409,87 @@ describe('DeepgramAuraStreamingTTS', () => {
     await flushed;
     expect(flushes).toHaveBeenCalledOnce();
   });
+
+  /** How many Flush messages the session has sent on the socket. */
+  const flushCount = (ws: MockSocket): number => sent(ws).filter((message) => (message as { type: string }).type === 'Flush').length;
+
+  /** Twenty short sentences within a second, each flushed and answered: Deepgram's Flush budget for the minute is spent. */
+  async function spendFlushBudget(session: StreamingTTSSession, ws: MockSocket): Promise<void> {
+    for (let i = 0; i < 20; i++) {
+      session.pushTokens('Go. ');
+      expect(flushCount(ws)).toBe(i + 1);
+      control(ws, { type: 'Flushed', sequence_id: i });
+      await vi.advanceTimersByTimeAsync(50);
+    }
+  }
+
+  it("sends at most twenty Flush messages a minute: a segment past the limit is spoken without one, the segments after it join it, and one Flush at the window's end proves them together", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const chunks = recorded(session);
+    const flushes = vi.fn();
+    session.on('flush_complete', flushes);
+    ws.send.mockClear();
+
+    const first = Date.now();
+    await spendFlushBudget(session, ws);
+    const before = sent(ws).length;
+    // The twenty-first sentence is spoken without a Flush, and the twenty-second, the final segment, joins it.
+    session.pushTokens('Twenty one. ');
+    session.pushTokens('Twenty two');
+    const flushed = session.flush();
+    expect(sent(ws).slice(before)).toEqual([{ type: 'Speak', text: ' Twenty one.' }, { type: 'Speak', text: ' Twenty two' }]);
+    frame(ws, 1);
+    frame(ws, 2);
+    // The joined segment holds its newest frame; the one before goes out without a boundary, the joined text its legacy text.
+    expect(chunks.map((chunk) => chunk.audio[0])).toEqual([1]);
+    expect(chunks[0].textBoundary).toBeUndefined();
+    expect(chunks[0].text).toBe(' Twenty one. Twenty two');
+    // No Flush was asked for, so nothing times out while the window runs.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(chunks).toHaveLength(1);
+    expect(flushCount(ws)).toBe(20);
+    expect(flushes).not.toHaveBeenCalled();
+    // Sixty-one seconds after the first Flush the window has passed: the Flush goes out, and its Flushed proves the
+    // joined segment, whose boundary covers both sentences exactly.
+    await vi.advanceTimersByTimeAsync(first + 61_000 - Date.now() - 1);
+    expect(flushCount(ws)).toBe(20);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(flushCount(ws)).toBe(21);
+    expect(sent(ws)[sent(ws).length - 1]).toEqual({ type: 'Flush' });
+    control(ws, { type: 'Flushed', sequence_id: 20 });
+    expect(chunks).toHaveLength(2);
+    expect(chunks[1].audio[0]).toBe(2);
+    expect(chunks[1].textBoundary).toEqual({ segmentId: expect.any(String), start: 79, end: 102, text: ' Twenty one. Twenty two', final: true });
+    expect(flushes).toHaveBeenCalledOnce();
+    await flushed;
+  });
+
+  it("a cancel while a segment waits for its Flush slot sends Clear, and no Flush follows at the window's end", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const chunks = recorded(session);
+    const flushes = vi.fn();
+    session.on('flush_complete', flushes);
+    ws.send.mockClear();
+
+    await spendFlushBudget(session, ws);
+    session.pushTokens('Twenty one. ');
+    frame(ws, 1);
+    const flushed = session.flush();
+    session.cancel();
+    // The held frame is dropped, Clear goes out, and the flush resolves without flush_complete.
+    expect(chunks).toHaveLength(0);
+    expect(sent(ws)[sent(ws).length - 1]).toEqual({ type: 'Clear' });
+    await flushed;
+    expect(flushes).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(flushCount(ws)).toBe(20);
+    // The window has passed: the next sentence is flushed as before.
+    session.pushTokens('Next one. ');
+    expect(sent(ws).slice(-2)).toEqual([{ type: 'Speak', text: 'Next one.' }, { type: 'Flush' }]);
+    expect(flushCount(ws)).toBe(21);
+  });
 });

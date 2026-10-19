@@ -18,6 +18,8 @@ vi.mock('ws', () => {
     static CLOSED = 3;
     /** Every socket constructed, in order, so a test can read the one a later segment opened. */
     static instances: MockWebSocket[] = [];
+    /** How the next sockets behave: 'open' opens on the next tick; 'hang' never opens, errors or closes. */
+    static behavior: 'open' | 'hang' = 'open';
     readyState = 1;
     send = vi.fn();
     close = vi.fn();
@@ -25,7 +27,7 @@ vi.mock('ws', () => {
     constructor() {
       super();
       MockWebSocket.instances.push(this);
-      process.nextTick(() => this.emit('open'));
+      if (MockWebSocket.behavior === 'open') process.nextTick(() => this.emit('open'));
     }
   }
   return { default: MockWebSocket, WebSocket: MockWebSocket };
@@ -42,8 +44,10 @@ interface MockSocket {
   emit(event: string, ...args: unknown[]): boolean;
 }
 
+/** The mock's class-level controls: the sockets opened so far, in order, and how the next ones behave. */
+const mock = (): { instances: MockSocket[]; behavior: 'open' | 'hang' } => MockedWs as unknown as { instances: MockSocket[]; behavior: 'open' | 'hang' };
 /** The sockets the session has opened so far, in order. */
-const sockets = (): MockSocket[] => (MockedWs as unknown as { instances: MockSocket[] }).instances;
+const sockets = (): MockSocket[] => mock().instances;
 /** The JSON messages the session sent on the socket, in order. */
 const sent = (ws: MockSocket): Array<Record<string, unknown>> => ws.send.mock.calls.map((call) => JSON.parse(call[0] as string));
 /** The messages after the socket's initial one. */
@@ -70,6 +74,7 @@ describe('ElevenLabsStreamingTTS', () => {
 
   beforeEach(() => {
     sockets().length = 0;
+    mock().behavior = 'open';
     tts = new ElevenLabsStreamingTTS({
       apiKey: 'test-key-123',
       voiceId: 'test-voice-id',
@@ -406,5 +411,54 @@ describe('ElevenLabsStreamingTTS', () => {
     expect(closes).toHaveBeenCalledOnce();
     first.emit('close');
     expect(closes).toHaveBeenCalledOnce();
+  });
+
+  it('rejects startSession when the socket does not open within eight seconds', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    mock().behavior = 'hang';
+    const starting = tts.startSession();
+    const rejected = expect(starting).rejects.toThrow('elevenlabs ws connect timed out after 8000ms');
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(sockets()[0].close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    // The socket that never opened is closed, so it does not linger.
+    expect(sockets()[0].close).toHaveBeenCalledOnce();
+  });
+
+  it("ends a segment whose new socket does not open within eight seconds without a boundary, reports the error, and goes on", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const session = await tts.startSession();
+    const [first] = sockets();
+    const chunks = recorded(session);
+    const errors = vi.fn();
+    session.on('error', errors);
+    const closes = vi.fn();
+    session.on('close', closes);
+
+    session.pushTokens('One. Two. ');
+    audio(first, 1);
+    // The second segment's socket never opens; its five-second wait for isFinal has not begun, since no end-of-stream
+    // message was sent.
+    mock().behavior = 'hang';
+    final(first);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].textBoundary).toEqual({ segmentId: expect.any(String), start: 0, end: 4, text: 'One.', final: true });
+    expect(sockets()).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(errors).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    // The open is given up: the segment ends without a boundary, the error reaches the listener, the session stays open.
+    expect(errors).toHaveBeenCalledOnce();
+    expect((errors.mock.calls[0][0] as Error).message).toBe('elevenlabs ws connect timed out after 8000ms');
+    expect(sockets()[1].close).toHaveBeenCalledOnce();
+    expect(chunks).toHaveLength(1);
+    expect(closes).not.toHaveBeenCalled();
+    // The next segment opens a socket of its own.
+    mock().behavior = 'open';
+    session.pushTokens('Three. ');
+    await opened();
+    expect(sockets()).toHaveLength(3);
+    expect(texts(sockets()[2])).toEqual([{ text: 'Three.' }, { text: '' }]);
   });
 });
