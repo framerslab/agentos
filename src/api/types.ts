@@ -998,10 +998,12 @@ export type AgencyTraceEvent =
 
 /**
  * Event callbacks registered on `BaseAgentConfig.on`. Each returns `void`.
- * Most are called directly, so an error thrown inside one propagates into
- * the run: an `agentStart` callback that throws ends the call with its
- * error. The callbacks of a `beforeTool` approval and the `guardrailResult`
- * calls catch the error and log a warning instead.
+ * An agency runs every one inside a try/catch, whichever part of a run fires
+ * it (the agency, its strategy, a tool approval or a HITL check): a callback
+ * that throws is written through the host's logger as
+ * `agency_callback_threw` (in an agency with a pool or a panel, with every
+ * key the agency can send masked in its message), and never fails the call
+ * or changes what it returns.
  */
 export interface AgencyCallbacks {
   /** Called immediately before an agent starts. */

@@ -74,6 +74,7 @@ import { lazyLogger } from './runtime/lazyLogger.js';
 import type {
   AgencyOptions,
   Agent,
+  AgencyCallbacks,
   BaseAgentConfig,
   CompiledStrategy,
   ResourceControls,
@@ -115,6 +116,40 @@ import type { RawData, WebSocket } from 'ws';
 
 /** The agency's own lines, to the host's logger factory whenever the host set it. */
 const agencyLogger = lazyLogger('agency');
+
+/** Every callback an agency fires, by name: a callback added to {@link AgencyCallbacks} must be listed here. */
+const CALLBACK_NAMES: Record<keyof AgencyCallbacks, true> = {
+  agentStart: true,
+  agentEnd: true,
+  handoff: true,
+  toolCall: true,
+  error: true,
+  emergentForge: true,
+  guardrailResult: true,
+  limitReached: true,
+  approvalRequested: true,
+  approvalDecided: true,
+  guardrailHitlOverride: true,
+};
+
+/**
+ * The callbacks `on` holds, each run through `fire`, which catches what it
+ * throws. Each is read by name, so a method an instance inherits is wrapped
+ * as an own one is, and a name `on` does not hold stays absent.
+ *
+ * @param on - The callbacks as the host gave them.
+ * @param fire - Runs one callback and writes what it throws to the host's logger.
+ * @returns The same callbacks, none of which throws.
+ */
+function guardedCallbacks(on: AgencyCallbacks, fire: (name: string, call: () => void) => void): AgencyCallbacks {
+  const out: Record<string, unknown> = { ...on };
+  for (const name of Object.keys(CALLBACK_NAMES) as Array<keyof AgencyCallbacks>) {
+    const fn: unknown = on[name];
+    if (typeof fn !== 'function') continue;
+    out[name] = (event: unknown) => fire(name, () => (fn as (event: unknown) => void).call(on, event));
+  }
+  return out as AgencyCallbacks;
+}
 
 // ---------------------------------------------------------------------------
 // Public factory
@@ -193,15 +228,6 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   const pooled = hasPoolSurface(opts, chosenStrategy);
   if (pooled) validatePoolOptions(opts, chosenStrategy);
 
-  // The construction-time compile stays for every agency, over the roster as
-  // written: it reports a graph cycle, a one-seat review-loop and a manager
-  // without a model now, not at the first call. An agency with a pool or a
-  // panel compiles again for every call, over that call's seating.
-  const strategy: CompiledStrategy = compileStrategy(
-    chosenStrategy,
-    opts.agents,
-    opts,
-  );
   const seatingState: SeatingState | undefined = pooled ? createSeatingState(opts, chosenStrategy) : undefined;
 
   // 3. Extract resource controls (may be undefined).
@@ -234,6 +260,13 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       agencyLogger.warn(`${name} callback threw`, { event: 'agency_callback_threw', callback: name, error: maskedMessageOf(err, mask) });
     }
   };
+  // Every callback runs through `fire`, whichever part of a run fires it:
+  // this agency, its strategy, a gate or a HITL check. One that throws is
+  // written to the host's logger with its message through the call's mask,
+  // and never fails the call or changes what it returns. Wrapped before the
+  // trail's and the masks' wrappers below, so the guard holds the host's own
+  // functions alone and those wrappers run whatever the host's callback does.
+  if (opts.on) opts = { ...opts, on: guardedCallbacks(opts.on, fire) };
 
   // 3b. Provenance recorder (in-memory event trail with optional hash chain).
   //     Hooks into opts.on so every callback the runtime fires is also written
@@ -282,6 +315,18 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       },
     };
   }
+
+  // The construction-time compile stays for every agency, over the roster as
+  // written: it reports a graph cycle, a one-seat review-loop and a manager
+  // without a model now, not at the first call. An agency with a pool or a
+  // panel compiles again for every call, over that call's seating. Compiled
+  // after the callbacks are wrapped, so a strategy compiled once, in an
+  // agency without a pool or a panel, fires them guarded and recorded too.
+  const strategy: CompiledStrategy = compileStrategy(
+    chosenStrategy,
+    opts.agents,
+    opts,
+  );
 
   // 4. In-memory session store keyed by session ID.
   const sessions = new Map<string, AgencySession>();
