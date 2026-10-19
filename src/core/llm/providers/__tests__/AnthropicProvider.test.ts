@@ -1495,6 +1495,49 @@ describe('AnthropicProvider', () => {
       expect(result.choices[0].finishReason).toBe('tool_calls');
     });
 
+    it('answers a forced schema call the output limit cut mid-JSON with its raw input and the length stop, in one request; a caller tool cut the same way still fails as an incomplete stream', async () => {
+      // A length stop is what generateObject raises its budget for; an
+      // incomplete-stream error was retried at the same budget, then thrown past it.
+      const cutEvents = (name: string) => [
+        d({ type: 'message_start', message: { ...makeAnthropicResponse(), content: [], stop_reason: null } }),
+        d({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_s', name } }),
+        d({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"scores":{"a":1,"b' } }),
+        d({ type: 'content_block_stop', index: 0 }),
+        d({ type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: null }, usage: { output_tokens: 16 } }),
+        d({ type: 'message_stop' }),
+      ];
+      const sseOf = (events: string[]) =>
+        ({
+          ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+          json: () => Promise.reject(new Error('SSE body, not JSON')),
+          body: createSseStream(events),
+        }) as unknown as Response;
+      const recordSchema = {
+        type: 'object',
+        properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+        required: ['scores'],
+      };
+      fetchMock.mockResolvedValueOnce(sseOf(cutEvents('emit')));
+
+      const result = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Score a and b.' }], {
+        responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: recordSchema } } as never,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(result.schemaRoute).toBe('forced_tool');
+      expect(result.choices[0].message.content).toBe('{"scores":{"a":1,"b');
+      expect(result.choices[0].message.tool_calls).toBeUndefined();
+      expect(result.choices[0].finishReason).toBe('length');
+
+      // A caller's own tool is not the answer: its cut input is still an incomplete response.
+      const single = new AnthropicProvider();
+      await single.initialize({ apiKey: 'test-anthropic-key', maxRetries: 1 });
+      fetchMock.mockResolvedValueOnce(sseOf(cutEvents('lookup')));
+      await expect(
+        single.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Look up a.' }], {}),
+      ).rejects.toMatchObject({ code: 'STREAM_INCOMPLETE' });
+    });
+
     it('sends the JSON output format with the stamped schema, no tool and no tool_choice on claude-opus-4-8', async () => {
       // Every model with Anthropic's structured outputs takes output_config.format
       // (anthropicSchemaRoute 'json_schema'); the forced tool is for the two models

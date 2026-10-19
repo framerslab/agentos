@@ -736,7 +736,12 @@ export class AnthropicProvider implements IProvider {
     // let the caller (or the retry loop below) recover in seconds.
     const payload = this.buildRequestPayload(modelId, messages, options, true);
     const structuredOutputName = forcedSchemaToolName(payload, options);
-    const apiResponse = await this.streamMessagesToResponse(payload, options.requestTimeout, options.abortSignal);
+    const apiResponse = await this.streamMessagesToResponse(
+      payload,
+      options.requestTimeout,
+      options.abortSignal,
+      structuredOutputName,
+    );
     this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
     return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
   }
@@ -798,6 +803,8 @@ export class AnthropicProvider implements IProvider {
    *   extend how long a dead connection can sit silent.
    * @param abortSignal Caller's signal. It aborts the request in flight, its
    *   body read included, and once it has fired no further attempt is sent.
+   * @param schemaToolName The forced schema tool's name when the payload sent
+   *   the schema as that tool ({@link accumulateMessagesStream}).
    * @throws {AnthropicProviderError} `REQUEST_ABORTED` when the caller's signal
    *   ends the request.
    * @private
@@ -806,6 +813,7 @@ export class AnthropicProvider implements IProvider {
     payload: Record<string, unknown>,
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
+    schemaToolName?: string,
   ): Promise<AnthropicMessagesResponse> {
     let lastError: AnthropicProviderError = new AnthropicProviderError(
       'Streaming completion failed after all retries.',
@@ -824,7 +832,7 @@ export class AnthropicProvider implements IProvider {
       const attemptInfo: { apiKey?: string; startedAt?: number } = {};
       try {
         const stream = await this.makeStreamRequest('/v1/messages', payload, requestTimeoutOverride, abortSignal, attemptInfo);
-        const accumulated = await this.accumulateMessagesStream(stream);
+        const accumulated = await this.accumulateMessagesStream(stream, schemaToolName);
         if (attemptInfo.apiKey) this.keyPool?.markSuccess(attemptInfo.apiKey, attemptInfo.startedAt);
         return accumulated;
       } catch (error: unknown) {
@@ -924,14 +932,25 @@ export class AnthropicProvider implements IProvider {
    * {@link mapResponseToCompletion} raises it as a content-policy error, and
    * a transport error here would be retried instead.
    *
+   * A forced schema tool call whose input an output limit cut off
+   * (`max_tokens`, or the context window) returns normally too: its raw
+   * input becomes a text block, so {@link mapResponseToCompletion} reports
+   * the cut text with finish reason `length`, the answer generateObject
+   * raises its budget for, where a transport error would be retried at the
+   * same budget and then thrown past the escalation.
+   *
+   * @param schemaToolName The forced schema tool's name when the request sent
+   *   the schema as that tool; a cut call of any other name still throws.
    * @throws {AnthropicProviderError} `STREAM_ERROR_EVENT` on an SSE error
    *   event, `STREAM_INCOMPLETE` when the stream ends before `message_delta`
-   *   or a tool_use input JSON is truncated, plus whatever
-   *   {@link parseSseStream} throws (`STREAM_IDLE_TIMEOUT`, parse errors).
+   *   or a tool_use input JSON is truncated (other than the schema call's at
+   *   an output limit), plus whatever {@link parseSseStream} throws
+   *   (`STREAM_IDLE_TIMEOUT`, parse errors).
    * @private
    */
   private async accumulateMessagesStream(
     stream: ReadableStream<Uint8Array>,
+    schemaToolName?: string,
   ): Promise<AnthropicMessagesResponse> {
     type AccumBlock = {
       type: 'text' | 'tool_use' | 'thinking' | 'redacted_thinking';
@@ -1058,6 +1077,16 @@ export class AnthropicProvider implements IProvider {
           try {
             input = block.argsJson ? (JSON.parse(block.argsJson) as Record<string, unknown>) : {};
           } catch {
+            if (
+              schemaToolName !== undefined &&
+              block.name === schemaToolName &&
+              (stopReason === 'max_tokens' || stopReason === 'model_context_window_exceeded')
+            ) {
+              // The answer stopped at an output limit while its JSON was still
+              // being written: the turn ended there, the stream did not drop.
+              // The raw input is the answer's text, reported with the stop.
+              return { type: 'text', text: block.argsJson ?? '' };
+            }
             throw new AnthropicProviderError(
               `Tool input JSON for "${block.name}" truncated mid-stream — response incomplete.`,
               'STREAM_INCOMPLETE',
@@ -2646,7 +2675,9 @@ export class AnthropicProvider implements IProvider {
     // the block leaves the tool calls: a tool loop (generateText's) would
     // otherwise run it as a tool it does not have and ask the model again.
     // A call the output limit stopped keeps the `length` stop below, so
-    // generateObject raises the budget when its JSON does not validate.
+    // generateObject raises the budget when its JSON does not parse or
+    // validate; one cut mid-JSON arrives here as a text block holding its raw
+    // input (accumulateMessagesStream), which is then the answer's text.
     const schemaToolBlock = structuredOutputName
       ? apiResponse.content.find(
           b => b.type === 'tool_use' && b.name === structuredOutputName && b.input !== undefined,
