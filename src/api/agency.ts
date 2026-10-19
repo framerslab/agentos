@@ -285,14 +285,17 @@ export function agency(opts: AgencyOptions): AgencyInstance {
   //     call's list before the trail and the caller's handler read them, for
   //     the beforeAgent, beforeTool and beforeReturn approvals alike; the
   //     replacement a beforeReturn approval carries is masked where it is
-  //     returned, in finalizeExecutionResult.
+  //     returned, in finalizeExecutionResult. A decision holds no count of
+  //     the library's: its numbers are the approver's (`modifications.toolArgs`),
+  //     so one whose digits hold a listed value is masked as in what a tool
+  //     returns.
   if (pooled && opts.on?.approvalDecided) {
     const on = opts.on;
     opts = {
       ...opts,
       on: {
         ...on,
-        approvalDecided: (decision: ApprovalDecision) => on.approvalDecided?.(mask.strings(decision)),
+        approvalDecided: (decision: ApprovalDecision) => on.approvalDecided?.(mask.strings(decision, true)),
       },
     };
   }

@@ -411,10 +411,11 @@ config, a default or the environment; a comma-separated key pool part by part;
 a pre-built seat's own key, URL and hops, a nested agency's level, pool, seats
 and chair included) is replaced with `[redacted]` in the result's text,
 `agentCalls` (outputs, tool arguments and results, an Error a tool returned
-as its output included), `toolCalls`, `transcriptDelta`, seat records, thrown
+as its output included, and a class instance it returned held as its JSON,
+masked, as the tool turn carried it), `toolCalls`, `transcriptDelta`, seat records, thrown
 errors (message, stack, cause and details), `on.error` and `agentEnd`
 payloads, the provenance trail (an approval decision's reason and
-modifications included), stream parts (a secret split between two text
+modifications, its numbers included), stream parts (a secret split between two text
 chunks, or around a tool call and its result between two steps, is masked
 whole; every other string of a part too), tool errors and tool turns (a tool result that holds a
 credential reaches the seat's next request masked; a successful result is
@@ -423,8 +424,8 @@ credentials as the tool gave them, while a failed tool's text also loses any
 URL credentials and `key=` value; the output is masked as a value before it is
 serialized, so a listed value with a quote or a backslash, which JSON escaping
 would change, is masked whole, a number whose digits hold a listed value
-becomes the string `[redacted]` (in a tool's output alone: the library's own
-counts, durations and timestamps stay numbers), the call record and the tool-result part hold
+becomes the string `[redacted]` (in a tool's output and an approval decision
+alone: the library's own counts, durations and timestamps stay numbers), the call record and the tool-result part hold
 the masked output, and the turn the next request carries stays JSON), `onFallback` and the `fallback_fired` and
 `fallback_exhausted` log lines. What a seat answers reaches the next seat, a
 synthesizer, a manager or the chair masked. A pre-built seat's answers and

@@ -491,10 +491,10 @@ export interface CallMask {
   text(text: string): string;
   /**
    * A copy of a record of plain objects and arrays with every string masked as
-   * {@link CallMask.text} masks it. With `numbers`, for what a tool returns, a
-   * number whose digits hold a listed value becomes the string `[redacted]`;
-   * without it every number stays: a usage count, a duration or a timestamp is
-   * the library's own and never a key.
+   * {@link CallMask.text} masks it. With `numbers`, for what a tool returns and
+   * an approver's decision, a number whose digits hold a listed value becomes
+   * the string `[redacted]`; without it every number stays: a usage count, a
+   * duration or a timestamp is the library's own and never a key.
    */
   strings<T>(value: T, numbers?: boolean): T;
   /** A {@link ChunkRedactor} for one stream of text. */
@@ -528,13 +528,17 @@ export function createErrorMask(holder: { list: readonly string[] }): CallMask {
  * every number whose digits hold a secret replaced by the string `[redacted]`. An Error inside it from
  * which a secret can be reached (one a tool returned as its output, its
  * message or cause holding a key) is replaced by its masked stand-in
- * ({@link maskedCopyOf}); a clean Error, any other class instance and a typed
- * array come back as they are. Finalization uses it where the tool loops
- * cannot mask: on what a pre-built seat returns.
+ * ({@link maskedCopyOf}); any other class instance from which a secret can
+ * be reached (a class, a URL or a Map a tool returns), and a plain object with
+ * a toJSON of its own whose JSON holds one, is replaced by its JSON,
+ * parsed and masked, the form a provider's turn carries, or by `[redacted]`
+ * when it has no JSON; a clean Error, a clean class instance and a typed array
+ * come back as they are. Finalization uses it where the tool loops cannot
+ * mask: on what a pre-built seat returns.
  *
  * @param value - A record made of plain objects, arrays and strings.
  * @param secrets - The call's redaction list.
- * @param numbers - Whether a number whose digits hold a secret is replaced: for what a tool returns, never for the library's own counts.
+ * @param numbers - Whether a number whose digits hold a secret is replaced: for what a tool returns and an approver's decision, never for the library's own counts.
  * @returns The redacted copy; `value` itself when the list is empty.
  */
 export function redactStrings<T>(value: T, secrets: readonly string[], numbers = false): T {
@@ -550,7 +554,7 @@ export function redactStrings<T>(value: T, secrets: readonly string[], numbers =
  *
  * @param value - A record made of plain objects, arrays and strings.
  * @param secrets - The call's redaction list.
- * @param numbers - Whether a number whose digits hold a secret is replaced: for what a tool returns, never for the library's own counts.
+ * @param numbers - Whether a number whose digits hold a secret is replaced: for what a tool returns and an approver's decision, never for the library's own counts.
  * @returns The masked copy; `value` itself when the list is empty.
  */
 export function maskStrings<T>(value: T, secrets: readonly string[], numbers = false): T {
@@ -560,12 +564,39 @@ export function maskStrings<T>(value: T, secrets: readonly string[], numbers = f
 /**
  * A copy of `value` with every string passed through `redact`, at any depth
  * of plain objects and arrays, with `numbers` every number whose digits hold a
- * secret replaced by the string `[redacted]`, and every Error from which a
- * secret can be reached replaced by its masked stand-in, one copy per Error.
+ * secret replaced by the string `[redacted]`, every Error from which a secret
+ * can be reached replaced by its masked stand-in, one copy per Error, and every
+ * other class instance from which a secret can be reached replaced by its JSON,
+ * masked.
  */
 function copyStrings<T>(value: T, secrets: readonly string[], redact: (text: string) => string, numbers: boolean): T {
   const copies = new WeakMap<object, object>();
   const pending: Array<[source: object, copy: object]> = [];
+  // A class instance other than an Error (a tool's own class, a URL, a Map) is no shell to copy member by member, and
+  // what a provider's turn carries of it is what a serializer writes: its JSON, a toJSON included. An instance from
+  // which a secret can be reached, or whose JSON masked as plain data changes, is replaced by that masked JSON, the
+  // form the provider's turn was sent, so the record never holds more than the turn did; such an instance no
+  // serializer can write (a cycle, a BigInt, a toJSON that throws) is replaced by the string `[redacted]`, and a graph
+  // too large to walk counts as holding a secret. A clean instance and a typed array (its bytes are not read) stay
+  // themselves.
+  const serializedStandIn = (item: object): unknown => {
+    if (ArrayBuffer.isView(item)) return item;
+    let reaches: boolean;
+    try {
+      reaches = containsSecret(item, secrets);
+    } catch {
+      reaches = true;
+    }
+    let text: string | undefined;
+    try {
+      text = JSON.stringify(item);
+    } catch {
+      return reaches ? '[redacted]' : item;
+    }
+    if (text === undefined) return reaches ? '[redacted]' : item;
+    const masked = copyStrings(JSON.parse(text) as unknown, secrets, redact, numbers);
+    return reaches || JSON.stringify(masked) !== text ? masked : item;
+  };
   const copyOf = (item: unknown): unknown => {
     if (typeof item === 'string') return redact(item);
     // With `numbers`, a number whose digits hold a listed value (a tool that returns a numeric key) comes back as
@@ -583,8 +614,15 @@ function copyStrings<T>(value: T, secrets: readonly string[], redact: (text: str
       copies.set(item, stood);
       return stood;
     }
-    const copy = shellOf(item);
-    if (!copy) return item;
+    // A plain object with a toJSON of its own is written by it, as a class instance is, so it is masked as one: a
+    // member-by-member copy would keep the toJSON, and the record would write the secret again when serialized.
+    const copy = typeof read(item, 'toJSON') === 'function' ? undefined : shellOf(item);
+    if (!copy) {
+      // Kept for the next reference to the same instance, a clean one as itself, so each is walked once.
+      const stood = serializedStandIn(item);
+      if (isObject(stood)) copies.set(item, stood);
+      return stood;
+    }
     copies.set(item, copy);
     pending.push([item, copy]);
     return copy;
