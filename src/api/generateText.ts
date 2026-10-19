@@ -2205,6 +2205,14 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       return JSON.stringify(sent);
     }
   };
+  /**
+   * A tool turn's JSON: the output's, else `absent`'s, for an output that is
+   * absent or that JSON leaves out (a function, a symbol, a toJSON that
+   * returns nothing). A tool that succeeded with such an output is sent as one
+   * that returned nothing, never as a failure.
+   */
+  const toolTurnJson = (output: unknown, absent: unknown): string =>
+    (output == null ? undefined : (JSON.stringify(output) as string | undefined)) ?? (JSON.stringify(absent) as string | undefined) ?? '""';
 
   try {
     const successResult: GenerateTextResult = await withAgentOSSpan('agentos.api.generate_text', async (span) => {
@@ -3104,12 +3112,14 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // the listed values alone, so a URL it returns is sent as the
                 // tool gave it; a failed tool's turn takes the error mask, URL
                 // patterns included. A turn a replacement left as no JSON is
-                // sent as a JSON string.
+                // sent as a JSON string, and an output JSON leaves out (a
+                // function, a symbol) as an absent one is, so a tool that
+                // succeeded never reaches the mask as no text and fails there.
                 const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
                 const output = maskToolValue(result.output);
                 record.result = output;
                 record.error = result.success ? undefined: errorText;
-                const turn = JSON.stringify(output ?? errorText ?? '');
+                const turn = toolTurnJson(output, errorText ?? '');
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,

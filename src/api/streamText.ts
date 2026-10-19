@@ -475,6 +475,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         return JSON.stringify(sent);
       }
     };
+    /**
+     * A tool turn's JSON: the output's, else `absent`'s, for an output that
+     * is absent or that JSON leaves out (a function, a symbol, a toJSON that
+     * returns nothing). A tool that succeeded with such an output is sent as
+     * one that returned nothing, never as a failure.
+     */
+    const toolTurnJson = (output: unknown, absent: unknown): string =>
+      (output == null ? undefined : (JSON.stringify(output) as string | undefined)) ?? (JSON.stringify(absent) as string | undefined) ?? '""';
     const startedAt = Date.now();
     const rootSpan = startAgentOSSpan('agentos.api.stream_text');
     const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -1453,12 +1461,16 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // a URL it returns is sent as the tool gave it; a failed tool's
             // turn takes the error mask, URL patterns included. A turn a
             // replacement left as no JSON is sent as a JSON string, and the
-            // part is read back from a turn the text mask changed.
+            // part is read back from a turn the text mask changed. An output
+            // that is absent or that JSON leaves out (a function, a symbol)
+            // is sent as generateText sends it: a successful tool's as the
+            // empty string's JSON, never as an error, a failed one's as its
+            // error.
             const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
             const output = maskToolValue(result.output);
             toolCallRecord.result = output;
             toolCallRecord.error = result.success ? undefined: errorText;
-            const turn = JSON.stringify(output ?? { error: errorText ?? 'Tool execution failed.' });
+            const turn = toolTurnJson(output, result.success ? (errorText ?? '') : { error: errorText ?? 'Tool execution failed.' });
             const sentTurn = asJsonText(result.success ? maskToolOutput(turn) : maskToolText(turn), turn);
             let partResult: unknown = output ?? { error: errorText };
             if (sentTurn !== turn) {

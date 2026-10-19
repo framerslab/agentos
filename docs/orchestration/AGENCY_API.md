@@ -431,7 +431,8 @@ would change, is masked whole, a number whose digits hold a listed value
 becomes the string `[redacted]` (in a tool's output, a pre-built seat's tool
 calls and tool-result parts included, and an approval decision alone: the
 library's own counts, durations and timestamps stay numbers), the call record and the tool-result part hold
-the masked output, and the turn the next request carries stays JSON), `onFallback` and the `fallback_fired` and
+the masked output, and the turn the next request carries stays JSON; an output JSON leaves out, a function or
+a symbol, is sent as an absent one is, and the tool stays a success), `onFallback` and the `fallback_fired` and
 `fallback_exhausted` log lines. What a seat answers reaches the next seat, a
 synthesizer, a manager or the chair masked. A pre-built seat's answers and
 errors are masked as they leave it, a rejected `generate()` included, a frozen

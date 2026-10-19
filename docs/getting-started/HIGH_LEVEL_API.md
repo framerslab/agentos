@@ -142,6 +142,11 @@ Prompt-only `ToolDefinitionForLLM[]` are exposed to the model too, but if the
 model calls one without an executor attached, AgentOS returns an explicit tool
 error instead of silently no-oping.
 
+In the native tool loop of either call, the model's next step receives a tool's
+output as JSON. A tool that succeeds with no output, or with one JSON leaves out
+(a function, a symbol, a `toJSON` that returns nothing), is sent as the empty
+string's JSON (`""`) and recorded as a success.
+
 The same `tools` forms work on `agent({ tools })` and `agency({ tools })`.
 When an agency-level tool set is combined with per-agent tools, AgentOS
 normalizes both sides first and then merges by tool name, with the per-agent
