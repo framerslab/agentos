@@ -1612,8 +1612,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * typed text (`_onClientText`). The turn joins the conversation as the user's item, the pipeline moves to
    * `processing` and the client is sent `agent_thinking`; then the endpoint detector hears that the agent holds the
    * floor, the agent is asked with the turn's `VoiceTurnMetadata`, and its reply speaks: each token goes to the TTS
-   * session, which is flushed once the tokens end. A listener that stops the session ends the turn there.
-   * `agentRequest` settles once the reply's token loop has ended.
+   * session, which is flushed once the tokens end, while the reply is still the one speaking. A listener that stops the
+   * session ends the turn there. `agentRequest` settles once the reply's token loop has ended.
    *
    * @param parts - The session's parts.
    * @param turn - The turn.
@@ -1675,7 +1675,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       } finally {
         requestEnded();
       }
-      if (this.current === 'speaking') await inPartAsync('tts', () => tts.flush());
+      // A reply that was cut, or that another reply replaced while its stream unwound, flushes nothing: the TTS session
+      // it shares holds the reply speaking now, which a flush would end early.
+      if (this.current === 'speaking' && this._currentReply === reply) await inPartAsync('tts', () => tts.flush());
     });
   }
 
