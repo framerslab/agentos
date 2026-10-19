@@ -21,10 +21,11 @@ permissions:
   contents: write
 
 # One build at a time. A run that starts while another is building waits for it
-# to finish instead of cancelling it, and GitHub replaces an older waiting run with
-# the newer one, so a series of merges still ends with the newest commit published.
-# Cancelling the build in progress instead would let merges that land faster than a
-# build takes cancel every build until they stop.
+# to finish instead of cancelling it, and a run that starts waiting replaces the
+# one already waiting, so during a series of merges every build that starts
+# finishes and the last run to start waiting builds next. Cancelling the build in
+# progress instead would let merges that land faster than a build takes cancel
+# every build until they stop.
 concurrency:
   group: "docs"
   cancel-in-progress: false
