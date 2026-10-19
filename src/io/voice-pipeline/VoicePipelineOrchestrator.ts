@@ -1529,7 +1529,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         this.playedMs = 0;
         this._watchSend(() => transport.sendControl({ type: 'agent_speaking', text: '' }));
         for await (const token of fromPart('agent', tokens)) {
-          if (this.current !== 'speaking') break;
+          // A reply a barge-in cut takes no more of its agent's stream, though the next reply speaks by then.
+          if (this.current !== 'speaking' || this._currentReply !== reply) break;
           if (!reply.started) {
             // The reply has its first word: the agent's speech is created, and the agent speaks.
             reply.started = true;
@@ -1540,7 +1541,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
           this.text += token;
           inPart('tts', () => tts.pushTokens(token));
         }
-        if (this.current === 'speaking') await inPartAsync('tts', () => tts.flush());
+        if (this.current === 'speaking' && this._currentReply === reply) await inPartAsync('tts', () => tts.flush());
       });
     });
     const playbackFormat = transport.playbackFormat;
