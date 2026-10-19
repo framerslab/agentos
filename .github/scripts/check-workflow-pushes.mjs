@@ -16,10 +16,16 @@
  *   refs/heads/master), an expression that resolves to it (${{ github.event.repository.default_branch }}, the base
  *   branch, a 'master' fallback, ${BRANCH:-master}), a wildcard destination that matches it, the matching refspec
  *   ":", --all, --branches and --mirror;
+ * - a git push with no refspec that git sends there by its settings, given with git -c or set by an earlier git
+ *   config in the job: push.default=matching (every branch both sides have), push.default=upstream (the branch the
+ *   checked-out one tracks, which this check does not follow, so it is reported whatever it is) and a refspec set
+ *   in remote.<name>.push;
  * - a git push of the checked-out branch (no destination, HEAD) while that branch can be the default branch, and a
  *   push to the run's own branch (${{ github.ref_name }}, $GITHUB_REF) from a workflow that runs on it. A workflow
  *   runs on the default branch unless its triggers keep it off: pull_request, pull_request_review(_comment),
- *   merge_group and release never run on a branch, and push filters are read as GitHub reads them. A step that
+ *   merge_group and release never run on a branch, and push filters are read as GitHub reads them. A pull_request
+ *   trigger whose types include closed runs on the branch a merged pull request went into (GITHUB_REF is that
+ *   branch), so its branches filters are read as a push's are. A step that
  *   checks out a branch (actions/checkout with ref, git checkout, git switch) changes the checked-out branch, and
  *   git switch - or git checkout - (@{-1}, @{-N}) returns to the one checked out before it;
  * - an action that pushes there: peaceiris/actions-gh-pages (publish_branch), JamesIves/github-pages-deploy-action
@@ -36,7 +42,8 @@
  * a printf pipes into a shell, and the substitutions in a ${ } (${CACHE:-$(...)}) and in an unquoted heredoc's body,
  * which run whatever program reads it. A word that is only printed (echo git push ...), a quoted heredoc fed to
  * another program, a comment and a dry run are not pushes. Not read: a branch held in a shell variable, a job's or
- * step's if: condition, a script a shell reads from a file, a variable or a download (curl ... | bash), and a push
+ * step's if: condition, a script a shell reads from a file, a variable or a download (curl ... | bash), a git
+ * setting made through GIT_CONFIG_* variables, a config file or another repository's configuration, and a push
  * made by a script file or by an action not named above.
  *
  * Usage: node .github/scripts/check-workflow-pushes.mjs [--root <dir>] [file ...]
@@ -65,6 +72,8 @@ import { pathToFileURL } from 'node:url';
  * @property {boolean} head whether the checked-out branch can be the default branch
  * @property {boolean[]} prev the same for each branch checked out before it, the newest last: git switch - and
  *   @{-N} return to them
+ * @property {string} pushDefault push.default as git config set it in the job, lowercased; '' when unset
+ * @property {string[]} pushRefspecs the refspecs git config set in remote.<name>.push in the job
  * @property {boolean} pullRequestOnly whether every trigger is pull_request or pull_request_target, the events that
  *   set github.head_ref
  * @property {string} dir the directory run steps start in, relative to the root
@@ -515,7 +524,8 @@ const strings = (value) => (Array.isArray(value) ? value : value == null ? [] : 
 
 /**
  * Whether a push trigger can run on one of the named branches. A trigger with only tags or tags-ignore never runs
- * for a branch push; one with neither branch nor tag filters runs on every branch.
+ * for a branch push; one with neither branch nor tag filters runs on every branch. A pull_request trigger's
+ * branches filters name the base branch, which a merged pull request's closed run is on, and read the same way.
  * @param {unknown} filters
  * @param {Set<string>} names
  */
@@ -596,8 +606,9 @@ function lastColon(spec) {
  * Reports a git push (its arguments after push) that reaches the default branch.
  * @param {string[]} args
  * @param {Step} step
+ * @param {{ pushDefault?: string, pushRefspecs?: string[] }} [given] the settings given with git -c on this command
  */
-function checkPush(args, { state, ctx, report }) {
+function checkPush(args, { state, ctx, report }, given = {}) {
   const command = `git push ${args.map(unhold).join(' ')}`.trim();
   const branch = ctx.branch;
   let dryRun = false;
@@ -645,22 +656,90 @@ function checkPush(args, { state, ctx, report }) {
     if (operands[k] === 'tag') k++;
     else refspecs.push(operands[k]);
   }
+  // With no refspec git pushes the refspecs remote.<name>.push sets, else what push.default names (git-push(1),
+  // git-config(1) push.default); --tags is a refspec of its own, refs/tags/*.
+  let via = '';
   if (refspecs.length === 0) {
-    if (!tags && state.head) report(`"${command}" pushes the checked-out branch, ${branch} on a run on ${branch}`);
-    return;
+    if (tags) return;
+    const configured = [...state.pushRefspecs, ...(given.pushRefspecs ?? [])];
+    const mode = given.pushDefault ?? state.pushDefault;
+    if (configured.length > 0) {
+      refspecs.push(...configured);
+      via = ' (remote.<name>.push)';
+    } else if (mode === 'matching') {
+      report(`"${command}" with push.default=matching pushes every branch the remote also has, ${branch} among them`);
+      return;
+    } else if (mode === 'upstream' || mode === 'tracking') {
+      report(`"${command}" with push.default=${mode} pushes the checked-out branch to the branch it tracks, which can be ${branch}; give the push its destination`);
+      return;
+    } else {
+      // push.default=nothing pushes nothing; current and simple (the default) push the checked-out branch.
+      if (mode !== 'nothing' && state.head) report(`"${command}" pushes the checked-out branch, ${branch} on a run on ${branch}`);
+      return;
+    }
   }
   for (const refspec of refspecs) {
     const spec = refspec.replace(/^\+/, '');
     if (spec === ':') {
-      report(`"${command}" pushes every branch the remote also has, ${branch} among them`);
+      report(`"${command}"${via} pushes every branch the remote also has, ${branch} among them`);
       continue;
     }
     const colon = lastColon(spec);
     const destination = colon < 0 ? spec : colon === spec.length - 1 ? spec.slice(0, colon) : spec.slice(colon + 1);
     const kind = classify(destination, ctx);
-    if (kind === 'protected') report(`"${command}" ${remove || colon === 0 ? 'deletes' : 'pushes to'} ${unhold(destination)}`);
-    else if (kind === 'head' && state.head) report(`"${command}" pushes the checked-out branch, ${branch} on a run on ${branch}`);
-    else if (kind === 'run' && state.run) report(`"${command}" pushes to the run's own branch, ${branch} on a run on ${branch}`);
+    if (kind === 'protected') report(`"${command}"${via} ${remove || colon === 0 ? 'deletes' : 'pushes to'} ${unhold(destination)}`);
+    else if (kind === 'head' && state.head) report(`"${command}"${via} pushes the checked-out branch, ${branch} on a run on ${branch}`);
+    else if (kind === 'run' && state.run) report(`"${command}"${via} pushes to the run's own branch, ${branch} on a run on ${branch}`);
+  }
+}
+
+/**
+ * A git setting that changes what a push with no refspec pushes, from git -c name=value or git config.
+ * @param {string} name
+ * @returns {'default' | 'refspec' | ''}
+ */
+function pushSetting(name) {
+  const key = name.toLowerCase();
+  if (key === 'push.default') return 'default';
+  return /^remote\..+\.push$/.test(key) ? 'refspec' : '';
+}
+
+/**
+ * Follows git config where it sets push.default or remote.<name>.push for the pushes after it in the job.
+ * @param {string[]} args
+ * @param {State} state
+ */
+function gitConfig(args, state) {
+  const valued = new Set(['-f', '--file', '--blob', '--type', '--default', '--comment', '--value']);
+  const reads = /^(?:-l|-e|--list|--edit|--get|--get-all|--get-regexp|--get-urlmatch|--get-color|--get-colorbool|--rename-section|--remove-section)$/;
+  let k = 0;
+  let unset = false;
+  // git config set and unset (git 2.46) name what they change; get, list and edit only read, and the section
+  // subcommands set no value.
+  if (args[0] === 'set') k = 1;
+  else if (args[0] === 'unset') {
+    unset = true;
+    k = 1;
+  } else if (/^(?:get|list|edit|rename-section|remove-section)$/.test(args[0] ?? '')) {
+    return;
+  }
+  /** @type {string[]} */
+  const positional = [];
+  for (; k < args.length; k++) {
+    const a = args[k];
+    if (a === '--unset' || a === '--unset-all') unset = true;
+    else if (reads.test(a)) return;
+    else if (valued.has(a)) k++;
+    else if (!a.startsWith('-')) positional.push(a);
+  }
+  const setting = pushSetting(positional[0] ?? '');
+  if (setting === '') return;
+  if (unset) {
+    if (setting === 'default') state.pushDefault = '';
+    else state.pushRefspecs = [];
+  } else if (positional.length >= 2) {
+    if (setting === 'default') state.pushDefault = positional[1].toLowerCase();
+    else state.pushRefspecs.push(positional[1]);
   }
 }
 
@@ -859,9 +938,22 @@ function checkCommand(words, step, depth) {
     for (const inner of shellCommands(args.join(' '))) checkCommand(inner, step, depth + 1);
   } else if (name === 'git') {
     let k = 0;
-    while (k < args.length && args[k].startsWith('-')) k += GIT_VALUED.has(args[k]) ? 2 : 1;
-    if (args[k] === 'push') checkPush(args.slice(k + 1), step);
+    /** @type {{ pushDefault?: string, pushRefspecs: string[] }} */
+    const given = { pushRefspecs: [] };
+    while (k < args.length && args[k].startsWith('-')) {
+      if (args[k] === '-c' && k + 1 < args.length) {
+        const pair = args[k + 1];
+        const eq = pair.indexOf('=');
+        const setting = pushSetting(eq < 0 ? pair : pair.slice(0, eq));
+        const value = eq < 0 ? '' : pair.slice(eq + 1);
+        if (setting === 'default') given.pushDefault = value.toLowerCase();
+        else if (setting === 'refspec' && value !== '') given.pushRefspecs.push(value);
+      }
+      k += GIT_VALUED.has(args[k]) ? 2 : 1;
+    }
+    if (args[k] === 'push') checkPush(args.slice(k + 1), step, given);
     else if (args[k] === 'checkout' || args[k] === 'switch') checkout(args[k], args.slice(k + 1), step);
+    else if (args[k] === 'config') gitConfig(args.slice(k + 1), step.state);
   } else if (step.state.run) {
     const dir = join(step.ctx.root, step.dir);
     if (runsSemanticRelease(run, dir, step.ctx, 0)) {
@@ -994,19 +1086,21 @@ function checkDocument(file, doc, ctx, findings) {
   const runs = d.runs && typeof d.runs === 'object' ? /** @type {Record<string, unknown>} */ (d.runs) : null;
   if (runs && runs.using === 'composite') {
     // A composite action runs in the job that calls it, which may be on the default branch.
-    checkSteps(file, runs.steps, '.runs', { run: true, head: true, prev: [], pullRequestOnly: false, dir: '.' }, ctx, findings);
+    checkSteps(file, runs.steps, '.runs', { run: true, head: true, prev: [], pushDefault: '', pushRefspecs: [], pullRequestOnly: false, dir: '.' }, ctx, findings);
     return;
   }
   if (!d.jobs || typeof d.jobs !== 'object') return;
   const events = triggers(d);
-  const run = events === null || Object.entries(events).some(([event, filters]) => (event === 'push' ? pushRunsOn(filters, ctx.names) : !OFF_BRANCH_EVENTS.has(event)));
+  // A pull request closed by its merge runs on the branch it went into (GitHub's events reference, pull_request).
+  const closes = (/** @type {unknown} */ filters) => !!filters && typeof filters === 'object' && strings(/** @type {Record<string, unknown>} */ (filters).types).includes('closed');
+  const run = events === null || Object.entries(events).some(([event, filters]) => (event === 'push' || (event === 'pull_request' && closes(filters)) ? pushRunsOn(filters, ctx.names) : !OFF_BRANCH_EVENTS.has(event)));
   const names = events === null ? [] : Object.keys(events);
   const pullRequestOnly = names.length > 0 && names.every((event) => PULL_REQUEST_EVENTS.has(event));
   for (const [id, job] of Object.entries(/** @type {Record<string, unknown>} */ (d.jobs))) {
     if (!job || typeof job !== 'object') continue;
     const j = /** @type {Record<string, unknown>} */ (job);
     const dir = workingDirectory(j.defaults) || workingDirectory(d.defaults) || '.';
-    checkSteps(file, j.steps, `.jobs[${JSON.stringify(id)}]`, { run, head: run, prev: [], pullRequestOnly, dir }, ctx, findings);
+    checkSteps(file, j.steps, `.jobs[${JSON.stringify(id)}]`, { run, head: run, prev: [], pushDefault: '', pushRefspecs: [], pullRequestOnly, dir }, ctx, findings);
   }
 }
 

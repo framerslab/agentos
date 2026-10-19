@@ -270,6 +270,37 @@ describe('refused: a workflow that pushes to master', () => {
     `) }, [/^jobs\.j\.steps\[1\]: "git push origin HEAD" pushes the checked-out branch/, /^jobs\.j\.steps\[2\]: "git push" pushes the checked-out branch/, /^jobs\.j\.steps\[3\]: "git push origin HEAD" pushes the checked-out branch/]);
   });
 
+  test('a push with no refspec under push.default=matching or upstream, or with remote.<name>.push set', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - uses: actions/checkout@v5
+      - run: |
+          git switch -c feature
+          git -c push.default=matching push origin
+      - run: |
+          git config --global push.default upstream
+          git push
+      - run: |
+          git -c remote.origin.push=refs/heads/feature:refs/heads/master push
+          git config push.default simple
+          git config --add remote.origin.push HEAD:refs/heads/master
+          git push origin
+    `) }, [
+      /^jobs\.j\.steps\[1\]: "git push origin" with push\.default=matching pushes every branch the remote also has, master among them$/,
+      /^jobs\.j\.steps\[2\]: "git push" with push\.default=upstream pushes the checked-out branch to the branch it tracks, which can be master/,
+      /^jobs\.j\.steps\[3\]: "git push" \(remote\.<name>\.push\) pushes to refs\/heads\/master$/,
+      /^jobs\.j\.steps\[3\]: "git push origin" \(remote\.<name>\.push\) pushes to refs\/heads\/master$/,
+    ]);
+  });
+
+  test('a pull request workflow that runs when the pull request closes, which a merge runs on master', () => {
+    // A merged pull request's closed run has GITHUB_REF set to the branch it went into (GitHub's events reference).
+    expectFindings({ '.github/workflows/w.yml': workflow('pull_request:\n  types: [closed]\n  branches: [master]', text`
+      - uses: actions/checkout@v5
+      - run: git push origin "HEAD:$GITHUB_REF"
+      - run: git push
+    `) }, [/^jobs\.j\.steps\[1\]: "git push origin HEAD:\$GITHUB_REF" pushes to the run's own branch, master on a run on master$/, /^jobs\.j\.steps\[2\]: "git push" pushes the checked-out branch, master on a run on master$/]);
+  });
+
   test('a pull request review run, on which git-auto-commit-action has no head branch and pushes the checked-out one', () => {
     // github.head_ref is set on pull_request and pull_request_target alone (GitHub's contexts reference).
     expectFindings({ '.github/workflows/w.yml': workflow('pull_request_review:', text`
@@ -377,6 +408,34 @@ describe('allowed: a workflow that does not push to master', () => {
           git switch - -c three
           git push -u origin HEAD
     `) }, []);
+  });
+
+  test('push.default current or nothing, a git config that only reads, and a refspec setting unset', () => {
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_MASTER, text`
+      - uses: actions/checkout@v5
+      - run: |
+          git config --get push.default
+          git config push.default
+          git -c push.default=nothing push
+          git config --add remote.origin.push HEAD:refs/heads/master
+          git config --unset-all remote.origin.push
+          git switch -c feature
+          git -c push.default=current push origin
+          git push
+    `) }, []);
+  });
+
+  test('a pull request workflow that runs on a close into another branch, or not on a close', () => {
+    expectFindings({
+      '.github/workflows/a.yml': workflow('pull_request:\n  types: [closed]\n  branches: [develop]', text`
+        - uses: actions/checkout@v5
+        - run: git push origin "HEAD:$GITHUB_REF"
+      `),
+      '.github/workflows/b.yml': workflow('pull_request:\n  types: [opened, synchronize]', text`
+        - uses: actions/checkout@v5
+        - run: git push origin "HEAD:$GITHUB_REF"
+      `),
+    }, []);
   });
 
   test('git checkout - after a checkout of a branch held in a variable returns to the branch before it', () => {
