@@ -723,6 +723,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@framers/agentos": "link:.",
+    "@framers/agentos-ext-account-sources": "^0.9.3",
     "@framers/agentos-extensions-registry": "^0.18.12",
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
     "@opentelemetry/context-async-hooks": "^2.0.1",
