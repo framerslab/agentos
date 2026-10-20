@@ -24,8 +24,9 @@
  *
  * Without a call profile the orchestrator runs the components the caller
  * injects. Failures stay inside the session: an `'error'` from the STT session,
- * the TTS session, the transport or the endpoint detector, and a turn whose
- * agent stream or synthesis flush fails, end this session and no other, while a
+ * the TTS session, the transport or the endpoint detector, a TTS session's
+ * `close` that the session's own stop did not make, and a turn whose agent
+ * stream or synthesis flush fails, end this session and no other, while a
  * transport send that rejects is reported and ends nothing.
  *
  * `overrides.callProfile` selects the call runtime instead: one scoped call
@@ -1589,6 +1590,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       this.watch(this.stt, 'stt');
       this.tts = await overrides.streamingTTS.startSession({ voice: this.config.voice, format: transport.playbackFormat ?? this.config.format, providerOptions: this.config.ttsOptions, expressiveness: this.config.ttsExpressiveness });
       this.watch(this.tts, 'tts');
+      // A TTS session that closes on its own has failed: every later reply would go to a closed session and stay
+      // speaking. The close a stop makes finds the session closed already, and so does the one after a failure.
+      this.tts.on('close', () => this.reportFailure('tts'));
       if ((this.current as PipelineState) === 'closed') {
         this.stt.close();
         this.tts.close();
