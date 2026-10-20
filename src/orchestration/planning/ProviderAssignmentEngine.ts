@@ -31,6 +31,7 @@ const DEFAULTS: Record<string, { text: string; cheap: string }> = {
   },
   mistral: { text: 'mistral-large-latest', cheap: 'mistral-small-latest' },
   xai: { text: 'grok-2', cheap: 'grok-2-mini' },
+  minimax: { text: 'MiniMax-M3.1-Flash', cheap: 'MiniMax-M3.1-Flash' },
 };
 
 /** Node with an optional complexity annotation from the planner. */

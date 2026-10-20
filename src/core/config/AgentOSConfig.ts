@@ -101,6 +101,7 @@ export function validateEnvironmentConfig(env: Partial<EnvironmentConfig>): Conf
     !env.ANTHROPIC_API_KEY &&
     !env.OPENROUTER_API_KEY &&
     !env.REQUESTY_API_KEY &&
+    !env.MINIMAX_API_KEY &&
     !env.OLLAMA_BASE_URL
   ) {
     warnings.push('No LLM provider API keys configured. AgentOS will have limited functionality.');
@@ -230,7 +231,7 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
       config: {
         apiKey: env.MINIMAX_API_KEY,
         baseURL: env.MINIMAX_BASE_URL || 'https://api.minimax.io/v1',
-        defaultModelId: 'MiniMax-M3',
+        defaultModelId: 'MiniMax-M3.1-Flash',
         requestTimeout: 60000,
       },
     });
@@ -277,7 +278,7 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
     providers.push({
       providerId: 'ollama',
       enabled: true,
-      isDefault: !env.OPENAI_API_KEY && !env.OPENROUTER_API_KEY && !env.REQUESTY_API_KEY,
+      isDefault: !env.OPENAI_API_KEY && !env.OPENROUTER_API_KEY && !env.REQUESTY_API_KEY && !env.MINIMAX_API_KEY,
       config: {
         baseURL: env.OLLAMA_BASE_URL,
         defaultModelId: 'llama3.2',
@@ -372,14 +373,19 @@ export async function createAgentOSConfig(
     // Create and initialize services
     const utilityAIService = await createUtilityAIService(env);
 
+    const modelProviderManagerConfig = createModelProviderManagerConfig(env);
+    const miniMaxDefault = modelProviderManagerConfig.providers.find(
+      provider => provider.providerId === 'minimax' && provider.isDefault,
+    );
+
     // Create individual component configurations
     const gmiManagerConfig: GMIManagerConfig = {
       personaLoaderConfig: createPersonaLoaderConfig(env),
       defaultGMIInactivityCleanupMinutes: 60,
       defaultWorkingMemoryType: 'in_memory',
       defaultGMIBaseConfigDefaults: {
-        defaultLlmProviderId: 'openai',
-        defaultLlmModelId: 'gpt-4o',
+        defaultLlmProviderId: miniMaxDefault ? 'minimax' : 'openai',
+        defaultLlmModelId: miniMaxDefault ? 'MiniMax-M3.1-Flash' : 'gpt-4o',
       },
     };
 
@@ -480,8 +486,6 @@ export async function createAgentOSConfig(
       maxClientsPerStream: 10,
       onClientSendErrorBehavior: 'log_and_continue',
     };
-
-    const modelProviderManagerConfig = createModelProviderManagerConfig(env);
 
     // Assemble final configuration
     const extensionSecrets: Record<string, string> = {};
