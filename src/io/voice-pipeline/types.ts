@@ -2269,7 +2269,10 @@ export type ServerTextMessage =
        * Emitted when the agent's complete response has been synthesised and sent.
        */
       type: 'agent_done';
-      /** Full text of the completed response. */
+      /**
+       * The reply's text. Empty once a pause discarded audio that a transport playing the audio itself held: the
+       * session then vouches for none of it, and a transport that writes the reply's line ends it with what it proved.
+       */
       text: string;
       /** Duration of the synthesised audio in milliseconds. */
       durationMs: number;

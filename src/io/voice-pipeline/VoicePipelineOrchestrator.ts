@@ -63,7 +63,10 @@
  *   reply has ended, since an agent answers one request at a time, or `TEXT_TURN_UNWIND_MS` after the cut when that
  *   request has not ended, and a reply that took the floor meanwhile is cut in its turn (`_onClientText`); a call
  *   profile cuts through `interrupt()` and its generation fence (`takeText`), where a turn the agent has yet to answer
- *   is aborted with no `barge_in`. A `text_input` message the check refuses is dropped.
+ *   is aborted with no `barge_in`, and takes texts one after another: one that arrives while the generation changes
+ *   waits for the change, at most four behind the one being taken. A `text_input` message the check refuses, or one
+ *   past those four, is dropped and reported as a warning naming the reason, never the text (`'error'`, or a console
+ *   warning when nothing listens, and a recoverable `session_error`).
  * - A transport that plays one audio format alone (`IStreamTransport.playbackFormat`, `'pcm'` for
  *   `LiveKitStreamTransport` with a publisher) gets it: the TTS session is asked for that format, and a chunk in
  *   another one is reported once, naming the TTS provider, and not sent.
@@ -159,7 +162,7 @@ import {
   type ServerTextMessage,
 } from './types.js';
 import { isClientTranscriptMessage, transcriptEventFromClient } from './clientTranscript.js';
-import { isClientTextInputMessage } from './clientTextInput.js';
+import { isClientTextInputMessage, MAX_TEXT_INPUT_LENGTH } from './clientTextInput.js';
 import { describeReason, isError } from './describeReason.js';
 import type { VoiceEventListener } from './VoiceEventEmitter.js';
 
@@ -199,6 +202,15 @@ const DEFAULT_MAX_PLAYOUT_WAIT_MS = 30_000;
  * (`_onClientText`): an agent whose stream does not end after `abort()` holds no later message of the client's.
  */
 const TEXT_TURN_UNWIND_MS = 2_000;
+
+/**
+ * How long a call profile's interruption, detach and close wait for the agent's stream of a cut reply to end after
+ * `abort()`, by default (`CallPipelineProfile.abortGraceMs`): an agent whose stream does not end must not hold the call.
+ */
+const DEFAULT_ABORT_GRACE_MS = 2_000;
+
+/** The most typed texts a call profile holds while a text before them is taken; one more is dropped with a warning. */
+const MAX_WAITING_TEXTS = 4;
 
 /** The longest delay `setTimeout()` keeps; a longer one would fire at once. */
 const MAX_TIMER_MS = 2_147_483_647;
@@ -355,6 +367,21 @@ function speakerOf(words: readonly TranscriptWord[] | undefined): string | undef
     speaker = word.speaker;
   }
   return speaker;
+}
+
+/**
+ * Why a `text_input` message failed `isClientTextInputMessage()`, by the check's own rules, for the warning that
+ * reports its drop: the reason alone, never the text, which can be anything the user typed.
+ *
+ * @param message - The refused message.
+ * @returns The reason.
+ */
+function textInputRefusal(message: { text?: unknown }): string {
+  const { text } = message;
+  if (typeof text !== 'string') return 'its text is not a string';
+  if (text.trim().length === 0) return 'its text is blank';
+  if (text.length > MAX_TEXT_INPUT_LENGTH) return `its text is over ${MAX_TEXT_INPUT_LENGTH} characters`;
+  return 'it failed the check';
 }
 
 /** A transcript of the user's speech, from an STT session or a client's line, as `user_input_transcribed` reports it. */
@@ -561,11 +588,20 @@ interface ReplyRecord {
   playsUntil: number;
   /** Whether the reply has its first word, from which the agent speaks (`agent_state_changed`). */
   started: boolean;
+  /** Whether a chunk of the reply's audio has been sent (`_sendReplyAudio`). */
+  audioSent: boolean;
   /**
    * Whether a wait for the reply's audio to play out failed (`_finishReply`), as a stalled LiveKit track's does once it
    * has discarded what it had not played: what of the reply was heard is then not known.
    */
   playoutFailed?: boolean;
+  /**
+   * Whether a pause held the reply, after audio was sent, on a transport that plays the audio itself (one with
+   * `waitForPlayout()`): such a transport discards the audio its track held at the pause, as a speaking
+   * `LiveKitStreamTransport` does, so what of the reply was heard is not known from then on, as when its playout wait
+   * fails (`_askBargein`).
+   */
+  discarded?: boolean;
 }
 
 /** The parts of a session without a call profile that its replies and their interruptions act on. */
@@ -684,8 +720,8 @@ export interface CallPipelineProfile {
   /** Most synthesis requests of the call. */
   maxSynthesisRequests: number;
   /**
-   * How long an interruption, and a close, waits for the agent's stream of a cut reply to end after `abort()`, in
-   * milliseconds, before the call goes on without it: a finite number of zero or more.
+   * How long an interruption, a detach and a close wait for the agent's stream of a cut reply to end after `abort()`,
+   * in milliseconds, before the call goes on without it with a warning: a finite number of zero or more.
    *
    * @defaultValue 2000
    */
@@ -755,7 +791,7 @@ export interface VoicePipelineOverrides {
  * | `'turn_complete'`      | {@link TurnCompleteEvent}; a {@link ScopedTurnCompleteEvent} under a call profile; none for a turn of typed text |
  * | `'close'`              | `{ reason, error?, createdAt }`: the session moved to `closed` |
  * | `'agent_state_changed'`, `'user_state_changed'`, `'user_input_transcribed'`, `'conversation_item_added'`, `'speech_created'`, `'barge_in'`, `'session_error'` | the session's events ({@link VoiceSessionEventMap}), emitted here as on the session, from the moment `startSession()` is called |
- * | `'error'`              | `Error`: a listener of the session's events threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); speech came from a second source and was dropped (the session's first drop only); a TTS chunk came in another format than the transport's `playbackFormat` and was dropped (the session's first only, naming the provider); or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
+ * | `'error'`              | `Error`: a listener of the session's events threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); speech came from a second source and was dropped (the session's first drop only); a TTS chunk came in another format than the transport's `playbackFormat` and was dropped (the session's first only, naming the provider); a `text_input` message was dropped, naming why and never the text (the check refused it, or under a call profile four texts already waited); under a call profile the agent's stream of a cut reply did not end within `abortGraceMs` of `abort()`; or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
  * | `'cleanup_incomplete'` | *(none)*: the stop that followed such a failure could not close every part |
  * | `'transcript'`, `'gap'`, `'generation'`, `'interrupted'`, `'usage'`, `'failure'`, `'detached'`, `'reattached'` | re-emitted from a call profile's session |
  *
@@ -779,7 +815,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * The reply being spoken: replaced as each reply starts to speak (PROCESSING -> SPEAKING). The send of each audio
    * chunk holds the reply it belongs to, so that each reply's first refused chunk is reported and the rest are not.
    */
-  private _currentReply: ReplyRecord = { audioRefusalReported: false, playsUntil: 0, started: false };
+  private _currentReply: ReplyRecord = { audioRefusalReported: false, playsUntil: 0, started: false, audioSent: false };
   /**
    * The agent's request for the latest reply: it settles once the reply's token loop has ended and the agent's stream
    * has unwound with it (`_takeTurn`). Typed text that cuts a reply asks the agent only then, or once
@@ -1147,6 +1183,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         if (action.type === 'pause' && !open.holding && !(open.lingering && open.segmentAt === null)) {
           open.paused = true;
           open.holding = true;
+          // A transport that plays the audio itself discards what its track held at the pause (a speaking
+          // LiveKitStreamTransport's publisher does): which of the reply's words were heard is not known from here.
+          if (typeof parts.transport.waitForPlayout === 'function' && this._currentReply.audioSent) this._currentReply.discarded = true;
           this._watchSend(() => parts.transport.sendControl({ type: 'barge_in', action }));
           this._bargedIn(open, action);
         }
@@ -1335,6 +1374,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   private _sendReplyAudio(transport: IStreamTransport, chunk: EncodedAudioChunk): void {
     this.playedMs += chunk.durationMs;
     const reply = this._currentReply;
+    reply.audioSent = true;
     // A transport that cannot report its playout plays each chunk after the one before it, from when it was sent at the
     // earliest; a duration that is no number of milliseconds plays for none.
     const durationMs = Number.isFinite(chunk.durationMs) && chunk.durationMs > 0 ? chunk.durationMs : 0;
@@ -1421,16 +1461,21 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Ends the reply once its audio has played (`_finishReply`): the transport is sent `agent_done`, the reply joins the
-   * conversation as played (`conversation_item_added`), or, when a wait for its playout failed, as interrupted with no
-   * text known heard, the pipeline returns to `listening`, the endpoint detector is reset and told the user holds the
-   * floor, and the watchdog starts.
+   * conversation as played (`conversation_item_added`), or, when a wait for its playout failed or a pause discarded
+   * audio the transport held (`ReplyRecord.discarded`), as interrupted with no text known heard, the pipeline returns
+   * to `listening`, the endpoint detector is reset and told the user holds the floor, and the watchdog starts.
+   * `agent_done` carries the reply's text, or none after such a pause: the session can then vouch for no word of it,
+   * and a transport that writes the reply's line, as `LiveKitStreamTransport` does, ends it with what it proved played
+   * itself, which after a pause that discarded audio is what its tracker holds, never the whole reply.
    *
    * @param parts - The session's parts.
    */
   private _replyDone(parts: ReplyParts): void {
-    this._watchSend(() => parts.transport.sendControl({ type: 'agent_done', text: this.text, durationMs: this.playedMs }));
-    // A reply whose playout wait failed joins as a cut one does: which of its words were heard is not known.
-    const heard = !this._currentReply.playoutFailed;
+    const reply = this._currentReply;
+    this._watchSend(() => parts.transport.sendControl({ type: 'agent_done', text: reply.discarded ? '' : this.text, durationMs: this.playedMs }));
+    // A reply whose playout wait failed, or that a pause held on a transport that discards what its track held, joins as
+    // a cut one does: which of its words were heard is not known.
+    const heard = !reply.playoutFailed && !reply.discarded;
     if (this.text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text: this.text, playedText: heard ? this.text : '', interrupted: !heard }, createdAt: Date.now() });
     // A listener may have stopped the session.
     if (this.current !== 'speaking') return;
@@ -1724,7 +1769,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       const tokens = inPart('agent', () => agent.sendText(turn.text, { speakers: [], endpointReason: turn.reason, speechDurationMs: turn.durationMs, wasInterrupted: false, transcriptConfidence: turn.confidence }));
       // The reply gets its record before its audio is sent.
       this._stopPlayoutWait();
-      const reply: ReplyRecord = { audioRefusalReported: false, playsUntil: 0, started: false };
+      const reply: ReplyRecord = { audioRefusalReported: false, playsUntil: 0, started: false, audioSent: false };
       this._currentReply = reply;
       this.stateTo('speaking');
       this.text = '';
@@ -1850,8 +1895,23 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     transport.on('message', (message: ClientTextMessage) => {
       if (this.current === 'closed') return;
       if (isClientTextInputMessage(message)) chain(() => this._onClientText(message.text, parts, lines));
+      else if ((message as { type?: unknown } | null)?.type === 'text_input') this._textInputRefused(message as { text?: unknown });
       else if (isClientTranscriptMessage(message) && this._takesSpeechFrom('client')) handle(message);
     });
+  }
+
+  /**
+   * Drops a `text_input` message the check refused, and says so: the drop is reported as `'error'` with the reason
+   * (`textInputRefusal`) and never the text, or as one console warning when nothing listens for `'error'`, and as a
+   * recoverable `session_error`; the session goes on. Silent, the user's typed message would vanish with nothing to
+   * say why; the LiveKit transport reports a refused chat text itself before the session sees it, a WebSocket
+   * transport does not.
+   *
+   * @param message - The refused message.
+   */
+  private _textInputRefused(message: { text?: unknown }): void {
+    const error = this._reportError(new Error(`a text_input message was dropped: ${textInputRefusal(message)}`), 'a refused text_input');
+    this._sessionError(error, true, 'session');
   }
 
   /**
@@ -2396,6 +2456,14 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
    * (`sendFailureEvents`): a failure whose `'error'` listener closes the call has its `session_error` before `close`.
    */
   private readonly failureEvents: FailureEvent[] = [];
+  /** How long an interruption, a detach and a close wait for a cut reply's agent response to end (`unwound`). */
+  private readonly abortGraceMs: number;
+  /** The typed texts being taken, one after another, each after the one before it (`queueText`). */
+  private textWork: Promise<void> = Promise.resolve();
+  /** How many typed texts are being taken or wait to be: at most one and `MAX_WAITING_TEXTS`. */
+  private textsPending = 0;
+  /** Wakes the typed texts waiting for the generation change under way to complete (`whenChanged`). */
+  private readonly changeWaiters: Array<() => void> = [];
 
   /**
    * @param report - Reports a failure to the listeners of `target`, the orchestrator's by default, as the orchestrator
@@ -2408,6 +2476,10 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.meter = new TtsUsageMeter(this.identity.scopeId, this.identity.callId, profile.maxSynthesisRequests);
     if (config.diarization) throw new Error('call-profile diarization unavailable');
     if (!agent.abort || ![profile.minSpeechMs, profile.maxTextCharacters, profile.maxSynthesisRequests].every((n) => Number.isSafeInteger(n) && n > 0)) throw new Error('invalid call profile');
+    // NaN or Infinity is no time to wait, and a negative number is no duration; zero waits for no stream.
+    const abortGraceMs = profile.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS;
+    if (!Number.isFinite(abortGraceMs) || abortGraceMs < 0) throw new Error('invalid call profile');
+    this.abortGraceMs = abortGraceMs;
     const playback = transport as Partial<IPlaybackTransport>;
     if (!playback.waitForPlayback || !playback.clearPlayback) throw new Error('acknowledged playback required');
   }
@@ -2621,10 +2693,12 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
         if (!this.detached && this.current !== 'closed') this.fan?.gap('transport', event.lostMs ?? event.droppedMs ?? 0);
       });
       // Client messages are an allowlist: typed text, and the controls mute, unmute and stop. Anything else ends the call.
-      this.transport.on('message', (message: { type?: string; action?: { type?: string } }) => {
+      this.transport.on('message', (message: { type?: string; action?: { type?: string }; text?: unknown }) => {
         if (message?.type === 'text_input') {
-          // Typed text is a user turn (`takeText`); a text the check refuses is dropped, and the call goes on.
-          if (isClientTextInputMessage(message)) void this.takeText(message.text).catch(() => this.fail('provider_failure'));
+          // Typed text is a user turn (`takeText`), taken in order; a text the check refuses is dropped with a warning,
+          // and the call goes on.
+          if (isClientTextInputMessage(message)) this.queueText(message.text);
+          else this.textInputRefused(textInputRefusal(message));
           return;
         }
         if (message?.type !== 'control' || !['mute', 'unmute', 'stop'].includes(message.action?.type ?? '')) {
@@ -2678,21 +2752,113 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   }
 
   /**
+   * Queues a checked `text_input` behind the texts before it, to be taken in order (`takeText`): at most
+   * `MAX_WAITING_TEXTS` wait behind the one being taken, and one more is dropped and reported (`textInputRefused`). A
+   * text whose taking fails fails the call; the texts after it are still taken.
+   *
+   * @param text - The text, as `isClientTextInputMessage()` accepted it.
+   */
+  private queueText(text: string): void {
+    if (this.textsPending > MAX_WAITING_TEXTS) {
+      this.textInputRefused(`${MAX_WAITING_TEXTS} texts already wait for the generation to change`);
+      return;
+    }
+    this.textsPending++;
+    this.textWork = this.textWork
+      .then(() => this.takeText(text))
+      .catch(() => this.fail('provider_failure'))
+      .finally(() => {
+        this.textsPending--;
+      });
+  }
+
+  /**
+   * Drops a `text_input` message, and says why: as the orchestrator's `'error'` with `reason` and never the text, which
+   * can be anything the user typed, or as one console warning when nothing listens for `'error'`, and as a recoverable
+   * `session_error`; the call goes on.
+   *
+   * @param reason - Why: the check's refusal (`textInputRefusal`), or the texts already waiting.
+   */
+  private textInputRefused(reason: string): void {
+    const error = this.report(new Error(`a text_input message was dropped: ${reason}`), 'a refused text_input');
+    this.sessionError(error, true, 'session');
+  }
+
+  /**
    * Takes the user's typed text, a `text_input` message, as a turn of its own: no `turn_complete`, a user item with
-   * `source: 'text'` and `endpointReason: 'manual'`, and the agent asked with no speech and full confidence. A text
-   * that comes while the call processes a turn or speaks interrupts it first, through `interrupt()` and its generation
-   * fence: `barge_in` reports a reply or a prompt being spoken, with `speechDurationMs: 0`, and a turn the agent has
-   * yet to answer is aborted with none. A text that comes while the call stops, is detached or changes its generation,
-   * or once it has closed, is dropped, and so is one whose interruption leaves the call other than listening. A muted
-   * call takes typed text.
+   * `source: 'text'` and `endpointReason: 'manual'`, and the agent asked with no speech and full confidence. Texts are
+   * taken one after another, in the order they arrived (`queueText`). A text that comes while the call processes a
+   * turn or speaks interrupts it first, through `interrupt()` and its generation fence: `barge_in` reports a reply or
+   * a prompt being spoken, with `speechDurationMs: 0`, and a turn the agent has yet to answer is aborted with none. One
+   * that finds the generation changing, as the text before it or the user's speech left it, waits for the change to
+   * complete (`whenChanged`) and is then taken, so texts typed in quick succession each cut the turn before them and
+   * the agent answers the last. A text that comes while the call stops or is detached, or once it has closed, is
+   * dropped, and so is one whose interruption leaves the call other than listening. A muted call takes typed text.
    *
    * @param text - The text, as `isClientTextInputMessage()` accepted it.
    */
   private async takeText(text: string): Promise<void> {
-    if (this.stopping || this.detached || this.changing || this.current === 'closed') return;
-    if (this.current === 'processing' || this.current === 'speaking') await this.interrupt('text');
-    if (this.stopping || this.detached || this.changing || this.current !== 'listening') return;
-    this.takeTurn(this.identity, { text, source: 'text', reason: 'manual', durationMs: 0, confidence: 1 });
+    for (;;) {
+      if (this.stopping || this.detached || this.current === 'closed') return;
+      if (this.changing) {
+        await this.whenChanged();
+        continue;
+      }
+      if (this.current === 'processing' || this.current === 'speaking') {
+        await this.interrupt('text');
+        continue;
+      }
+      if (this.current !== 'listening') return;
+      this.takeTurn(this.identity, { text, source: 'text', reason: 'manual', durationMs: 0, confidence: 1 });
+      return;
+    }
+  }
+
+  /**
+   * Resolves once the generation change under way has completed (`changed`), at once when none is under way. Typed
+   * texts wait here (`takeText`).
+   */
+  private whenChanged(): Promise<void> {
+    if (!this.changing) return Promise.resolve();
+    return new Promise<void>((resolve) => this.changeWaiters.push(resolve));
+  }
+
+  /**
+   * The generation change under way has completed: input, turns, transcripts and synthesis are taken again, and the
+   * typed texts that waited for it go on.
+   */
+  private changed(): void {
+    this.changing = false;
+    for (const wake of this.changeWaiters.splice(0)) wake();
+  }
+
+  /**
+   * Waits for the agent's response of a cut reply to end, at most `abortGraceMs`. `interrupt()`, `detach()` and
+   * `close()` wait here after `abort()`: an agent whose stream does not end after it (a stalled model stream, an
+   * `abort()` that does nothing) must not hold the call, which once waited for it without bound and dropped every
+   * later turn, spoken or typed, while a close hung. A response still running when the bound passes is left to end on
+   * its own, which its stale generation keeps from speaking, and reported as a warning: `'error'` naming the bound and
+   * no word of the reply, or a console warning when nothing listens, and a recoverable `session_error` from the agent.
+   * The next request then goes to the agent while the stale one may still be open; an agent that refuses it as one
+   * still active, as `AgentSessionVoiceAdapter` does, fails the call as the agent's failure.
+   *
+   * @param response - The response to wait for (`response`), or none.
+   */
+  private async unwound(response: Promise<void> | undefined): Promise<void> {
+    if (!response) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ended = await Promise.race([
+      response.then(
+        () => true,
+        () => true
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), Math.min(this.abortGraceMs, MAX_TIMER_MS));
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (ended) return;
+    const error = this.report(new Error('the agent stream of the cut reply did not end within abortGraceMs of abort(); the call goes on without it'), 'a stalled agent stream');
+    this.sessionError(error, true, 'agent');
   }
 
   /**
@@ -2722,7 +2888,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.response = (async () => {
       await this.profile.onGeneration(generation);
       await this.resetInput();
-      this.changing = false;
+      this.changed();
       if (!this.live(generation)) return;
       await this.send({ type: 'agent_thinking' }, generation);
       if (!this.live(generation)) return;
@@ -2830,7 +2996,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     if (!this.live(generation)) return;
     this.changing = true;
     await this.resetInput();
-    this.changing = false;
+    this.changed();
     if (this.live(generation)) this.stateTo('listening');
   }
 
@@ -2847,7 +3013,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     const work = (async () => {
       await this.profile.onGeneration(generation);
       await this.resetInput();
-      this.changing = false;
+      this.changed();
       if (this.live(generation)) await this.synthesize(tokens, identity, 'say');
     })();
     this.response = work.catch((err: unknown) => {
@@ -2857,10 +3023,11 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   }
 
   /**
-   * Advances the generation synchronously, then aborts the agent, cancels synthesis, clears playback, waits for the
-   * old generation's inference fence and resets input before the call listens again. A reply or a prompt being spoken
-   * joins the conversation as interrupted; when the user's speech or typed text interrupted it, `barge_in` says so
-   * first.
+   * Advances the generation synchronously, cancels the playback queue, aborts the agent and cancels synthesis, then
+   * waits for the old generation's inference fence and for the cut reply's response to end, at most `abortGraceMs`
+   * (`unwound`), and resets input before the call listens again. A reply or a prompt being spoken joins the
+   * conversation as interrupted, with the played text the cancelled queue holds; when the user's speech or typed text
+   * interrupted it, `barge_in` says so first.
    *
    * @param cause - `'speech'` when the user's speech interrupts the agent; `'text'` when the user's typed text does,
    *   which reports `barge_in`, with no speech, only for a reply or a prompt being spoken; `'other'` for a mute, a gap
@@ -2877,32 +3044,40 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.stateTo('interrupting');
     this.profile.onInterrupted(interrupted);
     this.emit('interrupted', interrupted);
+    // The playback queue is cancelled before anything is read from it: the cancel aborts the wait for the chunk in its
+    // slot and forgets the chunk, so a receipt that comes while the host writes the fence advances neither the played
+    // text below nor the room's agent line, which the transport cuts as the clear reaches it, and the interrupted item
+    // and the line hold the same text. The clear is awaited in the transition; a clear that fails before then rejects
+    // nothing unhandled.
+    const queue = this.queue;
+    this.queue = undefined;
+    const cleared = queue?.cancel();
+    cleared?.catch(() => {});
     if (cause === 'speech' || (cause === 'text' && this.replying)) {
       // Speech while the call processes a turn cuts no reply: the text of the last one, which played, is not reported.
-      this.events.emit('barge_in', { speechDurationMs, interruptedText: this.replying ? this.replyText : '', playedDurationMs: this.queue?.stats().playedMs ?? 0, action: 'cancel', createdAt: Date.now() });
+      this.events.emit('barge_in', { speechDurationMs, interruptedText: this.replying ? this.replyText : '', playedDurationMs: queue?.stats().playedMs ?? 0, action: 'cancel', createdAt: Date.now() });
     }
     if (this.replying) {
       this.replying = false;
       const text = this.replyText;
       this.replyText = '';
       // The played text is the contiguous prefix of the sentence segments whose last frame the transport acknowledged
-      // (the text boundaries the TTS chunks carry); empty while none is proven, never a guess from bytes sent.
-      if (text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text, playedText: this.queue?.playedText ?? '', interrupted: true }, createdAt: Date.now() });
+      // (the text boundaries the TTS chunks carry), as the cancelled queue holds it: empty while none is proven, never a
+      // guess from bytes sent.
+      if (text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text, playedText: queue?.playedText ?? '', interrupted: true }, createdAt: Date.now() });
     }
     this.agent.abort?.();
     const tts = this.tts;
     this.tts = undefined;
     tts?.cancel();
     tts?.close();
-    const queue = this.queue;
-    this.queue = undefined;
     const response = this.response;
     this.transition = (async () => {
       await this.profile.onGeneration(generation);
-      await Promise.all([queue?.cancel(), this.profile.fenceInference(old)]);
-      await response;
+      await Promise.all([cleared, this.profile.fenceInference(old)]);
+      await this.unwound(response);
       await this.resetInput();
-      this.changing = false;
+      this.changed();
       if (this.current !== 'closed') this.stateTo('listening');
     })();
     return this.transition;
@@ -2913,10 +3088,11 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     if (this.current === 'closed' || transportEpoch !== this.identity.generation.transportEpoch) return;
     this.detached = true;
     await this.transition;
-    // A response opening a provider has its own generation guard; fence it before a replacement can speak.
+    // A response opening a provider has its own generation guard; fence it before a replacement can speak, waiting at
+    // most abortGraceMs for one whose agent stream does not end.
     if (this.changing) {
-      await this.response;
-      this.changing = false;
+      await this.unwound(this.response);
+      this.changed();
     }
     await this.interrupt();
     this.emit('detached', { ...this.identity });
@@ -2983,6 +3159,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     if (this.closing) return this.closing;
     this.stopping = true;
     this.draining = false;
+    // A typed text waiting for a generation change finds the call stopping, and is dropped.
+    for (const wake of this.changeWaiters.splice(0)) wake();
     const old = { ...this.identity.generation };
     // Only close() moves the call to closed, so a call that reads closed has announced its close already.
     if (this.current !== 'closed') {
@@ -3004,7 +3182,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
       this.stt?.close();
       await this.profile.fenceInference(old);
       await this.transition;
-      await this.response;
+      // A cut reply's agent stream that does not end holds the close at most abortGraceMs.
+      await this.unwound(this.response);
       await this.transcriptWork;
       await this.vadWork;
       if (this.fan) await this.fan.dispose();
