@@ -176,6 +176,26 @@ describe('key pool defaults on the generateText path', () => {
     log.mockRestore();
   });
 
+  it("keeps the shared strategy when a provider's own variable names none", async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const draws = (pool: { next(): string }) => new Set([pool.next(), pool.next(), pool.next(), pool.next()]);
+    // The host orders every provider's keys and mistypes OpenAI's and Groq's own variables: both stay ordered.
+    vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY', 'ordered');
+    vi.stubEnv('OPENAI_API_KEY', 'sk_pooltest_e_0015,sk_pooltest_f_0016');
+    vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY_OPENAI', 'orderd');
+    const openai = (await createProviderManager(resolveProvider('openai', 'gpt-4o'))).getProvider('openai') as unknown as {
+      keyPool: { next(): string };
+    };
+    expect(draws(openai.keyPool)).toEqual(new Set(['sk_pooltest_e_0015']));
+
+    vi.stubEnv('GROQ_API_KEY', 'gsk_pooltest_g_0017,gsk_pooltest_h_0018');
+    vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY_GROQ', 'orderd');
+    const delegate = delegateOf(await createProviderManager(resolveProvider('groq', 'llama-3.3-70b-versatile')), 'groq');
+    expect(delegate.config.keyPool).toMatchObject({ id: 'groq:GROQ_API_KEY', strategy: 'ordered' });
+    expect(draws(delegate.keyPool)).toEqual(new Set(['gsk_pooltest_g_0017']));
+    log.mockRestore();
+  });
+
   it('names no pool for an override, so the store does not apply to it', () => {
     vi.stubEnv('OPENAI_API_KEY', 'sk_pooltest_env_0003');
     const resolved = resolveProvider('openai', 'gpt-4o', { apiKey: 'sk_pooltest_override_0004' });

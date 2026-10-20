@@ -99,20 +99,34 @@ export function keyFingerprint(key: string): string {
   return hash.toString(16).padStart(16, '0').slice(0, 12);
 }
 
+/** The strategy variables already logged as naming no strategy, by name and value, so each writes its warning once. */
+const ignoredStrategyLogged = new Set<string>();
+
 /**
  * The pool strategy the environment asks for when a provider's config names
  * none: `AGENTOS_KEY_POOL_STRATEGY_<PROVIDER>` (ANTHROPIC, OPENAI, GEMINI,
  * OPENROUTER, REQUESTY, and GROQ, MISTRAL, TOGETHER, XAI and LITELLM, which
  * send through an OpenAIProvider) for one provider, else `AGENTOS_KEY_POOL_STRATEGY` for
  * every provider; `ordered` prefers the earliest usable key (a cost order:
- * credited keys first, the paid key last), `round-robin` spreads load.
+ * credited keys first, the paid key last), `round-robin` spreads load. A
+ * variable that names neither strategy is skipped, so a typo in a provider's
+ * own variable leaves the shared one in force, and logged once per value as
+ * `key_pool.strategy_ignored`, naming the variable and not what it holds.
  */
 export function keyPoolStrategyFromEnv(providerId?: string): Pick<ApiKeyPoolConfig, 'strategy'> {
   if (typeof process === 'undefined') return {};
-  const own = providerId ? process.env[`AGENTOS_KEY_POOL_STRATEGY_${providerId.replace(/[^a-z0-9]+/gi, '_').toUpperCase()}`] : undefined;
-  const value = own || process.env.AGENTOS_KEY_POOL_STRATEGY;
-  if (value === 'ordered') return { strategy: 'ordered' };
-  if (value === 'round-robin') return { strategy: 'round-robin' };
+  const own = providerId ? `AGENTOS_KEY_POOL_STRATEGY_${providerId.replace(/[^a-z0-9]+/gi, '_').toUpperCase()}` : undefined;
+  for (const variable of [own, 'AGENTOS_KEY_POOL_STRATEGY']) {
+    if (!variable) continue;
+    const value = process.env[variable];
+    if (!value) continue;
+    if (value === 'ordered' || value === 'round-robin') return { strategy: value };
+    const logged = `${variable}=${value}`;
+    if (!ignoredStrategyLogged.has(logged)) {
+      ignoredStrategyLogged.add(logged);
+      createLogger('key-pool').warn('key_pool.strategy_ignored', { variable });
+    }
+  }
   return {};
 }
 
