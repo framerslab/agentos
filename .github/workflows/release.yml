@@ -86,7 +86,9 @@ jobs:
       # ci.yml's Test & Lint job installs the same npm for the package checks; change both together.
       - name: Use npm 11 for trusted publishing
         if: steps.guard.outputs.should_release == 'true'
-        run: npm install -g npm@11.20.0 && npm --version
+        run: |
+          npm install -g npm@11.20.0
+          test "$(npm --version)" = 11.20.0
 
       - name: Semantic Release
         if: steps.guard.outputs.should_release == 'true'
