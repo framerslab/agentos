@@ -79,8 +79,14 @@
  *   the native queue has drained and the participant has sent its playback
  *   receipt on the topic.
  *
- * With a publisher the participant's text streams are read with bounds (4096
- * bytes, five seconds, four at once) and only a playback or clear receipt, a
+ * With a publisher the participant's text streams are read with bounds (five
+ * seconds, four at once). A `text_input` message, which a page that speaks the
+ * client protocol sends with what its user types, is read up to 24576 bytes,
+ * which holds every text the check accepts as any JSON encoder writes it, and
+ * taken as text input takes a text: emitted as `{ type: 'text_input', text }`
+ * once `isClientTextInputMessage()` accepts it, a refused one reported as the
+ * warning `livekit text input refused` while the transport stays open. Any
+ * other message keeps to 4096 bytes, and only a playback or clear receipt, a
  * `transcript` message (as `isClientTranscriptMessage()` checks it) or a
  * `control` message with `mute`, `unmute` or `stop` is taken; anything else
  * is reported as `'error'` and closes the transport. Outbound text is bounded
@@ -181,6 +187,16 @@ const TEXT_INPUT_TOPIC = 'lk.chat';
  * `isClientTextInputMessage()` accepts fits whole, in any script.
  */
 const TEXT_INPUT_MAX_BYTES = MAX_TEXT_INPUT_LENGTH * 3;
+
+/** The most a speaking transport's control message other than a `text_input` is, in UTF-8 bytes. */
+const CONTROL_MAX_BYTES = 4096;
+
+/**
+ * The most a speaking transport's control stream is read to, in UTF-8 bytes, so a `text_input` message holding any text
+ * `isClientTextInputMessage()` accepts fits whole: a JSON encoder writes a UTF-16 code unit in six bytes at most
+ * (`\u0001`), and 576 bytes are left for the message around the text.
+ */
+const CONTROL_TEXT_INPUT_MAX_BYTES = MAX_TEXT_INPUT_LENGTH * 6 + 576;
 
 /** A frame's length in milliseconds. */
 const frameMs = (frame: AudioFrame): number => (frame.samples.length / frame.sampleRate) * 1000;
@@ -315,7 +331,7 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * |-------------|---------------------------|-----------------------------------------------|
  * | `'audio'`   | `AudioFrame`              | The participant's audio, mono Float32.        |
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
- * | `'message'` | {@link ClientTextMessage} | A JSON message from the linked participant on the topic; with a publisher, only a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. With text input, also a `text_input` message for each text the linked participant sends on the text-input topic. |
+ * | `'message'` | {@link ClientTextMessage} | A JSON message from the linked participant on the topic; with a publisher, only a `text_input` message the check accepts, as `{ type, text }`, a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. With text input, also a `text_input` message for each text the linked participant sends on the text-input topic. |
  * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting, the linked participant leaving while `closeOnDisconnect` is on or, with a publisher, a refused message or a capture that never returned. |
  * | `'warning'` | `Error`                   | A failure the transport and a session on it go on after, with a fixed message that names no text: a text input refused (`livekit text input refused`), or the first of a run of transcription writes that failed (`livekit transcription failed`). With nothing listening for it, one warning line, through `logger` when one is given. |
  * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. A session on the transport ends on it, as `IStreamTransport` defines `'error'` as fatal. |
@@ -782,10 +798,15 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     if (participant.identity !== this.linked || this._state !== 'open') { closeTextReader(reader); return; }
     if (this.publisher && this.readers.size >= 4) { closeTextReader(reader); this.emitErrorSafe(new Error('livekit control refused')); this.close(); return; }
     this.readers.add(reader);
-    const read = this.publisher ? this.readBounded(reader) : reader.readAll();
+    const read = this.publisher ? this.readBounded(reader, CONTROL_TEXT_INPUT_MAX_BYTES) : reader.readAll();
     void read.then((text) => {
       if (this._state !== 'open') return; let value: unknown; try { value = JSON.parse(text); } catch { throw new Error('LiveKitStreamTransport: failed to parse inbound text message as JSON'); }
       if (this.publisher) {
+        // A page that speaks the client protocol sends what its user types here: it is taken as text input takes a text.
+        if (typeof value === 'object' && value !== null && !Array.isArray(value) && (value as { type?: unknown }).type === 'text_input') {
+          this.takeTextInput((value as { text?: unknown }).text); return;
+        }
+        if (Buffer.byteLength(text) > CONTROL_MAX_BYTES) throw new Error('livekit control bound');
         const receipt = PlaybackAcknowledgementSchema.safeParse(value);
         if (receipt.success) { this.publisher.receiveReceipt(receipt.data); return; }
         // A page that transcribes on its own device sends its lines, which a session without a call profile reads.
@@ -810,15 +831,20 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     const read = reader[Symbol.asyncIterator] ? this.readBounded(reader, TEXT_INPUT_MAX_BYTES) : reader.readAll();
     // The warning names the refusal, never the text; an 'error' would end the session on the transport.
     const refused = (): void => { if (this._state === 'open') this.warnOf(new Error('livekit text input refused')); };
-    void read.then((text) => {
-      if (this._state !== 'open') return;
-      const message = { type: 'text_input' as const, text };
-      if (isClientTextInputMessage(message)) this.emit('message', message); else refused();
-    }, refused)
+    void read.then((text) => { if (this._state === 'open') this.takeTextInput(text); }, refused)
       // A 'message' or 'warning' listener that throws is reported as the transport's error, as the control topic reports one.
       .catch((error: unknown) => { if (this._state === 'open') this.emitErrorSafe(error instanceof Error ? error : new Error(String(error))); })
       .finally(() => { this.textInputReaders.delete(reader); });
   };
+  /**
+   * Takes a text the linked participant typed: emitted as `{ type: 'text_input', text }` once `isClientTextInputMessage()`
+   * accepts it, and otherwise dropped and reported as the warning `livekit text input refused`, which names no text.
+   */
+  private takeTextInput(text: unknown): void {
+    const message = { type: 'text_input' as const, text };
+    if (isClientTextInputMessage(message)) this.emit('message', { type: 'text_input', text: message.text });
+    else this.warnOf(new Error('livekit text input refused'));
+  }
   /**
    * Emit `'error'` only when a listener exists: an unlistened EventEmitter
    * `'error'` throws and takes the whole process down.
