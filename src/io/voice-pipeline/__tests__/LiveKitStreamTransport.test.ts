@@ -2466,9 +2466,13 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
 
   it("holds the session's messages while nobody is linked, the last eight, and delivers them in order to the first participant linked", async () => {
     const room = new FakeRoom();
-    const { transport, errors } = conventions(room, { participant: 'first', transcriptionOutput: false });
+    const logger = { warn: vi.fn() };
+    const { transport, errors } = conventions(room, { participant: 'first', transcriptionOutput: false, logger });
     for (let i = 1; i <= 10; i++) await transport.sendControl({ type: 'transcript', text: `Line ${i}`, isFinal: true, confidence: 0.9 });
     expect(room.localParticipant.sendText).not.toHaveBeenCalled();
+    // The two oldest were dropped, and one line says so.
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledWith('LiveKitStreamTransport: nobody is linked, so the oldest held message was dropped; the last 8 are held');
     room.join('user-1', PARTICIPANT_KIND_STANDARD, new FakePublication(new FakeTrack('TR_1')));
     await settle();
     const sent = room.sentOn('agentos.voice');
@@ -2511,6 +2515,25 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     expect(speaker.transport.state).toBe('open');
     speaker.transport.close();
     await speaker.transport.whenClosed();
+  });
+
+  it('reports held messages that fail to reach the participant linked as one warning, and stays open', async () => {
+    const room = new FakeRoom();
+    const { transport, errors, warnings } = conventions(room, { participant: 'first', transcriptionOutput: false });
+    await transport.sendControl({ type: 'agent_thinking' });
+    await transport.sendControl({ type: 'agent_speaking', text: '' });
+    // The room refuses the streams for a while.
+    room.localParticipant.sendText.mockImplementation(async () => {
+      throw new Error('not sent');
+    });
+    room.join('user-1', PARTICIPANT_KIND_STANDARD, new FakePublication(new FakeTrack('TR_1')));
+    await settle();
+    // Each was tried, in order; their sends resolved when they were held, so a warning that names no message says so.
+    expect(controlTypes(room)).toEqual(['agent_thinking', 'agent_speaking']);
+    expect(warnings).toEqual(['livekit held message failed']);
+    expect(errors).toEqual([]);
+    expect(transport.state).toBe('open');
+    transport.close();
   });
 
   it('runs under VoicePipelineOrchestrator: a participant who joins after the session started receives session_started', async () => {

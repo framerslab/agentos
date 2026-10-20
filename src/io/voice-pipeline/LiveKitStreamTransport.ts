@@ -14,8 +14,10 @@
  * agent, a recorder, an ingress) are passed over. `participantIdentity` links
  * one identity with the transport's own defaults. `setParticipant()` links
  * another participant at any time. While nobody is linked, the audio source
- * waits, `sendControl()` sends nothing and resolves, and every text stream
- * that arrives is closed unread.
+ * waits, `sendControl()` holds the session's messages, the last eight, and
+ * resolves, and every text stream that arrives is closed unread; the first
+ * participant linked gets the held messages in order, one at a time, ahead of
+ * any message sent since. Audio is never held.
  *
  * ## Audio (inbound)
  * One participant's microphone, read by {@link LiveKitRoomAudioSource} as
@@ -198,6 +200,9 @@ const CONTROL_MAX_BYTES = 4096;
  */
 const CONTROL_TEXT_INPUT_MAX_BYTES = MAX_TEXT_INPUT_LENGTH * 6 + 576;
 
+/** How many session messages are held while nobody is linked: the last ones, for the first participant linked. */
+const HELD_MESSAGES = 8;
+
 /** A frame's length in milliseconds. */
 const frameMs = (frame: AudioFrame): number => (frame.samples.length / frame.sampleRate) * 1000;
 
@@ -271,9 +276,10 @@ export interface LiveKitStreamTransportOptions {
    */
   transcriptionOutput?: boolean | { topic?: string };
   /**
-   * Takes the transport's warning lines: the line saying text input is off, a warning that nothing listens for
-   * (`LiveKitStreamTransport: livekit text input refused`, `LiveKitStreamTransport: livekit transcription failed`)
-   * and, without a publisher, an error that nothing listens for. Each is a console warning when omitted.
+   * Takes the transport's warning lines: the line saying text input is off, the line saying a message held while
+   * nobody is linked was dropped, a warning that nothing listens for (`LiveKitStreamTransport: livekit text input
+   * refused`, `LiveKitStreamTransport: livekit transcription failed`, `LiveKitStreamTransport: livekit held message
+   * failed`) and, without a publisher, an error that nothing listens for. Each is a console warning when omitted.
    */
   logger?: { warn(message: string): void };
   /**
@@ -333,7 +339,7 @@ const controlSchema = z.strictObject({ type: z.literal('control'), action: z.str
  * | `'gap'`     | `{ droppedMs: number, reason: 'paused' }` | Audio dropped beyond the paused buffer, reported on resume before held frames; a pause asked again during the replay stops it, and the frames not yet emitted stay held. |
  * | `'message'` | {@link ClientTextMessage} | A JSON message from the linked participant on the topic; with a publisher, only a `text_input` message the check accepts, as `{ type, text }`, a `transcript` message or a `control` message with `mute`, `unmute` or `stop`. With text input, also a `text_input` message for each text the linked participant sends on the text-input topic. |
  * | `'close'`   | *(none)*                  | The transport closed: `close()`, the room disconnecting, the linked participant leaving while `closeOnDisconnect` is on or, with a publisher, a refused message or a capture that never returned. |
- * | `'warning'` | `Error`                   | A failure the transport and a session on it go on after, with a fixed message that names no text: a text input refused (`livekit text input refused`), or the first of a run of transcription writes that failed (`livekit transcription failed`). With nothing listening for it, one warning line, through `logger` when one is given. |
+ * | `'warning'` | `Error`                   | A failure the transport and a session on it go on after, with a fixed message that names no text: a text input refused (`livekit text input refused`), the first of a run of transcription writes that failed (`livekit transcription failed`), or a message held while nobody was linked that failed to reach the participant linked then (`livekit held message failed`). With nothing listening for it, one warning line, through `logger` when one is given. |
  * | `'error'`   | `Error`                   | A message that is not JSON, a text stream of the participant's that fails while it is read, a failure to read audio (the peer missing among them), or cleanup after `close()` that did not complete (`livekit cleanup incomplete`); with a publisher, also a refused message, and a capture that never returned (`livekit output stalled`), which closes the transport. A session on the transport ends on it, as `IStreamTransport` defines `'error'` as fatal. |
  *
  * Without a publisher, an error that nothing listens for is written as a
@@ -389,6 +395,12 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private controls: Promise<void> = Promise.resolve();
   /** How many control messages wait to go out, behind a cancel's clear or behind a message that waits. */
   private waitingControls = 0;
+  /** The session's messages sent while nobody is linked, the last eight, in order, for the first participant linked. */
+  private readonly heldMessages: ServerTextMessage[] = [];
+  /** Settles once the messages held while nobody was linked have gone out or failed; unset when none are going out. */
+  private heldDelivery: Promise<void> | undefined;
+  /** Whether the line saying a held message was dropped has been written; it is written once. */
+  private heldDropWritten = false;
   private readonly inputPump: Promise<void>;
   /** The identity of the participant the transport hears and answers; `undefined` while `'first'` waits for one. */
   private linked: string | undefined;
@@ -501,11 +513,16 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     if (typeof identity !== 'string' || identity === '') throw new Error('LiveKitStreamTransport: setParticipant needs a participant identity');
     if (this._state === 'open') this.link(identity);
   }
-  /** Links the participant with the identity, ending a `'first'` wait. */
+  /**
+   * Links the participant with the identity, ending a `'first'` wait. The first participant linked gets the messages held
+   * while nobody was.
+   */
   private link(identity: string): void {
     this.stopWaitingForFirst();
     if (identity === this.linked) return;
+    const first = this.linked === undefined;
     this.linked = identity; this.source.setParticipant(identity);
+    if (first) this.deliverHeld();
   }
   /** The first remote participant in the room, in the room's order, whose kind `'first'` links. */
   private firstOfKind(): string | undefined {
@@ -613,7 +630,10 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   /**
    * Sends one JSON message to the participant as a text stream on the topic. Existing server messages retain their
    * wire representation; call-profile messages carry their captured scope and generation. A SIP participant reads no
-   * text streams, so nothing is sent to one and the send resolves, as it does while nobody is linked. Outside
+   * text streams, so nothing is sent to one and the send resolves. While nobody is linked the message is held and the
+   * send resolves: the last eight are held, an older one is dropped (one warning line says so the first time), and the
+   * first participant linked gets them in order, one at a time, ahead of every message asked for since; one that fails
+   * then is reported as the warning `livekit held message failed`. Outside
    * participant playout a `barge_in` message first acts on the track, as a page acts on the audio it plays: a `cancel`
    * clears what the track holds, a `pause` holds the track (`LiveKitAudioPublisher.pause()`) and a `resume` releases
    * it, each at once. Messages go out in the
@@ -643,19 +663,17 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     } else if (action?.type === 'pause') this.publisher!.pause();
     else if (action?.type === 'resume') this.publisher!.resume();
     this.transcribe(message, action);
-    if (!previous && !cleared) {
-      if (this.nobodyReads()) return;
-      return this.sendWire(message);
-    }
+    if (!previous && !cleared) return this.deliver(message);
     this.waitingControls++;
     const sent = (async () => {
       try {
         // The messages that wait go out one at a time, each once the one ahead of it has gone out or failed.
         if (previous) await previous;
         if (cleared) await this.clearOrDeadline(cleared);
+        // The messages held while nobody was linked were asked for before this one, so they go out first.
+        if (this.heldDelivery) await this.heldDelivery;
       } finally { this.waitingControls--; }
-      if (this.nobodyReads()) return;
-      await this.sendWire(message);
+      await this.deliver(message);
     })();
     // A failed message is its caller's to report; the messages behind it still go out.
     this.controls = sent.catch(() => {});
@@ -677,6 +695,52 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private linkedParticipant(): LiveKitParticipantLike | undefined { return this.linked === undefined ? undefined : this.options.room.remoteParticipants.get(this.linked); }
   /** Whether a control message has nobody to read it: nobody is linked, or the linked participant is a phone caller. */
   private nobodyReads(): boolean { return this.linked === undefined || isLiveKitSipParticipant(this.linkedParticipant()); }
+  /**
+   * Sends one of the session's messages to the linked participant. While nobody is linked it is held for the first
+   * participant linked instead: the last eight are held, an older one is dropped, and one warning line says so the first
+   * time.
+   */
+  private deliver(message: ServerTextMessage): Promise<void> {
+    if (this.linked !== undefined) return this.sendToLinked(message);
+    this.heldMessages.push(message);
+    if (this.heldMessages.length > HELD_MESSAGES) {
+      this.heldMessages.shift();
+      if (!this.heldDropWritten) { this.heldDropWritten = true; this.warn(`LiveKitStreamTransport: nobody is linked, so the oldest held message was dropped; the last ${HELD_MESSAGES} are held`); }
+    }
+    return Promise.resolve();
+  }
+  /** Sends a message to the linked participant; a phone caller, who reads no text streams, is sent nothing. */
+  private sendToLinked(message: ServerTextMessage): Promise<void> { return this.nobodyReads() ? Promise.resolve() : this.sendWire(message); }
+  /**
+   * Sends the messages held while nobody was linked to the participant just linked: in order, one at a time, each once
+   * the one before it has gone out or failed, ahead of every message asked for since, and each counted among the messages
+   * that wait until it goes out. Their callers' sends resolved when they were held, so one that fails is reported as the
+   * warning `livekit held message failed`, once for the lot.
+   */
+  private deliverHeld(): void {
+    const held = this.heldMessages.splice(0);
+    if (held.length === 0) return;
+    this.waitingControls += held.length;
+    let reported = false;
+    let ahead: Promise<void> = Promise.resolve();
+    for (const message of held) {
+      const before = ahead;
+      ahead = (async () => {
+        try { await before; } finally { this.waitingControls--; }
+        if (this._state !== 'open') return;
+        try { await this.sendToLinked(message); } catch {
+          if (this._state === 'open' && !reported) { reported = true; this.warnOf(new Error('livekit held message failed')); }
+        }
+      })()
+        // A 'warning' listener that throws is reported as the transport's error.
+        .catch((error: unknown) => { if (this._state === 'open') this.emitErrorSafe(error instanceof Error ? error : new Error(String(error))); });
+    }
+    const delivered = ahead;
+    this.heldDelivery = delivered;
+    // The messages asked for from now on wait behind them, as behind any message that waits.
+    this.controls = Promise.all([this.controls, delivered]).then(() => undefined);
+    void delivered.then(() => { if (this.heldDelivery === delivered) this.heldDelivery = undefined; });
+  }
   /**
    * Writes what a message the session sends says of the conversation. A `transcript` is a line of the user's, opened by
    * the first one after a final and closed by its final. `agent_speaking` opens the agent's line of the reply, ending
@@ -750,8 +814,9 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     if (this.textInputTopic !== undefined) this.options.room.unregisterTextStreamHandler(this.textInputTopic);
     if (this.closeOnDeparture) this.options.room.off('participantDisconnected', this.participantDisconnected);
     this.stopWaitingForFirst();
-    // what a pause held goes with the transport: a resume after the close emits none of it, and no gap
-    this.source.close(); this.held.length = 0; this.heldMs = 0; this.droppedMs = 0;
+    // what a pause held goes with the transport: a resume after the close emits none of it, and no gap; so do the
+    // messages held while nobody was linked
+    this.source.close(); this.held.length = 0; this.heldMs = 0; this.droppedMs = 0; this.heldMessages.length = 0;
     const readers = [...this.readers, ...this.textInputReaders]; this.readers.clear(); this.textInputReaders.clear();
     this.closing = (async () => {
       const results = await Promise.allSettled([this.source.whenClosed(), this.inputPump, this.publisher?.close() ?? Promise.resolve(), ...readers.map((reader) => reader.close?.() ?? Promise.resolve())]);
