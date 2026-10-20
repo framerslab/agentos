@@ -21,7 +21,7 @@ pnpm run build
 pnpm run test
 ```
 
-CI runs on Node 22 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `node --test scripts/curated-extensions-peer.test.mjs` (the curated extensions installed for the tests take this checkout as their AgentOS; see [AGENTS.md](https://github.com/framerslab/agentos/blob/master/AGENTS.md#conventions)), `pnpm run build`, `pnpm run verify:exports`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test -- --coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. A second job, "Batch-1 gated tests", runs a fixed set of test files. Maintainers merge a pull request only when both jobs are green.
+CI runs on Node 22 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `node --test scripts/curated-extensions-peer.test.mjs` (the curated extensions installed for the tests take this checkout as their AgentOS, and each of their other first-party peers at a version inside its range; see [AGENTS.md](https://github.com/framerslab/agentos/blob/master/AGENTS.md#conventions)), `pnpm run build`, `pnpm run verify:exports`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test -- --coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. A second job, "Batch-1 gated tests", runs a fixed set of test files. Maintainers merge a pull request only when both jobs are green.
 
 A newer push to a pull request cancels the unfinished runs of its earlier commits, workflow by workflow, and an edit or a label change does the same for the breaking-change gate, so the newest run is the one that counts. A re-run cancels nothing.
 

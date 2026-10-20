@@ -9,10 +9,18 @@
  * tree. package.json gives the repository a dev dependency on itself, "@framers/agentos":
  * "link:.", and pnpm resolves every one of those peers to it.
  *
- * The checks of this repository need an install and no build: one reads pnpm-lock.yaml, the other
- * follows Node's module lookup from each installed curated package to the AgentOS it would import,
- * and fails on a curated package the lockfile lists that the install lacks. Each has a fixture in
- * the shape it guards against, so neither can pass by checking nothing.
+ * The account-source connectors (calendar-google, google-drive, github) also declare
+ * @framers/agentos-ext-account-sources as a peer. When pnpm installs a missing peer itself, it
+ * takes the newest version of that package the lockfile already holds, whether or not the peer's
+ * range admits it, and only warns: a lockfile holding account-sources 0.7.2 gave it to
+ * calendar-google 1.0.3, whose range is >=0.9.0. package.json pins account-sources as a dev
+ * dependency, which the weekly bump keeps at the newest release, and pnpm resolves those peers to it.
+ *
+ * The checks of this repository need an install and no build: two read pnpm-lock.yaml (every
+ * AgentOS is this checkout; every other first-party peer of a curated package is inside its range),
+ * the third follows Node's module lookup from each installed curated package to the AgentOS it would
+ * import, and fails on a curated package the lockfile lists that the install lacks. Each has a
+ * fixture in the shape it guards against, so none can pass by checking nothing.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,6 +39,9 @@ const REGISTRY = '@framers/agentos-extensions-registry';
 
 /** The registry and the curated extensions it installs. */
 const isCurated = (name) => name === REGISTRY || name.startsWith('@framers/agentos-ext-');
+
+/** A first-party peer whose range the lockfile check reads: any @framers/* package but AgentOS, checked on its own. */
+const isFirstPartyPeer = (peer) => peer.startsWith('@framers/') && peer !== AGENTOS;
 
 /** A lockfile key (`name@version`, then an optional peer suffix) as its package name and its key in `packages`. */
 function splitKey(key) {
@@ -65,6 +76,77 @@ export function agentosFromElsewhere(lockfile) {
       if (!isCheckout(ref)) found.push(`${key} resolves ${AGENTOS} to ${ref}`);
     } else if (isCurated(name) && lockfile.packages?.[id]?.peerDependencies?.[AGENTOS] !== undefined) {
       found.push(`${key} leaves its ${AGENTOS} peer unresolved`);
+    }
+  }
+  return found;
+}
+
+/** A release version (`1.2.3`) as its three numbers, or null for anything else (a prerelease, a link). */
+function release(version) {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  return match === null ? null : match.slice(1, 4).map(Number);
+}
+
+/**
+ * Whether a release version is inside a node-semver range, for the forms first-party peers are written in: `*`, and
+ * a full version alone or after `=`, `>`, `>=`, `<`, `<=`, `^` or `~`, the comparators of a set joined by spaces and
+ * the sets by `||`.
+ *
+ * @param {string} version A release version, such as `0.9.3`.
+ * @param {string} range The range a package declares, such as `>=0.9.0`.
+ * @returns {boolean} True when the version satisfies the range.
+ * @throws {Error} When the version is not a release or the range holds a form this check cannot read, so a peer it
+ *   cannot judge fails the test instead of passing it.
+ */
+export function inRange(version, range) {
+  const v = release(version);
+  if (v === null) throw new Error(`${version} is not a release version`);
+  const sets = range.split('||').map((set) => set.trim().replace(/(>=|<=|[<>=^~])\s+/g, '$1').split(/\s+/)
+    .filter((comparator) => comparator !== '' && comparator !== '*')
+    .map((comparator) => {
+      const match = /^(>=|<=|[<>=^~])?v?(\d+)\.(\d+)\.(\d+)$/.exec(comparator);
+      if (match === null) throw new Error(`the range ${range} holds a comparator this check cannot read: ${comparator}`);
+      return { op: match[1] ?? '=', bound: match.slice(2, 5).map(Number) };
+    }));
+  return sets.some((set) => set.every(({ op, bound }) => {
+    const order = v[0] - bound[0] || v[1] - bound[1] || v[2] - bound[2];
+    switch (op) {
+      case '>': return order > 0;
+      case '>=': return order >= 0;
+      case '<': return order < 0;
+      case '<=': return order <= 0;
+      case '~': return order >= 0 && v[0] === bound[0] && v[1] === bound[1];
+      // The first nonzero part stays: ^1.2.3 is below 2.0.0, ^0.9.0 below 0.10.0, ^0.0.3 below 0.0.4.
+      case '^': return order >= 0 && v[0] === bound[0]
+        && (bound[0] > 0 || (v[1] === bound[1] && (bound[1] > 0 || v[2] === bound[2])));
+      default: return order === 0;
+    }
+  }));
+}
+
+/**
+ * Every place a parsed pnpm-lock.yaml gives a curated package a first-party peer outside the range the package
+ * declares, or leaves a required one unresolved. The AgentOS peer is agentosFromElsewhere's.
+ *
+ * @param {any} lockfile pnpm-lock.yaml, parsed.
+ * @returns {string[]} One line per place; empty when every such peer resolves inside its range.
+ */
+export function firstPartyPeersOutOfRange(lockfile) {
+  const found = [];
+  for (const [key, snapshot] of Object.entries(lockfile.snapshots ?? {})) {
+    const { name, id } = splitKey(key);
+    if (!isCurated(name)) continue;
+    const pkg = lockfile.packages?.[id] ?? {};
+    for (const [peer, range] of Object.entries(pkg.peerDependencies ?? {})) {
+      if (!isFirstPartyPeer(peer)) continue;
+      const ref = snapshot?.dependencies?.[peer] ?? snapshot?.optionalDependencies?.[peer];
+      if (ref === undefined) {
+        if (!pkg.peerDependenciesMeta?.[peer]?.optional) found.push(`${key} leaves its ${peer} peer unresolved`);
+        continue;
+      }
+      const version = String(ref).split('(')[0];
+      if (release(version) === null) found.push(`${key} resolves ${peer} to ${ref}, not a release version`);
+      else if (!inRange(version, String(range))) found.push(`${key} resolves ${peer} to ${version}, outside ${range}`);
     }
   }
   return found;
@@ -197,6 +279,107 @@ test('pnpm-lock.yaml resolves every AgentOS peer to this checkout', () => {
   const curated = Object.keys(lockfile.snapshots ?? {}).map((key) => splitKey(key).name).filter(isCurated);
   assert.ok(curated.includes(REGISTRY), `pnpm-lock.yaml has no snapshot of ${REGISTRY}`);
   assert.ok(curated.length > 1, 'pnpm-lock.yaml has no snapshot of a curated extension');
+});
+
+test('the range check reads the forms first-party peers are written in, and refuses any other', () => {
+  const cases = [
+    ['0.9.3', '>=0.9.0', true],
+    ['0.7.2', '>=0.9.0', false],
+    ['0.7.2', '>=0.7.0', true],
+    ['0.9.3', '^0.9.0', true],
+    ['0.10.0', '^0.9.0', false],
+    ['1.4.0', '^1.2.3', true],
+    ['2.0.0', '^1.2.3', false],
+    ['0.0.4', '^0.0.3', false],
+    ['1.2.9', '~1.2.3', true],
+    ['1.3.0', '~1.2.3', false],
+    ['0.9.3', '>=0.8.0 <0.9.0 || >= 0.9.2', true],
+    ['0.9.1', '>=0.8.0 <0.9.0 || >=0.9.2', false],
+    ['0.9.3', '0.9.3', true],
+    ['0.9.3', '*', true],
+  ];
+  for (const [version, range, inside] of cases) assert.equal(inRange(version, range), inside, `${version} in ${range}`);
+  assert.throws(() => inRange('0.9.3', '0.9.x'), /cannot read: 0\.9\.x/);
+  assert.throws(() => inRange('0.9.3', '0.8.0 - 0.9.0'), /cannot read: -/);
+  assert.throws(() => inRange('link:', '>=0.9.0'), /not a release version/);
+});
+
+test('the check flags a lockfile that gives a curated extension a first-party peer outside its range', () => {
+  // The shape pull request 574's lockfile had: account-sources 0.7.2, the version the lockfile held, installed for
+  // calendar-google 1.0.3 (>=0.9.0) and google-drive 1.2.0 (>=0.8.0), and in range for github 0.5.0 (>=0.7.0). The
+  // last extension leaves a required first-party peer unresolved, and an optional one, which is not flagged.
+  const sources = '0.7.2(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1)';
+  const peers = `(@framers/agentos-ext-account-sources@${sources})(@framers/agentos@)`;
+  const lockfile = parse(`
+lockfileVersion: '9.0'
+packages:
+  '@framers/agentos-ext-account-sources@0.7.2':
+    resolution: {integrity: sha512-account-sources}
+    peerDependencies:
+      '@framers/agentos': '>=0.13.134'
+  '@framers/agentos-ext-calendar-google@1.0.3':
+    resolution: {integrity: sha512-calendar-google}
+    peerDependencies:
+      '@framers/agentos': '>=0.13.144'
+      '@framers/agentos-ext-account-sources': '>=0.9.0'
+  '@framers/agentos-ext-github@0.5.0':
+    resolution: {integrity: sha512-github}
+    peerDependencies:
+      '@framers/agentos': '>=0.13.144'
+      '@framers/agentos-ext-account-sources': '>=0.7.0'
+  '@framers/agentos-ext-google-drive@1.2.0':
+    resolution: {integrity: sha512-google-drive}
+    peerDependencies:
+      '@framers/agentos': '>=0.13.144'
+      '@framers/agentos-ext-account-sources': '>=0.8.0'
+  '@framers/agentos-ext-unresolved@1.0.0':
+    resolution: {integrity: sha512-unresolved}
+    peerDependencies:
+      '@framers/agentos': '>=0.13.144'
+      '@framers/agentos-ext-account-sources': '>=0.9.0'
+      '@framers/agentos-ext-optional': '>=1.0.0'
+    peerDependenciesMeta:
+      '@framers/agentos-ext-optional':
+        optional: true
+snapshots:
+  '@framers/agentos-ext-account-sources@${sources}':
+    dependencies:
+      '@framers/agentos': 'link:'
+    optional: true
+  '@framers/agentos-ext-calendar-google@1.0.3${peers}':
+    dependencies:
+      '@framers/agentos': 'link:'
+      '@framers/agentos-ext-account-sources': ${sources}
+      '@framers/agentos-ext-google-drive': 1.2.0${peers}
+    optional: true
+  '@framers/agentos-ext-github@0.5.0${peers}':
+    dependencies:
+      '@framers/agentos': 'link:'
+      '@framers/agentos-ext-account-sources': ${sources}
+    optional: true
+  '@framers/agentos-ext-google-drive@1.2.0${peers}':
+    dependencies:
+      '@framers/agentos': 'link:'
+      '@framers/agentos-ext-account-sources': ${sources}
+    optional: true
+  '@framers/agentos-ext-unresolved@1.0.0(@framers/agentos@)':
+    dependencies:
+      '@framers/agentos': 'link:'
+    optional: true
+`);
+  assert.deepEqual(firstPartyPeersOutOfRange(lockfile), [
+    `@framers/agentos-ext-calendar-google@1.0.3${peers} resolves @framers/agentos-ext-account-sources to 0.7.2, outside >=0.9.0`,
+    `@framers/agentos-ext-google-drive@1.2.0${peers} resolves @framers/agentos-ext-account-sources to 0.7.2, outside >=0.8.0`,
+    '@framers/agentos-ext-unresolved@1.0.0(@framers/agentos@) leaves its @framers/agentos-ext-account-sources peer unresolved',
+  ]);
+});
+
+test('pnpm-lock.yaml resolves every first-party peer of a curated package inside its range', () => {
+  const lockfile = parse(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8'));
+  assert.deepEqual(firstPartyPeersOutOfRange(lockfile), []);
+  const withPeers = Object.keys(lockfile.snapshots ?? {}).map(splitKey).filter(({ name, id }) =>
+    isCurated(name) && Object.keys(lockfile.packages?.[id]?.peerDependencies ?? {}).some(isFirstPartyPeer));
+  assert.ok(withPeers.length > 0, 'pnpm-lock.yaml has no curated package with a first-party peer besides AgentOS');
 });
 
 test('the install check flags an extension that finds another AgentOS, and one listed but not installed', () => {
