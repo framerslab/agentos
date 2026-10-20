@@ -1213,6 +1213,7 @@ export interface StreamingTTSConfig {
  * |--------------------|---------------------------|--------------------------------------|
  * | `'audio'`          | {@link EncodedAudioChunk}  | A synthesised chunk ready for playback. |
  * | `'flush_complete'`  | *(none)*                  | All queued tokens have been synthesised. |
+ * | `'warning'`        | `Error`                   | A failure the session goes on after, such as a provider socket lost mid-segment and the segment spoken again (`ElevenLabsStreamingTTS`). With nothing listening for it, the provider writes one warning line. |
  * | `'error'`          | `Error`                   | Unrecoverable synthesis error.       |
  * | `'close'`          | *(none)*                  | Session terminated.                  |
  *

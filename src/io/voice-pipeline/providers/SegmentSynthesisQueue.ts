@@ -26,7 +26,11 @@
  * `flush_complete`. `lost()`, for a provider that is gone, ends the segment in
  * flight without a boundary, its held frame going out, drops the queued
  * segments and completes the pending flushes with `flush_complete`, so the
- * reply they belong to ends. `hold()` keeps the next segment from starting
+ * reply they belong to ends. `retry()`, for a segment whose provider failed
+ * before its terminal response, ends it without a boundary, its held frame going
+ * out, and queues it again at the front, nothing counted as ended, so the
+ * adapter's next start is that segment's, on a fresh connection, and a flush
+ * waiting for it goes on waiting. `hold()` keeps the next segment from starting
  * until `release()`, for an adapter that must first let a stale response pass.
  *
  * @example
@@ -120,7 +124,8 @@ interface FlushWaiter {
  */
 export class SegmentSynthesisQueue {
   private readonly segmenter = new SentenceSegmenter();
-  private readonly pending: TextSegment[] = [];
+  /** The segments waiting to start, in order, each with how many queued segments it holds: one, unless it is a flight sent again. */
+  private readonly pending: Array<{ segment: TextSegment; count: number }> = [];
   private flight?: Flight;
   private queued = 0;
   private ended = 0;
@@ -206,6 +211,20 @@ export class SegmentSynthesisQueue {
   }
 
   /**
+   * The provider failed the segment in flight before its terminal response, and the adapter will send it again: the
+   * segment ends without a boundary, its held frame going out, and is queued again at the front, with the segments it
+   * held, so the next start is its own. Nothing is counted as ended: a flush waiting for it goes on waiting.
+   */
+  retry(): void {
+    const flight = this.flight;
+    if (!flight) return;
+    this.end(flight);
+    if (flight.held) this.hooks.emit(flight.held);
+    this.pending.unshift({ segment: flight.segment, count: flight.count });
+    this.startNext();
+  }
+
+  /**
    * The provider is gone: the segment in flight ends without a boundary, its held frame going out, the queued segments
    * are dropped and the text forgotten, and the pending flushes complete, with `flush_complete`, since every segment
    * queued before them has ended. A caller's `cancel()` differs in taking `flush_complete` with it.
@@ -254,15 +273,15 @@ export class SegmentSynthesisQueue {
       flight.count++;
       return;
     }
-    this.pending.push(segment);
+    this.pending.push({ segment, count: 1 });
     this.startNext();
   }
 
   private startNext(): void {
     if (this.flight || this.holding) return;
-    const segment = this.pending.shift();
-    if (!segment) return;
-    const flight: Flight = { segment, abort: new AbortController(), armed: false, count: 1 };
+    const next = this.pending.shift();
+    if (!next) return;
+    const flight: Flight = { segment: next.segment, abort: new AbortController(), armed: false, count: next.count };
     this.flight = flight;
     let started: Promise<void>;
     try {

@@ -1,11 +1,14 @@
 /**
  * Unit tests for ElevenLabsStreamingTTS provider.
  *
- * Uses a mock WebSocket to simulate ElevenLabs' streaming API responses. The
- * session sends one sentence segment at a time, each followed by the
- * end-of-stream message, and the `isFinal` that answers it completes the
- * segment: the last frame before it carries the segment's text boundary. A
- * spent socket is not reused; the next segment opens a new one.
+ * Uses a mock WebSocket to simulate ElevenLabs' multi-context streaming API.
+ * The session sends one sentence segment at a time, each as a context of its
+ * own on the session's socket: the context's initial message with the
+ * settings, its text with the flush flag, and its close. The context's
+ * `isFinal` completes the segment, and the last frame before it carries the
+ * segment's text boundary. A reply's sentences open no socket of their own; a
+ * socket that fails a segment is reported as a warning, and the segment gets a
+ * fresh one, once.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -51,13 +54,11 @@ const mock = (): { instances: MockSocket[]; behavior: 'open' | 'hang' } => Mocke
 const sockets = (): MockSocket[] => mock().instances;
 /** The JSON messages the session sent on the socket, in order. */
 const sent = (ws: MockSocket): Array<Record<string, unknown>> => ws.send.mock.calls.map((call) => JSON.parse(call[0] as string));
-/** The messages after the socket's initial one. */
-const texts = (ws: MockSocket): Array<Record<string, unknown>> => sent(ws).slice(1);
-/** One audio message from the server: one byte of audio, recognizable by `n`. */
+/** One audio message from the server, of no context: one byte of audio, recognizable by `n`. */
 const audio = (ws: MockSocket, n: number): void => {
   ws.emit('message', JSON.stringify({ audio: Buffer.from([n]).toString('base64') }));
 };
-/** The server's final message. */
+/** The server's final message, of no context. */
 const final = (ws: MockSocket): void => {
   ws.emit('message', JSON.stringify({ isFinal: true }));
 };
@@ -113,27 +114,27 @@ describe('ElevenLabsStreamingTTS', () => {
     expect(typeof session.close).toBe('function');
   });
 
-  it('should send BOS message on connection', async () => {
+  it("sends nothing at the open, and the voice and generation settings in the first message of each segment's context", async () => {
     const session = await tts.startSession();
-    const ws = (session as any).ws;
+    const [ws] = sockets();
+    expect(ws.send).not.toHaveBeenCalled();
 
-    // First call is the BOS (beginning of stream) message
-    expect(ws.send).toHaveBeenCalledOnce();
-    const bosMsg = JSON.parse(ws.send.mock.calls[0][0]);
-    expect(bosMsg).toHaveProperty('text', ' ');
-    expect(bosMsg).toHaveProperty('voice_settings');
-    expect(bosMsg).toHaveProperty('generation_config');
+    session.pushTokens('Hello world! ');
+    const [initial] = sent(ws);
+    expect(initial).toMatchObject({ text: ' ', context_id: expect.any(String) });
+    expect(initial.voice_settings).toEqual({ stability: 0.5, similarity_boost: 0.75, style: 0, use_speaker_boost: true });
+    expect(initial.generation_config).toEqual({ chunk_length_schedule: [120, 160, 250, 290] });
   });
 
-  it('sends a completed sentence as one text message followed by the end-of-stream message', async () => {
+  it('sends a completed sentence as a context: its initial message, its text with the flush flag ending in a space, and its close', async () => {
     const session = await tts.startSession();
     const [ws] = sockets();
 
     session.pushTokens('Hello ');
-    expect(texts(ws)).toEqual([]);
+    expect(sent(ws)).toEqual([]);
     // The sentence is complete once whitespace has followed its mark.
     session.pushTokens('world! ');
-    expect(texts(ws)).toEqual([{ text: 'Hello world!' }, { text: '' }]);
+    expect(sent(ws)).toEqual(context('Hello world! '));
   });
 
   it('should emit audio events when receiving audio chunks', async () => {
@@ -168,10 +169,10 @@ describe('ElevenLabsStreamingTTS', () => {
     const [ws] = sockets();
 
     session.pushTokens('Hello');
-    expect(texts(ws)).toEqual([]);
+    expect(sent(ws)).toEqual([]);
     const flushPromise = session.flush();
-    // The text, then the end-of-stream message.
-    expect(texts(ws)).toEqual([{ text: 'Hello' }, { text: '' }]);
+    // The segment's context: its initial message, its text with the flush flag, its close.
+    expect(sent(ws)).toEqual(context('Hello '));
 
     final(ws);
     await flushPromise;
@@ -196,12 +197,12 @@ describe('ElevenLabsStreamingTTS', () => {
 
     // The first sentence goes out whole, as soon as it is complete, before any text of the second.
     session.pushTokens('Hello th');
-    expect(texts(first)).toEqual([]);
+    expect(sent(first)).toEqual([]);
     session.pushTokens('ere. How are you');
-    expect(texts(first)).toEqual([{ text: 'Hello there.' }, { text: '' }]);
+    expect(sent(first)).toEqual(context('Hello there. '));
     const flushed = session.flush();
-    // The final segment waits for the one in flight: no second socket yet.
-    expect(sockets()).toHaveLength(1);
+    // The final segment waits for the one in flight: its context is not sent yet.
+    expect(sent(first)).toHaveLength(3);
 
     audio(first, 1);
     audio(first, 2);
@@ -217,18 +218,16 @@ describe('ElevenLabsStreamingTTS', () => {
     expect(chunks[2].textBoundary).toEqual({ segmentId: expect.any(String), start: 0, end: 12, text: 'Hello there.', final: true });
     expect(flushes).not.toHaveBeenCalled();
 
-    // The spent socket is closed, and the second segment goes out on a new one, after its initial message.
-    await opened();
-    expect(first.close).toHaveBeenCalledWith(1000, expect.any(String));
-    const [, second] = sockets();
-    expect(sent(second)[0]).toMatchObject({ text: ' ' });
-    expect(texts(second)).toEqual([{ text: ' How are you' }, { text: '' }]);
-    audio(second, 4);
-    audio(second, 5);
+    // The second segment follows as the next context on the same socket, which stays open.
+    expect(first.close).not.toHaveBeenCalled();
+    expect(sockets()).toHaveLength(1);
+    expect(sent(first).slice(3)).toEqual(context(' How are you '));
+    audio(first, 4);
+    audio(first, 5);
     expect(chunks).toHaveLength(4);
     expect(chunks[3].textBoundary).toBeUndefined();
     expect(chunks[3].text).toBe(' How are you');
-    final(second);
+    final(first);
     expect(chunks).toHaveLength(5);
     expect(chunks[4].audio[0]).toBe(5);
     expect(chunks[4].textBoundary).toEqual({ segmentId: expect.any(String), start: 12, end: 24, text: ' How are you', final: true });
@@ -242,25 +241,20 @@ describe('ElevenLabsStreamingTTS', () => {
     const [first] = sockets();
 
     session.pushTokens('One. Two. Three');
-    expect(texts(first)).toEqual([{ text: 'One.' }, { text: '' }]);
+    expect(sent(first)).toEqual(context('One. '));
     audio(first, 1);
     await opened();
-    expect(sockets()).toHaveLength(1);
+    expect(sent(first)).toHaveLength(3);
     final(first);
-    await opened();
-    expect(sockets()).toHaveLength(2);
-    const [, second] = sockets();
-    expect(texts(second)).toEqual([{ text: ' Two.' }, { text: '' }]);
+    expect(sent(first).slice(3)).toEqual(context(' Two. '));
     const flushed = session.flush();
     await opened();
-    expect(sockets()).toHaveLength(2);
-    final(second);
-    await opened();
-    expect(sockets()).toHaveLength(3);
-    const [, , third] = sockets();
-    expect(texts(third)).toEqual([{ text: ' Three' }, { text: '' }]);
-    final(third);
+    expect(sent(first)).toHaveLength(6);
+    final(first);
+    expect(sent(first).slice(6)).toEqual(context(' Three '));
+    final(first);
     await flushed;
+    expect(sockets()).toHaveLength(1);
   });
 
   it('emits the held frame without a boundary when the terminal response does not come within five seconds, and goes on', async () => {
@@ -273,8 +267,9 @@ describe('ElevenLabsStreamingTTS', () => {
 
     session.pushTokens('First one. Second');
     const flushed = session.flush();
-    expect(texts(first)).toEqual([{ text: 'First one.' }, { text: '' }]);
-    audio(first, 1);
+    expect(sent(first)).toEqual(context('First one. '));
+    const c1 = sent(first)[1].context_id as string;
+    audioIn(first, c1, 1);
     await vi.advanceTimersByTimeAsync(4_999);
     expect(chunks).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(1);
@@ -283,37 +278,34 @@ describe('ElevenLabsStreamingTTS', () => {
     expect(chunks[0].audio[0]).toBe(1);
     expect(chunks[0].textBoundary).toBeUndefined();
     expect(flushes).not.toHaveBeenCalled();
-    // The first socket stays open and no second one opens yet: the sentence's isFinal, and the rest of its audio, may
-    // still come, and the next segment waits for them so the audio arrives whole and in order.
+    // The next segment's context is not sent yet: the sentence's isFinal, and the rest of its audio, may still come,
+    // and the next segment waits for them so the audio arrives whole and in order.
     await opened();
-    expect(first.close).not.toHaveBeenCalled();
-    expect(sockets()).toHaveLength(1);
+    expect(sent(first)).toHaveLength(3);
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(sockets()).toHaveLength(1);
-    // The late frames go out at once, in order, without a boundary.
-    audio(first, 9);
-    audio(first, 10);
+    expect(sent(first)).toHaveLength(3);
+    // The late frames of that context go out at once, in order, without a boundary.
+    audioIn(first, c1, 9);
+    audioIn(first, c1, 10);
     expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary])).toEqual([
       [1, undefined],
       [9, undefined],
       [10, undefined],
     ]);
-    // The late isFinal completes nothing, and lets the next segment open its socket; the spent one is closed then.
-    final(first);
+    // Its late isFinal completes nothing, and lets the next segment's context go out, on the same socket.
+    finalIn(first, c1);
     expect(chunks).toHaveLength(3);
     expect(flushes).not.toHaveBeenCalled();
-    await opened();
-    expect(first.close).toHaveBeenCalledWith(1000, expect.any(String));
-    expect(sockets()).toHaveLength(2);
-    const [, second] = sockets();
-    expect(texts(second)).toEqual([{ text: ' Second' }, { text: '' }]);
-    audio(second, 2);
-    final(second);
+    expect(sent(first).slice(3)).toEqual(context(' Second '));
+    const c2 = sent(first)[4].context_id as string;
+    audioIn(first, c2, 2);
+    finalIn(first, c2);
     expect(chunks).toHaveLength(4);
     expect(chunks[3].audio[0]).toBe(2);
     expect(chunks[3].textBoundary).toEqual({ segmentId: expect.any(String), start: 10, end: 17, text: ' Second', final: true });
     expect(flushes).toHaveBeenCalledOnce();
     await flushed;
+    expect(sockets()).toHaveLength(1);
   });
 
   it('starts the next segment once the bounded wait for the late isFinal of a timed-out segment ends', async () => {
@@ -324,29 +316,26 @@ describe('ElevenLabsStreamingTTS', () => {
 
     session.pushTokens('First one. Second');
     const flushed = session.flush();
-    audio(first, 1);
+    const c1 = sent(first)[1].context_id as string;
+    audioIn(first, c1, 1);
     await vi.advanceTimersByTimeAsync(5_000);
     expect(chunks).toHaveLength(1);
-    // No isFinal comes for five more seconds: the next segment goes out anyway, on a socket of its own, and the spent
-    // socket is closed.
+    // No isFinal comes for five more seconds: the next segment's context goes out anyway, on the same socket.
     await vi.advanceTimersByTimeAsync(4_999);
-    await opened();
-    expect(sockets()).toHaveLength(1);
+    expect(sent(first)).toHaveLength(3);
     await vi.advanceTimersByTimeAsync(1);
-    await opened();
-    expect(sockets()).toHaveLength(2);
-    expect(first.close).toHaveBeenCalledWith(1000, expect.any(String));
-    const [, second] = sockets();
-    expect(texts(second)).toEqual([{ text: ' Second' }, { text: '' }]);
-    // What the first socket still sends is no longer the session's.
-    audio(first, 9);
-    final(first);
+    expect(sent(first).slice(3)).toEqual(context(' Second '));
+    const c2 = sent(first)[4].context_id as string;
+    // What the timed-out context still sends is nobody's: dropped.
+    audioIn(first, c1, 9);
+    finalIn(first, c1);
     expect(chunks).toHaveLength(1);
-    audio(second, 2);
-    final(second);
+    audioIn(first, c2, 2);
+    finalIn(first, c2);
     expect(chunks).toHaveLength(2);
     expect(chunks[1].textBoundary).toEqual({ segmentId: expect.any(String), start: 10, end: 17, text: ' Second', final: true });
     await flushed;
+    expect(sockets()).toHaveLength(1);
   });
 
   it('attaches nothing to a frame after a cancel, and a late terminal response emits nothing', async () => {
@@ -384,13 +373,11 @@ describe('ElevenLabsStreamingTTS', () => {
 
     session.pushTokens('One. Two. ');
     const flushed = session.flush();
-    expect(texts(first)).toEqual([{ text: 'One.' }, { text: '' }]);
+    expect(sent(first)).toEqual(context('One. '));
     final(first);
     expect(flushes).not.toHaveBeenCalled();
-    await opened();
-    const [, second] = sockets();
-    expect(texts(second)).toEqual([{ text: ' Two.' }, { text: '' }]);
-    final(second);
+    expect(sent(first).slice(3)).toEqual(context(' Two. '));
+    final(first);
     expect(flushes).toHaveBeenCalledOnce();
     await flushed;
     expect(flushes).toHaveBeenCalledOnce();
@@ -409,7 +396,7 @@ describe('ElevenLabsStreamingTTS', () => {
 
     session.pushTokens('Your order shipped.');
     const flushed = session.flush();
-    expect(texts(first)).toEqual([{ text: 'Your order shipped.' }, { text: '' }]);
+    expect(sent(first)).toEqual(context('Your order shipped. '));
     audio(first, 1);
     audio(first, 2);
     audio(first, 3);
@@ -428,31 +415,34 @@ describe('ElevenLabsStreamingTTS', () => {
     expect(played.playedText).toBe('Your order shipped.');
   });
 
-  it('reopens the socket for the next segment after the server closes it on isFinal', async () => {
+  it('opens a new socket for the next segment after the server closes the idle one between segments, with no warning', async () => {
     const session = await tts.startSession();
     const [first] = sockets();
     const closes = vi.fn();
     session.on('close', closes);
+    const warnings = vi.fn();
+    session.on('warning', warnings);
 
     session.pushTokens('One. Two');
-    expect(texts(first)).toEqual([{ text: 'One.' }, { text: '' }]);
+    expect(sent(first)).toEqual(context('One. '));
     final(first);
-    // The server ends the stream: the session stays open and says nothing.
-    first.emit('close');
+    // The server ends the idle socket: the session stays open and says nothing.
+    first.emit('close', 1000, Buffer.from(''));
     expect(closes).not.toHaveBeenCalled();
+    expect(warnings).not.toHaveBeenCalled();
     await opened();
     expect(sockets()).toHaveLength(1);
 
-    // The final segment opens a new socket, with its initial message first.
+    // The final segment opens a new socket, and goes out on it as a context of its own.
     const flushed = session.flush();
     await opened();
     expect(sockets()).toHaveLength(2);
     const [, second] = sockets();
-    expect(sent(second)[0]).toMatchObject({ text: ' ', voice_settings: expect.any(Object), generation_config: expect.any(Object) });
-    expect(texts(second)).toEqual([{ text: ' Two' }, { text: '' }]);
+    expect(sent(second)).toEqual(context(' Two '));
     final(second);
     await flushed;
     expect(closes).not.toHaveBeenCalled();
+    expect(warnings).not.toHaveBeenCalled();
   });
 
   it('stays usable after a cancel: the next segment opens a new socket', async () => {
@@ -469,30 +459,25 @@ describe('ElevenLabsStreamingTTS', () => {
     await opened();
     expect(sockets()).toHaveLength(2);
     const [, second] = sockets();
-    expect(sent(second)[0]).toMatchObject({ text: ' ' });
-    expect(texts(second)).toEqual([{ text: 'Next one.' }, { text: '' }]);
+    expect(sent(second)).toEqual(context('Next one. '));
     expect(closes).not.toHaveBeenCalled();
   });
 
-  it('ends the segment in flight without a boundary when its socket closes before isFinal, and goes on', async () => {
+  it("writes one console warning line for a segment's failure when nothing listens for warning, and speaks the segment again all the same", async () => {
     const session = await tts.startSession();
     const [first] = sockets();
-    const chunks = recorded(session);
-    const closes = vi.fn();
-    session.on('close', closes);
-
-    session.pushTokens('One. Two. ');
-    audio(first, 1);
-    expect(chunks).toHaveLength(0);
-    first.emit('close');
-    // The held frame goes out without a boundary; the session is not closed; the next segment opens a new socket.
-    expect(chunks).toHaveLength(1);
-    expect(chunks[0].textBoundary).toBeUndefined();
-    expect(closes).not.toHaveBeenCalled();
-    await opened();
-    expect(sockets()).toHaveLength(2);
-    const [, second] = sockets();
-    expect(texts(second)).toEqual([{ text: ' Two.' }, { text: '' }]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      session.pushTokens('One. Two. ');
+      first.emit('close', 1011, Buffer.from(''));
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toContain("[elevenlabs-streaming] elevenlabs ws closed before the segment's isFinal (code 1011)");
+      await opened();
+      expect(sockets()).toHaveLength(2);
+      expect(sent(sockets()[1])).toEqual(context('One. '));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('emits close once, from close() alone', async () => {
@@ -521,82 +506,69 @@ describe('ElevenLabsStreamingTTS', () => {
     expect(sockets()[0].close).toHaveBeenCalledOnce();
   });
 
-  it("ends a segment whose new socket does not open within eight seconds without a boundary, reports the error, and goes on", async () => {
+  it("gives a segment whose socket does not open within eight seconds a fresh socket, with a warning naming the timeout, and ends the reply when that one does not open either", async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const session = await tts.startSession();
     const [first] = sockets();
     const chunks = recorded(session);
+    const warnings = vi.fn();
+    session.on('warning', warnings);
     const errors = vi.fn();
     session.on('error', errors);
     const closes = vi.fn();
     session.on('close', closes);
+    const flushes = vi.fn();
+    session.on('flush_complete', flushes);
 
-    session.pushTokens('One. Two. ');
-    audio(first, 1);
-    // The second segment's socket never opens; its five-second wait for isFinal has not begun, since no end-of-stream
-    // message was sent.
+    // The server closed the idle socket between replies; the next reply's socket never opens.
+    first.emit('close', 1000, Buffer.from(''));
     mock().behavior = 'hang';
-    final(first);
-    expect(chunks).toHaveLength(1);
-    expect(chunks[0].textBoundary).toEqual({ segmentId: expect.any(String), start: 0, end: 4, text: 'One.', final: true });
+    session.pushTokens('One. Two. ');
+    const flushed = session.flush();
     expect(sockets()).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(7_999);
-    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
-    // The open is given up: the segment ends without a boundary, the error reaches the listener, the session stays open.
-    expect(errors).toHaveBeenCalledOnce();
-    expect((errors.mock.calls[0][0] as Error).message).toBe('elevenlabs ws connect timed out after 8000ms');
+    // The open is given up and the socket closed, as a warning and never the session's error; the segment gets a
+    // fresh socket.
+    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).toHaveBeenCalledOnce();
+    expect((warnings.mock.calls[0][0] as Error).message).toContain('elevenlabs ws connect timed out after 8000ms');
     expect(sockets()[1].close).toHaveBeenCalledOnce();
-    expect(chunks).toHaveLength(1);
-    expect(closes).not.toHaveBeenCalled();
-    // The next segment opens a socket of its own.
-    mock().behavior = 'open';
-    session.pushTokens('Three. ');
-    await opened();
     expect(sockets()).toHaveLength(3);
-    expect(texts(sockets()[2])).toEqual([{ text: ' Three.' }, { text: '' }]);
+    // That one does not open either: the reply ends with a second warning, its flush completes, the session stays.
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(warnings).toHaveBeenCalledTimes(2);
+    expect(sockets()[2].close).toHaveBeenCalledOnce();
+    expect(sockets()).toHaveLength(3);
+    await flushed;
+    expect(flushes).toHaveBeenCalledOnce();
+    expect(chunks).toHaveLength(0);
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
   });
 
-  it('reports a socket that fails before it opens for a later segment, ends the segment without a boundary, and goes on', async () => {
+  it('reports a socket that closes before it opens, with no error event, as a warning naming the close code, and gives the segment a fresh socket', async () => {
     const session = await tts.startSession();
     const [first] = sockets();
-    const chunks = recorded(session);
+    const warnings = vi.fn();
+    session.on('warning', warnings);
     const errors = vi.fn();
     session.on('error', errors);
-    const closes = vi.fn();
-    session.on('close', closes);
 
-    session.pushTokens('One. Two. Three. ');
-    audio(first, 1);
-    // The second segment's socket is refused: ws reports the error, then the close.
+    first.emit('close', 1000, Buffer.from(''));
     mock().behavior = 'hang';
-    final(first);
-    expect(chunks).toHaveLength(1);
+    session.pushTokens('One. ');
     expect(sockets()).toHaveLength(2);
-    const [, second] = sockets();
-    second.emit('error', new Error('connect ECONNREFUSED'));
-    second.emit('close');
+    sockets()[1].emit('close', 1006, Buffer.from(''));
     await opened();
-    // The segment ends without a boundary, the error reaches the listener, the session stays open, and the third
-    // segment opens a socket of its own.
-    expect(errors).toHaveBeenCalledOnce();
-    expect((errors.mock.calls[0][0] as Error).message).toBe('connect ECONNREFUSED');
-    expect(chunks).toHaveLength(1);
-    expect(closes).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).toHaveBeenCalledOnce();
+    expect((warnings.mock.calls[0][0] as Error).message).toContain('elevenlabs ws closed before it opened (code 1006)');
     expect(sockets()).toHaveLength(3);
-    // A socket that closes before it opens, with no error event, is reported as well.
-    sockets()[2].emit('close');
+    sockets()[2].emit('open');
     await opened();
-    expect(errors).toHaveBeenCalledTimes(2);
-    expect((errors.mock.calls[1][0] as Error).message).toBe('elevenlabs ws closed before it opened');
-    expect(chunks).toHaveLength(1);
-    expect(closes).not.toHaveBeenCalled();
-    // The next segment's socket opens, and the segment goes out on it.
-    mock().behavior = 'open';
-    session.pushTokens('Four. ');
-    await opened();
-    expect(sockets()).toHaveLength(4);
-    expect(texts(sockets()[3])).toEqual([{ text: ' Four.' }, { text: '' }]);
+    expect(sent(sockets()[2])).toEqual(context('One. '));
   });
 
   it('speaks the segments of a reply on one socket, each as a flushed context of its own, and opens no socket per sentence', async () => {
@@ -744,7 +716,9 @@ describe('ElevenLabsStreamingTTS', () => {
     first.emit('close', 1011, Buffer.from('internal error'));
     expect(errors).not.toHaveBeenCalled();
     expect(warnings).toHaveBeenCalledOnce();
-    expect((warnings.mock.calls[0][0] as Error).message).toContain('1011');
+    expect((warnings.mock.calls[0][0] as Error).message).toBe(
+      "elevenlabs ws closed before the segment's isFinal (code 1011: internal error); the segment is spoken again on a fresh socket"
+    );
     expect(closes).not.toHaveBeenCalled();
     expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary])).toEqual([[1, undefined], [2, undefined]]);
     // The sentence is spoken again, whole, on a fresh socket, as a context of its own, and proven by its own isFinal.
