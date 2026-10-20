@@ -22,7 +22,7 @@ import {
 } from '../IProvider';
 import { OpenRouterProviderError } from '../errors/OpenRouterProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
-import { classifyKeyFailure, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
@@ -30,6 +30,8 @@ import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { cheapestPricedChatModel } from './billing-probe-model.js';
+import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
 
 /**
  * Configuration specific to the OpenRouterProvider.
@@ -48,7 +50,7 @@ export interface OpenRouterProviderConfig {
    * default; `AGENTOS_KEY_POOL_STRATEGY=ordered` changes it when this is
    * absent); `store` and `id` persist the keys' standing across restarts.
    */
-  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'store' | 'id'>;
+  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'loadTimeoutMs' | 'storeTimeoutMs' | 'store' | 'id'>;
 }
 
 /**
@@ -244,82 +246,8 @@ interface OpenRouterListModelsAPIResponse {
   data: OpenRouterModelAPIObject[];
 }
 
-/** Longest streamed error body read into an error, in bytes. */
-const MAX_STREAM_ERROR_BODY_BYTES = 8192;
-
-/** How long reading a streamed error body may take, in milliseconds. */
-const STREAM_ERROR_BODY_TIMEOUT_MS = 2000;
-
 /** How many characters of the text delivered before a decline go into its details. */
 const DECLINE_PARTIAL_TEXT_CHARS = 2000;
-
-/** Whether a value is a Node readable stream, as axios returns for `responseType: 'stream'`. */
-function isReadableStream(value: unknown): value is NodeJS.ReadableStream & { destroy?: () => void } {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as { pipe?: unknown }).pipe === 'function' &&
-    typeof (value as { on?: unknown }).on === 'function'
-  );
-}
-
-/**
- * Reads up to {@link MAX_STREAM_ERROR_BODY_BYTES} of a streamed error body as
- * UTF-8 text, waiting at most {@link STREAM_ERROR_BODY_TIMEOUT_MS}, then
- * destroys the stream so its socket is released.
- *
- * @param stream - The error response body axios returned as a stream.
- * @returns The text read, possibly empty, and whether it is the whole body
- *   (false when the size limit, the timeout or a stream error cut it short).
- */
-async function readErrorStream(
-  stream: NodeJS.ReadableStream & { destroy?: () => void },
-): Promise<{ text: string; complete: boolean }> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  let ended = false;
-  try {
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(finish, STREAM_ERROR_BODY_TIMEOUT_MS);
-      function finish(): void {
-        clearTimeout(timer);
-        stream.removeListener('data', onData);
-        stream.removeListener('end', onEnd);
-        stream.removeListener('error', finish);
-        resolve();
-      }
-      function onEnd(): void {
-        ended = true;
-        finish();
-      }
-      function onData(chunk: Buffer | string): void {
-        const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
-        chunks.push(bytes);
-        size += bytes.length;
-        if (size >= MAX_STREAM_ERROR_BODY_BYTES) finish();
-      }
-      stream.on('data', onData);
-      stream.once('end', onEnd);
-      stream.once('error', finish);
-    });
-  } finally {
-    stream.destroy?.();
-  }
-  return {
-    text: Buffer.concat(chunks).subarray(0, MAX_STREAM_ERROR_BODY_BYTES).toString('utf8'),
-    complete: ended && size <= MAX_STREAM_ERROR_BODY_BYTES,
-  };
-}
-
-/** An error body read as text: the parsed JSON object when it is one, else the text. */
-function parseErrorBody(text: string): unknown {
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return parsed !== null && typeof parsed === 'object' ? parsed : text;
-  } catch {
-    return text;
-  }
-}
 
 /**
  * Whether an OpenRouter error is a request larger than the model's context
@@ -434,16 +362,23 @@ export class OpenRouterProvider implements IProvider {
   constructor() {}
 
   public async initialize(config: OpenRouterProviderConfig): Promise<void> {
-    // A re-initialize replaces the configuration and the pool: the old pool first stops its interval, finishes its
-    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
-    // the new configuration nor overwrite what the new pool loads from the store.
-    await this.keyPool?.close();
     if (!config.apiKey) {
       throw new OpenRouterProviderError(
         'OpenRouter API key (apiKey) is required for initialization.',
         'INIT_FAILED_MISSING_API_KEY'
       );
     }
+    // The new pool is built before anything of the old state is touched: its construction makes no request, so a
+    // timing it refuses (a RangeError) leaves this provider as it was, its pool and its recheck timer included.
+    const keyPool = new ApiKeyPool(config.apiKey, {
+      ...(config.keyPool ?? {}),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openrouter')),
+      probe: (key, kind) => this.probeKey(key, kind),
+    });
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     // Corrected: Ensure all properties of Required<OpenRouterProviderConfig> are present
     // by providing defaults for optional fields before freezing.
     this.config = Object.freeze({
@@ -455,11 +390,7 @@ export class OpenRouterProvider implements IProvider {
       requestTimeout: config.requestTimeout || 60000,
       streamRequestTimeout: config.streamRequestTimeout || 180000,
     });
-    this.keyPool = new ApiKeyPool(config.apiKey, {
-      ...(config.keyPool ?? {}),
-      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('openrouter')),
-      probe: (key) => this.probeKey(key),
-    });
+    this.keyPool = keyPool;
     await this.keyPool.ready();
     this.defaultModelId = this.config.defaultModelId; // Store the potentially undefined value
 
@@ -482,11 +413,22 @@ export class OpenRouterProvider implements IProvider {
       headers,
     });
 
+    // Every key of a pool of several is out (the store held them failed): the model listing would draw no key and
+    // fail the initialize, and a provider that never initializes runs no recheck timer, so nothing would probe the
+    // keys back until a fresh process forgot them. It initializes without the listing instead and its timer probes
+    // the keys at their recheck; the model cache fills on the first lookup that misses it.
+    if (keyPool.size > 1 && keyPool.usable() === 0) {
+      this.isInitialized = true;
+      keyPool.startRechecks();
+      console.warn('OpenRouterProvider: every API key of the pool is out of rotation; initialized without the model listing, and the keys are probed at their recheck.');
+      return;
+    }
+
     try {
       await this.refreshAvailableModels();
       this.isInitialized = true;
       // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
-      // breaker holds still gets its keys back; the interval never keeps the process alive.
+      // breaker holds still gets its keys back; the timer never keeps the process alive.
       if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
       console.log(`OpenRouterProvider initialized. Default Model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models via OpenRouter.`);
     } catch (error: unknown) {
@@ -765,7 +707,9 @@ export class OpenRouterProvider implements IProvider {
         'POST',
         // CR8: honor a per-call requestTimeout override over the provider default.
         options.requestTimeout ?? this.config.requestTimeout,
-        payload
+        payload,
+        false,
+        options.abortSignal
       );
     } catch (error: unknown) {
       const degraded = this.degradeSchemaPayloadOnNoEndpoints(payload, error);
@@ -774,7 +718,9 @@ export class OpenRouterProvider implements IProvider {
         '/chat/completions',
         'POST',
         options.requestTimeout ?? this.config.requestTimeout,
-        payload
+        payload,
+        false,
+        options.abortSignal
       );
     }
     this.throwOnInBodyError(apiResponseData, modelId);
@@ -929,34 +875,6 @@ export class OpenRouterProvider implements IProvider {
     this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
 
-    let stream: NodeJS.ReadableStream;
-    // True once the request goes again without its schema payload (the
-    // json_object retry below); the answer's chunks then say so.
-    let schemaLeftPayload = false;
-    try {
-      stream = await this.makeApiRequest<NodeJS.ReadableStream>(
-        '/chat/completions',
-        'POST',
-        // CR8: honor a per-call requestTimeout override over the stream default.
-        options.requestTimeout ?? this.config.streamRequestTimeout,
-        payload,
-        true
-      );
-    } catch (error: unknown) {
-      const degraded = this.degradeSchemaPayloadOnNoEndpoints(payload, error);
-      if (!degraded) throw error;
-      schemaLeftPayload = true;
-      stream = await this.makeApiRequest<NodeJS.ReadableStream>(
-        '/chat/completions',
-        'POST',
-        options.requestTimeout ?? this.config.streamRequestTimeout,
-        payload,
-        true
-      );
-    }
-
-    const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
-
     const abortSignal = options.abortSignal;
     // `usage` is what a refused turn billed before the abort; a consumer
     // metering final chunks would otherwise lose it.
@@ -970,6 +888,52 @@ export class OpenRouterProvider implements IProvider {
       isFinal: true,
       ...(usage ? { usage } : {}),
     });
+    if (abortSignal?.aborted) {
+      // The caller aborted before the call: no request is sent.
+      yield abortChunk('Stream aborted prior to first chunk');
+      return;
+    }
+
+    let stream: NodeJS.ReadableStream;
+    // True once the request goes again without its schema payload (the
+    // json_object retry below); the answer's chunks then say so.
+    let schemaLeftPayload = false;
+    try {
+      try {
+        stream = await this.makeApiRequest<NodeJS.ReadableStream>(
+          '/chat/completions',
+          'POST',
+          // CR8: honor a per-call requestTimeout override over the stream default.
+          options.requestTimeout ?? this.config.streamRequestTimeout,
+          payload,
+          true,
+          abortSignal
+        );
+      } catch (error: unknown) {
+        const degraded = !abortSignal?.aborted && this.degradeSchemaPayloadOnNoEndpoints(payload, error);
+        if (!degraded) throw error;
+        schemaLeftPayload = true;
+        stream = await this.makeApiRequest<NodeJS.ReadableStream>(
+          '/chat/completions',
+          'POST',
+          options.requestTimeout ?? this.config.streamRequestTimeout,
+          payload,
+          true,
+          abortSignal
+        );
+      }
+    } catch (error: unknown) {
+      // An abort while the draw waits on the pool's probes (or between attempts) ends the stream with the abort
+      // chunk, as an abort before the first chunk does; nothing was sent after it.
+      if (abortSignal?.aborted) {
+        yield abortChunk('Stream aborted prior to first chunk');
+        return;
+      }
+      throw error;
+    }
+
+    const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
+
     if (abortSignal?.aborted) {
       // The response is already open, and parseSseStream, which closes it,
       // never runs on this path.
@@ -1309,6 +1273,12 @@ export class OpenRouterProvider implements IProvider {
     if (!this.client) {
       return { isHealthy: false, details: { message: "OpenRouterProvider not initialized (HTTP client missing)."}};
     }
+    // The key a request would send, drawn as a request draws it. With every key of the pool out there is no
+    // credential to send: the provider is unhealthy, and an empty bearer would only earn a 401.
+    const apiKey = this.keyPool?.hasKeys ? await this.keyPool.nextAfterProbes() : this.config.apiKey;
+    if (apiKey === '') {
+      return { isHealthy: false, details: { message: 'Every OpenRouter API key is out of rotation', error: this.allKeysFailedError() } };
+    }
     try {
       // Auth rides per-request since the key moved off the axios instance
       // (per-attempt pool rotation) — /models is public today, but keep the
@@ -1316,7 +1286,7 @@ export class OpenRouterProvider implements IProvider {
       await this.client.get('/models', {
         timeout: Math.min(this.config.requestTimeout || 10000, 10000),
         headers: {
-          Authorization: `Bearer ${this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
       });
       return { isHealthy: true, details: { message: "Successfully connected to OpenRouter /models endpoint." } };
@@ -1334,7 +1304,7 @@ export class OpenRouterProvider implements IProvider {
   }
 
   public async shutdown(): Promise<void> {
-    // Stops the recheck interval, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    // Stops the recheck timer, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
     await this.keyPool?.close();
     this.isInitialized = false;
     this.availableModelsCache.clear();
@@ -1528,13 +1498,18 @@ export class OpenRouterProvider implements IProvider {
    *  - 408/429/5xx and transport-level failures (no HTTP response) retry
    *    with the response's Retry-After when present (capped), else
    *    jittered exponential backoff; 4xx request errors throw immediately.
+   *
+   * The caller's `signal` ends a draw that waits on the pool's probes, and
+   * no attempt is sent once it has fired: the request throws
+   * `REQUEST_ABORTED` instead.
    */
   private async makeApiRequest<T = unknown>(
     endpoint: string,
     method: 'GET' | 'POST',
     timeout?: number,
     body?: Record<string, unknown>,
-    expectStream: boolean = false
+    expectStream: boolean = false,
+    signal?: AbortSignal
   ): Promise<T> {
     let lastError: OpenRouterProviderError | null = null;
 
@@ -1543,7 +1518,13 @@ export class OpenRouterProvider implements IProvider {
     // transient attempt.
     let keyHops = 0;
     for (let attempt = 0; attempt < OpenRouterProvider.MAX_REQUEST_ATTEMPTS; attempt++) {
-      const apiKey = this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
+      // With no usable key while a probe of a failed key is in flight (its recheck came due), the draw waits for that
+      // probe, bounded by the pool's probe timeout, so the first request after a recheck is served by a key that came
+      // back; the caller's signal ends that wait at once, and nothing is sent after it.
+      const apiKey = this.keyPool?.hasKeys ? await this.keyPool.nextAfterProbes(signal) : this.config.apiKey;
+      if (signal?.aborted) {
+        throw new OpenRouterProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       if (apiKey === '') throw this.allKeysFailedError();
       const attemptStartedAt = Date.now();
       try {
@@ -1562,7 +1543,8 @@ export class OpenRouterProvider implements IProvider {
         let errorData: any;
         let errorMessage = 'Unknown OpenRouter API error';
         let errorType = 'UNKNOWN_API_ERROR';
-        let retryAfterSec: number | undefined;
+        // The server's Retry-After (delay-seconds or an HTTP-date), bounded as the pool bounds a key's rest.
+        let serverRetryAfterMs: number | null = null;
         let transportFailure = false;
 
         if (axios.isAxiosError(error)) {
@@ -1581,11 +1563,7 @@ export class OpenRouterProvider implements IProvider {
           }
           transportFailure = error.response === undefined;
           const retryAfterRaw = error.response?.headers?.['retry-after'];
-          const parsedRetryAfter =
-            typeof retryAfterRaw === 'string' ? parseInt(retryAfterRaw, 10) : NaN;
-          if (Number.isFinite(parsedRetryAfter) && parsedRetryAfter > 0) {
-            retryAfterSec = parsedRetryAfter;
-          }
+          serverRetryAfterMs = retryAfterMs(typeof retryAfterRaw === 'string' ? retryAfterRaw : null, undefined, this.config.keyPool?.maxRetryAfterMs);
           if (errorData?.error && typeof errorData.error === 'object') {
             errorMessage = errorData.error.message || errorMessage;
             const metaType = errorData.error.metadata?.error_type;
@@ -1618,7 +1596,7 @@ export class OpenRouterProvider implements IProvider {
           this.keyPool.markFailed(apiKey, keyFailure, {
             status: statusCode,
             at: attemptStartedAt,
-            ...(retryAfterSec !== undefined ? { retryAfterMs: retryAfterSec * 1000 } : {}),
+            ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
           });
           if (this.keyPool.size > 1) {
             if (this.keyPool.usable() > 0 && ++keyHops < this.keyPool.size) {
@@ -1664,8 +1642,8 @@ export class OpenRouterProvider implements IProvider {
         }
 
         const sleepMs = Math.min(
-          retryAfterSec !== undefined
-            ? retryAfterSec * 1000
+          serverRetryAfterMs !== null && serverRetryAfterMs > 0
+            ? serverRetryAfterMs
             : 300 * 2 ** attempt + Math.floor(Math.random() * 200),
           OpenRouterProvider.MAX_RETRY_SLEEP_MS,
         );
@@ -1682,15 +1660,54 @@ export class OpenRouterProvider implements IProvider {
     throw lastError ?? new OpenRouterProviderError('OpenRouter request failed.', 'API_REQUEST_FAILED');
   }
 
-  /** Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. */
-  private async probeKey(apiKey: string): Promise<ProbeResult> {
+  /**
+   * Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. An auth failure is probed
+   * with `GET /key`, the documented read of the calling key (https://openrouter.ai/docs/api-reference/limits). A
+   * billing failure is probed with the smallest billable completion, since that read reports the credit left rather
+   * than refusing for its lack: on the default model, else on the cheapest chat model the catalog lists with a
+   * price, never a free one, which need not refuse an account without credit (the same page names a negative
+   * balance, not an empty one, as what refuses free models). A
+   * provider that started without its catalog (every key was out) lists it with the probing key first and keeps it;
+   * with no priced model to send, the probe has no verdict and the key stays out. Every answer goes through the same
+   * classifier as a request's.
+   */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
-    try {
-      const response = await fetch(`${this.config.baseURL}/auth/key`, { method: 'GET', headers: { Authorization: `Bearer ${apiKey}` }, signal: controller.signal });
+    const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+    const verdict = async (response: Response): Promise<ProbeResult> => {
       if (response.ok) return 'ok';
       const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
       return classifyKeyFailure(response.status, text) ?? 'unknown';
+    };
+    try {
+      if (kind !== 'billing') {
+        return await verdict(await fetch(`${this.config.baseURL}/key`, { method: 'GET', headers, signal: controller.signal }));
+      }
+      let model = this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
+      if (!model && this.availableModelsCache.size === 0) {
+        const listed = await fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
+        if (!listed.ok) return await verdict(listed);
+        const body = (await listed.json().catch(() => ({}))) as Partial<OpenRouterListModelsAPIResponse>;
+        if (Array.isArray(body.data) && this.availableModelsCache.size === 0) {
+          for (const apiModel of body.data) {
+            const modelInfo = this.mapApiToModelInfo(apiModel);
+            this.availableModelsCache.set(modelInfo.modelId, modelInfo);
+          }
+        }
+        model = cheapestPricedChatModel(this.availableModelsCache.values());
+      }
+      if (!model) return 'unknown';
+      return await verdict(
+        await fetch(`${this.config.baseURL}/chat/completions`, {
+          method: 'POST',
+          headers,
+          // 16: OpenRouter's chat reference notes that some providers enforce a minimum of 16 for max_tokens
+          // (https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion.md, read 19 October 2026).
+          body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
+          signal: controller.signal,
+        }),
+      );
     } catch {
       return 'unknown';
     } finally {
@@ -1883,16 +1900,7 @@ export class OpenRouterProvider implements IProvider {
    * @returns The text with any such tail replaced by `[redacted]`.
    */
   private maskCutSecretTail(text: string): string {
-    let cut = 0;
-    for (const secret of this.configuredSecrets()) {
-      for (let length = Math.min(secret.length - 1, text.length); length > cut; length--) {
-        if (text.endsWith(secret.slice(0, length))) {
-          cut = length;
-          break;
-        }
-      }
-    }
-    return cut > 0 ? `${text.slice(0, text.length - cut)}[redacted]` : text;
+    return maskCutSecretTail(text, this.configuredSecrets());
   }
 
   /**
