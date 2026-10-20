@@ -64,16 +64,12 @@ export default {
       },
       // Writer tweaks: don't silently truncate long commit subjects.
       // The default writer caps `header` at 100 chars and slices mid-word.
+      // Leave `transform` to the preset: a writerOpts property replaces the
+      // preset's, and the preset's transform is what drops merge commits and
+      // the hidden types, gives each section and the breaking-change notes
+      // their titles, and adds each commit's 7-character shortHash.
       writerOpts: {
         headerMaxLength: 500,
-        transform: (commit, context) => {
-          // conventional-changelog-writer@8 freezes commit objects, so
-          // we must return a new object instead of mutating in place.
-          if (commit.hash && typeof commit.hash === 'string') {
-            return { ...commit, shortHash: commit.hash.substring(0, 7) };
-          }
-          return commit;
-        },
       },
     }],
 
