@@ -5,7 +5,9 @@
  * `node:vm` is not a security mechanism (Node's documentation), and the
  * context is handed the host's own constructors and functions, so this
  * executor declares `isolates: false`. It enforces a wall-clock timeout;
- * memory is reported as a heap delta around the call, not limited.
+ * memory is reported as a heap delta around the call, not limited. A garbage
+ * collection inside that window reads the delta as zero (the figure is clamped
+ * at zero), so `memoryUsedBytes` is a floor, never a peak.
  *
  * @module @framers/agentos/emergent/executor/InProcessExecutor
  */
