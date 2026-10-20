@@ -30,7 +30,7 @@
 
 AgentOS is an open-source TypeScript framework for AI agents that **remember, adapt, and write their own tools**.
 
-- **Top open-source memory benchmarks:** [85.6% on LongMemEval-S](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) at $0.0090/correct (gpt-4o), and 70.2% on LongMemEval-M, the only open-source library above 65% on M with reproducible methodology.
+- **Top open-source memory benchmarks:** [85.6% on LongMemEval-S](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) at $0.0090/correct (`gpt-4o` and `gpt-5-mini` readers, routed per question type), and 70.2% on LongMemEval-M, the only open-source library above 65% on M with reproducible methodology.
 - **Runtime tool forging.** An agent writes a JavaScript function with JSON Schemas for its input and output, the declared test cases run it, an LLM judge reviews the result, and on approval the tool joins the session's tool list. Forged code runs in an in-process `node:vm` context or, with `QuickJSExecutor`, in a QuickJS WebAssembly instance of its own for each call.
 - **Persistent [cognitive memory](https://docs.agentos.sh/features/cognitive-memory)** with Ebbinghaus decay and 8 neuroscience-backed mechanisms, among them retrieval-induced forgetting, reconsolidation and source-confidence decay.
 - **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [6 orchestration strategies](https://docs.agentos.sh/features/agency-collaboration), [guardrails](https://docs.agentos.sh/features/guardrails-architecture), and [voice](https://docs.agentos.sh/features/voice-pipeline) across **13 LLM providers**; 100+ extensions and 88 skills ship as separate packages with registries that load them.
@@ -137,9 +137,9 @@ await session.send('Explain recursion with an analogy.');
 
 ## Memory Benchmarks
 
-`gpt-4o` reader, `gpt-4o-2024-08-06` judge, full N=500, single-CLI reproduction with bootstrap 95% CIs and per-benchmark judge-FPR probes.
+Both headline results use a per-category reader router (`gpt-4o` answers temporal-reasoning and single-session-user questions, `gpt-5-mini` the other four types), with the `gpt-4o-2024-08-06` judge, full N=500, single-CLI reproduction with bootstrap 95% CIs and per-benchmark judge-FPR probes.
 
-- **LongMemEval-S: 85.6%** at $0.0090/correct, 3,558 ms p50: +1.4 points over Mastra OM gpt-4o (84.23%), 0.4 behind Emergence.ai's closed-source 86%. The highest publicly reproducible open-source number at `gpt-4o`.
+- **LongMemEval-S: 85.6%** at $0.0090/correct, 3,558 ms p50. With `gpt-4o` reading every question, the same retrieval scores 84.2%, level with Mastra OM with a `gpt-4o` actor (84.23%; Mastra uses `gemini-2.5-flash` as its observer and reflector); Mastra OM reports 94.87% with a `gpt-5-mini` actor. Full table and methodology: [LEADERBOARD.md](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md).
 - **LongMemEval-M: 70.2%** (1.5M-token haystacks, 500 sessions): the only open-source library above 65% on M with reproducible methodology.
 
 [Full leaderboard ->](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) * [Transparency audit ->](https://agentos.sh/en/blog/memory-benchmark-transparency-audit/) * [LongMemEval paper](https://arxiv.org/abs/2410.10813) (Wu et al., ICLR 2025)
@@ -168,7 +168,7 @@ await session.send('Explain recursion with an analogy.');
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
 | **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts (opt-in per persona) * mood-weighted memory bridge * bounded `adapt_personality` trait changes (opt-in) |
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
-| **Multi-Agent Teams** | 6 coordination strategies * manager delegation and specialist spawning * panel quorum on the parallel strategy * HITL approval gates |
+| **Multi-Agent Teams** | 7 coordination strategies * manager delegation and specialist spawning * model pools with seating policies and strict per-seat credentials * a panel strategy with a provider and vendor quorum * HITL approval gates |
 | **Orchestration** | `workflow()` DAGs * `AgentGraph` router, personality and discovery edges * `mission()` graphs from plan templates * checkpointing |
 | **Guardrails** | 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
 | **Emergent Capabilities** | Runtime tool forging * 4 self-improvement tools * tiered promotion * skill export |
@@ -195,7 +195,7 @@ const team = agency({
 const result = await team.generate('Compare TCP vs UDP for game networking.');
 ```
 
-Strategies: `sequential`, `parallel`, `debate`, `review-loop`, `hierarchical`, `graph`. With `hierarchical` + `emergent: { enabled: true }`, the manager forges new sub-agents at runtime. Every roster agent can set its own `provider`, `model`, `apiKey` and `effort`; a `parallel` agency can require a provider quorum (`quorum: { minProviders: 2 }`) before it synthesizes. [Multi-agent docs ->](https://docs.agentos.sh/features/agency-api)
+Strategies: `sequential`, `parallel`, `debate`, `review-loop`, `hierarchical`, `graph`, `panel`. With `hierarchical` + `emergent: { enabled: true }`, the manager forges new sub-agents at runtime. Every roster agent can set its own `provider`, `model`, `apiKey` and `effort`; a `parallel` or `panel` agency can require a provider quorum (`quorum: { minProviders: 2 }`) before it synthesizes. A `modelPool` fills every seat that names neither `provider` nor `model` from named models on each call, with strict per-seat credentials and every key redacted from the records. [Multi-agent docs ->](https://docs.agentos.sh/features/agency-api)
 
 ---
 
@@ -219,7 +219,7 @@ Extensions load from the manifest a host passes to `AgentOS.create({ extensionMa
 
 ## Configure API Keys
 
-Three layers, highest priority first: inline `apiKey` on the call, a module-level `setDefaultProvider()` at boot, or environment-variable auto-detection (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and the rest, resolved in priority order and reorderable with `setProviderPriority([...])`). A comma-separated list of keys rotates per request on the providers that support it ([Key rotation](https://github.com/framerslab/agentos/blob/master/docs/KEY_ROTATION.md)).
+Three layers, highest priority first: inline `apiKey` on the call, a module-level `setDefaultProvider()` at boot, or environment-variable auto-detection (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and the rest, resolved in priority order and reorderable with `setProviderPriority([...])`). A comma-separated list of keys gives a provider a key pool: round-robin by default, or `AGENTOS_KEY_POOL_STRATEGY_<PROVIDER>=ordered` (`AGENTOS_KEY_POOL_STRATEGY_ANTHROPIC=ordered` for Anthropic's keys alone; `AGENTOS_KEY_POOL_STRATEGY=ordered` for every provider's) to use the keys in order and fail over to the next when one is revoked, unpaid or throttled ([Key rotation](https://github.com/framerslab/agentos/blob/master/docs/KEY_ROTATION.md)).
 
 [Full credential resolution + default models per provider ->](https://docs.agentos.sh/architecture/llm-providers)
 
@@ -245,6 +245,7 @@ Provider fallback is on by default for `generateText()`, `streamText()`, `agent(
 - **[Cognitive Memory](https://docs.agentos.sh/features/cognitive-memory)**: 8 mechanisms with 30+ APA citations
 - **[RAG Configuration](https://docs.agentos.sh/features/rag-memory)**: vector stores, embeddings, sources
 - **[Document Ingestion](https://docs.agentos.sh/features/memory-document-ingestion)**: PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, HTML and Markdown read to text, with bounds on what a Word or office archive inflates to
+- **[Library Index](https://docs.agentos.sh/features/library-index)**: sources over any vector store, and a browser entry for a page's own search and records, transcript files from other notetakers (SubRip, WebVTT, Otter, Fireflies, Word) read to turns with the speakers kept apart, and the plan of an archive's entries
 - **[Text Processing & Search](https://docs.agentos.sh/text)**: tokenizers and stemming, BM25, fuzzy and hybrid search, text statistics, chunking, reranking
 - **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: two-phase dispatcher, four verdicts, fail-open and fail-closed guards
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony

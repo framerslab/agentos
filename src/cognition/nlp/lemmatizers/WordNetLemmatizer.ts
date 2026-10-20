@@ -1,9 +1,9 @@
 /**
- * @fileoverview WordNet lemmatizer wrapping the `natural` package.
- * Falls back to no-op if `natural` is not installed.
+ * @fileoverview A lemma stage over the `natural` package's Lancaster stemmer. Passes tokens through unchanged when
+ * `natural` cannot be loaded.
  *
- * Lemmatization produces the dictionary form of a word:
- * `ran` → `run`, `better` → `good`, `mice` → `mouse`.
+ * It looks nothing up in WordNet: `natural` reads WordNet asynchronously only, and a pipeline stage is synchronous,
+ * so the lemma is the Lancaster stem, not the dictionary form: `better` never becomes `good`, nor `mice` `mouse`.
  *
  * @module agentos/nlp/lemmatizers/WordNetLemmatizer
  */
@@ -37,10 +37,8 @@ function loadLemmatizer(): void {
 }
 
 /**
- * WordNet-based lemmatizer. Reduces words to their dictionary (lemma) form.
- *
- * Sets `token.lemma` and updates `token.text` to the lemmatized form.
- * Falls back to Lancaster stemming if full WordNet lookup is unavailable.
+ * Sets `token.lemma`, and `token.text`, to the Lancaster stem of the token's text. Despite its name it does not look
+ * words up in WordNet, so it gives no dictionary forms; see the module comment.
  */
 export class WordNetLemmatizer implements ITextProcessor {
   readonly name = 'WordNetLemmatizer';

@@ -14,14 +14,22 @@
  * Exit conditions are modelled as a **single `Promise.race`** rather than a state
  * machine because the conditions are orthogonal and any one of them can fire at any
  * time. The `settled` flag inside {@link raceExitConditions} guards against
- * double-resolution when two conditions fire within the same microtask.
+ * double-resolution when two conditions fire within the same microtask. When the race
+ * settles, every listener it added, the collector's included, its silence timer and its
+ * abort listener are released, so a node that runs again and again on one session and
+ * one transport leaves nothing behind.
  *
  * ## State contract
  *
  * Voice transport and session references are expected in `state.scratch`:
- * - `voiceTransport` -- the bidirectional transport EventEmitter (emits `close` / `disconnected`).
- * - `voiceTransport._voiceSession` -- the voice pipeline session EventEmitter that fires
- *   `final_transcript`, `turn_complete`, `speech_start`, and `barge_in` events.
+ * - `voiceSession` -- a started `VoicePipelineSession`, whose own events the node reads:
+ *   `user_input_transcribed`, `conversation_item_added`, `user_state_changed`, `barge_in`
+ *   and `close` (`VoiceTransportAdapter` puts it there when given `{ session, orchestrator }`).
+ * - `voiceTransport` -- the bidirectional transport EventEmitter (emits `close` / `disconnected`);
+ *   without it, the started session's `transport`.
+ * - `voiceTransport._voiceSession` -- deprecated, read only without `voiceSession` and kept until
+ *   the next minor: an emitter of the pipeline's events relayed under the names
+ *   `final_transcript`, `interim_transcript`, `turn_complete`, `speech_start` and `barge_in`.
  *
  * Checkpoint data is stored in `state.scratch[nodeId]` as a {@link VoiceNodeCheckpoint},
  * enabling the graph runtime to resume a voice session from the exact turn index where
@@ -36,8 +44,23 @@ import { EventEmitter } from 'events';
 import type { GraphNode, GraphState, VoiceNodeConfig } from '../ir/types.js';
 import type { GraphEvent } from '../events/GraphEvent.js';
 import type { NodeExecutionResult } from './NodeExecutor.js';
-import { VoiceTurnCollector } from './VoiceTurnCollector.js';
+import { VoiceTurnCollector, type VoiceTurnCollectorEvents } from './VoiceTurnCollector.js';
 import { VoiceInterruptError } from '../../io/voice-pipeline/VoiceInterruptError.js';
+import type { VoiceSessionEventMap } from '../../io/voice-pipeline/types.js';
+
+/** The silence a `silence-timeout` node waits through, in milliseconds. */
+const SILENCE_TIMEOUT_MS = 30_000;
+
+/**
+ * Whether a session or a transport reads `closed`, as a `VoicePipelineSession` and an `IStreamTransport` report it in
+ * `state`. An emitter without a `state`, such as one a host relays a pipeline's events onto, never does.
+ *
+ * @param value - The session or the transport.
+ * @returns `true` when its `state` is `'closed'`.
+ */
+function readsClosed(value: unknown): boolean {
+  return (value as { state?: unknown } | null | undefined)?.state === 'closed';
+}
 
 // ---------------------------------------------------------------------------
 // Checkpoint type
@@ -99,13 +122,17 @@ export interface VoiceNodeCheckpoint {
  * multiple exit conditions to determine when the node is done.
  *
  * Exit conditions are evaluated concurrently via a single `Promise` race:
- * - **Hangup** -- transport emits `close` or `disconnected`.
- * - **Turns exhausted** -- session emits `turn_complete` and the collector's count
- *   reaches `config.maxTurns`.
- * - **Keyword** -- a `final_transcript` event contains one of `config.exitKeywords`.
+ * - **Hangup** -- transport emits `close` or `disconnected`, or a started session emits `close`;
+ *   at once when either already reads `closed` as the node starts.
+ * - **Turns exhausted** -- a user turn completes (a started session's `conversation_item_added`
+ *   with a user item, or a relayed `turn_complete`) and the collector's count reaches
+ *   `config.maxTurns`.
+ * - **Keyword** -- a final transcript (a started session's final `user_input_transcribed`, or a
+ *   relayed `final_transcript`) contains one of `config.exitKeywords`.
  * - **Silence timeout** -- no speech activity for 30 seconds (when `exitOn: 'silence-timeout'`).
  * - **Abort/barge-in** -- the internal `AbortController` is signalled, either by a
- *   parent abort signal or a `VoiceInterruptError`.
+ *   parent abort signal (at once when it was aborted before the node started) or a
+ *   `VoiceInterruptError`.
  *
  * @example
  * ```ts
@@ -136,13 +163,16 @@ export class VoiceNodeExecutor {
    * ## Lifecycle
    *
    * 1. Validates that `node.executorConfig.type` is `'voice'`.
-   * 2. Creates an internal `AbortController` for barge-in, wiring it to any parent
+   * 2. Extracts the started session (`state.scratch.voiceSession`) and the `voiceTransport`
+   *    from `state.scratch`, or the started session's own transport (pre-placed by the
+   *    graph runtime or `VoiceTransportAdapter`).
+   * 3. Checks for a {@link VoiceNodeCheckpoint} to resume from.
+   * 4. Emits a `voice_session` started event.
+   * 5. Creates an internal `AbortController` for barge-in, wiring it to any parent
    *    abort signal in `state.scratch.abortSignal`.
-   * 3. Extracts the `voiceTransport` from `state.scratch` (must be pre-placed by
-   *    the graph runtime or `VoiceTransportAdapter`).
-   * 4. Checks for a {@link VoiceNodeCheckpoint} to resume from.
-   * 5. Emits a `voice_session` started event.
-   * 6. Wires a `VoiceTurnCollector` onto the session and races exit conditions.
+   * 6. Wires a `VoiceTurnCollector` onto the session and races exit conditions; the
+   *    collector's and the race's listeners, the race's timer and the parent abort
+   *    listener are released as the race settles.
    * 7. Resolves the exit reason to a route target via the node's edge map.
    * 8. Returns a {@link NodeExecutionResult} with transcript, exit reason, checkpoint,
    *    and optional route target.
@@ -150,7 +180,8 @@ export class VoiceNodeExecutor {
    * @param node  - Immutable voice node descriptor from the compiled graph IR.
    *                Must have `executorConfig.type === 'voice'`.
    * @param state - Current (partial) graph state threaded from the runtime.
-   *                Must contain `scratch.voiceTransport` for the voice session.
+   *                Must contain `scratch.voiceSession` (a started `VoicePipelineSession`)
+   *                or `scratch.voiceTransport` for the voice session.
    * @returns A {@link NodeExecutionResult} with transcript, exit reason, and optional route target.
    *          On success, `output` contains `{ transcript, turns, exitReason, lastSpeaker, interruptedText }`.
    *          `scratchUpdate` carries the {@link VoiceNodeCheckpoint} keyed by node id.
@@ -168,25 +199,16 @@ export class VoiceNodeExecutor {
     }
 
     const voiceConfig = config.voiceConfig;
+    const scratch = (state as any)?.scratch as Record<string, unknown> | undefined;
 
-    // Create an internal AbortController so barge-in events or parent cancellation
-    // can terminate the exit condition race without waiting for a session event.
-    const controller = new AbortController();
-
-    // If a parent abort signal exists in scratch (e.g. from a graph-level timeout
-    // or manual cancellation), forward its abort to our internal controller so that
-    // the voice session is cancelled when the parent cancels.
-    const parentSignal = (state as any)?.scratch?.abortSignal as AbortSignal | undefined;
-    if (parentSignal) {
-      parentSignal.addEventListener('abort', () => controller.abort(parentSignal.reason), {
-        once: true,
-      });
-    }
+    // A started VoicePipelineSession, whose own events the node reads. VoiceTransportAdapter puts it here when it is
+    // given `{ session, orchestrator }`.
+    const startedSession = scratch?.voiceSession as (EventEmitter & { transport?: unknown }) | undefined;
 
     // The voice transport must be pre-placed in state.scratch by the graph runtime
-    // or VoiceTransportAdapter before executing a voice node. Without it we cannot
-    // receive session events or detect hangup.
-    const transport = (state as any)?.scratch?.voiceTransport as EventEmitter | undefined;
+    // or VoiceTransportAdapter before executing a voice node, or come with the
+    // started session. Without it we cannot detect hangup.
+    const transport = (scratch?.voiceTransport ?? startedSession?.transport) as EventEmitter | undefined;
     if (!transport) {
       return { success: false, error: 'Voice node requires voiceTransport in state.scratch' };
     }
@@ -230,27 +252,41 @@ export class VoiceNodeExecutor {
     // Signal that the voice session is now active for this node.
     this.eventSink({ type: 'voice_session', nodeId: node.id, action: 'started' });
 
-    try {
-      // The voice session EventEmitter is expected on transport._voiceSession.
-      // In production this is the VoicePipelineSession; in tests it can be a
-      // plain EventEmitter. Fallback to a fresh emitter avoids null dereferences
-      // when the transport doesn't have an attached session.
-      const session: EventEmitter = (transport as any)._voiceSession ?? new EventEmitter();
+    // Create an internal AbortController so barge-in events or parent cancellation
+    // can terminate the exit condition race without waiting for a session event.
+    const controller = new AbortController();
 
-      // Create the turn collector -- it subscribes to session events (interim_transcript,
-      // final_transcript, turn_complete, barge_in) and bridges them into GraphEvents
-      // while maintaining a running transcript buffer and turn counter.
-      const collector = new VoiceTurnCollector(session, this.eventSink, node.id, initialTurnCount);
+    // If a parent abort signal exists in scratch (e.g. from a graph-level timeout
+    // or manual cancellation), forward its abort to our internal controller so that
+    // the voice session is cancelled when the parent cancels. The listener goes when
+    // the race settles, so a node run again and again under one signal leaves none.
+    const parentSignal = scratch?.abortSignal as AbortSignal | undefined;
+    const onParentAbort = (): void => controller.abort(parentSignal?.reason);
+    parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+    // A signal aborted before the node started fires no abort event again: the node is interrupted at once.
+    if (parentSignal?.aborted) controller.abort(parentSignal.reason);
+
+    try {
+      // The session whose events the node reads: the started session, under its own
+      // names. Without one, and deprecated until the next minor, the emitter a host
+      // relays the pipeline's events onto as transport._voiceSession, under the
+      // relayed names; without that either, a fresh emitter, which fires nothing, so
+      // that only a hangup or an abort ends the node.
+      const events: VoiceTurnCollectorEvents = startedSession ? 'session' : 'relayed';
+      const session: EventEmitter = startedSession ?? (transport as any)._voiceSession ?? new EventEmitter();
+
+      // Create the turn collector -- it subscribes to the session's transcripts,
+      // turns and barge-ins and bridges them into GraphEvents while maintaining a
+      // running transcript buffer and turn counter.
+      const collector = new VoiceTurnCollector(session, this.eventSink, node.id, initialTurnCount, { events });
 
       // Race all exit conditions against each other. The first condition to fire
-      // determines exitReason and ends the voice node.
-      const result = await this.raceExitConditions(
-        session,
-        collector,
-        voiceConfig,
-        controller,
-        transport
-      );
+      // determines exitReason and ends the voice node; the collector's listeners
+      // go with the race's own.
+      const result = await this.raceExitConditions(session, events, collector, voiceConfig, controller, transport).finally(() => {
+        collector.dispose();
+        parentSignal?.removeEventListener('abort', onParentAbort);
+      });
 
       // Map the exitReason string to a target node id using the edge map.
       // This is how voice nodes implement conditional routing: different exit
@@ -341,12 +377,25 @@ export class VoiceNodeExecutor {
    * ## How it works
    *
    * Each exit condition is wired as a listener on either the `session` or
-   * `transport` EventEmitter. All listeners call a shared `settleWith()` helper
-   * that resolves the outer Promise exactly once (guarded by a `settled` boolean).
+   * `transport` EventEmitter, through `subscribe()`, which records how to remove
+   * it. All listeners call a shared `settleWith()` helper that settles the outer
+   * Promise exactly once (guarded by a `settled` boolean); as it settles, by a
+   * resolve or a reject, every listener the race added is removed, the silence
+   * timer is cleared and the abort listener is dropped, so a node that loops on
+   * one session adds nothing per run.
    *
    * The `AbortController` signal is also monitored -- if it fires with a
    * {@link VoiceInterruptError} the Promise rejects (handled by the caller's
    * catch block), otherwise it resolves with `{ reason: 'interrupted' }`.
+   *
+   * ## Which events
+   *
+   * On a started session (`events: 'session'`): a user item in
+   * `conversation_item_added` is a turn, a final `user_input_transcribed` is a
+   * transcript, the user's `user_state_changed` to `'speaking'` and each turn are
+   * speech activity, and the session's `close` is a hangup. On relayed events
+   * (`events: 'relayed'`): `turn_complete`, `final_transcript`, and `speech_start`
+   * with `turn_complete`, as before.
    *
    * ## Why a Promise race instead of a state machine?
    *
@@ -355,8 +404,8 @@ export class VoiceNodeExecutor {
    * event listener. The `settled` guard handles the only tricky case: two
    * conditions firing in the same microtask.
    *
-   * @param session    - Voice pipeline session EventEmitter that fires
-   *                     `turn_complete`, `final_transcript`, `speech_start`, `barge_in`.
+   * @param session    - The session whose events the node reads.
+   * @param events     - The names those events come under.
    * @param collector  - Active turn collector tracking turn count and transcript.
    * @param config     - Voice node configuration with exit settings (`maxTurns`,
    *                     `exitOn`, `exitKeywords`).
@@ -367,6 +416,7 @@ export class VoiceNodeExecutor {
    */
   private async raceExitConditions(
     session: EventEmitter,
+    events: VoiceTurnCollectorEvents,
     collector: VoiceTurnCollector,
     config: VoiceNodeConfig,
     controller: AbortController,
@@ -375,6 +425,26 @@ export class VoiceNodeExecutor {
     return new Promise((resolve, reject) => {
       /** Prevents double-resolution when multiple conditions fire simultaneously. */
       let settled = false;
+
+      /** How to undo each listener and timer the race set up, run once as it settles. */
+      const releases: Array<() => void> = [];
+
+      /**
+       * Adds a listener and records its removal.
+       *
+       * @param emitter  - The session or the transport.
+       * @param event    - The event.
+       * @param listener - What the race runs on it.
+       */
+      const subscribe = (emitter: EventEmitter, event: string, listener: (...args: any[]) => void): void => {
+        emitter.on(event, listener);
+        releases.push(() => emitter.off(event, listener));
+      };
+
+      /** Removes every listener the race added, clears its timer and drops its abort listener. */
+      const release = (): void => {
+        for (const undo of releases.splice(0)) undo();
+      };
 
       /**
        * Settle the promise with a resolve value, guarding against double-settle.
@@ -385,27 +455,54 @@ export class VoiceNodeExecutor {
       const settleWith = (result: { reason: string; interruptedText?: string }): void => {
         if (settled) return;
         settled = true;
+        release();
         resolve(result);
+      };
+
+      /**
+       * Settle the promise with a rejection, guarding against double-settle.
+       *
+       * @param reason - The rejection: a {@link VoiceInterruptError}.
+       */
+      const failWith = (reason: unknown): void => {
+        if (settled) return;
+        settled = true;
+        release();
+        reject(reason);
       };
 
       // -- Hangup: transport disconnects -----------------------------------
       // Both `close` and `disconnected` events indicate the transport is gone.
       // We listen for both because different transport implementations emit
       // different event names (WebSocket uses `close`, telephony uses `disconnected`).
+      // A started session that closes, by its transport or by a stop, says nothing more.
       const onDisconnect = (): void => settleWith({ reason: 'hangup' });
-      transport.on('close', onDisconnect);
-      transport.on('disconnected', onDisconnect);
+      subscribe(transport, 'close', onDisconnect);
+      subscribe(transport, 'disconnected', onDisconnect);
+      if (events === 'session') subscribe(session, 'close', onDisconnect);
+
+      /** Whether a session event's payload is a user item of the conversation: a completed turn. */
+      const isUserTurn = (evt: Partial<VoiceSessionEventMap['conversation_item_added']> | undefined): boolean =>
+        evt?.item?.role === 'user';
 
       // -- Turns exhausted -------------------------------------------------
       // Only armed when maxTurns is a positive number. We check the collector's
       // count (not a local counter) because the collector may have been seeded
-      // with an initialTurnCount from a checkpoint restore.
+      // with an initialTurnCount from a checkpoint restore. The collector counts
+      // the turn first: it subscribed before the race did.
       if (config.maxTurns && config.maxTurns > 0) {
-        session.on('turn_complete', () => {
+        const onTurn = (): void => {
           if (collector.getTurnCount() >= config.maxTurns!) {
             settleWith({ reason: 'turns-exhausted' });
           }
-        });
+        };
+        if (events === 'session') {
+          subscribe(session, 'conversation_item_added', (evt: Partial<VoiceSessionEventMap['conversation_item_added']> | undefined) => {
+            if (isUserTurn(evt)) onTurn();
+          });
+        } else {
+          subscribe(session, 'turn_complete', onTurn);
+        }
       }
 
       // -- Keyword detection -----------------------------------------------
@@ -413,15 +510,22 @@ export class VoiceNodeExecutor {
       // The keyword check is case-insensitive and uses substring matching so that
       // "goodbye" matches "okay goodbye then".
       if (config.exitOn === 'keyword' && config.exitKeywords?.length) {
-        session.on('final_transcript', (evt: any) => {
-          const text = (evt.text ?? '').toLowerCase();
+        const onFinal = (said: string): void => {
+          const text = said.toLowerCase();
           for (const kw of config.exitKeywords!) {
             if (text.includes(kw.toLowerCase())) {
               settleWith({ reason: `keyword:${kw}` });
               return;
             }
           }
-        });
+        };
+        if (events === 'session') {
+          subscribe(session, 'user_input_transcribed', (evt: Partial<VoiceSessionEventMap['user_input_transcribed']> | undefined) => {
+            if (evt?.isFinal) onFinal(evt.transcript ?? '');
+          });
+        } else {
+          subscribe(session, 'final_transcript', (evt: any) => onFinal(evt?.text ?? ''));
+        }
       }
 
       // -- Silence timeout (default 30 s) ----------------------------------
@@ -429,19 +533,32 @@ export class VoiceNodeExecutor {
       // on every speech activity event. If the timer fires without being reset,
       // the user has been silent for too long and the session ends.
       if (config.exitOn === 'silence-timeout') {
-        let silenceTimer: ReturnType<typeof setTimeout> | null = null;
-        const timeoutMs = 30_000;
+        let silenceTimer: ReturnType<typeof setTimeout> | undefined;
 
-        /** Reset the silence watchdog -- called on any speech activity. */
+        /**
+         * Reset the silence watchdog -- called on any speech activity. Once the race has settled it sets no timer: an
+         * emit under way still calls the listeners it began with, the ones the settle removed included.
+         */
         const resetTimer = (): void => {
-          if (silenceTimer) clearTimeout(silenceTimer);
-          silenceTimer = setTimeout(() => settleWith({ reason: 'silence-timeout' }), timeoutMs);
+          if (settled) return;
+          clearTimeout(silenceTimer);
+          silenceTimer = setTimeout(() => settleWith({ reason: 'silence-timeout' }), SILENCE_TIMEOUT_MS);
         };
+        releases.push(() => clearTimeout(silenceTimer));
 
-        // Reset on both speech_start (user began talking) and turn_complete
-        // (user finished a turn) to cover all speech activity signals.
-        session.on('speech_start', resetTimer);
-        session.on('turn_complete', resetTimer);
+        // Reset as the user begins to speak and as a turn completes, to cover all
+        // speech activity signals.
+        if (events === 'session') {
+          subscribe(session, 'user_state_changed', (evt: Partial<VoiceSessionEventMap['user_state_changed']> | undefined) => {
+            if (evt?.newState === 'speaking') resetTimer();
+          });
+          subscribe(session, 'conversation_item_added', (evt: Partial<VoiceSessionEventMap['conversation_item_added']> | undefined) => {
+            if (isUserTurn(evt)) resetTimer();
+          });
+        } else {
+          subscribe(session, 'speech_start', resetTimer);
+          subscribe(session, 'turn_complete', resetTimer);
+        }
         resetTimer(); // Start the initial timer immediately.
       }
 
@@ -450,18 +567,26 @@ export class VoiceNodeExecutor {
       // (the caller's catch block converts it to exitReason: 'interrupted').
       // For any other abort reason (e.g. parent timeout), we resolve normally
       // with reason: 'interrupted'.
-      controller.signal.addEventListener(
-        'abort',
-        () => {
-          const reason = controller.signal.reason;
-          if (reason instanceof VoiceInterruptError) {
-            reject(reason);
-          } else {
-            settleWith({ reason: 'interrupted' });
-          }
-        },
-        { once: true }
-      );
+      const onAbort = (): void => {
+        const reason = controller.signal.reason;
+        if (reason instanceof VoiceInterruptError) {
+          failWith(reason);
+        } else {
+          settleWith({ reason: 'interrupted' });
+        }
+      };
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+      releases.push(() => controller.signal.removeEventListener('abort', onAbort));
+
+      // -- Already over ----------------------------------------------------
+      // An abort that came before the race, and a call that ended before the
+      // node started, fire nothing more: the race settles at once, once every
+      // listener above is in place, so that settling releases them all.
+      if (controller.signal.aborted) {
+        onAbort();
+      } else if ((events === 'session' && readsClosed(session)) || readsClosed(transport)) {
+        settleWith({ reason: 'hangup' });
+      }
     });
   }
 }

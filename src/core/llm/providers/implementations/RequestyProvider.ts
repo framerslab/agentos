@@ -21,10 +21,14 @@ import {
   ModelCompletionChoice,
 } from '../IProvider';
 import { RequestyProviderError } from '../errors/RequestyProviderError';
-import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
+import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { cheapestPricedChatModel } from './billing-probe-model.js';
+import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream } from '../stream-error-body.js';
+import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 
 /**
  * Configuration specific to the RequestyProvider.
@@ -37,6 +41,13 @@ export interface RequestyProviderConfig {
   appName?: string;
   requestTimeout?: number;
   streamRequestTimeout?: number;
+  /**
+   * The key pool behind a comma-separated `apiKey`: `ordered` prefers the
+   * earliest usable key (a cost order), `round-robin` spreads load (the
+   * default; `AGENTOS_KEY_POOL_STRATEGY=ordered` changes it when this is
+   * absent); `store` and `id` persist the keys' standing across restarts.
+   */
+  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'loadTimeoutMs' | 'storeTimeoutMs' | 'store' | 'id'>;
 }
 
 interface RequestyChatChoice {
@@ -166,7 +177,7 @@ export class RequestyProvider implements IProvider {
   public defaultModelId?: string;
 
   // Corrected: Changed type of this.config to satisfy the Readonly<Required<...>> assignment by providing defaults
-  private config!: Readonly<Required<Omit<RequestyProviderConfig, 'defaultModelId' | 'siteUrl' | 'appName' | 'baseURL' | 'requestTimeout' | 'streamRequestTimeout'>> & RequestyProviderConfig>;
+  private config!: Readonly<Required<Omit<RequestyProviderConfig, 'defaultModelId' | 'siteUrl' | 'appName' | 'baseURL' | 'requestTimeout' | 'streamRequestTimeout' | 'keyPool'>> & RequestyProviderConfig>;
   private keyPool: ApiKeyPool | null = null;
   private client!: AxiosInstance;
   private readonly availableModelsCache: Map<string, ModelInfo> = new Map();
@@ -180,6 +191,17 @@ export class RequestyProvider implements IProvider {
         'INIT_FAILED_MISSING_API_KEY'
       );
     }
+    // The new pool is built before anything of the old state is touched: its construction makes no request, so a
+    // timing it refuses (a RangeError) leaves this provider as it was, its pool and its recheck timer included.
+    const keyPool = new ApiKeyPool(config.apiKey, {
+      ...(config.keyPool ?? {}),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('requesty')),
+      probe: (key, kind) => this.probeKey(key, kind),
+    });
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
     // Corrected: Ensure all properties of Required<RequestyProviderConfig> are present
     // by providing defaults for optional fields before freezing.
     this.config = Object.freeze({
@@ -191,7 +213,8 @@ export class RequestyProvider implements IProvider {
       requestTimeout: config.requestTimeout || 60000,
       streamRequestTimeout: config.streamRequestTimeout || 180000,
     });
-    this.keyPool = new ApiKeyPool(config.apiKey);
+    this.keyPool = keyPool;
+    await this.keyPool.ready();
     this.defaultModelId = this.config.defaultModelId; // Store the potentially undefined value
 
     // No Authorization header here: the key is resolved per request inside
@@ -213,9 +236,23 @@ export class RequestyProvider implements IProvider {
       headers,
     });
 
+    // Every key of a pool of several is out (the store held them failed): the model listing would draw no key and
+    // fail the initialize, and a provider that never initializes runs no recheck timer, so nothing would probe the
+    // keys back until a fresh process forgot them. It initializes without the listing instead and its timer probes
+    // the keys at their recheck; the model cache fills on the first lookup that misses it.
+    if (keyPool.size > 1 && keyPool.usable() === 0) {
+      this.isInitialized = true;
+      keyPool.startRechecks();
+      console.warn('RequestyProvider: every API key of the pool is out of rotation; initialized without the model listing, and the keys are probed at their recheck.');
+      return;
+    }
+
     try {
       await this.refreshAvailableModels();
       this.isInitialized = true;
+      // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
+      // breaker holds still gets its keys back; the timer never keeps the process alive.
+      if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
       console.log(`RequestyProvider initialized. Default Model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models via Requesty.`);
     } catch (error: unknown) {
       this.isInitialized = false;
@@ -602,9 +639,10 @@ export class RequestyProvider implements IProvider {
     try {
       // Auth rides per request since the key is no longer on the axios
       // instance; keep the health probe representative of real traffic.
+      const apiKey = await this.resolveApiKey();
       await this.client.get('/models', {
         timeout: Math.min(this.config.requestTimeout || 10000, 10000),
-        headers: { Authorization: `Bearer ${this.resolveApiKey()}` },
+        headers: { Authorization: `Bearer ${apiKey}` },
       });
       return { isHealthy: true, details: { message: "Successfully connected to Requesty /models endpoint." } };
     } catch (error: unknown) {
@@ -621,6 +659,8 @@ export class RequestyProvider implements IProvider {
   }
 
   public async shutdown(): Promise<void> {
+    // Stops the recheck timer, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    await this.keyPool?.close();
     this.isInitialized = false;
     this.availableModelsCache.clear();
     console.log('RequestyProvider shutdown: Instance marked as uninitialized and cache cleared.');
@@ -807,11 +847,88 @@ export class RequestyProvider implements IProvider {
 
   /**
    * Resolve the bearer key for one request: a per call override wins,
-   * otherwise the next key from the pool (weighted rotation).
+   * otherwise the next key from the pool (weighted rotation). With no usable
+   * key while a probe of a failed key is in flight (its recheck came due), the
+   * draw waits for that probe, bounded by the pool's probe timeout, so the
+   * first request after a recheck is served by a key that came back; the
+   * caller's signal ends that wait at once.
    */
-  private resolveApiKey(apiKeyOverride?: string): string {
+  private async resolveApiKey(apiKeyOverride?: string, signal?: AbortSignal): Promise<string> {
     if (apiKeyOverride) return apiKeyOverride;
-    return this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
+    if (this.keyPool?.hasKeys) {
+      const key = await this.keyPool.nextAfterProbes(signal);
+      if (signal?.aborted) throw new RequestyProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      if (key === '') throw this.allKeysFailedError();
+      return key;
+    }
+    return this.config.apiKey;
+  }
+
+  /**
+   * Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. An auth failure is probed
+   * with the models list, which rejects a revoked key with 403 "Invalid authorization token". A billing failure is
+   * probed with the smallest billable completion, since a list need not refuse a key whose balance is spent: on the
+   * default model, else on the cheapest chat model the catalog lists with a price, never a free one. A provider that
+   * started without its catalog (every key was out) lists it with the probing key first and keeps it; with no priced
+   * model to send, the probe has no verdict and the key stays out. Every answer goes through the same classifier as
+   * a request's.
+   */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+    const verdict = async (response: Response): Promise<ProbeResult> => {
+      if (response.ok) return 'ok';
+      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
+      return classifyKeyFailure(response.status, text) ?? 'unknown';
+    };
+    try {
+      const listModels = () => fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
+      if (kind !== 'billing') return await verdict(await listModels());
+      let model = this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
+      if (!model && this.availableModelsCache.size === 0) {
+        const listed = await listModels();
+        if (!listed.ok) return await verdict(listed);
+        const body = (await listed.json().catch(() => ({}))) as Partial<RequestyListModelsAPIResponse>;
+        if (Array.isArray(body.data) && this.availableModelsCache.size === 0) {
+          for (const apiModel of body.data) {
+            const modelInfo = this.mapApiToModelInfo(apiModel);
+            this.availableModelsCache.set(modelInfo.modelId, modelInfo);
+          }
+        }
+        model = cheapestPricedChatModel(this.availableModelsCache.values());
+      }
+      if (!model) return 'unknown';
+      return await verdict(
+        await fetch(`${this.config.baseURL}/chat/completions`, {
+          method: 'POST',
+          headers,
+          // 16: the router hands max_tokens to the model's own provider, and some providers enforce a minimum of 16
+          // (OpenRouter's chat reference says so of the providers it routes to; Requesty's names no floor).
+          body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
+          signal: controller.signal,
+        }),
+      );
+    } catch {
+      return 'unknown';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */
+  private allKeysFailedError(message?: string, status?: number, errorType?: string): RequestyProviderError {
+    const kinds = Array.from(
+      new Set((this.keyPool?.snapshot() ?? []).map((state) => state.kind).filter((kind): kind is KeyFailureKind => kind !== undefined)),
+    );
+    const retryAfter = this.keyPool?.soonestReturnMs();
+    return new RequestyProviderError(
+      message ?? `Every Requesty API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
+      'ALL_KEYS_FAILED',
+      status ?? statusOfKinds(kinds),
+      errorType,
+      { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
+    );
   }
 
   /**
@@ -831,6 +948,14 @@ export class RequestyProvider implements IProvider {
     return { message: String(error) };
   }
 
+  /** Every configured secret: the raw key setting, each pooled key, and base-URL credentials. */
+  private configuredSecrets(): string[] {
+    const rawKeys = this.config?.apiKey ?? '';
+    return [rawKeys, ...rawKeys.split(',').map((key) => key.trim()), baseUrlCredentials(this.config?.baseURL) ?? ''].filter(
+      (secret) => secret.length > 0,
+    );
+  }
+
   private async makeApiRequest<T = unknown>(
     endpoint: string,
     method: 'GET' | 'POST',
@@ -839,51 +964,99 @@ export class RequestyProvider implements IProvider {
     expectStream: boolean = false,
     perRequest?: { apiKeyOverride?: string; signal?: AbortSignal }
   ): Promise<T> {
-    try {
-      const response = await this.client.request<T>({
-        url: endpoint,
-        method,
-        data: body,
-        timeout: timeout,
-        headers: { Authorization: `Bearer ${this.resolveApiKey(perRequest?.apiKeyOverride)}` },
-        // Forward the caller's AbortSignal so an abort settles the request
-        // while Axios is still waiting for headers or the next body chunk.
-        ...(perRequest?.signal ? { signal: perRequest.signal } : {}),
-        responseType: expectStream ? 'stream' as ResponseType : 'json' as ResponseType,
-      });
-      return response.data;
-    } catch (error: unknown) {
-      let statusCode: number | undefined;
-      let errorData: any;
-      let errorMessage = 'Unknown Requesty API error';
-      let errorType = 'UNKNOWN_API_ERROR';
+    let apiKey = await this.resolveApiKey(perRequest?.apiKeyOverride, perRequest?.signal);
+    // Key hops this request has made: a key-scoped failure on a pool of several keys re-sends the request with the
+    // next usable key at once, at most once per key. A per-request override is the caller's choice and is never
+    // hopped; a single key and a failure that is not the key's leave the request as it was.
+    let keyHops = 0;
+    for (;;) {
+      const attemptStartedAt = Date.now();
+      try {
+        const response = await this.client.request<T>({
+          url: endpoint,
+          method,
+          data: body,
+          timeout: timeout,
+          headers: { Authorization: `Bearer ${apiKey}` },
+          // Forward the caller's AbortSignal so an abort settles the request
+          // while Axios is still waiting for headers or the next body chunk.
+          ...(perRequest?.signal ? { signal: perRequest.signal } : {}),
+          responseType: expectStream ? 'stream' as ResponseType : 'json' as ResponseType,
+        });
+        if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, attemptStartedAt);
+        return response.data;
+      } catch (error: unknown) {
+        let statusCode: number | undefined;
+        let errorData: any;
+        let errorMessage = 'Unknown Requesty API error';
+        let errorType = 'UNKNOWN_API_ERROR';
+        let retryAfterHeader: unknown;
 
-      if (axios.isAxiosError(error)) {
-        statusCode = error.response?.status;
-        errorData = error.response?.data;
-        if (errorData?.error && typeof errorData.error === 'object') {
-          errorMessage = errorData.error.message || errorMessage;
-          errorType = errorData.error.type || errorType;
-        } else if (typeof errorData === 'string') {
-          errorMessage = errorData;
-        } else if ((error as Error).message) {
-          errorMessage = (error as Error).message;
+        if (axios.isAxiosError(error)) {
+          statusCode = error.response?.status;
+          errorData = error.response?.data;
+          // A streamed request's error body is the live response stream, whose `req` holds the request head with the
+          // Authorization header: serializing it for the classifier throws (the response and its request refer to
+          // each other), so the key was never marked and the request never moved on, and keeping it in the error's
+          // details kept the key. Read a bounded prefix with the configured keys masked, then drop the stream.
+          if (isReadableStream(errorData)) {
+            const { text, complete } = await readErrorStream(errorData);
+            const secrets = this.configuredSecrets();
+            const masked = redactUrlSecrets(text, this.config?.baseURL, secrets);
+            errorData = parseErrorBody(complete ? masked : maskCutSecretTail(masked, secrets));
+          }
+          retryAfterHeader = error.response?.headers?.['retry-after'];
+          if (errorData?.error && typeof errorData.error === 'object') {
+            errorMessage = errorData.error.message || errorMessage;
+            errorType = errorData.error.type || errorType;
+          } else if (typeof errorData === 'string') {
+            errorMessage = errorData;
+          } else if ((error as Error).message) {
+            errorMessage = (error as Error).message;
+          }
+        } else if (error instanceof Error) {
+          errorMessage = error.message;
         }
-      } else if (error instanceof Error) {
-        errorMessage = error.message;
-      }
 
-      // Prefix the status code into the message so downstream retry/fallback
-      // logic (e.g. isRetryableError, which greps for \b402\b) can route on it
-      // even when the Requesty API body provides a friendlier description.
-      const decoratedMessage = statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage;
-      throw new RequestyProviderError(
-        decoratedMessage,
-        'API_REQUEST_FAILED',
-        statusCode,
-        errorType,
-        { requestEndpoint: endpoint, requestBodyKeys: body ? Object.keys(body) : undefined, responseData: errorData, underlyingError: this.sanitizeUnderlyingError(error) }
-      );
+        // A key-scoped failure (a bad or revoked key, an unpaid account, a
+        // throttle) takes this key out of rotation; with another usable key the
+        // request is sent again at once with it, so the caller gets an answer
+        // instead of the key's error.
+        const keyFailure = typeof statusCode === 'number' ? classifyKeyFailure(statusCode, typeof errorData === 'string' ? errorData : JSON.stringify(errorData ?? {})) : null;
+        if (keyFailure && this.keyPool?.has(apiKey)) {
+          const serverRetryAfterMs = retryAfterMs(typeof retryAfterHeader === 'string' ? retryAfterHeader : null, undefined, this.config.keyPool?.maxRetryAfterMs);
+          this.keyPool.markFailed(apiKey, keyFailure, {
+            status: statusCode,
+            at: attemptStartedAt,
+            ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
+          });
+          if (!perRequest?.apiKeyOverride && this.keyPool.size > 1 && this.keyPool.usable() > 0 && ++keyHops < this.keyPool.size && !perRequest?.signal?.aborted) {
+            const nextKey = this.keyPool.next();
+            if (nextKey !== '') {
+              apiKey = nextKey;
+              continue;
+            }
+          }
+          // This answer took out the pool's last usable key for auth or billing: every key is out, and the request
+          // ends as the other providers' do, with ALL_KEYS_FAILED carrying this answer's status and the kinds seen.
+          // A throttle (quota) leaves the key resting, and an override's answer stays the caller's own.
+          if (!perRequest?.apiKeyOverride && this.keyPool.size > 1 && this.keyPool.usable() === 0 && keyFailure !== 'quota') {
+            throw this.allKeysFailedError(statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage, statusCode, errorType);
+          }
+        }
+
+        // Prefix the status code into the message so downstream retry/fallback
+        // logic (e.g. isRetryableError, which greps for \b402\b) can route on it
+        // even when the Requesty API body provides a friendlier description.
+        const decoratedMessage = statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage;
+        throw new RequestyProviderError(
+          decoratedMessage,
+          'API_REQUEST_FAILED',
+          statusCode,
+          errorType,
+          { requestEndpoint: endpoint, requestBodyKeys: body ? Object.keys(body) : undefined, responseData: errorData, underlyingError: this.sanitizeUnderlyingError(error) }
+        );
+      }
     }
   }
 

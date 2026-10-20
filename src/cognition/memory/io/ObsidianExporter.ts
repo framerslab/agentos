@@ -6,7 +6,7 @@
  * 1. **`#tag` decorations** — each trace tag is appended to the document body
  *    as an Obsidian-recognisable inline hashtag.
  *
- * 2. **`[[wikilinks]]`** — for each trace, the exporter queries
+ * 2. **`[[wikilinks]]`** — for each trace, the exporter queries the brain's
  *    `knowledge_edges` for related entities that share the same trace ID as
  *    a source.  Related knowledge-node labels are appended as `[[label]]`
  *    links so Obsidian's graph view can visualise the semantic network.
@@ -147,10 +147,14 @@ export class ObsidianExporter extends MarkdownExporter {
   // -------------------------------------------------------------------------
 
   /**
-   * Pre-fetch all knowledge-edge relationships and group them by source_id.
+   * Pre-fetch this brain's knowledge-edge relationships and group them by the
+   * trace their source node names.
    *
    * This populates `_relatedNodesCache` so that the synchronous
    * `buildFileContent` method can look up wikilinks without async DB access.
+   * A database can hold several brains, and node ids repeat across them (an
+   * import keeps them), so the edges are this brain's and each join matches a
+   * node of the same brain.
    */
   private async _prefetchRelatedNodes(): Promise<void> {
     this._relatedNodesCache.clear();
@@ -164,8 +168,10 @@ export class ObsidianExporter extends MarkdownExporter {
       const rows = await this.brain.all<RelatedNodeRow>(
         `SELECT ${sourceTraceExpr} AS trace_id, kn.label
          FROM knowledge_edges ke
-         JOIN knowledge_nodes src ON src.id = ke.source_id
-         JOIN knowledge_nodes kn ON kn.id = ke.target_id`,
+         JOIN knowledge_nodes src ON src.brain_id = ke.brain_id AND src.id = ke.source_id
+         JOIN knowledge_nodes kn ON kn.brain_id = ke.brain_id AND kn.id = ke.target_id
+         WHERE ke.brain_id = ?`,
+        [this.brain.brainId],
       );
 
       for (const row of rows) {

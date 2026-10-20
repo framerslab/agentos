@@ -670,13 +670,12 @@ describe('generateObject', () => {
       });
     });
 
-    it('routes Fable to the prompt-JSON path (no forced tool_use) since Fable rejects forced tool_choice', async () => {
+    it('routes Fable to the JSON output format marker (route json_schema), never a forced tool', async () => {
       // Claude Fable rejects a forced tool_choice at the API level
-      // ("tool_choice forces tool use is not compatible with this model").
-      // generateObject must detect that and fall through to the prompt-only
-      // JSON path (schema already lives in the system prompt; the result text
-      // is extractJson + safeParse'd in the retry loop) instead of sending a
-      // forced tool the model 400s on.
+      // ("tool_choice forces tool use is not compatible with this model") and
+      // has the native JSON output format, so the marker rides with route
+      // json_schema and the provider sends output_config.format; the result
+      // text is extractJson + safeParse'd in the retry loop as on every provider.
       const { resolveModelOption } = await import('../../model.js');
       vi.mocked(resolveModelOption).mockReturnValueOnce({
         providerId: 'anthropic',
@@ -694,10 +693,8 @@ describe('generateObject', () => {
         prompt: 'Extract',
       });
 
-      // No forced tool payload — falls through to prompt-only JSON.
       const args = hoisted.generateCompletion.mock.calls[0][2];
-      expect(args.responseFormat).toBeUndefined();
-      // The prompt-JSON path still produces a validated object.
+      expect(args.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
       expect(object).toEqual({ name: 'F', age: 5 });
     });
 
@@ -871,11 +868,12 @@ describe('generateObject fallback-leg responseFormat rebuild (2026-07-07)', () =
 
       expect(result.object).toEqual({ palette: { primary: '#aabbcc' } });
       const calls = hoisted.generateCompletion.mock.calls as unknown[][];
-      // Primary call carried the anthropic forced-tool marker…
+      // The primary carried the forced-tool marker: a record schema is outside the JSON output format, and Opus 4.8
+      // accepts a forced tool choice, so the non-strict forced tool carries it as it did before the format…
       const primaryOptions = (calls.find((c) => c[0] === 'claude-opus-4-8')?.[2] ?? {}) as {
         responseFormat?: Record<string, unknown>;
       };
-      expect(primaryOptions.responseFormat?._agentosUseToolForStructuredOutput).toBe(true);
+      expect(primaryOptions.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'forced_tool' });
       // …and the openai LEG was rebuilt to json_object (record schema fails
       // the strict gate), NOT the verbatim anthropic marker.
       const legOptions = (calls.find((c) => c[0] === 'gpt-4o-mini')?.[2] ?? {}) as {
@@ -1043,7 +1041,7 @@ describe('generateObject — the schema text carries the Zod size checks (2026-1
     return typeof content === 'string' ? content : JSON.stringify(content);
   }
 
-  it('prompt-only path: the limits are in the system prompt and no payload carries them', async () => {
+  it('the JSON output format path: the limits are in the system prompt and the payload schema is free of them', async () => {
     const { resolveModelOption } = await import('../../model.js');
     vi.mocked(resolveModelOption).mockReturnValueOnce({
       providerId: 'anthropic',
@@ -1061,7 +1059,12 @@ describe('generateObject — the schema text carries the Zod size checks (2026-1
 
     expect(object).toEqual({ title: 'T', tags: ['a'] });
     const args = hoisted.generateCompletion.mock.calls[0][2];
-    expect(args.responseFormat).toBeUndefined();
+    // Claude Fable 5 takes the JSON output format; the lowering drops the size checks, so the payload's schema has none.
+    expect(args.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
+    const payloadSchema = JSON.stringify(args.responseFormat.tool.input_schema);
+    expect(payloadSchema).not.toContain('maxLength');
+    expect(payloadSchema).not.toContain('minItems');
+    expect(payloadSchema).not.toContain('maxItems');
     const text = systemText();
     expect(text).toContain('"maxLength": 40');
     expect(text).toContain('"minItems": 1');
@@ -1112,5 +1115,46 @@ describe('generateObject — the schema text carries the Zod size checks (2026-1
     expect(payload).toContain('"input_schema"');
     expect(payload).not.toMatch(/maxLength|minItems|maxItems/);
     expect(systemText()).toContain('"maxLength": 40');
+  });
+});
+
+describe('enum casing repair', () => {
+  // Anthropic's JSON output format does not guarantee the capitalization of
+  // enum and const values; generateObject repairs a case-only difference once
+  // before a retry is spent.
+  beforeEach(() => {
+    hoisted.generateCompletion.mockReset();
+  });
+
+  it('an enum value that differs from the schema only by case is repaired without a retry', async () => {
+    const schema = z.object({ verdict: z.enum(['red', 'green']) });
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"verdict":"RED"}'));
+
+    const result = await generateObject({ schema, prompt: 'grade' });
+
+    expect(result.object).toEqual({ verdict: 'red' });
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('when the repaired candidate still fails, the retry is told the issue that remains, not the casing', async () => {
+    // Zod runs an object's refinement only once its fields parse, so the casing is the sole issue of the first
+    // parse, the repair runs, and the revalidation reaches the refinement: that failure is the one to report.
+    const schema = z
+      .object({ verdict: z.enum(['red', 'green']), score: z.number() })
+      .refine((v) => v.score <= 10, { message: 'score must be at most 10', path: ['score'] });
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(mockResponse('{"verdict":"RED","score":42}'))
+      .mockResolvedValueOnce(mockResponse('{"verdict":"red","score":7}'));
+
+    const result = await generateObject({ schema, prompt: 'grade' });
+
+    expect(result.object).toEqual({ verdict: 'red', score: 7 });
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
+    const retry = JSON.stringify(hoisted.generateCompletion.mock.calls[1]);
+    const at = retry.indexOf('Validation errors:');
+    expect(at).toBeGreaterThan(-1);
+    const feedback = retry.slice(at, retry.indexOf('Please fix the JSON', at));
+    expect(feedback).toContain('score');
+    expect(feedback).not.toContain('verdict');
   });
 });

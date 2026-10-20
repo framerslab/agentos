@@ -1,8 +1,9 @@
 /**
  * @fileoverview Markdown exporter for AgentOS memory brain.
  *
- * Creates a directory of Markdown files — one per memory trace — organised
- * into a `{output}/{scope}/{type}/` folder hierarchy.  Each file contains
+ * Creates a directory of Markdown files — one per live memory trace of the
+ * brain, never another brain's in the same database — organised into a
+ * `{output}/{scope}/{type}/` folder hierarchy.  Each file contains
  * YAML front-matter (id, type, scope, strength, tags, createdAt) followed
  * by the plain-text trace content.
  *
@@ -106,7 +107,8 @@ export class MarkdownExporter {
   // -------------------------------------------------------------------------
 
   /**
-   * Export all memory traces as `.md` files into `outputDir`.
+   * Export the brain's live memory traces as `.md` files into `outputDir`.
+   * Another brain's traces in the same database are not read.
    *
    * Directories are created on demand, one name at a time. A trace is not
    * written, and is reported in the result, when its scope, type or id is not
@@ -129,7 +131,9 @@ export class MarkdownExporter {
   async export(outputDir: string, _options?: ExportOptions): Promise<ExportResult> {
     // Oldest first, so of two traces whose files would be one, the older is written.
     const traces = await this.brain.all<TraceRow>(
-      'SELECT id, type, scope, content, strength, created_at, tags FROM memory_traces WHERE deleted = 0 ORDER BY created_at, id',
+      `SELECT id, type, scope, content, strength, created_at, tags FROM memory_traces
+       WHERE brain_id = ? AND deleted = 0 ORDER BY created_at, id`,
+      [this.brain.brainId],
     );
 
     // Every trace is placed before any folder is made or file written.

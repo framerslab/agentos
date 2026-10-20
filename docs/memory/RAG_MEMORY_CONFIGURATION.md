@@ -1,6 +1,6 @@
 # RAG and Memory Configuration
 
-> **Memory benchmarks (N=500, gpt-4o reader):** 85.6% on LongMemEval-S at $0.0090 per correct answer, and 70.2% on LongMemEval-M, the 1.5M-token, 500-session variant. The LongMemEval paper (Wu et al., ICLR 2025) reports 65.7% (round, top-5), 71.4% (session, top-5) and 72.0% (round, top-10) on M. [Benchmarks](https://docs.agentos.sh/benchmarks) · [Run JSONs](https://github.com/framerslab/agentos-bench/tree/master/results/runs) · [Write-up](https://agentos.sh/en/blog/agentos-memory-sota-longmemeval/)
+> **Memory benchmarks (N=500, `gpt-4o` and `gpt-5-mini` readers routed per question type):** 85.6% on LongMemEval-S at $0.0090 per correct answer (84.2% with `gpt-4o` reading every question), and 70.2% on LongMemEval-M, the 1.5M-token, 500-session variant. The LongMemEval paper (Wu et al., ICLR 2025) reports 65.7% (round, top-5), 71.4% (session, top-5) and 72.0% (round, top-10) on M. [Benchmarks](https://docs.agentos.sh/benchmarks) · [Run JSONs](https://github.com/framerslab/agentos-bench/tree/master/results/runs) · [Write-up](https://agentos.sh/en/blog/agentos-memory-sota-longmemeval/)
 
 AgentOS provides three levels of memory API:
 
@@ -431,7 +431,7 @@ Minimal example (persona JSON):
 
 ### Ingestion summarization is opt-in
 
-Turn-summary ingestion stores the raw turn text. An LLM summary replaces it only when:
+Turn-summary ingestion stores the raw turn text. A summary replaces it only when:
 
 ```json
 {
@@ -444,6 +444,8 @@ Turn-summary ingestion stores the raw turn text. An LLM summary replaces it only
   }
 }
 ```
+
+The summary is the GMI's utility class's `summarize()` with `method` (`abstractive_llm` unless given; `extractive` is `extractive_sentence_rank`, the first sentences, which `StatisticalUtilityAI` has) and `targetLength` (`short` unless given). A summary that fails, such as `abstractive_llm` asked of a `StatisticalUtilityAI`, leaves the raw turn text to be stored, with a `WARNING` in the reasoning trace.
 
 ## Manual Ingest and Retrieve
 
@@ -589,7 +591,7 @@ Notes:
 
 If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augmentor builds a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) and registers the built-in providers its `providers` list names: `cohere` (needs `apiKey`) and `local` (an offline cross-encoder through Transformers.js: `@huggingface/transformers`, or `@xenova/transformers`). Reranking is opt-in per request: with `RagRetrievalOptions.rerankerConfig.enabled: true`, or, on a request without `rerankerConfig`, with a `policy` whose `reranker` is `'always'`.
 
-`RerankerService.rerankChain(query, chunks, stages)` runs several providers one after another, each stage keeping its `topK`. The caller passes the stages; no config file or research depth sets a chain.
+`RerankerService.rerankChain(query, chunks, stages)` runs several providers one after another, each stage keeping its `topK`. A stage asks for its `model`, else the provider's `defaultModelId` in the service config, else the service's `defaultModelId`, else the provider's own default. The caller passes the stages; no config file or research depth sets a chain.
 
 ### Providers
 
@@ -597,7 +599,7 @@ If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augm
 |---|---|---|
 | `local` | `LocalCrossEncoderReranker` | Transformers.js cross-encoder; default model `cross-encoder/ms-marco-MiniLM-L-6-v2` (`LOCAL_RERANKER_MODELS` lists the others) |
 | `cohere` | `CohereReranker` | Cohere's rerank API with the `apiKey` in its config; `COHERE_RERANKER_MODELS` lists the model ids, `rerank-v4.0-pro`, `rerank-v4.0-fast` and `rerank-v3.5` among them |
-| `llm-judge` | `LlmJudgeReranker` | Your `llmCallFn(system, user, model?)`: phase 1 scores up to 100 documents 0-10 in batches of 10 with `scoringModel`; phase 2 ranks the best 20 with `rankingModel`, falling back to the phase-1 order when it fails |
+| `llm-judge` | `LlmJudgeReranker` | Your `llmCallFn(system, user, model?)`: phase 1 scores up to 100 documents 0-10 in batches of 10 with `scoringModel`; phase 2 ranks the best 20 with `rankingModel`, falling back to the phase-1 order when it fails or runs past `timeoutMs`. It answers every scored document, the ranked ones first and each once, unless the request's `topN` (a stage's `topK`) cuts it ([The LLM judge](../text/RERANKING.md#the-llm-judge)) |
 
 ### Skipped stages
 

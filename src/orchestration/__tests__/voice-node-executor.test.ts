@@ -14,13 +14,18 @@
  * 8. **Checkpoint restore** -- `initialTurnCount` resumes from a persisted value.
  * 9. **Non-voice node rejection** -- returns error for nodes with wrong executor type.
  * 10. **Disconnected event** -- `disconnected` (alternative to `close`) triggers hangup.
+ * 11. **A started session** -- `scratch.voiceSession`'s own events: a final `user_input_transcribed`
+ *     is a transcript and a keyword, a user item of `conversation_item_added` is a turn, and the
+ *     session's `close` is a hangup; its transport stands in for `voiceTransport`.
+ * 12. **Release** -- twenty runs of one node on one session and one transport, on a started session
+ *     or on relayed events, leave every listener count as it was, no timer and no abort listener.
  *
  * All tests use plain `EventEmitter` instances as transport/session mocks -- no real
  * audio hardware, STT, or TTS provider is needed.
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { EventEmitter } from 'events';
+import { EventEmitter, getEventListeners } from 'events';
 import { VoiceNodeExecutor } from '../runtime/VoiceNodeExecutor.js';
 import type { GraphNode, GraphState } from '../ir/types.js';
 
@@ -232,5 +237,190 @@ describe('VoiceNodeExecutor', () => {
     expect(result.success).toBe(true);
     expect((result.output as any).exitReason).toBe('hangup');
     expect(result.routeTarget).toBe('end');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A started session, and what a settled node leaves behind
+// ---------------------------------------------------------------------------
+
+/** A started `VoicePipelineSession` as a node meets it: an emitter with its id, its transport and `close()`. */
+function startedSession() {
+  const transport = new EventEmitter();
+  const session = Object.assign(new EventEmitter(), {
+    sessionId: 'session-1',
+    state: 'listening',
+    transport,
+    close: async () => undefined,
+  });
+  return { session, transport };
+}
+
+describe('VoiceNodeExecutor on a started session', () => {
+  it("reads scratch.voiceSession's own events: its final transcripts and its user items, and needs no voiceTransport", async () => {
+    const events: any[] = [];
+    const executor = new VoiceNodeExecutor((e) => events.push(e));
+    const node = createVoiceNode({ maxTurns: 1 }, { 'turns-exhausted': 'next' });
+    const { session } = startedSession();
+    const state = { scratch: { voiceSession: session } } as any;
+
+    const run = executor.execute(node, state);
+    session.emit('user_input_transcribed', { transcript: 'Book a table.', isFinal: true, speakerId: 'Speaker_1', createdAt: 1 });
+    // An agent reply is no turn of the user's; the user's item is.
+    session.emit('conversation_item_added', { item: { role: 'assistant', text: 'Hello.', playedText: 'Hello.', interrupted: false }, createdAt: 2 });
+    session.emit('conversation_item_added', { item: { role: 'user', text: 'Book a table.', source: 'speech', endpointReason: 'punctuation' }, createdAt: 3 });
+    const result = await run;
+
+    expect(result.success).toBe(true);
+    expect(result.routeTarget).toBe('next');
+    expect(result.output).toMatchObject({
+      exitReason: 'turns-exhausted',
+      turns: 1,
+      lastSpeaker: 'Speaker_1',
+      transcript: [{ speaker: 'Speaker_1', text: 'Book a table.' }],
+    });
+    expect(events).toContainEqual({ type: 'voice_turn_complete', nodeId: 'voice-1', transcript: 'Book a table.', turnIndex: 1, endpointReason: 'punctuation' });
+  });
+
+  it("exits on a keyword in a started session's final transcript, and on the session's close", async () => {
+    const executor = new VoiceNodeExecutor(vi.fn());
+    const keyword = createVoiceNode({ exitOn: 'keyword', exitKeywords: ['goodbye'] }, { 'keyword:goodbye': 'farewell' });
+    const hangup = createVoiceNode({}, { hangup: 'end' });
+    const { session, transport } = startedSession();
+    const state = { scratch: { voiceSession: session, voiceTransport: transport } } as any;
+
+    const said = executor.execute(keyword, state);
+    // An interim that holds the keyword is no exit: only a final is.
+    session.emit('user_input_transcribed', { transcript: 'okay goodbye', isFinal: false, createdAt: 1 });
+    session.emit('user_input_transcribed', { transcript: 'Okay, goodbye then.', isFinal: true, createdAt: 2 });
+    expect((await said).routeTarget).toBe('farewell');
+
+    const closed = executor.execute(hangup, state);
+    session.emit('close', { reason: 'transport_closed', createdAt: 3 });
+    const result = await closed;
+    expect((result.output as any).exitReason).toBe('hangup');
+    expect(result.routeTarget).toBe('end');
+  });
+
+  it('keeps every listener count and leaves no timer after twenty runs of one node on one transport', async () => {
+    vi.useFakeTimers();
+    try {
+      const executor = new VoiceNodeExecutor(vi.fn());
+      const node = createVoiceNode({ maxTurns: 1, exitOn: 'silence-timeout' }, { 'turns-exhausted': 'next' });
+      const { session, transport } = startedSession();
+      const parent = new AbortController();
+      const state = { scratch: { voiceSession: session, voiceTransport: transport, abortSignal: parent.signal } } as any;
+      const names = ['close', 'disconnected', 'user_input_transcribed', 'conversation_item_added', 'user_state_changed', 'barge_in', 'speech_start', 'turn_complete', 'final_transcript', 'interim_transcript'];
+      const counts = () => names.map((name) => `${name} ${session.listenerCount(name)} ${transport.listenerCount(name)}`);
+      const before = counts();
+
+      for (let run = 0; run < 20; run++) {
+        const result = executor.execute(node, state);
+        session.emit('user_state_changed', { oldState: 'listening', newState: 'speaking', createdAt: run });
+        session.emit('user_input_transcribed', { transcript: 'Book a table.', isFinal: true, createdAt: run });
+        session.emit('conversation_item_added', { item: { role: 'user', text: 'Book a table.', source: 'speech' }, createdAt: run });
+        expect((await result).routeTarget).toBe('next');
+        expect(counts()).toEqual(before);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(getEventListeners(parent.signal, 'abort')).toHaveLength(0);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10_000);
+
+  it('keeps every listener count after twenty runs on relayed events, and exits on silence with no timer left', async () => {
+    vi.useFakeTimers();
+    try {
+      const executor = new VoiceNodeExecutor(vi.fn());
+      const node = createVoiceNode({ maxTurns: 1, exitOn: 'silence-timeout' }, { 'turns-exhausted': 'next', 'silence-timeout': 'quiet' });
+      const state = createState();
+      const transport = (state.scratch as any).voiceTransport as EventEmitter;
+      const session = (transport as any)._voiceSession as EventEmitter;
+      const names = ['close', 'disconnected', 'speech_start', 'turn_complete', 'final_transcript', 'interim_transcript', 'barge_in'];
+      const counts = () => names.map((name) => `${name} ${session.listenerCount(name)} ${transport.listenerCount(name)}`);
+      const before = counts();
+
+      for (let run = 0; run < 20; run++) {
+        const result = executor.execute(node, state);
+        session.emit('speech_start');
+        session.emit('turn_complete', { transcript: 'Book a table.', reason: 'punctuation' });
+        expect((await result).routeTarget).toBe('next');
+        expect(counts()).toEqual(before);
+        expect(vi.getTimerCount()).toBe(0);
+      }
+
+      // Thirty seconds without speech end the node, and its timer goes with it.
+      const quiet = executor.execute(node, state);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect((await quiet).routeTarget).toBe('quiet');
+      expect(counts()).toEqual(before);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A node that starts after the call has ended
+// ---------------------------------------------------------------------------
+
+/**
+ * What `run` settles with, or `'still waiting'` when it has not settled within 100 ms: a node that waits for an event
+ * that fired before it started never settles.
+ */
+async function settledSoon<T>(run: Promise<T>): Promise<T | 'still waiting'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waiting = new Promise<'still waiting'>((resolve) => {
+    timer = setTimeout(() => resolve('still waiting'), 100);
+  });
+  try {
+    return await Promise.race([run, waiting]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+describe('VoiceNodeExecutor when the call ended before the node started', () => {
+  it('hangs up at once on a started session that has closed, and leaves no listener behind', async () => {
+    const executor = new VoiceNodeExecutor(vi.fn());
+    const node = createVoiceNode({ maxTurns: 1 }, { hangup: 'end' });
+    const { session, transport } = startedSession();
+    session.state = 'closed';
+    const state = { scratch: { voiceSession: session } } as any;
+
+    const result = await settledSoon(executor.execute(node, state));
+
+    expect(result).toMatchObject({ success: true, routeTarget: 'end', output: { exitReason: 'hangup' } });
+    expect(session.eventNames()).toEqual([]);
+    expect(transport.eventNames()).toEqual([]);
+  });
+
+  it('hangs up at once on relayed events when the transport has closed', async () => {
+    const executor = new VoiceNodeExecutor(vi.fn());
+    const node = createVoiceNode({ maxTurns: 1 }, { hangup: 'end' });
+    const state = createState();
+    const transport = (state.scratch as any).voiceTransport as EventEmitter;
+    (transport as any).state = 'closed';
+
+    const result = await settledSoon(executor.execute(node, state));
+
+    expect(result).toMatchObject({ success: true, routeTarget: 'end', output: { exitReason: 'hangup' } });
+    expect(transport.eventNames()).toEqual([]);
+  });
+
+  it('ends at once as interrupted under a parent signal aborted before the node started', async () => {
+    const executor = new VoiceNodeExecutor(vi.fn());
+    const node = createVoiceNode({ maxTurns: 1 }, { interrupted: 'stop' });
+    const { session } = startedSession();
+    const signal = AbortSignal.abort();
+    const state = { scratch: { voiceSession: session, abortSignal: signal } } as any;
+
+    const result = await settledSoon(executor.execute(node, state));
+
+    expect(result).toMatchObject({ success: true, routeTarget: 'stop', output: { exitReason: 'interrupted' } });
+    expect(getEventListeners(signal, 'abort')).toHaveLength(0);
+    expect(session.eventNames()).toEqual([]);
   });
 });

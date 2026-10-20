@@ -21,7 +21,9 @@ pnpm run build
 pnpm run test
 ```
 
-CI runs on Node 22 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `pnpm run build`, `pnpm run verify:exports`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test -- --coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. A second job, "Batch-1 gated tests", runs a fixed set of test files. Maintainers merge a pull request only when both jobs are green.
+CI runs on Node 22 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `node --test scripts/curated-extensions-peer.test.mjs` (the curated extensions installed for the tests take this checkout as their AgentOS, and each of their other first-party peers at a version inside its range; see [AGENTS.md](https://github.com/framerslab/agentos/blob/master/AGENTS.md#conventions)), `pnpm run build`, `pnpm run verify:exports`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test -- --coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. A second job, "Batch-1 gated tests", runs a fixed set of test files. Maintainers merge a pull request only when both jobs are green.
+
+A newer push to a pull request cancels the unfinished runs of its earlier commits, workflow by workflow, and an edit or a label change does the same for the breaking-change gate, so the newest run is the one that counts. A re-run cancels nothing.
 
 To run one test file: `pnpm vitest run <path>`.
 
@@ -42,7 +44,7 @@ Write the subject in the imperative mood and keep each commit to one change.
 - Keep each pull request to one concern.
 - Fill in the [pull request template](https://github.com/framerslab/agentos/blob/master/.github/pull_request_template.md), including how you verified the change.
 - Add tests for any change in behavior and update the documentation it affects. CI must be green.
-- Maintainers squash-merge with the pull request title as the commit subject, which is what the release reads. Give the title the Conventional Commits form, put `!` before the colon for a change that breaks users (`feat!:` or `feat(api)!:`), and describe what users must change in the Migration notes section.
+- Maintainers squash-merge with the pull request title as the commit subject, which is what the release reads. Give the title the Conventional Commits form (`fix(providers): ...`; the types are `feat`, `fix`, `perf`, `refactor`, `revert`, `docs`, `chore`, `test`, `ci`, `build` and `style`), put `!` before the colon for a change that breaks users (`feat!:` or `feat(api)!:`), and describe what users must change in the Migration notes section. CI refuses a title outside this form (the Pull request title check), since a plain title matches no release rule and releases nothing. The release notes carry the title only, so what callers of a change that does not break them see differently (a new error code, a request that now moves on where it failed, a variable that now applies) goes in the feature's documentation page and the pull request's Summary.
 
 ## Automated review threads
 

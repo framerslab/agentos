@@ -61,8 +61,9 @@ import path from 'node:path';
 
 /**
  * Callable that invokes a chat LLM given a system + user prompt and
- * returns the generated text. The bench constructs one from the
- * existing {@link IReader} so summarization reuses the same pricing +
+ * returns the generated text. The bench constructs one from an
+ * `IReader`, the reader interface in `framerslab/agentos-bench`
+ * (`src/readers/IReader.ts`), so summarization reuses the same pricing +
  * timeout plumbing as the benchmark's reader.
  */
 export type SessionSummarizerInvoker = (
@@ -83,8 +84,9 @@ export interface SessionSummarizerOptions {
   invoker: SessionSummarizerInvoker;
   /**
    * Optional directory for persistent disk cache. When set, summaries
-   * survive across process restarts and re-runs. Mirrors the
-   * {@link CachedEmbedder} cache layout.
+   * survive across process restarts and re-runs. Mirrors the cache layout
+   * of `CachedEmbedder` in `framerslab/agentos-bench`
+   * (`src/cognitive/CachedEmbedder.ts`).
    */
   cacheDir?: string;
   /**

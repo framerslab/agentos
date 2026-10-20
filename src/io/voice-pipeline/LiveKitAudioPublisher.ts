@@ -95,7 +95,8 @@ export interface LiveKitAudioPublisherOptions {
    * How playback is acknowledged ({@link LiveKitPlayout}). Unset, the publisher plays natively unless the participant
    * declares {@link LIVEKIT_PLAYOUT_ATTRIBUTE} as `'participant'` and these options carry the call identity. A SIP
    * participant is always played natively. `'participant'` requires `scopeId`, `callId` and `generation`. The mode is
-   * fixed once the participant is in the room; a chunk sent before then plays natively.
+   * fixed once the participant is in the room; a chunk sent before then plays natively, its playback wait stays native
+   * once the mode is fixed, and a clear with the generation waits out its capture in flight (`clearPlayback()`).
    */
   playout?: LiveKitPlayout;
   /**
@@ -122,7 +123,8 @@ export interface LiveKitAudioPublisherOptions {
   maxDurationMs: number;
   /**
    * The deadline of a playback wait, and in participant playout of a receipt and a clear, from 1 to 30000 milliseconds;
-   * also the longest the track waits, once published, for a participant to subscribe to it before it plays.
+   * also the longest the track waits, once published, for a participant to subscribe to it before it plays. With
+   * `maxDurationMs` added, how long a playout wait waits for a track that takes no frame before it gives up.
    */
   receiptTimeoutMs: number;
   /**
@@ -140,6 +142,11 @@ export interface LiveKitPublisherBinding {
    * is fixed: the mode waits for the participant.
    */
   participant?(): LiveKitPlayoutParticipant | undefined;
+  /**
+   * Called once when a capture has not returned within `receiptTimeoutMs` plus `maxDurationMs`: the track can take
+   * no more audio, so the transport closes its path.
+   */
+  stalled?(): void;
 }
 /**
  * Loads the optional publishing peer through {@link loadLiveKitRtc}, so a missing package is named with how to install
@@ -159,10 +166,15 @@ function publishingRtc(input: unknown): LiveKitPublishingRtc {
   return rtc as LiveKitPublishingRtc;
 }
 /**
- * A chunk native playout admitted: what its receipt reports, the clear count it was admitted under, the hold count
- * under which the track began to take it, and its capture.
+ * A chunk native playout admitted: the playout it was admitted under, what its receipt reports, the clear count it was
+ * admitted under, the hold count under which the track began to take it, and its capture.
  */
 interface NativeChunk {
+  /**
+   * The playout the chunk was admitted under, which its playback wait goes through: a chunk sent before the participant
+   * was in the room is waited for on the track once a later chunk has fixed participant playout.
+   */
+  playout: 'native';
   generation?: VoiceGeneration;
   sequence: number;
   playedSamples: number;
@@ -176,6 +188,12 @@ interface NativeChunk {
   holds?: number;
   /** Settles once the chunk's frames are captured, or once the chunk was discarded. */
   captured: Promise<void>;
+}
+/** A chunk participant playout admitted: the playout it was admitted under, and what the participant's receipt reports. */
+interface ParticipantChunk {
+  /** The playout the chunk was admitted under, which its playback wait goes through. */
+  playout: 'participant';
+  receipt: PlaybackReceipt;
 }
 /**
  * One published track of the agent's speech. In native playout chunks queue on the track in order, as fast as its
@@ -195,7 +213,8 @@ export class LiveKitAudioPublisher {
   private closed = false;
   private cancellation = 0;
   private clearWork?: Promise<void>;
-  private pending?: PlaybackReceipt;
+  /** Participant playout: the chunk announced last, until its playback wait settles or a clear has finished. */
+  private pending?: ParticipantChunk;
   /** The playout mode, fixed at the first readiness or admission that finds the participant in the room. */
   private mode?: LiveKitPlayout;
   /** Native playout: the end of the queue of chunks being captured, and of a clear; it never rejects. */
@@ -211,6 +230,20 @@ export class LiveKitAudioPublisher {
    * chunk the track had begun to take when one began does not count as played.
    */
   private holds = 0;
+  /**
+   * How many times a stalled track was given up on, by a playout wait or at a capture that did not return, so that a
+   * frame whose capture was under way then is cleared as it lands, and a playout wait under way then rejects.
+   */
+  private stalls = 0;
+  /** Whether a capture that did not return retired the track; a close then does not wait for that capture. */
+  private retired = false;
+  /** Whether the track is being published and its first subscription waited for; a playout wait's clock stops meanwhile. */
+  private preparing = false;
+  /**
+   * Settles at the next change a playout wait watches: a frame captured, a hold begun or released, the track published,
+   * a clear or a close.
+   */
+  private watch?: { changed: Promise<void>; notify: () => void };
   /** Ends the wait for the first subscription, so that a close does not wait it out. */
   private stopWaiting?: () => void;
   /**
@@ -252,7 +285,11 @@ export class LiveKitAudioPublisher {
   }
   /**
    * Fixes the playout mode when the participant is in the room, then publishes exactly once and waits for a participant
-   * to subscribe to the track, at most `receiptTimeoutMs`, before the host records connected readiness.
+   * to subscribe to the track, at most `receiptTimeoutMs`, before the host records connected readiness. The wait ends
+   * at the first subscriber (rtc-node's `LocalTrackPublication.waitForSubscription()` resolves once the first
+   * participant subscribes), so readiness a subscription brought means one participant hears the track, and a
+   * participant who subscribes later misses what played before. Readiness also comes with nobody subscribed: once
+   * `receiptTimeoutMs` has passed, when the wait fails, and at once for a publication without the method.
    */
   ready(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('publisher closed'));
@@ -267,18 +304,22 @@ export class LiveKitAudioPublisher {
     if (this.closed) return Promise.reject(new Error('publisher closed'));
     if (this.preparation) return this.preparation;
     this.preparation = (async () => {
-      const rtc = publishingRtc(this.options.rtc ?? this.binding.rtc ?? (await loadLiveKitRtc()));
-      if (this.closed) throw new Error('publisher closed'); this.rtc = rtc;
-      this.source = new rtc.AudioSource(this.options.sampleRate, 1, this.options.maxDurationMs);
-      this.track = rtc.LocalAudioTrack.createAudioTrack('voice', this.source);
-      const options = new rtc.TrackPublishOptions(); options.source = rtc.TrackSource.SOURCE_MICROPHONE;
-      const publication = await this.participant.publishTrack(this.track, options);
-      if (!publication.sid) throw new Error('publication id missing'); this.publication = publication.sid;
-      if (this.closed) throw new Error('publisher closed');
-      // A participant that subscribes after a capture misses what played before it; LiveKit's own publish-wav example
-      // waits for the subscription before its first capture too.
-      await this.subscription(publication);
-      if (this.closed) throw new Error('publisher closed');
+      // A playout wait's clock stops until the track is published and its subscription waited for (watchTrack).
+      this.preparing = true;
+      try {
+        const rtc = publishingRtc(this.options.rtc ?? this.binding.rtc ?? (await loadLiveKitRtc()));
+        if (this.closed) throw new Error('publisher closed'); this.rtc = rtc;
+        this.source = new rtc.AudioSource(this.options.sampleRate, 1, this.options.maxDurationMs);
+        this.track = rtc.LocalAudioTrack.createAudioTrack('voice', this.source);
+        const options = new rtc.TrackPublishOptions(); options.source = rtc.TrackSource.SOURCE_MICROPHONE;
+        const publication = await this.participant.publishTrack(this.track, options);
+        if (!publication.sid) throw new Error('publication id missing'); this.publication = publication.sid;
+        if (this.closed) throw new Error('publisher closed');
+        // A participant that subscribes after a capture misses what played before it; LiveKit's own publish-wav example
+        // waits for the subscription before its first capture too.
+        await this.subscription(publication);
+        if (this.closed) throw new Error('publisher closed');
+      } finally { this.preparing = false; this.moved(); }
     })(); return this.preparation;
   }
   /**
@@ -328,9 +369,33 @@ export class LiveKitAudioPublisher {
     if (!frames.length || Math.abs(publishedSamples - pcm.samples * this.options.sampleRate / pcm.sampleRate) > 1 || publishedSamples * 2 + pcm.pcm.length > this.options.maxBytes || frames.some((f) => f.sampleRate !== this.options.sampleRate || f.channels !== 1 || f.data.length !== f.samplesPerChannel || !Number.isSafeInteger(f.samplesPerChannel) || f.samplesPerChannel <= 0)) throw new Error('resampled audio refused');
     return { frames, publishedSamples };
   }
-  /** Captures one frame on an allocation of its own: AudioFrame.protoInfo reads the full backing allocation, so an offset view is never passed. */
-  private capture(rtc: LiveKitPublishingRtc, output: PublishedAudioFrame): Promise<void> {
-    return this.source!.captureFrame(new rtc.AudioFrame(Int16Array.from(output.data), output.sampleRate, 1, output.samplesPerChannel));
+  /**
+   * Captures one frame on an allocation of its own: AudioFrame.protoInfo reads the full backing allocation, so an offset
+   * view is never passed. The track's native queue is `maxDurationMs` long, so a track that plays takes the frame within
+   * that time; a capture that has not returned once `receiptTimeoutMs` plus `maxDurationMs` have passed is given up
+   * (`captureStalled()`) and rejects with `publisher capture stalled`, so the chunk's send and every wait behind it
+   * settle. Should its frame land after all, it is cleared as it lands.
+   */
+  private async capture(rtc: LiveKitPublishingRtc, output: PublishedAudioFrame): Promise<void> {
+    const native = this.source!.captureFrame(new rtc.AudioFrame(Int16Array.from(output.data), output.sampleRate, 1, output.samplesPerChannel));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stalled = new Promise<'stalled'>((resolve) => { timer = setTimeout(() => resolve('stalled'), this.options.receiptTimeoutMs + this.options.maxDurationMs); });
+    try {
+      if ((await Promise.race([native.then(() => 'captured' as const), stalled])) === 'captured') return;
+    } finally { clearTimeout(timer); }
+    native.then(() => { try { this.source?.clearQueue(); } catch { /* the source closed under it */ } }, () => {});
+    this.captureStalled();
+    throw new Error('publisher capture stalled');
+  }
+  /**
+   * Gives up on a capture that did not return: the track can take no more audio. The chunks admitted are cancelled and
+   * the native queue is cleared, a close no longer waits for that capture, and the transport is told, once, to close its
+   * path (`LiveKitPublisherBinding.stalled`).
+   */
+  private captureStalled(): void {
+    this.cancellation++; this.stalls++; this.moved();
+    const first = !this.retired; this.retired = true;
+    try { this.source?.clearQueue(); } finally { if (first) this.binding.stalled?.(); }
   }
   /**
    * Admits one raw or WAV PCM16 chunk, decoded and resampled once at this boundary.
@@ -339,7 +404,8 @@ export class LiveKitAudioPublisher {
    * a generation must carry the publisher's, so a publisher without them refuses it. A chunk without a sequence takes
    * the next of the publisher's own, from 1.
    * The send resolves once the chunk's frames are on the track's native queue, which waits while the queue is full,
-   * or once a clear, a close or a newer generation has discarded it.
+   * or once a clear, a close or a newer generation has discarded it; it rejects with `publisher capture stalled` when a
+   * capture has not returned within `receiptTimeoutMs` plus `maxDurationMs`.
    *
    * In participant playout the chunk must carry the publisher's scope, call and generation and a sequence, it is
    * announced to the participant first, and another chunk is refused until its playback wait has settled or a clear
@@ -354,7 +420,7 @@ export class LiveKitAudioPublisher {
     // A scope, a call or a generation the chunk carries must be the publisher's, which a publisher without one lacks.
     if ((chunk.scopeId !== undefined && chunk.scopeId !== scopeId) || (chunk.callId !== undefined && chunk.callId !== callId) || (chunk.generation && (!call || !sameVoiceGeneration(chunk.generation, call))) || (chunk.sequence !== undefined && (!Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1))) throw new Error('publisher scope or generation refused');
     const pcm = this.decode(chunk);
-    const entry: NativeChunk = { generation: chunk.generation ? { ...chunk.generation } : undefined, sequence: chunk.sequence ?? this.nextSequence++, playedSamples: pcm.samples, sampleRate: pcm.sampleRate, cancellation: this.cancellation, captured: Promise.resolve() };
+    const entry: NativeChunk = { playout: 'native', generation: chunk.generation ? { ...chunk.generation } : undefined, sequence: chunk.sequence ?? this.nextSequence++, playedSamples: pcm.samples, sampleRate: pcm.sampleRate, cancellation: this.cancellation, captured: Promise.resolve() };
     const previous = this.queued;
     entry.captured = (async () => {
       await previous;
@@ -365,11 +431,13 @@ export class LiveKitAudioPublisher {
         // A pause holds the track: no frame is captured until it is released.
         while (this.hold) await this.hold.released;
         if (!this.current(entry.generation, entry.cancellation)) return;
-        const holds = this.holds; entry.holds ??= holds;
+        const holds = this.holds; const stalls = this.stalls; entry.holds ??= holds;
         await this.capture(rtc, output);
         // A pause that began while the frame was captured cleared the queue before the frame reached it, so the frame
-        // is cleared as it lands, even when a resume came first: what the queue held at the pause is not heard.
-        if (this.holds !== holds) this.source?.clearQueue();
+        // is cleared as it lands, even when a resume came first: what the queue held at the pause is not heard. So is a
+        // frame whose capture a playout wait gave up on.
+        if (this.holds !== holds || this.stalls !== stalls) this.source?.clearQueue();
+        this.moved();
       }
     })();
     this.queued = entry.captured.catch(() => {}); this.latest = entry;
@@ -382,7 +450,7 @@ export class LiveKitAudioPublisher {
     const pcm = this.decode(chunk);
     const generation = { ...chunk.generation }; const captured = this.cancellation;
     const receipt: PlaybackReceipt = { generation, sequence: chunk.sequence, playedSamples: pcm.samples, sampleRate: pcm.sampleRate };
-    this.acks.begin(receipt); this.pending = receipt;
+    this.acks.begin(receipt); this.pending = { playout: 'participant', receipt };
     const work = (async () => {
       await this.prepare(); this.live(generation, captured); const rtc = this.rtc!;
       const { frames, publishedSamples } = this.convert(rtc, pcm);
@@ -390,8 +458,11 @@ export class LiveKitAudioPublisher {
         publicationId: this.publication, encoding: 'pcm16le', channels: 1, samples: pcm.samples, sampleRate: pcm.sampleRate,
         publishedSamples, publishedSampleRate: this.options.sampleRate });
       for (const output of frames) {
-        this.live(generation, captured);
-        await this.capture(rtc, output); this.live(generation, captured);
+        this.live(generation, captured); const stalls = this.stalls;
+        await this.capture(rtc, output);
+        // A frame whose capture a playout wait gave up on is cleared as it lands.
+        if (this.stalls !== stalls) this.source?.clearQueue();
+        this.moved(); this.live(generation, captured);
       }
     })(); this.sending = work;
     try { await work; } finally { if (this.sending === work) this.sending = undefined; }
@@ -405,13 +476,27 @@ export class LiveKitAudioPublisher {
    * and rate. A queue that a clear emptied does not count as played, nor does a chunk the track had begun to take when
    * a pause came, whether the pause came before this wait or during it. In participant playout both the native drain
    * and the participant's receipt are required; the native drain alone does not count.
+   *
+   * The wait goes through the playout the chunk was admitted under: a chunk sent natively before the participant was
+   * in the room waits for the track, also once a later chunk has fixed participant playout.
    */
   async waitForPlayback(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
-    return this.mode === 'participant' ? this.waitForReceipt(generation, sequence, signal) : this.waitForTrack(generation, sequence, signal);
+    const chunk = this.admitted(generation, sequence);
+    if (!chunk) throw new Error('missing publisher receipt');
+    return chunk.playout === 'participant' ? this.waitForReceipt(chunk, generation, sequence, signal) : this.waitForTrack(chunk, generation, sequence, signal);
   }
-  private async waitForTrack(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
+  /**
+   * The outstanding chunk with this generation and sequence, under the playout it was admitted under: the one
+   * participant playout announced last, else the last one native playout admitted.
+   */
+  private admitted(generation: VoiceGeneration, sequence: number): NativeChunk | ParticipantChunk | undefined {
+    const pending = this.pending;
+    if (pending && pending.receipt.sequence === sequence && sameVoiceGeneration(pending.receipt.generation, generation)) return pending;
     const entry = this.latest;
-    if (!entry || entry.sequence !== sequence || (entry.generation && !sameVoiceGeneration(entry.generation, generation))) throw new Error('missing publisher receipt');
+    if (entry && entry.sequence === sequence && (!entry.generation || sameVoiceGeneration(entry.generation, generation))) return entry;
+    return undefined;
+  }
+  private async waitForTrack(entry: NativeChunk, generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
     let timer: ReturnType<typeof setTimeout> | undefined; let abort: (() => void) | undefined;
     const stopped = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(new Error('publisher drain timeout')), this.options.receiptTimeoutMs);
@@ -437,9 +522,9 @@ export class LiveKitAudioPublisher {
     }
   }
   /** Participant playout: both acknowledgements are mandatory. clearQueue's local waiter release cannot count as playback. */
-  private async waitForReceipt(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
-    const pending = this.pending; const captured = this.cancellation;
-    if (!pending || !sameVoiceGeneration(pending.generation, generation) || pending.sequence !== sequence || !this.source) throw new Error('missing publisher receipt');
+  private async waitForReceipt(pending: ParticipantChunk, generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt> {
+    const captured = this.cancellation;
+    if (!this.source) throw new Error('missing publisher receipt');
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('publisher drain timeout')), this.options.receiptTimeoutMs); });
     try {
@@ -452,17 +537,108 @@ export class LiveKitAudioPublisher {
    * it waits, has been captured or discarded, and the track's native queue has played out
    * (`AudioSource.waitForPlayout()`). A pause holds it while chunks wait for the track; a queue that a clear, a pause
    * or a close emptied counts as played out, and in participant playout the participant's receipt is not waited for.
-   * It rejects only when the native wait does.
+   * A clear or a close ends it at once, and so does an aborted `signal`, as a session aborts it when a barge-in cuts
+   * the reply or the session closes: the wait rejects at once with `publisher playout wait aborted`, and the track
+   * plays on.
+   *
+   * The wait is bounded: a track that takes no frame, and does not play its queue out, for `receiptTimeoutMs` plus
+   * `maxDurationMs` while no pause holds it has stalled; the clock starts once the track is published and its first
+   * subscription waited for. What it holds or has yet to take is then discarded, so none of
+   * it plays later: the chunks admitted are cancelled, the native queue is cleared and a frame whose capture is under
+   * way is cleared as it lands. The wait then rejects with `publisher drain timeout`; it rejects as well when the native
+   * wait does. A single capture that has not returned within `receiptTimeoutMs` plus `maxDurationMs` is given up,
+   * whoever waits for it: its chunk's send rejects with `publisher capture stalled`, a close no longer waits for it,
+   * and the transport closes its path.
+   *
+   * @param signal - Ends the wait when aborted.
    */
-  async waitForPlayout(): Promise<void> {
+  async waitForPlayout(signal?: AbortSignal): Promise<void> {
+    if (!signal) return this.drainPlayout();
+    if (signal.aborted) throw new Error('publisher playout wait aborted');
+    let abort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(new Error('publisher playout wait aborted'));
+      signal.addEventListener('abort', abort, { once: true });
+    });
+    const drained = this.drainPlayout();
+    // A drain that fails after the wait was aborted has no one to tell.
+    drained.catch(() => {});
+    try {
+      await Promise.race([drained, aborted]);
+    } finally {
+      if (abort) signal.removeEventListener('abort', abort);
+    }
+  }
+  /** Waits until every chunk admitted so far, and any admitted meanwhile, has left the track ({@link waitForPlayout}). */
+  private async drainPlayout(): Promise<void> {
+    const stalls = this.stalls;
     for (;;) {
-      const queued = this.queued; const sending = this.sending;
-      await queued; await sending?.catch(() => {});
+      const queued = this.queued; const sending = this.sending; const cancellation = this.cancellation;
+      const captured = await this.watchTrack(Promise.all([queued, sending?.catch(() => {})]).then(() => {}), cancellation);
+      if (captured !== 'settled') return this.endWait(captured, stalls);
       // A chunk admitted meanwhile is waited for too.
       if (queued !== this.queued || sending !== this.sending) continue;
-      await this.source?.waitForPlayout();
+      const drained = this.source ? await this.watchTrack(this.source.waitForPlayout(), cancellation) : 'settled';
+      if (drained !== 'settled') return this.endWait(drained, stalls);
       if (queued === this.queued && sending === this.sending) return;
     }
+  }
+  /**
+   * Waits for `work` while the track moves, and gives up once `receiptTimeoutMs` plus `maxDurationMs` pass with no
+   * frame captured; the clock stops while a pause holds the track and while the track is being published and its first
+   * subscription waited for, and starts again at each frame, at the release and once the track is published. The
+   * track's native queue is `maxDurationMs` long, so a track that plays takes its next frame, or plays its queue out,
+   * within that time; `receiptTimeoutMs` is the slack a playback wait already allows.
+   *
+   * @param work - A step of the playout wait: the captures of the chunks admitted, or the native queue's playout.
+   * @param cancellation - The clear count the wait read; a clear or a close since then ends the wait.
+   * @returns `'settled'` once `work` has settled, `'cleared'` once a clear or a close came, `'stalled'` at the bound.
+   * @throws When `work` rejects.
+   */
+  private async watchTrack(work: Promise<void>, cancellation: number): Promise<'settled' | 'cleared' | 'stalled'> {
+    const settled = work.then(() => 'settled' as const);
+    // A wait a clear or a close ends before it races `work` leaves a later rejection of `work` handled.
+    settled.catch(() => {});
+    for (;;) {
+      if (this.closed || this.cancellation !== cancellation) return 'cleared';
+      const changed = this.nextChange().then(() => 'changed' as const);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const stalled = new Promise<'stalled'>((resolve) => {
+        if (!this.hold && !this.preparing) timer = setTimeout(() => resolve('stalled'), this.options.receiptTimeoutMs + this.options.maxDurationMs);
+      });
+      try {
+        const outcome = await Promise.race([settled, changed, stalled]);
+        if (outcome === 'settled') return outcome;
+        // A pause, or a publication, that began as the bound passed stops the clock instead; a clear or a close ends it.
+        if (outcome === 'stalled' && !this.hold && !this.preparing) return this.closed || this.cancellation !== cancellation ? 'cleared' : outcome;
+      } finally { clearTimeout(timer); }
+    }
+  }
+  /**
+   * Ends a playout wait that a clear or a close ended, which counts as played out, or that gave up on a stalled track:
+   * what the track holds or has yet to take is discarded, so none of it plays later, and the wait rejects. A wait that a
+   * capture given up on ended (`captureStalled()`) rejects the same way. Only a capture that did not return retires the
+   * track; a wait that gave up on anything else, a participant's audio announcement among them, does not.
+   *
+   * @param stalls - The count of stalls as the wait began.
+   */
+  private endWait(outcome: 'cleared' | 'stalled', stalls: number): void {
+    if (outcome === 'cleared' && this.stalls === stalls) return;
+    if (outcome === 'stalled') { this.cancellation++; this.stalls++; this.moved(); this.source?.clearQueue(); }
+    throw new Error('publisher drain timeout');
+  }
+  /** The next change a playout wait watches; one promise serves every wait until it settles. */
+  private nextChange(): Promise<void> {
+    if (!this.watch) {
+      let notify!: () => void;
+      const changed = new Promise<void>((resolve) => { notify = resolve; });
+      this.watch = { changed, notify };
+    }
+    return this.watch.changed;
+  }
+  /** Tells the playout waits that the track moved: a frame was captured, a hold began or ended, a clear or a close came. */
+  private moved(): void {
+    const watch = this.watch; this.watch = undefined; watch?.notify();
   }
   /**
    * Only the authenticated intended participant's parsed control stream calls this method. A receipt counts in
@@ -481,7 +657,7 @@ export class LiveKitAudioPublisher {
     if (this.closed || this.mode === 'participant' || this.hold) return;
     let release!: () => void;
     const released = new Promise<void>((resolve) => { release = resolve; });
-    this.hold = { released, release }; this.holds++;
+    this.hold = { released, release }; this.holds++; this.moved();
     this.source?.clearQueue();
   }
   /** Releases the hold of {@link pause}: the chunks it held are captured, in order. Without a hold it does nothing. */
@@ -489,13 +665,16 @@ export class LiveKitAudioPublisher {
   /** Ends the hold of a pause, if one is in place. */
   private release(): void {
     const hold = this.hold; this.hold = undefined; hold?.release();
+    if (hold) this.moved();
   }
   /**
    * Discards what is queued: invalidates at once, clears the native queue, ends a pause's hold, waits for a capture in
    * flight to return and clears it again. In native playout, and before the mode is fixed, that is all, with no answer
    * asked, and without a `generation` it clears whatever the track holds; a clear of another generation than the last
    * chunk's does nothing. In participant playout it then sends `clear` and waits for the participant's `cleared`
-   * answer; it needs the `generation`.
+   * answer; it needs the `generation`, and without it does nothing. With the generation, it also waits out the capture
+   * in flight of a chunk sent natively before participant playout was fixed, and clears the queue again, before it sends
+   * `clear`.
    */
   clearPlayback(generation?: VoiceGeneration): Promise<void> {
     if (this.closed) return this.closing ?? Promise.resolve();
@@ -503,31 +682,40 @@ export class LiveKitAudioPublisher {
     if (this.mode === 'participant') return generation ? this.clearForReceipt(generation) : Promise.resolve();
     const latest = this.latest;
     if (generation && latest?.generation && !sameVoiceGeneration(latest.generation, generation)) return Promise.resolve();
-    this.cancellation++; this.source?.clearQueue(); this.release(); const queued = this.queued;
+    this.cancellation++; this.moved(); this.source?.clearQueue(); this.release(); const queued = this.queued;
     const work = (async () => {
       await queued; this.source?.clearQueue();
       if (this.latest === latest) this.latest = undefined;
     })(); this.clearWork = work; this.queued = work.catch(() => {});
     return work.finally(() => { if (this.clearWork === work) this.clearWork = undefined; });
   }
-  /** Participant playout: invalidates immediately, clears the native queue, waits out capture, clears again, then awaits remote discard. */
+  /**
+   * Participant playout: invalidates immediately, clears the native queue, waits out capture, clears again, then awaits
+   * remote discard. The capture in flight of a chunk native playout admitted before the mode was fixed is waited out
+   * too, before the queue is cleared again.
+   */
   private clearForReceipt(generation: VoiceGeneration): Promise<void> {
-    if (this.pending && !sameVoiceGeneration(this.pending.generation, generation)) return Promise.resolve();
-    this.cancellation++; this.source?.clearQueue(); this.release(); const sending = this.sending;
+    if (this.pending && !sameVoiceGeneration(this.pending.receipt.generation, generation)) return Promise.resolve();
+    this.cancellation++; this.moved(); this.source?.clearQueue(); this.release(); const sending = this.sending; const queued = this.queued;
     const work = (async () => {
-      await sending?.catch(() => {}); this.source?.clearQueue();
+      await sending?.catch(() => {}); await queued; this.source?.clearQueue(); this.latest = undefined;
       await this.acks.clear(generation, (message) => this.send({ ...message })); this.pending = undefined;
     })(); this.clearWork = work;
     return work.finally(() => { if (this.clearWork === work) this.clearWork = undefined; });
   }
-  /** Confirms unpublication and native disposal once. Rejection is incomplete cleanup, never stop evidence. */
+  /**
+   * Confirms unpublication and native disposal once, after the work in flight has returned; a capture a playout wait
+   * gave up on is not waited for. Rejection is incomplete cleanup, never stop evidence.
+   */
   close(): Promise<void> {
     if (this.closing) return this.closing;
-    this.closed = true; this.cancellation++; this.acks.close(); this.release(); this.stopWaiting?.();
+    this.closed = true; this.cancellation++; this.moved(); this.acks.close(); this.release(); this.stopWaiting?.();
     const failures: unknown[] = [];
     try { this.source?.clearQueue(); } catch (error) { failures.push(error); }
     this.closing = (async () => {
-      await this.preparation?.catch(() => {}); await this.sending?.catch(() => {}); await this.queued; await this.clearWork?.catch(() => {});
+      await this.preparation?.catch(() => {});
+      // A capture a playout wait gave up on is not waited for: the track is unpublished and its source closed under it.
+      if (!this.retired) { await this.sending?.catch(() => {}); await this.queued; await this.clearWork?.catch(() => {}); }
       try { this.source?.clearQueue(); } catch (error) { failures.push(error); }
       if (this.publication) try { await this.participant.unpublishTrack(this.publication, false); } catch (error) { failures.push(error); }
       try { await this.track?.close(false); } catch (error) { failures.push(error); }

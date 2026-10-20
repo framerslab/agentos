@@ -264,6 +264,7 @@ export type {
   GenerateTextOptions,
   GenerateTextResult,
   FallbackProviderEntry,
+  FallbackSignal,
   HostLLMPolicy,
   GenerationHookContext,
   GenerationHookResult,
@@ -316,6 +317,22 @@ export type {
   ResolvedCognition,
 } from './api/runtime/gmiCognition.js';
 export { personaFromAgentOptions } from './api/runtime/gmiPersona.js';
+// Teams a gmi() agent launches from a turn (`agencies.launch` registers `launch_agency`), and persistent gmi()
+// agents seated in an agency as themselves (`sessionSeat()`).
+export { LAUNCH_AGENCY_TOOL_NAME } from './api/runtime/agencyLaunch/types.js';
+export type {
+  AgencyLaunchOptions,
+  LaunchAgencyArgs,
+  LaunchAgencyResult,
+  LaunchRefusal,
+  LaunchRefusalCode,
+  LaunchSeatRecord,
+  LaunchSeatSpec,
+  LaunchStatus,
+  LaunchUsage,
+} from './api/runtime/agencyLaunch/types.js';
+export { sessionSeat } from './api/runtime/agencyLaunch/sessionSeat.js';
+export type { SeatHandle, SessionSeatOptions } from './api/runtime/agencyLaunch/sessionSeat.js';
 // The learning layer (docs/GMI.md, "Learning"): off unless a host sets its `learning` option.
 export { createLearningLayer } from './cognition/learning/index.js';
 export type {
@@ -387,8 +404,23 @@ export type {
   CompiledStrategy,
   CompiledStrategyStreamResult,
   Agency,
+  SeatMetadata,
+  ModelPoolEntry,
+  SeatingConfig,
+  PanelOptions,
+  PanelSeatRecord,
+  PanelSeatStatus,
+  SeatingRecord,
+  SeatingSeatRecord,
+  PanelQuorumRecord,
+  AgencyResult,
+  PanelResult,
+  PanelLedger,
+  AgencyInstance,
+  AgencyQuorumConfig,
 } from './api/types.js';
-export { AgencyConfigError } from './api/types.js';
+export { AgencyConfigError, AgencyQuorumError, AgencyPanelError, AgencySeatingError } from './api/types.js';
+export { vendorOf } from './api/runtime/pool/vendor.js';
 export { generateImage } from './api/generateImage.js';
 export type { GenerateImageOptions, GenerateImageResult } from './api/generateImage.js';
 export { editImage } from './api/editImage.js';
@@ -468,6 +500,7 @@ export {
   parseModelString,
   resolveProvider,
   resolveModelOption,
+  shutdownProviderManagers,
   ProviderInitializationError,
 } from './api/model.js';
 export { PROVIDER_DEFAULTS, autoDetectProvider } from './api/runtime/provider-defaults.js';
@@ -508,3 +541,28 @@ export {
 } from './api/observers.js';
 export type { LlmUsageEvent, LlmUsageObserver } from './api/observers.js';
 // CI retrigger
+// API key pools: several keys per provider from one comma-separated string,
+// failover to the next usable key when one is revoked, unpaid or throttled,
+// probes before a failed key returns, and state a host may persist.
+export {
+  ApiKeyPool,
+  keyFingerprint,
+  keyPoolStrategyFromEnv,
+  InMemoryKeyPoolStateStore,
+  SqlKeyPoolStateStore,
+  keyPoolStateDdl,
+  KEY_POOL_STATE_DDL,
+  classifyKeyFailure,
+  isQuotaError,
+  retryAfterMs as retryAfterHeaderMs,
+} from './core/providers/index.js';
+export { setKeyPoolDefaults, getKeyPoolDefaults } from './api/keyPoolDefaults.js';
+export type { KeyPoolDefaults } from './api/keyPoolDefaults.js';
+export type {
+  ApiKeyPoolConfig,
+  ProbeResult as KeyProbeResult,
+  KeyPoolStateStore,
+  KeyState,
+  SqlKeyPoolStateStoreOptions,
+  KeyFailureKind,
+} from './core/providers/index.js';

@@ -162,3 +162,38 @@ describe('buildResponseFormat', () => {
     expect((r as any).json_schema.name).toBe('response');
   });
 });
+
+describe('buildResponseFormat for anthropic carries the route for the model it is built for', () => {
+  const schema = z.object({ city: z.string() });
+
+  it('json_schema on a model with the JSON output format, forced_tool on Claude Sonnet 4, none for a record, and by the schema alone without a model id', () => {
+    expect(buildResponseFormat({ provider: 'anthropic', modelId: 'claude-sonnet-5-5', schema, schemaName: 'place' })).toMatchObject({
+      _agentosUseToolForStructuredOutput: true,
+      route: 'json_schema',
+      tool: { name: 'place', input_schema: { type: 'object' } },
+    });
+    expect(buildResponseFormat({ provider: 'anthropic', modelId: 'claude-sonnet-4-20250514', schema, schemaName: 'place' })).toMatchObject({
+      route: 'forced_tool',
+    });
+    expect(
+      buildResponseFormat({
+        provider: 'anthropic',
+        modelId: 'claude-sonnet-5-5',
+        schema: z.object({ scores: z.record(z.string(), z.number()) }),
+        schemaName: 'place',
+      }),
+    ).toMatchObject({ route: 'none' });
+    // No model id (a fallback entry resolved later): the schema alone decides.
+    expect(buildResponseFormat({ provider: 'anthropic', schema, schemaName: 'place' })).toMatchObject({ route: 'json_schema' });
+  });
+
+  it('a record on a model that accepts a forced choice, and a record with no model id, take the forced tool', () => {
+    const recordSchema = z.object({ scores: z.record(z.string(), z.number()) });
+    expect(
+      buildResponseFormat({ provider: 'anthropic', modelId: 'claude-sonnet-4-6', schema: recordSchema, schemaName: 'place' }),
+    ).toMatchObject({ route: 'forced_tool', tool: { name: 'place' } });
+    expect(buildResponseFormat({ provider: 'anthropic', schema: recordSchema, schemaName: 'place' })).toMatchObject({
+      route: 'forced_tool',
+    });
+  });
+});

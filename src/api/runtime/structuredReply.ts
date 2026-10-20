@@ -5,9 +5,8 @@
  * against a Zod or a JSON schema, the repair message a failed attempt is answered with, and the check again after
  * the output guardrails. `generateObject` shares the parsers here.
  */
-import Ajv from 'ajv';
-import addFormats from 'ajv-formats';
 import type { ZodError, ZodType } from 'zod';
+import { SchemaChecks, type SchemaCheck } from '../../core/utils/schemaChecks.js';
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
 
 // ---------------------------------------------------------------------------
@@ -37,7 +36,13 @@ export interface StructuredOutputMeta {
   valid: boolean;
   /** Model calls the turn made for the structured reply. */
   attempts: number;
-  /** How the schema reached the model: a forced tool call lifted by the gateway, the gateway's provider-native schema format, or the instruction in the system prompt alone. */
+  /**
+   * How the schema reached the model: `forced_tool`, a forced schema tool call the gateway lifted; `provider_schema`, a
+   * hop whose payload carried the schema (OpenAI's strict json_schema, Gemini's responseSchema, Anthropic's JSON output
+   * format, whose text answer the gateway lifts, and a forced tool call that did not parse or that the output limit
+   * stopped); `prompt_only`, the schema reached the model in the prompt alone (a record schema on a Claude model that
+   * refuses a forced choice, say).
+   */
   enforcement: 'forced_tool' | 'provider_schema' | 'prompt_only';
   /** Where the last check ran: on the model's reply, or on the text an output guardrail rewrote. */
   stage: 'model' | 'post_guardrail';
@@ -105,14 +110,14 @@ export interface ResolvedStructuredReply {
   checkValue(value: unknown): StructuredCheck;
 }
 
-let sharedAjv: InstanceType<typeof Ajv> | undefined;
-function ajvInstance(): InstanceType<typeof Ajv> {
-  if (!sharedAjv) {
-    sharedAjv = new Ajv({ allErrors: true, strict: false });
-    addFormats(sharedAjv);
-  }
-  return sharedAjv;
-}
+/**
+ * The checks of the JSON Schemas requests name. Ajv reads a schema as JSON Schema draft-07, reports every error of a
+ * value, checks the standard formats (`date-time`, `email`, `uri` and the others of `ajv-formats`), and passes over a
+ * keyword it does not know, as JSON Schema says to, and a format it does not know (strict mode is off). A host may
+ * send its schema anew with each request, under one `$id` too: each compile lets go of the `$id`s it registered, and
+ * an Ajv instance compiles at most `SCHEMAS_PER_INSTANCE` schemas.
+ */
+const structuredSchemaChecks = new SchemaChecks({ allErrors: true, strict: false });
 
 /** Builds what a structured turn needs from the spec, or null when the request carries none. Throws on a spec without a usable schema. */
 export function resolveStructuredReply(spec: StructuredReplySpec | undefined | null): ResolvedStructuredReply | null {
@@ -136,9 +141,9 @@ export function resolveStructuredReply(spec: StructuredReplySpec | undefined | n
       checkValue: (value) => checkWithZod(value, schema),
     };
   }
-  let validate: ((data: unknown) => boolean) & { errors?: Array<{ instancePath?: string; message?: string }> | null };
+  let validate: SchemaCheck;
   try {
-    validate = ajvInstance().compile(schema) as typeof validate;
+    validate = structuredSchemaChecks.check(schema);
   } catch (e) {
     throw new StructuredReplyConfigError(`structuredReply.schema is not a valid JSON Schema: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -344,6 +349,85 @@ export function repairStringEncodedContainers(
     }
   }
   return { value: root, repaired };
+}
+
+/**
+ * Repairs enum and literal values that differ from the schema's only by case.
+ *
+ * Anthropic's JSON output format does not guarantee the capitalization of
+ * `enum` and `const` values (the structured outputs page, read 2026-10-18), so
+ * a `"Yes"` can come back for a schema that says `'yes'`. Driven strictly by
+ * the validation issues: when EVERY issue is an `invalid_value` whose actual
+ * value is a string matching exactly one of the issue's allowed values
+ * case-insensitively, each such value is replaced by the schema's spelling on
+ * a clone. Any other issue (a missing field, a wrong type, a value that
+ * matches none or two of the options) leaves the candidate untouched, so the
+ * caller's normal retry/feedback path still applies.
+ *
+ * @param value - The extracted-but-invalid candidate value.
+ * @param error - The Zod error from the failed validation.
+ * @returns The (possibly repaired) value and whether any repair applied.
+ * @internal
+ */
+export function repairEnumCasing(
+  value: unknown,
+  error: ZodError,
+): { value: unknown; repaired: boolean } {
+  type ValueIssue = { code?: string; values?: unknown[]; options?: unknown[]; expected?: unknown; path?: PropertyKey[] };
+  /**
+   * The values an enum or literal issue allows: Zod 4's `invalid_value.values`,
+   * Zod 3's `invalid_enum_value.options` and `invalid_literal.expected`. Any
+   * other issue is not a casing difference.
+   */
+  const allowedValues = (issue: ValueIssue): unknown[] | undefined => {
+    if (issue.code === 'invalid_value' && Array.isArray(issue.values)) return issue.values;
+    if (issue.code === 'invalid_enum_value' && Array.isArray(issue.options)) return issue.options;
+    if (issue.code === 'invalid_literal' && issue.expected !== undefined) return [issue.expected];
+    return undefined;
+  };
+  const issues = error.issues as unknown as ValueIssue[];
+  if (issues.length === 0) return { value, repaired: false };
+  const fixes: Array<{ path: PropertyKey[]; to: string }> = [];
+  for (const issue of issues) {
+    const allowed = allowedValues(issue);
+    if (!allowed) return { value, repaired: false };
+    const path = issue.path ?? [];
+    let node: unknown = value;
+    for (const key of path) {
+      if (node === null || typeof node !== 'object') {
+        node = undefined;
+        break;
+      }
+      node = (node as Record<PropertyKey, unknown>)[key];
+    }
+    if (typeof node !== 'string') return { value, repaired: false };
+    const lowered = node.toLowerCase();
+    const matches = allowed.filter(
+      (option): option is string => typeof option === 'string' && option !== node && option.toLowerCase() === lowered,
+    );
+    if (matches.length !== 1) return { value, repaired: false };
+    fixes.push({ path, to: matches[0] });
+  }
+  let root: unknown;
+  try {
+    root = structuredClone(value);
+  } catch {
+    return { value, repaired: false };
+  }
+  for (const fix of fixes) {
+    if (fix.path.length === 0) {
+      root = fix.to;
+      continue;
+    }
+    let parent: unknown = root;
+    for (const key of fix.path.slice(0, -1)) {
+      parent = parent === null || typeof parent !== 'object' ? undefined : (parent as Record<PropertyKey, unknown>)[key];
+    }
+    if (parent && typeof parent === 'object') {
+      (parent as Record<PropertyKey, unknown>)[fix.path[fix.path.length - 1]] = fix.to;
+    }
+  }
+  return { value: root, repaired: true };
 }
 
 export const MAX_FEEDBACK_BAD_RESPONSE_CHARS = 500;

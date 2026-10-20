@@ -17,7 +17,7 @@ Same code on every storage backend, one set of benchmarks: **85.6% on LongMemEva
 
 | Headline | Number | Compared with |
 |---|---|---|
-| LongMemEval-S accuracy (gpt-4o reader, N=500) | **85.6%** [82.4%, 88.6%] | Mastra OM gpt-4o 84.23%, EmergenceMem Internal 86.0% (closed-source SaaS), Supermemory gpt-4o 81.6% |
+| LongMemEval-S accuracy (gpt-4o and gpt-5-mini readers routed per question type, N=500) | **85.6%** [82.4%, 88.6%]; 84.2% with gpt-4o on every question | Mastra OM gpt-4o 84.23%, EmergenceMem Internal 86.0% (closed-source SaaS), Supermemory gpt-4o 81.6% |
 | LongMemEval-S cost per correct | **$0.0090** | EmergenceMem Simple Fast measured $0.0581 (6.5x more) |
 | LongMemEval-S p50 latency | **3,558 ms** | EmergenceMem Internal 5,650 ms |
 | LongMemEval-M accuracy (1.5M-token haystacks, N=500) | **70.2%** [66.0%, 74.0%] | LongMemEval paper Top-5 round 65.7%, paper Top-10 round 72.0%, AgentBrain (closed) 71.7% |
@@ -123,7 +123,7 @@ const sharedBrain = await Brain.openWithAdapter(adapter, { brainId: 'companion-a
 Three things the adapter abstracts away so the brain code stays identical:
 
 1. **SQL Dialect.** `INSERT OR IGNORE`, `json_extract(...)`, `ifnull(...)`, `PRAGMA` get translated automatically between SQLite and Postgres via the [`SqlDialect`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/dialect.ts) interface. The brain writes one set of queries; the dialect rewrites them per backend.
-2. **Full-text search.** [`IFullTextSearch`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/fts.ts) abstracts FTS5 (SQLite Porter tokenizer) and tsvector + GIN (Postgres) behind one `createIndex` / `matchClause` / `rankExpression` / `rebuildCommand` API, so the brain's `memory_traces_fts` index and the `memory_search` tool's query work on both backends without branching. `HybridRetriever` does not read this index: its BM25 leg is a per-instance in-memory `BM25Index` that the caller fills.
+2. **Full-text search.** [`IFullTextSearch`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/fts.ts) abstracts FTS5 (SQLite with the Porter tokenizer), FTS4 (sql.js and the IndexedDB adapter, whose SQLite builds have no FTS5) and tsvector + GIN (Postgres) behind one `createIndex` / `matchClause` / `rankExpression` / `relevanceOrder` / `rebuildCommand` API, so the brain's `memory_traces_fts` index and the `memory_search` tool's query work on both backends without branching. The brain passes `?` as the query placeholder to every fragment: the adapter sends a statement that already holds a `$n` placeholder as written, so a fragment left on its default `$1` would leave the statement's `?` unbound on Postgres. It also names the index by its own name in the join, never an alias: FTS4's rank, `offsets(memory_traces_fts)`, takes the table's hidden column, which carries the table's name. `HybridRetriever` does not read this index: its BM25 leg is a per-instance in-memory `BM25Index` that the caller fills.
 3. **BLOB codec.** Embeddings are stored as raw `Float32Array` BLOBs. [`NodeBlobCodec`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/codecs/NodeBlobCodec.ts) uses `Buffer`; [`BrowserBlobCodec`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/codecs/BrowserBlobCodec.ts) uses `DataView`. The 1536-dim `text-embedding-3-small` vector takes ~6 KB per trace on disk and round-trips byte-identical across backends.
 
 ### Multi-tenant Postgres mode
@@ -166,7 +166,7 @@ const forkBrain = await Brain.openPostgres(connStr, { brainId: 'alice-fork' });
 await forkBrain.importFromSqlite('/tmp/alice-snapshot.sqlite');
 ```
 
-The adapter's [`IDatabaseExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/exporter.ts) ships [`SqliteFileExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/exporters/SqliteFileExporter.ts) (`VACUUM INTO`) and [`PostgresExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/exporters/PostgresExporter.ts) (`pg_dump`) for backend-native export paths.
+The adapter's [`IDatabaseExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/exporter.ts) ships [`SqliteFileExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/exporters/SqliteFileExporter.ts) (`VACUUM INTO`) and [`PostgresExporter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/exporters/PostgresExporter.ts) (`pg_dump`) for backend-native export paths. Each copies the whole database, every brain in it included; the memory facade's SQLite export (`mem.export(path, { format: 'sqlite' })`) goes through `Brain.exportToSqlite` and writes one brain's rows from either backend.
 
 ### Why this matters for the benchmarks
 
@@ -627,13 +627,14 @@ Every dropped probe ships its run JSON under `agentos-bench/results/runs/` for i
 
 ## Vendor Comparison and Caveats
 
-Direct accuracy comparison (LongMemEval-S, gpt-4o reader, full N=500 except where noted):
+Direct accuracy comparison (LongMemEval-S, full N=500 except where noted; every row uses a gpt-4o reader except the AgentOS ReaderRouter row, which routes gpt-5-mini on four of the six question types):
 
 | System | Accuracy | $/correct | p50 latency | License | Notes |
 |---|---:|---:|---:|---|---|
 | **AgentOS canonical-hybrid + ReaderRouter** | **85.6%** | **$0.0090** | **3,558 ms** | Apache-2.0 | This stack |
 | EmergenceMem Internal | 86.0% | not published | 5,650 ms | closed-source SaaS | Hosted at emergence.ai; cannot install, fork, or self-host |
-| Mastra OM gpt-4o (gemini-flash observer) | 84.23% | not published | not published | Apache-2.0 | -1.4 pp aggregate, but cross-provider observer pipeline |
+| Mastra OM gpt-4o (gemini-flash observer) | 84.23% | not published | not published | Apache-2.0 | Level with AgentOS at a matched gpt-4o reader; cross-provider observer pipeline |
+| AgentOS canonical-hybrid, gpt-4o on every question | 84.2% | not published | not published | Apache-2.0 | The matched-reader comparison point: run 18-41, footnote `canonical-reader-router-pb` in [LEADERBOARD.md](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) |
 | EmergenceMem Simple Fast (rerun in agentos-bench) | 80.6% | $0.0581 | 3,703 ms | no LICENSE file | Apache-2.0 grants no license to redistribute the upstream `main.py`; we measured it for accuracy comparison only |
 | Supermemory gpt-4o | 81.6% | not published | not published | proprietary | -4.0 pp |
 | Zep (self / independent reproduction) | 71.2% / 63.8% | not published | not published | varied | Self-reported number gamed; independent reproduction far below |
@@ -645,7 +646,7 @@ Direct accuracy comparison (LongMemEval-S, gpt-4o reader, full N=500 except wher
 - MemMachine 93.0% with GPT-5-mini (different reader)
 - Hindsight 91.4% (unspecified backbone)
 
-The cross-reader frontier across all reader tiers and judge configurations spans 89-96%. AgentOS at gpt-4o reader is one band below that cross-reader frontier; pinning the reader to gpt-4o keeps the comparison apples-to-apples.
+The cross-reader frontier across all reader tiers and judge configurations spans 89-96%. The 85.6% AgentOS headline routes gpt-5-mini on four of the six question types; pinning the reader to gpt-4o (84.2%) keeps the comparison apples-to-apples.
 
 ### Methodology hygiene we ship
 

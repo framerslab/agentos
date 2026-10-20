@@ -32,7 +32,7 @@
  * is handled at the transport level rather than per-callback.
  */
 
-import type { EventEmitterLike } from './VoiceEventEmitter.js';
+import type { EventEmitterLike, VoiceEventListener } from './VoiceEventEmitter.js';
 
 // ============================================================================
 // Section 1 -- Raw audio types
@@ -273,15 +273,20 @@ export interface IStreamTransport extends EventEmitterLike {
   sendControl(message: ServerTextMessage): Promise<void>;
 
   /**
-   * Resolves once the audio handed to `sendAudio()` has played out, on a transport that plays it on its own timing
-   * after taking it, as a speaking `LiveKitStreamTransport` does: every chunk sent so far, and any sent while it waits.
-   * Audio a clear discarded counts as played out. `VoicePipelineOrchestrator` without a call profile keeps a reply
-   * `speaking` until it settles, so speech over the rest of the reply interrupts it; a rejection ends the reply as a
-   * resolution does. Without it, a reply ends when its synthesis completes.
+   * Resolves once the audio handed to `sendAudio()` has played out at the far end, as far as the transport can tell,
+   * on a transport that plays it on its own timing after taking it, as a speaking `LiveKitStreamTransport` does: every
+   * chunk sent so far, and any sent while it waits. Audio a clear discarded counts as played out.
+   * `VoicePipelineOrchestrator` without a call profile keeps a reply `speaking` until it settles, so speech over the
+   * rest of the reply interrupts it; a rejection ends the reply too, as interrupted, since what of it played is not
+   * known (`VoiceConversationItem`), unless the wait was aborted. It aborts `signal` when a barge-in
+   * cuts the reply or the session closes first, and a transport may then settle the wait at once. On a transport
+   * without it, the orchestrator keeps the reply `speaking` for the duration of the audio it was sent instead
+   * (`VoicePipelineConfig.maxPlayoutWaitMs`).
    *
+   * @param signal - Aborted when the wait is no longer needed.
    * @returns Resolves once the audio sent so far has played out.
    */
-  waitForPlayout?(): Promise<void>;
+  waitForPlayout?(signal?: AbortSignal): Promise<void>;
 
   /**
    * Close the transport, optionally supplying a WebSocket-style close code and
@@ -1704,6 +1709,25 @@ export interface VoicePipelineConfig {
   falseInterruptionMs?: number;
 
   /**
+   * The longest a reply stays `speaking` after its synthesis completes, in milliseconds, on a transport without
+   * `IStreamTransport.waitForPlayout()`. Such a transport cannot say when its audio has played, so the reply holds the
+   * floor for the duration of the audio it was sent: each chunk plays after the one before it, from the moment it is
+   * sent at the earliest. A barge-in over the rest of the reply interrupts it, and the reply ends, with `agent_done`,
+   * once that audio has played or this much time has passed since its synthesis completed. Read without a call
+   * profile. A finite number of zero or more: `VoicePipelineOrchestrator`'s constructor throws a `RangeError` otherwise.
+   * @defaultValue 30000
+   */
+  maxPlayoutWaitMs?: number;
+
+  /**
+   * How long the user and the agent may both be listening before the session reports the user `'away'` in
+   * `user_state_changed`, in milliseconds. The user's next speech makes the user `'speaking'` again. Unset, the user is
+   * never `'away'`. A finite number greater than zero: `VoicePipelineOrchestrator`'s constructor throws a `RangeError`
+   * otherwise.
+   */
+  userAwayTimeoutMs?: number;
+
+  /**
    * Provider-level STT options merged into `StreamingSTTConfig.providerOptions`.
    */
   sttOptions?: Record<string, unknown>;
@@ -1749,19 +1773,49 @@ export type PipelineState =
  *
  * ## Events emitted
  *
- * | Event                    | Payload                   | Description                             |
- * |--------------------------|---------------------------|-----------------------------------------|
- * | `'state_change'`         | {@link PipelineState}     | Pipeline state machine transition.      |
- * | `'turn_complete'`        | {@link TurnCompleteEvent} | User turn detected.                     |
- * | `'agent_response_start'` | *(none)*                  | Agent has begun generating a response.  |
- * | `'agent_response_end'`   | *(none)*                  | Agent response fully played.            |
- * | `'barge_in'`             | {@link BargeinContext}     | User interrupted TTS playback.          |
- * | `'error'`                | `Error`                   | Unrecoverable pipeline error.           |
- * | `'close'`                | *(none)*                  | Session has been fully torn down.       |
+ * The events of {@link VoiceSessionEventMap}, every one of which
+ * {@link VOICE_SESSION_EVENT_NAMES} lists; `on`, `once` and `off` type each
+ * listener by its event's payload. Both of `VoicePipelineOrchestrator`'s
+ * runtimes emit the same map, and the orchestrator emits it as well, except
+ * `error` and `state_change`, so a host that listens on the orchestrator
+ * before `startSession()` also hears the session start.
+ *
+ * | Event                      | Payload                                   | When                                         |
+ * |----------------------------|-------------------------------------------|----------------------------------------------|
+ * | `'agent_state_changed'`    | `{ oldState, newState, createdAt }`       | The agent's {@link VoiceAgentState} changed. |
+ * | `'user_state_changed'`     | `{ oldState, newState, createdAt }`       | The user's {@link VoiceUserState} changed.   |
+ * | `'user_input_transcribed'` | `{ transcript, isFinal, ... }`            | A transcript of the user's speech arrived.   |
+ * | `'conversation_item_added'`| `{ item, createdAt }`                     | A user turn or an agent reply joined the conversation. |
+ * | `'speech_created'`         | `{ source, userInitiated, createdAt }`    | A reply or a host prompt began to speak.     |
+ * | `'barge_in'`               | `{ speechDurationMs, action, ... }`       | The user's speech paused, resumed or cut the reply. |
+ * | `'error'`                  | `Error`                                   | The session ended on a failure (content-free). |
+ * | `'session_error'`          | `{ error, recoverable, source, createdAt }` | A failure, with where it came from and whether the session goes on. |
+ * | `'close'`                  | `{ reason, error?, createdAt }`           | The session closed.                          |
+ * | `'state_change'`           | {@link PipelineState}                     | Deprecated: read `agent_state_changed`.      |
+ * | `'turn_complete'`          | {@link TurnCompleteEvent}                 | Deprecated: read `conversation_item_added`.  |
  *
  * See `VoicePipelineOrchestrator.startSession()` for the factory method that creates these sessions.
+ *
+ * @example
+ * ```typescript
+ * session.on('agent_state_changed', ({ oldState, newState }) => console.log(`${oldState} -> ${newState}`));
+ * session.on('conversation_item_added', ({ item }) => history.push(item));
+ * ```
  */
 export interface VoicePipelineSession extends EventEmitterLike {
+  /** Adds a listener for one of the session's events, typed by its payload. */
+  on<K extends keyof VoiceSessionEventMap>(event: K, listener: (payload: VoiceSessionEventMap[K]) => void): this;
+  /** Adds a listener for any event, as `EventEmitter.on()` does. */
+  on(eventName: string | symbol, listener: VoiceEventListener): this;
+  /** Adds a listener for the next one of the session's events, typed by its payload. */
+  once<K extends keyof VoiceSessionEventMap>(event: K, listener: (payload: VoiceSessionEventMap[K]) => void): this;
+  /** Adds a listener for the next event of a name, as `EventEmitter.once()` does. */
+  once(eventName: string | symbol, listener: VoiceEventListener): this;
+  /** Removes a listener of one of the session's events. */
+  off<K extends keyof VoiceSessionEventMap>(event: K, listener: (payload: VoiceSessionEventMap[K]) => void): this;
+  /** Removes a listener, as `EventEmitter.off()` does. */
+  off(eventName: string | symbol, listener: VoiceEventListener): this;
+
   /**
    * Unique, stable identifier for this session (UUID).
    */
@@ -1787,6 +1841,222 @@ export interface VoicePipelineSession extends EventEmitterLike {
    */
   close(reason?: string): Promise<void>;
 }
+
+// ============================================================================
+// Section 9b -- Session events
+// ============================================================================
+
+/**
+ * What the agent is doing, as `agent_state_changed` reports it. The names are
+ * LiveKit Agents' agent states (https://docs.livekit.io/agents/build/events/).
+ *
+ * - `'initializing'`: the session is starting; it reads so until `startSession()` has wired it.
+ * - `'idle'`: input is turned off, so the agent hears nothing. `VoicePipelineOrchestrator` never reports it; a host
+ *   API that can turn a session's input off does.
+ * - `'listening'`: the agent waits for the user's turn.
+ * - `'thinking'`: the user's turn has completed and the agent's reply has no word yet, or, under a call profile, a
+ *   prompt `pushToTTS()` speaks has no word yet.
+ * - `'speaking'`: the reply or the prompt has its first word, until its audio has played out or a barge-in cuts it.
+ */
+export type VoiceAgentState = 'initializing' | 'idle' | 'listening' | 'thinking' | 'speaking';
+
+/**
+ * What the user is doing, as `user_state_changed` reports it.
+ *
+ * - `'listening'`: the user is not speaking.
+ * - `'speaking'`: between a start of the user's speech and its end: the STT session's `speech_start` and
+ *   `speech_end`, a client's transcript lines from the first to open until the last closes, or, under a call profile,
+ *   from `minSpeechMs` of successive VAD speech until a frame of silence.
+ * - `'away'`: the user and the agent have both been listening for `VoicePipelineConfig.userAwayTimeoutMs`; only with
+ *   that option set. The user's next speech makes the user `'speaking'`.
+ */
+export type VoiceUserState = 'listening' | 'speaking' | 'away';
+
+/**
+ * The part of a session a `session_error` came from: its STT, TTS, agent, transport, VAD or endpoint detector, or the
+ * session itself (a listener that threw, speech from a second source, a barge-in handler that failed, a host prompt's
+ * stream of text that failed, work the session runs across its parts).
+ */
+export type VoiceSessionErrorSource = 'stt' | 'tts' | 'agent' | 'transport' | 'vad' | 'endpoint' | 'session';
+
+/** One item of the conversation, in the order the session added it (`conversation_item_added`). */
+export type VoiceConversationItem =
+  | {
+      /** A user's turn. */
+      role: 'user';
+      /** The turn's transcript, as the agent receives it. */
+      text: string;
+      /** The language of the turn's last final transcript, when its transcriber reported one. */
+      language?: string;
+      /**
+       * Where the turn came from: the session's STT (`'speech'`), a client's transcript messages (`'client'`), or a
+       * typed message (`'text'`).
+       */
+      source: 'speech' | 'client' | 'text';
+      /** Why the endpoint detector ended the turn, for a turn it ended. */
+      endpointReason?: EndpointReason;
+    }
+  | {
+      /** An agent's reply. */
+      role: 'assistant';
+      /** The reply's text, as the agent produced it. */
+      text: string;
+      /**
+       * The part of `text` the session knows was heard: all of it for a reply whose audio played out, and, for a reply
+       * a barge-in cut, the prefix the transport has acknowledged as played, which is empty while no transport reports
+       * which text it played. A partly played reply's heard extent is then unknown, and `text` is not cut to a guess;
+       * so is that of a reply whose transport's playout wait (`IStreamTransport.waitForPlayout()`) rejected.
+       */
+      playedText: string;
+      /**
+       * Whether a barge-in or another interruption cut the reply, or its audio did not play out: the transport's playout
+       * wait rejected, as a stalled LiveKit track's does once it has discarded what it had not played.
+       */
+      interrupted: boolean;
+    };
+
+/**
+ * The events of a {@link VoicePipelineSession}, by name, each with the payload its listeners get. Both runtimes of
+ * `VoicePipelineOrchestrator` emit the same map, the names after LiveKit Agents' `AgentSession` events where LiveKit
+ * has one (https://docs.livekit.io/agents/build/events/). A listener that throws is reported, and the listeners after
+ * it still run.
+ */
+export interface VoiceSessionEventMap {
+  /** The agent's state changed; LiveKit Agents' `agent_state_changed`. */
+  agent_state_changed: {
+    /** The state before. */
+    oldState: VoiceAgentState;
+    /** The state now. */
+    newState: VoiceAgentState;
+    /** When it changed, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** The user's state changed; LiveKit Agents' `user_state_changed`. */
+  user_state_changed: {
+    /** The state before. */
+    oldState: VoiceUserState;
+    /** The state now. */
+    newState: VoiceUserState;
+    /** When it changed, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** A transcript of the user's speech, interim or final, with words; LiveKit Agents' `user_input_transcribed`. */
+  user_input_transcribed: {
+    /** The transcript's text. */
+    transcript: string;
+    /** Whether the transcript is final. */
+    isFinal: boolean;
+    /** The transcriber's confidence in the transcript, in [0, 1], when it reported one. */
+    confidence?: number;
+    /** The transcript's language, when the transcriber reported one. */
+    language?: string;
+    /** The speaker, when every word of the transcript that names one names the same speaker. */
+    speakerId?: string;
+    /** The transcriber's or the client's key for the utterance, when it has one. */
+    itemId?: string;
+    /** When it arrived, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** A user turn or an agent reply joined the conversation; LiveKit Agents' `conversation_item_added`. */
+  conversation_item_added: {
+    /** The item. */
+    item: VoiceConversationItem;
+    /** When it was added, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** A reply or a host prompt began to speak: its first word; LiveKit Agents' `speech_created`. */
+  speech_created: {
+    /**
+     * `'reply'` for the agent's answer to a turn, `'say'` for a prompt the host speaks through `pushToTTS()`: under a
+     * call profile each one, which it speaks as a reply of its own, and without one a prompt pushed while a reply is
+     * speaking, whose audio goes out with the reply's.
+     */
+    source: 'reply' | 'say';
+    /** Whether the host asked for the speech (`true` for a prompt) rather than the session (`false` for a reply). */
+    userInitiated: boolean;
+    /** When it began, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /**
+   * The user's speech acted on the reply: a `'pause'` held it, a `'resume'` let it go on after a false interruption,
+   * a `'cancel'` cut it. Each matches the `barge_in` message the transport is sent; under a call profile, speech that
+   * interrupts the agent is a `'cancel'`.
+   */
+  barge_in: {
+    /** The user's speech over the reply so far, in milliseconds. */
+    speechDurationMs: number;
+    /** The reply's text so far. */
+    interruptedText: string;
+    /** The duration of the reply's audio sent so far (acknowledged as played, under a call profile), in milliseconds. */
+    playedDurationMs: number;
+    /** What the speech did to the reply. */
+    action: BargeinAction['type'];
+    /** When it happened, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /**
+   * The session ended on a failure: the content-free `Error('voice pipeline failed')`, or `Error('voice call failed
+   * (<code>)')` under a call profile, which never carries a part's own text. Existing payload and `errorMonitor`
+   * semantics remain unchanged: the `errorMonitor` listeners get the same object first.
+   */
+  error: Error;
+  /**
+   * A failure, with where it came from and whether the session goes on: the `Error` that `error` delivers for a failure
+   * that ends the session (`recoverable: false`, before `close`), or the one the orchestrator's `error` reports for one
+   * that does not, such as a transport send that rejected (`recoverable: true`).
+   */
+  session_error: {
+    /** The failure. */
+    error: Error;
+    /** `true` when the session goes on. */
+    recoverable: boolean;
+    /** The part it came from. */
+    source: VoiceSessionErrorSource;
+    /** When it happened, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** The session closed; LiveKit Agents' `close`. */
+  close: {
+    /** Why: the reason given to the stop, `'transport_closed'` when the transport closed, or `'closed'`. */
+    reason: string;
+    /** The failure the session ended on, when it ended on one: the `Error` of `error`. */
+    error?: Error;
+    /** When it closed, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** @deprecated Read agent_state_changed. Emitted beside it until the next minor. */
+  state_change: PipelineState;
+  /** @deprecated Read conversation_item_added (a user item). Emitted beside it until the next minor. */
+  turn_complete: TurnCompleteEvent;
+}
+
+/** One `true` per event of {@link VoiceSessionEventMap}, so the compiler checks the list below names each once. */
+const SESSION_EVENT_KEYS: Readonly<Record<keyof VoiceSessionEventMap, true>> = {
+  agent_state_changed: true,
+  user_state_changed: true,
+  user_input_transcribed: true,
+  conversation_item_added: true,
+  speech_created: true,
+  barge_in: true,
+  error: true,
+  session_error: true,
+  close: true,
+  state_change: true,
+  turn_complete: true,
+};
+
+/**
+ * Every key of {@link VoiceSessionEventMap}, in the map's order, for hosts that relay a session's events and for
+ * the documentation's events table.
+ *
+ * @example
+ * ```typescript
+ * for (const name of VOICE_SESSION_EVENT_NAMES) session.on(name, (payload: unknown) => relay(name, payload));
+ * ```
+ */
+export const VOICE_SESSION_EVENT_NAMES: readonly (keyof VoiceSessionEventMap)[] = Object.freeze(
+  Object.keys(SESSION_EVENT_KEYS) as (keyof VoiceSessionEventMap)[]
+);
 
 // ============================================================================
 // Section 10 -- Wire protocol: client -> server messages
@@ -1893,13 +2163,19 @@ export type ClientTextMessage =
 export type ServerTextMessage =
   | {
       /**
-       * Sent once after the server has applied the client's `config` message
-       * and is ready to receive audio.
+       * Sent once, when the session has opened and is ready to receive audio.
+       * `VoicePipelineOrchestrator` sends it as `startSession()` completes, on a
+       * session without a call profile.
        */
       type: 'session_started';
-      /** The server-assigned session ID. */
+      /** The server-assigned session ID: the session's `sessionId`. */
       sessionId: string;
-      /** Echo of the effective configuration (may differ from client request). */
+      /**
+       * The effective configuration (may differ from the client's request).
+       * `VoicePipelineOrchestrator` sends the fields `VoicePipelineConfig`
+       * declares, less `sttOptions` and `ttsOptions`, the provider options,
+       * which can hold what a host keeps from its client.
+       */
       config: VoicePipelineConfig;
     }
   | {
@@ -1967,9 +2243,11 @@ export type ServerTextMessage =
   | {
       /**
        * Emitted as the final message before the server closes the transport.
+       * `VoicePipelineOrchestrator` sends it as a stop closes a transport that
+       * is still open, on a session without a call profile.
        */
       type: 'session_ended';
-      /** Optional human-readable reason for the session ending. */
+      /** Optional human-readable reason for the session ending: the reason the stop was given. */
       reason?: string;
     };
 

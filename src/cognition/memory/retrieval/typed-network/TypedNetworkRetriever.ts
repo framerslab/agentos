@@ -152,10 +152,10 @@ export class TypedNetworkRetriever {
  * inline in the content so the reader can distinguish typed facts
  * from raw chunks at prompt time.
  *
- * Defaults follow the {@link HybridRetriever.factToScoredTrace}
- * pattern: encoding strength 1, retrieval score = activation level,
- * neutral emotional context, lifecycle timestamps drawn from the
- * fact's mention timestamp.
+ * Defaults follow the pattern of {@link HybridRetriever}'s private
+ * `factToScoredTrace` method: encoding strength 1, retrieval score =
+ * activation level, neutral emotional context, lifecycle timestamps
+ * drawn from the fact's mention timestamp.
  */
 export function typedFactToScoredTrace(
   fact: TypedFact,

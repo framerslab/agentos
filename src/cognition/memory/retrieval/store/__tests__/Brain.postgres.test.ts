@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
+import { PostgresAdapter } from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
 import { PORTABLE_TABLES } from '../portable-tables.js';
 
@@ -155,10 +156,10 @@ describeIfPostgres('Brain.openPostgres', () => {
     ]);
     openedBrains.push(brainA, brainB);
 
-    // Both must see schema_version = '3' (latest). The lock + transaction
-    // serialization in MigrationRunner ensures only one runs the migration
-    // (or in the fresh-DB case, both safely no-op since _initSchema is
-    // idempotent).
+    // Both must see schema_version = '3' (latest). MigrationRunner's lock
+    // and transaction let one open run the migrations while the other waits;
+    // both run the schema step, where a create that loses the race to the
+    // other connection runs again and finds the object.
     expect(await brainA.getMeta('schema_version')).toBe('3');
     expect(await brainB.getMeta('schema_version')).toBe('3');
 
@@ -179,6 +180,152 @@ describeIfPostgres('Brain.openPostgres', () => {
       [brainId],
     );
     expect(rows.map((r) => r.id)).toEqual(['race-trace-a', 'race-trace-b']);
+  });
+
+  it('sets the shared schema up once when several brains first open a fresh database at once', async () => {
+    // A schema of its own stands in for a fresh database: the opens below create every table in it.
+    const schema = `agentos_fresh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    await admin.exec(`CREATE SCHEMA ${schema}`);
+    const url = new URL(POSTGRES_URL!);
+    url.searchParams.set('options', `-c search_path=${schema},public`);
+    const fresh: Brain[] = [];
+    try {
+      // Different brains: their CREATE ... IF NOT EXISTS statements race on the shared tables, and
+      // one that loses (pg_type_typname_nsp_index) runs again and finds the object.
+      fresh.push(
+        ...(await Promise.all(
+          Array.from({ length: 6 }, () => Brain.openPostgres(url.toString(), { brainId: uniqueBrainId() })),
+        )),
+      );
+      for (const brain of fresh) {
+        expect(await brain.getMeta('schema_version')).toBe('3');
+      }
+      const created = await admin.all<{ n: string | number }>(
+        `SELECT count(*) AS n FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'memory_traces'`,
+        [schema],
+      );
+      expect(Number(created[0]?.n)).toBe(1);
+      // The fresh schema gets the table's indexes too, though public, later on the search path and set up by
+      // the admin brain's open, already holds indexes of the same names.
+      const indexes = await admin.all<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'memory_traces'`,
+        [schema],
+      );
+      expect(indexes.map((row) => row.indexname)).toEqual(
+        expect.arrayContaining([
+          'idx_memory_traces_brain_type',
+          'idx_memory_traces_brain_scope',
+          'idx_memory_traces_brain_scope_id',
+        ]),
+      );
+    } finally {
+      for (const brain of fresh) await brain.close().catch(() => undefined);
+      await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
+  it('gives a fresh schema the indexes of every table it makes there, though a schema later on the search path holds them', async () => {
+    // One open alone, so no other open makes a table before this one looks for that table's indexes. public, later on
+    // the search path and set up by the admin brain's open, holds tables and indexes of the same names.
+    const schema = `agentos_fresh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    await admin.exec(`CREATE SCHEMA ${schema}`);
+    const url = new URL(POSTGRES_URL!);
+    url.searchParams.set('options', `-c search_path=${schema},public`);
+    let fresh: Brain | undefined;
+    try {
+      fresh = await Brain.openPostgres(url.toString(), { brainId: uniqueBrainId() });
+      const indexes = await admin.all<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE schemaname = $1`, [schema]);
+      expect(indexes.map((row) => row.indexname)).toEqual(
+        expect.arrayContaining([
+          'idx_memory_traces_brain_type',
+          'idx_memory_traces_brain_scope',
+          'idx_memory_traces_brain_scope_id',
+          'idx_knowledge_nodes_brain_type',
+          'idx_knowledge_edges_brain_source',
+          'idx_knowledge_edges_brain_target',
+          'idx_document_chunks_brain_document',
+          'idx_consolidation_log_brain_time',
+          'idx_retrieval_feedback_brain_trace',
+          'idx_messages_brain_conversation',
+          'idx_archived_traces_brain_time',
+          'idx_archived_traces_brain_reason',
+          'idx_archive_access_recency',
+        ]),
+      );
+    } finally {
+      await fresh?.close().catch(() => undefined);
+      await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
+  it("indexes a session's temporary table that shadows a brain table, where each CREATE INDEX of the open lands", async () => {
+    // A session's temporary table is searched before every schema on the search path, so the open's unqualified
+    // CREATE INDEX ... ON knowledge_nodes indexes it, though public, set up by the admin brain's open, holds the index.
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    const pool = new PostgresAdapter(POSTGRES_URL!);
+    await pool.open();
+    try {
+      await pool.withConnection(async (session) => {
+        await session.exec('CREATE TEMP TABLE knowledge_nodes (LIKE public.knowledge_nodes)');
+        let brain: Brain | undefined;
+        try {
+          brain = await Brain.openWithAdapter(session, { brainId: uniqueBrainId() });
+          const indexes = await session.all<{ indexname: string }>(
+            `SELECT c.relname AS indexname FROM pg_index x JOIN pg_class c ON c.oid = x.indexrelid
+              WHERE x.indrelid = 'pg_temp.knowledge_nodes'::regclass`,
+          );
+          expect(indexes.map((row) => row.indexname)).toEqual(expect.arrayContaining(['idx_knowledge_nodes_brain_type']));
+        } finally {
+          await session.exec('DROP TABLE IF EXISTS pg_temp.knowledge_nodes');
+          if (brain) {
+            await cleanup(brain);
+            await brain.close();
+          }
+        }
+      });
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('opens while another connection holds a write transaction on the shared tables', async () => {
+    const writer = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(writer);
+    // The opening connection gives up on any lock after two seconds instead of waiting for the writer.
+    const url = new URL(POSTGRES_URL!);
+    url.searchParams.set('options', '-c lock_timeout=2000');
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let inserted!: () => void;
+    const writing = new Promise<void>((resolve) => {
+      inserted = resolve;
+    });
+    // A write transaction left open on memory_traces, as a long import holds one.
+    const transaction = writer.transaction(async (trx) => {
+      await trx.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+        [writer.brainId, 'held-trace', 'episodic', 'user', 'held open', Date.now()],
+      );
+      inserted();
+      await held;
+    });
+    try {
+      await writing;
+      const opened = await Brain.openPostgres(url.toString(), { brainId: uniqueBrainId() });
+      openedBrains.push(opened);
+      expect(await opened.getMeta('schema_version')).toBe('3');
+    } finally {
+      release();
+      await transaction;
+    }
   });
 
   it('enforces FK constraints across brain-scoped tables', async () => {

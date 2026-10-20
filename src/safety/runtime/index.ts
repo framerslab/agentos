@@ -79,6 +79,10 @@ export {
   openAIModelPricing,
   openAITranscriptionPricing,
 } from '../../core/llm/providers/implementations/openaiPricing.js';
+export type { OpenAIModelPrice } from '../../core/llm/providers/implementations/openaiPricing.js';
+// Claude's prices in the same shape, from the catalog module, which loads no provider either.
+export { anthropicModelPricing } from '../../core/llm/providers/implementations/anthropicCatalog.js';
+export type { AnthropicModelPrice } from '../../core/llm/providers/implementations/anthropicCatalog.js';
 export {
   DEEPGRAM_PRE_RECORDED_PRICING,
   DEEPGRAM_STREAMING_PRICING,

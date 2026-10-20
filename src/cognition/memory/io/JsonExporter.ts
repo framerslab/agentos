@@ -153,12 +153,11 @@ export class JsonExporter {
   /**
    * Export the full brain state to a JSON file at `outputPath`.
    *
-   * @param outputPath       - Absolute path to write the JSON output.
-   * @param options          - Optional export configuration.
-   * @param options.includeEmbeddings   - When `true`, raw embedding BLOBs are
-   *   encoded as base64 strings and included in the output. Defaults to `false`.
-   * @param options.includeConversations - When `false`, conversation rows are
-   *   omitted from the output. Defaults to `true`.
+   * @param outputPath - Absolute path to write the JSON output.
+   * @param options - Optional export configuration. `includeEmbeddings` (default
+   *   `false`): when `true`, raw embedding BLOBs are encoded as base64 strings and
+   *   included in the output. `includeConversations` (default `true`): when
+   *   `false`, conversation and message rows are omitted from the output.
    */
   async export(outputPath: string, options?: ExportOptions): Promise<void> {
     const payload = await this._buildPayload(options);

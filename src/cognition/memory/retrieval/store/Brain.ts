@@ -31,6 +31,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { v4 as uuidv4 } from 'uuid';
 import type {
   StorageAdapter,
   StorageRunResult,
@@ -46,7 +47,7 @@ import {
   DDL_ARCHIVE_ACCESS_LOG_IDX,
 } from '../../archive/SqlStorageMemoryArchive.js';
 import { MigrationRunner, MIGRATIONS, LATEST_SCHEMA_VERSION } from './migrations/index.js';
-import { ensureScopeIdColumn } from './migrations/v2-to-v3.js';
+import { ensureScopeIdColumn, postgresIndexExists } from './migrations/v2-to-v3.js';
 import { PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 
@@ -60,6 +61,106 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
  * Used by {@link Brain.open} when the caller does not supply an
  * explicit `brainId`.
  */
+/**
+ * Runs one idempotent schema step, and once more if it lost a race. Every brain
+ * in a Postgres database shares its tables, and `CREATE ... IF NOT EXISTS` is
+ * not atomic there: two connections can both find an object missing, and the
+ * second then fails on the catalog's unique index (23505, such as
+ * pg_type_typname_nsp_index) or as duplicate_table (42P07), duplicate_object
+ * (42710) or duplicate_column (42701). Run again, the step finds the object and
+ * does nothing. Each statement commits on its own, so no table lock outlives it.
+ */
+async function retryLostCreate(step: () => Promise<void>): Promise<void> {
+  try {
+    await step();
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code !== '23505' && code !== '42P07' && code !== '42710' && code !== '42701') {
+      throw error;
+    }
+    await step();
+  }
+}
+
+/** Each `CREATE INDEX IF NOT EXISTS <name> ON <table> ...;` statement of a schema script, with the index's name and its table's. */
+const CREATE_INDEX_IF_NOT_EXISTS =
+  /CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)\s+ON\s+([A-Za-z_][A-Za-z0-9_]*)\b[^;]*;?/gi;
+
+/**
+ * Runs a schema script on Postgres: its other statements first (the script's `CREATE TABLE IF NOT EXISTS`), then each
+ * of its `CREATE INDEX IF NOT EXISTS` statements whose index Postgres does not have. Postgres takes the table's SHARE
+ * lock before it checks IF NOT EXISTS, so an open would otherwise wait for any long write transaction on the table,
+ * and while it waited, every writer queued behind its lock request would wait too. Each index is looked for once its
+ * table exists, on the table the statement's name resolves to then, which is the table the statement indexes: one the
+ * script has just made in the first schema on the search path, though a later schema holds a table of that name, or
+ * a session's temporary table of that name where the search path reaches it first (a path that does not name
+ * `pg_temp` searches the session's temporary schema before any other). Each call may run on another connection of a
+ * pool, so a pool's connections are taken to share their session state, as the adapter's `withConnection` asks.
+ */
+async function execSchemaScriptOnPostgres(adapter: StorageAdapter, script: string): Promise<void> {
+  const indexes = [...script.matchAll(CREATE_INDEX_IF_NOT_EXISTS)].map((match) => ({
+    statement: match[0],
+    name: match[1]!,
+    table: match[2]!,
+  }));
+  const rest = script.replace(CREATE_INDEX_IF_NOT_EXISTS, '');
+  if (rest.trim().length > 0) await retryLostCreate(() => adapter.exec(rest));
+  for (const { statement, name, table } of indexes) {
+    if (await postgresIndexExists(adapter, name, table)) continue;
+    await retryLostCreate(() => adapter.exec(statement));
+  }
+}
+
+/**
+ * Whether anything is at `entry`: a file, a folder, or a link, dangling or
+ * not. `lstat` reads the entry itself, where `access` follows a link and
+ * reports a dangling one as free.
+ */
+async function entryExists(entry: string): Promise<boolean> {
+  return fs.lstat(entry).then(
+    () => true,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    },
+  );
+}
+
+/**
+ * Moves the finished file at `from` to `to` in one step, so `to` holds the
+ * whole file or nothing, and never replaces a file already at `to`.
+ *
+ * A hard link fails with EEXIST when `to` exists; once it succeeds the export
+ * is published, and the temporary name is removed on a best-effort basis (a
+ * file left at `from` never turns a published export into a failure). A file
+ * system without hard links (FAT and exFAT, some network shares) gets a check
+ * that `to` is free and then a rename, which is atomic but replaces: the
+ * instant between the two is the only moment a file appearing at `to` could
+ * be replaced there.
+ *
+ * @throws {Error} Naming `to` when a file is already there.
+ */
+async function publishWithoutReplacing(from: string, to: string): Promise<void> {
+  const taken = (): Error => new Error(`Brain.exportToSqlite: target already exists: ${to}`);
+  try {
+    await fs.link(from, to);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST') {
+      throw taken();
+    }
+    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EXDEV' && code !== 'ENOSYS') {
+      throw error;
+    }
+    if (await entryExists(to)) {
+      throw taken();
+    }
+    await fs.rename(from, to);
+    return;
+  }
+  await fs.rm(from, { force: true }).catch(() => undefined);
+}
+
 function parseBetterSqliteUri(dbPath: string): {
   body: string;
   params: URLSearchParams;
@@ -1017,8 +1118,8 @@ export class Brain {
   /**
    * Expose the raw storage adapter for advanced usage.
    *
-   * Primarily used by SqliteExporter (VACUUM INTO) and SqliteImporter
-   * (which needs direct adapter access for the target brain).
+   * Code that needs the adapter itself reads it here; the brain's own
+   * queries go through `run`, `get`, `all` and `transaction`.
    */
   get adapter(): StorageAdapter {
     return this._adapter;
@@ -1043,6 +1144,7 @@ export class Brain {
    * is sufficient and avoids adapter-specific transaction quirks during DDL.
    */
   private async _initSchema(): Promise<void> {
+    const adapter = this._adapter;
     const ddlStatements = [
       DDL_BRAIN_META,
       DDL_MEMORY_TRACES,
@@ -1064,12 +1166,15 @@ export class Brain {
       DDL_ARCHIVE_ACCESS_LOG_IDX,
     ];
 
+    const postgres = this._features.dialect.name === 'postgres';
     for (const statement of ddlStatements) {
-      await this._adapter.exec(this._normalizeDdlForDialect(statement));
+      const normalized = this._normalizeDdlForDialect(statement);
+      if (postgres) await execSchemaScriptOnPostgres(adapter, normalized);
+      else await retryLostCreate(() => adapter.exec(normalized));
     }
 
     // A table another path created without `scope_id` (a migration engine's copy) gains it here; a fresh table has it.
-    await ensureScopeIdColumn(this._adapter);
+    await retryLostCreate(() => ensureScopeIdColumn(adapter));
 
     // FTS index via feature abstraction (FTS5 on SQLite, tsvector/GIN on Postgres).
     // SQL.js builds may not include FTS5, so keep the core schema independent.
@@ -1080,7 +1185,7 @@ export class Brain {
       tokenizer: 'porter ascii',
     });
     try {
-      await this._adapter.exec(ftsDdl);
+      await retryLostCreate(() => adapter.exec(ftsDdl));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes('no such module: fts5')) {
@@ -1114,22 +1219,25 @@ export class Brain {
    * `memory_traces_fts` is external-content with no triggers, so it only
    * covers rows a writer synced. Brains written through the cognitive
    * pipeline before `MemoryStore.store()` synced carry an EMPTY index, a
-   * failed sync leaves one row out, and an `INSERT OR REPLACE` revival
-   * leaves the old rowid's entry behind. Each makes the index's set of
-   * document ids differ from the content table's rowids. Both sets hold
-   * unique ids, so they are equal exactly when both counts equal the size of
-   * their join (|T ∩ D| = |T| = |D|); anything else triggers a rebuild from
-   * the content table. That is exact — defects cannot cancel — and costs one
-   * primary-key probe into the index's document table per content row, with
-   * no temporary index.
+   * failed sync leaves one row out, and a revival leaves the entry under its
+   * old rowid behind: the upsert rewrites the row in place, and
+   * `MemoryStore.store()` then moves it to a fresh rowid. Each makes the
+   * index's set of document ids differ from the content table's rowids. Both
+   * sets hold unique ids, so they are equal exactly when both counts equal
+   * the size of their join (|T ∩ D| = |T| = |D|); anything else triggers a
+   * rebuild from the content table. That is exact (defects cannot cancel)
+   * and costs one primary-key probe into the index's document table per
+   * content row, with no temporary index.
    *
    * The check cannot see indexed content rewritten under an unchanged
-   * rowid set. The writers that rewrite content in place (MemoryUpdateTool,
-   * the Memory facade, ConsolidationLoop) rebuild the index themselves, and
-   * the one writer that hard deletes traces (`importFromSqlite`) does too. SQLite
-   * only — a SQLite brain is its own file, while a rebuild on a shared
-   * Postgres table would re-index every brain's rows. Best-effort: nothing
-   * here may block opening the brain.
+   * rowid set. The writers that rewrite indexed text in place
+   * (MemoryUpdateTool, the Memory facade, ConsolidationLoop, SqliteImporter's
+   * tag merge, and `MemoryStore.store()` when a revival's move fails) rebuild
+   * the index themselves, and the one writer that hard deletes traces
+   * (`importFromSqlite`) does too.
+   * SQLite only: on Postgres the index is a column of each row, and every
+   * open fills the rows where it is null. Best-effort: nothing here may
+   * block opening the brain.
    */
   private async _repairFullTextIndex(): Promise<void> {
     if (this._features.dialect.name === 'postgres') {
@@ -1144,7 +1252,7 @@ export class Brain {
         `SELECT (SELECT count(*) FROM memory_traces) AS trace_rows,
                 (SELECT count(*) FROM memory_traces_fts_docsize) AS indexed_docs,
                 (SELECT count(*) FROM memory_traces t
-                   JOIN memory_traces_fts_docsize d ON d.id = t.rowid) AS matched`,
+                   JOIN memory_traces_fts_docsize d ON d.rowid = t.rowid) AS matched`,
       );
       if (
         !sets ||
@@ -1160,24 +1268,25 @@ export class Brain {
   }
 
   /**
-   * Rebuild the full-text index from the content table (SQLite only,
-   * best-effort). Used after bulk writes that bypass per-row syncing.
+   * Rebuild this brain's full-text index from its traces (best-effort), with
+   * the statement `fullTextRebuild` returns: the whole index on SQLite, the
+   * `_tsv` column of this brain's rows on Postgres. Used after bulk writes
+   * that bypass per-row syncing.
    */
   private async _rebuildFullTextIndex(): Promise<void> {
-    if (this._features.dialect.name === 'postgres') {
-      return;
-    }
     try {
-      await this._adapter.exec(this._features.fts.rebuildCommand('memory_traces_fts'));
+      const rebuild = this.fullTextRebuild();
+      await this._adapter.run(rebuild.sql, rebuild.params);
     } catch (error) {
       this._warnFullTextIndexError('rebuild', error);
     }
   }
 
-  /** Log a full-text index failure, staying silent when FTS5 is absent. */
+  /** Log a full-text index failure, staying silent when the database holds no index. */
   private _warnFullTextIndexError(action: 'repair' | 'rebuild', error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
-    // SQL.js builds without FTS5 never create the index; nothing to maintain.
+    // A database the index was never created in has nothing to maintain. sql.js and the IndexedDB
+    // adapter get an FTS4 index (sql-storage-adapter 0.7.5 and later), every other SQLite adapter FTS5.
     if (message.includes('no such module: fts5') || message.includes('no such table: memory_traces_fts')) {
       return;
     }
@@ -1268,6 +1377,23 @@ export class Brain {
     return parseInt(stored, 10) === dimensions;
   }
 
+  /**
+   * The statement that rebuilds this brain's full-text index from its traces,
+   * for `run()` on the brain or on a transaction. SQLite keeps the index in
+   * one FTS5 table per file and rebuilds it whole. Postgres keeps it in the
+   * `_tsv` column of the `memory_traces` table every brain shares, so there
+   * the statement updates this brain's rows only.
+   *
+   * @returns The SQL and its parameters.
+   */
+  fullTextRebuild(): { sql: string; params: unknown[] } {
+    const sql = this._features.fts.rebuildCommand('memory_traces_fts');
+    if (this._features.dialect.name !== 'postgres') {
+      return { sql, params: [] };
+    }
+    return { sql: `${sql} ${/\bwhere\b/i.test(sql) ? 'AND' : 'WHERE'} brain_id = ?`, params: [this.#brainId] };
+  }
+
   // ---------------------------------------------------------------------------
   // Portable artifact: export to / import from a SQLite snapshot
   // ---------------------------------------------------------------------------
@@ -1282,6 +1408,13 @@ export class Brain {
    * Refuses to overwrite an existing file at `targetPath` so callers do
    * not silently lose data.
    *
+   * The rows come from one consistent view of the database (see
+   * `_readSnapshot`), so a write that lands while the export runs is wholly
+   * in the file or wholly out of it. The file is written under a temporary
+   * name beside `targetPath` and moved there once whole: a failed export
+   * leaves nothing at `targetPath`, and a retry can run. A file that appears
+   * at `targetPath` while the export runs is kept, and the export fails.
+   *
    * Forking semantics: rows are emitted with the source brainId. Importing
    * the resulting file under a different brainId produces a fork.
    *
@@ -1289,41 +1422,97 @@ export class Brain {
    * @returns Bytes written to the destination file.
    */
   async exportToSqlite(targetPath: string): Promise<{ bytesWritten: number }> {
-    // Refuse to overwrite an existing file.
-    try {
-      await fs.access(targetPath);
+    // Refuse to overwrite anything at the target, a dangling link included.
+    if (await entryExists(targetPath)) {
       throw new Error(`Brain.exportToSqlite: target already exists: ${targetPath}`);
-    } catch (err: unknown) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        // Re-throw the "already exists" error and any other access error
-        // that isn't a missing-file response.
-        throw err;
-      }
     }
 
-    // Open a fresh SQLite Brain at the target path. We import under the
-    // source brainId so the export file is identifiable as belonging to
-    // this brain even if the receiving Brain has a different id.
-    const target = await Brain.openSqlite(targetPath, { brainId: this.#brainId });
+    const partialPath = `${targetPath}.partial-${uuidv4()}`;
     try {
-      for (const table of PORTABLE_TABLES) {
-        const rows = await this.all<Record<string, unknown>>(
-          `SELECT * FROM ${table} WHERE brain_id = ?`,
-          [this.#brainId],
-        );
-        if (rows.length === 0) continue;
+      // Open a fresh SQLite Brain at the partial path. We import under the
+      // source brainId so the export file is identifiable as belonging to
+      // this brain even if the receiving Brain has a different id.
+      const target = await Brain.openSqlite(partialPath, { brainId: this.#brainId });
+      try {
+        await this._readSnapshot(async (source) => {
+          for (const table of PORTABLE_TABLES) {
+            const rows = await source.all<Record<string, unknown>>(
+              `SELECT * FROM ${table} WHERE brain_id = ?`,
+              [this.#brainId],
+            );
+            if (rows.length === 0) continue;
 
-        // Upsert so source rows override the brain_meta defaults
-        // (schema_version, created_at) seeded during target initialisation.
-        await this._bulkCopy(target, table, rows, this.#brainId, { upsert: true });
+            // Upsert so source rows override the brain_meta defaults
+            // (schema_version, created_at) seeded during target initialisation.
+            await this._bulkCopy(target, table, rows, this.#brainId, { upsert: true });
+          }
+        });
+        // Fold the write-ahead log into the file, so the one file moved into
+        // place holds every row.
+        const rollbackJournal = target._features.dialect.pragma('journal_mode', 'DELETE');
+        if (rollbackJournal) {
+          await target.exec(rollbackJournal);
+        }
+      } finally {
+        await target.close();
       }
-    } finally {
-      await target.close();
+      await publishWithoutReplacing(partialPath, targetPath);
+    } catch (error) {
+      await Promise.all(
+        ['', '-wal', '-shm', '-journal'].map((suffix) =>
+          fs.rm(`${partialPath}${suffix}`, { force: true }).catch(() => undefined),
+        ),
+      );
+      throw error;
     }
 
     const stat = await fs.stat(targetPath);
     return { bytesWritten: stat.size };
+  }
+
+  /**
+   * Run `read` against one consistent view of this brain's database, so that
+   * rows written while it reads are all in the view or all out of it.
+   *
+   * - Postgres: a `REPEATABLE READ, READ ONLY` transaction on a pooled
+   *   connection of its own; other connections' writes stay outside it.
+   * - A better-sqlite3 file in WAL mode (as `openSqlite` opens it): a read
+   *   transaction on a second, read-only connection to the file. WAL gives
+   *   it one snapshot, and the brain's own connection keeps writing.
+   * - Anything else (an in-memory database, another adapter, another
+   *   journal mode) has one connection that every call shares, so `read`
+   *   runs on the brain's adapter as it is.
+   *
+   * @param read - Reads the view; its result is returned.
+   */
+  private async _readSnapshot<T>(read: (source: StorageAdapter) => Promise<T>): Promise<T> {
+    if (this._features.dialect.name === 'postgres') {
+      return this._adapter.transaction(async (trx) => {
+        await trx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+        return read(trx);
+      });
+    }
+    if (this._adapter.kind !== 'better-sqlite3') {
+      return read(this._adapter);
+    }
+    const main = (await this._adapter.all<{ name: string; file: string }>('PRAGMA database_list')).find(
+      (database) => database.name === 'main',
+    );
+    const journal = await this._adapter.get<{ journal_mode: string }>('PRAGMA journal_mode');
+    if (!main?.file || journal?.journal_mode?.toLowerCase() !== 'wal') {
+      return read(this._adapter);
+    }
+    const reader = await resolveStorageAdapter({
+      filePath: main.file,
+      priority: ['better-sqlite3'],
+      openOptions: { readOnly: true },
+      quiet: true,
+    });
+    try {
+      return await reader.transaction(read);
+    } finally {
+      await reader.close();
+    }
   }
 
   /**
@@ -1427,11 +1616,15 @@ export class Brain {
     } finally {
       await source.close();
       // The bulk copy writes memory_traces without syncing the full-text
-      // index, and a 'replace' import hard-deletes rows first, so SQLite can
-      // hand the imported traces reused rowids that still carry the old
-      // postings. Rebuild so the index matches whatever the import left —
-      // including a partial import that failed midway. Best-effort: it never
-      // throws, so an import error still propagates unchanged.
+      // index. On SQLite its upsert rewrites a trace the brain holds in place,
+      // under a rowid whose postings hold the old words, and a 'replace'
+      // import hard-deletes rows first, so the imported traces can get reused
+      // rowids that still carry old postings. On Postgres the upsert's SET
+      // list leaves `_tsv` as it was: a re-imported trace keeps its old
+      // words, and a new one stays null until an open fills it. Rebuild so
+      // the index matches whatever the import left, a partial import that
+      // failed midway included. Best-effort: it never throws, so an import
+      // error still propagates unchanged.
       await this._rebuildFullTextIndex();
     }
 

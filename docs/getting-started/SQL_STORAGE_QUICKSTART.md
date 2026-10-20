@@ -161,7 +161,7 @@ const mem = await Memory.createSqlite('./brain.sqlite', {
 });
 ```
 
-A brain is one `brain.sqlite` file. With the optional `hnswlib-node` package installed, the facade keeps an HNSW index beside it as `brain.hnsw`, loads it at start, and builds it when `remember()` stores a trace with an embedding and the brain then holds at least 1,000 traces (deleted traces excluded, with or without embeddings); the build indexes every trace that has an embedding. Without the package, recall runs without the index.
+A brain is one `brain.sqlite` file. With the optional `hnswlib-node` package installed, the facade keeps an HNSW index beside it, one file per brain, named `<database file name>.<digest>.hnsw` (the digest is of the file name and the brain id, so brains sharing a file or a directory never share an index). It loads the index at start, and builds it when `remember()` stores a trace with an embedding and the brain then holds at least 1,000 traces of its own (deleted traces excluded, with or without embeddings), or after an import; the build indexes each of the brain's traces that has an embedding. A `brain.hnsw` file, the one index of every brain in a directory that earlier versions wrote, is not read. Without the package, recall runs without the index.
 
 ### Postgres
 

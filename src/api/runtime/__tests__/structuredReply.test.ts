@@ -4,11 +4,12 @@
  * message; the check after an output guardrail.
  */
 import { describe, expect, it } from 'vitest';
-import { z } from 'zod';
+import { z, type ZodError } from 'zod';
 import {
   checkStructuredReply,
   extractJson,
   recheckStructuredReply,
+  repairEnumCasing,
   resolveStructuredReply,
   resolveStructuredReplySpec,
   StructuredReplyConfigError,
@@ -82,5 +83,49 @@ describe('checkStructuredReply', () => {
     const broken = recheckStructuredReply('[the reply was replaced]', previous, resolved);
     expect(broken.meta).toMatchObject({ valid: false, stage: 'post_guardrail' });
     expect(broken.meta.issues?.[0]).toMatch(/not JSON/);
+  });
+});
+
+describe('repairEnumCasing', () => {
+  const schema = z.object({
+    answer: z.enum(['yes', 'no']),
+    kind: z.literal('plan'),
+    nested: z.object({ level: z.enum(['Low', 'High']) }).optional(),
+  });
+  const errorOf = (value: unknown): ZodError => {
+    const result = schema.safeParse(value);
+    if (result.success) throw new Error('expected a validation failure');
+    return result.error;
+  };
+
+  it('repairs enum and literal values that differ from the schema only by case, at the root and nested, on a copy', () => {
+    const value = { answer: 'YES', kind: 'Plan', nested: { level: 'high' } };
+    const out = repairEnumCasing(value, errorOf(value));
+    expect(out.repaired).toBe(true);
+    expect(out.value).toEqual({ answer: 'yes', kind: 'plan', nested: { level: 'High' } });
+    expect(schema.safeParse(out.value).success).toBe(true);
+    expect(value).toEqual({ answer: 'YES', kind: 'Plan', nested: { level: 'high' } });
+  });
+
+  it('leaves the value alone when an issue is not a casing difference', () => {
+    const value = { answer: 'maybe', kind: 'Plan' };
+    const out = repairEnumCasing(value, errorOf(value));
+    expect(out.repaired).toBe(false);
+    expect(out.value).toBe(value);
+  });
+
+  it('leaves the value alone when a wrong type sits beside a casing difference', () => {
+    const value = { answer: 'Yes', kind: 42 };
+    const out = repairEnumCasing(value, errorOf(value));
+    expect(out.repaired).toBe(false);
+    expect(out.value).toBe(value);
+  });
+
+  it('leaves the value alone when two options match the value case-insensitively', () => {
+    const two = z.object({ a: z.enum(['Ab', 'aB']) });
+    const value = { a: 'AB' };
+    const result = two.safeParse(value);
+    if (result.success) throw new Error('expected a validation failure');
+    expect(repairEnumCasing(value, result.error)).toEqual({ value, repaired: false });
   });
 });

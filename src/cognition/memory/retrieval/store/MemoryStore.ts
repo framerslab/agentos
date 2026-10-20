@@ -527,32 +527,40 @@ async function withTraceOperation<T>(
 /**
  * Sync one durable trace row into the Brain's full-text index.
  *
- * `memory_traces_fts` is an external-content index with no triggers, so it
- * only covers rows a writer syncs explicitly — the Memory facade and
- * MemoryAddTool do. Without this, every trace written through
+ * On SQLite, `memory_traces_fts` is an external-content index with no
+ * triggers, so it only covers rows a writer syncs explicitly (the Memory
+ * facade and MemoryAddTool do). Without this, every trace written through
  * `MemoryStore.store()` (the whole cognitive pipeline) was invisible to
- * lexical recall and MemorySearchTool.
+ * lexical recall and MemorySearchTool. The rowid lookup is scoped by
+ * `(brain_id, id)`: several brains may share one database, and a trace id
+ * alone can match another brain's row.
  *
- * The rowid lookup is scoped by `(brain_id, id)`: several brains may share
- * one database, and a trace id alone can match another brain's row. The
- * caller skips Postgres — the adapter's `syncInsert` there can only target
- * `WHERE id = $1`, which is not brain-scoped on a shared table (no Postgres
- * sync existed on this path before either).
+ * On Postgres the index is the row's own `_tsv` column, which the upsert in
+ * `store()` writes as null. The sync fills it from the content and tags the
+ * row holds, through the brain's rebuild statement narrowed to this brain's
+ * row: the adapter's `syncInsert` there can only target `WHERE id = $1`,
+ * which is not brain-scoped on the table every brain shares.
  *
- * The index is secondary: a sync failure never fails the durable write. Any
- * row the index misses — and any stale posting an `INSERT OR REPLACE`
- * revival leaves behind — is repaired the next time the Brain opens (see
- * `Brain._repairFullTextIndex`). The write and the sync are separate
- * statements, so two processes reviving the SAME trace id at once could in
- * principle leave one revision's tokens under the other's row; that race
- * needs same-id revival across processes and is not caught by the open-time
- * check, which compares row sets rather than content.
+ * The index is secondary: a sync failure never fails the durable write. On
+ * SQLite, any row the index misses, and the stale entry a revival leaves
+ * behind under its old rowid (see `moveTraceToFreshRowid`), is repaired the
+ * next time the Brain opens (see `Brain._repairFullTextIndex`); on Postgres,
+ * every open fills a `_tsv` left null. The read, the write, the move and the
+ * sync are separate statements, so two processes storing the SAME trace id
+ * at once could in principle leave one revision's tokens under the other's
+ * row; that race needs same-id writes across processes and is not caught by
+ * the open-time check, which compares row sets rather than content.
  */
 async function syncTraceFullTextIndex(
   brain: import('./Brain.js').Brain,
   trace: MemoryTrace,
 ): Promise<void> {
   try {
+    if (brain.features.dialect.name === 'postgres') {
+      const rebuild = brain.fullTextRebuild();
+      await brain.run(`${rebuild.sql} AND id = ?`, [...rebuild.params, trace.id]);
+      return;
+    }
     await brain.run(
       brain.features.fts.syncInsert(
         'memory_traces_fts',
@@ -563,12 +571,123 @@ async function syncTraceFullTextIndex(
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    // SQL.js builds without FTS5 never create the index; nothing to sync.
-    if (message.includes('no such module: fts5') || message.includes('no such table: memory_traces_fts')) {
+    // A database the index was never created in has nothing to sync.
+    if (fullTextIndexMissing(message)) {
       return;
     }
     console.warn(`[MemoryStore] full-text index sync failed for trace ${trace.id}: ${message}`);
   }
+}
+
+/**
+ * Whether a full-text statement failed because the database has no index.
+ * sql.js and the IndexedDB adapter get an FTS4 index (sql-storage-adapter
+ * 0.7.5 and later), every other SQLite adapter FTS5; a SQLite build without
+ * the module has none.
+ */
+function fullTextIndexMissing(message: string): boolean {
+  return message.includes('no such module: fts5') || message.includes('no such table: memory_traces_fts');
+}
+
+/**
+ * Whether the brain holds a row for `traceId`, read before `store()` writes
+ * it. Only a row the brain held is rewritten in place, under the rowid its
+ * index entry names, and has to move (see `moveTraceToFreshRowid`); a new row
+ * gets a fresh rowid from its insert. A read takes no write lock, so a new
+ * trace's store writes nothing it does not need. A failed read counts as
+ * held: moving a new row is harmless, and leaving a revived one in place
+ * would keep its old words in the index.
+ */
+async function traceRowHeld(
+  brain: import('./Brain.js').Brain,
+  traceId: string,
+): Promise<boolean> {
+  try {
+    const row = await brain.get<{ held: number }>(
+      'SELECT 1 AS held FROM memory_traces WHERE brain_id = ? AND id = ?',
+      [brain.brainId, traceId],
+    );
+    return row !== null && row !== undefined;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Move a revived trace's row to a fresh rowid once its rewrite has committed.
+ *
+ * A revival stores new content under a trace id the brain already holds. The
+ * dialect's upsert rewrites that row in place and keeps its rowid, so the
+ * entry the full-text index holds under the rowid would go on matching the
+ * old words: the external-content index holds no text of its own. Moved, the
+ * row leaves that entry pointing at no row, which a search's join drops, and
+ * the next open's repair finds the row sets apart and rebuilds; the sync after
+ * the move indexes the row under its new rowid. Nothing else keys on a
+ * trace's rowid: the HNSW sidecar maps its labels to trace ids.
+ *
+ * After the write, not before it: a failed write then leaves the row and its
+ * index entry as they were, and the trace stays found by the words it holds.
+ *
+ * A move, not a delete from the index: an index delete reads the text to
+ * forget from the content row, and a row rewritten in place without a rebuild
+ * would hand it the wrong text.
+ *
+ * SQLite only, and only for a row the brain held before the write (see
+ * `traceRowHeld`). Throws when the move fails; `indexStoredTrace` then
+ * rebuilds the index instead of syncing the row.
+ */
+async function moveTraceToFreshRowid(
+  brain: import('./Brain.js').Brain,
+  traceId: string,
+): Promise<void> {
+  await brain.run(
+    `UPDATE memory_traces SET rowid = (SELECT max(rowid) + 1 FROM memory_traces)
+      WHERE brain_id = ? AND id = ?`,
+    [brain.brainId, traceId],
+  );
+}
+
+/**
+ * Bring the full-text index in step with the row `store()` has just written:
+ * a revived row moves to a fresh rowid (see `moveTraceToFreshRowid`), then
+ * the row is synced (see `syncTraceFullTextIndex`).
+ *
+ * When the move fails (another writer holds the database: SQLITE_BUSY), the
+ * row was rewritten in place under the rowid whose entry holds its old words,
+ * and a sync would add the new words beside them. The open-time check
+ * compares row sets, not content, so no open would clear the old ones. The
+ * sync is skipped and the index rebuilt from the content table instead
+ * (`Brain.fullTextRebuild`), and one line names the path taken. When the
+ * rebuild fails as well, the line says so: the old words then match until a
+ * later rebuild.
+ *
+ * @param revived - Whether the brain held the row before the write (see `traceRowHeld`).
+ */
+async function indexStoredTrace(
+  brain: import('./Brain.js').Brain,
+  trace: MemoryTrace,
+  revived: boolean,
+): Promise<void> {
+  if (revived) {
+    try {
+      await moveTraceToFreshRowid(brain, trace.id);
+    } catch (moveError) {
+      const reason = moveError instanceof Error ? moveError.message : String(moveError);
+      let outcome = 'rebuilt the full-text index from the traces instead of syncing the row';
+      try {
+        const rebuild = brain.fullTextRebuild();
+        await brain.run(rebuild.sql, rebuild.params);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        outcome = fullTextIndexMissing(message)
+          ? 'the database has no full-text index to rebuild'
+          : `the full-text index rebuild failed too, so its old words match until a later rebuild: ${message}`;
+      }
+      console.warn(`[MemoryStore] trace ${trace.id} kept its rowid through its rewrite (${reason}); ${outcome}`);
+      return;
+    }
+  }
+  await syncTraceFullTextIndex(brain, trace);
 }
 
 export class MemoryStore {
@@ -1193,12 +1312,21 @@ export class MemoryStore {
     // failed write would look successful locally and then be fenced as a
     // provider-only document on the next durable recall.
     if (brain) {
+      // The upsert rewrites a revived row in place, under the rowid its old
+      // full-text entry names. Read first whether the row exists, so that a
+      // held row alone moves, once its rewrite has committed.
+      const revived = brain.features.dialect.name !== 'postgres' && (await traceRowHeld(brain, trace.id));
       try {
         const { dialect } = brain.features;
+        // On Postgres the full-text index is the row's `_tsv` column, and the
+        // upsert's SET list names only the columns given: without `_tsv`, a
+        // revived row would keep its old words. It is written null here and
+        // filled by the sync below; an open fills one the sync left null.
+        const tsv = dialect.name === 'postgres';
         const insertSql = dialect.insertOrReplace(
           'memory_traces',
-          ['brain_id', 'id', 'type', 'scope', 'content', 'embedding', 'strength', 'created_at', 'last_accessed', 'retrieval_count', 'tags', 'emotions', 'metadata', 'deleted', 'scope_id'],
-          ['?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '0', '?'],
+          ['brain_id', 'id', 'type', 'scope', 'content', 'embedding', 'strength', 'created_at', 'last_accessed', 'retrieval_count', 'tags', 'emotions', 'metadata', 'deleted', 'scope_id', ...(tsv ? ['_tsv'] : [])],
+          ['?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '0', '?', ...(tsv ? ['NULL'] : [])],
           'brain_id, id',
         );
         const insertParams = [
@@ -1241,11 +1369,10 @@ export class MemoryStore {
       // The durable row is committed; bring the full-text index with it.
       // Deliberately NOT a nested brain.transaction(): store() may itself run
       // inside a caller's transaction, and the adapter's transaction queue
-      // would deadlock on a second owner. A missed sync is repaired by the
-      // exact open-time check in Brain.
-      if (brain.features.dialect.name !== 'postgres') {
-        await syncTraceFullTextIndex(brain, trace);
-      }
+      // would deadlock on a second owner. A missed sync is repaired on the
+      // next open: by the exact check in Brain on SQLite, by the fill of a
+      // null `_tsv` on Postgres.
+      await indexStoredTrace(brain, trace, revived);
     }
 
     trace.isActive = true;

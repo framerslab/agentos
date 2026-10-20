@@ -112,6 +112,31 @@ export const reply = {
       usage: { promptTokens: 9, completionTokens: 5, totalTokens: 14 },
     },
   ],
+  /** A reply cut off at the output limit after writing `text`: Anthropic's `max_tokens` stop, which the provider maps to `length`. */
+  cutOff: (text: string, model = 'stub-model') => [
+    { ...base, modelId: model, choices: [], responseTextDelta: text },
+    {
+      ...base,
+      modelId: model,
+      isFinal: true,
+      choices: [{ index: 0, message: { role: 'assistant', content: text }, finishReason: 'length' }],
+      usage: { promptTokens: 12, completionTokens: 16, totalTokens: 28 },
+    },
+  ],
+  /** Anthropic's forced schema tool cut off at the output limit: the call's arguments end mid-JSON. */
+  cutSchemaTool: (name: string, partialArguments: string) => [
+    {
+      ...base,
+      modelId: 'stub-model',
+      isFinal: true,
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: null, tool_calls: [{ id: 'schema_1', type: 'function', function: { name, arguments: partialArguments } }] },
+        finishReason: 'length',
+      }],
+      usage: { promptTokens: 9, completionTokens: 16, totalTokens: 25 },
+    },
+  ],
   /** One delta, then the connection drops. */
   breakAfterFirstDelta: (text: string) => Object.assign([{ ...base, modelId: 'stub-model', choices: [], responseTextDelta: text }], { breakAfter: 1 }),
   /**

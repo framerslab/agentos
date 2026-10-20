@@ -53,7 +53,7 @@ export interface MemoryDeleteOutput {
  * ```ts
  * const tool = new MemoryDeleteTool(brain);
  * const result = await tool.execute(
- *   { traceId: 'mt_1711234567890_0', reason: 'Information is outdated.' },
+ *   { traceId: 'mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b', reason: 'Information is outdated.' },
  *   context,
  * );
  * // result.output.deleted → true

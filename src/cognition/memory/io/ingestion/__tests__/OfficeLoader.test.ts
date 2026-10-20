@@ -23,8 +23,10 @@ import {
   epubOf,
   odpOf,
   odsOf,
+  odsOfCells,
   odtOf,
   pptxOf,
+  pptxOfTable,
   rtfOf,
   scannedPdf,
   sparseXlsxOf,
@@ -69,6 +71,7 @@ describe('OfficeLoader', () => {
     await expect(refused).rejects.toBeInstanceOf(DocumentTooLargeError);
     await expect(refused).rejects.toMatchObject({
       limit: 65_536,
+      message: 'the document inflates past 65536 bytes',
       cause: { message: 'officeparser: ZIP_SIZE_LIMIT_EXCEEDED' },
     });
   });
@@ -78,9 +81,12 @@ describe('OfficeLoader', () => {
     const refused = new OfficeLoader({ maxXmlElements: 1_000 }).load(many, { format: 'odt' });
     await expect(refused).rejects.toBeInstanceOf(DocumentTooLargeError);
     // The error carries the loader's bound on inflation, 64 MiB when left out,
-    // whichever bound was reached; its cause names that one.
+    // whichever bound was reached; its message and its cause name the one reached.
+    // The file inflates to far less than 64 MiB, so a message saying it inflates
+    // past that would be false.
     await expect(refused).rejects.toMatchObject({
       limit: 67_108_864,
+      message: 'the document reached the bound officeparser reports as XML_ELEMENT_LIMIT_EXCEEDED',
       cause: { message: 'officeparser: XML_ELEMENT_LIMIT_EXCEEDED' },
     });
   });
@@ -133,6 +139,35 @@ describe('OfficeLoader', () => {
     await expect(refused).rejects.toMatchObject({
       code: 'DOCUMENT_TOO_LARGE',
       cause: { message: 'officeparser: TABLE_CELL_LIMIT_EXCEEDED' },
+    });
+  });
+
+  it("reads an .xlsx sheet's cells without counting them as elements, and counts an .ods sheet's toward both bounds", async () => {
+    // An .xlsx sheet is read without building elements: its 2,000 cells pass a bound of 1,000 elements.
+    const workbook = await new OfficeLoader({ maxXmlElements: 1_000 }).load(xlsxOfCells(2_000), { format: 'xlsx' });
+    expect(workbook.metadata.wordCount).toBeGreaterThanOrEqual(2_000);
+    // An .ods sheet is XML: the same 2,000 cells are 4,000 elements, past that bound.
+    const sheet = odsOfCells(2_000);
+    await expect(new OfficeLoader({ maxXmlElements: 1_000 }).load(sheet, { format: 'ods' })).rejects.toMatchObject({
+      code: 'DOCUMENT_TOO_LARGE',
+      cause: { message: 'officeparser: XML_ELEMENT_LIMIT_EXCEEDED' },
+    });
+    // And its cells count toward the cell bound as well.
+    await expect(new OfficeLoader({ maxTableCells: 1_999 }).load(sheet, { format: 'ods' })).rejects.toMatchObject({
+      code: 'DOCUMENT_TOO_LARGE',
+      cause: { message: 'officeparser: TABLE_CELL_LIMIT_EXCEEDED' },
+    });
+  });
+
+  it("leaves a .pptx table's cells to the element bound: officeparser counts cells in sheets and OpenDocument tables alone", async () => {
+    const deck = pptxOfTable(40, SENTENCE);
+    // Forty cells pass a cell bound of one, and every one of them is read.
+    const loaded = await new OfficeLoader({ maxTableCells: 1 }).load(deck, { format: 'pptx' });
+    expect(loaded.content.split(SENTENCE)).toHaveLength(41);
+    // Each cell is six XML elements, which the element bound counts.
+    await expect(new OfficeLoader({ maxXmlElements: 100 }).load(deck, { format: 'pptx' })).rejects.toMatchObject({
+      code: 'DOCUMENT_TOO_LARGE',
+      cause: { message: 'officeparser: XML_ELEMENT_LIMIT_EXCEEDED' },
     });
   });
 

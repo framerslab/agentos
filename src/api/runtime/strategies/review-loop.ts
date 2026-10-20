@@ -46,6 +46,8 @@ import {
   checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  callRecordExtras,
+  nestedRunUnanswered,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -182,6 +184,10 @@ export function compileReviewLoop(
         const prodStart = Date.now();
         const prodResult = (await producer.generate(prodGate.input, opts)) as Record<string, unknown>;
         const prodDuration = Date.now() - prodStart;
+        // A nested agency that no seat of its own answered wrote no draft, as
+        // a rejected producer writes none: the loop ends on the current draft,
+        // and no reviewer is sent an empty one.
+        if (nestedRunUnanswered(prodResult)) break;
 
         const prodText = (prodResult.text as string) ?? '';
         const prodUsage = (prodResult.usage as ResultUsageSnapshot) ?? {};
@@ -196,6 +202,7 @@ export function compileReviewLoop(
           toolCalls: prodToolCalls,
           usage: buildAgentCallUsage(prodUsage),
           durationMs: prodDuration,
+          ...callRecordExtras(prodResult),
         });
 
         totalUsage.promptTokens += prodUsage.promptTokens ?? 0;
@@ -225,6 +232,9 @@ export function compileReviewLoop(
         const revStart = Date.now();
         const revResult = (await reviewer.generate(revGate.input, opts)) as Record<string, unknown>;
         const revDuration = Date.now() - revStart;
+        // A nested agency that no seat of its own answered gave no review, as a
+        // rejected reviewer gives none: the current draft stands.
+        if (nestedRunUnanswered(revResult)) break;
 
         const revText = (revResult.text as string) ?? '';
         const revUsage = (revResult.usage as ResultUsageSnapshot) ?? {};
@@ -237,6 +247,7 @@ export function compileReviewLoop(
           toolCalls: revToolCalls,
           usage: buildAgentCallUsage(revUsage),
           durationMs: revDuration,
+          ...callRecordExtras(revResult),
         });
 
         totalUsage.promptTokens += revUsage.promptTokens ?? 0;

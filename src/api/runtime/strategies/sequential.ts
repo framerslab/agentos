@@ -31,6 +31,7 @@ import type {
   AgentCallRecord,
   AgencyStreamPart,
 } from '../types.js';
+import type { FallbackSignal } from '../generateText.js';
 import { createBufferedAsyncReplay } from '../streamBuffer.js';
 import {
   isAgent,
@@ -38,6 +39,9 @@ import {
   checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  callRecordExtras,
+  nestedRunUnanswered,
+  nestedStreamUnanswered,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -105,6 +109,10 @@ export function compileSequential(
         const start = Date.now();
         const result = (await a.generate(effectiveContext, opts)) as Record<string, unknown>;
         const durationMs = Date.now() - start;
+        // A nested agency that no seat of its own answered gave no answer, as
+        // a rejected agent gives none: it adds no record, and the next agent's
+        // input and the run's text stay as they were.
+        if (nestedRunUnanswered(result)) continue;
 
         const resultText = (result.text as string) ?? '';
         const resultUsage = (result.usage as {
@@ -124,6 +132,7 @@ export function compileSequential(
           toolCalls: resultToolCalls,
           usage: buildAgentCallUsage(resultUsage),
           durationMs,
+          ...callRecordExtras(result),
         });
 
         totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
@@ -194,9 +203,15 @@ export function compileSequential(
             cacheCreationTokens?: number;
           } = {};
           let resultToolCalls: Array<{ name: string; args: unknown; result?: unknown; error?: string }> = [];
+          let recordExtras: ReturnType<typeof callRecordExtras>;
+          // The error the seat's stream ended on, when it reported one as a part.
+          let seatError: Error | undefined;
+          // A nested agency that no seat of its own answered, as under execute().
+          let unanswered = false;
           try {
             const agentStream = a.stream(effectivePrompt, opts) as {
               textStream?: AsyncIterable<string>;
+              fullStream?: AsyncIterable<{ type: string; text?: unknown; error?: unknown }>;
               text?: Promise<string>;
               usage?: Promise<{
                 promptTokens?: number;
@@ -207,12 +222,33 @@ export function compileSequential(
                 cacheCreationTokens?: number;
               }>;
               toolCalls?: Promise<Array<{ name: string; args: unknown; result?: unknown; error?: string }>>;
+              provider?: Promise<string>;
+              model?: Promise<string>;
+              finishReason?: Promise<string>;
+              fallback?: Promise<FallbackSignal | undefined>;
+              agentCalls?: Promise<unknown>;
             } | null;
 
             if (agentStream?.textStream) {
-              for await (const chunk of agentStream.textStream) {
-                yield { type: 'text' as const, text: chunk, agent: name };
-                agentText += chunk;
+              // streamText reports a failed call as an error part of
+              // `fullStream`, which `textStream` leaves out. A result that
+              // carries `fallback` is streamText's own (it always sets it), so
+              // its parts are read there: the text as before, and the error
+              // the stream ended on. Any other seat's stream is read as text.
+              if (agentStream.fallback !== undefined && agentStream.fullStream) {
+                for await (const part of agentStream.fullStream) {
+                  if (part.type === 'text' && typeof part.text === 'string') {
+                    yield { type: 'text' as const, text: part.text, agent: name };
+                    agentText += part.text;
+                  } else if (part.type === 'error') {
+                    seatError = part.error instanceof Error ? part.error : new Error(String(part.error));
+                  }
+                }
+              } else {
+                for await (const chunk of agentStream.textStream) {
+                  yield { type: 'text' as const, text: chunk, agent: name };
+                  agentText += chunk;
+                }
               }
               // If textStream didn't give us the full text, resolve the promise.
               if (!agentText && agentStream.text) {
@@ -223,6 +259,20 @@ export function compileSequential(
               }
               resultUsage = (await Promise.resolve(agentStream.usage)) ?? {};
               resultToolCalls = (await Promise.resolve(agentStream.toolCalls)) ?? [];
+              // Who answered: the leg that served when the seat's chain fired.
+              const [streamProvider, streamModel, streamFinish, streamFallback] = await Promise.all([
+                Promise.resolve(agentStream.provider),
+                Promise.resolve(agentStream.model),
+                Promise.resolve(agentStream.finishReason),
+                Promise.resolve(agentStream.fallback),
+              ]);
+              recordExtras = callRecordExtras({
+                provider: streamFallback?.finalProvider ?? streamProvider,
+                model: streamFallback?.finalModel ?? streamModel,
+                finishReason: streamFinish,
+                fallback: streamFallback,
+              });
+              unanswered = await nestedStreamUnanswered(agentStream, agentText, resultUsage, streamFinish);
             } else {
               // Fallback: non-streaming generate() call.
               const result = (await a.generate(effectivePrompt, opts)) as Record<string, unknown>;
@@ -232,21 +282,33 @@ export function compileSequential(
               }
               resultUsage = (result.usage as typeof resultUsage) ?? {};
               resultToolCalls = (result.toolCalls as Array<{ name: string; args: unknown; result?: unknown; error?: string }>) ?? [];
+              recordExtras = callRecordExtras(result);
+              unanswered = nestedRunUnanswered(result);
             }
 
-            agentCalls.push({
-              agent: name,
-              input: currentPrompt,
-              output: agentText,
-              toolCalls: resultToolCalls,
-              usage: buildAgentCallUsage(resultUsage),
-              durationMs: Date.now() - agentStart,
-            });
+            if (!unanswered) {
+              agentCalls.push({
+                agent: name,
+                input: currentPrompt,
+                output: agentText,
+                toolCalls: resultToolCalls,
+                usage: buildAgentCallUsage(resultUsage),
+                durationMs: Date.now() - agentStart,
+                ...recordExtras,
+              });
 
-            totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
-            totalUsage.completionTokens += resultUsage.completionTokens ?? 0;
-            totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
-            accumulateExtraUsage(totalUsage, resultUsage);
+              totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
+              totalUsage.completionTokens += resultUsage.completionTokens ?? 0;
+              totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
+              accumulateExtraUsage(totalUsage, resultUsage);
+            }
+
+            // A seat whose stream ended on an error: the error is a part of
+            // this stream too, and the run goes on to the next seat, as it
+            // does for an error a seat throws.
+            if (seatError) {
+              yield { type: 'error' as const, error: seatError, agent: name };
+            }
           } catch (err) {
             const error = err instanceof Error ? err : new Error(String(err));
             yield { type: 'error' as const, error, agent: name };
@@ -254,6 +316,7 @@ export function compileSequential(
 
           const durationMs = Date.now() - agentStart;
           yield { type: 'agent-end' as const, agent: name, output: agentText, durationMs };
+          if (unanswered) continue;
 
           finalText = agentText;
           currentPrompt = `Original task: ${prompt}\n\nPrevious agent (${name}) output:\n${agentText}`;

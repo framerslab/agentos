@@ -12,6 +12,8 @@ import { z } from 'zod';
 import { agent, type AgentOptions } from '../agent';
 import { DEFAULT_COT_INSTRUCTION } from '../generateText';
 import { reply, script } from './helpers/stubProviders';
+import { ObjectGenerationError } from '../generateObject';
+import { setGlobalLlmObserver, type LlmUsageEvent } from '../observers';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { GMIErrorCode } from '../../core/utils/errors';
 import { clearProviderPriority, setProviderPriority } from '../runtime/provider-priority';
@@ -213,15 +215,161 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(session.messages().at(-1)).toEqual({ role: 'assistant', content: '{"city":"Lyon"}' });
   });
 
-  it('a structured send on Claude Sonnet 5.5 (no forced tool): the schema rides the system prompt, and the JSON text answer is parsed', async () => {
+  it('a structured send on Claude Sonnet 5.5: the JSON output format marker carries the schema, the system prompt does not repeat it, and the JSON text answer is parsed', async () => {
     const k = key(); const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon"}')] });
     const r = await agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s')
       .send('where?', { responseSchema: z.object({ city: z.string() }) });
     expect(r.object).toEqual({ city: 'Lyon' });
+    expect(r.text).toBe('{"city":"Lyon"}');
+    expect(s.seen[0].options.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
+    expect(systemText(s.seen[0])).not.toContain(SCHEMA_LINE);
+  });
+
+  it('a structured send on Claude Fable 5.1 keeps the schema answer when an onAfterGeneration hook returns other text', async () => {
+    const k = key(); const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon"}')] });
+    const r = await agent({
+      ...base(k),
+      provider: 'anthropic',
+      model: 'claude-fable-5-1',
+      onAfterGeneration: async (result) => ({ ...result, text: 'Rewritten by a hook.' }),
+    }).session('s').send('where?', { responseSchema: z.object({ city: z.string() }) });
+    // The gateway lifts the JSON text answer into structuredOutput, so the hook's text does not replace it.
+    expect(r.object).toEqual({ city: 'Lyon' });
+    expect(r.text).toBe('{"city":"Lyon"}');
+    expect(s.seen[0].options.responseFormat).toMatchObject({ route: 'json_schema' });
+  });
+
+  it('a structured send on Claude Sonnet 5.5 with a record schema (outside the JSON output format): the schema rides the system prompt, and the JSON text answer is parsed', async () => {
+    const k = key(); const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon","scores":{"a":1}}')] });
+    const r = await agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s')
+      .send('where?', { responseSchema: z.object({ city: z.string(), scores: z.record(z.string(), z.number()) }) });
+    expect(r.object).toEqual({ city: 'Lyon', scores: { a: 1 } });
     expect(s.seen[0].options.responseFormat).toBeUndefined();
-    // No payload carries the schema to this model, so the request's system prompt does.
+    // No payload carries this schema to the model, so the request's system prompt does.
     expect(systemText(s.seen[0])).toContain(SCHEMA_LINE);
-    expect(systemText(s.seen[0])).toContain('"city"');
+    expect(systemText(s.seen[0])).toContain('"scores"');
+  });
+
+  it('a structured send on Claude Sonnet 4.6 with a record schema (outside the JSON output format) keeps the forced tool: the schema tool call becomes the object', async () => {
+    const k = key(); const s = script('anthropic', k, { replies: [reply.schemaTool('scores', { city: 'Lyon', scores: { a: 1 } })] });
+    const r = await agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-4-6' }).session('s')
+      .send('where?', { responseSchema: z.object({ city: z.string(), scores: z.record(z.string(), z.number()) }), schemaName: 'scores' });
+    expect(r.object).toEqual({ city: 'Lyon', scores: { a: 1 } });
+    expect(r.finishReason).toBe('stop');
+    expect(s.seen[0].options.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'forced_tool', tool: { name: 'scores' } });
+    // The forced tool carries the schema, so the system prompt does not repeat it.
+    expect(systemText(s.seen[0])).not.toContain(SCHEMA_LINE);
+  });
+
+  it('a structured send cut off at maxTokens on Claude Sonnet 5.5 (the JSON output format) rejects naming the cut-off; the step keeps its own text and the call reports length', async () => {
+    const k = key(); const cut = '{"city":"Ly';
+    script('anthropic', k, { replies: [reply.cutOff(cut)] });
+    const events: LlmUsageEvent[] = [];
+    setGlobalLlmObserver((event) => { events.push(event); });
+    try {
+      const stepTexts: string[] = [];
+      const session = agent({
+        ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5',
+        onAfterGeneration: async (result) => { stepTexts.push(result.text); return result; },
+      }).session('s');
+      const error = await session.send('where?', { responseSchema: z.object({ city: z.string() }), maxTokens: 16 }).then(() => undefined, (e: unknown) => e);
+      expect(error).toBeInstanceOf(ObjectGenerationError);
+      expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (16)');
+      expect((error as ObjectGenerationError).rawText).toBe(cut);
+      // Nothing was lifted: the step's text is the model's text, not a JSON string of it.
+      expect(stepTexts).toEqual([cut]);
+      expect(events.map((e) => e.finishReason)).toEqual(['length']);
+      expect(session.messages()).toEqual([]);
+    } finally {
+      setGlobalLlmObserver(null);
+    }
+  });
+
+  it('a structured send stopped at maxTokens whose JSON parses but misses a required field rejects naming the cut-off, not a schema mismatch', async () => {
+    // The cut-off is read from the step's own finish reason, and the error carries the issues.
+    const k = key(); script('anthropic', k, { replies: [reply.cutOff('{"city":"Lyon"}')] });
+    const session = agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s');
+    const error = await session
+      .send('where?', { responseSchema: z.object({ city: z.string(), country: z.string() }), maxTokens: 16 })
+      .then(() => undefined, (e: unknown) => e);
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (16)');
+    expect((error as ObjectGenerationError).validationErrors).toBeDefined();
+    expect(session.messages()).toEqual([]);
+  });
+
+  it('a structured send stopped at maxTokens whose JSON parses and matches the schema still rejects naming the cut-off: nothing is lifted from a cut-off, and the call reports length', async () => {
+    const k = key(); script('anthropic', k, { replies: [reply.cutOff('{"city":"Lyon"}')] });
+    const events: LlmUsageEvent[] = [];
+    setGlobalLlmObserver((event) => { events.push(event); });
+    try {
+      const stepTexts: string[] = [];
+      const session = agent({
+        ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5',
+        onAfterGeneration: async (result) => { stepTexts.push(result.text); return result; },
+      }).session('s');
+      const error = await session
+        .send('where?', { responseSchema: z.object({ city: z.string() }), maxTokens: 16 })
+        .then(() => undefined, (e: unknown) => e);
+      expect(error).toBeInstanceOf(ObjectGenerationError);
+      expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (16)');
+      expect((error as ObjectGenerationError).rawText).toBe('{"city":"Lyon"}');
+      expect((error as ObjectGenerationError).validationErrors).toBeUndefined();
+      expect(stepTexts).toEqual(['{"city":"Lyon"}']);
+      expect(events.map((e) => e.finishReason)).toEqual(['length']);
+      expect(session.messages()).toEqual([]);
+    } finally {
+      setGlobalLlmObserver(null);
+    }
+  });
+
+  it('a structured send whose forced schema tool call stopped at the output limit with the arguments {} rejects naming the cut-off, though {} fits a schema whose fields are optional', async () => {
+    const k = key();
+    const s = script('anthropic', k, { replies: [reply.cutSchemaTool('scores', '{}')] });
+    const events: LlmUsageEvent[] = [];
+    setGlobalLlmObserver((event) => { events.push(event); });
+    try {
+      const session = agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-4-6' }).session('s');
+      const error = await session
+        .send('where?', { responseSchema: z.object({ scores: z.record(z.string(), z.number()).optional() }), schemaName: 'scores', maxTokens: 1 })
+        .then(() => undefined, (e: unknown) => e);
+      expect(error).toBeInstanceOf(ObjectGenerationError);
+      expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (1)');
+      expect((error as ObjectGenerationError).rawText).toBe('{}');
+      expect(events.map((e) => e.finishReason)).toEqual(['length']);
+      // The route was the forced tool, and the cut call was not run as a tool.
+      expect(s.seen[0].options.responseFormat).toMatchObject({ route: 'forced_tool', tool: { name: 'scores' } });
+      expect(s.seen).toHaveLength(1);
+      expect(session.messages()).toEqual([]);
+    } finally {
+      setGlobalLlmObserver(null);
+    }
+  });
+
+  it('a structured send whose forced schema tool call was cut off rejects naming the cut-off: the cut arguments are the step\'s text, never a tool the turn runs', async () => {
+    const k = key(); const cut = '{"city":"Lyon","scores":{"a":';
+    const s = script('anthropic', k, { replies: [reply.cutSchemaTool('scores', cut)] });
+    const events: LlmUsageEvent[] = [];
+    setGlobalLlmObserver((event) => { events.push(event); });
+    try {
+      const stepTexts: string[] = [];
+      const session = agent({
+        ...base(k, { tools: [lookupTool(async () => ({ success: true }))] }), provider: 'anthropic', model: 'claude-sonnet-4-6',
+        onAfterGeneration: async (result) => { stepTexts.push(result.text); return result; },
+      }).session('s');
+      const error = await session
+        .send('where?', { responseSchema: z.object({ city: z.string(), scores: z.record(z.string(), z.number()) }), schemaName: 'scores', maxTokens: 16 })
+        .then(() => undefined, (e: unknown) => e);
+      expect(error).toBeInstanceOf(ObjectGenerationError);
+      expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (16)');
+      expect((error as ObjectGenerationError).rawText).toBe(cut);
+      expect(stepTexts).toEqual([cut]);
+      expect(events.map((e) => e.finishReason)).toEqual(['length']);
+      // One model call: the cut call was not run as a tool, so no tool round asked the model again.
+      expect(s.seen).toHaveLength(1);
+    } finally {
+      setGlobalLlmObserver(null);
+    }
   });
 
   it('a structured send in OpenAI JSON mode (a schema strict mode cannot take) carries the schema in its system prompt; a strict one does not repeat it', async () => {

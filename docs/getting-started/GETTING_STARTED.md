@@ -119,7 +119,7 @@ export OLLAMA_BASE_URL=http://localhost:11434
 export STABLE_DIFFUSION_LOCAL_BASE_URL=http://localhost:7860
 ```
 
-[API Key Rotation](../KEY_ROTATION.md) lists the providers that rotate a key list and the ones that rest a key after a quota error. Among the LLM providers, Anthropic, Gemini and OpenRouter rest a key; the OpenAI provider rotates its keys and rests none.
+[API Key Rotation](../KEY_ROTATION.md) explains the key pool behind a comma-separated key list: the LLM providers (OpenAI, Anthropic, Gemini, OpenRouter and Requesty) take a revoked, unpaid or throttled key out and move the request to the next usable one, and `AGENTOS_KEY_POOL_STRATEGY_ANTHROPIC=ordered` (one variable per provider; `AGENTOS_KEY_POOL_STRATEGY` for every provider) uses that provider's keys in the order given, credited keys first and the paid key last.
 
 ### Inline API Keys
 

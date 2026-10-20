@@ -190,8 +190,8 @@ describe('HTTP error responses', () => {
     expect(request).toHaveBeenCalledTimes(1);
     // No key was cooled: every pool entry's cooldown is still unset. (The pool is a
     // weighted round-robin, so the next key drawn is not a usable signal.)
-    const pool = (provider as unknown as { keyPool: { keys: Array<{ key: string; exhaustedUntil: number }> } }).keyPool;
-    expect(pool.keys.map((k) => k.exhaustedUntil)).toEqual([0, 0]);
+    const pool = (provider as unknown as { keyPool: { snapshot(): Array<{ status: string }> } }).keyPool;
+    expect(pool.snapshot().map((k) => k.status)).toEqual(['ok', 'ok']);
   });
 
   it('a decline body on a throttled status is thrown before the key cooldown and the retry', async () => {
@@ -207,8 +207,8 @@ describe('HTTP error responses', () => {
     expect(err.code).toBe('content_filter');
     expect((err.details as { httpStatus?: number }).httpStatus).toBe(429);
     expect(request).toHaveBeenCalledTimes(1);
-    const pool = (provider as unknown as { keyPool: { keys: Array<{ exhaustedUntil: number }> } }).keyPool;
-    expect(pool.keys.map((k) => k.exhaustedUntil)).toEqual([0, 0]);
+    const pool = (provider as unknown as { keyPool: { snapshot(): Array<{ status: string }> } }).keyPool;
+    expect(pool.snapshot().map((k) => k.status)).toEqual(['ok', 'ok']);
   });
 
   it('an HTTP error that is not a decline takes its error type from metadata.error_type', async () => {
@@ -572,15 +572,29 @@ describe('streams', () => {
     expect(out[0]?.usage?.promptTokens).toBe(120);
   });
 
-  it('an abort before the first chunk closes the response stream', async () => {
+  it('an abort that lands while the request is in flight, before the first chunk, closes the response stream', async () => {
     const controller = new AbortController();
-    controller.abort();
     const body = sse([textChunk('never')]) as Readable;
-    const request = vi.fn().mockResolvedValueOnce({ data: body });
+    // The caller aborts after the request went out and before its answer is read.
+    const request = vi.fn().mockImplementationOnce(async () => {
+      controller.abort();
+      return { data: body };
+    });
     const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string } }>;
     expect(out).toHaveLength(1);
     expect(out[0]?.error?.type).toBe('abort');
+    expect(request).toHaveBeenCalledTimes(1);
     expect(body.destroyed).toBe(true);
+  });
+
+  it('an abort before the call sends nothing and yields the abort chunk', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([textChunk('never')]) });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.type).toBe('abort');
+    expect(request).not.toHaveBeenCalled();
   });
 
   it('a non-decline error event during the usage wait does not replace the held decline', async () => {

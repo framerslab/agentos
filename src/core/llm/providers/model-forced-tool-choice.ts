@@ -14,11 +14,11 @@
  *   - {@link AnthropicProvider} clamps any resolved forced `tool_choice` to
  *     `auto` for those models (the same defensive clamp it already applies when
  *     extended thinking is active), so no caller has to remember the quirk.
- *   - {@link generateObject} skips the forced-tool structured-output payload
- *     for those models and falls through to the prompt-only JSON path instead (the
- *     schema already rides in the system prompt; the result text is
- *     extractJson + safeParse'd in the retry loop), so structured output
- *     degrades gracefully on those models and the request still succeeds.
+ *   - `anthropicSchemaRoute` (model-strict-tool-use.ts) sends a schema the JSON
+ *     output format cannot carry (a record, a schema over the vendor's
+ *     limits) as a non-strict forced tool on every model this predicate
+ *     admits, and as a block in the prompt on the models it denies; a schema
+ *     the format carries takes the format on every current model either way.
  *
  * Sibling of `modelSupportsThinking` / `modelSupportsTemperature`. Kept in its
  * own pure module so the unit test imports no provider/SDK code.
@@ -49,7 +49,9 @@
  * `claude-fable-5-1`, with the message `tool_choice: type "tool" and "any" are
  * not supported for this model.` The same two requests return 200 on
  * `claude-opus-5`. Both return HTTP 400 on `claude-sonnet-5-5` (probed
- * 2026-09-30).
+ * 2026-09-30). `{type:'tool'}` with no `thinking` field returns 200 with a
+ * `tool_use` stop on `claude-haiku-5-5` (probed 2026-10-19), so Haiku 5.5
+ * stays off the list.
  *
  * `AnthropicProvider` clamps an unsupported forced choice to `{ type: 'auto' }`
  * and logs a warning. An extra entry here therefore costs guaranteed tool

@@ -35,14 +35,27 @@ import {
 } from '../IProvider';
 import { stripForeignVendorParams } from '../openrouter-only-params';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
-import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
+import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
+import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { resolveThinkingOff, resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import {
-  modelSupportsStrictToolUse,
-  toolInputSchemaSupportsStrict,
-  toolInputSchemaWithExplicitNoExtraProps,
+  anthropicJsonOutputSchema,
+  anthropicSchemaRoute,
+  modelSupportsJsonOutputs,
+  type AnthropicSchemaRoute,
 } from '../model-strict-tool-use.js';
+import {
+  ANTHROPIC_MODELS,
+  anthropicModelPricing,
+  estimateAnthropicCostUSD,
+  resolveAnthropicModelEntry,
+  resolveModelCatalogEntry,
+  type AnthropicCacheCreationBreakdown,
+  type AnthropicModelInfo,
+  type AnthropicModelPrice,
+  type AnthropicUsageForCost,
+} from './anthropicCatalog.js';
 import { resolveAnthropicEffort } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
@@ -55,6 +68,21 @@ import { contentSafeConsole as console } from '../../../logging/contentSafeConso
 // it, even though its source of truth is the pure model-forced-tool-choice
 // module.
 export { modelSupportsForcedToolChoice };
+
+// The model catalog, its lookups and its prices live in anthropicCatalog.ts,
+// which imports nothing of this provider, so `@framers/agentos/safety/runtime`
+// can carry `anthropicModelPricing` without loading the provider. Re-exported
+// here so every import that reached them through this module keeps working.
+export {
+  anthropicModelPricing,
+  estimateAnthropicCostUSD,
+  resolveAnthropicModelEntry,
+  resolveModelCatalogEntry,
+  type AnthropicCacheCreationBreakdown,
+  type AnthropicModelInfo,
+  type AnthropicModelPrice,
+  type AnthropicUsageForCost,
+};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -124,6 +152,31 @@ export interface AnthropicProviderConfig {
    * @default 4096
    */
   defaultMaxTokens?: number;
+  /**
+   * The key pool behind a comma-separated `apiKey`: `ordered` prefers the
+   * earliest usable key (a cost order: credited keys first, the paid key
+   * last), `round-robin` spreads load (the default; the environment's
+   * `AGENTOS_KEY_POOL_STRATEGY=ordered` changes it when this is absent);
+   * `store` and `id` persist the keys' standing across restarts. A key the
+   * pool took out is probed off the request path before it returns.
+   */
+  keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'loadTimeoutMs' | 'storeTimeoutMs' | 'store' | 'id'>;
+}
+
+/** The kind of key failure an in-stream `error` event names, or null when it is not the key's fault. */
+function keyFailureOfStreamError(type: string | undefined, message: string): KeyFailureKind | null {
+  if (type === 'authentication_error' || type === 'permission_error') return 'auth';
+  if (type === 'rate_limit_error') return 'quota';
+  if (type === 'invalid_request_error' && message.toLowerCase().startsWith('your credit balance is too low')) return 'billing';
+  return null;
+}
+
+/** What a stream request's error carries about the key it used, for the retry loops' key hops. */
+interface KeyFailureDetails {
+  keyFailure?: KeyFailureKind;
+  keyUsable?: number;
+  keyCount?: number;
+  retryAfterSec?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,18 +242,6 @@ interface AnthropicContentBlock {
   is_error?: boolean;
   /** Present when type === 'image'. */
   source?: { type: 'base64'; media_type: string; data: string };
-}
-
-/**
- * Prompt-cache writes on one response, split by cache TTL: the
- * `usage.cache_creation` object of the Messages API. The two counts add up to
- * `cache_creation_input_tokens`.
- */
-export interface AnthropicCacheCreationBreakdown {
-  /** Tokens written with the default 5-minute TTL. */
-  ephemeral_5m_input_tokens?: number;
-  /** Tokens written with the 1-hour TTL (`cache_control.ttl: '1h'`). */
-  ephemeral_1h_input_tokens?: number;
 }
 
 /**
@@ -357,254 +398,6 @@ type AnthropicStreamEvent =
   | { type: 'ping' }
   | { type: 'error'; error: { type: string; message: string } };
 
-// ---------------------------------------------------------------------------
-// Known model catalog — used by listAvailableModels / getModelInfo
-// ---------------------------------------------------------------------------
-
-/**
- * Static catalog of well-known Anthropic models and their metadata.
- *
- * Prices are USD per 1M tokens, verified against Anthropic's pricing page and
- * model pages on 2026-09-30. A cache hit costs 0.1x the input price except
- * where a row sets `pricePer1MTokensCacheRead`: Opus 5.5 (0.05x) and Fable 5.1
- * (0.025x) differ, and Fable 5 states its standard 0.1x rate explicitly so
- * the Fable 5.1 rate is not mistaken for it. Cache writes cost 1.25x the input
- * price at the 5-minute TTL and 2x at the 1-hour TTL on every model; see
- * {@link estimateAnthropicCostUSD}.
- *
- * `outputTokenLimit` is the model's real max output ceiling, surfaced via
- * getModelInfo for callers that want to size requests. It is informational,
- * not the per-request default: when a caller omits `maxTokens`, the request
- * falls back to `config.defaultMaxTokens`, but a per-call `maxTokens` is
- * clamped to it via {@link clampAnthropicMaxTokens}. Anthropic's limits:
- * Opus 5.5, Opus 5, Opus 4.6-4.8, Fable 5.1, Fable 5, Sonnet 5.5, Sonnet 5 and
- * Sonnet 4.6 take 128K output with a 1M context; Opus 4.5, Sonnet 4.5 and
- * Haiku 4.5 take 64K output with a 200K context.
- */
-const ANTHROPIC_MODELS: ModelInfo[] = [
-  {
-    modelId: 'claude-opus-5-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 5.5',
-    description: "Anthropic's recommended starting model for most workloads. Frontier Opus for agents and coding, priced below Claude Opus 5.",
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 4,
-    pricePer1MTokensOutput: 20,
-    // Cache hits and refreshes bill at 0.05x the input price.
-    pricePer1MTokensCacheRead: 0.2,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-fable-5-1',
-    providerId: 'anthropic',
-    displayName: 'Claude Fable 5.1',
-    description: "Anthropic's most capable model, for demanding reasoning and long-horizon agentic work.",
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 10,
-    pricePer1MTokensOutput: 50,
-    // Cache hits and refreshes bill at 0.025x the input price.
-    pricePer1MTokensCacheRead: 0.25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-fable-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Fable 5',
-    description: 'Previous Fable generation, superseded by Claude Fable 5.1.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 10,
-    pricePer1MTokensOutput: 50,
-    // The standard 0.1x rate. Fable 5.1's 0.025x does not apply to Fable 5.
-    pricePer1MTokensCacheRead: 1,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-opus-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 5',
-    description: 'Frontier Opus for agents and coding; drop-in successor to Claude Opus 4.8 at the same pricing.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 5,
-    pricePer1MTokensOutput: 25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-opus-4-8',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 4.8',
-    description: 'Most intelligent model for agents and coding.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 5,
-    pricePer1MTokensOutput: 25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-opus-4-7',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 4.7',
-    description: 'Prior Opus generation.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 5,
-    pricePer1MTokensOutput: 25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-opus-4-6',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 4.6',
-    description: 'Previous-generation Opus with same pricing as 4.7.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 5,
-    pricePer1MTokensOutput: 25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    // The dated id is the canonical row: the bare alias `claude-opus-4-5`
-    // resolves to it through the prefix fallback in resolveModelCatalogEntry,
-    // as `claude-haiku-4-5` resolves to the dated Haiku row.
-    modelId: 'claude-opus-4-5-20251101',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 4.5',
-    description: 'Legacy Opus, still served. Superseded by Claude Opus 5.5.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 64000,
-    pricePer1MTokensInput: 5,
-    pricePer1MTokensOutput: 25,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-sonnet-5-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Sonnet 5.5',
-    description: 'Current Sonnet for everyday coding, agent and enterprise work; adaptive thinking on by default.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 2,
-    pricePer1MTokensOutput: 10,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-sonnet-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Sonnet 5',
-    description: 'Near-Opus coding/agentic Sonnet; adaptive thinking on by default.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    outputTokenLimit: 128000,
-    // $2/$10 is the standard price: Anthropic kept its launch pricing and
-    // cancelled the increase to $3/$15 scheduled for 2026-09-01 (pricing
-    // page, 2026-09-30). The row must stay in this table: without it the
-    // model prices as costUSD undefined, which turned the 2026-07-20..26
-    // quota-outage fallback traffic (thousands of sonnet-5 leg calls a day)
-    // into unmetered spend.
-    pricePer1MTokensInput: 2,
-    pricePer1MTokensOutput: 10,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-sonnet-4-6',
-    providerId: 'anthropic',
-    displayName: 'Claude Sonnet 4.6',
-    description: 'Optimal balance of intelligence, cost, and speed.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 1000000,
-    // 128K per current Anthropic specs (every current-generation model
-    // streams to 128K; only Haiku 4.5 and legacy Sonnet 4.5 cap at 64K).
-    // The old 64000 silently halved caller budgets via the clamp.
-    outputTokenLimit: 128000,
-    pricePer1MTokensInput: 3,
-    pricePer1MTokensOutput: 15,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-sonnet-4-5',
-    providerId: 'anthropic',
-    displayName: 'Claude Sonnet 4.5',
-    description: 'Previous-generation Sonnet with same pricing as 4.6.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 64000,
-    pricePer1MTokensInput: 3,
-    pricePer1MTokensOutput: 15,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  {
-    modelId: 'claude-haiku-4-5-20251001',
-    providerId: 'anthropic',
-    displayName: 'Claude Haiku 4.5',
-    description: 'Fastest, most cost-efficient model for lightweight tasks.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 64000,
-    pricePer1MTokensInput: 1,
-    pricePer1MTokensOutput: 5,
-    supportsStreaming: true,
-    status: 'active',
-  },
-  // Legacy entries retained for model-ID back-compat. Prices reflect the
-  // original rate card for those specific snapshots.
-  // Claude Opus 4 and Claude Sonnet 4 (the 2025-05-14 snapshots) were retired
-  // by Anthropic on 2026-06-15. Both ids return HTTP 404 not_found_error on the
-  // Messages API (probed 2026-09-29, with a claude-sonnet-5 control returning
-  // 200). They stay in the catalog as `deprecated` so a caller still holding
-  // one of them gets limits, a price and a status from the catalog. Anthropic's
-  // documented replacements are claude-opus-4-8 and claude-sonnet-4-6.
-  {
-    modelId: 'claude-opus-4-20250514',
-    providerId: 'anthropic',
-    displayName: 'Claude Opus 4 (2025-05-14)',
-    description: 'Retired 2026-06-15 and no longer served. Use claude-opus-4-8.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 32000,
-    pricePer1MTokensInput: 15,
-    pricePer1MTokensOutput: 75,
-    supportsStreaming: true,
-    status: 'deprecated',
-  },
-  {
-    modelId: 'claude-sonnet-4-20250514',
-    providerId: 'anthropic',
-    displayName: 'Claude Sonnet 4 (2025-05-14)',
-    description: 'Retired 2026-06-15 and no longer served. Use claude-sonnet-4-6.',
-    capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 64000,
-    pricePer1MTokensInput: 3,
-    pricePer1MTokensOutput: 15,
-    supportsStreaming: true,
-    status: 'deprecated',
-  },
-];
-
 /**
  * Clamp a requested `max_tokens` to the target model's real output ceiling from
  * {@link ANTHROPIC_MODELS}. Anthropic returns HTTP 400 when `max_tokens` exceeds
@@ -617,118 +410,6 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
 export function clampAnthropicMaxTokens(modelId: string, requested: number): number {
   const ceiling = resolveAnthropicModelEntry(modelId)?.outputTokenLimit;
   return typeof ceiling === 'number' && ceiling > 0 ? Math.min(requested, ceiling) : requested;
-}
-
-/**
- * Resolves a caller-supplied model id to its ANTHROPIC_MODELS catalog row.
- * Exact id match wins; otherwise a dated snapshot (`claude-sonnet-5-20260101`)
- * or bare alias is matched by prefix — the SAME resolution the max-tokens
- * clamp uses, shared so pricing ({@link estimateAnthropicCostUSD}) and
- * clamping can never disagree about which row a model id means (an
- * exact-only match prices every dated snapshot id as costUSD undefined:
- * unmetered spend).
- *
- * The longest catalog id that prefixes `modelId` wins. Catalog ids nest:
- * `claude-opus-5` is a prefix of `claude-opus-5-5`. A first-match scan makes
- * the answer depend on array order and can resolve a dated
- * `claude-opus-5-5-…` snapshot to Opus 5's row, pricing it at $5/$25 instead
- * of $4/$20. An id that is itself a prefix of a catalog id, such as the bare
- * alias `claude-haiku-4-5`, resolves to the first catalog id it prefixes.
- */
-export function resolveAnthropicModelEntry(modelId: string): ModelInfo | undefined {
-  return resolveModelCatalogEntry(ANTHROPIC_MODELS, modelId);
-}
-
-/**
- * Catalog lookup behind {@link resolveAnthropicModelEntry}, taking the catalog
- * as a parameter so the ordering behavior can be tested against a catalog
- * whose shorter id comes first.
- *
- * @param catalog Model rows to search, in any order.
- * @param modelId Caller-supplied model id, bare or dated.
- * @returns The exact row, else the row with the longest id that prefixes
- *   `modelId`, else the first row whose id starts with `modelId`. An empty id
- *   resolves to nothing: every catalog id starts with `''`, so the last rule
- *   would otherwise price a response with no model echo as the first row.
- */
-export function resolveModelCatalogEntry(
-  catalog: readonly ModelInfo[],
-  modelId: string,
-): ModelInfo | undefined {
-  if (!modelId) return undefined;
-  const exact = catalog.find((m) => m.modelId === modelId);
-  if (exact) return exact;
-  let longest: ModelInfo | undefined;
-  for (const m of catalog) {
-    if (modelId.startsWith(m.modelId) && (!longest || m.modelId.length > longest.modelId.length)) {
-      longest = m;
-    }
-  }
-  return longest ?? catalog.find((m) => m.modelId.startsWith(modelId));
-}
-
-/**
- * Token counts that decide what one Messages API call costs, under the API's
- * own `usage` field names.
- */
-export interface AnthropicUsageForCost {
-  /** Input tokens billed at the full input price (cache reads and writes excluded). */
-  input_tokens: number;
-  /** Output tokens, thinking included. */
-  output_tokens: number;
-  /** Tokens read from the prompt cache. */
-  cache_read_input_tokens?: number;
-  /** Tokens written to the prompt cache, both TTLs together. */
-  cache_creation_input_tokens?: number;
-  /** The same writes split by TTL, when the response reports the split. */
-  cache_creation?: AnthropicCacheCreationBreakdown | null;
-}
-
-/**
- * Estimates the USD cost of one Anthropic Messages API call from its usage.
- *
- * | Tokens | Price |
- * | --- | --- |
- * | `input_tokens` | the input price |
- * | `cache_read_input_tokens` | the row's `pricePer1MTokensCacheRead`, else 0.1x the input price |
- * | 5-minute cache writes | 1.25x the input price |
- * | 1-hour cache writes | 2x the input price |
- * | `output_tokens` | the output price |
- *
- * `input_tokens` excludes cached tokens, so the input components add up
- * without double counting. The 1-hour share of the writes comes from
- * `cache_creation.ephemeral_1h_input_tokens`: a response without that split
- * is priced as 5-minute writes only, and a 1-hour count above the write total
- * is capped at the total.
- *
- * @param modelId Model id, bare or dated, resolved with
- *   {@link resolveAnthropicModelEntry}.
- * @param usage Token counts from the response.
- * @returns The cost in USD, or `undefined` when the catalog has no price for
- *   the model (unknown, empty or unpriced id).
- */
-export function estimateAnthropicCostUSD(
-  modelId: string,
-  usage: AnthropicUsageForCost,
-): number | undefined {
-  const info = resolveAnthropicModelEntry(modelId);
-  const inputPrice = info?.pricePer1MTokensInput;
-  const outputPrice = info?.pricePer1MTokensOutput;
-  if (!inputPrice || !outputPrice) return undefined;
-  const cacheReadPrice = info?.pricePer1MTokensCacheRead ?? inputPrice * 0.1;
-  const split = usage.cache_creation ?? undefined;
-  const written =
-    usage.cache_creation_input_tokens
-    ?? ((split?.ephemeral_5m_input_tokens ?? 0) + (split?.ephemeral_1h_input_tokens ?? 0));
-  const writtenOneHour = Math.min(Math.max(split?.ephemeral_1h_input_tokens ?? 0, 0), written);
-  // Tokens times USD per 1M tokens: the sum is in millionths of a dollar.
-  const microDollars =
-    usage.input_tokens * inputPrice
-    + (usage.cache_read_input_tokens ?? 0) * cacheReadPrice
-    + (written - writtenOneHour) * inputPrice * 1.25
-    + writtenOneHour * inputPrice * 2
-    + usage.output_tokens * outputPrice;
-  return microDollars / 1_000_000;
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +428,151 @@ function warnOnce(key: string, message: string): void {
   if (warnedKeys.has(key)) return;
   warnedKeys.add(key);
   console.warn(message);
+}
+
+/**
+ * True when any content block of the wire `messages` enables citations
+ * (`citations: { enabled: true }` on a document block). Structured outputs are
+ * incompatible with citations: the API answers 400 to a request carrying both.
+ */
+function messagesEnableCitations(messages: unknown): boolean {
+  if (!Array.isArray(messages)) return false;
+  for (const message of messages) {
+    const content = (message as { content?: unknown } | null)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      const citations = (block as { citations?: unknown } | null)?.citations;
+      if (citations && typeof citations === 'object' && (citations as { enabled?: unknown }).enabled === true) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The block the prompt-only route adds to the system prompt, for a schema
+ * request neither the JSON output format nor a forced tool carries.
+ */
+function schemaPromptText(schema: unknown): string {
+  return `Answer with JSON only, matching this schema: ${JSON.stringify(schema)}`;
+}
+
+/**
+ * Appends the prompt-only route's schema block to a system prompt the caller's
+ * passthrough set (`customModelParams.system`): a string gets the block joined
+ * on, a block array gets a text block in a new array, and an empty one gets
+ * the block alone. The provider's own system blocks take the block in the
+ * payload builder instead, so the auto-cache's re-emission of those blocks
+ * keeps it.
+ */
+function appendSchemaSystemBlock(payload: Record<string, unknown>, text: string): void {
+  const system = payload.system;
+  if (Array.isArray(system)) {
+    // A new array: a passthrough `system` is the caller's own array, reused
+    // across calls, and must not grow a block per call.
+    payload.system = [...system, { type: 'text', text }];
+  } else if (typeof system === 'string' && system) {
+    payload.system = `${system}\n\n${text}`;
+  } else {
+    payload.system = text;
+  }
+}
+
+/**
+ * The route a built payload's schema took, read by the paths that send it:
+ * `forced_tool` names the schema tool for the response mapper, and `none`
+ * says the schema rode the prompt, not the payload.
+ */
+const schemaRouteOfPayload = new WeakMap<object, AnthropicSchemaRoute>();
+
+/**
+ * The forced schema tool's name when the built payload sent the schema as that
+ * tool, so the mapper surfaces the tool call's input as the answer. The other
+ * routes name none: on the JSON output format the answer is the text block, so
+ * a caller tool that shares the schema's name stays a tool call.
+ */
+function forcedSchemaToolName(payload: object, options: ModelCompletionOptions): string | undefined {
+  if (schemaRouteOfPayload.get(payload) !== 'forced_tool') return undefined;
+  const name = (options.responseFormat as { tool?: { name?: unknown } } | undefined)?.tool?.name;
+  return typeof name === 'string' && name ? name : undefined;
+}
+
+/** True when the payload turns thinking on (`adaptive` or `enabled`); the off shapes (`disabled`, `between_tools`) do not. */
+function payloadThinkingActive(payload: Record<string, unknown>): boolean {
+  const type = (payload.thinking as { type?: unknown } | undefined)?.type;
+  return type === 'adaptive' || type === 'enabled';
+}
+
+/**
+ * The `input_schema` of every `strict: true` tool on the wire. Only a
+ * passthrough `tools` array carries one (the provider's own tool conversion
+ * never sets `strict`), and the vendor counts it with the JSON output format
+ * toward the union-typed and optional parameter limits.
+ */
+function strictToolInputSchemas(tools: unknown): unknown[] {
+  if (!Array.isArray(tools)) return [];
+  return tools
+    .filter((tool) => tool !== null && typeof tool === 'object' && (tool as { strict?: unknown }).strict === true)
+    .map((tool) => (tool as { input_schema?: unknown }).input_schema ?? {});
+}
+
+/** True when a wire `tools` array holds a tool named `name`. */
+function toolsInclude(tools: unknown, name: string): boolean {
+  return (
+    Array.isArray(tools) &&
+    tools.some((tool) => tool !== null && typeof tool === 'object' && (tool as { name?: unknown }).name === name)
+  );
+}
+
+/**
+ * True when a wire `tool_choice` keeps the forced route for the schema tool
+ * `name`: a choice that names it, or `any` with the schema tool on the wire.
+ * `any` makes the model call a tool and write no text (live-probed 2026-10-19
+ * with the schema in the system prompt and two tools: Claude Haiku 5.5 called
+ * the schema tool, Claude Sonnet 4.6 the other one, neither wrote a text
+ * block), so beside other tools the prompt route has no answer to give, while
+ * on the forced route a call to the schema tool is the answer.
+ * `passthroughTools` is a passthrough `tools` array, or undefined when the
+ * provider sends the schema tool alone.
+ */
+function toolChoiceKeepsSchemaTool(toolChoice: unknown, passthroughTools: unknown, name: string): boolean {
+  if (!toolChoice || typeof toolChoice !== 'object') return false;
+  const choice = toolChoice as { type?: unknown; name?: unknown };
+  if (choice.type === 'tool') return choice.name === name;
+  if (choice.type !== 'any') return false;
+  return passthroughTools === undefined || toolsInclude(passthroughTools, name);
+}
+
+/**
+ * Removes a passthrough `output_config.format`, keeping the rest of
+ * `output_config`, for a request whose messages enable citations: the format
+ * and citations together answer 400.
+ */
+function dropOutputConfigFormat(payload: Record<string, unknown>): void {
+  const config = payload.output_config;
+  if (!config || typeof config !== 'object' || Array.isArray(config) || !('format' in config)) return;
+  const rest: Record<string, unknown> = { ...(config as Record<string, unknown>) };
+  delete rest.format;
+  if (Object.keys(rest).length > 0) payload.output_config = rest;
+  else delete payload.output_config;
+}
+
+/**
+ * Marks a completion or stream chunk of a schema request with the route the
+ * built payload took (`schemaRoute`), so a completion gateway lifts the answer
+ * from where this request put it: the text on the JSON output format, the
+ * schema tool's call on the forced tool. A request that put the schema in the
+ * prompt itself also says `schemaInPayload: false`, as OpenRouter's
+ * json_object retry does, so a gateway lifts nothing and the session checks
+ * the text as prompt-only. A request without a schema is left as it is.
+ */
+function withSchemaRoute<T extends ModelCompletionResponse>(completion: T, payload: object): T {
+  const schemaRoute = schemaRouteOfPayload.get(payload);
+  if (!schemaRoute) return completion;
+  return schemaRoute === 'none'
+    ? { ...completion, schemaRoute, schemaInPayload: false }
+    : { ...completion, schemaRoute };
 }
 
 /**
@@ -803,6 +629,17 @@ export class AnthropicProvider implements IProvider {
         'INIT_FAILED_MISSING_API_KEY',
       );
     }
+    // The new pool is built before anything of the old state is touched: its construction makes no request, so a
+    // timing it refuses (a RangeError) leaves this provider as it was, its pool and its recheck timer included.
+    const keyPool = new ApiKeyPool(config.apiKey, {
+      ...(config.keyPool ?? {}),
+      ...(config.keyPool?.strategy ? {} : keyPoolStrategyFromEnv('anthropic')),
+      probe: (key, kind) => this.probeKey(key, kind),
+    });
+    // A re-initialize replaces the configuration and the pool: the old pool first stops its timer, finishes its
+    // probes (which read this provider's configuration) and writes their results, so a late probe can neither use
+    // the new configuration nor overwrite what the new pool loads from the store.
+    await this.keyPool?.close();
 
     this.config = {
       baseURL: 'https://api.anthropic.com',
@@ -828,9 +665,13 @@ export class AnthropicProvider implements IProvider {
       defaultMaxTokens: 16000,
       ...config,
     };
-    this.keyPool = new ApiKeyPool(config.apiKey);
+    this.keyPool = keyPool;
+    await this.keyPool.ready();
     this.defaultModelId = config.defaultModelId;
     this.isInitialized = true;
+    // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
+    // breaker holds still gets its keys back; the timer never keeps the process alive.
+    if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
 
     const env = typeof process !== 'undefined' ? process.env : undefined;
     const debugOn = env && (env.AGENTOS_DEBUG === '1' || env.AGENTOS_DEBUG === 'true' || (env.AGENTOS_LOG_LEVEL ?? '').toLowerCase() === 'debug');
@@ -871,21 +712,17 @@ export class AnthropicProvider implements IProvider {
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
 
-    // Capture the structured-output tool name from the request options
-    // so the response mapper can surface the matching tool_use block's
-    // input as JSON-string content (uniform API across providers).
-    const sf = options.responseFormat as
-      | { _agentosUseToolForStructuredOutput?: boolean; tool?: { name: string } }
-      | undefined;
-    const structuredOutputName = sf?._agentosUseToolForStructuredOutput
-      ? sf.tool?.name
-      : undefined;
+    // The response mapper surfaces the forced schema tool's input as the
+    // message's JSON text, named from the route the built payload took
+    // (forcedSchemaToolName): the payload builder decides it for the model on
+    // the wire, after thinking and citations have had their say.
 
     // Escape hatch: single-shot JSON transport for SSE-hostile proxies.
     // On both transports the caller's signal aborts the request in flight and
     // stops its retries.
     if (this.config.streamCompletions === false) {
       const payload = this.buildRequestPayload(modelId, messages, options, false);
+      const structuredOutputName = forcedSchemaToolName(payload, options);
       const apiResponse = await this.makeApiRequest<AnthropicMessagesResponse>(
         '/v1/messages',
         'POST',
@@ -894,7 +731,7 @@ export class AnthropicProvider implements IProvider {
         options.abortSignal,
       );
       this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
-      return this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId);
+      return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
     }
 
     // Default: ride the SSE path so parseSseStream's idle watchdog bounds
@@ -905,9 +742,15 @@ export class AnthropicProvider implements IProvider {
     // streamIdleTimeoutMs means the connection is dead — fail fast and
     // let the caller (or the retry loop below) recover in seconds.
     const payload = this.buildRequestPayload(modelId, messages, options, true);
-    const apiResponse = await this.streamMessagesToResponse(payload, options.requestTimeout, options.abortSignal);
+    const structuredOutputName = forcedSchemaToolName(payload, options);
+    const apiResponse = await this.streamMessagesToResponse(
+      payload,
+      options.requestTimeout,
+      options.abortSignal,
+      structuredOutputName,
+    );
     this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
-    return this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId);
+    return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
   }
 
   /**
@@ -967,6 +810,8 @@ export class AnthropicProvider implements IProvider {
    *   extend how long a dead connection can sit silent.
    * @param abortSignal Caller's signal. It aborts the request in flight, its
    *   body read included, and once it has fired no further attempt is sent.
+   * @param schemaToolName The forced schema tool's name when the payload sent
+   *   the schema as that tool ({@link accumulateMessagesStream}).
    * @throws {AnthropicProviderError} `REQUEST_ABORTED` when the caller's signal
    *   ends the request.
    * @private
@@ -975,6 +820,7 @@ export class AnthropicProvider implements IProvider {
     payload: Record<string, unknown>,
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
+    schemaToolName?: string,
   ): Promise<AnthropicMessagesResponse> {
     let lastError: AnthropicProviderError = new AnthropicProviderError(
       'Streaming completion failed after all retries.',
@@ -982,13 +828,20 @@ export class AnthropicProvider implements IProvider {
     );
 
     const attempts = Math.max(1, this.config.maxRetries ?? 1);
+    // Key hops this request has made: a key-scoped failure hops to the next
+    // usable key at once without spending a transient attempt, at most once
+    // per key of the pool.
+    let keyHops = 0;
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (abortSignal?.aborted) {
         throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
       }
+      const attemptInfo: { apiKey?: string; startedAt?: number } = {};
       try {
-        const stream = await this.makeStreamRequest('/v1/messages', payload, requestTimeoutOverride, abortSignal);
-        return await this.accumulateMessagesStream(stream);
+        const stream = await this.makeStreamRequest('/v1/messages', payload, requestTimeoutOverride, abortSignal, attemptInfo);
+        const accumulated = await this.accumulateMessagesStream(stream, schemaToolName);
+        if (attemptInfo.apiKey) this.keyPool?.markSuccess(attemptInfo.apiKey, attemptInfo.startedAt);
+        return accumulated;
       } catch (error: unknown) {
         // A caller abort ends the request here; it is not a failure to retry.
         if (abortSignal?.aborted) {
@@ -1001,6 +854,31 @@ export class AnthropicProvider implements IProvider {
                 error instanceof Error ? error.message : 'Streaming completion failed.',
                 'STREAM_PROCESSING_ERROR',
               );
+        // An in-stream error event that names the key (a revoked key, an
+        // unpaid account, a throttle) marks it: nothing has reached the
+        // caller yet on this path, so the next key may take the request.
+        if (lastError.code === 'STREAM_ERROR_EVENT' && attemptInfo.apiKey && this.keyPool) {
+          const kind = keyFailureOfStreamError(lastError.anthropicErrorType, lastError.message);
+          if (kind) {
+            this.keyPool.markFailed(attemptInfo.apiKey, kind, { at: attemptInfo.startedAt });
+            lastError = new AnthropicProviderError(lastError.message, lastError.code, lastError.httpStatus, lastError.anthropicErrorType, {
+              ...(typeof lastError.details === 'object' && lastError.details !== null ? (lastError.details as Record<string, unknown>) : {}),
+              keyFailure: kind,
+              keyUsable: this.keyPool.usable(),
+              keyCount: this.keyPool.size,
+            });
+          }
+        }
+        const keyDetails = lastError.details as KeyFailureDetails | undefined;
+        if (keyDetails?.keyFailure && (keyDetails.keyCount ?? 1) > 1) {
+          if ((keyDetails.keyUsable ?? 0) > 0 && ++keyHops < (keyDetails.keyCount ?? 1)) {
+            attempt -= 1;
+            continue;
+          }
+          if ((keyDetails.keyUsable ?? 0) === 0 && keyDetails.keyFailure !== 'quota') {
+            throw this.allKeysFailedError(lastError.message, lastError.httpStatus, lastError.anthropicErrorType);
+          }
+        }
         if (!this.isRetryableStreamError(lastError) || attempt === attempts - 1) {
           throw lastError;
         }
@@ -1028,6 +906,7 @@ export class AnthropicProvider implements IProvider {
    * @private
    */
   private isRetryableStreamError(error: AnthropicProviderError): boolean {
+    if (error.code === 'ALL_KEYS_FAILED') return false;
     if (
       typeof error.httpStatus === 'number' &&
       error.httpStatus >= 400 &&
@@ -1060,14 +939,27 @@ export class AnthropicProvider implements IProvider {
    * {@link mapResponseToCompletion} raises it as a content-policy error, and
    * a transport error here would be retried instead.
    *
+   * A forced schema tool call whose input an output limit cut off
+   * (`max_tokens`, or the context window) returns normally too: its raw
+   * input becomes a text block, so {@link mapResponseToCompletion} reports
+   * the cut text with finish reason `length`, the answer generateObject
+   * raises its budget for, where a transport error would be retried at the
+   * same budget and then thrown past the escalation. A call the limit
+   * stopped before any of its input arrived parses as `{}` here, which
+   * {@link mapResponseToCompletion} reports as no text.
+   *
+   * @param schemaToolName The forced schema tool's name when the request sent
+   *   the schema as that tool; a cut call of any other name still throws.
    * @throws {AnthropicProviderError} `STREAM_ERROR_EVENT` on an SSE error
    *   event, `STREAM_INCOMPLETE` when the stream ends before `message_delta`
-   *   or a tool_use input JSON is truncated, plus whatever
-   *   {@link parseSseStream} throws (`STREAM_IDLE_TIMEOUT`, parse errors).
+   *   or a tool_use input JSON is truncated (other than the schema call's at
+   *   an output limit), plus whatever {@link parseSseStream} throws
+   *   (`STREAM_IDLE_TIMEOUT`, parse errors).
    * @private
    */
   private async accumulateMessagesStream(
     stream: ReadableStream<Uint8Array>,
+    schemaToolName?: string,
   ): Promise<AnthropicMessagesResponse> {
     type AccumBlock = {
       type: 'text' | 'tool_use' | 'thinking' | 'redacted_thinking';
@@ -1194,6 +1086,16 @@ export class AnthropicProvider implements IProvider {
           try {
             input = block.argsJson ? (JSON.parse(block.argsJson) as Record<string, unknown>) : {};
           } catch {
+            if (
+              schemaToolName !== undefined &&
+              block.name === schemaToolName &&
+              (stopReason === 'max_tokens' || stopReason === 'model_context_window_exceeded')
+            ) {
+              // The answer stopped at an output limit while its JSON was still
+              // being written: the turn ended there, the stream did not drop.
+              // The raw input is the answer's text, reported with the stop.
+              return { type: 'text', text: block.argsJson ?? '' };
+            }
             throw new AnthropicProviderError(
               `Tool input JSON for "${block.name}" truncated mid-stream — response incomplete.`,
               'STREAM_INCOMPLETE',
@@ -1261,7 +1163,32 @@ export class AnthropicProvider implements IProvider {
     this.ensureInitialized();
 
     const payload = this.buildRequestPayload(modelId, messages, options, true);
+    if (!schemaRouteOfPayload.has(payload)) {
+      yield* this.streamRequest(modelId, options, payload);
+      return;
+    }
+    const schemaToolName = forcedSchemaToolName(payload, options);
+    // A schema request: every chunk names the route the payload took, and one
+    // whose schema rode the prompt says `schemaInPayload: false` (as
+    // OpenRouter's json_object retry does), so a gateway lifts the answer from
+    // where this request put it, or lifts nothing.
+    for await (const chunk of this.streamRequest(modelId, options, payload, schemaToolName)) {
+      yield withSchemaRoute(chunk, payload);
+    }
+  }
 
+  /**
+   * The stream of one built request: the abort handling, the SSE parse, the retries and the chunk mapping.
+   *
+   * @param schemaToolName The forced schema tool's name when the payload sent the schema as that tool: on a turn that
+   *   stopped at an output limit, the final chunk gives that call its raw input ({@link assembleToolCalls}).
+   */
+  private async *streamRequest(
+    modelId: string,
+    options: ModelCompletionOptions,
+    payload: Record<string, unknown>,
+    schemaToolName?: string,
+  ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     // Handle pre-aborted signals
     const abortSignal = options.abortSignal;
     if (abortSignal?.aborted) {
@@ -1269,7 +1196,35 @@ export class AnthropicProvider implements IProvider {
       return;
     }
 
-    const stream = await this.makeStreamRequest('/v1/messages', payload);
+    // A key-scoped connection failure, before any event has reached the
+    // caller, moves to the next usable key; after content has streamed an
+    // error surfaces as before and the key stays marked for the next request.
+    const streamAttempt: { apiKey?: string; startedAt?: number } = {};
+    let keyHops = 0;
+    let stream: ReadableStream<Uint8Array> | undefined;
+    while (stream === undefined) {
+      try {
+        // The caller's signal ends a draw that waits on the pool's probes, the connection and the body's reads.
+        stream = await this.makeStreamRequest('/v1/messages', payload, undefined, abortSignal, streamAttempt);
+      } catch (error: unknown) {
+        // An abort before the first event, while the draw waited on the probes or the connection was opening,
+        // ends the stream with the abort chunk, as an abort before the request does.
+        if (abortSignal?.aborted) {
+          yield this.buildAbortChunk(modelId);
+          return;
+        }
+        if (error instanceof AnthropicProviderError) {
+          const keyDetails = error.details as KeyFailureDetails | undefined;
+          if (keyDetails?.keyFailure && (keyDetails.keyCount ?? 1) > 1) {
+            if ((keyDetails.keyUsable ?? 0) > 0 && ++keyHops < (keyDetails.keyCount ?? 1)) continue;
+            if ((keyDetails.keyUsable ?? 0) === 0 && keyDetails.keyFailure !== 'quota') {
+              throw this.allKeysFailedError(error.message, error.httpStatus, error.anthropicErrorType);
+            }
+          }
+        }
+        throw error;
+      }
+    }
 
     // State accumulators across SSE events
     let responseId = `anthropic-${modelId}-${Date.now()}`;
@@ -1434,8 +1389,13 @@ export class AnthropicProvider implements IProvider {
             outputTokens = event.usage?.output_tokens ?? outputTokens;
             const stopReason = this.mapStopReason(event.delta.stop_reason);
 
-            // Assemble final tool_calls array from accumulated blocks
-            const toolCalls = this.assembleToolCalls(toolCallAccum);
+            // Assemble final tool_calls array from accumulated blocks. The
+            // forced schema tool's call on a turn stopped at an output limit
+            // keeps its raw input, empty when the limit came before any of it
+            // arrived, for the completion gateway to make the step's text.
+            const stoppedAtLimit =
+              event.delta.stop_reason === 'max_tokens' || event.delta.stop_reason === 'model_context_window_exceeded';
+            const toolCalls = this.assembleToolCalls(toolCallAccum, stoppedAtLimit ? schemaToolName : undefined);
             const hasToolCalls = toolCalls.length > 0;
 
             // Assemble thinking blocks in content-block index order so they
@@ -1532,7 +1492,14 @@ export class AnthropicProvider implements IProvider {
           }
 
           case 'error': {
-            // Stream-level error from Anthropic
+            // Stream-level error from Anthropic. One that names the key (a
+            // revoked key, an unpaid account, a throttle) takes the key out
+            // for the next request; this request has streamed content, so
+            // the error surfaces as before.
+            const keyKind = keyFailureOfStreamError(event.error.type, event.error.message);
+            if (keyKind && streamAttempt.apiKey && this.keyPool) {
+              this.keyPool.markFailed(streamAttempt.apiKey, keyKind, { at: streamAttempt.startedAt });
+            }
             yield {
               id: responseId,
               object: 'chat.completion.chunk',
@@ -1559,6 +1526,12 @@ export class AnthropicProvider implements IProvider {
       // it instead of reading an error chunk.
       if (streamError instanceof AnthropicProviderError && streamError.code === 'content_filter') {
         throw streamError;
+      }
+      // The caller's signal rides on the fetch, so an abort mid-stream ends the body's read at once: the stream
+      // ends with the abort chunk, not an error chunk.
+      if (abortSignal?.aborted) {
+        yield this.buildAbortChunk(modelId);
+        return;
       }
       const message = streamError instanceof Error ? streamError.message : 'Anthropic stream processing error';
       console.error(`AnthropicProvider stream error for model ${modelId}:`, message);
@@ -1657,6 +1630,8 @@ export class AnthropicProvider implements IProvider {
 
   /** @inheritdoc */
   public async shutdown(): Promise<void> {
+    // Stops the recheck timer, waits for the probes in flight (each under the probe timeout), then writes the keys' standing.
+    await this.keyPool?.close();
     this.isInitialized = false;
     console.log('AnthropicProvider shutdown complete.');
   }
@@ -1930,78 +1905,54 @@ export class AnthropicProvider implements IProvider {
       }
     }
 
-    // --- Schema-driven structured output via forced tool-use ---
-    // Anthropic doesn't have an OpenAI-style response_format with
-    // json_schema. The equivalent is a single forced tool whose
-    // input_schema matches the desired output shape; the model returns
-    // a tool_use block whose input is JSON-validated by Anthropic's
-    // own enforcement.
+
+    // --- Schema-driven structured output ---
+    // The marker from structuredOutputFormat.ts carries one object schema under
+    // `tool.input_schema`. anthropicSchemaRoute decides, for the model going on
+    // the wire (a passthrough `model` included, so it runs after the passthrough
+    // below) and that schema, which surface carries it; the builder ran the same
+    // function on the same object for the model it was built for. The payload
+    // then has its say, once the passthrough has run:
     //
-    // The provider-format adapter (structuredOutputFormat.ts) signals
-    // this mode by setting _agentosUseToolForStructuredOutput on the
-    // responseFormat option. The downstream response-mapper detects the
-    // matching block by the tool's name and surfaces its input as the
-    // JSON-string body of the choice's message.
+    //   json_schema  `output_config.format` with the schema, merged over a
+    //                passthrough `output_config` (an effort, say) rather than
+    //                wiped by it. No tool and no tool_choice for the schema; a
+    //                direct caller's tools stay, since the format works beside
+    //                tools, and the format's parameter limits are counted with
+    //                their strict schemas. The model answers JSON in its text
+    //                block. A request that enables citations leaves this route
+    //                (the API refuses the pair) for the forced tool, which
+    //                rides beside citations, or the prompt where it cannot.
+    //   forced_tool  A model without the JSON output format, or a schema the
+    //                format cannot carry (a record, an untyped node, a $ref or
+    //                oneOf, more union-typed or optional properties than it
+    //                takes), on a model that accepts a forced tool_choice: one
+    //                tool whose input_schema is the schema, with tool_choice
+    //                forced on it; the answer is the tool call's input. The
+    //                caller's tools are dropped as before (mixing them needs a
+    //                multi-turn protocol the session path does not speak).
+    //                Never strict: a schema strict mode carries takes the format
+    //                on every model with strict tool use, and beside citations,
+    //                which refuse structured outputs, the tool goes out plain.
+    //                Never clamped: a payload that turns thinking on takes the
+    //                prompt instead, and so do a passthrough `tools` that
+    //                replaces the tool and a passthrough `tool_choice` under
+    //                which the model need not call it (`auto`, `none`, another
+    //                tool's name). `any` keeps the route: it admits no text
+    //                answer, so a call to the schema tool is the answer.
+    //   none         Neither carries the schema. The schema goes into the
+    //                prompt itself, as a system block after the caller's, with
+    //                one warning per model and reason, so a direct caller still
+    //                gets the shape asked for; every completion and stream
+    //                chunk of the request says `schemaInPayload: false`.
+    //
+    // Every completion and stream chunk of a schema request names the route it
+    // took (`schemaRoute`), so a completion gateway lifts the answer from where
+    // this request put it, not from where the marker's builder expected it.
     const sf = options.responseFormat as
       | { _agentosUseToolForStructuredOutput?: boolean; tool?: { name: string; input_schema: Record<string, unknown> } }
       | undefined;
-    if (sf?._agentosUseToolForStructuredOutput && sf.tool) {
-      // Schema-aware mode reserves the tool slot for the schema tool;
-      // mixing structured output with caller-provided tools requires a
-      // multi-turn protocol the session.send overload doesn't speak.
-      // The caller path (AgentSession.send) already strips its tools
-      // before reaching us; this drop is the second line of defense
-      // against a direct provider.generateCompletion call that
-      // accidentally passes both responseFormat (structured-output
-      // marker) and a tools array.
-      // Guaranteed schema conformance where the model supports strict tool
-      // use (structured-outputs surface, 4.5+ generations): the API
-      // validates the tool input against input_schema server-side instead
-      // of best-effort adherence, so long/adversarial generations can no
-      // longer drift from the schema and fail the caller's Zod parse.
-      // Older models reject the unknown field ("tools.0.strict: Extra
-      // inputs are not permitted"), hence the capability gate. The
-      // matching `structured-outputs-2025-11-13` beta header is emitted by
-      // betaHeaders() whenever a payload's tools carry the flag.
-      //
-      // TWO gates, both required. The schema-shape gate
-      // (toolInputSchemaSupportsStrict) exists because strict mode rejects
-      // any object node whose `additionalProperties` is present and not
-      // exactly `false` — which is how `z.record(...)` lowers, so a
-      // record-bearing schema under `strict: true` 400s deterministically
-      // on every attempt ("tools.0.custom: For 'object' type,
-      // 'additionalProperties' must be explicitly set to false"; 77
-      // provider rejections across four codegen tools the day strict
-      // shipped without it). Such schemas degrade to the non-strict forced
-      // tool — best-effort adherence + caller-side Zod validation, the
-      // pre-strict behavior — mirroring the canUseStrictJsonSchema gate on
-      // the OpenAI / OpenRouter strict paths.
-      //
-      // The gates alone are NOT sufficient: the validator ALSO requires
-      // `additionalProperties: false` PRESENT on every object node
-      // (live-API verified 2026-07-07 — the key absent 400s identically,
-      // nested nodes included; optional properties left out of `required`
-      // are accepted). Zod-lowered schemas omit the key, so the eligible
-      // path sends a stamped COPY of the schema: the wire payload is
-      // strict-valid while the caller's schema object is never mutated.
-      // The copy also STRIPS constraint keywords the validator rejects
-      // (maxItems / uniqueItems / number bounds / object property counts —
-      // live-API mapped 2026-07-07); Zod re-validates caller-side, so the
-      // constraints are still enforced after parse.
-      const strictEligible =
-        modelSupportsStrictToolUse(modelId) &&
-        toolInputSchemaSupportsStrict(sf.tool.input_schema);
-      payload.tools = [{
-        name: sf.tool.name,
-        input_schema: strictEligible
-          ? (toolInputSchemaWithExplicitNoExtraProps(
-              sf.tool.input_schema,
-            ) as Record<string, unknown>)
-          : sf.tool.input_schema,
-        ...(strictEligible ? { strict: true } : {}),
-      }];
-      payload.tool_choice = { type: 'tool', name: sf.tool.name };
-    }
+    const schemaMarker = sf?._agentosUseToolForStructuredOutput && sf.tool ? sf.tool : undefined;
 
     // Pass through any custom model params — minus OpenRouter's routing
     // controls and Gemini's request fields, which only those vendors' bodies
@@ -2020,12 +1971,135 @@ export class AnthropicProvider implements IProvider {
     // message array never reaches the wire.
     let customSystemOverride = false;
     let customMessagesOverride = false;
+    let customToolsOverride = false;
+    let customToolChoiceOverride = false;
     {
       const passthrough = stripForeignVendorParams(options.customModelParams);
       if (passthrough) {
         customSystemOverride = Object.prototype.hasOwnProperty.call(passthrough, 'system');
         customMessagesOverride = Object.prototype.hasOwnProperty.call(passthrough, 'messages');
+        customToolsOverride = Object.prototype.hasOwnProperty.call(passthrough, 'tools');
+        customToolChoiceOverride = Object.prototype.hasOwnProperty.call(passthrough, 'tool_choice');
         Object.assign(payload, passthrough);
+      }
+    }
+    // The model on the wire: a passthrough `model` replaces the one given, and
+    // the schema route, the forced-choice clamp and the warnings follow it.
+    const wireModelId = typeof payload.model === 'string' && payload.model ? payload.model : modelId;
+
+    // The JSON output format and the prompt-only schema block, after the
+    // passthrough: the passthrough assigns whole top-level keys, so a format
+    // set before it under `output_config` would be wiped by a passthrough
+    // `output_config`, and a schema block appended to `system` before it would
+    // be lost to a passthrough `system`. The messages read here for citations
+    // are the ones going on the wire, a passthrough `messages` included.
+    if (schemaMarker) {
+      // The format's union-typed and optional parameter limits are the
+      // request's: a strict tool beside it counts toward them (only a
+      // passthrough `tools` array carries one).
+      let schemaRoute: AnthropicSchemaRoute = anthropicSchemaRoute(
+        wireModelId,
+        schemaMarker.input_schema,
+        strictToolInputSchemas(payload.tools),
+      );
+      // Why the request takes the prompt route, when the payload rather than
+      // the model and the schema sent it there.
+      let promptOnlyReason: string | undefined;
+      if (messagesEnableCitations(payload.messages)) {
+        // Citations and the JSON output format answer 400 together, so a
+        // passthrough format goes (the rest of output_config stays), and the
+        // format route gives way to the non-strict forced tool, which rides
+        // beside citations (live-probed 2026-10-19 on claude-sonnet-4-6, 200
+        // with a tool_use stop), or to the prompt on a model that refuses a
+        // forced choice.
+        dropOutputConfigFormat(payload);
+        if (schemaRoute === 'json_schema') {
+          schemaRoute = modelSupportsForcedToolChoice(wireModelId) ? 'forced_tool' : 'none';
+          if (schemaRoute === 'none') {
+            promptOnlyReason =
+              'the request enables citations, which the JSON output format refuses, and the model refuses a forced tool choice';
+          }
+        }
+      }
+      if (schemaRoute === 'forced_tool' && payloadThinkingActive(payload)) {
+        // A forced choice cannot ride with thinking on, and the clamp below
+        // would send the schema tool under `auto` with no guarantee: the
+        // prompt is the honest route.
+        schemaRoute = 'none';
+        promptOnlyReason = 'thinking is on, and a forced tool choice cannot be sent beside it';
+      }
+      if (schemaRoute === 'forced_tool' && customToolsOverride && !toolsInclude(payload.tools, schemaMarker.name)) {
+        // A passthrough `tools` array keeps precedence; forcing a tool it does
+        // not hold would answer 400.
+        schemaRoute = 'none';
+        promptOnlyReason = 'a passthrough tools array replaces the schema tool';
+      }
+      if (
+        schemaRoute === 'forced_tool' &&
+        customToolChoiceOverride &&
+        !toolChoiceKeepsSchemaTool(payload.tool_choice, customToolsOverride ? payload.tools : undefined, schemaMarker.name)
+      ) {
+        // A passthrough `tool_choice` keeps precedence too; one under which the
+        // model need not call the schema tool (`auto`, `none`, another tool's
+        // name) leaves the call to the model, which may answer in prose, so the
+        // schema rides the prompt rather than a tool the model need not call.
+        // `any` stays on this route: the model must call a tool and can write
+        // no text, so the prompt would leave it nothing to answer with.
+        schemaRoute = 'none';
+        promptOnlyReason = 'a passthrough tool_choice does not force the schema tool';
+      }
+      schemaRouteOfPayload.set(payload, schemaRoute);
+
+      if (schemaRoute === 'json_schema') {
+        const existing = payload.output_config;
+        payload.output_config = {
+          ...(existing && typeof existing === 'object' && !Array.isArray(existing)
+            ? (existing as Record<string, unknown>)
+            : {}),
+          format: { type: 'json_schema', schema: anthropicJsonOutputSchema(schemaMarker.input_schema) },
+        };
+      } else if (schemaRoute === 'forced_tool') {
+        // The non-strict forced schema tool. A passthrough `tool_choice` keeps
+        // precedence, as it did when the schema tool was set before the
+        // passthrough; a passthrough `tools` array that holds the schema tool
+        // is sent as given.
+        if (!customToolsOverride) payload.tools = [{ name: schemaMarker.name, input_schema: schemaMarker.input_schema }];
+        if (!customToolChoiceOverride) payload.tool_choice = { type: 'tool', name: schemaMarker.name };
+      } else {
+        const reason =
+          promptOnlyReason ??
+          (!modelSupportsJsonOutputs(wireModelId)
+            ? 'the model has neither the JSON output format nor a forced tool choice'
+            : 'the schema is outside the limits of the JSON output format (a record, a $ref or oneOf, an untyped node, ' +
+              'or more union-typed or optional properties than it takes, a strict tool beside it counted), and the model ' +
+              'refuses a forced tool choice');
+        const text = schemaPromptText(schemaMarker.input_schema);
+        if (customSystemOverride) {
+          appendSchemaSystemBlock(payload, text);
+        } else {
+          // The provider's own system blocks take the schema block, so the
+          // auto-cache below, which re-emits them as a block array to place
+          // its marker, sends it too.
+          systemBlocks.push({ type: 'text', text });
+          payload.system = systemBlocks.some((b) => b.cache_control)
+            ? systemBlocks
+            : systemBlocks.map((b) => b.text).join('\n\n');
+        }
+        warnOnce(
+          `structured-output-prompt-only:${wireModelId}:${reason}`,
+          `[agentos] AnthropicProvider: structured output for '${schemaMarker.name}' on model ${wireModelId} rides the ` +
+            `prompt alone: ${reason}. The schema was added to the system prompt; the caller's schema validates the answer.`,
+        );
+      }
+      if (
+        schemaRoute !== 'forced_tool' &&
+        payload.tool_choice !== undefined &&
+        !(Array.isArray(payload.tools) && payload.tools.length > 0)
+      ) {
+        // The format and prompt routes send no schema tool, so a passthrough
+        // tool_choice can be left with no tool on the wire; a choice with
+        // nothing to choose from says nothing, and it goes.
+        delete payload.tool_choice;
       }
     }
 
@@ -2040,9 +2114,11 @@ export class AnthropicProvider implements IProvider {
     // letting the request 400. The model still chooses tools on 'auto' —
     // strongest with prescriptive tool descriptions — but forced tool use is no
     // longer guaranteed. Centralizing this means no caller has to special-case
-    // the thinking or Fable quirks. Catches the convertToolChoice path, the
-    // structured-output forced tool, AND a tool_choice injected via
-    // customModelParams (which is why this runs after the passthrough above).
+    // the thinking or Fable quirks. Catches the convertToolChoice path AND a
+    // tool_choice injected via customModelParams (which is why this runs after
+    // the passthrough above). The structured-output forced tool never reaches
+    // it: the schema route above sends the schema in the prompt where thinking
+    // is on or the model refuses a forced choice, rather than a clamped tool.
     {
       const tc = payload.tool_choice as { type?: string } | undefined;
       if (tc && (tc.type === 'any' || tc.type === 'tool')) {
@@ -2050,14 +2126,14 @@ export class AnthropicProvider implements IProvider {
         // off shapes (disabled, between_tools) do not.
         const thinkingType = (payload.thinking as { type?: string } | undefined)?.type;
         const thinkingActive = thinkingType === 'adaptive' || thinkingType === 'enabled';
-        const modelRejectsForced = !modelSupportsForcedToolChoice(modelId);
+        const modelRejectsForced = !modelSupportsForcedToolChoice(wireModelId);
         if (thinkingActive || modelRejectsForced) {
           const reason = thinkingActive
             ? 'extended thinking is incompatible with a forced tool_choice'
-            : `model ${modelId} rejects a forced tool_choice`;
+            : `model ${wireModelId} rejects a forced tool_choice`;
           console.warn(
             `[agentos] AnthropicProvider: ${reason} (type='${tc.type}'); clamping to ` +
-              `'auto' for model ${modelId}. The model decides whether to call a tool — ` +
+              `'auto' for model ${wireModelId}. The model decides whether to call a tool — ` +
               `forced tool use is not guaranteed.`,
           );
           payload.tool_choice = { type: 'auto' };
@@ -2630,9 +2706,39 @@ export class AnthropicProvider implements IProvider {
       throw this.refusalError(pricedModelId, apiResponse.stop_details, fullText, usage);
     }
 
-    // Collect tool_use blocks and convert to OpenAI-style tool_calls
+    // Schema-driven structured output: when the request forced the schema
+    // tool, the matching tool_use block is the answer. Its input becomes the
+    // message's JSON text, which keeps result.text uniform with OpenAI's
+    // json_schema response for callers that read result.text directly, and
+    // the block leaves the tool calls: a tool loop (generateText's) would
+    // otherwise run it as a tool it does not have and ask the model again.
+    // A call the output limit stopped keeps the `length` stop below, so
+    // generateObject raises the budget when its JSON does not parse or
+    // validate; one cut mid-JSON arrives here as a text block holding its raw
+    // input (accumulateMessagesStream), which is then the answer's text.
+    const schemaToolBlock = structuredOutputName
+      ? apiResponse.content.find(
+          b => b.type === 'tool_use' && b.name === structuredOutputName && b.input !== undefined,
+        )
+      : undefined;
+    if (schemaToolBlock) {
+      // A call the output limit stopped comes with an empty input: the API
+      // sends none of it, whatever the model wrote (live-probed 2026-10-19 on
+      // Claude Sonnet 4.6 and Haiku 5.5: input {} on the single-shot response,
+      // one empty input_json_delta on the stream, at 1 to 200 output tokens).
+      // That is no answer, so the message has no text: a `{}` would pass for
+      // one under a schema whose fields are all optional.
+      const stoppedAtLimit =
+        apiResponse.stop_reason === 'max_tokens' || apiResponse.stop_reason === 'model_context_window_exceeded';
+      const input = schemaToolBlock.input;
+      const noInput =
+        input !== null && typeof input === 'object' && !Array.isArray(input) && Object.keys(input).length === 0;
+      fullText = stoppedAtLimit && noInput ? '' : JSON.stringify(input);
+    }
+
+    // Collect the other tool_use blocks and convert to OpenAI-style tool_calls
     const toolCalls = apiResponse.content
-      .filter(block => block.type === 'tool_use')
+      .filter(block => block.type === 'tool_use' && block !== schemaToolBlock)
       .map(block => ({
         id: block.id!,
         type: 'function' as const,
@@ -2660,22 +2766,12 @@ export class AnthropicProvider implements IProvider {
       return [];
     });
 
-    // Schema-driven structured output: if the request set a forced tool
-    // for structured output, find the matching tool_use block and surface
-    // its input as JSON-string content. This keeps result.text uniform
-    // with OpenAI's json_schema response (text is valid JSON) for
-    // session.send callers that consume result.text directly.
-    if (structuredOutputName) {
-      const toolBlock = apiResponse.content.find(
-        b => b.type === 'tool_use' && b.name === structuredOutputName,
-      );
-      if (toolBlock?.input !== undefined) {
-        fullText = JSON.stringify(toolBlock.input);
-      }
-    }
-
     const hasToolCalls = toolCalls.length > 0;
-    const finishReason = this.mapStopReason(apiResponse.stop_reason);
+    // A tool_use stop whose only call was the schema answer finished the answer.
+    const finishReason =
+      schemaToolBlock && !hasToolCalls && apiResponse.stop_reason === 'tool_use'
+        ? 'stop'
+        : this.mapStopReason(apiResponse.stop_reason);
 
     const choice: ModelCompletionChoice = {
       index: 0,
@@ -2767,14 +2863,21 @@ export class AnthropicProvider implements IProvider {
   }
 
   /**
-   * Assembles completed tool calls from the streaming accumulator.
+   * Assembles completed tool calls from the streaming accumulator. A call with
+   * no input gets `{}`, except the one `rawInputFor` names, which keeps its
+   * raw input: the forced schema tool's call on a turn that stopped at an
+   * output limit, where an empty input means none of it arrived (the API's
+   * shape for every such call, {@link mapResponseToCompletion}) and a `{}`
+   * would pass for an answer.
    *
    * @param {Map<number, { id: string; name: string; argsJson: string }>} accum - Tool call accumulators.
+   * @param rawInputFor The forced schema tool's name on a turn stopped at an output limit.
    * @returns {NonNullable<ChatMessage['tool_calls']>} Assembled tool calls array.
    * @private
    */
   private assembleToolCalls(
     accum: Map<number, { id: string; name: string; argsJson: string }>,
+    rawInputFor?: string,
   ): NonNullable<ChatMessage['tool_calls']> {
     if (accum.size === 0) return [];
     return Array.from(accum.values()).map(tc => ({
@@ -2782,7 +2885,7 @@ export class AnthropicProvider implements IProvider {
       type: 'function' as const,
       function: {
         name: tc.name,
-        arguments: tc.argsJson || '{}',
+        arguments: tc.argsJson || (rawInputFor !== undefined && tc.name === rawInputFor ? '' : '{}'),
       },
     }));
   }
@@ -2804,6 +2907,56 @@ export class AnthropicProvider implements IProvider {
       error: { message: 'Stream aborted by caller', type: 'abort' },
       isFinal: true,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Key pool: probes and the all-keys-failed error
+  // -------------------------------------------------------------------------
+
+  /**
+   * Probes a key the pool took out of rotation (the pool calls this off the
+   * request path): an auth failure with the cheapest authenticated read, a
+   * billing failure with the smallest billable request, since a models list
+   * can answer 200 with no credit left. The answer goes through the same
+   * classifier as a request's.
+   */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const headers = { ...this.buildHeaders(apiKey), 'Content-Type': 'application/json' };
+      const response =
+        kind === 'billing'
+          ? await fetch(`${this.config.baseURL}/v1/messages`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({ model: this.defaultModelId || 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
+              signal: controller.signal,
+            })
+          : await fetch(`${this.config.baseURL}/v1/models?limit=1`, { method: 'GET', headers, signal: controller.signal });
+      if (response.ok) return 'ok';
+      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
+      return classifyKeyFailure(response.status, text) ?? 'unknown';
+    } catch {
+      return 'unknown';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */
+  private allKeysFailedError(message?: string, httpStatus?: number, errorType?: string): AnthropicProviderError {
+    const kinds = Array.from(
+      new Set((this.keyPool?.snapshot() ?? []).map((state) => state.kind).filter((kind): kind is KeyFailureKind => kind !== undefined)),
+    );
+    const retryAfter = this.keyPool?.soonestReturnMs();
+    return new AnthropicProviderError(
+      message ?? `Every Anthropic API key is out of rotation (${kinds.join(', ') || 'unknown'}).`,
+      'ALL_KEYS_FAILED',
+      httpStatus ?? statusOfKinds(kinds),
+      errorType,
+      { kinds, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) },
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -2851,13 +3004,22 @@ export class AnthropicProvider implements IProvider {
       'MAX_RETRIES_REACHED',
     );
 
+    // Key hops this request has made: a key-scoped failure moves to the next
+    // usable key at once (at most one hop per key) without spending a transient
+    // attempt; the attempt counter bounds the 429, 5xx and network retries.
+    let keyHops = 0;
     for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
       if (abortSignal?.aborted) {
         throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
       }
       // Rotate the key per attempt so a retry after a 429 fails over to a
       // different key from the pool instead of hammering the throttled one.
-      const apiKey = this.nextApiKey();
+      const apiKey = await this.drawApiKey(abortSignal);
+      if (abortSignal?.aborted) {
+        throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
+      if (apiKey === '') throw this.allKeysFailedError();
+      const attemptStartedAt = Date.now();
       const headers = this.buildHeaders(apiKey);
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), effRequestTimeout);
@@ -2896,20 +3058,40 @@ export class AnthropicProvider implements IProvider {
           const errorType = errorData.error?.type;
           this.logStrictSchemaRejection(body, response.status, errorMessage);
 
+          // A key-scoped failure (a bad or revoked key, an unpaid account, a
+          // throttle) takes this key out of rotation and moves to the next
+          // usable key at once; the hop spends no transient attempt.
+          const keyFailure = classifyKeyFailure(response.status, JSON.stringify(errorData));
+          const serverRetryAfterMs = retryAfterMs(response.headers.get('retry-after'), undefined, this.config.keyPool?.maxRetryAfterMs);
+          if (keyFailure && this.keyPool && this.keyPool.size > 1) {
+            this.keyPool.markFailed(apiKey, keyFailure, {
+              status: response.status,
+              at: attemptStartedAt,
+              ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
+            });
+            lastError = new AnthropicProviderError(errorMessage, keyFailure === 'quota' ? 'RATE_LIMIT_EXCEEDED' : 'API_CLIENT_ERROR', response.status, errorType, errorData);
+            if (this.keyPool.usable() > 0 && ++keyHops < this.keyPool.size) {
+              attempt -= 1;
+              continue;
+            }
+            if (this.keyPool.usable() === 0 && keyFailure !== 'quota') {
+              throw this.allKeysFailedError(errorMessage, response.status, errorType);
+            }
+          }
+
           // Non-retryable client errors
           if (response.status === 401 || response.status === 403 || response.status === 400 || response.status === 404) {
             throw new AnthropicProviderError(errorMessage, 'API_CLIENT_ERROR', response.status, errorType, errorData);
           }
 
-          // Rate limit — take this key out of rotation (quota cooldown) so the
-          // next attempt fails over to a different key, then respect Retry-After.
+          // Rate limit: the key rests (quota cooldown) so the next attempt
+          // draws another when one is usable, then respect Retry-After.
           if (response.status === 429) {
             lastError = new AnthropicProviderError(errorMessage, 'RATE_LIMIT_EXCEEDED', 429, errorType, errorData);
-            this.keyPool?.markExhausted(apiKey);
-            const retryAfter = response.headers.get('retry-after');
+            if (!(this.keyPool && this.keyPool.size > 1)) this.keyPool?.markExhausted(apiKey);
             // Retry-After is authoritative when present; otherwise jittered backoff.
-            const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : computeRetryBackoffMs(attempt);
-            await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+            const waitMs = serverRetryAfterMs ?? computeRetryBackoffMs(attempt);
+            await new Promise(resolve => setTimeout(resolve, waitMs));
             continue;
           }
 
@@ -2922,6 +3104,8 @@ export class AnthropicProvider implements IProvider {
 
           throw new AnthropicProviderError(errorMessage, 'API_REQUEST_FAILED', response.status, errorType, errorData);
         }
+
+        this.keyPool?.markSuccess(apiKey, attemptStartedAt);
 
         // The race above bounds only the connection + response headers; the
         // body then streams in via `response.json()`. With no bound here, a
@@ -2958,7 +3142,7 @@ export class AnthropicProvider implements IProvider {
           throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
         }
         if (error instanceof AnthropicProviderError) {
-          if (error.code === 'API_CLIENT_ERROR') throw error;
+          if (error.code === 'API_CLIENT_ERROR' || error.code === 'ALL_KEYS_FAILED') throw error;
           lastError = error;
         } else if (error instanceof Error && error.name === 'AbortError') {
           lastError = new AnthropicProviderError(
@@ -3005,9 +3189,19 @@ export class AnthropicProvider implements IProvider {
     body: Record<string, unknown>,
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
+    attemptOut?: { apiKey?: string; startedAt?: number },
   ): Promise<ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
-    const apiKey = this.nextApiKey();
+    const apiKey = await this.drawApiKey(abortSignal);
+    if (abortSignal?.aborted) {
+      throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+    }
+    if (apiKey === '') throw this.allKeysFailedError();
+    const startedAt = Date.now();
+    if (attemptOut) {
+      attemptOut.apiKey = apiKey;
+      attemptOut.startedAt = startedAt;
+    }
     const headers = this.buildHeaders(apiKey);
 
     // Bounds the CONNECTION phase only (request + response headers) — it is
@@ -3058,26 +3252,30 @@ export class AnthropicProvider implements IProvider {
         const errorData = await response.json().catch(() => ({})) as Partial<AnthropicAPIError>;
         const errorMessage = errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`;
         this.logStrictSchemaRejection(body, response.status, errorMessage);
-        // A throttled key should not be reused by the next stream/request —
-        // mark it for cooldown so the pool fails over.
-        if (response.status === 429) {
-          this.keyPool?.markExhausted(apiKey);
+        // A key-scoped failure takes this key out so the next stream or
+        // request draws another; the retry loops read `keyFailure` on the
+        // error to hop keys at once. The server's Retry-After rides on the
+        // error (in seconds) so the stream retry loop can honor it.
+        const serverRetryAfterMs = retryAfterMs(response.headers.get('retry-after'), undefined, this.config.keyPool?.maxRetryAfterMs);
+        const keyFailure = classifyKeyFailure(response.status, JSON.stringify(errorData));
+        if (keyFailure) {
+          this.keyPool?.markFailed(apiKey, keyFailure, {
+            status: response.status,
+            at: startedAt,
+            ...(serverRetryAfterMs !== null ? { retryAfterMs: serverRetryAfterMs } : {}),
+          });
         }
-        // Carry the server's Retry-After (seconds) on the error so the
-        // stream retry loop (streamMessagesToResponse) can honor it — the
-        // non-stream path already does; without this the stream path
-        // re-hit a throttled endpoint on computed backoff and burned an
-        // attempt the server told us was doomed.
-        const retryAfterHeader = response.headers.get('retry-after');
-        const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+        const retryAfterSec = serverRetryAfterMs !== null ? Math.ceil(serverRetryAfterMs / 1000) : NaN;
+        const keyDetails: KeyFailureDetails = {
+          ...(Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? { retryAfterSec } : {}),
+          ...(keyFailure ? { keyFailure, keyUsable: this.keyPool ? this.keyPool.usable() : 1, keyCount: this.keyPool?.size ?? 1 } : {}),
+        };
         throw new AnthropicProviderError(
           errorMessage,
           'STREAM_CONNECTION_FAILED',
           response.status,
           errorData.error?.type,
-          Number.isFinite(retryAfterSec) && retryAfterSec > 0
-            ? { ...errorData, retryAfterSec }
-            : errorData,
+          { ...errorData, ...keyDetails },
         );
       }
 
@@ -3118,14 +3316,18 @@ export class AnthropicProvider implements IProvider {
    * @private
    */
   /**
-   * Resolve the next API key. With a multi-key pool this is a weighted
-   * round-robin that skips keys currently in quota cooldown; with a single
+   * Resolve the next API key. With a multi-key pool this is the pool's
+   * strategy, which skips keys resting after a 429 or taken out; with a single
    * key it returns that key. Call this once PER ATTEMPT (not once per
    * request) so a retry after a 429 fails over to a different key rather
-   * than reusing the throttled one.
+   * than reusing the throttled one. When no key is usable while a probe of a
+   * failed key is in flight (its recheck came due), it waits for that probe,
+   * bounded by the pool's probe timeout, and draws again, so the first request
+   * after a recheck is served by a key that came back; the caller's signal
+   * ends that wait at once, and the request then reports the abort.
    */
-  private nextApiKey(): string {
-    return this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
+  private async drawApiKey(abortSignal?: AbortSignal): Promise<string> {
+    return this.keyPool?.hasKeys ? this.keyPool.nextAfterProbes(abortSignal) : this.config.apiKey;
   }
 
   private buildHeaders(apiKey: string): Record<string, string> {
@@ -3196,8 +3398,14 @@ export class AnthropicProvider implements IProvider {
     // found 2026-07-08). Match the umbrella prefix so the tripwire catches
     // the whole class, present and future, instead of a hand-maintained
     // message list that already missed the empty-schema case.
+    // The JSON output format's rejections are prefixed `output_config.format`
+    // (`output_config.format.schema: For 'array' type, 'minItems' values other
+    // than 0 or 1 are not supported`, live-probed 2026-10-19), the same class
+    // of schema rejection on the route every current model takes.
     const strictRejection =
-      /tools\.\d+\.custom:/.test(message) || message.includes('additionalProperties');
+      /tools\.\d+\.custom:/.test(message) ||
+      /output_config\.format/.test(message) ||
+      message.includes('additionalProperties');
     if (!strictRejection) return;
     try {
       console.warn(
@@ -3210,6 +3418,7 @@ export class AnthropicProvider implements IProvider {
           payloadUsesStrictTools: this.payloadUsesStrictTools(body),
           message: message.slice(0, 300),
           tools: body.tools ?? [],
+          outputConfigFormat: (body.output_config as { format?: unknown } | undefined)?.format ?? null,
         }),
       );
     } catch {

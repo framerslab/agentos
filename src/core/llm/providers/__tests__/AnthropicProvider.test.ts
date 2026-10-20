@@ -1453,16 +1453,169 @@ describe('AnthropicProvider', () => {
       );
 
       expect(result.choices[0].message.content).toBe('{"x":2}');
+      // The forced schema call is the answer, not a call for a tool loop to run.
+      expect(result.choices[0].message.tool_calls).toBeUndefined();
+      expect(result.choices[0].finishReason).toBe('stop');
     });
 
-    it('stamps strict:true on the structured-output tool for a strict-compatible schema', async () => {
+    it('keeps the length stop of a forced schema call the output limit stopped, and answers no text for the empty input the single-shot transport gives it: the call leaves the tool calls, and the stop is never read as a clean one', async () => {
+      // The single-shot response gives such a call input {} whatever the model
+      // wrote (live-probed 2026-10-19 on claude-sonnet-4-6 at max_tokens 1, 12
+      // and 40, and on claude-haiku-5-5 at 30). The length stop is what tells
+      // generateObject to raise the budget; {} as the text would pass for an
+      // answer under a schema whose fields are all optional.
+      const single = new AnthropicProvider();
+      await single.initialize({ apiKey: 'test-anthropic-key', streamCompletions: false });
+      fetchMock.mockResolvedValueOnce(
+        mockJsonResponse(
+          makeAnthropicResponse({
+            content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: {} }],
+            stop_reason: 'max_tokens',
+          }),
+        ),
+      );
+
+      const result = await single.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Hi' }], {
+        responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit' } } as never,
+      });
+
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body).stream).toBe(false);
+      expect(result.schemaRoute).toBe('forced_tool');
+      expect(result.choices[0].message.content).toBeNull();
+      expect(result.choices[0].message.tool_calls).toBeUndefined();
+      expect(result.choices[0].finishReason).toBe('length');
+    });
+
+    it('keeps a caller tool call beside the consumed schema call, and the tool_use stop with it', async () => {
       const msg = makeAnthropicResponse({
-        content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { x: 2 } }],
+        content: [
+          { type: 'tool_use', id: 'toolu_s', name: 'emit', input: { x: 2 } },
+          { type: 'tool_use', id: 'toolu_c', name: 'lookup', input: { q: 'a' } },
+        ],
         stop_reason: 'tool_use',
       });
       fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
 
-      await provider.generateCompletion(
+      const result = await provider.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Hi' }], {
+        responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit' } } as never,
+      });
+
+      expect(result.choices[0].message.content).toBe('{"x":2}');
+      expect(result.choices[0].message.tool_calls?.map((call) => call.id)).toEqual(['toolu_c']);
+      expect(result.choices[0].finishReason).toBe('tool_calls');
+    });
+
+    it('answers a forced schema call the output limit cut mid-JSON with its raw input and the length stop, in one request; a caller tool cut the same way still fails as an incomplete stream', async () => {
+      // A length stop is what generateObject raises its budget for; an
+      // incomplete-stream error was retried at the same budget, then thrown past it.
+      const cutEvents = (name: string) => [
+        d({ type: 'message_start', message: { ...makeAnthropicResponse(), content: [], stop_reason: null } }),
+        d({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_s', name } }),
+        d({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"scores":{"a":1,"b' } }),
+        d({ type: 'content_block_stop', index: 0 }),
+        d({ type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: null }, usage: { output_tokens: 16 } }),
+        d({ type: 'message_stop' }),
+      ];
+      const sseOf = (events: string[]) =>
+        ({
+          ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+          json: () => Promise.reject(new Error('SSE body, not JSON')),
+          body: createSseStream(events),
+        }) as unknown as Response;
+      const recordSchema = {
+        type: 'object',
+        properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+        required: ['scores'],
+      };
+      fetchMock.mockResolvedValueOnce(sseOf(cutEvents('emit')));
+
+      const result = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Score a and b.' }], {
+        responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: recordSchema } } as never,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(result.schemaRoute).toBe('forced_tool');
+      expect(result.choices[0].message.content).toBe('{"scores":{"a":1,"b');
+      expect(result.choices[0].message.tool_calls).toBeUndefined();
+      expect(result.choices[0].finishReason).toBe('length');
+
+      // A caller's own tool is not the answer: its cut input is still an incomplete response.
+      const single = new AnthropicProvider();
+      await single.initialize({ apiKey: 'test-anthropic-key', maxRetries: 1 });
+      fetchMock.mockResolvedValueOnce(sseOf(cutEvents('lookup')));
+      await expect(
+        single.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Look up a.' }], {}),
+      ).rejects.toMatchObject({ code: 'STREAM_INCOMPLETE' });
+    });
+
+    it('answers a forced schema call the output limit stopped before any of its input arrived with no text and the length stop, never a {} built for it, on the completion and on the stream', async () => {
+      // The API's shape for every forced call the limit stops (live-probed
+      // 2026-10-19 on claude-sonnet-4-6 at max_tokens 1, 12, 40 and 200, and on
+      // claude-haiku-5-5 at 1 and 200): the block starts with input {}, one
+      // input_json_delta carries an empty partial_json, no content_block_stop
+      // follows, and the turn stops at max_tokens. None of the input arrived:
+      // a {} built for the call would pass for an answer under a schema whose
+      // fields are all optional, and generateObject would return it without
+      // raising its budget.
+      const events = () => [
+        d({ type: 'message_start', message: { ...makeAnthropicResponse(), content: [], stop_reason: null } }),
+        d({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_s', name: 'emit', input: {} } }),
+        d({ type: 'ping' }),
+        d({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '' } }),
+        d({ type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: null }, usage: { output_tokens: 1 } }),
+        d({ type: 'message_stop' }),
+      ];
+      const sseOf = (list: string[]) =>
+        ({
+          ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+          json: () => Promise.reject(new Error('SSE body, not JSON')),
+          body: createSseStream(list),
+        }) as unknown as Response;
+      const optionalRecord = {
+        type: 'object',
+        properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+      };
+      const marker = { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: optionalRecord } } as never;
+      fetchMock.mockResolvedValueOnce(sseOf(events())).mockResolvedValueOnce(sseOf(events()));
+
+      const result = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Score a.' }], {
+        maxTokens: 8,
+        responseFormat: marker,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(result.schemaRoute).toBe('forced_tool');
+      expect(result.choices[0].message.content).toBeNull();
+      expect(result.choices[0].message.tool_calls).toBeUndefined();
+      expect(result.choices[0].finishReason).toBe('length');
+
+      // The stream names the call's raw input, which is empty; the completion
+      // gateway removes the call and makes that input the step's text.
+      const chunks: any[] = [];
+      for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', [{ role: 'user', content: 'Score a.' }], {
+        maxTokens: 8,
+        responseFormat: marker,
+      })) {
+        chunks.push(chunk);
+      }
+      const final = chunks.find((chunk) => chunk.isFinal);
+      expect(final?.schemaRoute).toBe('forced_tool');
+      expect(final?.choices[0].finishReason).toBe('length');
+      expect(final?.choices[0].message.tool_calls).toEqual([
+        { id: 'toolu_s', type: 'function', function: { name: 'emit', arguments: '' } },
+      ]);
+    });
+
+    it('sends the JSON output format with the stamped schema, no tool and no tool_choice on claude-opus-4-8', async () => {
+      // Every model with Anthropic's structured outputs takes output_config.format
+      // (anthropicSchemaRoute 'json_schema'); the forced tool is for the two models
+      // without it. The format needs no beta header.
+      const msg = makeAnthropicResponse({
+        content: [{ type: 'text', text: '{"x":2}' }],
+        stop_reason: 'end_turn',
+      });
+      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+
+      const result = await provider.generateCompletion(
         'claude-opus-4-8',
         [{ role: 'user', content: 'Hi' }],
         {
@@ -1481,18 +1634,27 @@ describe('AnthropicProvider', () => {
       );
 
       const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
-      expect(requestBody.tools[0].strict).toBe(true);
-      // The wire schema is the STAMPED copy: strict mode requires
-      // additionalProperties:false PRESENT on every object node (absent
-      // 400s at the API), and zod-lowered schemas omit it.
-      expect(requestBody.tools[0].input_schema.additionalProperties).toBe(false);
-      expect(requestBody.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+      expect(requestBody.output_config.format.type).toBe('json_schema');
+      // The wire schema is the STAMPED copy: the format requires
+      // additionalProperties:false PRESENT on every object node, and
+      // zod-lowered schemas omit it.
+      expect(requestBody.output_config.format.schema).toEqual({
+        type: 'object',
+        properties: { x: { type: 'number' } },
+        required: ['x'],
+        additionalProperties: false,
+      });
+      expect(requestBody.tools).toBeUndefined();
+      expect(requestBody.tool_choice).toBeUndefined();
+      expect(fetchMock.mock.calls[0][1].headers['anthropic-beta'] ?? '').not.toContain('structured-outputs-2025-11-13');
+      // The JSON is the text block itself.
+      expect(result.choices[0].message.content).toBe('{"x":2}');
     });
 
-    it('stamps additionalProperties:false onto NESTED object nodes of the strict payload', async () => {
+    it('stamps additionalProperties:false onto NESTED object nodes of the format schema and strips the keywords the format rejects', async () => {
       const msg = makeAnthropicResponse({
-        content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { inner: { z: 1 } } }],
-        stop_reason: 'tool_use',
+        content: [{ type: 'text', text: '{"inner":{"z":1}}' }],
+        stop_reason: 'end_turn',
       });
       fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
 
@@ -1518,24 +1680,136 @@ describe('AnthropicProvider', () => {
       );
 
       const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
-      expect(requestBody.tools[0].strict).toBe(true);
-      expect(requestBody.tools[0].input_schema.additionalProperties).toBe(false);
-      expect(requestBody.tools[0].input_schema.properties.inner.additionalProperties).toBe(false);
-      // required is untouched — Anthropic strict accepts optional properties.
-      expect(requestBody.tools[0].input_schema.required).toEqual(['inner']);
+      const schema = requestBody.output_config.format.schema;
+      expect(schema.additionalProperties).toBe(false);
+      expect(schema.properties.inner.additionalProperties).toBe(false);
+      // required is untouched — the format accepts optional properties.
+      expect(schema.required).toEqual(['inner']);
       // Rejected constraint keywords are stripped from the wire payload
-      // (strict 400s on them: "For 'array' type, property 'maxItems' is
-      // not supported"); Zod re-validates caller-side.
-      expect('maxItems' in requestBody.tools[0].input_schema.properties.list).toBe(false);
-      expect('minimum' in requestBody.tools[0].input_schema.properties.inner.properties.z).toBe(false);
+      // ("For 'array' type, property 'maxItems' is not supported"); Zod
+      // re-validates caller-side.
+      expect('maxItems' in schema.properties.list).toBe(false);
+      expect('minimum' in schema.properties.inner.properties.z).toBe(false);
+      expect(requestBody.tools).toBeUndefined();
     });
 
-    it('omits strict for a schema over the union-typed parameter limit', async () => {
-      // Anthropic allows at most 16 parameters that use anyOf or a type array
-      // across a request's strict schemas and 400s past that; the forced tool
-      // still rides, without the strict flag.
+    it('sends the format beside adaptive thinking on claude-opus-5-5, with the thinking header and no structured-outputs header', async () => {
+      // The grammar applies to the final output, not to thinking, so the
+      // format is never clamped the way a forced tool is with thinking on.
       const msg = makeAnthropicResponse({
-        content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: {} }],
+        content: [{ type: 'text', text: '{"x":2}' }],
+        stop_reason: 'end_turn',
+      });
+      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const result = await provider.generateCompletion(
+          'claude-opus-5-5',
+          [{ role: 'user', content: 'Hi' }],
+          {
+            thinking: { budgetTokens: 4000 },
+            responseFormat: {
+              _agentosUseToolForStructuredOutput: true,
+              tool: {
+                name: 'emit',
+                input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] },
+              },
+            } as never,
+          },
+        );
+
+        const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(['adaptive', 'enabled']).toContain(requestBody.thinking?.type);
+        expect(requestBody.output_config.format.type).toBe('json_schema');
+        expect(requestBody.tools).toBeUndefined();
+        expect(requestBody.tool_choice).toBeUndefined();
+        const beta = String(fetchMock.mock.calls[0][1].headers['anthropic-beta'] ?? '');
+        expect(beta).toContain('interleaved-thinking-2025-05-14');
+        expect(beta).not.toContain('structured-outputs-2025-11-13');
+        expect(result.choices[0].message.content).toBe('{"x":2}');
+        // No clamp warning: nothing was forced.
+        expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('clamping'))).toBe(false);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('merges the format over a passthrough output_config instead of wiping either', async () => {
+      const msg = makeAnthropicResponse({
+        content: [{ type: 'text', text: '{"x":2}' }],
+        stop_reason: 'end_turn',
+      });
+      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+
+      await provider.generateCompletion(
+        'claude-opus-5-5',
+        [{ role: 'user', content: 'Hi' }],
+        {
+          customModelParams: { output_config: { effort: 'high' } },
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: {
+              name: 'emit',
+              input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] },
+            },
+          } as never,
+        },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.output_config.effort).toBe('high');
+      expect(requestBody.output_config.format.type).toBe('json_schema');
+    });
+
+    it('leaves a caller tool that shares the schema name as a tool call on the json_schema route', async () => {
+      // The format works beside tools, and only the forced route names a
+      // structured tool for the mapper, so a tool_use block called `emit` is a
+      // tool call, not the answer; the text block is the content.
+      const msg = makeAnthropicResponse({
+        content: [
+          { type: 'text', text: '{"x":2}' },
+          { type: 'tool_use', id: 'toolu_c', name: 'emit', input: { q: 1 } },
+        ],
+        stop_reason: 'tool_use',
+      });
+      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+
+      const result = await provider.generateCompletion(
+        'claude-opus-5-5',
+        [{ role: 'user', content: 'Hi' }],
+        {
+          tools: [
+            {
+              type: 'function',
+              function: { name: 'emit', description: 'Emit a value.', parameters: { type: 'object', properties: { q: { type: 'number' } } } },
+            },
+          ],
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: {
+              name: 'emit',
+              input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] },
+            },
+          } as never,
+        },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.output_config.format.type).toBe('json_schema');
+      expect(requestBody.tools).toHaveLength(1);
+      expect(requestBody.tools[0].name).toBe('emit');
+      expect(requestBody.tool_choice).toBeUndefined();
+      expect(result.choices[0].message.content).toBe('{"x":2}');
+      expect(result.choices[0].message.tool_calls?.[0]?.function.name).toBe('emit');
+    });
+
+    it('a schema over the union-typed parameter limit takes the non-strict forced tool on claude-opus-4-8: no format, no schema block', async () => {
+      // Anthropic allows at most 16 parameters that use anyOf or a type array
+      // across a request's strict schemas and 400s past that, so the format
+      // cannot carry this one; the forced tool still rides, without the strict
+      // flag, as it did before the format.
+      const msg = makeAnthropicResponse({
+        content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { f0: 'a' } }],
         stop_reason: 'tool_use',
       });
       fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
@@ -1543,7 +1817,7 @@ describe('AnthropicProvider', () => {
         Array.from({ length: 17 }, (_, i) => [`f${i}`, { type: ['string', 'null'] }]),
       );
 
-      await provider.generateCompletion(
+      const result = await provider.generateCompletion(
         'claude-opus-4-8',
         [{ role: 'user', content: 'Hi' }],
         {
@@ -1558,22 +1832,28 @@ describe('AnthropicProvider', () => {
       );
 
       const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.tools).toHaveLength(1);
+      expect(requestBody.tools[0].name).toBe('emit');
       expect(requestBody.tools[0].strict).toBeUndefined();
       expect(requestBody.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+      expect(requestBody.output_config).toBeUndefined();
+      expect(String(requestBody.system ?? '')).not.toContain('Answer with JSON only');
+      expect(result.choices[0].message.content).toBe('{"f0":"a"}');
+      expect(result.schemaRoute).toBe('forced_tool');
     });
 
-    it('omits strict for a record-bearing input_schema (degrades to the non-strict forced tool)', async () => {
+    it('a record-bearing schema takes the non-strict forced tool on claude-opus-4-8 (degrades from the format, not to the prompt)', async () => {
       // z.record(...) lowers to a schema-valued additionalProperties, which
-      // strict mode rejects at the API ("'additionalProperties' must be
-      // explicitly set to false") — deterministically, on every retry. The
-      // forced tool must still ride, just without the strict flag.
+      // the format and strict mode reject at the API ("'additionalProperties'
+      // must be explicitly set to false") deterministically, on every retry.
+      // The forced tool must still ride, just without the strict flag.
       const msg = makeAnthropicResponse({
         content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { config: { a: 'b' } } }],
         stop_reason: 'tool_use',
       });
       fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
 
-      await provider.generateCompletion(
+      const result = await provider.generateCompletion(
         'claude-opus-4-8',
         [{ role: 'user', content: 'Hi' }],
         {
@@ -1598,9 +1878,756 @@ describe('AnthropicProvider', () => {
       // The forced tool itself is unchanged — only the strict flag is gated.
       expect(requestBody.tools[0].name).toBe('emit');
       expect(requestBody.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+      expect(requestBody.output_config).toBeUndefined();
+      expect(String(requestBody.system ?? '')).not.toContain('Answer with JSON only');
+      expect(result.choices[0].message.content).toBe('{"config":{"a":"b"}}');
     });
 
-    it('logs the strict-schema diagnostic on a 4xx additionalProperties rejection (tripwire, 2026-07-07)', async () => {
+    it('with thinking on, a schema over the union-typed limit on claude-opus-4-8 takes the prompt, never a clamped tool: no tool, no format, the schema block, one warning naming thinking', async () => {
+      // A forced tool_choice cannot ride with thinking on; the clamp would send
+      // the schema tool under `auto`, which guarantees nothing, so the schema
+      // goes into the prompt, after the caller's system prompt.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const msg = () =>
+          makeAnthropicResponse({ content: [{ type: 'text', text: '{"f0":"a"}' }], stop_reason: 'end_turn' });
+        fetchMock.mockResolvedValueOnce(mockSseResponse(msg())).mockResolvedValueOnce(mockSseResponse(msg()));
+        const properties = Object.fromEntries(
+          Array.from({ length: 17 }, (_, i) => [`f${i}`, { type: ['string', 'null'] }]),
+        );
+        const options = {
+          thinking: { budgetTokens: 1024 },
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: {
+              name: 'emit',
+              input_schema: { type: 'object', properties, required: Object.keys(properties) },
+            },
+          } as never,
+        };
+        const messages: ChatMessage[] = [
+          { role: 'system', content: 'You are terse.' },
+          { role: 'user', content: 'Hi' },
+        ];
+
+        const result = await provider.generateCompletion('claude-opus-4-8', messages, options);
+        await provider.generateCompletion('claude-opus-4-8', messages, options);
+
+        const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(['adaptive', 'enabled']).toContain(requestBody.thinking?.type);
+        expect(requestBody.tools).toBeUndefined();
+        expect(requestBody.tool_choice).toBeUndefined();
+        expect(requestBody.output_config).toBeUndefined();
+        const system = JSON.stringify(requestBody.system);
+        expect(system).toContain('Answer with JSON only, matching this schema:');
+        expect(system).toContain('f16');
+        expect(system.indexOf('Answer with JSON only')).toBeGreaterThan(system.indexOf('You are terse.'));
+        expect(result.choices[0].message.content).toBe('{"f0":"a"}');
+        expect(result.schemaInPayload).toBe(false);
+        expect(result.schemaRoute).toBe('none');
+        const warnings = warnSpy.mock.calls.filter((c) => String(c[0]).includes('rides the prompt alone'));
+        expect(warnings).toHaveLength(1);
+        expect(String(warnings[0][0])).toContain('claude-opus-4-8');
+        expect(String(warnings[0][0])).toContain('thinking');
+        expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('clamping'))).toBe(false);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('with thinking on, a record-bearing schema on claude-opus-4-8 takes the prompt too, with no clamped tool', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"config":{"a":"b"}}' }], stop_reason: 'end_turn' })),
+        );
+
+        const result = await provider.generateCompletion('claude-opus-4-8', [{ role: 'user', content: 'Hi' }], {
+          thinking: { budgetTokens: 1024 },
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: {
+              name: 'emit',
+              input_schema: {
+                type: 'object',
+                properties: { config: { type: 'object', additionalProperties: { type: 'string' } } },
+                required: ['config'],
+              },
+            },
+          } as never,
+        });
+
+        const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(requestBody.tools).toBeUndefined();
+        expect(requestBody.tool_choice).toBeUndefined();
+        expect(requestBody.output_config).toBeUndefined();
+        expect(JSON.stringify(requestBody.system)).toContain('Answer with JSON only, matching this schema:');
+        expect(result.schemaInPayload).toBe(false);
+        // The one warning per model and reason was printed by the case above; none clamps a tool.
+        const warnings = warnSpy.mock.calls.filter((c) => String(c[0]).includes('rides the prompt alone'));
+        expect(warnings.every((c) => String(c[0]).includes('thinking'))).toBe(true);
+        expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('clamping'))).toBe(false);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('a record-bearing schema on claude-sonnet-4-6 and on claude-opus-5, with no thinking option, takes the non-strict forced tool', async () => {
+      const recordMarker = {
+        _agentosUseToolForStructuredOutput: true,
+        tool: {
+          name: 'emit',
+          input_schema: {
+            type: 'object',
+            properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+            required: ['scores'],
+          },
+        },
+      } as never;
+      for (const model of ['claude-sonnet-4-6', 'claude-opus-5']) {
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(
+            makeAnthropicResponse({
+              content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { scores: { a: 1 } } }],
+              stop_reason: 'tool_use',
+            }),
+          ),
+        );
+        const result = await provider.generateCompletion(model, [{ role: 'user', content: 'Grade.' }], { responseFormat: recordMarker });
+        const body = JSON.parse(fetchMock.mock.calls.at(-1)![1].body);
+        expect(body.model).toBe(model);
+        expect(body.thinking).toBeUndefined();
+        expect(body.tools).toEqual([
+          {
+            name: 'emit',
+            input_schema: {
+              type: 'object',
+              properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+              required: ['scores'],
+            },
+          },
+        ]);
+        expect(body.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+        expect(body.output_config).toBeUndefined();
+        expect(result.choices[0].message.content).toBe('{"scores":{"a":1}}');
+        expect(result.schemaRoute).toBe('forced_tool');
+      }
+    });
+
+    it('a record-bearing schema takes the prompt on claude-opus-5-5, after the caller system prompt, warning once', async () => {
+      // z.record(...) lowers to a schema-valued additionalProperties, which the
+      // format rejects at the API ("'additionalProperties' must be explicitly
+      // set to false") deterministically, on every retry.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const msg = () =>
+          makeAnthropicResponse({ content: [{ type: 'text', text: '{"config":{"a":"b"}}' }], stop_reason: 'end_turn' });
+        fetchMock.mockResolvedValueOnce(mockSseResponse(msg())).mockResolvedValueOnce(mockSseResponse(msg()));
+        const options = {
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: {
+              name: 'emit',
+              input_schema: {
+                type: 'object',
+                properties: {
+                  config: { type: 'object', additionalProperties: { type: 'string' } },
+                },
+                required: ['config'],
+              },
+            },
+          } as never,
+        };
+        const messages: ChatMessage[] = [
+          { role: 'system', content: 'You are terse.' },
+          { role: 'user', content: 'Hi' },
+        ];
+
+        const result = await provider.generateCompletion('claude-opus-5-5', messages, options);
+        await provider.generateCompletion('claude-opus-5-5', messages, options);
+
+        const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(requestBody.tools).toBeUndefined();
+        expect(requestBody.tool_choice).toBeUndefined();
+        expect(requestBody.output_config).toBeUndefined();
+        const system = String(requestBody.system);
+        expect(system.indexOf('You are terse.')).toBeGreaterThanOrEqual(0);
+        expect(system.indexOf('Answer with JSON only, matching this schema:')).toBeGreaterThan(system.indexOf('You are terse.'));
+        expect(system).toContain('"config"');
+        expect(result.choices[0].message.content).toBe('{"config":{"a":"b"}}');
+        expect(warnSpy.mock.calls.filter((c) => String(c[0]).includes('rides the prompt alone'))).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('a request whose messages enable citations takes the prompt on claude-sonnet-5-5 (the format refuses citations)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })),
+        );
+
+        await provider.generateCompletion(
+          'claude-sonnet-5-5',
+          [{ role: 'user', content: 'Summarize the document.' }],
+          {
+            customModelParams: {
+              messages: [
+                {
+                  role: 'user',
+                  content: [
+                    {
+                      type: 'document',
+                      source: { type: 'text', media_type: 'text/plain', data: 'The sky is blue.' },
+                      citations: { enabled: true },
+                    },
+                    { type: 'text', text: 'Summarize the document.' },
+                  ],
+                },
+              ],
+            },
+            responseFormat: {
+              _agentosUseToolForStructuredOutput: true,
+              tool: {
+                name: 'emit',
+                input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] },
+              },
+            } as never,
+          },
+        );
+
+        const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(requestBody.output_config).toBeUndefined();
+        expect(requestBody.tools).toBeUndefined();
+        expect(requestBody.tool_choice).toBeUndefined();
+        expect(String(requestBody.system)).toContain('Answer with JSON only, matching this schema:');
+        const warnings = warnSpy.mock.calls.filter((c) => String(c[0]).includes('rides the prompt alone'));
+        expect(warnings).toHaveLength(1);
+        expect(String(warnings[0][0])).toContain('citations');
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('the prompt-only schema block never grows a caller-owned passthrough system array: the same params twice send one block each', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const system = [{ type: 'text', text: 'You grade things.' }];
+        const customModelParams = { system };
+        const recordSchema = {
+          type: 'object',
+          properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+          required: ['scores'],
+        };
+        for (let i = 0; i < 2; i++) {
+          fetchMock.mockResolvedValueOnce(
+            mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"scores":{"a":1}}' }], stop_reason: 'end_turn' })),
+          );
+          await provider.generateCompletion('claude-opus-5-5', [{ role: 'user', content: 'Grade.' }], {
+            customModelParams,
+            responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: recordSchema } } as never,
+          });
+        }
+        expect(system).toEqual([{ type: 'text', text: 'You grade things.' }]);
+        expect(fetchMock.mock.calls).toHaveLength(2);
+        for (const call of fetchMock.mock.calls) {
+          const body = JSON.parse(call[1].body);
+          expect(body.system[0]).toEqual({ type: 'text', text: 'You grade things.' });
+          const schemaBlocks = (body.system as Array<{ text: string }>).filter((b) => b.text.startsWith('Answer with JSON only, matching this schema:'));
+          expect(schemaBlocks).toHaveLength(1);
+        }
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('the citations downgrade drops a passthrough output_config.format, keeps the rest of output_config, and the completion says the schema rode the prompt', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })),
+        );
+        const completion = await provider.generateCompletion('claude-opus-5-5', [{ role: 'user', content: 'Summarize the document.' }], {
+          customModelParams: {
+            output_config: {
+              effort: 'high',
+              format: { type: 'json_schema', schema: { type: 'object', properties: {}, additionalProperties: false } },
+            },
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'document',
+                    source: { type: 'text', media_type: 'text/plain', data: 'The sky is blue.' },
+                    citations: { enabled: true },
+                  },
+                  { type: 'text', text: 'Summarize the document.' },
+                ],
+              },
+            ],
+          },
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: { name: 'emit', input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+          } as never,
+        });
+        const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(body.output_config).toEqual({ effort: 'high' });
+        expect(body.tools).toBeUndefined();
+        expect(body.tool_choice).toBeUndefined();
+        expect(String(body.system)).toContain('Answer with JSON only, matching this schema:');
+        expect(completion.schemaInPayload).toBe(false);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('routes by the model on the wire: a passthrough model from Opus 5.5 to Sonnet 4 takes the forced tool, and the reverse takes the format', async () => {
+      const marker = {
+        _agentosUseToolForStructuredOutput: true,
+        tool: { name: 'emit', input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+      } as never;
+      fetchMock.mockResolvedValueOnce(
+        mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })),
+      );
+      await provider.generateCompletion('claude-opus-5-5', [{ role: 'user', content: 'Go.' }], {
+        customModelParams: { model: 'claude-sonnet-4-20250514' },
+        responseFormat: marker,
+      });
+      const toSonnet4 = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(toSonnet4.model).toBe('claude-sonnet-4-20250514');
+      expect(toSonnet4.output_config).toBeUndefined();
+      expect(toSonnet4.tools?.[0]?.name).toBe('emit');
+      expect(toSonnet4.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+
+      fetchMock.mockResolvedValueOnce(
+        mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })),
+      );
+      await provider.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Go.' }], {
+        customModelParams: { model: 'claude-opus-5-5' },
+        responseFormat: marker,
+      });
+      const toOpus = JSON.parse(fetchMock.mock.calls[1][1].body);
+      expect(toOpus.model).toBe('claude-opus-5-5');
+      expect(toOpus.output_config?.format?.type).toBe('json_schema');
+      expect(toOpus.tools).toBeUndefined();
+      expect(toOpus.tool_choice).toBeUndefined();
+    });
+
+    it('the prompt-only route says so on every stream chunk (schemaInPayload false); the format route says nothing', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const recordMarker = {
+          _agentosUseToolForStructuredOutput: true,
+          tool: {
+            name: 'emit',
+            input_schema: { type: 'object', properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } }, required: ['scores'] },
+          },
+        } as never;
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"scores":{"a":1}}' }], stop_reason: 'end_turn' })),
+        );
+        const chunks: Array<{ schemaInPayload?: boolean }> = [];
+        for await (const chunk of provider.generateCompletionStream('claude-sonnet-5-5', [{ role: 'user', content: 'Grade.' }], { responseFormat: recordMarker })) {
+          chunks.push(chunk as { schemaInPayload?: boolean });
+        }
+        expect(chunks.length).toBeGreaterThan(0);
+        expect(chunks.every((c) => c.schemaInPayload === false)).toBe(true);
+
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })),
+        );
+        const onFormat = await provider.generateCompletion('claude-sonnet-5-5', [{ role: 'user', content: 'Go.' }], {
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: { name: 'emit', input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+          } as never,
+        });
+        expect(onFormat.schemaInPayload).toBeUndefined();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('keeps the forced tool on claude-sonnet-4-20250514 (no JSON output format), now never strict', async () => {
+      const msg = makeAnthropicResponse({
+        content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { x: 2 } }],
+        stop_reason: 'tool_use',
+      });
+      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+
+      const result = await provider.generateCompletion(
+        'claude-sonnet-4-20250514',
+        [{ role: 'user', content: 'Hi' }],
+        {
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: {
+              name: 'emit',
+              input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] },
+            },
+          } as never,
+        },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.output_config).toBeUndefined();
+      expect(requestBody.tools).toHaveLength(1);
+      expect(requestBody.tools[0].name).toBe('emit');
+      expect(requestBody.tools[0].strict).toBeUndefined();
+      // The schema goes out as given: no strict stamp on a model without strict tool use.
+      expect(requestBody.tools[0].input_schema).toEqual({ type: 'object', properties: { x: { type: 'number' } }, required: ['x'] });
+      expect(requestBody.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+      expect(fetchMock.mock.calls[0][1].headers['anthropic-beta']).toBeUndefined();
+      expect(result.choices[0].message.content).toBe('{"x":2}');
+    });
+
+    it('a request whose messages enable citations takes the non-strict forced tool on claude-sonnet-4-6 and drops a passthrough output_config.format', async () => {
+      // The format and citations answer 400 together; a plain forced tool beside
+      // a citations-enabled document answered 200 with a tool_use stop
+      // (live-probed 2026-10-19 on claude-sonnet-4-6).
+      fetchMock.mockResolvedValueOnce(
+        mockSseResponse(
+          makeAnthropicResponse({
+            content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { x: 2 } }],
+            stop_reason: 'tool_use',
+          }),
+        ),
+      );
+      const completion = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Summarize the document.' }], {
+        customModelParams: {
+          output_config: {
+            effort: 'high',
+            format: { type: 'json_schema', schema: { type: 'object', properties: {}, additionalProperties: false } },
+          },
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'document',
+                  source: { type: 'text', media_type: 'text/plain', data: 'The sky is blue.' },
+                  citations: { enabled: true },
+                },
+                { type: 'text', text: 'Summarize the document.' },
+              ],
+            },
+          ],
+        },
+        responseFormat: {
+          _agentosUseToolForStructuredOutput: true,
+          tool: { name: 'emit', input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+        } as never,
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.output_config).toEqual({ effort: 'high' });
+      expect(body.tools).toEqual([
+        { name: 'emit', input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+      ]);
+      expect(body.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+      expect(String(body.system ?? '')).not.toContain('Answer with JSON only');
+      expect(completion.choices[0].message.content).toBe('{"x":2}');
+      expect(completion.schemaRoute).toBe('forced_tool');
+      expect(completion.schemaInPayload).toBeUndefined();
+    });
+
+    it("the prompt-only schema block survives the auto-cache's block placement (thinking on, a 1-hour cache TTL)", async () => {
+      // The auto-cache re-emits the provider's own system blocks as an array to
+      // place its marker when thinking is on or a TTL is asked for; the schema
+      // block must be one of them, or the schema never reaches the model.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const recordMarker = {
+          _agentosUseToolForStructuredOutput: true,
+          tool: {
+            name: 'emit',
+            input_schema: {
+              type: 'object',
+              properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+              required: ['scores'],
+            },
+          },
+        } as never;
+        const messages: ChatMessage[] = [
+          { role: 'system', content: 'You grade things.' },
+          { role: 'user', content: 'Grade.' },
+        ];
+        const reply = () =>
+          mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"scores":{"a":1}}' }], stop_reason: 'end_turn' }));
+        fetchMock.mockResolvedValueOnce(reply()).mockResolvedValueOnce(reply());
+
+        await provider.generateCompletion('claude-opus-5-5', messages, { thinking: { budgetTokens: 2000 }, responseFormat: recordMarker });
+        await provider.generateCompletion('claude-opus-5-5', messages, { cache: { ttl: '1h' }, responseFormat: recordMarker });
+
+        for (const call of fetchMock.mock.calls) {
+          const body = JSON.parse(call[1].body);
+          expect(Array.isArray(body.system)).toBe(true);
+          expect(body.system[0]).toMatchObject({ type: 'text', text: 'You grade things.', cache_control: { type: 'ephemeral' } });
+          expect(body.system.at(-1).text.startsWith('Answer with JSON only, matching this schema:')).toBe(true);
+          expect(body.system.at(-1).text).toContain('"scores"');
+        }
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('counts a strict passthrough tool beside the format toward its union-typed limit: no format goes out, the caller tool stays, and the schema rides the prompt', async () => {
+      // A strict tool of ten union-typed parameters beside a format schema of
+      // ten answered 400 ("20 parameters with type arrays or anyOf ... limit:
+      // 16", live-probed 2026-10-19 on claude-haiku-5-5). Forcing the schema
+      // tool would need it in the caller's tools array, which keeps precedence.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const unionsOf = (n: number) => {
+          const properties = Object.fromEntries(Array.from({ length: n }, (_, i) => [`u${i}`, { type: ['string', 'null'] }]));
+          return { type: 'object', properties, required: Object.keys(properties), additionalProperties: false };
+        };
+        const lookup = { name: 'lookup', description: 'Look up.', input_schema: unionsOf(10), strict: true };
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"u0":null}' }], stop_reason: 'end_turn' })),
+        );
+
+        const completion = await provider.generateCompletion('claude-haiku-5-5', [{ role: 'user', content: 'Go.' }], {
+          customModelParams: { tools: [lookup] },
+          responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: unionsOf(10) } } as never,
+        });
+
+        const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(body.output_config).toBeUndefined();
+        expect(body.tools).toEqual([lookup]);
+        expect(body.tool_choice).toBeUndefined();
+        expect(String(body.system)).toContain('Answer with JSON only, matching this schema:');
+        expect(completion.schemaRoute).toBe('none');
+        expect(completion.schemaInPayload).toBe(false);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('a passthrough tools array without the schema tool sends no forced choice naming it: the schema rides the prompt; with the schema tool in it, the choice is forced on it', async () => {
+      // A forced tool_choice must name a tool the request carries; the
+      // passthrough array keeps precedence over the schema tool, so a forced
+      // choice on Claude Sonnet 4 (forced-tool route) needs the tool in it.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const lookup = { name: 'lookup', description: 'Look up.', input_schema: { type: 'object', properties: { q: { type: 'string' } } } };
+        const schema = { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] };
+        const marker = { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: schema } } as never;
+        fetchMock
+          .mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })))
+          .mockResolvedValueOnce(
+            mockSseResponse(
+              makeAnthropicResponse({ content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { x: 2 } }], stop_reason: 'tool_use' }),
+            ),
+          );
+
+        const withoutSchemaTool = await provider.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Go.' }], {
+          customModelParams: { tools: [lookup] },
+          responseFormat: marker,
+        });
+        const first = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(first.tools).toEqual([lookup]);
+        expect(first.tool_choice).toBeUndefined();
+        expect(String(first.system)).toContain('Answer with JSON only, matching this schema:');
+        expect(withoutSchemaTool.schemaRoute).toBe('none');
+        expect(withoutSchemaTool.schemaInPayload).toBe(false);
+
+        const emit = { name: 'emit', input_schema: schema };
+        const withSchemaTool = await provider.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Go.' }], {
+          customModelParams: { tools: [lookup, emit] },
+          responseFormat: marker,
+        });
+        const second = JSON.parse(fetchMock.mock.calls[1][1].body);
+        expect(second.tools).toEqual([lookup, emit]);
+        expect(second.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+        expect(String(second.system ?? '')).not.toContain('Answer with JSON only');
+        expect(withSchemaTool.schemaRoute).toBe('forced_tool');
+        expect(withSchemaTool.choices[0].message.content).toBe('{"x":2}');
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('a passthrough tool_choice that does not force the schema tool takes the prompt route, with no tool_choice left on a wire without tools; any with the schema tool alone keeps the forced tool', async () => {
+      // A record schema on Claude Sonnet 4.6 takes the forced tool; a caller's
+      // tool_choice keeps precedence, and with auto the model need not call
+      // the schema tool, so the schema rides the prompt.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const recordSchema = {
+          type: 'object',
+          properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+          required: ['scores'],
+        };
+        const marker = { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: recordSchema } } as never;
+        fetchMock
+          .mockResolvedValueOnce(
+            mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"scores":{"a":1}}' }], stop_reason: 'end_turn' })),
+          )
+          .mockResolvedValueOnce(
+            mockSseResponse(
+              makeAnthropicResponse({
+                content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { scores: { a: 1 } } }],
+                stop_reason: 'tool_use',
+              }),
+            ),
+          );
+
+        const auto = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Score a.' }], {
+          customModelParams: { tool_choice: { type: 'auto' } },
+          responseFormat: marker,
+        });
+        const first = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(first.tools).toBeUndefined();
+        expect(first.tool_choice).toBeUndefined();
+        expect(first.output_config?.format).toBeUndefined();
+        expect(JSON.stringify(first.system ?? '')).toContain('Answer with JSON only, matching this schema:');
+        expect(auto.schemaRoute).toBe('none');
+        expect(auto.schemaInPayload).toBe(false);
+        expect(auto.choices[0].message.content).toBe('{"scores":{"a":1}}');
+        expect(
+          warnSpy.mock.calls.some((c) => String(c[0]).includes('a passthrough tool_choice does not force the schema tool')),
+        ).toBe(true);
+
+        const any = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Score a.' }], {
+          customModelParams: { tool_choice: { type: 'any' } },
+          responseFormat: marker,
+        });
+        const second = JSON.parse(fetchMock.mock.calls[1][1].body);
+        expect(second.tools).toEqual([{ name: 'emit', input_schema: recordSchema }]);
+        expect(second.tool_choice).toEqual({ type: 'any' });
+        expect(JSON.stringify(second.system ?? '')).not.toContain('Answer with JSON only');
+        expect(any.schemaRoute).toBe('forced_tool');
+        expect(any.choices[0].message.content).toBe('{"scores":{"a":1}}');
+        expect(any.choices[0].message.tool_calls).toBeUndefined();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('any beside a passthrough tools array that holds the schema tool and another keeps the forced tool: any admits no text answer, and a call to the schema tool is the answer', async () => {
+      // With tool_choice any the model can only call a tool (live-probed
+      // 2026-10-19 with the schema in the system prompt and two tools: Claude
+      // Haiku 5.5 called the schema tool, Claude Sonnet 4.6 the other one,
+      // neither wrote a text block), so the prompt route has no answer to give,
+      // and on it the schema call stayed a tool call.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const recordSchema = {
+          type: 'object',
+          properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+          required: ['scores'],
+        };
+        const emit = { name: 'emit', input_schema: recordSchema };
+        const lookup = {
+          name: 'lookup',
+          description: 'Look a word up.',
+          input_schema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] },
+        };
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(
+            makeAnthropicResponse({
+              content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { scores: { a: 1 } } }],
+              stop_reason: 'tool_use',
+            }),
+          ),
+        );
+
+        const result = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Score a.' }], {
+          customModelParams: { tools: [lookup, emit], tool_choice: { type: 'any' } },
+          responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: recordSchema } } as never,
+        });
+
+        const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(body.tools).toEqual([lookup, emit]);
+        expect(body.tool_choice).toEqual({ type: 'any' });
+        expect(JSON.stringify(body.system ?? '')).not.toContain('Answer with JSON only');
+        expect(result.schemaRoute).toBe('forced_tool');
+        expect(result.schemaInPayload).toBeUndefined();
+        expect(result.choices[0].message.content).toBe('{"scores":{"a":1}}');
+        expect(result.choices[0].message.tool_calls).toBeUndefined();
+        expect(result.choices[0].finishReason).toBe('stop');
+        expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('rides the prompt alone'))).toBe(false);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('drops a passthrough tool_choice the JSON output format route leaves with no tool on the wire, and keeps one beside a caller tool', async () => {
+      const marker = {
+        _agentosUseToolForStructuredOutput: true,
+        tool: { name: 'emit', input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+      } as never;
+      const lookup = { name: 'lookup', description: 'Look up.', input_schema: { type: 'object', properties: { q: { type: 'string' } } } };
+      fetchMock
+        .mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })))
+        .mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })));
+
+      const alone = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Go.' }], {
+        customModelParams: { tool_choice: { type: 'auto' } },
+        responseFormat: marker,
+      });
+      const first = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(first.output_config.format.type).toBe('json_schema');
+      expect(first.tools).toBeUndefined();
+      expect(first.tool_choice).toBeUndefined();
+      expect(alone.schemaRoute).toBe('json_schema');
+
+      await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Go.' }], {
+        customModelParams: { tools: [lookup], tool_choice: { type: 'auto' } },
+        responseFormat: marker,
+      });
+      const second = JSON.parse(fetchMock.mock.calls[1][1].body);
+      expect(second.output_config.format.type).toBe('json_schema');
+      expect(second.tools).toEqual([lookup]);
+      expect(second.tool_choice).toEqual({ type: 'auto' });
+    });
+
+    it('names the route it took on every completion and stream chunk of a schema request, and on no other', async () => {
+      const recordMarker = {
+        _agentosUseToolForStructuredOutput: true,
+        tool: {
+          name: 'emit',
+          input_schema: { type: 'object', properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } }, required: ['scores'] },
+        },
+      } as never;
+      fetchMock.mockResolvedValueOnce(
+        mockSseResponse(
+          makeAnthropicResponse({
+            content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { scores: { a: 1 } } }],
+            stop_reason: 'tool_use',
+          }),
+        ),
+      );
+      const chunks: Array<{ schemaRoute?: string; schemaInPayload?: boolean }> = [];
+      for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', [{ role: 'user', content: 'Grade.' }], { responseFormat: recordMarker })) {
+        chunks.push(chunk);
+      }
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.every((c) => c.schemaRoute === 'forced_tool' && c.schemaInPayload === undefined)).toBe(true);
+
+      fetchMock.mockResolvedValueOnce(
+        mockSseResponse(makeAnthropicResponse({ content: [{ type: 'text', text: '{"x":2}' }], stop_reason: 'end_turn' })),
+      );
+      const onFormat = await provider.generateCompletion('claude-opus-4-8', [{ role: 'user', content: 'Go.' }], {
+        responseFormat: {
+          _agentosUseToolForStructuredOutput: true,
+          tool: { name: 'emit', input_schema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+        } as never,
+      });
+      expect(onFormat.schemaRoute).toBe('json_schema');
+
+      fetchMock.mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse()));
+      const plain: Array<{ schemaRoute?: string }> = [];
+      for await (const chunk of provider.generateCompletionStream('claude-opus-4-8', [{ role: 'user', content: 'Hi' }], {})) {
+        plain.push(chunk);
+      }
+      expect(plain.some((c) => c.schemaRoute !== undefined)).toBe(false);
+    });
+
+    it('logs the schema diagnostic on a 4xx output_config.format rejection (tripwire, 2026-07-07; the format route, 2026-10-19)', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         fetchMock.mockResolvedValueOnce(
@@ -1609,7 +2636,7 @@ describe('AnthropicProvider', () => {
               error: {
                 type: 'invalid_request_error',
                 message:
-                  "tools.0.custom: For 'object' type, 'additionalProperties' must be explicitly set to false",
+                  "output_config.format.schema: For 'array' type, 'minItems' values other than 0 or 1 are not supported (got: [2, 5])",
               },
             },
             400,
@@ -1646,9 +2673,10 @@ describe('AnthropicProvider', () => {
         expect(payload.status).toBe(400);
         expect(payload.modelId).toContain('claude');
         expect(typeof payload.payloadUsesStrictTools).toBe('boolean');
-        // The outbound tool schemas ride the diagnostic so the next
-        // occurrence is a one-log root-cause.
-        expect(JSON.stringify(payload.tools)).toContain('emit');
+        // The outbound format schema rides the diagnostic so the next
+        // occurrence is a one-log root-cause; no tool goes out on this route.
+        expect(JSON.stringify(payload.outputConfigFormat)).toContain('"title"');
+        expect(payload.tools).toEqual([]);
       } finally {
         warnSpy.mockRestore();
       }

@@ -211,16 +211,16 @@ Store a new memory trace in the agent's brain database.
 **Output:**
 
 ```json
-{ "traceId": "mt_1711234567890_0" }
+{ "traceId": "mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b" }
 ```
 
 **Behaviour:**
 - Creates a trace with strength 1.0 (full encoding strength at creation time) and no embedding.
 - Refuses a `type` or `scope` outside the lists above with an error result and stores nothing, also when the caller runs the tool without checking its arguments against the schema.
 - Stores the SHA-256 hash of the content in the trace's metadata. It does not check for an existing trace with the same content: calling it twice stores two traces.
-- ID format: `mt_<epoch ms>_<counter>`, the counter counting up within the process.
+- ID format: `mt_<uuid>`, a v4 UUID, as the Memory facade names its traces.
 - Records the scope id resolved from the execution context (for example the user id for `user` scope) in the metadata.
-- Indexes the trace in FTS5.
+- Writes the trace's full-text entry in the transaction that writes the trace: in the `memory_traces_fts` table on SQLite (FTS5 on better-sqlite3; FTS4 on sql.js and the IndexedDB adapter), in the trace's `_tsv` column on Postgres. `memory_search` finds the trace as soon as the call returns.
 
 **Example:**
 
@@ -258,7 +258,7 @@ Update the content or tags of an existing memory trace.
 - Locates the active (not deleted) trace by ID in `memory_traces`.
 - Updates only the specified fields (content, tags, or both).
 - When the content changes, recomputes the content hash and clears the stored embedding.
-- Rebuilds the FTS5 index.
+- Rebuilds the brain's full-text index: the FTS5 table on SQLite; on Postgres, the `_tsv` column of the brain's own rows.
 - Returns `{ "updated": false }` if the trace was not found, was deleted, or neither field was given.
 
 **Example:**
@@ -267,7 +267,7 @@ Update the content or tags of an existing memory trace.
 {
   "name": "memory_update",
   "arguments": {
-    "traceId": "mt_1711234567890_0",
+    "traceId": "mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b",
     "content": "User prefers dark mode, TypeScript, and VS Code.",
     "tags": ["preference", "ui", "language", "editor"]
   }
@@ -303,7 +303,7 @@ Soft-delete a memory trace by ID.
 {
   "name": "memory_delete",
   "arguments": {
-    "traceId": "mt_1711234567890_0"
+    "traceId": "mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b"
   }
 }
 ```
@@ -334,7 +334,7 @@ Merge two or more memory traces into one surviving trace.
 - The trace with the highest retrieval count survives and takes the merged content; its embedding is cleared.
 - Tags from all source traces are unioned onto the survivor.
 - Retrieval counts are summed, and the survivor keeps the latest access time and the highest decay stability among the sources.
-- The other traces are soft-deleted, and the FTS5 index is rebuilt.
+- The other traces are soft-deleted, and the brain's full-text index is rebuilt (on Postgres, the brain's own rows).
 
 **Example:**
 
@@ -380,9 +380,11 @@ Full-text search over memory traces using the FTS5 index with BM25 ranking.
 ```
 
 **Behaviour:**
-- Queries the `memory_traces_fts` FTS5 virtual table.
-- Results are ranked by BM25 relevance score.
+- Queries the brain's full-text index: the `memory_traces_fts` virtual table on SQLite (FTS5 on better-sqlite3; FTS4 on sql.js and the IndexedDB adapter, whose SQLite builds have no FTS5), the `_tsv` column of the brain's own rows on Postgres.
+- The best match comes first on every backend: by BM25 on FTS5, by the number of matches (`length(offsets())`) on FTS4, by `ts_rank` on Postgres.
 - Only active traces are returned (soft-deleted traces are excluded).
+- Finds a trace as soon as the write that made it returns, on both backends: `memory_add`, `Memory.remember()`, `MemoryStore.store()` with a Brain attached (as `CognitiveMemoryManager` attaches the `brain` its config names) and `Brain.importFromSqlite` each bring the index with the write.
+- A trace stored again under its id with new words (a `MemoryStore` revival, or a trace `Brain.importFromSqlite` rewrites) is found by its new words only.
 - Optional `type` and `scope` filters are applied via SQL WHERE clauses on the join; a `scope` filter also matches the scope id resolved from the execution context.
 - `limit` takes 1 to 100.
 - The query runs as FTS5 syntax first; when SQLite rejects it as a syntax error, the tool converts it to a natural-language FTS5 query and runs it again.
@@ -446,7 +448,7 @@ Runs the 6 consolidation steps in order:
 3. **Strengthen** --- record Hebbian co-activation edges from retrieval feedback.
 4. **Derive** --- synthesise insight traces from memory clusters (LLM-backed, skipped if no LLM).
 5. **Compact** --- promote old high-retrieval episodic traces to semantic type.
-6. **Re-index** --- rebuild FTS5 index and log run to `consolidation_log`.
+6. **Re-index** --- rebuild the brain's full-text index (on Postgres, its own rows) and log run to `consolidation_log`.
 
 If a consolidation cycle is already in progress (mutex), returns immediately with zero counts.
 
@@ -521,16 +523,17 @@ All operations are available via the `Memory` facade API.
 
 ### Export Formats
 
-### SQLite (Byte-Perfect Backup)
+### SQLite (One Brain, Every Table)
 
-The highest-fidelity export. Uses SQLite's `VACUUM INTO` to produce a clean, self-contained copy of the entire brain database including all traces, embeddings, graph edges, documents, chunks, and consolidation logs.
+The highest-fidelity export. Writes the brain's own rows of every portable table into a new SQLite file: traces with their embeddings, the knowledge graph, documents and chunks, conversations and messages, the consolidation log and the rest. It runs from a SQLite or a Postgres brain alike. A database can hold several brains, and the file holds this brain's rows only.
 
 ```ts
 await mem.export('./backup.sqlite', { format: 'sqlite' });
 ```
 
-- Produces an exact copy of the brain file.
+- Nothing may exist at the path yet.
 - Includes raw embedding BLOBs (no re-embedding needed on import).
+- The rows keep the brain's id; importing the file into a brain with another id forks it.
 - Suitable for disaster recovery, agent cloning, or migration.
 
 ### JSON (Programmatic)
@@ -552,7 +555,7 @@ Each trace entry is the raw `memory_traces` row, with snake_case columns and JSO
 ```json
 {
   "brain_id": "brain",
-  "id": "mt_1711234567890_0",
+  "id": "mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b",
   "type": "semantic",
   "scope": "user",
   "content": "User prefers TypeScript over Python",
@@ -572,7 +575,7 @@ Each trace entry is the raw `memory_traces` row, with snake_case columns and JSO
 
 ### Markdown (Human-Readable)
 
-Exports each active trace as a standalone `.md` file with YAML front-matter, in a `{scope}/{type}/` folder:
+Exports each of the brain's active traces as a standalone `.md` file with YAML front-matter, in a `{scope}/{type}/` folder; another brain's traces in the same database are not read:
 
 ```ts
 await mem.export('./memory-export', { format: 'markdown' });
@@ -584,19 +587,19 @@ Produces files like:
 memory-export/
   user/
     episodic/
-      mt_1711234567890_0.md
+      mt_3f2b8c1e-5d4a-4e6f-9b7c-2a1d0e8f6c5b.md
     semantic/
-      mt_1711234567890_1.md
+      mt_8a41d6f2-0c7e-4b39-a5d8-6e2f91c4b073.md
   thread/
     procedural/
-      mt_1711234567890_2.md
+      mt_c95e0b7a-1f2d-4c68-8e3b-7d4a2f6e9b10.md
 ```
 
 Each file:
 
 ```markdown
 ---
-id: mt_1711234567890_1
+id: mt_8a41d6f2-0c7e-4b39-a5d8-6e2f91c4b073
 type: semantic
 scope: user
 strength: 0.87
@@ -617,7 +620,7 @@ for (const trace of refused) {
 }
 ```
 
-A JSON or SQLite export writes every trace into its one file, and its `refused` is empty.
+A JSON export writes the brain's traces, and a SQLite export the brain's rows of every portable table, into one file; their `refused` is empty.
 
 ### Obsidian (Wikilinks + Tags)
 
@@ -630,14 +633,14 @@ await mem.export('./vault', { format: 'obsidian' });
 Produces:
 
 - `#tags` in the body for every tag on the trace.
-- A **Related:** list of `[[wikilinks]]` to the labels of the knowledge-graph nodes the trace's node links to (empty when the graph has no edges for it).
+- A **Related:** list of `[[wikilinks]]` to the labels of the knowledge-graph nodes the trace's node links to in the brain's own graph (empty when the graph has no edges for it). Another brain in the same database never adds a link, though node ids repeat across brains.
 - The same YAML front-matter and `{scope}/{type}/` folders as the Markdown export, with the same rule for the names a trace's folders and file take, and the same `refused` list.
 
 Example output:
 
 ```markdown
 ---
-id: mt_1711234567890_1
+id: mt_8a41d6f2-0c7e-4b39-a5d8-6e2f91c4b073
 type: semantic
 scope: user
 strength: 0.87
@@ -660,7 +663,7 @@ User prefers TypeScript over Python
 
 ### SQLite
 
-Merges another brain database into the current one. A source trace is not inserted when a trace in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. Knowledge nodes are matched by label and type, edges by source, target and type.
+Merges one brain's SQLite file into the current brain. The importer reads the rows of the one brain the file holds: a file whose rows carry several brain ids imports nothing, and `errors` names the ids. A SQLite export holds one brain, so export each brain and import its file. A file older than the `brain_id` column holds one brain, and every row of it is read. A source trace is not inserted when a trace of the same scope and scope id in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. Once the import has committed, the importer rebuilds the brain's full-text index, once, when it inserted a trace or a merge changed a trace's tags (on Postgres, the `_tsv` column of the brain's own rows), so `memory_search` finds the imported traces, and a trace by a merged tag. Knowledge nodes are matched by label and type, edges by source, target and type.
 
 ```ts
 const result = await mem.importFrom('./backup.sqlite', { format: 'sqlite' });
@@ -726,13 +729,15 @@ content,type,tags
 "Deploy with Docker Compose",procedural,"deployment,docker"
 ```
 
+A row's `metadata` cell names its scope id, so it is read before the duplicate check: a cell that is not valid JSON makes the row an error, listed in `errors` and not imported, even when a trace of the same scope already holds the row's text.
+
 
 ### SHA-256 Deduplication
 
 All import paths use SHA-256 content hashing to prevent duplicate traces:
 
 1. Before inserting a trace, the importer computes `SHA-256(content)` and stores it in the trace's metadata as `import_hash`.
-2. When a trace of the same scope and scope id already carries that hash, the row is skipped (counted in `skipped`), whatever its type. A trace of another scope id is not a duplicate: a record whose text another tenant's, user's or session's trace holds is imported under its own scope id. A record's scope id is its metadata `scopeId`, else the `scope_id` an export of a schema-3 brain carries, else `''`; Markdown, Obsidian and ChatGPT records file under `''`. The CSV importer also matches a trace whose metadata `content_hash` equals the hash. The SQLite importer also matches a trace with identical `content`, does not read `content_hash`, and merges the skipped row's tags, and the later of the two `created_at` times, into the trace it matched.
+2. When a trace of the same scope and scope id already carries that hash, the row is skipped (counted in `skipped`), whatever its type. A trace of another scope id is not a duplicate: a record whose text another tenant's, user's or session's trace holds is imported under its own scope id. A record's scope id is its metadata `scopeId`, else the `scope_id` an export of a schema-3 brain carries, else `''`; Markdown, Obsidian and ChatGPT records file under `''`. The CSV importer also matches a trace whose metadata `content_hash` equals the hash. The SQLite importer also matches a trace with identical `content`, does not read `content_hash`, and merges the skipped row's tags, and the later of the two `created_at` times, into the trace it matched; when that changes the trace's tags, it rebuilds the full-text index, so the trace is found by the merged tags.
 3. Deduplication is enabled by default (`dedup: true`) and can be disabled per-import.
 
 ```ts
@@ -755,6 +760,8 @@ interface ImportResult {
   errors: string[];  // Human-readable error messages for failures
 }
 ```
+
+After an import whose `imported` count is above zero, `importFrom` and `importFromString` rebuild the brain's HNSW index, when the brain has one, from the brain's embedded traces, and its full-text index; a SQLite import rebuilds the full-text index itself, so `importFrom` does not rebuild it again.
 
 
 ### ExportOptions Reference
@@ -797,7 +804,7 @@ All under [`src/cognition/memory/io/`](https://github.com/framerslab/agentos/tre
 | `MarkdownImporter.ts` | Markdown directory import |
 | `ObsidianExporter.ts` | Obsidian vault export (wikilinks + tags) |
 | `ObsidianImporter.ts` | Obsidian vault import (wikilinks -> graph edges) |
-| `SqliteExporter.ts` | `VACUUM INTO` byte-perfect backup |
-| `SqliteImporter.ts` | SQLite merge with smart dedup + tag union |
+| `SqliteExporter.ts` | The brain's own rows of every portable table, in a new SQLite file |
+| `SqliteImporter.ts` | Merge of one brain's SQLite file, with dedup + tag union |
 | `ChatGptImporter.ts` | ChatGPT `conversations.json` parser |
 | `CsvImporter.ts` | CSV import with required `content` column |

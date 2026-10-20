@@ -13,7 +13,7 @@
  * 9. Execution time is measured and returned
  */
 
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, parse, resolve } from 'node:path';
@@ -481,27 +481,42 @@ describe('SandboxedToolForge', () => {
   // -------------------------------------------------------------------------
   // Cycle 4: memoryUsedBytes returns honest heap delta after delegation
   // -------------------------------------------------------------------------
-  it('reports a non-zero memoryUsedBytes after a meaningful allocation', async () => {
-    const request = makeRequest(
-      // Allocate ~5 MB of strings; the host heap delta should register
-      // something positive even with GC noise.
-      `function execute() {
-        const chunks = [];
-        for (let i = 0; i < 50; i++) {
-          chunks.push("x".repeat(100000));
-        }
-        return chunks.length;
-      }`,
-    );
+  it('reports the heap delta measured around the call, and zero when the heap shrank', async () => {
+    // The in-process executor reads process.memoryUsage().heapUsed before and
+    // after the call and reports the difference, clamped at zero. A real
+    // allocation cannot pin that: the code's strings are unreachable once it
+    // returns, so a collection before the second reading zeroes the delta (CI
+    // run 39334002795, 19 October 2026). The readings are fixed here instead:
+    // the first call reads `before`, every later one `after`, and the field
+    // must carry exactly their difference, so it is measured, not hard-coded.
+    const realMemoryUsage = process.memoryUsage.bind(process);
+    const heapReadings = (before: number, after: number) => {
+      let calls = 0;
+      return vi.spyOn(process, 'memoryUsage').mockImplementation(() => {
+        calls += 1;
+        return { ...realMemoryUsage(), heapUsed: calls === 1 ? before : after };
+      });
+    };
+    const request = makeRequest('function execute() { return 1; }');
 
-    const result = await forge.execute(request);
+    const grew = heapReadings(10_000_000, 10_004_096);
+    try {
+      const result = await forge.execute(request);
+      expect(result.success).toBe(true);
+      expect(result.output).toBe(1);
+      expect(result.memoryUsedBytes).toBe(4_096);
+    } finally {
+      grew.mockRestore();
+    }
 
-    expect(result.success).toBe(true);
-    expect(result.output).toBe(50);
-    // Honest field: was hard-coded to 0; after the heap-delta heuristic it
-    // should report something positive. The exact bound depends on GC timing,
-    // so just assert > 0.
-    expect(result.memoryUsedBytes).toBeGreaterThan(0);
+    const shrank = heapReadings(10_004_096, 10_000_000);
+    try {
+      const result = await forge.execute(request);
+      expect(result.success).toBe(true);
+      expect(result.memoryUsedBytes).toBe(0);
+    } finally {
+      shrank.mockRestore();
+    }
   });
 
   // -------------------------------------------------------------------------

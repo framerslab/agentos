@@ -8,8 +8,10 @@
  * {@link streamText}.
  */
 import { createHash } from 'node:crypto';
+import { keyPoolConfigFor, keyPoolDefaultsVersion } from './keyPoolDefaults.js';
 
 import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderManager.js';
+import { baseUrlCredentials } from '../core/llm/providers/url-secrets.js';
 import { PROVIDER_DEFAULTS, autoDetectProvider } from './runtime/provider-defaults.js';
 import { getDefaultProvider } from './runtime/global-default.js';
 import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
@@ -38,6 +40,11 @@ export interface ResolvedProvider {
   apiKey?: string;
   /** Base URL override forwarded to the provider SDK. */
   baseUrl?: string;
+  /**
+   * The key pool's id for a key read from the environment, `<providerId>:<ENV_VAR>`, under which the pool's state
+   * persists when a host set a store with `setKeyPoolDefaults()`; absent for an override or a global default.
+   */
+  poolId?: string;
 }
 
 const ENV_KEY_MAP: Record<string, string> = {
@@ -79,6 +86,27 @@ const ENV_URL_MAP: Record<string, string> = {
  */
 export function providerEnvVars(providerId: string): { key?: string; url?: string } {
   return { key: ENV_KEY_MAP[providerId], url: ENV_URL_MAP[providerId] };
+}
+
+/**
+ * The value of every provider key variable that is set and the credentials in
+ * every provider URL variable that is set, for a call's redaction list: a
+ * failover hop resolved at call time reads its key and URL from them.
+ *
+ * @returns The key values as set (a comma-separated key pool is one value)
+ *   and the `user:password` part of each URL that has one.
+ */
+export function providerEnvSecrets(): { keys: string[]; urlCredentials: string[] } {
+  const valuesOf = (variables: Record<string, string>): string[] =>
+    Object.values(variables)
+      .map((name) => process.env[name])
+      .filter((value): value is string => Boolean(value));
+  return {
+    keys: valuesOf(ENV_KEY_MAP),
+    urlCredentials: valuesOf(ENV_URL_MAP)
+      .map((url) => baseUrlCredentials(url))
+      .filter((credentials): credentials is string => Boolean(credentials)),
+  };
 }
 
 const KEYLESS_PROVIDER_IDS = new Set(['claude-code-cli', 'gemini-cli']);
@@ -194,21 +222,29 @@ function refuseMisdirectedCredentials(opts: ModelOption, task: TaskType): void {
  * @param providerId - Provider identifier (e.g. `"openai"`, `"anthropic"`, `"ollama"`).
  * @param modelId - Model identifier within the provider.
  * @param overrides - Optional explicit API key and/or base URL that take precedence
- *   over environment variable lookups.
+ *   over environment variable lookups. `strict` (set for an agency seat) admits
+ *   only a `setDefaultProvider()` default that names this provider, for the key
+ *   and for the URL, and turns off the Anthropic → OpenRouter fallback, so a
+ *   provider with no key of its own fails. `quiet` is for a lookup that sends
+ *   no request, such as the read of the provider's shared credentials that
+ *   `providerHealthKey` compares a call's own with: it resolves the same way
+ *   and prints no notice that a request goes to OpenRouter.
  * @returns A `ResolvedProvider` ready for `createProviderManager()`.
  * @throws {Error} When no credentials can be resolved for the given provider.
  */
 export function resolveProvider(
   providerId: string,
   modelId: string,
-  overrides?: { apiKey?: string; baseUrl?: string }
+  overrides?: { apiKey?: string; baseUrl?: string; strict?: boolean; quiet?: boolean }
 ): ResolvedProvider {
   // Global-default credentials apply when their `provider` matches the
   // provider being resolved (or when no provider was pinned in the
   // default — in which case the default's apiKey is treated as
-  // applicable to whichever provider the auto-detect chain picked).
+  // applicable to whichever provider the auto-detect chain picked),
+  // unless the caller is strict (an agency seat): then only a default
+  // that names this provider applies, and Anthropic is never rerouted.
   const def = getDefaultProvider();
-  const defAppliesToThisProvider = def && (!def.provider || def.provider === providerId);
+  const defAppliesToThisProvider = def && (def.provider === providerId || (!def.provider && !overrides?.strict));
   const defApiKey = defAppliesToThisProvider ? def?.apiKey : undefined;
   const defBaseUrl = defAppliesToThisProvider ? def?.baseUrl : undefined;
 
@@ -236,18 +272,22 @@ export function resolveProvider(
   // if available. This is a convenience — OpenRouter proxies Anthropic models.
   // Not when the call or the global default gave a base URL: that is where
   // the caller sends Anthropic requests, and OpenRouter would drop it.
-  if (providerId === 'anthropic' && !apiKey && !baseUrl) {
+  // A strict caller fails below instead: its key must be Anthropic's own.
+  if (providerId === 'anthropic' && !apiKey && !baseUrl && !overrides?.strict) {
     const orKey = process.env['OPENROUTER_API_KEY'];
     if (orKey) {
       // Anthropic's native API takes dated model IDs (e.g. "claude-haiku-4-5-20251001").
       // OpenRouter exposes Anthropic models under dateless slugs (e.g. "anthropic/claude-haiku-4-5").
       // Strip a trailing -YYYYMMDD release-date suffix when remapping so the OR call resolves.
       const orModelId = modelId.replace(/-\d{8}$/, '');
-      console.warn(
-        `[AgentOS] ANTHROPIC_API_KEY not set — falling back to OpenRouter for model "${modelId}" ` +
-        `(routed as "anthropic/${orModelId}"). Set ANTHROPIC_API_KEY for direct access.`
-      );
-      return { providerId: 'openrouter', modelId: `anthropic/${orModelId}`, apiKey: orKey };
+      // A lookup that sends no request sends none to OpenRouter.
+      if (!overrides?.quiet) {
+        console.warn(
+          `[AgentOS] ANTHROPIC_API_KEY not set — falling back to OpenRouter for model "${modelId}" ` +
+          `(routed as "anthropic/${orModelId}"). Set ANTHROPIC_API_KEY for direct access.`
+        );
+      }
+      return { providerId: 'openrouter', modelId: `anthropic/${orModelId}`, apiKey: orKey, poolId: 'openrouter:OPENROUTER_API_KEY' };
     }
     throw new Error(`No API key for anthropic. Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY.`);
   }
@@ -257,7 +297,9 @@ export function resolveProvider(
     throw new Error(`No API key for ${providerId}. Set ${envVar} or pass apiKey.`);
   }
 
-  return { providerId, modelId, apiKey, baseUrl };
+  // A key read from the environment names its pool, so the pool's state can persist under that name.
+  const fromEnv = overrides?.apiKey === undefined && defApiKey === undefined && ENV_KEY_MAP[providerId] !== undefined;
+  return { providerId, modelId, apiKey, baseUrl, ...(fromEnv ? { poolId: `${providerId}:${ENV_KEY_MAP[providerId]}` } : {}) };
 }
 
 /**
@@ -573,6 +615,49 @@ export function cachedProviderManagerCount(): number {
 }
 
 /**
+ * The {@link shutdownProviderManagers} call in progress, if any. A manager
+ * {@link createProviderManager} builds while it runs waits for it, so the
+ * new manager's pools load the state the replaced pools are writing instead
+ * of the rows from before it.
+ */
+let shutdownInProgress: Promise<void> | undefined;
+
+/**
+ * Shuts down every provider manager {@link createProviderManager} has cached
+ * and empties the cache. Each provider's `shutdown()` closes its key pool,
+ * which stops the pool's recheck timer and writes the keys' standing at once,
+ * so a short-lived host (a CLI, a job) that calls this before it exits keeps
+ * the last quarter second of key state its pools would otherwise lose to the
+ * save debounce. A manager still initializing is awaited first; one whose
+ * initialization failed is skipped. Calls after this one build new managers
+ * as the first call did, and a manager built before it has finished waits
+ * for it, so its pools start from what the old pools wrote.
+ */
+export async function shutdownProviderManagers(): Promise<void> {
+  const pending = Array.from(managerCache.values());
+  managerCache.clear();
+  const shuttingDown = Promise.all(
+    pending.map(async (initializing) => {
+      let manager: AIModelProviderManager;
+      try {
+        manager = await initializing;
+      } catch {
+        return;
+      }
+      await manager.shutdown().catch(() => undefined);
+    }),
+  ).then(() => undefined);
+  const previous = shutdownInProgress;
+  const all = previous ? Promise.all([previous, shuttingDown]).then(() => undefined) : shuttingDown;
+  shutdownInProgress = all;
+  try {
+    await all;
+  } finally {
+    if (shutdownInProgress === all) shutdownInProgress = undefined;
+  }
+}
+
+/**
  * Thrown by {@link createProviderManager} when the requested provider did not
  * initialize: a rejected or revoked API key (the provider's model listing
  * answers 401), an unreachable endpoint, or a provider id the manager does
@@ -618,7 +703,12 @@ function httpStatusOf(error: unknown): number | undefined {
 
 /** The cache key: the provider, and a digest of its key and base URL, so the map holds no key. */
 function buildCacheKey(resolved: ResolvedProvider): string {
-  const digest = createHash('sha256').update(`${resolved.apiKey ?? ''}\n${resolved.baseUrl ?? ''}`).digest('hex');
+  // The pool id and the defaults' version are part of the key: the same key string from the environment (a named,
+  // persisted pool) and from an override (no pool id) builds two managers, and a change of the key pool defaults
+  // gives later calls a manager built with them.
+  const digest = createHash('sha256')
+    .update(`${resolved.apiKey ?? ''}\n${resolved.baseUrl ?? ''}\n${resolved.poolId ?? ''}\n${keyPoolDefaultsVersion()}`)
+    .digest('hex');
   return `${resolved.providerId}::${digest}`;
 }
 
@@ -655,6 +745,9 @@ export async function createProviderManager(
   }
 
   const pending = (async () => {
+    // A manager built while shutdownProviderManagers() runs waits for it: the replaced pools write their pending
+    // state first, so this manager's pools load that state rather than the rows from before it.
+    if (shutdownInProgress) await shutdownInProgress;
     const manager = new AIModelProviderManager();
 
     const providerConfig: Record<string, unknown> = {};
@@ -663,6 +756,9 @@ export async function createProviderManager(
       providerConfig.baseURL = resolved.baseUrl;
       providerConfig.baseUrl = resolved.baseUrl;
     }
+    // The host's key pool defaults (a store, a strategy) and the pool's id for a key from the environment.
+    const keyPool = keyPoolConfigFor(resolved.poolId);
+    if (keyPool) providerConfig.keyPool = keyPool;
 
     await manager.initialize({
       providers: [

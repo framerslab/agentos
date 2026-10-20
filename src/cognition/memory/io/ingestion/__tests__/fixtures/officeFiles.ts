@@ -1,7 +1,8 @@
 /**
  * @fileoverview Office documents the OfficeLoader tests write at run time, so
- * no binary file is committed: a workbook, a deck, an OpenDocument sheet and
- * an OpenDocument deck as the smallest packages officeparser's parsers read;
+ * no binary file is committed: workbooks, decks (one holding a table),
+ * OpenDocument sheets and an OpenDocument deck as the smallest packages
+ * officeparser's parsers read;
  * an OpenDocument text, an RTF file and an EPUB book written by officeparser's
  * own converter from Markdown; and a PDF of one page whose only content is a
  * picture of the words "Tesseract.js".
@@ -147,11 +148,11 @@ export function sparseXlsxOf(text: string): Buffer {
 /**
  * The smallest `.pptx` deck officeparser reads: the content types, the
  * package's relationships, the presentation with its slide list, its
- * relationships and one slide holding one text box.
+ * relationships and one slide.
  *
- * @param text - The text box's one line.
+ * @param shapes - The slide's shapes, after its shape tree's own properties.
  */
-export function pptxOf(text: string): Buffer {
+function deckOf(shapes: string): Buffer {
   const namespaces =
     'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
     `xmlns:r="${OFFICE_RELATIONSHIPS}" ` +
@@ -173,11 +174,40 @@ export function pptxOf(text: string): Buffer {
       'ppt/slides/slide1.xml',
       `${OOXML_DECLARATION}<p:sld ${namespaces}><p:cSld><p:spTree>` +
         '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>' +
-        '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/>' +
-        `<p:txBody><a:bodyPr/><a:p><a:r><a:t>${characterData(text)}</a:t></a:r></a:p></p:txBody></p:sp>` +
-        '</p:spTree></p:cSld></p:sld>',
+        `${shapes}</p:spTree></p:cSld></p:sld>`,
     ),
   ]);
+}
+
+/**
+ * A `.pptx` deck of one slide holding one text box.
+ *
+ * @param text - The text box's one line.
+ */
+export function pptxOf(text: string): Buffer {
+  return deckOf(
+    '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/>' +
+      `<p:txBody><a:bodyPr/><a:p><a:r><a:t>${characterData(text)}</a:t></a:r></a:p></p:txBody></p:sp>`,
+  );
+}
+
+/**
+ * A `.pptx` deck of one slide holding one table of one row, each of its cells
+ * holding the same line.
+ *
+ * @param cells - How many cells the row holds.
+ * @param text - Each cell's one line.
+ */
+export function pptxOfTable(cells: number, text: string): Buffer {
+  const cell = `<a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>${characterData(text)}</a:t></a:r></a:p></a:txBody></a:tc>`;
+  return deckOf(
+    '<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="2" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>' +
+      '<p:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="370840"/></p:xfrm>' +
+      '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">' +
+      `<a:tbl><a:tblGrid>${'<a:gridCol w="914400"/>'.repeat(cells)}</a:tblGrid>` +
+      `<a:tr h="370840">${cell.repeat(cells)}</a:tr></a:tbl>` +
+      '</a:graphicData></a:graphic></p:graphicFrame>',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -214,17 +244,35 @@ function openDocumentOf(mediaType: string, body: string): Buffer {
 }
 
 /**
+ * An `.ods` sheet of one row.
+ *
+ * @param cells - The row's `table:table-cell` elements.
+ */
+function sheetOf(cells: string): Buffer {
+  return openDocumentOf(
+    'application/vnd.oasis.opendocument.spreadsheet',
+    '<office:spreadsheet><table:table table:name="Sheet1">' +
+      `<table:table-row>${cells}</table:table-row></table:table></office:spreadsheet>`,
+  );
+}
+
+/**
  * An `.ods` sheet of one cell.
  *
  * @param text - The cell's text.
  */
 export function odsOf(text: string): Buffer {
-  return openDocumentOf(
-    'application/vnd.oasis.opendocument.spreadsheet',
-    '<office:spreadsheet><table:table table:name="Sheet1"><table:table-row>' +
-      `<table:table-cell office:value-type="string"><text:p>${characterData(text)}</text:p></table:table-cell>` +
-      '</table:table-row></table:table></office:spreadsheet>',
-  );
+  return sheetOf(`<table:table-cell office:value-type="string"><text:p>${characterData(text)}</text:p></table:table-cell>`);
+}
+
+/**
+ * An `.ods` sheet whose one row holds cells, each the text `1`: two XML
+ * elements a cell.
+ *
+ * @param cells - How many cells the row holds.
+ */
+export function odsOfCells(cells: number): Buffer {
+  return sheetOf('<table:table-cell office:value-type="string"><text:p>1</text:p></table:table-cell>'.repeat(cells));
 }
 
 /**

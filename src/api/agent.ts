@@ -32,6 +32,9 @@ import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credenti
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
+import type { SeatInternals } from './runtime/pool/seating.js';
+import { isCallMask } from './runtime/pool/redact.js';
+import { maskStreamMembers } from './runtime/pool/maskedOutput.js';
 import type { HostLLMPolicy } from './runtime/hostPolicy.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
@@ -313,7 +316,7 @@ export interface AgentOptions extends BaseAgentConfig {
    * before `instructions`, `chainOfThought`, `personality`, or `skills`. STYLE.md
    * is appended as a second system message when present.
    *
-   * @see {@link loadSoul} in `@framers/agentos/cognition/substrate/personas/SoulLoader`
+   * @see `loadSoul` in `@framers/agentos/cognition/substrate/personas/SoulLoader`
    * for the loader implementation and full SOUL.md format spec.
    * @see https://github.com/aaronjmars/soul.md for the cross-framework convention.
    */
@@ -363,14 +366,15 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
   /**
    * Zod schema describing the expected shape of the assistant reply. When
    * present, agentos converts the schema to JSON Schema, routes through
-   * the provider's native structured-output API (OpenAI json_schema,
-   * Anthropic forced tool-use, Gemini responseSchema), and returns a
+   * the provider's native structured-output API (OpenAI json_schema;
+   * Anthropic's JSON output format, or a forced tool call for a schema
+   * the format cannot carry; Gemini responseSchema), and returns a
    * Zod-validated typed object on `result.object` alongside the JSON
    * string in `result.text`. A call whose provider payload carries no
-   * schema (a provider with none, an Anthropic model that rejects a
-   * forced tool choice, JSON-object mode) gets the schema in its system
-   * prompt, in the words `generateObject` uses; each fallback provider is
-   * checked for its own payload.
+   * schema (a provider with none, a record schema on an Anthropic model
+   * that refuses a forced tool choice, JSON-object mode) gets the schema
+   * in its system prompt, in the words `generateObject` uses; each
+   * fallback provider is checked for its own payload.
    *
    * The agent's tools are left out of a schema request, and with them the
    * chain-of-thought instruction; `runtime: 'legacy'` (the default) warns
@@ -665,6 +669,48 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
 }
 
 /**
+ * Passes every error that leaves a stream result through `mask`: thrown by
+ * the iterables, carried by an error part, or rejecting any of the result's
+ * promises. With an agency's call mask, what the seat answers leaves masked
+ * too: its streamed text, a secret split between two pieces included, its
+ * other parts and every value its promises settle to
+ * ({@link maskStreamMembers}). With a bare error mask the result's other
+ * members are returned as they are.
+ *
+ * @param result - The stream result `streamText` returned for a seated config.
+ * @param mask - The seat's mask.
+ * @returns A stream result with the same members, whose errors come out masked.
+ */
+function maskStreamResult(result: StreamTextResult, mask: (error: unknown) => unknown): StreamTextResult {
+  if (isCallMask(mask)) return maskStreamMembers(result, mask);
+  const wrapIterable = <T>(iterable: AsyncIterable<T>, mapPart: (part: T) => T): AsyncIterable<T> => ({
+    async *[Symbol.asyncIterator]() {
+      try {
+        for await (const part of iterable) yield mapPart(part);
+      } catch (error) {
+        throw mask(error);
+      }
+    },
+  });
+  const out = { ...result } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(result)) {
+    if (value && typeof (value as Promise<unknown>).then === 'function') {
+      out[key] = (value as Promise<unknown>).then(
+        (settled) => settled,
+        (error: unknown) => {
+          throw mask(error);
+        },
+      );
+    }
+  }
+  out.textStream = wrapIterable(result.textStream, (text) => text);
+  out.fullStream = wrapIterable(result.fullStream, (part) =>
+    part.type === 'error' ? { ...part, error: mask(part.error) as Error } : part,
+  );
+  return out as unknown as StreamTextResult;
+}
+
+/**
  * Resolve an `AgentOptions.soul` value (string path | { content } | { path })
  * into a `LoadedSoul`. Returns null on failure so the agent can still boot
  * (the soul is additive, not load-blocking).
@@ -874,6 +920,12 @@ export function agent(opts: AgentOptions): Agent {
   const effectiveLedger: AgentOSUsageLedgerOptions | undefined =
     (opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger;
 
+  // What an agency's seating writes onto a seated config: strict provider
+  // resolution, and the call's error mask, which every error that leaves
+  // generate() or stream() passes through before a strategy sees it.
+  const seatInternals = opts as AgentOptions & Partial<SeatInternals>;
+  const maskError = seatInternals.__maskError;
+
   const baseOpts: Partial<GenerateTextOptions> = {
     provider: opts.provider,
     model: opts.model,
@@ -928,6 +980,12 @@ export function agent(opts: AgentOptions): Agent {
     onBeforeGeneration: opts.onBeforeGeneration,
     onAfterGeneration: opts.onAfterGeneration,
     onBeforeToolExecution: opts.onBeforeToolExecution,
+    // Set by an agency's seating: strict provider resolution on every call
+    // and every failover hop.
+    ...(seatInternals.__strictCredentials ? { __strictCredentials: true } : {}),
+    // The call's mask reaches the tool loops, which mask a tool's error
+    // before they write it anywhere.
+    ...(maskError ? { __maskError: maskError } : {}),
     // The agent's one budget, on every generate / stream / session call
     // (each spreads baseOpts). A `budget` passed to generate() or stream()
     // replaces it for that call.
@@ -962,38 +1020,46 @@ export function agent(opts: AgentOptions): Agent {
       prompt: MessageContent,
       extra?: Partial<GenerateTextOptions>
     ): Promise<GenerateTextResult> {
-      const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
-      const genOpts: Partial<GenerateTextOptions> = {
-        ...callOptions(extra),
-        usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
-          source: extra?.usageLedger?.source ?? 'agent.generate',
-        }),
-      };
-      if (typeof prompt === 'string') {
-        genOpts.prompt = prompt;
-      } else {
-        genOpts.messages = [...(genOpts.messages ?? []), { role: 'user', content: prompt }];
-      }
-      if (opts.responseSchema) {
-        genOpts._schemaInstruction = buildSchemaInstructionText(lowerZodToJsonSchema(opts.responseSchema), 'response');
-      }
-      const { result, object } = await generateWithValidation(
-        genOpts as GenerateTextOptions,
-        opts.responseSchema,
-        opts.controls?.maxValidationRetries ?? 1,
-        true,
-        (attempt) => accumulateUsage(agentUsageTally, attempt.usage),
-        { provider: opts.memoryProvider, userText, options: opts.memoryProviderOptions },
-      );
-      if (opts.responseSchema) result.parsed = object;
-      if (opts.verifyCitations) {
-        result.grounding = await runCitationVerification(
-          result.text,
-          userText,
-          opts.verifyCitations,
+      try {
+        const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
+        const genOpts: Partial<GenerateTextOptions> = {
+          ...callOptions(extra),
+          usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
+            source: extra?.usageLedger?.source ?? 'agent.generate',
+          }),
+        };
+        if (typeof prompt === 'string') {
+          genOpts.prompt = prompt;
+        } else {
+          genOpts.messages = [...(genOpts.messages ?? []), { role: 'user', content: prompt }];
+        }
+        if (opts.responseSchema) {
+          genOpts._schemaInstruction = buildSchemaInstructionText(lowerZodToJsonSchema(opts.responseSchema), 'response');
+        }
+        const { result, object } = await generateWithValidation(
+          genOpts as GenerateTextOptions,
+          opts.responseSchema,
+          opts.controls?.maxValidationRetries ?? 1,
+          true,
+          (attempt) => accumulateUsage(agentUsageTally, attempt.usage),
+          { provider: opts.memoryProvider, userText, options: opts.memoryProviderOptions },
         );
+        if (opts.responseSchema) result.parsed = object;
+        if (opts.verifyCitations) {
+          result.grounding = await runCitationVerification(
+            result.text,
+            userText,
+            opts.verifyCitations,
+          );
+        }
+        // A seated config's answer leaves the seat masked, its text and tool
+        // calls included: the next seat, a synthesizer, a manager and the
+        // chair are sent only what came out of the mask.
+        return isCallMask(maskError) ? maskError.strings(result) : result;
+      } catch (error) {
+        // A seated config's error leaves the seat masked.
+        throw maskError ? maskError(error) : error;
       }
-      return result;
     },
 
     stream(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): StreamTextResult {
@@ -1018,7 +1084,9 @@ export function agent(opts: AgentOptions): Agent {
       void result.usage
         .then((usage) => accumulateUsage(agentUsageTally, usage))
         .catch(() => { /* stream errored; usage tally unchanged */ });
-      return result;
+      // A seated config's errors leave the seat masked: error parts, a
+      // throwing iterable and rejected result promises alike.
+      return maskError ? maskStreamResult(result, maskError) : result;
     },
 
     session(id?: string): AgentSession {
@@ -1111,8 +1179,9 @@ export function agent(opts: AgentOptions): Agent {
           // Schema-aware calls disable tools. Mixing native structured
           // output with tool-calling requires a multi-turn schema+tool
           // protocol that this overload doesn't speak. Anthropic's
-          // forced tool-use mode reserves the tool slot for the schema
-          // tool, and OpenAI's json_schema mode forbids tools alongside.
+          // forced schema tool (a schema its JSON output format cannot
+          // carry) reserves the tool slot, and OpenAI's json_schema mode
+          // forbids tools alongside.
           // Strip caller-provided tools when responseSchema is set;
           // surface a console.warn so the caller can adjust if they
           // meant to pass both. (toolChoice is not part of

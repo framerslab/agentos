@@ -13,7 +13,7 @@ import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities } from './runtime/hostPolicy.js';
-import { adaptTools } from './runtime/toolAdapter.js';
+import { adaptTools, isSingleUseToolInput, toolInputNames } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
 import { APPROVAL_GRANTED, askApprovalGate } from './runtime/approval-gate.js';
 import {
@@ -30,6 +30,7 @@ import {
   addModelUsage,
   hasBillableUsage,
   isRetryableError,
+  isTimeoutError,
   markChainWalked,
   markToolsRan,
   chainWalkedBefore,
@@ -37,6 +38,7 @@ import {
   usageOfError,
   resolveChainOfThought,
   type FallbackProviderEntry,
+  type FallbackSignal,
   type FallbackSkipReason,
   type GenerateTextOptions,
   type GenerationHookContext,
@@ -59,10 +61,16 @@ import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstructor.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
-import { createLogger } from '../core/logging/loggerFactory.js';
+import { lazyLogger } from './runtime/lazyLogger.js';
+import { isCallMask } from './runtime/pool/redact.js';
 import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 
-const fallbackLogger = createLogger('fallback');
+/**
+ * The `fallback` component's lines, to the logger the host's factory makes when
+ * each line is written: a factory set with `setLoggerFactory` after this module
+ * was imported still receives every failover line.
+ */
+const fallbackLogger = lazyLogger('fallback');
 
 async function recordAgentOSUsageLazy(
   input: Parameters<typeof import('./runtime/usageLedger.js')['recordAgentOSUsage']>[0]
@@ -192,9 +200,9 @@ export function normalizeStreamFinishReason(
 /**
  * The object returned immediately by {@link streamText}.
  *
- * Consumers may iterate `textStream` for raw token deltas, `fullStream` for
- * all event types, or simply `await` the promise properties for aggregated
- * results once the stream has drained.
+ * Consumers iterate `textStream` for raw token deltas or `fullStream` for
+ * all event types; the promise properties settle once that iteration has
+ * drained the stream, and awaiting one of them alone starts no request.
  */
 export interface StreamTextResult {
   /** Citation verdicts after text completes, when enabled on a default-runtime session. */
@@ -241,6 +249,14 @@ export interface StreamTextResult {
   provider: Promise<string>;
   /** Resolves to the resolved model id once the stream has started. */
   model: Promise<string>;
+  /**
+   * The failover trail, resolved when the stream ends: `fired` is true when a
+   * fallback leg served or was tried; `finalProvider` / `finalModel` name the
+   * run that answered; `undefined` only when the stream ended before routing.
+   * Optional in the type, so an object typed as `StreamTextResult` without it
+   * still compiles; `streamText` always sets it.
+   */
+  fallback?: Promise<FallbackSignal | undefined>;
   /**
    * Resolves to the reason the FINAL model step stopped emitting, on the
    * same cadence as {@link usage} (when the stream completes):
@@ -318,8 +334,12 @@ function formatPlanForPrompt(plan: Plan): string {
  * Stateless streaming text generation with optional multi-step tool calling.
  *
  * Returns a {@link StreamTextResult} immediately; the underlying provider call
- * begins lazily when a consumer starts iterating `textStream` or `fullStream`.
- * Awaiting `text`, `usage`, or `toolCalls` will also drain the stream.
+ * begins when a consumer starts iterating `textStream` or `fullStream`, and
+ * `text`, `usage`, `toolCalls` and the other promises settle once that
+ * iteration has run the stream to its end or the consumer stopped reading.
+ * Awaiting a promise alone starts no request and never settles it: a caller
+ * that wants only the assembled text calls {@link generateText}, or reads the
+ * stream to its end first.
  *
  * @param opts - Generation options (same shape as {@link generateText}).
  * @returns A {@link StreamTextResult} with async iterables and awaitable promises.
@@ -387,6 +407,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   const finishReasonPromise = new Promise<StreamFinishReason>((r) => {
     resolveFinishReason = r;
   });
+  // The failover trail, settled at every terminal and in the generator's
+  // finally (first settle wins): who answered, and every hop tried.
+  let resolveFallback: (v: FallbackSignal | undefined) => void;
+  const fallbackPromise = new Promise<FallbackSignal | undefined>((r) => {
+    resolveFallback = r;
+  });
   // Cache-diagnostics verdict + provider message id of the FINAL step.
   // Settled in the generator's finally (every terminal path, including
   // early abandonment) so awaiters never hang; null when not opted in.
@@ -417,6 +443,52 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   let shimRanTool = false;
 
   async function* runStream(): AsyncGenerator<StreamPart> {
+    // A tool's error text as the call's mask leaves it (an agency seat's), one
+    // redacted string for the call record, the tool-result part and the tool
+    // turn. Declared first so the prompt shim and the native loop both see it.
+    const maskToolText = (text: string): string => {
+      const masked = opts.__maskError?.(text);
+      return typeof masked === 'string' ? masked : text;
+    };
+    /**
+     * A tool's successful output as the next request carries it. Under an
+     * agency's call mask the listed values alone are replaced, so a URL the
+     * tool returns keeps its query and its credentials as the tool gave them;
+     * a bare mask is applied as it is. A failed tool's text takes the error mask.
+     */
+    const maskToolOutput = (text: string): string => (isCallMask(opts.__maskError) ? opts.__maskError.text(text) : maskToolText(text));
+    /**
+     * A tool's output as a value, masked before it is serialized: under an
+     * agency's call mask each string, and each number whose digits hold a
+     * listed value, is replaced, so a secret JSON escaping would change (one
+     * with a quote or a backslash) is masked whole, and the call record and
+     * the tool-result part hold the masked output. A bare mask reads text only.
+     */
+    const maskToolValue = (output: unknown): unknown => (isCallMask(opts.__maskError) ? opts.__maskError.strings(output, true) : output);
+    /** A masked turn as the request carries it: the JSON it still is, else (a replacement inside what a class wrote through toJSON) the masked text as a JSON string. */
+    const asJsonText = (sent: string, turn: string): string => {
+      if (sent === turn) return sent;
+      try {
+        JSON.parse(sent);
+        return sent;
+      } catch {
+        return JSON.stringify(sent);
+      }
+    };
+    /**
+     * A tool turn's JSON: the output's, else `absent`'s, for an output that
+     * is absent or that JSON leaves out (a function, a symbol, a toJSON that
+     * returns nothing). A tool that succeeded with such an output is sent as
+     * one that returned nothing, never as a failure. When the mask made a copy
+     * of the output, `returned` (the output as the tool gave it) is written
+     * first: the copy reads a getter that throws as undefined, so an output no
+     * serializer can write (such a getter, a toJSON that throws) fails the tool
+     * here as it does without a mask.
+     */
+    const toolTurnJson = (output: unknown, absent: unknown, returned: unknown = output): string => {
+      if (returned !== output && returned != null) JSON.stringify(returned);
+      return (output == null ? undefined : (JSON.stringify(output) as string | undefined)) ?? (JSON.stringify(absent) as string | undefined) ?? '""';
+    };
     const startedAt = Date.now();
     const rootSpan = startAgentOSSpan('agentos.api.stream_text');
     const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -442,6 +514,30 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     /** The id this attempt's health is recorded under: see providerHealthKey. */
     let healthProviderId: string | undefined;
     let recordedModelId: string | undefined;
+    // The failover trail `fallback` reports once the walk runs: this
+    // attempt first, then each leg's own trail, in the order the walk ran.
+    const hopsTried: FallbackSignal['hops'] = [];
+    // The leg whose run answered: one that served, or one whose output
+    // reached the consumer before it failed.
+    let answeredBy: { provider: string; model: string } | undefined;
+    // Settles `fallback` from what this stream ran (first settle wins).
+    // `primaryOk` is the primary's hop status when no walk ran. Undefined
+    // only when the stream ended before routing.
+    const settleFallback = (primaryOk: boolean): void => {
+      if (recordedProviderId === undefined && hopsTried.length === 0) {
+        resolveFallback!(undefined);
+        return;
+      }
+      const hops: FallbackSignal['hops'] = hopsTried.length > 0
+        ? [...hopsTried]
+        : [{ provider: recordedProviderId ?? 'unknown', model: recordedModelId, ok: primaryOk }];
+      resolveFallback!({
+        fired: hops.length > 1,
+        finalProvider: answeredBy?.provider ?? recordedProviderId ?? '',
+        finalModel: answeredBy?.model ?? recordedModelId ?? '',
+        hops,
+      });
+    };
     // Raw provider finish reason of the most recent step's final chunk.
     // The LAST step's reason is the one that describes the assembled
     // reply (earlier steps end on tool calls by construction).
@@ -523,16 +619,31 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
       const ownCredentials =
         providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
+      // An agency seat resolves strictly: no provider-less default, no reroute.
+      // A call a router moved to another provider takes none of its own key
+      // and URL there, and only a seat's call carries the strict flag.
+      const strict = opts.__strictCredentials === true;
       const resolved = resolveProvider(
         providerId,
         modelId,
-        providerId === credentialProviderId ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl } : undefined,
+        providerId === credentialProviderId
+          ? { apiKey: opts.apiKey, baseUrl: opts.baseUrl, strict }
+          : strict
+            ? { strict }
+            : undefined,
       );
       recordedProviderId = resolved.providerId;
       recordedModelId = resolved.modelId;
       // A key or base URL of the call's own, when it differs from the
-      // provider's, has a health record of its own.
-      const healthId = providerHealthKey(resolved, ownCredentials ? () => resolveProvider(providerId, modelId) : undefined);
+      // provider's, has a health record of its own. So do the credentials a
+      // seat's strict resolution reaches when they differ from the provider's:
+      // a default that names no provider serves the provider's other callers
+      // and never a seat. The provider's are read quietly: that lookup sends
+      // nothing, to OpenRouter or anywhere else.
+      const healthId = providerHealthKey(
+        resolved,
+        ownCredentials || strict ? () => resolveProvider(providerId, modelId, { quiet: true }) : undefined,
+      );
       healthProviderId = healthId;
       // Resolve the eagerly-exposed routing Promises so callers
       // logging telemetry don't have to wait for the stream to drain.
@@ -560,8 +671,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       rootSpan?.setAttribute('llm.provider', resolved.providerId);
       rootSpan?.setAttribute('llm.model', resolved.modelId);
 
-      const tools = adaptTools(opts.tools);
-      const toolMap = new Map<string, ITool>();
+      let tools = adaptTools(opts.tools);
+      // The names the table held when it was last adapted.
+      let adaptedNames = toolInputNames(opts.tools);
+      let toolMap = new Map<string, ITool>();
       for (const tool of tools) toolMap.set(tool.name, tool);
       const helperToolRunId = randomUUID();
 
@@ -605,9 +718,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
       rootSpan?.setAttribute('agentos.api.tool_count', tools.length);
 
-      const toolSchemas =
-        tools.length > 0
-          ? tools.map((tool) => ({
+      const toolSchemasOf = (list: ITool[]) =>
+        list.length > 0
+          ? list.map((tool) => ({
               type: 'function' as const,
               function: {
                 name: tool.name,
@@ -616,6 +729,27 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               },
             }))
          : undefined;
+      let toolSchemas = toolSchemasOf(tools);
+      // A table that grew since the call started is read again before a later
+      // step: a hierarchical manager's spawn_specialist writes delegate_to_<role>
+      // into the table the manager was given, and the manager's next step
+      // sends the new tool and runs it when the model calls it. The names are
+      // read first, which converts no schema: a table whose names are
+      // unchanged keeps the tools of the first read and is not adapted again,
+      // and a table given as a single-use iterable (a generator), which the
+      // first read exhausted, is not read again.
+      const reusableTools = !isSingleUseToolInput(opts.tools);
+      const refreshTools = (): void => {
+        if (!reusableTools) return;
+        const names = toolInputNames(opts.tools);
+        if (names.length === adaptedNames.length && names.every((name, i) => name === adaptedNames[i])) return;
+        adaptedNames = names;
+        const current = adaptTools(opts.tools);
+        if (current.length === tools.length && current.every((tool, i) => tool.name === tools[i].name)) return;
+        tools = current;
+        toolMap = new Map(current.map((tool) => [tool.name, tool]));
+        toolSchemas = toolSchemasOf(current);
+      };
 
       // A catalog model is sent only a request it can hold: otherwise the
       // call throws in place of the send and the walk moves on. Checked on
@@ -697,6 +831,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       async function* runShimStream(): AsyncGenerator<StreamPart> {
         const loopResult = await runEmulatedToolLoop({
           tools: Array.from(toolMap.values()),
+          // The table is read again before each later round, as on the native
+          // loop, so a tool added mid-call (a spawned specialist's delegate
+          // tool) is listed and runs.
+          currentTools: () => {
+            refreshTools();
+            return Array.from(toolMap.values());
+          },
           onToolExecute: () => {
             shimRanTool = true;
           },
@@ -705,6 +846,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
+          // A seat's mask reaches the shim's tool errors too, and a successful
+          // output passes the listed values alone.
+          maskToolError: opts.__maskError ? maskToolText : undefined,
+          maskToolOutput: opts.__maskError ? maskToolOutput : undefined,
+          maskToolValue: opts.__maskError ? maskToolValue : undefined,
           // Native tool turns in the history become the shim's own
           // <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -812,6 +958,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         resolveText!(finalText);
         resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
         resolveToolCalls!(shimToolCalls);
+        settleFallback(true);
       }
       if (tools.length > 0 && toolMode === 'prompt') {
         yield* runShimStream();
@@ -823,6 +970,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       for (let step = 0; step < maxSteps; step++) {
         // No step starts once the caller's signal has aborted.
         opts.abortSignal?.throwIfAborted();
+        if (step > 0) refreshTools();
         stepUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
         // --- onBeforeGeneration hook ---
         let effectiveMessages = messages;
@@ -1046,8 +1194,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // registry and walked like any thrown error. An abort is the
               // caller's own stop and never walks.
               if (!aborted && firstPartAt === undefined && !shimRanTool) throw error;
-              // After output the stream ends here, and the failure is recorded.
-              if (!aborted && !stoppedBy && healthProviderId) {
+              // After output the stream ends here, and the failure is recorded,
+              // unless it is a timeout the panel's own deadline produced.
+              if (!aborted && !stoppedBy && healthProviderId && !(opts.__panelDeadline && isTimeoutError(error))) {
                 globalLLMProviderHealth.recordFailure(healthProviderId, error);
               }
               // Settled before the error part is handed over: a consumer that
@@ -1057,6 +1206,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
               resolveToolCalls!(allToolCalls);
               resolveFinishReason!('error');
+              settleFallback(false);
               const part: StreamPart = { type: 'error', error: stoppedBy ?? error };
               parts.push(part);
               yield part;
@@ -1170,6 +1320,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!(stepFinish);
+          settleFallback(true);
           return;
         }
 
@@ -1312,24 +1463,50 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 toolCallId || undefined,
               ),
             );
-            toolCallRecord.result = result.output;
-            toolCallRecord.error = result.success ? undefined: result.error;
+            // One masked output serves the record, the tool-result part and
+            // the tool turn: the seat's next request carries no key. The
+            // output is masked as a value before it is serialized, then the
+            // whole turn passes the text mask: a tool that returns a
+            // credential of the call would otherwise send it to the seat's
+            // provider. A successful output passes the listed values alone, so
+            // a URL it returns is sent as the tool gave it; a failed tool's
+            // turn takes the error mask, URL patterns included. A turn a
+            // replacement left as no JSON is sent as a JSON string, and the
+            // part is read back from a turn the text mask changed. An output
+            // that is absent or that JSON leaves out (a function, a symbol)
+            // is sent as generateText sends it: a successful tool's as the
+            // empty string's JSON, never as an error, a failed one's as its
+            // error. An output no serializer can write fails here, masked or
+            // not.
+            const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
+            const output = maskToolValue(result.output);
+            toolCallRecord.result = output;
+            toolCallRecord.error = result.success ? undefined: errorText;
+            const turn = toolTurnJson(output, result.success ? (errorText ?? '') : { error: errorText ?? 'Tool execution failed.' }, result.output);
+            const sentTurn = asJsonText(result.success ? maskToolOutput(turn) : maskToolText(turn), turn);
+            let partResult: unknown = output ?? { error: errorText };
+            if (sentTurn !== turn) {
+              try {
+                partResult = JSON.parse(sentTurn);
+              } catch {
+                // Not reached: asJsonText sends JSON. Kept so a part is never lost to a parse.
+                partResult = sentTurn;
+              }
+            }
             const resultPart: StreamPart = {
               type: 'tool-result',
               toolName: fnName,
-              result: result.output ?? { error: result.error },
+              result: partResult,
             };
             parts.push(resultPart);
             yield resultPart;
             messages.push({
               role: 'tool',
               tool_call_id: toolCallId,
-              content: JSON.stringify(
-                result.output ?? { error: result.error ?? 'Tool execution failed.' }
-              ),
+              content: sentTurn,
             } as any);
           } catch (err: any) {
-            toolCallRecord.error = err?.message ?? String(err);
+            toolCallRecord.error = maskToolText(err?.message ?? String(err));
             const resultPart: StreamPart = {
               type: 'tool-result',
               toolName: fnName,
@@ -1377,6 +1554,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           ? 'tool-calls'
           : normalizeStreamFinishReason(lastStepFinishReason),
       );
+      settleFallback(true);
       // Primary streaming attempt succeeded: reset the failure streak
       // so a future transient error starts fresh. See
       // {@link LLMProviderHealthRegistry}.
@@ -1409,10 +1587,17 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
       // Record the failure on the provider-health registry. Synthetic
       // circuit-open errors are skipped because they're already a
-      // *consequence* of the registry, not a new failure to record, and so
-      // is a call the caller stopped (its spend budget's refusal, a hook's
-      // stop, an abort), which says nothing about the provider.
-      if (healthProviderId && error.name !== 'LLMProviderCircuitOpenError' && !stoppedBy && !isCallerStop(err)) {
+      // *consequence* of the registry, not a new failure to record; so is
+      // a call the caller stopped (its spend budget's refusal, a hook's
+      // stop, an abort) and a timeout the panel's own deadline produced,
+      // neither of which says anything about the provider's health.
+      if (
+        healthProviderId &&
+        error.name !== 'LLMProviderCircuitOpenError' &&
+        !stoppedBy &&
+        !isCallerStop(err) &&
+        !(opts.__panelDeadline && isTimeoutError(error))
+      ) {
         globalLLMProviderHealth.recordFailure(healthProviderId, error);
       }
 
@@ -1470,6 +1655,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       );
 
       if (walks && effectiveFallbacks.length) {
+        // The failed attempt heads the trail.
+        hopsTried.push({ provider: recordedProviderId ?? 'unknown', model: recordedModelId, ok: false });
         let lastFallbackError: Error = error;
         // How the walk ended: a leg served the stream; a leg failed after it
         // delivered output (its error part already reached the consumer); or
@@ -1496,8 +1683,16 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // recursion overhead.
           // The breaker read is the provider the leg is sent to: an
           // `openrouter:` id under another provider goes to OpenRouter.
+          // That record speaks only for a leg that runs on the provider's
+          // shared credentials. A leg with a key or URL of its own, and every
+          // leg of a seat's call (strict, so a default that names no provider
+          // never reaches it), can keep the record of the key it sends
+          // (providerHealthKey), which the call below reads before it sends;
+          // a failure of another key skips none of them.
           const legProvider = fallbackEntrySentAs(fb).provider;
-          if (globalLLMProviderHealth.isOpen(legProvider)) {
+          const legOnSharedCredentials =
+            fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;
+          if (legOnSharedCredentials && globalLLMProviderHealth.isOpen(legProvider)) {
             fallbackLogger.info('streaming provider fallback skipped (circuit open)', {
               event: 'fallback_skipped_circuit_open',
               api: 'streamText',
@@ -1515,6 +1710,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // reported before it did.
           let legDelivered = false;
           let legError: Error | undefined;
+          // The run this leg reports as the one that answered, once it ended.
+          let legAnswer: { provider: string; model: string } | undefined;
           try {
             fallbackLogger.info('streaming provider fallback triggered', {
               event: 'fallback_fired',
@@ -1523,10 +1720,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               fallbackProvider: fb.provider,
               fallbackModel: fb.model,
               errorType: lastFallbackError.name,
-              errorMessage: lastFallbackError.message.slice(0, 200),
+              // A seat's mask first: a provider's message can echo the key it was sent.
+              errorMessage: maskToolText(lastFallbackError.message).slice(0, 200),
               attempt,
             });
-            opts.onFallback?.(lastFallbackError, fb.provider);
+            // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
+            opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastFallbackError) as Error) : lastFallbackError, fb.provider);
             const fallbackResult = streamText({
               ...opts,
               provider: fb.provider,
@@ -1547,8 +1746,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // Stamp the leg's observer events with its hop depth (see
               // LlmUsageEvent.fallbackDepth).
               __fallbackDepth: (opts.__fallbackDepth ?? 0) + 1,
-              apiKey: undefined,
-              baseUrl: undefined,
+              // The hop's own key and URL, when its entry carries them (an
+              // agency's seating writes them); otherwise the fallback
+              // provider's environment, never the primary's overrides.
+              apiKey: fb.apiKey,
+              baseUrl: fb.baseUrl,
               // Preserve the REMAINING chain (entries AFTER the current fb;
               // `attempt` is 1-indexed so slice(attempt) drops fb and all
               // already-tried entries), mirroring generateText. Passing
@@ -1590,6 +1792,16 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // served, failed after output or abandoned.
               addTokenUsage(usage, await fallbackResult.usage);
               finalText = await fallbackResult.text;
+              // The leg's own trail (its attempt and every hop it walked)
+              // joins this stream's; a leg whose output reached the consumer
+              // is the run that answered, served or not.
+              const legSignal = await fallbackResult.fallback;
+              hopsTried.push(...(legSignal?.hops ?? [{ provider: fb.provider, model: fb.model, ok: false }]));
+              legAnswer = {
+                provider: legSignal?.finalProvider || fb.provider,
+                model: legSignal?.finalModel || (await fallbackResult.model) || (fb.model ?? ''),
+              };
+              if (legDelivered) answeredBy = legAnswer;
             }
 
             if (legError) {
@@ -1632,6 +1844,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               resolveCacheDiagnostics!(fallbackResult.cacheDiagnostics);
               resolveProviderMessageId!(fallbackResult.providerMessageId);
             }
+            // The leg answered, a leg that served with no part included.
+            answeredBy = legAnswer ?? answeredBy;
 
             if (fallbackFinishReason === 'error') {
               outcome = 'failed-after-output';
@@ -1657,6 +1871,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             break;
           } catch (fbErr: any) {
             lastFallbackError = fbErr instanceof Error ? fbErr : new Error(String(fbErr));
+            // A leg that failed before its stream was read has no trail of its own.
+            if (!legAnswer) hopsTried.push({ provider: fb.provider, model: fb.model, ok: false });
             if (legDelivered) {
               // Output already reached the consumer: this error ends the
               // stream and nothing is replayed.
@@ -1684,12 +1900,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!(fallbackFinishReason);
+          settleFallback(false);
         } else if (outcome === 'failed-after-output') {
           metricStatus = 'error';
           resolveText!(finalText);
           resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!('error');
+          settleFallback(false);
         } else {
           // The caller's signal ended the walk: the stream ends on the
           // signal's reason, and no exhausted chain is reported.
@@ -1702,10 +1920,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               primaryProvider: recordedProviderId,
               attempts: attempt,
               errorType: lastFallbackError.name,
-              errorMessage: lastFallbackError.message.slice(0, 200),
+              errorMessage: maskToolText(lastFallbackError.message).slice(0, 200),
             });
           }
           metricStatus = 'error';
+          // No leg answered: the trail names this attempt's provider.
+          settleFallback(false);
           // Marked so a walker that called this one as a leg stops instead of
           // walking the same remaining entries again.
           const terminal = walkStoppedBy ?? (markChainWalked(lastFallbackError) as Error);
@@ -1719,6 +1939,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         }
       } else {
         metricStatus = 'error';
+        settleFallback(false);
         // Marked so a walker that called this one as a leg does not run the
         // tools again on another provider. The signal's reason is the
         // caller's own object and stays as it was given.
@@ -1759,6 +1980,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ? 'tool-calls'
             : normalizeStreamFinishReason(lastStepFinishReason),
       );
+      // The failover trail too: a no-op after a terminal settled it; on
+      // early abandonment it names the run that was streaming.
+      settleFallback(metricStatus !== 'error');
       // Same belt-and-suspenders: every path settles the diagnostics pair
       // here (null when the run never opted in or never reached a final
       // chunk) so awaiters never hang. When opted in, the id is the final
@@ -1911,6 +2135,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     toolCalls: toolCallsPromise,
     provider: providerPromise,
     model: modelPromise,
+    fallback: fallbackPromise,
     finishReason: finishReasonPromise,
     cacheDiagnostics: cacheDiagnosticsPromise,
     providerMessageId: providerMessageIdPromise,

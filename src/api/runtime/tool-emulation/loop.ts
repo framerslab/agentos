@@ -17,6 +17,13 @@ export interface EmulatedToolCallRecord { name: string; args: Record<string, unk
 
 export interface RunEmulatedToolLoopOptions {
   tools: ITool[];
+  /**
+   * Reads the tool table again before each later round. A table whose names
+   * changed since the last read (a hierarchical manager's `spawn_specialist`
+   * adds `delegate_to_<role>`) is rendered into the tool block again and its
+   * tools run; one whose names are unchanged keeps the tools of the last read.
+   */
+  currentTools?: () => ITool[];
   messages: EmulatedLoopMessage[];
   /** Buffered model call. Returns the full assistant text + usage. */
   callModel: (messages: EmulatedLoopMessage[]) => Promise<{ text: string; usage?: { totalTokens?: number } }>;
@@ -45,6 +52,21 @@ export interface RunEmulatedToolLoopOptions {
   hookErrors?: 'warn' | 'throw';
   /** The agency approval gate, called after the hook: anything but its exact approval skips the tool. */
   approvalGate?: ApprovalGateFn;
+  /** Masks a tool's error text before it is recorded and returned to the model (an agency seat's mask). */
+  maskToolError?: (text: string) => string;
+  /**
+   * Masks a successful tool response before the model reads it. An agency
+   * seat passes the listed values alone here, so a URL a tool returns keeps
+   * its query; without it, `maskToolError` masks the whole response.
+   */
+  maskToolOutput?: (text: string) => string;
+  /**
+   * Masks a tool's output as a value before the response is serialized: each
+   * string, and each number whose digits hold a listed value, so a secret JSON
+   * escaping would change is masked whole. An agency seat passes its call
+   * mask's value form here.
+   */
+  maskToolValue?: (output: unknown) => unknown;
 }
 
 export interface EmulatedToolLoopResult {
@@ -63,15 +85,26 @@ export interface EmulatedToolLoopResult {
 export async function runEmulatedToolLoop(
   opts: RunEmulatedToolLoopOptions
 ): Promise<EmulatedToolLoopResult> {
-  const toolMap = new Map(opts.tools.map((t) => [t.name, t]));
+  let tools = opts.tools;
+  let toolMap = new Map(tools.map((t) => [t.name, t]));
   const messages: EmulatedLoopMessage[] = [
-    { role: 'system', content: renderToolSystemBlock(opts.tools) },
+    { role: 'system', content: renderToolSystemBlock(tools) },
     ...opts.messages,
   ];
   const toolCalls: EmulatedToolCallRecord[] = [];
   let totalTokens = 0;
 
   for (let step = 0; step < opts.maxRoundtrips; step++) {
+    // A tool the last round added (a spawned specialist's delegate tool) is
+    // listed in this round's tool block and runs when the model calls it.
+    if (step > 0 && opts.currentTools) {
+      const current = opts.currentTools();
+      if (current.length !== tools.length || current.some((t, i) => t.name !== tools[i].name)) {
+        tools = current;
+        toolMap = new Map(current.map((t) => [t.name, t]));
+        messages[0] = { role: 'system', content: renderToolSystemBlock(current) };
+      }
+    }
     const { text, usage } = await opts.callModel(messages);
     totalTokens += usage?.totalTokens ?? 0;
     const { calls, cleanedText, parseErrors } = parseToolCalls(text);
@@ -116,12 +149,39 @@ export async function runEmulatedToolLoop(
         }
         try {
           opts.onToolExecute?.(call.name);
-          const result = await tool.execute(args, opts.toolContext as ToolExecutionContext);
-          toolCalls.push({ name: call.name, args: call.arguments });
-          return formatToolResponse(call.name, result);
+          const raw = await tool.execute(args, opts.toolContext as ToolExecutionContext);
+          // The output is masked as a value before the response is written,
+          // and a returned failure is masked before the model reads it, and
+          // recorded as the native loops record it.
+          const result = {
+            ...raw,
+            ...(opts.maskToolValue && raw.output !== undefined ? { output: opts.maskToolValue(raw.output) } : {}),
+            ...(opts.maskToolError && raw.success === false && typeof raw.error === 'string' ? { error: opts.maskToolError(raw.error) } : {}),
+          };
+          // The response is written before the call is recorded, so an output
+          // no serializer can write (a getter or a toJSON that throws, a
+          // cycle) is recorded once, as the failure the catch below records.
+          // The masked copy reads such a getter as undefined, so the output as
+          // the tool returned it is written first, and fails the tool as an
+          // unmasked response does.
+          if (result.success && result.output !== raw.output && raw.output != null) JSON.stringify(raw.output);
+          const response = formatToolResponse(call.name, result);
+          toolCalls.push({
+            name: call.name,
+            args: call.arguments,
+            ...(result.success === false && typeof result.error === 'string' ? { error: result.error } : {}),
+          });
+          // The whole response passes the mask, a successful output included:
+          // a tool that returns a credential of the call would otherwise send
+          // it to the seat's provider. A successful response takes the output
+          // mask when the caller gives one (the listed values alone), a failed
+          // one the error mask.
+          const maskResponse = result.success === false ? opts.maskToolError : (opts.maskToolOutput ?? opts.maskToolError);
+          return maskResponse ? maskResponse(response) : response;
         } catch (err) {
-          toolCalls.push({ name: call.name, args: call.arguments, error: String(err) });
-          return formatToolResponse(call.name, { success: false, error: String(err) });
+          const error = opts.maskToolError ? opts.maskToolError(String(err)) : String(err);
+          toolCalls.push({ name: call.name, args: call.arguments, error });
+          return formatToolResponse(call.name, { success: false, error });
         }
       })
     );

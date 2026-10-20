@@ -166,6 +166,16 @@ export interface CompletionAttempt extends AsyncIterable<ModelCompletionResponse
    * so read it once the attempt's stream has ended.
    */
   schemaInPayload?: boolean;
+  /**
+   * For an attempt with a response schema on an Anthropic hop: the route the
+   * hop's request took, as the provider's chunks say it (`schemaRoute`), else
+   * the route of the hop's marker. `json_schema` (the JSON output format; a
+   * text answer that parses is lifted into `structuredOutput`), `forced_tool`
+   * (a schema tool call whose arguments parse is lifted) or `none` (the schema
+   * rode the prompt; nothing is lifted). Unset on other providers and without
+   * a schema; like `schemaInPayload`, read it once the stream has ended.
+   */
+  schemaRoute?: 'json_schema' | 'forced_tool' | 'none';
 }
 
 /**
@@ -564,17 +574,29 @@ function billedUsage(buffered: ReadonlyArray<ModelCompletionResponse>, error: Er
   return undefined;
 }
 
+/** How an Anthropic hop carried the response schema: the JSON output format, the forced schema tool, or the prompt. */
+type SchemaRoute = 'json_schema' | 'forced_tool' | 'none';
+
 /**
  * The provider-native schema payload for this hop, built as session.send builds
  * it, and, when that payload carries no schema (no payload for the provider or
  * model, or a JSON mode without one), the schema instructions for the hop's
- * system prompt, in generateObject's words.
+ * system prompt, in generateObject's words. For an Anthropic hop, `route` is
+ * the marker's route and `toolName` the schema's name; the attempt lifts by
+ * the route the provider says it took (`schemaRoute` on its chunks), else by
+ * this one, so the schema tool's call is lifted only on the forced route and a
+ * caller tool that shares the schema's name is never lifted on the others.
  */
 function lowerForHop(
   resolution: CompletionResolution,
   schema: ZodType,
   schemaName: string,
-): { responseFormat: Record<string, unknown> | undefined; toolName?: string; schemaInstruction?: string } {
+): {
+  responseFormat: Record<string, unknown> | undefined;
+  route?: SchemaRoute;
+  toolName?: string;
+  schemaInstruction?: string;
+} {
   const jsonSchema = lowerZodToJsonSchema(schema);
   const responseFormat = buildResponseFormatForProvider({
     providerId: resolution.providerId,
@@ -583,10 +605,14 @@ function lowerForHop(
     effectiveSchema: schema,
     schemaName,
   });
-  const marker = responseFormat as { _agentosUseToolForStructuredOutput?: boolean; tool?: { name?: string } } | undefined;
+  const marker = responseFormat as
+    | { _agentosUseToolForStructuredOutput?: boolean; route?: SchemaRoute; tool?: { name?: string } }
+    | undefined;
+  const route = marker?._agentosUseToolForStructuredOutput ? marker.route ?? 'forced_tool' : undefined;
   return {
     responseFormat,
-    toolName: marker?._agentosUseToolForStructuredOutput ? marker.tool?.name : undefined,
+    ...(route ? { route } : {}),
+    toolName: route ? marker?.tool?.name : undefined,
     ...(responseFormatCarriesSchema(responseFormat) ? {} : { schemaInstruction: buildSchemaInstructionText(jsonSchema, schemaName) }),
   };
 }
@@ -598,27 +624,75 @@ function withSystemMessage(messages: ChatMessage[], text: string): ChatMessage[]
   return [...messages.slice(0, at), { role: 'system', content: text }, ...messages.slice(at)];
 }
 
-/** A streamed forced schema tool call becomes `structuredOutput` on the chunk, never a tool call the GMI would dispatch. */
+/**
+ * True when a chunk stopped at the output limit: `length`, the providers'
+ * mapping of Anthropic's `max_tokens`, or the raw `max_tokens`.
+ */
+function stoppedAtOutputLimit(chunk: ModelCompletionResponse): boolean {
+  const reason = chunk.choices?.[0]?.finishReason;
+  return reason === 'length' || reason === 'max_tokens';
+}
+
+/**
+ * A streamed forced schema tool call becomes `structuredOutput` on the chunk,
+ * never a tool call the GMI would dispatch. A call that is no answer is still
+ * removed, its raw arguments become the chunk's text and nothing goes into
+ * `structuredOutput`, so the step keeps its finish reason and the session
+ * names the failure, and the GMI never parses or runs the cut call: arguments
+ * that do not parse, and any call on a chunk that stopped at the output limit
+ * (`length`), whose arguments can parse though the call was cut (the limit
+ * can fall just after the closing brace; Anthropic's provider gives a call
+ * none of whose input arrived empty arguments, never a `{}`).
+ */
 function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): ModelCompletionResponse {
   const choice = chunk.choices?.[0];
   const calls = choice?.message?.tool_calls;
   if (!choice || !calls?.length) return chunk;
   const schemaCall = calls.find((call) => call.function?.name === toolName);
   if (!schemaCall) return chunk;
-  let structuredOutput: unknown = schemaCall.function.arguments;
-  if (typeof structuredOutput === 'string') {
+  const rest = calls.filter((call) => call !== schemaCall);
+  const message = { ...choice.message, tool_calls: rest.length > 0 ? rest : undefined };
+  const args: unknown = schemaCall.function.arguments;
+  const asText = (): ModelCompletionResponse => {
+    const raw = typeof args === 'string' ? args : JSON.stringify(args ?? null);
+    const text = typeof message.content === 'string' && message.content ? `${message.content}${raw}` : raw;
+    return { ...chunk, choices: [{ ...choice, message: { ...message, content: text } }, ...chunk.choices.slice(1)] };
+  };
+  if (stoppedAtOutputLimit(chunk)) return asText();
+  let structuredOutput: unknown = args;
+  if (typeof args === 'string') {
     try {
-      structuredOutput = JSON.parse(structuredOutput);
+      structuredOutput = JSON.parse(args);
     } catch {
-      // Kept as the raw string; the session reports the parse failure.
+      return asText();
     }
   }
-  const rest = calls.filter((call) => call !== schemaCall);
   return {
     ...chunk,
-    choices: [{ ...choice, message: { ...choice.message, tool_calls: rest.length > 0 ? rest : undefined } }, ...chunk.choices.slice(1)],
+    choices: [{ ...choice, message }, ...chunk.choices.slice(1)],
     structuredOutput,
   } as ModelCompletionResponse & { structuredOutput: unknown };
+}
+
+/**
+ * A JSON text answer (an Anthropic hop on the JSON output format, which puts
+ * the JSON in the text block) becomes `structuredOutput` on the chunk, as
+ * {@link liftSchemaToolCall} lifts a forced tool call, so the session's
+ * protection of a schema answer and its parse see the same field on both
+ * routes. Only text that parses, on a chunk that did not stop at the output
+ * limit, is lifted: prose, and a `max_tokens` cut-off whether or not its text
+ * parses (the limit can fall just after the closing brace), keep their text
+ * and their finish reason, so a cut-off never reads as a clean stop.
+ */
+function liftSchemaText(chunk: ModelCompletionResponse, text: string): ModelCompletionResponse {
+  if (stoppedAtOutputLimit(chunk)) return chunk;
+  let structuredOutput: unknown;
+  try {
+    structuredOutput = JSON.parse(text);
+  } catch {
+    return chunk;
+  }
+  return { ...chunk, structuredOutput } as ModelCompletionResponse & { structuredOutput: unknown };
 }
 
 export function createCompletionGateway(defaults: Partial<CompletionRoute> = {}): CompletionGateway {
@@ -705,9 +779,10 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           : resolveProvider(parsed.providerId, parsed.modelId);
         servingProviderId = resolved.providerId;
         const ownCredentials = routeCredentials && (route.apiKey !== undefined || route.baseUrl !== undefined);
+        // The provider's shared credentials are read quietly: that lookup sends nothing.
         const hopHealthId = providerHealthKey(
           resolved,
-          ownCredentials ? () => resolveProvider(parsed.providerId, parsed.modelId) : undefined,
+          ownCredentials ? () => resolveProvider(parsed.providerId, parsed.modelId, { quiet: true }) : undefined,
         );
         healthId = hopHealthId;
         if (globalLLMProviderHealth.isOpen(hopHealthId)) throw circuitOpenError(resolved.providerId, hopHealthId);
@@ -802,6 +877,38 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       stream: true,
     };
 
+    /**
+     * The route the hop's provider says its request took (`schemaRoute` on its
+     * chunks): it decides on the request it sends (the model on the wire, thinking,
+     * citations, passthrough tools), so it can differ from the marker's route.
+     */
+    let sentRoute: SchemaRoute | undefined;
+    /** The text of a JSON-output-format answer so far, lifted once on the final chunk. */
+    let answerText = '';
+    let answerLifted = false;
+    const liftJsonText = (raw: ModelCompletionResponse): ModelCompletionResponse => {
+      // A hop whose provider put the schema in the prompt itself (its chunks say
+      // schemaInPayload false) answered as prompt-only text: nothing is lifted, and
+      // the session extracts the JSON from the text as it does for any prompt-only hop.
+      if (schemaInPayload === false) return raw;
+      if (raw.responseTextDelta) answerText += raw.responseTextDelta;
+      if (answerLifted || !raw.isFinal) return raw;
+      const content = raw.choices?.[0]?.message?.content;
+      const text = typeof content === 'string' && content ? content : answerText;
+      if (!text) return raw;
+      answerLifted = true;
+      return liftSchemaText(raw, text);
+    };
+    /** The answer lifted from where the hop's request put it: the schema tool's call, the format's text, or nowhere. */
+    const lift = (raw: ModelCompletionResponse): ModelCompletionResponse => {
+      if (!structured?.route) return raw;
+      if (raw.schemaRoute) sentRoute = raw.schemaRoute;
+      const route = sentRoute ?? structured.route;
+      if (route === 'forced_tool') return structured.toolName ? liftSchemaToolCall(raw, structured.toolName) : raw;
+      if (route === 'json_schema') return liftJsonText(raw);
+      return raw;
+    };
+
     async function* run(): AsyncGenerator<ModelCompletionResponse, void, undefined> {
       let delivered = false;
       let completed = false;
@@ -825,7 +932,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         const signal = callOptions.abortSignal;
         for await (const raw of signal ? untilAborted(chunks, signal, resolution, onLateUsage) : chunks) {
           if (structured && raw.schemaInPayload === false) schemaInPayload = false;
-          const chunk = structured?.toolName ? liftSchemaToolCall(raw, structured.toolName) : raw;
+          const chunk = lift(raw);
           if (chunk.error) {
             // An abort is the caller's own stop: it is never walked to another
             // hop and says nothing about the provider's health (as in streamText).
@@ -882,7 +989,14 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     }
 
     const attempt: CompletionAttempt = { [Symbol.asyncIterator]: () => run(), outcome };
-    if (structured) Object.defineProperty(attempt, 'schemaInPayload', { enumerable: true, get: () => schemaInPayload });
+    if (structured) {
+      Object.defineProperty(attempt, 'schemaInPayload', { enumerable: true, get: () => schemaInPayload });
+      // The route the request took, as the provider said it; the marker's own until a chunk says.
+      if (structured.route) {
+        const markerRoute = structured.route;
+        Object.defineProperty(attempt, 'schemaRoute', { enumerable: true, get: () => sentRoute ?? markerRoute });
+      }
+    }
     return attempt;
   }
 

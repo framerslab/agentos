@@ -20,8 +20,19 @@ import type {
   JSONSchemaObject,
 } from '../../../../core/tools/ITool.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
-import { buildNaturalLanguageFtsQuery } from '../../retrieval/store/tracePersistence.js';
+import { bindingsFor, buildNaturalLanguageFtsQuery } from '../../retrieval/store/tracePersistence.js';
 import { resolveMemoryToolScopeId } from './scopeContext.js';
+
+/**
+ * Whether a full-text query failed as SQLite rejected it: better-sqlite3 marks the error with the
+ * `SQLITE_ERROR` code, while sql.js throws an Error that carries only the message, FTS4's
+ * "malformed MATCH expression" or FTS5's "fts5: syntax error".
+ */
+function isFtsQueryError(error: unknown): boolean {
+  if ((error as { code?: unknown } | null)?.code === 'SQLITE_ERROR') return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /malformed MATCH expression|fts5: syntax error/i.test(message);
+}
 
 // ---------------------------------------------------------------------------
 // Internal row types
@@ -169,13 +180,14 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
    * The SQL pattern:
    * ```sql
    * SELECT mt.id, mt.content, mt.type, mt.scope, mt.strength, mt.tags
-   * FROM memory_traces_fts fts
-   * JOIN memory_traces mt ON mt.rowid = fts.rowid
-   * WHERE fts.memory_traces_fts MATCH ?
+   * FROM memory_traces_fts memory_traces_fts
+   * JOIN memory_traces mt ON mt.rowid = memory_traces_fts.rowid
+   * WHERE memory_traces_fts MATCH ?
    *   AND mt.deleted = 0
    *   [AND mt.type = ?]    -- when type filter provided
    *   [AND mt.scope = ?]   -- when scope filter provided
-   * ORDER BY rank          -- FTS5 BM25 relevance (lower = more relevant)
+   * ORDER BY memory_traces_fts.rank  -- FTS5 BM25 relevance (lower = more relevant);
+   *                                  -- FTS4 orders by length(offsets(memory_traces_fts)) DESC
    * LIMIT ?
    * ```
    *
@@ -224,18 +236,25 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
       const extraWhere = extraClauses.length > 0 ? `AND ${extraClauses.join(' AND ')}` : '';
 
       const { fts } = this.brain.features;
+      // The best match first on every engine: FTS5's rank is lower for a
+      // better match, FTS4's length of offsets() and Postgres's ts_rank
+      // higher. On Postgres the order reads the query text through its own
+      // `?`, bound after the filters. The index keeps its own name in the
+      // join: FTS4's offsets(memory_traces_fts) takes the table's hidden
+      // column, which carries the table's name and no alias.
+      const order = fts.relevanceOrder('memory_traces_fts', '?');
       const sql = `
         SELECT mt.id, mt.content, mt.type, mt.scope, mt.strength, mt.tags
-        FROM ${fts.joinClause('memory_traces', 'mt', 'fts', 'memory_traces_fts')}
+        FROM ${fts.joinClause('memory_traces', 'mt', 'memory_traces_fts', 'memory_traces_fts')}
         WHERE ${fts.matchClause('memory_traces_fts', '?')}
           AND mt.deleted = 0
           ${extraWhere}
-        ORDER BY ${fts.rankExpression('fts')}
+        ORDER BY ${order}
         LIMIT ?
       `;
 
       const runSearch = async (query: string): Promise<SearchRow[]> => {
-        const params: unknown[] = [query, ...extraParams, limit];
+        const params: unknown[] = [query, ...extraParams, ...bindingsFor(order, query), limit];
         return await this.brain.all<SearchRow>(sql, params);
       };
 
@@ -244,7 +263,7 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
         rows = await runSearch(rawQuery);
       } catch (error: any) {
         const fallbackQuery = buildNaturalLanguageFtsQuery(rawQuery);
-        if (error?.code !== 'SQLITE_ERROR' || !fallbackQuery || fallbackQuery === rawQuery) {
+        if (!isFtsQueryError(error) || !fallbackQuery || fallbackQuery === rawQuery) {
           throw error;
         }
         rows = await runSearch(fallbackQuery);

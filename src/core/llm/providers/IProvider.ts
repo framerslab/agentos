@@ -118,11 +118,11 @@ export interface ChatMessage {
 // ... (ensure ModelCompletionOptions, ModelUsage, ModelCompletionChoice, ModelCompletionResponse, etc. are correctly defined or imported if they were part of the "..." )
 
 
-/** One request a call sent to its provider, as {@link ModelCompletionOptions.onAttempt} reports it. */
+/** One attempt a call made to its provider, as {@link ModelCompletionOptions.onAttempt} reports it. */
 export interface AttemptOutcome {
-  /** The request's number in the call, from 1. */
+  /** The attempt's number in the call, from 1. */
   attempt: number;
-  /** The HTTP status it answered, or null when none came (a timeout, a network failure). */
+  /** The HTTP status its last send answered (after any key hops inside it), or null when none came (a timeout, a network failure). */
   status: number | null;
   /** True when it answered with a success. */
   ok: boolean;
@@ -158,9 +158,16 @@ export interface ModelCompletionOptions {
    * this field.
    */
   requestTimeout?: number;
-  /** The most requests this call sends, a first and its retries together; the provider's configured count when left out. */
+  /**
+   * The most attempts this call makes, a first and its retries together; the provider's configured count when left
+   * out. Within one attempt, a key-scoped failure (a rejected, unpaid or throttled key) on a pool of several keys
+   * re-sends the same request with the next usable key, at most once per key, and those sends are not counted.
+   */
   maxAttempts?: number;
-  /** Called after each request this call sent, so a caller can settle the attempts it paid for. */
+  /**
+   * Called once per attempt, with the answer of the attempt's last send (a key hop's earlier answers are not
+   * reported), so a caller can settle the attempts it paid for.
+   */
   onAttempt?: (outcome: AttemptOutcome) => void;
   /**
    * Anthropic extended-thinking switch. `{ budgetTokens }` turns thinking on:
@@ -300,9 +307,20 @@ export interface ModelCompletionOptions {
    *   - OpenAI strict JSON Schema mode:
    *       `{ type: 'json_schema',
    *          json_schema: { name, strict: true, schema } }`
-   *   - Anthropic forced tool-use marker (routed to tool_choice
-   *     internally by AnthropicProvider):
+   *   - Anthropic structured-output marker (AnthropicProvider sends it as
+   *     `output_config.format` on a model with the JSON output format when
+   *     the schema fits the format's limits; as a non-strict forced tool call
+   *     on a model without the format (Claude Opus 4 and Sonnet 4) and for a
+   *     schema the format cannot carry on a model that accepts a forced
+   *     choice; and as a schema block in the system prompt for such a schema
+   *     on a model that refuses a forced choice, or on the forced-tool route
+   *     when the request turns thinking on (the format route keeps the format
+   *     with thinking on). `route` is the
+   *     builder's verdict for the model it was built for; the provider decides
+   *     again for the model it sends to and says which route it took on the
+   *     response, `schemaRoute`):
    *       `{ _agentosUseToolForStructuredOutput: true,
+   *          route: 'json_schema' | 'forced_tool' | 'none',
    *          tool: { name, input_schema } }`
    *   - Gemini responseSchema (routed to generationConfig
    *     internally by GeminiProvider):
@@ -418,9 +436,24 @@ export interface ModelCompletionResponse {
    * response schema the caller's `responseFormat` put in the payload, with the
    * schema stated in the prompt instead: OpenRouter sends a strict
    * `json_schema` request that no endpoint can serve again in `json_object`
-   * mode. Unset when the request carried the payload the caller asked for.
+   * mode; Anthropic puts the schema in its own system block when neither the
+   * JSON output format nor a forced tool can carry it on the model sent to
+   * (a record schema on a model that refuses a forced choice, a forced tool
+   * that thinking would clamp). Unset when the request carried the payload the
+   * caller asked for.
    */
   schemaInPayload?: boolean;
+  /**
+   * On every completion and chunk of an Anthropic request that carried the
+   * structured-output marker: the route the provider sent the schema by, for
+   * the model it sent to. `json_schema` (the JSON output format: the answer is
+   * the text), `forced_tool` (the schema tool's call is the answer) or `none`
+   * (the schema rode the prompt; `schemaInPayload` is false too). It can
+   * differ from the marker's `route`, which was decided before the request's
+   * thinking, citations, passthrough `model` and `tools` were known. Unset on
+   * other requests and providers.
+   */
+  schemaRoute?: 'json_schema' | 'forced_tool' | 'none';
   /** Unified error envelope; present ONLY if an error occurred for this request/chunk. */
   error?: {
     /** Human readable message suitable for UI display or logging. */

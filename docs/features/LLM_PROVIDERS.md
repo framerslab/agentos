@@ -174,7 +174,7 @@ OPENROUTER_API_KEY=sk-or-...
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list that its requests draw their key from. [API Key Rotation](../KEY_ROTATION.md) lists those providers, the ones that rest a key after a quota error, and the ones that need a single key.
+For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list: a key pool. The LLM providers move a request to the next usable key when one is revoked, unpaid or throttled, probe a failed key before it returns, and persist the keys' standing when given a store; `AGENTOS_KEY_POOL_STRATEGY_ANTHROPIC=ordered` uses Anthropic's keys in the order given (credited keys first, the paid key last), and the same variable with another provider's name (`_OPENAI`, `_GEMINI`, `_OPENROUTER`, `_REQUESTY`) orders that provider's; `AGENTOS_KEY_POOL_STRATEGY=ordered` orders every provider's keys, so a list kept for load spreading on another provider becomes ordered too. [API Key Rotation](../KEY_ROTATION.md) has the strategies, the failure kinds, and the providers that need a single key.
 
 ### Per-Agent Override
 
@@ -302,10 +302,12 @@ Every provider reports each call's token usage. Whether the result also carries 
 
 | Provider | `usage.costUSD` |
 |----------|-----------------|
-| OpenAI, Anthropic, Gemini | Priced from the provider's own table of the vendor's list prices ([`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), [`AnthropicProvider.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/AnthropicProvider.ts), [`GeminiProvider.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiProvider.ts)). A model the table has no row for reports no cost. |
+| OpenAI, Anthropic, Gemini | Priced from the provider's own table of the vendor's list prices ([`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), [`anthropicCatalog.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/anthropicCatalog.ts), [`GeminiProvider.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiProvider.ts)). A model the table has no row for reports no cost. |
 | OpenRouter, Requesty | The cost the gateway returns with the response |
 | Ollama, Claude Code CLI, Gemini CLI | `0` |
 | Groq, Together, Mistral, xAI, LiteLLM | These providers send their calls through the OpenAI provider, which prices a call from OpenAI's table ([`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts)) by the model id the response names, exact or with a trailing `-YYYY-MM-DD` removed; an id the table has no row for reports no cost. The table lists only OpenAI's models, so a call to the default model of Groq, Together, Mistral or xAI reports no cost, and a LiteLLM call whose response names an OpenAI model, such as `gpt-4o-mini`, is priced at OpenAI's list price. |
+
+Prices for a host: `openAIModelPricing(modelId)` and `anthropicModelPricing(modelId)`, exported from `@framers/agentos/safety/runtime` and from the package root with the types `OpenAIModelPrice` and `AnthropicModelPrice`, give a spend guard a call's list price in USD per 1K tokens before the call is made, without loading a provider: `{ input, output }` for OpenAI and `{ input, output, cacheRead, longContext? }` for Claude. `anthropicModelPricing` resolves an exact catalog id, a dated snapshot of a bare id (`claude-sonnet-5-5-20261001`) and the bare alias of a dated row (`claude-opus-4-5`), and answers `undefined` for any other id (`claude-opus-4`, `claude-sonnet-4`, `claude`), never a prefix guess; a retired snapshot (`claude-opus-4-20250514`) prices by its exact id alone. `longContext` is present on a model priced by prompt length (Claude Haiku 5.5: `{ fromTokens: 100000, input, output, cacheRead }`) and names the prompt size above which its long `input`, `output` and `cacheRead` rates apply; `estimateAnthropicCostUSD` bills a response whose prompt, cached tokens included, is over that size at the same long rates.
 
 The list prices of the default text models, in USD per 1M tokens, as each vendor's page gave them on 2026-10-12. Each vendor's other models cost more or less; the linked pages list them.
 
@@ -415,11 +417,11 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `claude-haiku-4-5-20251001` | 200K | Yes | Yes | Fastest |
 | `claude-opus-4-5-20251101` | 200K | Yes | Yes | Legacy Opus, 64K output ($5/$25 per MTok) |
 
-Reasoning-default models (`claude-opus-5-5`, `claude-fable-5-1`, `claude-sonnet-5-5`, `claude-opus-5`, `claude-fable-5`, `claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-4-7`) reject `temperature` and `top_p` with HTTP 400; the provider drops both automatically for these models and sends adaptive thinking when a thinking budget is requested. Claude Opus 5.5, Claude Sonnet 5.5, Claude Mythos 5.1 and the Fable models also reject a forced `tool_choice`, so the provider sends `auto` for them and structured output uses the prompt-based JSON path. Anthropic retired `claude-opus-4-20250514` and `claude-sonnet-4-20250514` on 2026-06-15.
+Reasoning-default models (`claude-opus-5-5`, `claude-fable-5-1`, `claude-sonnet-5-5`, `claude-opus-5`, `claude-fable-5`, `claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-4-7`) reject `temperature` and `top_p` with HTTP 400; the provider drops both automatically for these models and sends adaptive thinking when a thinking budget is requested. Claude Opus 5.5, Claude Sonnet 5.5, Claude Mythos 5.1 and the Fable models also reject a forced `tool_choice`, so the provider sends `auto` for them; a schema request on these models takes the native JSON output format (`output_config.format`, see Tool Calling Support below) when the schema fits the format's limits, and the provider's own schema block in the system prompt when it does not. The provider sends a forced `tool_choice` to every other Claude model, so a schema the format cannot carry goes to it as a forced tool call (Claude Haiku 5.5 among them, probed on 2026-10-19). Anthropic retired `claude-opus-4-20250514` and `claude-sonnet-4-20250514` on 2026-06-15 (the API answers 404 for both; the catalog keeps them as `deprecated`); a schema request on those two ids takes the forced tool.
 
 Opus 5 and later, Sonnet 5 and later, Fable and Mythos think by default. Pass `thinking: false` to turn thinking off: the provider sends `{ type: 'between_tools' }` on `claude-sonnet-5-5` and `{ type: 'disabled' }` on `claude-opus-5` and `claude-sonnet-5`, and lowers `effort` to `high` on Sonnet 5.5 and Opus 5, which turn thinking off only at that level or below. `claude-opus-5-5`, the Fable models and Mythos always think; `thinking: false` sends nothing there and logs a warning once. Older models think only when asked, so `thinking: false` leaves the field out. `effort` follows each model's ladder: `claude-opus-4-5` takes `low`, `medium` and `high`, `claude-opus-4-6` and `claude-sonnet-4-6` add `max`, and later models take all five levels; a level a model does not take is sent as `high`. `generateObject` and `streamObject` take the same `thinking` and `effort` options and forward them unchanged; a structured call on a model that thinks by default needs `thinking: false` or room in `maxTokens` for the thinking.
 
-`usage.costUSD` prices cache reads at 0.1x the input price, except Claude Opus 5.5 (0.05x) and Claude Fable 5.1 (0.025x), and cache writes at 1.25x for the 5-minute TTL and 2x for the 1-hour TTL, read from the response's `cache_creation` split.
+`usage.costUSD` prices cache reads at 0.1x the input price, except Claude Opus 5.5 and Claude Sonnet 5.5 (0.05x) and Claude Fable 5.1 (0.025x), and cache writes at 1.25x for the 5-minute TTL and 2x for the 1-hour TTL, read from the response's `cache_creation` split.
 
 When Claude declines a request (`stop_reason: "refusal"`), the provider throws an `AnthropicProviderError` with code `content_filter`, whether the refusal came before any output or partway through it. The error carries `stop_details` and any partial text in `details`, and no tool call from the refused turn runs. `generateText` and `streamText` treat it like other content-policy errors: the fallback chain fires, and with `fallbackProviders: []` the call fails. A `streamText` refusal that arrives after text has streamed ends the stream with an `error` part and finish reason `error` instead of falling back, because the refused text has already reached the consumer. Refusals do not count toward the provider-health breaker.
 
@@ -429,7 +431,7 @@ When Claude declines a request (`stop_reason: "refusal"`), the provider throws a
 export GEMINI_API_KEY=AIza...
 ```
 
-The key travels in the `x-goog-api-key` header, never in the request URL, so proxy and access logs do not record it. A comma-separated list of keys rotates per request, and a key that answers HTTP 429 rests while the next request uses another one.
+The key travels in the `x-goog-api-key` header, never in the request URL, so proxy and access logs do not record it. A comma-separated list of keys is a key pool: a key that answers HTTP 429, or the 400 that names an invalid key, is taken out and the request moves to the next usable key at once; a streaming request marks the key and the next request draws another.
 
 | Model | Context | Vision | Tool Calling | Notes |
 |-------|---------|--------|-------------|-------|
@@ -688,11 +690,74 @@ The Structured Output column is the provider-side enforcement that
 also writes the schema into the system prompt on every provider. A session's
 `responseSchema`, on either agent runtime, writes it there only when the
 provider-side format carries no schema: on a provider whose entry is "None",
-on an Anthropic model that rejects a forced tool choice, and in JSON-object
-mode. Each fallback provider is checked for its own format. `streamObject()`
-sends no provider-side format on any provider: its schema travels in the system
-prompt only. All three validate the reply against the caller's Zod schema, and
-`send()` throws an `ObjectGenerationError` when the reply is not matching JSON.
+on an Anthropic model whose schema neither the JSON output format nor a forced
+tool carries (a record schema on a model that refuses a forced tool choice), and
+in JSON-object mode. Each fallback provider is checked for its
+own format. `streamObject()` sends no provider-side format on any provider: its
+schema travels in the system prompt only. All three validate the reply against
+the caller's Zod schema, and `send()` throws an `ObjectGenerationError` when the
+reply is not matching JSON.
+
+On Anthropic, `anthropicSchemaRoute(modelId, schema)`
+([`model-strict-tool-use.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/model-strict-tool-use.ts))
+picks one of three routes for the model and the schema. The native JSON output
+format (`output_config.format` with `type: json_schema`) goes to every model
+that has it (Opus 4.5 and later, Sonnet 4.5 and later, Haiku 4.5 and later,
+Fable, Mythos) when the schema fits the vendor's limits: an object root with
+properties, `additionalProperties: false` on every object (stamped on the wire
+copy), no `$ref`, `oneOf`, `not` or record, at most 16 union-typed and 24
+optional properties. `minLength`, `maxLength` and `pattern` go out as written;
+`minItems` above 1, `maxItems`, numeric bounds and a `format` outside the
+vendor's list are stripped from the wire copy, and the caller's Zod schema
+re-validates the answer with every constraint. The model answers JSON in its
+text block; the format rides with adaptive thinking and beside a direct
+caller's tools, with no beta header, and the vendor's union-typed and optional
+property limits count a direct caller's `strict: true` tools with the format's
+schema. A forced tool call whose input is the schema, sent without `strict` and
+with `tool_choice` forced on it, carries a schema the format cannot carry (a
+record, say) on every model that accepts a forced tool choice, Claude Sonnet
+4.6 (the provider's default text model), Opus 4.5 to 4.8, Opus 5, Sonnet 4.5,
+Sonnet 5, Haiku 4.5 and Haiku 5.5 among them. It carries every schema on Claude
+Opus 4 and Claude Sonnet 4 (the May 2025 ids, retired on 2026-06-15), which have
+no JSON output format. The call's input is the answer: it becomes the message's
+JSON text and leaves `tool_calls`, so `generateText()`'s tool loop never runs it
+as a tool. A passthrough `customModelParams.tools` array replaces the schema
+tool, so it must hold a tool of the schema's name for the forced choice to go
+out; without one the schema rides the prompt. A passthrough `tool_choice` keeps
+precedence too: one under which the model need not call the schema tool
+(`auto`, `none`, another tool's name) sends the schema in the prompt, and `any`
+keeps the forced tool, since under `any` the model calls a tool and writes no
+text: a call to the schema tool is the answer, and a call to another tool stays
+a tool call. The format and prompt routes send no schema tool,
+so a passthrough `tool_choice` they leave with no tool on the wire is dropped.
+When neither route carries the schema (such a schema on Claude Opus 5.5, Sonnet
+5.5, Fable or Mythos 5.1, which refuse a forced tool choice), and when a request
+on the forced-tool route turns thinking on, which a forced tool choice cannot
+ride beside, the provider puts the schema into the system prompt itself as one
+block after the caller's ("Answer with JSON only, matching this schema: ...")
+and warns once per model and reason. The schema tool is never sent clamped to
+`auto`, and thinking moves only the forced-tool route: a request on the format
+route keeps the format with thinking on. A request that enables citations
+leaves the format, which the API refuses beside citations, for the forced tool,
+or for the prompt on a model that refuses a forced choice. Every completion and
+stream chunk of a schema request names the route it took (`schemaRoute`), and
+one whose schema rode the prompt says `schemaInPayload: false`, so a completion
+gateway lifts the answer from where the request put it. A cut-off answer
+(`max_tokens`) keeps `finishReason: 'length'`, even when its JSON parses. The
+API sends none of the input of a forced call the limit stops (the single-shot
+response gives it `{}`, the stream one empty input delta; probed on 2026-10-19
+on Claude Sonnet 4.6 and Haiku 5.5), so the provider answers that call with no
+text, never a `{}` that would pass for an answer under a schema whose fields
+are all optional, and answers a forced call cut mid-JSON with its raw input as
+the text, in one request.
+`generateObject()` raises its output budget and asks again when the answer does
+not parse or validate, and returns one that does with `finishReason: 'length'`;
+a completion gateway lifts nothing from a cut-off, and a session's `send()` on
+the GMI runtime rejects naming the cut-off, whatever the JSON. Two cautions
+from the vendor's page: a schema property that asks for the model's reasoning
+may draw a refusal, and the capitalization of `enum` and `const` values is not
+guaranteed, so `generateObject()` repairs an enum or literal value that differs
+from the schema's only by case once before it spends a retry.
 
 The Tool Choice column is what the provider does with the `toolChoice` option
 (`'auto'`, `'none'`, `'required'`, or `{ type: 'function', function: { name } }`).
@@ -700,7 +765,7 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 | Provider | Structured Output | Tool Choice |
 |----------|-------------------|-------------|
 | OpenAI | `json_schema` with `strict: true` when the schema fits OpenAI's strict rules, otherwise JSON-object mode | Sent as `tool_choice` |
-| Anthropic | A forced tool call whose input is the schema; none on a model that rejects a forced tool choice | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
+| Anthropic | The native JSON output format (`output_config.format`) on every model that has it and whose schema fits its limits; a non-strict forced tool call whose input is the schema for a schema the format cannot carry on a model that accepts a forced choice, and for every schema on Claude Opus 4 and Sonnet 4; the provider's own schema block in the system prompt when neither carries the schema, and on the forced-tool route when the request turns thinking on, a passthrough `tools` drops the schema tool, or a passthrough `tool_choice` of `auto`, `none` or another tool's name lets the model skip it (the format route keeps the format with thinking on) | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
 | Gemini | `responseSchema` with JSON output | Not sent; the API default applies |
 | OpenRouter | Strict `json_schema` when the schema fits, otherwise JSON-object mode. When OpenRouter finds no endpoint that serves the strict schema (HTTP 404, "No endpoints found"), the request is sent once more in JSON-object mode with the schema written into its system prompt, unless the system prompt states a schema already | Sent as `tool_choice`; the routed model decides |
 | Requesty | None | Sent as `tool_choice`; the routed model decides |
@@ -725,7 +790,7 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 - [Cost Optimization](../safety/COST_OPTIMIZATION.md) — Budget management and routing
 - [Architecture](../architecture/ARCHITECTURE.md) — System architecture overview
 - [Structured Output](../orchestration/STRUCTURED_OUTPUT.md) — JSON schema enforcement per provider
-- [API Key Rotation](../KEY_ROTATION.md): comma-separated key lists, and which providers rotate and rest keys
+- [API Key Rotation](../KEY_ROTATION.md): comma-separated key lists as a pool, the strategies, failover and probes, and which providers need a single key
 - [CLI Error Codes](./CLI_ERROR_CODES.md): the errors the Claude Code and Gemini CLI providers raise
 
 ## Prompt caching

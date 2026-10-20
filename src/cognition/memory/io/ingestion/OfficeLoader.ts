@@ -98,16 +98,22 @@ export interface OfficeLoaderOptions {
    */
   maxInflatedBytes?: number;
   /**
-   * The most XML elements read from a document's parts. A workbook's sheets
-   * are read without building elements, and their cells count toward
-   * `maxTableCells` alone. officeparser's own default when left out.
+   * The most XML elements read from a document's parts, an EPUB's chapters
+   * included. An `.xlsx` workbook's sheets are read without building
+   * elements, and their cells count toward `maxTableCells` alone; an `.ods`
+   * file's sheets are XML, and count toward both. officeparser's own default
+   * when left out.
    */
   maxXmlElements?: number;
   /**
-   * The most table cells a document may hold. officeparser allows a document
-   * one more cell for each byte of its file; the loader takes that allowance
-   * out of the limit it passes, so this is the bound itself. officeparser's
-   * own default, with its allowance, when left out.
+   * The most cells an `.xlsx` workbook's sheets, and an OpenDocument file's
+   * sheets and tables, may hold. officeparser counts no other format's
+   * cells: a `.pptx` or `.epub` table's cells are XML elements, which
+   * `maxXmlElements` bounds, and none of the loader's three bounds counts an
+   * `.rtf` file's. officeparser allows a document one more cell for each
+   * byte of its file; the loader takes that allowance out of the limit it
+   * passes, so this is the bound itself. officeparser's own default, with
+   * its allowance, when left out.
    */
   maxTableCells?: number;
   /** Pages of a scanned PDF read by OCR, from the first: a whole number; 0 refuses a PDF. Default 0. */
@@ -204,10 +210,14 @@ function formatOf(hint: string | undefined): OfficeFormat {
  * The refusal of a document that reached a bound.
  *
  * @param limit - The loader's `maxInflatedBytes`, which the error carries whichever bound was reached.
- * @param code - officeparser's code for the bound reached, which the error's `cause` names.
+ * @param code - officeparser's code for the bound reached, which the error's message and `cause` name.
  */
 function tooLarge(limit: number, code: string): DocumentTooLargeError {
-  return Object.assign(new DocumentTooLargeError(limit), { cause: new Error(`officeparser: ${code}`) });
+  // Past the bound on inflation, the message gives it in bytes, as the Word loader's does. A document that reached
+  // another bound may inflate to far less than `limit`, so its message names that bound instead.
+  const message =
+    code === 'ZIP_SIZE_LIMIT_EXCEEDED' ? undefined : `the document reached the bound officeparser reports as ${code}`;
+  return Object.assign(new DocumentTooLargeError(limit, message), { cause: new Error(`officeparser: ${code}`) });
 }
 
 /**
@@ -344,7 +354,8 @@ export class OfficeLoader implements IDocumentLoader {
    *   a page count.
    * @throws {DocumentTooLargeError} When the document reaches a bound, one officeparser only warns of included.
    *   The error's `limit` is the loader's `maxInflatedBytes` whichever bound was reached, and its `cause` names
-   *   the bound by officeparser's code.
+   *   the bound by officeparser's code. So does its message, but past `maxInflatedBytes`, where the message
+   *   gives that bound in bytes.
    * @throws {ScannedDocumentError} For a PDF while `ocrPages` is 0, and for a scan whose pages gave no text. When
    *   officeparser reported a picture OCR could not read, the first such failure is the error's `cause`.
    * @throws The reason of `options.signal` when the caller aborts it.

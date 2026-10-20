@@ -15,8 +15,10 @@ import {
   canUseStrictJsonSchema,
   buildOpenAIJsonSchemaResponseFormat,
 } from './openaiResponseFormat.js';
-import { buildResponseFormat } from '../../core/llm/providers/structuredOutputFormat.js';
-import { modelSupportsForcedToolChoice } from '../../core/llm/providers/model-forced-tool-choice.js';
+import {
+  buildResponseFormat,
+  type AnthropicStructuredOutputMarker,
+} from '../../core/llm/providers/structuredOutputFormat.js';
 
 /**
  * Providers whose chat API accepts `response_format: { type: 'json_object' }`
@@ -31,9 +33,9 @@ export interface BuildResponseFormatForProviderInputs {
   providerId: string;
   /**
    * Provider-side model id. `''` when a fallback entry omits `model` (the
-   * provider default is resolved later) — treated as forced-tool-capable
-   * for Anthropic since every default Anthropic text model accepts a forced
-   * `tool_choice`; only Fable-class models reject it.
+   * provider default is resolved later): for Anthropic the route is then
+   * decided on the schema alone, and the provider decides for its real model
+   * on the same object schema (see `anthropicSchemaRoute`).
    */
   modelId: string;
   /** Lowered JSON Schema (`lowerZodToJsonSchema` of `effectiveSchema`). */
@@ -53,9 +55,16 @@ export interface BuildResponseFormatForProviderInputs {
  * Behavior is generateObject's historical provider branch, verbatim:
  * - `openai` — strict `json_schema` when the lowered schema satisfies the
  *   strict validator, else loose `json_object`.
- * - `anthropic` — forced `tool_use` marker (gold-standard tier) unless the
- *   model rejects a forced `tool_choice` (Fable) — those degrade to the
- *   prompt-only JSON path.
+ * - `anthropic` — the structured-output marker with its route: the native
+ *   JSON output format on every model that has it (Opus 4.5 and later,
+ *   Sonnet 4.5 and later, Haiku 4.5 and later, Fable, Mythos) when the
+ *   schema fits its limits; the non-strict forced schema tool on a model
+ *   without the format (Claude Opus 4 and Sonnet 4) and for a schema the
+ *   format cannot carry (a record, a `$ref`, a `oneOf`, an untyped node, more
+ *   union-typed or optional properties than the format takes) on a model that
+ *   accepts a forced choice, the empty id included; and `undefined` for such
+ *   a schema on a model that refuses a forced choice (Claude Opus 5.5, Sonnet
+ *   5.5, Fable, Mythos 5.1), which leaves the schema to the prompt.
  * - `gemini` — native `responseSchema` marker.
  * - `gemini-cli` — `undefined`. GeminiCLIProvider never reads
  *   `options.responseFormat` (bridge options + text return only), so
@@ -77,16 +86,18 @@ export function buildResponseFormatForProvider(
       : { type: 'json_object' as const };
   }
   if (providerId === 'anthropic') {
-    // Forced tool_use is the gold-standard tier, but Fable rejects a forced
-    // tool_choice at the API level — those models degrade to the prompt-only
-    // JSON path (schema already rides the system prompt).
-    return modelSupportsForcedToolChoice(modelId)
-      ? buildResponseFormat({
-          provider: providerId,
-          schema: effectiveSchema,
-          schemaName: schemaName ?? 'response',
-        })
-      : undefined;
+    // The marker carries one object schema and the route the model takes with
+    // it. A route of `none` means neither the JSON output format nor a forced
+    // tool carries this schema on this model: no payload, so the schema rides
+    // the system prompt (the session and gateway paths write it there, and
+    // generateObject writes it there on every provider).
+    const marker = buildResponseFormat({
+      provider: providerId,
+      modelId,
+      schema: effectiveSchema,
+      schemaName: schemaName ?? 'response',
+    }) as unknown as AnthropicStructuredOutputMarker;
+    return marker.route === 'none' ? undefined : (marker as unknown as Record<string, unknown>);
   }
   if (providerId === 'gemini') {
     return buildResponseFormat({
@@ -115,21 +126,33 @@ export function buildResponseFormatForProvider(
 }
 
 /**
+ * The route an Anthropic marker carries: its `route` field, or `forced_tool`
+ * for a marker built without one (a hand-written marker from before the field
+ * existed, which the provider sends as the forced tool on a model without
+ * JSON outputs).
+ */
+function anthropicMarkerRoute(responseFormat: Record<string, unknown>): 'json_schema' | 'forced_tool' | 'none' {
+  const route = responseFormat.route;
+  return route === 'json_schema' || route === 'none' ? route : 'forced_tool';
+}
+
+/**
  * Whether a payload from {@link buildResponseFormatForProvider} carries the
- * schema to the model. A strict `json_schema`, Anthropic's forced schema tool
- * and Gemini's `responseSchema` (typed `json_object`, with the schema under
- * `_gemini`) do; no payload, the loose `json_object` mode and any other shape
- * do not, so the schema has to ride the prompt.
+ * schema to the model. A strict `json_schema`, an Anthropic marker whose route
+ * is the JSON output format or the forced schema tool, and Gemini's
+ * `responseSchema` (typed `json_object`, with the schema under `_gemini`) do;
+ * no payload, an Anthropic marker whose route is `none`, the loose
+ * `json_object` mode and any other shape do not, so the schema has to ride
+ * the prompt.
  */
 export function responseFormatCarriesSchema(
   responseFormat: Record<string, unknown> | undefined,
 ): boolean {
   if (!responseFormat) return false;
-  return (
-    responseFormat.type === 'json_schema' ||
-    responseFormat._agentosUseToolForStructuredOutput === true ||
-    responseFormat._gemini !== undefined
-  );
+  if (responseFormat._agentosUseToolForStructuredOutput === true) {
+    return anthropicMarkerRoute(responseFormat) !== 'none';
+  }
+  return responseFormat.type === 'json_schema' || responseFormat._gemini !== undefined;
 }
 
 /**
@@ -137,15 +160,20 @@ export function responseFormatCarriesSchema(
  * `fallback_fired` log line (`rebuiltResponseFormatType`) as the live
  * verification signal that per-leg rebuild is active.
  *
- * @returns `'none'` | `'anthropic_tool'` | `'gemini_response_schema'` |
- *   the payload's `type` string (`'json_schema'` / `'json_object'` / …) |
- *   `'unknown'`.
+ * @returns `'none'` | `'anthropic_json_schema'` | `'anthropic_tool'` |
+ *   `'gemini_response_schema'` | the payload's `type` string (`'json_schema'`
+ *   / `'json_object'` / …) | `'unknown'`. An Anthropic marker answers by its
+ *   route: `anthropic_json_schema` for the JSON output format,
+ *   `anthropic_tool` for the forced tool, `none` when neither is sent.
  */
 export function describeResponseFormatShape(
   responseFormat: Record<string, unknown> | undefined,
 ): string {
   if (!responseFormat) return 'none';
-  if (responseFormat._agentosUseToolForStructuredOutput) return 'anthropic_tool';
+  if (responseFormat._agentosUseToolForStructuredOutput) {
+    const route = anthropicMarkerRoute(responseFormat);
+    return route === 'json_schema' ? 'anthropic_json_schema' : route === 'forced_tool' ? 'anthropic_tool' : 'none';
+  }
   if (responseFormat._gemini) return 'gemini_response_schema';
   return typeof responseFormat.type === 'string' ? responseFormat.type : 'unknown';
 }
