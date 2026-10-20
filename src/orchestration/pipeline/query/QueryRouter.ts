@@ -58,6 +58,7 @@ import { QueryGenerator } from './QueryGenerator.js';
 import { TopicExtractor } from './TopicExtractor.js';
 import { KeywordFallback } from './KeywordFallback.js';
 import { CitationVerifier } from '../../../cognition/rag/citation/CitationVerifier.js';
+import { providerEnvVars } from '../../../api/model.js';
 import {
   DEFAULT_QUERY_ROUTER_CONFIG,
   DEFAULT_STRATEGY_CONFIG,
@@ -431,8 +432,8 @@ export class QueryRouter {
       model: this.config.generationModel,
       modelDeep: this.config.generationModelDeep,
       provider: this.config.generationProvider,
-      apiKey: this.getLlmApiKey(),
-      baseUrl: this.getLlmBaseUrl(),
+      apiKey: this.getLlmApiKey(this.config.generationProvider),
+      baseUrl: this.getLlmBaseUrl(this.config.generationProvider),
       maxContextTokens: this.config.maxContextTokens,
     });
 
@@ -1422,8 +1423,8 @@ export class QueryRouter {
       maxTier: this.config.maxTier,
       topicList,
       toolList: this.formatToolList(this.config.availableTools),
-      apiKey: this.getLlmApiKey(),
-      baseUrl: this.getLlmBaseUrl(),
+      apiKey: this.getLlmApiKey(this.config.classifierProvider),
+      baseUrl: this.getLlmBaseUrl(this.config.classifierProvider),
     });
 
     if (this.capabilityDiscoveryEngine) {
@@ -1568,8 +1569,8 @@ export class QueryRouter {
    */
   private getEmbeddingApiKey(): string {
     if (this.config.embeddingApiKey) return this.config.embeddingApiKey;
-    // Fall through to general LLM key resolver
-    return this.getLlmApiKey();
+    // Fall through to general LLM key resolver; with no provider named it scans the env vars and returns a string.
+    return this.getLlmApiKey() ?? '';
   }
 
   private getEmbeddingBaseUrl(): string | undefined {
@@ -1603,12 +1604,24 @@ export class QueryRouter {
   /**
    * Resolve API key for LLM calls.
    *
-   * Checks config override first, then scans all provider env vars in priority
-   * order. Returns empty string for keyless providers (claude-code-cli, gemini-cli)
-   * which is fine — generateText() handles them via CLISubprocessBridge.
+   * Checks config override first. A call to a provider other than OpenAI
+   * then takes that provider's own key variable, or no key when it is unset
+   * or the provider has none (Ollama, the CLIs), so `generateText` resolves
+   * the provider's credentials and one vendor's key never reaches another.
+   * An OpenAI call, and one that names no provider (the embedding check),
+   * scans the provider env vars in priority order. Returns an empty string
+   * when that scan finds none, which is fine for keyless providers
+   * (claude-code-cli, gemini-cli): generateText() handles them via
+   * CLISubprocessBridge.
+   *
+   * @param provider - The provider the call goes to, when it names one.
    */
-  private getLlmApiKey(): string {
+  private getLlmApiKey(provider?: string): string | undefined {
     if (this.config.apiKey) return this.config.apiKey;
+    if (provider !== undefined && provider !== 'openai') {
+      const ownKey = providerEnvVars(provider).key;
+      return (ownKey && process.env[ownKey]) || undefined;
+    }
 
     // Check all providers in priority order.
     // Direct provider keys (OpenAI, Anthropic, etc.) take precedence over
@@ -1638,14 +1651,24 @@ export class QueryRouter {
    *
    * Only OpenRouter and Ollama need custom base URLs. All other providers
    * (including CLI) use their default endpoints via generateText() resolution.
+   * A call to a provider other than OpenAI gets none here: generateText()
+   * reads that provider's own URL variable (`MINIMAX_BASE_URL`,
+   * `OPENROUTER_BASE_URL`, `OLLAMA_BASE_URL`) or uses its default, so an
+   * OpenRouter or Ollama URL meant for another key never carries its key.
+   *
+   * @param provider - The provider the call goes to, when it names one.
    */
-  private getLlmBaseUrl(): string | undefined {
+  private getLlmBaseUrl(provider?: string): string | undefined {
     if (this.config.baseUrl !== undefined) {
       return this.config.baseUrl as string;
     }
 
     // If user provided an explicit API key, don't override the URL
     if (this.config.apiKey !== undefined) {
+      return undefined;
+    }
+
+    if (provider !== undefined && provider !== 'openai') {
       return undefined;
     }
 

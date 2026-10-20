@@ -569,8 +569,12 @@ export interface QueryRouterConfig {
   /**
    * Optional API key override for classifier and generator LLM calls.
    *
-   * When omitted, QueryRouter prefers `OPENAI_API_KEY` and falls back to
-   * `OPENROUTER_API_KEY` with the OpenRouter compatibility base URL.
+   * When omitted, a classifier or generator whose provider is not OpenAI
+   * takes that provider's own key variable (`MINIMAX_API_KEY` for
+   * `minimax`), and none when it is unset, so `generateText` resolves the
+   * provider's credentials and no other vendor's key reaches it. An OpenAI
+   * one prefers `OPENAI_API_KEY` and falls back to `OPENROUTER_API_KEY` with
+   * the OpenRouter compatibility base URL.
    */
   apiKey?: string;
 
@@ -578,7 +582,9 @@ export interface QueryRouterConfig {
    * Optional base URL override for classifier and generator LLM providers.
    *
    * When omitted, QueryRouter auto-selects the OpenRouter compatibility URL
-   * only when `OPENROUTER_API_KEY` is being used implicitly.
+   * only when `OPENROUTER_API_KEY` is being used implicitly for an OpenAI
+   * classifier or generator. Any other provider takes the endpoint
+   * `generateText` resolves for it (`MINIMAX_BASE_URL`, or MiniMax's default).
    */
   baseUrl?: string;
 
@@ -781,6 +787,12 @@ export const DEFAULT_STRATEGY_CONFIG: Required<Omit<QueryRouterStrategyConfig, '
  * a real source of 401s — the provider would be `openrouter` while the
  * resolved api key was the OpenAI one).
  *
+ * A MiniMax key comes last, after OpenRouter's: `generateText`'s
+ * auto-detection ranks it after every key listed here, and the provider
+ * manager makes MiniMax its default only when no OpenAI, OpenRouter or
+ * Requesty key is set. A MiniMax route then takes `MINIMAX_API_KEY`
+ * through {@link QueryRouter.getLlmApiKey}'s lookup by provider.
+ *
  * Falls back to `openai` when no provider key is present (CLI providers
  * still work because they don't require a key).
  */
@@ -795,6 +807,7 @@ function resolveDefaultProvider(): string {
       ['MISTRAL_API_KEY', 'mistral'],
       ['XAI_API_KEY', 'xai'],
       ['OPENROUTER_API_KEY', 'openrouter'],
+      ['MINIMAX_API_KEY', 'minimax'],
     ];
     for (const [envKey, id] of envMap) {
       if (process.env[envKey]) return id;
@@ -817,6 +830,7 @@ const CHEAP_MODELS: Record<string, string> = {
   mistral: 'mistral-small-latest',
   xai: 'grok-2-mini',
   ollama: 'llama3.2',
+  minimax: 'MiniMax-M3.1-Flash',
   'claude-code-cli': 'claude-haiku-4-5-20251001',
   'gemini-cli': 'gemini-2.5-flash-lite',
 };
@@ -832,6 +846,8 @@ const STRONG_MODELS: Record<string, string> = {
   mistral: 'mistral-large-latest',
   xai: 'grok-2',
   ollama: 'llama3.2',
+  // MiniMax's default text model, as in PROVIDER_DEFAULTS and the mission planner.
+  minimax: 'MiniMax-M3.1-Flash',
   'claude-code-cli': 'claude-sonnet-4-6',
   'gemini-cli': 'gemini-3.5-flash',
 };
