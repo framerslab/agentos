@@ -1648,7 +1648,7 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     const { transport, messages } = conventions(room, { participant: 'first' });
     expect(transport.participantIdentity).toBeUndefined();
     await settle();
-    // Nobody is linked: a control message has nobody to go to, and a chat stream is closed unread.
+    // Nobody is linked: a control message is held for the participant linked next, and a chat stream is closed unread.
     await transport.sendControl({ type: 'agent_thinking' });
     expect(room.localParticipant.sendText).not.toHaveBeenCalled();
     const early = room.chat('someone', 'Hello?');
@@ -1668,7 +1668,8 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     room.join('user-2', PARTICIPANT_KIND_STANDARD, new FakePublication(new FakeTrack('TR_2')));
     expect(transport.participantIdentity).toBe('user-1');
     await transport.sendControl({ type: 'agent_thinking' });
-    expect(room.sentOn('agentos.voice').map((stream) => stream.destinationIdentities)).toEqual([['user-1']]);
+    // The message held while nobody was linked went to the participant linked, ahead of the one sent since.
+    expect(room.sentOn('agentos.voice').map((stream) => stream.destinationIdentities)).toEqual([['user-1'], ['user-1']]);
     expect(messages).toEqual([]);
     transport.close();
   });
@@ -2277,5 +2278,286 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     expect(lines(room).filter(([, id]) => id === `${s.transport.id}:agent-1`)).toEqual([]);
     expect(s.errors).toEqual([]);
     await s.orchestrator.stopSession('done');
+  });
+
+  it("setParticipant() fixes the playout mode again for the new participant: a phone caller is played natively, and a playback wait for the page's receipt ends with the track's playout", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1'))).attributes = { 'agentos.playout': 'participant' };
+    room.addSipCaller('caller', new FakePublication(new FakeTrack('TR_CALLER')));
+    const { transport, errors } = speakingTo(room, 'user-1');
+    await transport.readyForPlayback();
+    expect(transport.playout).toBe('participant');
+    // A chunk is announced to the page, and its playback waits for the page's receipt.
+    await transport.sendAudio(scopedChunk(1));
+    expect(controlTypes(room)).toEqual(['audio']);
+    let outcome: unknown;
+    void transport.waitForPlayback(firstGeneration, 1, new AbortController().signal).then(
+      (receipt) => {
+        outcome = receipt;
+      },
+      (error: Error) => {
+        outcome = error.message;
+      }
+    );
+    await settle();
+    // The host links the phone caller LiveKit SIP brought into the room, who reads no text streams.
+    transport.setParticipant('caller');
+    expect(transport.playout).toBe('native');
+    // Nobody is asked for the receipt any more: the chunk counts as played once the track has played it out.
+    await settle();
+    expect(outcome).toBeUndefined();
+    const source = FakeAudioSource.created[0]!;
+    source.playOut();
+    await settle();
+    expect(outcome).toEqual({ generation: firstGeneration, sequence: 1, playedSamples: 320, sampleRate: 16_000 });
+    // The next chunk plays natively: nothing is announced to the caller, and the track's playout proves it played.
+    await transport.sendAudio(scopedChunk(2));
+    const next = transport.waitForPlayback(firstGeneration, 2, new AbortController().signal);
+    source.playOut();
+    expect(await next).toEqual({ generation: firstGeneration, sequence: 2, playedSamples: 320, sampleRate: 16_000 });
+    expect(controlTypes(room)).toEqual(['audio']);
+    expect(errors).toEqual([]);
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it("ends a clear that waits for the page's answer once setParticipant() links a phone caller, the track's queue cleared already", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1'))).attributes = { 'agentos.playout': 'participant' };
+    room.addSipCaller('caller', new FakePublication(new FakeTrack('TR_CALLER')));
+    const { transport, errors } = speakingTo(room, 'user-1');
+    await transport.readyForPlayback();
+    await transport.sendAudio(scopedChunk(1));
+    // The reply is cut: the clear empties the track's queue and asks the page to discard the generation.
+    let outcome: string | undefined;
+    void transport.clearPlayback(firstGeneration).then(
+      () => {
+        outcome = 'cleared';
+      },
+      (error: Error) => {
+        outcome = error.message;
+      }
+    );
+    await vi.waitFor(() => expect(controlTypes(room)).toContain('clear'));
+    const clears = FakeAudioSource.created[0]!.clears;
+    expect(clears).toBeGreaterThan(0);
+    // The page will never answer for the caller: the clear is done once the caller is linked.
+    transport.setParticipant('caller');
+    await settle();
+    expect(outcome).toBe('cleared');
+    expect(transport.playout).toBe('native');
+    expect(errors).toEqual([]);
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it('counts the chunks a pause held whole, none of their frames taken, once they have played after the resume', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    // The track waits for the participant to subscribe to it, so the reply's chunks wait too, none of their frames taken.
+    let subscribe!: () => void;
+    room.subscription = new Promise<void>((resolve) => {
+      subscribe = resolve;
+    });
+    const { transport, errors } = speakingTo(room, 'user-1');
+    await transport.sendControl({ type: 'agent_speaking', text: '' });
+    const sent = [transport.sendAudio(spoken(1, 'seg-1', 0, 'First.')), transport.sendAudio(spoken(2, 'seg-2', 6, ' Second.'))];
+    await settle();
+    // The user coughs: the pause holds the track, with the reply's chunks whole behind it.
+    await transport.sendControl({ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } });
+    subscribe();
+    await settle();
+    expect(capturedTones()).toEqual([]);
+    // A false interruption: the reply resumes and plays whole, and a playout wait proves it played.
+    await transport.sendControl({ type: 'barge_in', action: { type: 'resume' } });
+    await Promise.all(sent);
+    expect(capturedTones()).toEqual([1, 2]);
+    const playout = transport.waitForPlayout();
+    await settle();
+    FakeAudioSource.created[0]!.playOut();
+    await playout;
+    await settle();
+    expect(lines(room)).toEqual([['First. Second.', `${transport.id}:agent-1`, 'false', 'TR_AGENT']]);
+    expect(errors).toEqual([]);
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it('never counts a sentence the pause cut into, though its last chunk waited whole behind the hold', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const { transport, errors } = speakingTo(room, 'user-1');
+    await transport.readyForPlayback();
+    await transport.sendControl({ type: 'agent_speaking', text: '' });
+    const source = FakeAudioSource.created[0]!;
+    // The track's queue is full: the first sentence's first chunk waits for room as it is captured, and the rest of
+    // the reply waits behind it.
+    let free!: () => void;
+    source.gate = new Promise<void>((resolve) => {
+      free = resolve;
+    });
+    const sent = [
+      transport.sendAudio(toneChunk(1)),
+      transport.sendAudio(spoken(2, 'seg-1', 0, 'First.')),
+      transport.sendAudio(spoken(3, 'seg-2', 6, ' Second.')),
+    ];
+    await settle();
+    // The pause clears the first chunk's frame as it lands; the end of the first sentence and the second wait whole.
+    await transport.sendControl({ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } });
+    source.gate = undefined;
+    free();
+    await settle();
+    await transport.sendControl({ type: 'barge_in', action: { type: 'resume' } });
+    await Promise.all(sent);
+    expect(capturedTones()).toEqual([1, 2, 3]);
+    const playout = transport.waitForPlayout();
+    await settle();
+    source.playOut();
+    await playout;
+    await settle();
+    // The first sentence lost its start to the pause, so it is not proven heard, and nothing after it shows.
+    expect(lines(room)).toEqual([]);
+    expect(errors).toEqual([]);
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it("takes a page's text_input on the control topic of a speaking transport as one on lk.chat: checked, forwarded, a refused one a warning", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const { transport, messages, errors, warnings } = speakingTo(room, 'user-1');
+    const control = room.textHandlers.get('agentos.voice')!;
+    // A page that speaks the client protocol sends what its user types on the control topic.
+    control(textReader(JSON.stringify({ type: 'text_input', text: 'Book a table.', extra: 1 })), { identity: 'user-1' });
+    await settle();
+    expect(messages).toEqual([{ type: 'text_input', text: 'Book a table.' }]);
+    // A text the check refuses is a warning that names no text, and the transport stays open.
+    control(textReader(JSON.stringify({ type: 'text_input', text: '   ' })), { identity: 'user-1' });
+    await settle();
+    expect(warnings).toEqual(['livekit text input refused']);
+    // 4,000 characters of 'é', 8,000 bytes, are taken whole, as on lk.chat.
+    control(textReader(JSON.stringify({ type: 'text_input', text: 'é'.repeat(4_000) })), { identity: 'user-1' });
+    await settle();
+    expect(messages).toEqual([
+      { type: 'text_input', text: 'Book a table.' },
+      { type: 'text_input', text: 'é'.repeat(4_000) },
+    ]);
+    expect(errors).toEqual([]);
+    expect(transport.state).toBe('open');
+    // Any other message keeps to 4096 bytes: a transcript past it is refused and closes the transport, as before.
+    control(textReader(JSON.stringify({ type: 'transcript', text: 'x'.repeat(4_100), isFinal: true, confidence: 0.9 })), { identity: 'user-1' });
+    await settle();
+    expect(errors).toEqual(['livekit control refused']);
+    expect(transport.state).toBe('closed');
+    await transport.whenClosed();
+  });
+
+  it("runs under VoicePipelineOrchestrator: a page's text_input on the control topic of a speaking transport is a user turn", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const s = await converse(room, 'user-1', { conventions: true });
+    room.textHandlers.get('agentos.voice')!(textReader(JSON.stringify({ type: 'text_input', text: 'Book a table.' })), { identity: 'user-1' });
+    await vi.waitFor(() => expect(s.orchestrator.state).toBe('speaking'));
+    expect(controlTypes(room)).toContain('agent_thinking');
+    expect(s.transport.state).toBe('open');
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
+  });
+
+  it("holds the session's messages while nobody is linked, the last eight, and delivers them in order to the first participant linked", async () => {
+    const room = new FakeRoom();
+    const { transport, errors } = conventions(room, { participant: 'first', transcriptionOutput: false });
+    for (let i = 1; i <= 10; i++) await transport.sendControl({ type: 'transcript', text: `Line ${i}`, isFinal: true, confidence: 0.9 });
+    expect(room.localParticipant.sendText).not.toHaveBeenCalled();
+    room.join('user-1', PARTICIPANT_KIND_STANDARD, new FakePublication(new FakeTrack('TR_1')));
+    await settle();
+    const sent = room.sentOn('agentos.voice');
+    expect(sent.map(({ text }) => (JSON.parse(text) as { text: string }).text)).toEqual(
+      ['Line 3', 'Line 4', 'Line 5', 'Line 6', 'Line 7', 'Line 8', 'Line 9', 'Line 10']
+    );
+    expect(sent.every((stream) => stream.destinationIdentities?.join() === 'user-1')).toBe(true);
+    // A message sent once a participant is linked goes to it at once, after them.
+    await transport.sendControl({ type: 'agent_thinking' });
+    expect(controlTypes(room).at(-1)).toBe('agent_thinking');
+    // Held messages go once: a later link sends none of them again.
+    transport.setParticipant('user-2');
+    await settle();
+    expect(room.sentOn('agentos.voice')).toHaveLength(9);
+    expect(errors).toEqual([]);
+    transport.close();
+
+    // A speaking transport holds them too, and sends them one at a time, within its four streams in flight.
+    const speakingRoom = new FakeRoom();
+    const speaker = conventions(speakingRoom, { participant: 'first', transcriptionOutput: false, publisher: { ...speaking, rtc: fakePublishingRtc() } });
+    for (let i = 1; i <= 8; i++) await speaker.transport.sendControl({ type: 'agent_thinking' });
+    let finish!: () => void;
+    speakingRoom.localParticipant.sendText.mockImplementation(
+      () =>
+        new Promise<{}>((resolve) => {
+          finish = () => resolve({});
+        })
+    );
+    speakingRoom.join('user-1', PARTICIPANT_KIND_STANDARD, new FakePublication(new FakeTrack('TR_1')));
+    await settle();
+    expect(speakingRoom.localParticipant.sendText).toHaveBeenCalledTimes(1);
+    for (let i = 2; i <= 8; i++) {
+      finish();
+      await settle();
+      expect(speakingRoom.localParticipant.sendText).toHaveBeenCalledTimes(i);
+    }
+    finish();
+    await settle();
+    expect(speaker.errors).toEqual([]);
+    expect(speaker.transport.state).toBe('open');
+    speaker.transport.close();
+    await speaker.transport.whenClosed();
+  });
+
+  it('runs under VoicePipelineOrchestrator: a participant who joins after the session started receives session_started', async () => {
+    const room = new FakeRoom();
+    const transport = new LiveKitStreamTransport({ room, participant: 'first', sampleRate: 16_000, rtc: fakeRtc() });
+    const stt: StreamingSTTSession = Object.assign(new EventEmitter(), {
+      pushAudio: () => undefined,
+      flush: async () => undefined,
+      close: () => undefined,
+    });
+    const tts: StreamingTTSSession = Object.assign(new EventEmitter(), {
+      pushTokens: () => undefined,
+      flush: async () => undefined,
+      cancel: () => undefined,
+      close: () => undefined,
+    });
+    const endpointDetector: IEndpointDetector = Object.assign(new EventEmitter(), {
+      mode: 'heuristic' as const,
+      pushVadEvent: () => undefined,
+      pushTranscript: () => undefined,
+      reset: () => undefined,
+    });
+    const orchestrator = new VoicePipelineOrchestrator({ stt: 'fake-stt', tts: 'fake-tts' });
+    const errors: Error[] = [];
+    orchestrator.on('error', (error: Error) => errors.push(error));
+    await orchestrator.startSession(
+      transport,
+      {
+        sendText: async function* () {
+          yield 'Hello';
+        },
+      },
+      {
+        streamingSTT: { providerId: 'fake-stt', isStreaming: true, startSession: async () => stt },
+        streamingTTS: { providerId: 'fake-tts', startSession: async () => tts },
+        endpointDetector,
+        bargeinHandler: cancelAtOnce,
+      }
+    );
+    await settle();
+    // The room is empty: nobody is linked to send session_started to.
+    expect(room.sentOn('agentos.voice')).toEqual([]);
+    room.join('user-1', PARTICIPANT_KIND_STANDARD, new FakePublication(new FakeTrack('TR_1')));
+    await settle();
+    expect(controlTypes(room)).toEqual(['session_started']);
+    expect(room.sentOn('agentos.voice')[0]!.destinationIdentities).toEqual(['user-1']);
+    expect(errors).toEqual([]);
+    await orchestrator.stopSession('done');
   });
 });
