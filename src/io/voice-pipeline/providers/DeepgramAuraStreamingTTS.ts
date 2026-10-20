@@ -275,6 +275,8 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
       this.ws.on('message', (data: Buffer, isBinary: boolean) => this._handleMessage(data, isBinary));
       this.ws.on('close', () => {
         if (!settled) fail(new Error('deepgram aura ws closed before the upgrade completed'));
+        // The session's own close() has emitted close: the closing handshake that follows it emits nothing more.
+        else if (this.closed) return;
         // A socket lost while a segment is in flight or a flush waits is the reply's failure, reported before the
         // session closes; one closed between replies closes the session alone.
         const lostReply = settled && this.segments.busy;
@@ -337,6 +339,10 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     if (outstanding) this.holdFor(CLEARED_MS);
   }
 
+  /**
+   * Ends the session: the segments are dropped, the socket is closed, and `close` is emitted, once. The socket's
+   * closing handshake, when it completes, emits nothing more.
+   */
   close(): void {
     if (this.closed) return;
     this.closed = true;
