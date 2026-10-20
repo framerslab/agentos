@@ -13,12 +13,10 @@
  * 9. Execution time is measured and returned
  */
 
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, parse, resolve } from 'node:path';
-import { setFlagsFromString } from 'node:v8';
-import { runInNewContext } from 'node:vm';
 import { SandboxedToolForge } from '../SandboxedToolForge.js';
 import type { SandboxExecutionRequest, SandboxAPI } from '../types.js';
 import { CapabilityBroker } from '../broker/CapabilityBroker.js';
@@ -46,22 +44,6 @@ function makeRequest(
     ...overrides,
   };
 }
-
-/**
- * V8's collector, exposed at run time the documented way (`--expose-gc` set
- * through `v8.setFlagsFromString`, then `gc` read from a fresh context), or
- * null where the flag cannot be set. The heap-delta case cleans its baseline
- * with it, so garbage left by earlier cases cannot hide an allocation.
- */
-const collectGarbage: (() => void) | null = (() => {
-  try {
-    setFlagsFromString('--expose-gc');
-    const gc: unknown = runInNewContext('gc');
-    return typeof gc === 'function' ? (gc as () => void) : null;
-  } catch {
-    return null;
-  }
-})();
 
 // ---------------------------------------------------------------------------
 // Suite
@@ -499,35 +481,42 @@ describe('SandboxedToolForge', () => {
   // -------------------------------------------------------------------------
   // Cycle 4: memoryUsedBytes returns honest heap delta after delegation
   // -------------------------------------------------------------------------
-  it('reports a non-zero memoryUsedBytes after a meaningful allocation', async () => {
-    const request = makeRequest(
-      // Allocate about 5 MB of strings; the host heap delta registers it unless
-      // a collection runs between the allocation and the executor's sample.
-      `function execute() {
-        const chunks = [];
-        for (let i = 0; i < 50; i++) {
-          chunks.push("x".repeat(100000));
-        }
-        return chunks.length;
-      }`,
-    );
+  it('reports the heap delta measured around the call, and zero when the heap shrank', async () => {
+    // The in-process executor reads process.memoryUsage().heapUsed before and
+    // after the call and reports the difference, clamped at zero. A real
+    // allocation cannot pin that: the code's strings are unreachable once it
+    // returns, so a collection before the second reading zeroes the delta (CI
+    // run 39334002795, 19 October 2026). The readings are fixed here instead:
+    // the first call reads `before`, every later one `after`, and the field
+    // must carry exactly their difference, so it is measured, not hard-coded.
+    const realMemoryUsage = process.memoryUsage.bind(process);
+    const heapReadings = (before: number, after: number) => {
+      let calls = 0;
+      return vi.spyOn(process, 'memoryUsage').mockImplementation(() => {
+        calls += 1;
+        return { ...realMemoryUsage(), heapUsed: calls === 1 ? before : after };
+      });
+    };
+    const request = makeRequest('function execute() { return 1; }');
 
-    // The in-process executor reports a heap delta around the call, observed
-    // and not limited (its header). A collection inside that window reads the
-    // delta as zero, more often under coverage instrumentation (CI run
-    // 39334002795, 19 October 2026): the field is a floor, not a peak. So the
-    // baseline is cleaned where V8 lends its collector, and the allocation gets
-    // up to five attempts; one that registers proves the field is measured
-    // and not hard-coded, which is what this case pins.
-    let measured = 0;
-    for (let attempt = 0; attempt < 5 && measured === 0; attempt++) {
-      collectGarbage?.();
+    const grew = heapReadings(10_000_000, 10_004_096);
+    try {
       const result = await forge.execute(request);
       expect(result.success).toBe(true);
-      expect(result.output).toBe(50);
-      measured = result.memoryUsedBytes;
+      expect(result.output).toBe(1);
+      expect(result.memoryUsedBytes).toBe(4_096);
+    } finally {
+      grew.mockRestore();
     }
-    expect(measured).toBeGreaterThan(0);
+
+    const shrank = heapReadings(10_004_096, 10_000_000);
+    try {
+      const result = await forge.execute(request);
+      expect(result.success).toBe(true);
+      expect(result.memoryUsedBytes).toBe(0);
+    } finally {
+      shrank.mockRestore();
+    }
   });
 
   // -------------------------------------------------------------------------
