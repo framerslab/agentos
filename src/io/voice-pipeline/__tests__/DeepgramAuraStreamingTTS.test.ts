@@ -573,7 +573,7 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(closes).toHaveBeenCalledOnce();
   });
 
-  it('closes without an error when the socket closes between replies', async () => {
+  it("emits close once when the session is closed, though the socket's closing handshake follows", async () => {
     const session = await tts.startSession({ format: 'pcm' });
     const ws = socketOf(session);
     const errors = vi.fn();
@@ -581,13 +581,110 @@ describe('DeepgramAuraStreamingTTS', () => {
     session.on('error', errors);
     session.on('close', closes);
 
-    session.pushTokens('Done.');
-    const flushed = session.flush();
-    control(ws, { type: 'Flushed', sequence_id: 0 });
-    await flushed;
-    ws.emit('close');
-    expect(errors).not.toHaveBeenCalled();
+    session.close();
+    expect(ws.close).toHaveBeenCalledWith(1000, 'session closed');
     expect(closes).toHaveBeenCalledOnce();
+    // The closing handshake completes: the socket's own close event follows the session's.
+    ws.emit('close', 1000, Buffer.from('session closed'));
+    expect(closes).toHaveBeenCalledOnce();
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it('stays open when Deepgram closes the socket between replies, and speaks the next reply on a fresh socket', async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const errors = vi.fn();
+    const warnings = vi.fn();
+    const closes = vi.fn();
+    const flushes = vi.fn();
+    session.on('error', errors);
+    session.on('warning', warnings);
+    session.on('close', closes);
+    session.on('flush_complete', flushes);
+
+    session.pushTokens('Done.');
+    const first = session.flush();
+    control(ws, { type: 'Flushed', sequence_id: 0 });
+    await first;
+    // Deepgram closes the idle socket: nothing is reported, and the session stays open.
+    (ws as unknown as { readyState: number }).readyState = 3;
+    ws.emit('close', 1011, Buffer.from(''));
+    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+
+    // The next reply opens a fresh socket, and its sentence goes out there once it is open.
+    const chunks = recorded(session);
+    session.pushTokens('Again. ');
+    const second = session.flush();
+    let fresh!: MockSocket;
+    await vi.waitFor(() => {
+      fresh = socketOf(session);
+      expect(fresh).toBeTruthy();
+      expect(fresh).not.toBe(ws);
+      expect(sent(fresh)).toEqual([{ type: 'Speak', text: 'Again.' }, { type: 'Flush' }]);
+    });
+    frame(fresh, 7);
+    control(fresh, { type: 'Flushed', sequence_id: 0 });
+    await second;
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([[7, 'Again.']]);
+    expect(flushes).toHaveBeenCalledTimes(2);
+    // Nothing of the next reply went to the closed socket.
+    expect(sent(ws)).toEqual([{ type: 'Speak', text: 'Done.' }, { type: 'Flush' }]);
+    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+    session.close();
+    expect(closes).toHaveBeenCalledOnce();
+  });
+
+  it('reports a socket that fails to reopen for the next reply as a warning, ends that reply unplayed with its flush_complete, and opens one again for the reply after it', async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const errors = vi.fn();
+    const warnings = vi.fn();
+    const closes = vi.fn();
+    const flushes = vi.fn();
+    session.on('error', errors);
+    session.on('warning', warnings);
+    session.on('close', closes);
+    session.on('flush_complete', flushes);
+    const chunks = recorded(session);
+
+    (ws as unknown as { readyState: number }).readyState = 3;
+    ws.emit('close', 1011, Buffer.from(''));
+    // The one try to open a socket for the next reply is refused.
+    MockCtl.nextBehavior = 'reject-400';
+    try {
+      session.pushTokens('Again. ');
+      await session.flush();
+    } finally {
+      MockCtl.nextBehavior = 'open';
+    }
+    expect(warnings).toHaveBeenCalledOnce();
+    expect(warnings.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+    // The reply ends unplayed: its flush completes, and no audio went out.
+    expect(flushes).toHaveBeenCalledOnce();
+    expect(chunks).toHaveLength(0);
+
+    // The reply after it opens a socket again.
+    session.pushTokens('Third. ');
+    const third = session.flush();
+    let fresh!: MockSocket;
+    await vi.waitFor(() => {
+      fresh = socketOf(session);
+      expect(fresh).toBeTruthy();
+      expect(fresh).not.toBe(ws);
+      expect(sent(fresh)).toEqual([{ type: 'Speak', text: 'Third.' }, { type: 'Flush' }]);
+    });
+    control(fresh, { type: 'Flushed', sequence_id: 0 });
+    await third;
+    expect(flushes).toHaveBeenCalledTimes(2);
+    expect(warnings).toHaveBeenCalledOnce();
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
   });
 
   it("sends the transport none of what Deepgram still delivers for a reply typed text cut, as the typed text's reply", async () => {
@@ -663,6 +760,71 @@ describe('DeepgramAuraStreamingTTS', () => {
       frame(ws, 4);
       control(ws, { type: 'Flushed', sequence_id: 1 });
       await vi.waitFor(() => expect(heard()).toEqual([1, 4]));
+    } finally {
+      await orchestrator.stopSession('done');
+    }
+  });
+
+  it('speaks the next reply on a fresh socket when Deepgram closed the idle one between replies, so the session listens again', async () => {
+    const transport = Object.assign(new EventEmitter(), {
+      id: 'transport-1',
+      state: 'open' as const,
+      sendAudio: vi.fn(async (_chunk: EncodedAudioChunk) => undefined),
+      sendControl: vi.fn(async (_message: unknown) => undefined),
+      close: vi.fn(),
+    });
+    const stt = Object.assign(new EventEmitter(), { pushAudio: vi.fn(), flush: vi.fn(async () => undefined), close: vi.fn() });
+    const endpoint = Object.assign(new EventEmitter(), { mode: 'heuristic' as const, pushVadEvent: vi.fn(), pushTranscript: vi.fn(), reset: vi.fn() });
+    const agent = {
+      sendText: vi.fn((text: string) =>
+        (async function* () {
+          yield text === 'First?' ? 'One.' : 'Two.';
+        })()
+      ),
+      abort: vi.fn(),
+    };
+    let session!: StreamingTTSSession;
+    const orchestrator = new VoicePipelineOrchestrator({ stt: 'fake-stt', tts: tts.providerId, format: 'pcm' });
+    await orchestrator.startSession(transport as unknown as IStreamTransport, agent, {
+      streamingSTT: { providerId: 'fake-stt', isStreaming: true, startSession: async () => stt as unknown as StreamingSTTSession },
+      streamingTTS: {
+        providerId: tts.providerId,
+        startSession: async (config?: StreamingTTSConfig) => (session = await tts.startSession(config)),
+      },
+      endpointDetector: endpoint as unknown as IEndpointDetector,
+      bargeinHandler: { mode: 'hard-cut', handleBargein: () => ({ type: 'cancel' }) },
+    });
+    const ws = socketOf(session);
+    /** The frames the transport was sent, by the value the server gave each. */
+    const heard = (): number[] => transport.sendAudio.mock.calls.map(([chunk]) => chunk.audio[0]!);
+    const ask = (transcript: string): void => {
+      endpoint.emit('turn_complete', { transcript, confidence: 0.9, durationMs: 800, reason: 'silence_timeout' });
+    };
+
+    try {
+      ask('First?');
+      await vi.waitFor(() => expect(sent(ws)).toEqual([{ type: 'Speak', text: 'One.' }, { type: 'Flush' }]));
+      frame(ws, 1);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      await vi.waitFor(() => expect(orchestrator.state).toBe('listening'));
+      expect(heard()).toEqual([1]);
+
+      // Deepgram closes the idle socket between the replies; the next reply goes out on a fresh one.
+      (ws as unknown as { readyState: number }).readyState = 3;
+      ws.emit('close', 1011, Buffer.from(''));
+      ask('Second?');
+      let fresh!: MockSocket;
+      await vi.waitFor(() => {
+        fresh = socketOf(session);
+        expect(fresh).toBeTruthy();
+        expect(fresh).not.toBe(ws);
+        expect(sent(fresh)).toEqual([{ type: 'Speak', text: 'Two.' }, { type: 'Flush' }]);
+      });
+      frame(fresh, 2);
+      control(fresh, { type: 'Flushed', sequence_id: 0 });
+      await vi.waitFor(() => expect(heard()).toEqual([1, 2]));
+      // The reply ends, and the session listens again.
+      await vi.waitFor(() => expect(orchestrator.state).toBe('listening'));
     } finally {
       await orchestrator.stopSession('done');
     }
