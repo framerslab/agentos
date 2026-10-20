@@ -63,6 +63,12 @@ jobs:
           node --test .github/scripts/check-workflow-pushes.test.mjs
           node .github/scripts/check-workflow-pushes.mjs
 
+      # The bump workflow fails a lockfile refresh that drops or changes an integrity the lockfile
+      # pins. Its tests run here, on every pull request; the bump's dry run runs only when the bump
+      # changes.
+      - name: The bump's lockfile integrity check
+        run: node --test .github/scripts/check-lockfile-integrity.test.mjs
+
       - name: Install PNPM
         uses: pnpm/action-setup@v6
         with:
