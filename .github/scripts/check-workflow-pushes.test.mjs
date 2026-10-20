@@ -311,6 +311,72 @@ describe('refused: a workflow that pushes to master', () => {
     `) }, Array(7).fill(/"git push origin HEAD" pushes the checked-out branch, master on a run on master$/));
   });
 
+  test('a step whose if: condition may not hold, or never holds, leaves the branch before it', () => {
+    // The job skips each conditional checkout when its condition is false, so each push can send master.
+    expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+      - run: git checkout master
+      - if: false
+        run: git checkout feature
+      - run: git push origin HEAD
+      - if: github.event.pull_request.draft == false
+        run: git checkout feature
+      - run: git push origin HEAD
+      - if: %{{ github.actor != 'dependabot[bot]' }}
+        uses: actions/checkout@v5
+        with: { ref: feature }
+      - run: git push origin HEAD
+    `) }, [
+      /^jobs\.j\.steps\[2\]: "git push origin HEAD" pushes the checked-out branch, master on a run on master$/,
+      /^jobs\.j\.steps\[4\]: "git push origin HEAD" pushes the checked-out branch, master on a run on master$/,
+      /^jobs\.j\.steps\[6\]: "git push origin HEAD" pushes the checked-out branch, master on a run on master$/,
+    ]);
+  });
+
+  test('a local composite action runs in the job that calls it: the branch it checks out is the one the job pushes', () => {
+    expectFindings({
+      '.github/actions/to-master/action.yml': text`
+        name: to-master
+        runs:
+          using: composite
+          steps:
+            - run: git checkout master
+              shell: bash
+      `,
+      // Outside .github/actions, so only the job that calls it reads it.
+      'tools/push/action.yml': text`
+        name: push
+        runs:
+          using: composite
+          steps:
+            - run: git push origin HEAD
+              shell: bash
+      `,
+      '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
+        - run: git checkout -b feature
+        - uses: ./.github/actions/to-master
+        - run: git push origin HEAD
+        - uses: ./tools/push
+      `),
+    }, [
+      /^jobs\.j\.steps\[2\]: "git push origin HEAD" pushes the checked-out branch, master on a run on master$/,
+      /^runs\.steps\[0\]: "git push origin HEAD" pushes the checked-out branch, master on a run on master$/,
+    ]);
+    const findings = check({
+      '.github/actions/push/action.yml': text`
+        name: push
+        runs:
+          using: composite
+          steps:
+            - run: git push origin HEAD
+              shell: bash
+      `,
+      '.github/workflows/a.yml': workflow(ON_MASTER, '- uses: ./.github/actions/push\n- uses: ./.github/actions/push/'),
+      '.github/workflows/b.yml': workflow(ON_MASTER, '- uses: ./.github/actions/push'),
+    });
+    // Found where the action is read and in three calls, reported once, on the action's line.
+    assert.deepEqual(findings.map((f) => `${f.file}:${f.line}`), ['.github/actions/push/action.yml:5']);
+  });
+
   test('git switch -- master and git checkout master --, which check master out, and git push options as git reads them', () => {
     expectFindings({ '.github/workflows/w.yml': workflow(ON_PULL_REQUEST, text`
       - run: |
@@ -523,6 +589,50 @@ describe('allowed: a workflow that does not push to master', () => {
       `),
       '.github/workflows/e.yml': workflow(ON_MASTER, '- run: git fetch origin && { git checkout -b registry-update; git push origin HEAD; }'),
       '.github/workflows/f.yml': workflow(ON_MASTER, '- run: git fetch origin && (git checkout -b registry-update; git push origin HEAD)'),
+    }, []);
+  });
+
+  test('a step whose condition holds when the steps before it succeed, a step with if: false, and a local composite action that checks out a branch of its own', () => {
+    expectFindings({
+      '.github/actions/branch/action.yml': text`
+        name: branch
+        runs:
+          using: composite
+          steps:
+            - run: git checkout -b registry-update
+              shell: bash
+      `,
+      '.github/actions/outer/action.yml': text`
+        name: outer
+        runs:
+          using: composite
+          steps:
+            - uses: ./.github/actions/branch
+      `,
+      // An action that calls itself is followed a few calls deep, then left.
+      '.github/actions/again/action.yml': text`
+        name: again
+        runs:
+          using: composite
+          steps:
+            - uses: ./.github/actions/again
+      `,
+      '.github/workflows/a.yml': workflow(ON_MASTER, text`
+        - if: success()
+          run: git checkout -b registry-update
+        - run: git push origin HEAD
+        - if: %{{ always() }}
+          run: git checkout -b docs-update
+        - run: git push origin HEAD
+        - if: false
+          run: git push origin HEAD:master
+      `),
+      '.github/workflows/b.yml': workflow(ON_MASTER, text`
+        - uses: ./.github/actions/outer
+        - uses: ./.github/actions/again
+        - uses: ./.github/actions/missing
+        - run: git push origin HEAD
+      `),
     }, []);
   });
 

@@ -33,7 +33,11 @@
  *   returns to the one checked out before it. A command after && or ||, a branch of an if or a case and a loop's
  *   body may not run, so after them the checked-out branch is any branch they can leave checked out
  *   (git checkout master; false && git checkout feature can leave master); a command that runs is taken to do
- *   what it names (a checkout that fails is not followed), and a loop's body is read once;
+ *   what it names (a checkout that fails is not followed), and a loop's body is read once. A step with an if:
+ *   condition may not run either, unless the condition is true, success(), always() or !cancelled(), and a step
+ *   with if: false never runs. A local composite action (uses: ./<path>) runs its steps in the job that calls it,
+ *   so the branch it leaves checked out is the one the job's later steps push, and its own pushes are read on the
+ *   job's branch; a push in it is reported on the action's file, once however many jobs call it;
  * - an action that pushes there: peaceiris/actions-gh-pages (publish_branch), JamesIves/github-pages-deploy-action
  *   (branch) and ad-m/github-push-action (branch; with none it pushes the default branch: the input defaulted to
  *   master through v0.6.0, and later versions look the repository's default branch up), each unless its repository
@@ -52,8 +56,8 @@
  * which run whatever program reads it. git push's options are read as git reads them: --no-<option> undoes an
  * option (--dry-run --no-dry-run pushes) and a long option can be cut to a prefix only it has (--mir is --mirror).
  * A word that is only printed (echo git push ...), a quoted heredoc fed to another program, a comment and a dry run
- * are not pushes. Not read: a branch held in a shell variable, a job's or
- * step's if: condition, a script a shell reads from a file, a variable or a download (curl ... | bash), a git
+ * are not pushes. Not read: a branch held in a shell variable, a job's if: condition and what a step's if:
+ * condition tests, a script a shell reads from a file, a variable or a download (curl ... | bash), a git
  * setting made through GIT_CONFIG_* variables, a config file or another repository's configuration, the repository a
  * remote URL or another checkout names (a git push there is read as one here), and a push made by a script file or
  * by an action not named above.
@@ -69,6 +73,7 @@ import { join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** @typedef {{ file: string, line: number, message: string }} Finding */
+/** @typedef {Finding & { path: string, called?: boolean }} Found a finding by its yq path; called when a local action's reading in a calling job made it */
 /**
  * @typedef {object} Context
  * @property {string} root the repository
@@ -1363,13 +1368,16 @@ function checkAction(uses, inputs, step) {
  * @param {string} path the yq path of the job or the action
  * @param {State} state
  * @param {Context} ctx
- * @param {(Finding & { path: string })[]} findings
+ * @param {Found[]} findings
+ * @param {number} [depth] how many local composite actions deep the steps are
  */
-function checkSteps(file, steps, path, state, ctx, findings) {
+function checkSteps(file, steps, path, state, ctx, findings, depth = 0) {
   if (!Array.isArray(steps)) return;
   steps.forEach((raw, index) => {
     if (!raw || typeof raw !== 'object') return;
     const s = /** @type {Record<string, unknown>} */ (raw);
+    const runs = stepRuns(s.if);
+    if (runs === 'never') return;
     const at = `${path}.steps[${index}]`;
     const label = `${at.slice(1).replace(/\["([^"]*)"\]/g, '.$1')}${s.name == null ? '' : ` (${String(s.name)})`}`;
     /** @type {Step} */
@@ -1377,11 +1385,55 @@ function checkSteps(file, steps, path, state, ctx, findings) {
       state,
       ctx,
       dir: s['working-directory'] == null ? state.dir : String(s['working-directory']),
-      report: (message) => findings.push({ file, path: at, line: 0, message: `${label}: ${message}` }),
+      report: (message) => findings.push({ file, path: at, line: 0, message: `${label}: ${message}`, called: depth > 0 }),
     };
-    if (typeof s.uses === 'string') checkAction(s.uses, s.with, step);
+    // A step whose condition may not hold leaves the job where it was as well as where the step leaves it.
+    const before = runs === 'maybe' ? copyState(state) : null;
+    if (typeof s.uses === 'string' && s.uses.trim().startsWith('./')) localAction(s.uses.trim(), step, findings, depth);
+    else if (typeof s.uses === 'string') checkAction(s.uses, s.with, step);
     if (s.run != null) runCommands(shellCommands(hold(String(s.run))), step, 0);
+    if (before) Object.assign(state, mergeStates(before, state));
   });
+}
+
+/**
+ * Whether a step's if: condition lets it run: always with none or with one that holds whenever the steps before it
+ * succeeded (true, success(), always(), !cancelled()), never with false, and maybe with any other, which this check
+ * does not evaluate.
+ * @param {unknown} condition
+ * @returns {'always' | 'never' | 'maybe'}
+ */
+function stepRuns(condition) {
+  if (condition == null) return 'always';
+  const text = String(condition).trim().replace(/^\$\{\{([\s\S]*)\}\}$/, '$1').trim();
+  if (/^(?:true|success\(\s*\)|always\(\s*\)|!\s*cancelled\(\s*\))$/.test(text)) return 'always';
+  return text === 'false' ? 'never' : 'maybe';
+}
+
+/**
+ * Follows a local composite action (uses: ./<path>, from the repository's root) in the job that calls it: its steps
+ * run there, on the job's checked-out branch, and leave the job on the branch they check out. An action that calls
+ * itself is followed four calls deep.
+ * @param {string} uses
+ * @param {Step} step
+ * @param {Found[]} findings
+ * @param {number} depth
+ */
+function localAction(uses, step, findings, depth) {
+  const { state, ctx } = step;
+  if (depth >= 4) return;
+  const dir = join(ctx.root, uses.slice(2));
+  const file = ['action.yml', 'action.yaml'].map((name) => join(dir, name)).find((name) => existsSync(name));
+  if (!file) return;
+  const doc = readYaml(file, ctx);
+  const d = doc && typeof doc === 'object' && !Array.isArray(doc) ? /** @type {Record<string, unknown>} */ (doc) : null;
+  const runs = d && d.runs && typeof d.runs === 'object' ? /** @type {Record<string, unknown>} */ (d.runs) : null;
+  if (!runs || runs.using !== 'composite') return;
+  // Its run steps are read from the repository's root, as its own reading reads them.
+  const jobDir = state.dir;
+  state.dir = '.';
+  checkSteps(file, runs.steps, '.runs', state, ctx, findings, depth + 1);
+  state.dir = jobDir;
 }
 
 /** @param {unknown} defaults */
@@ -1396,7 +1448,7 @@ const workingDirectory = (defaults) => {
  * @param {string} file
  * @param {unknown} doc
  * @param {Context} ctx
- * @param {(Finding & { path: string })[]} findings
+ * @param {Found[]} findings
  */
 function checkDocument(file, doc, ctx, findings) {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return;
@@ -1508,14 +1560,24 @@ export function checkFiles(files, options = {}) {
     scripts: new Map(),
   };
   requireYq(ctx.yq);
-  /** @type {(Finding & { path: string })[]} */
+  /** @type {Found[]} */
   const findings = [];
   for (const file of files) {
     const before = findings.length;
     checkDocument(file, readYaml(file, ctx), ctx, findings);
-    for (const finding of findings.slice(before)) finding.line = lineOf(file, finding.path, ctx);
+    for (const finding of findings.slice(before)) finding.line = lineOf(finding.file, finding.path, ctx);
   }
-  return findings.map(({ file, line, message }) => ({ file: relative(ctx.root, file), line, message }));
+  // A push in a local composite action is found again in each job that calls it: one found where the action's own
+  // file is read, or in an earlier calling job, is reported once.
+  const key = (/** @type {Found} */ f) => `${resolve(f.file)}\0${f.path}\0${f.message}`;
+  const own = new Set(findings.filter((f) => !f.called).map(key));
+  const reported = findings.filter((f) => {
+    if (!f.called) return true;
+    if (own.has(key(f))) return false;
+    own.add(key(f));
+    return true;
+  });
+  return reported.map(({ file, line, message }) => ({ file: relative(ctx.root, file), line, message }));
 }
 
 /** @param {string} text */
