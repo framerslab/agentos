@@ -1796,6 +1796,30 @@ describe('VoicePipelineOrchestrator', () => {
     expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'It is booked for two at seven.', durationMs: 200 });
   });
 
+  it('ends a reply a pause held on a transport that plays the audio itself with the text proven played alone, which is none', async () => {
+    // A speaking LiveKitStreamTransport reports its playout, and its pause discards the audio its track held: which of
+    // the reply's words were heard after that is not known, as when its playout wait fails.
+    (transport as any).waitForPlayout = vi.fn(async () => {});
+    const { sent, states } = await speakingWith(new SoftFadeBargeinHandler());
+    const log = recordSessionEvents(orchestrator);
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(100); // the handler pauses at its 100 ms, the first chunk sent
+    ttsSession.emit('audio', replyChunk('two'));
+    ttsSession.emit('flush_complete'); // the last of the reply's audio is held by the pause
+    sttSession.emit('transcript', sttFinal('uh huh'));
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two']);
+    expect(states).toEqual(['listening']);
+    // agent_done carries no text the track is not proven to have played, and the reply joins the conversation as
+    // interrupted with none of it known heard.
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: '', durationMs: 200 });
+    expect(log).toContain('item assistant interrupted It is booked for two at seven.|');
+    expect(log).not.toContain('item assistant played It is booked for two at seven.|It is booked for two at seven.');
+  });
+
   it("measures a client's line said over the reply, and hands its words to the agent when they cancel the reply", async () => {
     const { sent, turns } = await speakingWith(new SoftFadeBargeinHandler(), { client: true });
 
@@ -2044,18 +2068,40 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(orchestrator.state).toBe('speaking');
   });
 
-  it('drops a text_input the check refuses', async () => {
+  it('drops a text_input the check refuses with a warning that names why, never the text', async () => {
     const session = await start();
     const log = recordSessionEvents(session);
+    const errors: Error[] = [];
+    orchestrator.on('error', (error: Error) => errors.push(error));
 
     await typeText('   ');
     await typeText('x'.repeat(4_001));
     transport.emit('message', { type: 'text_input', text: 42 });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(log).toEqual([]);
+    // Each refused message is reported as the orchestrator's 'error' and a recoverable session_error, naming the
+    // reason and none of the text; the session listens on and the agent is not asked.
+    expect(errors.map((error) => error.message)).toEqual([
+      'a text_input message was dropped: its text is blank',
+      'a text_input message was dropped: its text is over 4000 characters',
+      'a text_input message was dropped: its text is not a string',
+    ]);
+    expect(errors.some((error) => error.message.includes('xxx'))).toBe(false);
+    expect(log).toEqual(['session_error session true', 'session_error session true', 'session_error session true']);
     expect(agentSession.sendText).not.toHaveBeenCalled();
     expect(orchestrator.state).toBe('listening');
+  });
+
+  it('writes a refused text_input as one console warning when nothing listens for error', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await start();
+      await typeText('   ');
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith('[voice-pipeline-orchestrator] a refused text_input:', 'a text_input message was dropped: its text is blank');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it.each(['client transcripts', 'audio'] as const)(

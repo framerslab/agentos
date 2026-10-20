@@ -23,8 +23,11 @@ import type {
   VoiceSessionEventMap,
 } from '../types.js';
 
-/** A call over fake parts, its session started with a log of the orchestrator's session events taken from before. */
-async function call() {
+/**
+ * A call over fake parts, its session started with a log of the orchestrator's session events taken from before;
+ * `overrides` replace fields of the call profile.
+ */
+async function call(overrides: Partial<CallPipelineProfile> = {}) {
   const initial: AudioIdentity = {
     scopeId: 'scope-a',
     callId: 'call-a',
@@ -96,6 +99,7 @@ async function call() {
     onInterrupted: vi.fn(),
     onFailure: vi.fn(),
     fenceInference: vi.fn(async () => {}),
+    ...overrides,
   };
   const runtime = new VoicePipelineOrchestrator({ stt: 'fake', tts: 'fake' });
   const log = recordSessionEvents(runtime);
@@ -269,8 +273,10 @@ describe('session events under a call profile', () => {
     await f.runtime.stopSession();
   });
 
-  it('drops a text_input the check refuses, and the call goes on', async () => {
+  it('drops a text_input the check refuses with a warning that names why, never the text, and the call goes on', async () => {
     const f = await call();
+    const errors: Error[] = [];
+    f.runtime.on('error', (error: Error) => errors.push(error));
 
     f.transport.emit('message', { type: 'text_input', text: '   ' });
     f.transport.emit('message', { type: 'text_input', text: 'x'.repeat(4_001) });
@@ -278,10 +284,94 @@ describe('session events under a call profile', () => {
     f.turn();
     await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
 
-    expect(f.log).toEqual(['agent initializing>listening', 'item user speech hello', 'agent listening>thinking', 'speech reply false', 'agent thinking>speaking']);
+    // Each refused message is the orchestrator's 'error' and a recoverable session_error, naming the reason alone.
+    expect(errors.map((error) => error.message)).toEqual([
+      'a text_input message was dropped: its text is blank',
+      'a text_input message was dropped: its text is over 4000 characters',
+    ]);
+    expect(f.log).toEqual([
+      'agent initializing>listening',
+      'session_error session true',
+      'session_error session true',
+      'item user speech hello',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+    ]);
     expect(f.agent.sendText).toHaveBeenCalledOnce();
     expect(f.profile.onFailure).not.toHaveBeenCalled();
     await f.runtime.stopSession();
+  });
+
+  it('takes texts typed while the generation changes in order, once it has changed', async () => {
+    const f = await call();
+
+    // The first text cuts the reply; the second comes while that interruption changes the generation.
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.transport.emit('message', { type: 'text_input', text: 'first' });
+    f.transport.emit('message', { type: 'text_input', text: 'second' });
+    await vi.waitFor(() => expect(f.agent.sendText).toHaveBeenLastCalledWith('second', expect.objectContaining({ endpointReason: 'manual' })));
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledTimes(2));
+    f.ack();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    // Both texts are the user's turns, in the order they were typed. The second is taken as soon as the first's
+    // interruption has changed the generation, so it cuts the first's turn before the agent answers it, as a text
+    // arriving then would: the agent answers the last of texts typed in quick succession.
+    expect(f.log.filter((line) => line.startsWith('item user'))).toEqual(['item user speech hello', 'item user text first', 'item user text second']);
+    expect(f.log.filter((line) => line.startsWith('session_error'))).toEqual([]);
+    expect(f.log.at(-2)).toBe('item assistant played hello|hello');
+    expect(f.profile.onFailure).not.toHaveBeenCalled();
+    await f.runtime.stopSession();
+  });
+
+  it('holds at most four texts while the generation changes, and drops the rest with a warning', async () => {
+    const f = await call();
+    const errors: Error[] = [];
+    f.runtime.on('error', (error: Error) => errors.push(error));
+
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    for (const text of ['first', 'second', 'third', 'fourth', 'fifth', 'sixth']) f.transport.emit('message', { type: 'text_input', text });
+    await vi.waitFor(() => expect(f.agent.sendText).toHaveBeenLastCalledWith('fifth', expect.objectContaining({ endpointReason: 'manual' })));
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledTimes(2));
+    f.ack();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    // The first cut the reply and four more waited for the change; the sixth found four waiting and was dropped, with
+    // a warning that names the bound and none of the text.
+    expect(f.log.filter((line) => line.startsWith('item user text'))).toEqual(['first', 'second', 'third', 'fourth', 'fifth'].map((text) => `item user text ${text}`));
+    expect(errors.map((error) => error.message)).toEqual(['a text_input message was dropped: 4 texts already wait for the generation to change']);
+    expect(f.log.filter((line) => line.startsWith('session_error'))).toEqual(['session_error session true']);
+    expect(f.profile.onFailure).not.toHaveBeenCalled();
+    await f.runtime.stopSession();
+  });
+
+  it("listens again within abortGraceMs when the cut reply's agent stream does not end after abort(), with a warning, and takes the next text", async () => {
+    const f = await call({ abortGraceMs: 50 });
+    const errors: Error[] = [];
+    f.runtime.on('error', (error: Error) => errors.push(error));
+    // An agent whose abort() is a no-op and whose stream, after its first token, yields nothing more.
+    f.agent.sendText.mockImplementation(async function* () {
+      yield 'hello';
+      await new Promise<void>(() => undefined);
+    });
+
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.transport.emit('message', { type: 'text_input', text: 'typed' });
+    // The interruption waits for the stream at most abortGraceMs; then the call listens again and the text is its turn.
+    await vi.waitFor(() => expect(f.agent.sendText).toHaveBeenCalledTimes(2));
+
+    expect(f.agent.sendText).toHaveBeenLastCalledWith('typed', expect.objectContaining({ endpointReason: 'manual' }));
+    expect(errors.map((error) => error.message)).toEqual(['the agent stream of the cut reply did not end within abortGraceMs of abort(); the call goes on without it']);
+    expect(f.log).toContain('session_error agent true');
+    expect(f.log.filter((line) => line.startsWith('item user'))).toEqual(['item user speech hello', 'item user text typed']);
+    expect(f.profile.onFailure).not.toHaveBeenCalled();
+    // A close waits the same bound for the stalled stream, then goes on.
+    await f.runtime.stopSession();
+    expect(f.runtime.state).toBe('closed');
   });
 
   it("reports no reply's text when speech interrupts a turn the agent has yet to answer", async () => {
@@ -620,6 +710,56 @@ describe('session events under a call profile', () => {
     expect(f.log.filter((line) => line.startsWith('item assistant'))).toEqual([
       'item assistant interrupted Hello there. How are you|Hello there.',
     ]);
+    expect(f.profile.onFailure).not.toHaveBeenCalled();
+    await f.runtime.stopSession();
+  });
+
+  it("takes the interrupted item's played text as playback is cleared, so it and the room's agent line agree", async () => {
+    const f = await callWithBoundaries();
+    // What the room's agent line holds: the text of each chunk the transport acknowledged, cut as playback is
+    // cleared, as LiveKitStreamTransport's line is.
+    const texts = new Map<number, string>();
+    const line: string[] = [];
+    let lineAtClear: string | undefined;
+    const sendAudio = f.transport.sendAudio;
+    f.transport.sendAudio = vi.fn(async (chunk: EncodedAudioChunk) => {
+      if (chunk.sequence !== undefined && chunk.textBoundary) texts.set(chunk.sequence, chunk.textBoundary.text);
+      await sendAudio(chunk);
+    });
+    const waitForPlayback = f.transport.waitForPlayback;
+    f.transport.waitForPlayback = vi.fn((generation: AudioIdentity['generation'], sequence: number, signal: AbortSignal) =>
+      waitForPlayback(generation, sequence, signal).then((receipt) => {
+        if (lineAtClear === undefined) line.push(texts.get(sequence) ?? '');
+        return receipt;
+      })
+    );
+    f.transport.clearPlayback = vi.fn(async () => {
+      lineAtClear ??= line.join('');
+    });
+
+    // The first segment's chunk is acknowledged; the second's waits.
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledTimes(2));
+    // The host's fence of the next generation takes its time.
+    let fenced!: () => void;
+    f.profile.onGeneration = vi.fn(() => new Promise<void>((resolve) => { fenced = resolve; }));
+    for (let i = 0; i < 6; i++) {
+      f.audio();
+      await vi.waitFor(() => expect(f.endpoint.pushAudio).toHaveBeenCalledTimes(i + 1));
+    }
+    await vi.waitFor(() => expect(f.log).toContain('barge_in cancel'));
+    // The second segment's chunk plays out while the fence is still being written.
+    f.ack();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    fenced();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    // Playback was cleared as the reply was cut, before that acknowledgement: the room's line and the item hold the
+    // first segment alone, and the same text.
+    expect(lineAtClear).toBe('Hello there.');
+    expect(f.log.filter((entry) => entry.startsWith('item assistant'))).toEqual([`item assistant interrupted Hello there. How are you|${lineAtClear}`]);
     expect(f.profile.onFailure).not.toHaveBeenCalled();
     await f.runtime.stopSession();
   });

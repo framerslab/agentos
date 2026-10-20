@@ -684,6 +684,13 @@ export interface CallPipelineProfile {
   /** Most synthesis requests of the call. */
   maxSynthesisRequests: number;
   /**
+   * How long an interruption, and a close, waits for the agent's stream of a cut reply to end after `abort()`, in
+   * milliseconds, before the call goes on without it: a finite number of zero or more.
+   *
+   * @defaultValue 2000
+   */
+  abortGraceMs?: number;
+  /**
    * The durable manager invokes each cleanup operation in order. With it set, a failure or a transport close is
    * reported through `onFailure`, and the call, like a client stop, is left for the manager to close.
    */
