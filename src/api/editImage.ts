@@ -114,8 +114,9 @@ export interface EditImageOptions {
   policyTier?: 'safe' | 'standard' | 'mature' | 'private-adult';
   /**
    * Required provider capabilities for mature/private-adult routing.
-   * Drives {@link UncensoredModelCatalog} filtering so callers can ask
-   * for `'face-consistency'` when editing a character's outfit, or
+   * Drives `UncensoredModelCatalog` filtering (the catalog interface is
+   * exported from `@framers/agentos/core/llm/routing/UncensoredModelCatalog`),
+   * so callers can ask for `'face-consistency'` when editing a character's outfit, or
    * `'img2img'` when the source is a scene the author wants preserved.
    * Ignored for safe/standard tiers.
    */

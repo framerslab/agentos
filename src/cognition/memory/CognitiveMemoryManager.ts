@@ -112,7 +112,8 @@ export interface ICognitiveMemoryManager {
       tags?: string[];
       entities?: string[];
       /**
-       * When encoding a subjective trace from {@link PerspectiveObserver},
+       * When encoding a subjective trace from `PerspectiveObserver`
+       * (`@framers/agentos/memory/pipeline/observation/PerspectiveObserver`),
        * thread the source-event identifiers through so the resulting
        * {@link MemoryTrace} carries the `MechanismMetadata` fields that
        * `applyReconsolidation` reads at retrieval time.

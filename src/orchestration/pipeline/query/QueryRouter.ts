@@ -347,7 +347,8 @@ export class QueryRouter {
   // ==========================================================================
 
   /**
-   * Attach a {@link CapabilityDiscoveryEngine} for capability-aware classification.
+   * Attach a `CapabilityDiscoveryEngine` (exported from `@framers/agentos/discovery`)
+   * for capability-aware classification.
    *
    * When set, the classifier injects Tier 0 capability summaries (~150 tokens)
    * into its LLM prompt, enabling it to recommend which skills, tools, and

@@ -98,14 +98,14 @@ export interface StreamObjectOptions<T extends ZodType> {
 
   /**
    * Reasoning depth forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.effort}.
+   * {@link GenerateTextOptions.effort}.
    */
   effort?: string;
 
   /**
    * Extended-thinking switch forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.thinking}; see
-   * {@link import('./generateObject.js').GenerateObjectOptions.thinking}.
+   * {@link GenerateTextOptions.thinking}; see
+   * {@link GenerateObjectOptions.thinking}.
    */
   thinking?: { budgetTokens: number } | false;
 
@@ -127,14 +127,14 @@ export interface StreamObjectOptions<T extends ZodType> {
 
   /**
    * Ends the stream when it aborts, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.abortSignal}: the provider's stream stops, the
+   * {@link GenerateTextOptions.abortSignal}: the provider's stream stops, the
    * partial-object iteration ends, and `object` rejects with the signal's reason.
    */
   abortSignal?: AbortSignal;
 
   /**
    * The most requests the stream's call sends, a first and its retries together; the provider's configured count
-   * when left out. Forwarded to {@link import('./generateText.js').GenerateTextOptions.maxAttempts}.
+   * when left out. Forwarded to {@link GenerateTextOptions.maxAttempts}.
    */
   maxAttempts?: number;
 

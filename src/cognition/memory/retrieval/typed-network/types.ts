@@ -95,7 +95,10 @@ export interface TypedFact {
   bank: BankId;
   /** Narrative text of the fact, post-coreference resolution. */
   text: string;
-  /** Embedding vector. Empty until {@link IEmbeddingManager.embed} populates. */
+  /**
+   * Embedding vector. {@link TypedNetworkObserver} creates each fact with an
+   * empty array, and nothing in this package fills it.
+   */
   embedding: number[];
   /** Temporal envelope (occurrence interval + mention timestamp). */
   temporal: FactTemporal;
