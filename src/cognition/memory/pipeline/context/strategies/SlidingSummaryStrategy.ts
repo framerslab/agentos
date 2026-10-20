@@ -14,6 +14,7 @@ import type {
   InfiniteContextConfig,
   SummaryChainNode,
 } from '../../../core/types.js';
+import { compactionSplitIndex } from './compactionSplit.js';
 
 /** ~4 chars per token. */
 function estimateTokens(text: string): number {
@@ -26,9 +27,13 @@ function generateId(): string {
 
 export class SlidingSummaryStrategy implements ICompactionStrategy {
   readonly name = 'sliding' as const;
-  private readonly llmInvoker: (prompt: string) => Promise<string>;
+  private readonly llmInvoker?: (prompt: string) => Promise<string>;
 
-  constructor(llmInvoker: (prompt: string) => Promise<string>) {
+  /**
+   * @param llmInvoker - Writes the summary. Without one, or when it fails or
+   *   answers nothing, the summary is the segment's first and last user messages.
+   */
+  constructor(llmInvoker?: (prompt: string) => Promise<string>) {
     this.llmInvoker = llmInvoker;
   }
 
@@ -37,14 +42,10 @@ export class SlidingSummaryStrategy implements ICompactionStrategy {
     config: InfiniteContextConfig,
   ): Promise<CompactionResult> {
     const startTime = Date.now();
-    const { messages, maxContextTokens } = input;
+    const { messages } = input;
 
-    // Determine how many messages to keep raw.
-    const preserveCount = Math.min(
-      config.preserveRecentTurns * 2, // turns → messages (user+assistant)
-      messages.length - 2, // must compact at least 2 messages
-    );
-    const splitIdx = messages.length - preserveCount;
+    // The newest turns stay as they are; see compactionSplitIndex.
+    const splitIdx = compactionSplitIndex(messages.length, config.preserveRecentTurns);
     if (splitIdx <= 0) {
       // Nothing to compact.
       return this.noopResult(messages, startTime);
@@ -83,20 +84,24 @@ export class SlidingSummaryStrategy implements ICompactionStrategy {
       'Summary:',
     ].join('\n');
 
-    let summary: string;
-    let entities: string[];
+    let summary: string | undefined;
     let droppedContent: string[] = [];
 
-    try {
-      const raw = await this.llmInvoker(prompt);
-      summary = raw.trim();
-      entities = this.extractEntities(summary);
-      droppedContent = this.detectDropped(toCompact, summary);
-    } catch {
-      // Fallback: take first and last messages as crude summary.
-      summary = this.fallbackSummary(toCompact);
-      entities = this.extractEntities(summary);
+    if (this.llmInvoker) {
+      try {
+        const written = (await this.llmInvoker(prompt)).trim();
+        if (written) {
+          summary = written;
+          droppedContent = this.detectDropped(toCompact, written);
+        }
+      } catch {
+        // The extractive summary below.
+      }
     }
+    // No summarizer, a failed call or an empty answer: the first and last
+    // user messages stand for the segment.
+    summary ??= this.fallbackSummary(toCompact);
+    const entities = this.extractEntities(summary);
 
     const outputTokens = estimateTokens(summary);
     const turnRange: [number, number] = [

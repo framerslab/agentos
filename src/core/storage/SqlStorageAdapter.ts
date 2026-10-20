@@ -22,7 +22,7 @@
  * 
  * @version 1.0.0
  * @author AgentOS Team
- * @license MIT
+ * @license Apache-2.0
  */
 
 import {
@@ -37,6 +37,40 @@ import type {
   IMessageQueryOptions,
   ITokenUsage,
 } from './IStorageAdapter.js';
+import { CONVERSATION_COLUMNS, MESSAGE_COLUMNS, ensureConversationSchema } from './sqlStorageSchema.js';
+import { createLogger, type ILogger } from '../logging/index.js';
+
+/** Milliseconds in a day, for `messageRetentionDays`. */
+const DAY_MS = 86_400_000;
+
+/**
+ * The row limit sent when a caller pages with an offset alone. SQLite reads
+ * OFFSET only after a LIMIT (https://www.sqlite.org/lang_select.html), so an
+ * offset needs a limit beside it. This one is the largest integer a JavaScript
+ * number holds exactly; PostgreSQL reads a LIMIT as a bigint, which holds it too.
+ */
+const NO_ROW_LIMIT = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Appends `LIMIT ? OFFSET ?` to a query when the caller asked for a limit, an
+ * offset or both, and pushes their values. A missing or zero limit returns every
+ * row after the offset.
+ */
+function pageClause(params: unknown[], limit?: number, offset?: number): string {
+  if (!limit && !offset) return '';
+  params.push(limit || NO_ROW_LIMIT, offset || 0);
+  return ' LIMIT ? OFFSET ?';
+}
+
+/**
+ * A column, count or sum as a number. PostgreSQL's driver hands back a BIGINT
+ * (a millisecond timestamp here, a COUNT, a SUM of INTEGER columns) as a string
+ * (https://github.com/brianc/node-pg-types#readme); SQLite hands back numbers.
+ * A NULL, such as the SUM of no rows, reads as 0.
+ */
+function toNumber(value: unknown): number {
+  return Number(value) || 0;
+}
 
 /**
  * Configuration options for the AgentOS SQL storage adapter.
@@ -45,8 +79,10 @@ import type {
  * 
  * @interface AgentOsSqlStorageConfig
  * @extends {StorageResolutionOptions}
- * @property {boolean} [enableAutoMigration] - Automatically run schema migrations on init
- * @property {number} [messageRetentionDays] - Auto-delete messages older than X days (0 = disabled)
+ * @property {boolean} [enableAutoMigration] - Create the tables and run the schema
+ *   migrations in `initialize()` (default true). False leaves the schema to the host.
+ * @property {number} [messageRetentionDays] - Delete messages older than this many days,
+ *   in `initialize()` and after each stored message (0, the default, keeps every message)
  * 
  * @example
  * ```typescript
@@ -80,35 +116,35 @@ export interface AgentOsSqlStorageConfig extends StorageResolutionOptions {
  * - `conversations` table: Stores conversation metadata
  * - `messages` table: Stores individual messages with foreign key to conversations
  * - Indexes on frequently queried columns for performance
+ * - Timestamps are milliseconds in BIGINT columns
  * 
  * @class SqlStorageAdapter
  * @implements {IStorageAdapter}
  * 
  * @example
  * ```typescript
- * // Node.js with SQLite
+ * // Node.js: better-sqlite3, or sql.js when the native module does not load
  * const storage = new SqlStorageAdapter({
- *   type: 'better-sqlite3',
- *   database: './data/agentos.db',
- *   enableWAL: true
+ *   filePath: './data/agentos.db',
+ *   priority: ['better-sqlite3', 'sqljs'],
  * });
- * 
  * await storage.initialize();
- * 
- * // Browser with SQL.js
- * const browserStorage = new SqlStorageAdapter({
- *   type: 'sql.js',
- *   database: 'agentos.db',
- *   enableAutoMigration: true
+ *
+ * // PostgreSQL, with the tables in a schema of their own
+ * const pgStorage = new SqlStorageAdapter({
+ *   priority: ['postgres'],
+ *   postgres: { connectionString: process.env.DATABASE_URL },
+ *   segment: 'agentos',
+ *   messageRetentionDays: 90,
  * });
- * 
- * await browserStorage.initialize();
+ * await pgStorage.initialize();
  * ```
  */
 export class SqlStorageAdapter implements IStorageAdapter {
   private adapter!: StorageAdapter;
   private config: AgentOsSqlStorageConfig;
   private initialized: boolean = false;
+  private logger?: ILogger;
 
   /**
    * Creates a new SQL storage adapter instance.
@@ -134,10 +170,13 @@ export class SqlStorageAdapter implements IStorageAdapter {
   /**
    * Initializes the storage adapter and creates the database schema.
    * 
-   * **Schema created:**
-   * - `conversations` table with indexes on userId and agentId
-   * - `messages` table with indexes on conversationId and timestamp
+   * **Schema created** (unless `enableAutoMigration` is false):
+   * - `conversations` table with indexes on userId, agentId and lastActivity
+   * - `messages` table with indexes on conversationId, timestamp and role
    * - Foreign key constraints for referential integrity
+   * - On PostgreSQL, INTEGER timestamp columns of an older table widened to BIGINT
+   *
+   * With `messageRetentionDays` set, it then deletes the messages older than that.
    * 
    * **Must be called before any other operations.**
    * 
@@ -158,78 +197,17 @@ export class SqlStorageAdapter implements IStorageAdapter {
     // Resolve the appropriate storage adapter for the platform
     this.adapter = await resolveStorageAdapter(this.config);
 
-    // Create conversations table
-    await this.adapter.exec(`
-      CREATE TABLE IF NOT EXISTS conversations (
-        id TEXT PRIMARY KEY,
-        userId TEXT NOT NULL,
-        agentId TEXT,
-        createdAt INTEGER NOT NULL,
-        lastActivity INTEGER NOT NULL,
-        title TEXT,
-        metadata TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_conversations_userId ON conversations(userId);
-      CREATE INDEX IF NOT EXISTS idx_conversations_agentId ON conversations(agentId);
-      CREATE INDEX IF NOT EXISTS idx_conversations_lastActivity ON conversations(lastActivity);
-    `);
-
-    // Create messages table with foreign key
-    await this.adapter.exec(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        conversationId TEXT NOT NULL,
-        role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system', 'tool')),
-        content TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        model TEXT,
-        promptTokens INTEGER,
-        completionTokens INTEGER,
-        totalTokens INTEGER,
-        cacheReadTokens INTEGER,
-        cacheCreationTokens INTEGER,
-        toolCalls TEXT,
-        toolCallId TEXT,
-        name TEXT,
-        metadata TEXT,
-        FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_messages_conversationId ON messages(conversationId);
-      CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
-    `);
-
-    // Back-compat migration: add cacheReadTokens / cacheCreationTokens
-    // columns on pre-existing databases. CREATE TABLE IF NOT EXISTS
-    // above only helps on fresh DBs; on DBs that predate this field
-    // set the table already exists and the new columns never land
-    // without an explicit ALTER. Swallow the duplicate-column error
-    // because neither SQLite nor Postgres has portable IF NOT EXISTS
-    // on ADD COLUMN (Postgres does; SQLite does not until 3.35).
-    //
-    // Both columns are read first and the ALTERs run only when that read
-    // fails. On Postgres an ALTER TABLE takes an ACCESS EXCLUSIVE lock even
-    // when the column exists; the lock waits behind every open reader of
-    // the table (a pg_dump reads it for its whole run) and later queries
-    // queue behind it.
-    let hasCacheTokenColumns = false;
-    try {
-      await this.adapter.get('SELECT cacheReadTokens, cacheCreationTokens FROM messages LIMIT 0');
-      hasCacheTokenColumns = true;
-    } catch {
-      // At least one column is missing: add them below.
-    }
-    if (!hasCacheTokenColumns) {
-      for (const col of ['cacheReadTokens', 'cacheCreationTokens']) {
-        try {
-          await this.adapter.exec(`ALTER TABLE messages ADD COLUMN ${col} INTEGER;`);
-        } catch {
-          // The column already exists (the other one was the missing one).
-        }
+    if (this.config.enableAutoMigration === false) {
+      this.log().debug?.('Schema left to the host', { enableAutoMigration: false });
+    } else {
+      const { widenedColumns } = await ensureConversationSchema(this.adapter);
+      if (widenedColumns > 0) {
+        this.log().info('Widened INTEGER timestamp columns to BIGINT', { widenedColumns });
       }
     }
 
     this.initialized = true;
+    await this.deleteExpiredMessages();
   }
 
   /**
@@ -243,7 +221,8 @@ export class SqlStorageAdapter implements IStorageAdapter {
    * ```
    */
   async close(): Promise<void> {
-    await this.adapter.close();
+    // Before initialize() has resolved a database there is nothing to close.
+    if (this.adapter) await this.adapter.close();
     this.initialized = false;
   }
 
@@ -288,7 +267,7 @@ export class SqlStorageAdapter implements IStorageAdapter {
     this.ensureInitialized();
 
     const row = await this.adapter.get<any>(
-      'SELECT * FROM conversations WHERE id = ?',
+      `SELECT ${CONVERSATION_COLUMNS} FROM conversations WHERE id = ?`,
       [conversationId]
     );
 
@@ -340,20 +319,25 @@ export class SqlStorageAdapter implements IStorageAdapter {
   }
 
   /**
-   * Deletes a conversation and all its messages.
-   * 
+   * Deletes a conversation and all its messages, in one transaction.
+   *
+   * The messages are deleted by their own statement. The table's
+   * `ON DELETE CASCADE` acts only where foreign keys are enforced, and SQLite
+   * leaves them off on a connection that does not turn them on
+   * (https://www.sqlite.org/foreignkeys.html), as the sql.js, IndexedDB and
+   * Capacitor adapters do.
+   *
    * @param {string} conversationId - Conversation to delete
    * @returns {Promise<boolean>} True if deleted, false if not found
    */
   async deleteConversation(conversationId: string): Promise<boolean> {
     this.ensureInitialized();
 
-    const result = await this.adapter.run(
-      'DELETE FROM conversations WHERE id = ?',
-      [conversationId]
-    );
-
-    return result.changes > 0;
+    return this.adapter.transaction(async (trx) => {
+      await trx.run('DELETE FROM messages WHERE conversationId = ?', [conversationId]);
+      const result = await trx.run('DELETE FROM conversations WHERE id = ?', [conversationId]);
+      return result.changes > 0;
+    });
   }
 
   /**
@@ -369,7 +353,7 @@ export class SqlStorageAdapter implements IStorageAdapter {
   ): Promise<IConversation[]> {
     this.ensureInitialized();
 
-    let query = 'SELECT * FROM conversations WHERE userId = ?';
+    let query = `SELECT ${CONVERSATION_COLUMNS} FROM conversations WHERE userId = ?`;
     const params: any[] = [userId];
 
     if (options?.agentId) {
@@ -378,16 +362,7 @@ export class SqlStorageAdapter implements IStorageAdapter {
     }
 
     query += ' ORDER BY lastActivity DESC';
-
-    if (options?.limit) {
-      query += ' LIMIT ?';
-      params.push(options.limit);
-    }
-
-    if (options?.offset) {
-      query += ' OFFSET ?';
-      params.push(options.offset);
-    }
+    query += pageClause(params, options?.limit, options?.offset);
 
     const rows = await this.adapter.all<any>(query, params);
     return rows.map((row: any) => this.rowToConversation(row));
@@ -426,9 +401,11 @@ export class SqlStorageAdapter implements IStorageAdapter {
         message.content,
         message.timestamp,
         message.model || null,
-        message.usage?.promptTokens || null,
-        message.usage?.completionTokens || null,
-        message.usage?.totalTokens || null,
+        // Null only when the caller reported no count, so a usage of zero
+        // tokens reads back as zero rather than as no usage.
+        message.usage?.promptTokens ?? null,
+        message.usage?.completionTokens ?? null,
+        message.usage?.totalTokens ?? null,
         // Persist cache-token counters when the caller reports them so
         // getConversationTokenUsage can SUM a full cache picture later.
         // Null when undefined — distinguishes "provider did not report"
@@ -448,6 +425,7 @@ export class SqlStorageAdapter implements IStorageAdapter {
       [message.timestamp, message.conversationId]
     );
 
+    await this.deleteExpiredMessages();
     return message;
   }
 
@@ -460,7 +438,9 @@ export class SqlStorageAdapter implements IStorageAdapter {
   async getMessage(messageId: string): Promise<IConversationMessage | null> {
     this.ensureInitialized();
 
-    const row = await this.adapter.get<any>('SELECT * FROM messages WHERE id = ?', [messageId]);
+    const row = await this.adapter.get<any>(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`, [
+      messageId,
+    ]);
 
     if (!row) {
       return null;
@@ -482,7 +462,7 @@ export class SqlStorageAdapter implements IStorageAdapter {
   ): Promise<IConversationMessage[]> {
     this.ensureInitialized();
 
-    let query = 'SELECT * FROM messages WHERE conversationId = ?';
+    let query = `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE conversationId = ?`;
     const params: any[] = [conversationId];
 
     if (options?.since) {
@@ -503,16 +483,7 @@ export class SqlStorageAdapter implements IStorageAdapter {
 
     const order = options?.order === 'desc' ? 'DESC' : 'ASC';
     query += ` ORDER BY timestamp ${order}`;
-
-    if (options?.limit) {
-      query += ' LIMIT ?';
-      params.push(options.limit);
-    }
-
-    if (options?.offset) {
-      query += ' OFFSET ?';
-      params.push(options.offset);
-    }
+    query += pageClause(params, options?.limit, options?.offset);
 
     const rows = await this.adapter.all<any>(query, params);
     return rows.map((row: any) => this.rowToMessage(row));
@@ -558,12 +529,12 @@ export class SqlStorageAdapter implements IStorageAdapter {
   async getMessageCount(conversationId: string): Promise<number> {
     this.ensureInitialized();
 
-    const row = await this.adapter.get<{ count: number }>(
-      'SELECT COUNT(*) as count FROM messages WHERE conversationId = ?',
+    const row = await this.adapter.get<{ count: number | string }>(
+      'SELECT COUNT(*) AS "count" FROM messages WHERE conversationId = ?',
       [conversationId]
     );
 
-    return row?.count || 0;
+    return toNumber(row?.count);
   }
 
   /**
@@ -577,33 +548,33 @@ export class SqlStorageAdapter implements IStorageAdapter {
 
     const row = await this.adapter.get<any>(
       `SELECT
-        SUM(promptTokens) as promptTokens,
-        SUM(completionTokens) as completionTokens,
-        SUM(totalTokens) as totalTokens,
-        SUM(cacheReadTokens) as cacheReadTokens,
-        SUM(cacheCreationTokens) as cacheCreationTokens,
-        COUNT(cacheReadTokens) as cacheReadCount,
-        COUNT(cacheCreationTokens) as cacheCreationCount
+        SUM(promptTokens) AS "promptTokens",
+        SUM(completionTokens) AS "completionTokens",
+        SUM(totalTokens) AS "totalTokens",
+        SUM(cacheReadTokens) AS "cacheReadTokens",
+        SUM(cacheCreationTokens) AS "cacheCreationTokens",
+        COUNT(cacheReadTokens) AS "cacheReadCount",
+        COUNT(cacheCreationTokens) AS "cacheCreationCount"
        FROM messages
        WHERE conversationId = ?`,
       [conversationId]
     );
 
     const usage: ITokenUsage = {
-      promptTokens: row?.promptTokens || 0,
-      completionTokens: row?.completionTokens || 0,
-      totalTokens: row?.totalTokens || 0,
+      promptTokens: toNumber(row?.promptTokens),
+      completionTokens: toNumber(row?.completionTokens),
+      totalTokens: toNumber(row?.totalTokens),
     };
     // COUNT returns the number of non-NULL rows; when nothing recorded
     // cache metrics, SUM collapses to NULL / 0 but the count is also 0.
     // We only populate the optional cache fields when at least one
     // message carried a value, preserving the "not reported" signal
     // on cache-silent providers (e.g. OpenAI).
-    if (row?.cacheReadCount && Number(row.cacheReadCount) > 0) {
-      usage.cacheReadTokens = Number(row.cacheReadTokens) || 0;
+    if (toNumber(row?.cacheReadCount) > 0) {
+      usage.cacheReadTokens = toNumber(row?.cacheReadTokens);
     }
-    if (row?.cacheCreationCount && Number(row.cacheCreationCount) > 0) {
-      usage.cacheCreationTokens = Number(row.cacheCreationTokens) || 0;
+    if (toNumber(row?.cacheCreationCount) > 0) {
+      usage.cacheCreationTokens = toNumber(row?.cacheCreationTokens);
     }
     return usage;
   }
@@ -622,6 +593,26 @@ export class SqlStorageAdapter implements IStorageAdapter {
     }
   }
 
+  /** The adapter's logger, made on first use through the host's logger factory. */
+  private log(): ILogger {
+    return (this.logger ??= createLogger('SqlStorageAdapter'));
+  }
+
+  /**
+   * Deletes the messages older than `messageRetentionDays`, when it is above 0.
+   * Runs in `initialize()` and after each stored message, so a message stored
+   * with a timestamp already past the cutoff is deleted at once.
+   */
+  private async deleteExpiredMessages(): Promise<void> {
+    const days = this.config.messageRetentionDays ?? 0;
+    if (!(days > 0)) return;
+    const cutoff = Date.now() - days * DAY_MS;
+    const result = await this.adapter.run('DELETE FROM messages WHERE timestamp < ?', [cutoff]);
+    if (result.changes > 0) {
+      this.log().debug?.('Deleted expired messages', { deleted: result.changes, retentionDays: days });
+    }
+  }
+
   /**
    * Converts a database row to an IConversation object.
    * 
@@ -634,8 +625,8 @@ export class SqlStorageAdapter implements IStorageAdapter {
       id: row.id,
       userId: row.userId,
       agentId: row.agentId || undefined,
-      createdAt: row.createdAt,
-      lastActivity: row.lastActivity,
+      createdAt: toNumber(row.createdAt),
+      lastActivity: toNumber(row.lastActivity),
       title: row.title || undefined,
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
     };
@@ -654,26 +645,29 @@ export class SqlStorageAdapter implements IStorageAdapter {
       conversationId: row.conversationId,
       role: row.role,
       content: row.content,
-      timestamp: row.timestamp,
+      timestamp: toNumber(row.timestamp),
     };
 
     if (row.model) message.model = row.model;
+    // A usage is read back when the row stored any count, zero included.
     if (
-      row.promptTokens ||
-      row.completionTokens ||
-      row.totalTokens ||
+      row.promptTokens != null ||
+      row.completionTokens != null ||
+      row.totalTokens != null ||
       row.cacheReadTokens != null ||
       row.cacheCreationTokens != null
     ) {
       message.usage = {
-        promptTokens: row.promptTokens || 0,
-        completionTokens: row.completionTokens || 0,
-        totalTokens: row.totalTokens || 0,
+        promptTokens: toNumber(row.promptTokens),
+        completionTokens: toNumber(row.completionTokens),
+        totalTokens: toNumber(row.totalTokens),
       };
       // Only set cache fields when the row actually stored a value so
       // callers retain "not reported" vs "zero hits" distinction.
-      if (row.cacheReadTokens != null) message.usage.cacheReadTokens = row.cacheReadTokens;
-      if (row.cacheCreationTokens != null) message.usage.cacheCreationTokens = row.cacheCreationTokens;
+      if (row.cacheReadTokens != null) message.usage.cacheReadTokens = toNumber(row.cacheReadTokens);
+      if (row.cacheCreationTokens != null) {
+        message.usage.cacheCreationTokens = toNumber(row.cacheCreationTokens);
+      }
     }
     if (row.toolCalls) message.toolCalls = JSON.parse(row.toolCalls);
     if (row.toolCallId) message.toolCallId = row.toolCallId;

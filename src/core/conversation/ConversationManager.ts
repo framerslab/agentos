@@ -12,11 +12,24 @@
  */
 
 import { ConversationContext, ConversationContextConfig } from './ConversationContext';
-import { ConversationMessage as InternalConversationMessage, MessageRole, createConversationMessage } from './ConversationMessage';
+import { ConversationMessage as InternalConversationMessage } from './ConversationMessage';
 import { IUtilityAI } from '../../cognition/nlp/ai_utilities/IUtilityAI';
 import { uuidv4 } from '../utils/uuid.js';
 import { GMIError, GMIErrorCode } from '../utils/errors.js';
+import { createLogger } from '../logging/index.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import { ensureConversationTables, isPostgresAdapter } from './conversationTables.js';
+import {
+  INSERT_MESSAGE_SQL,
+  REPLACE_MESSAGE_SQL,
+  SELECT_MESSAGES_SQL,
+  UPDATE_MESSAGE_SQL,
+  messageFromRow,
+  messageRowValues,
+  readNumber,
+  updateMessageValues,
+  type ConversationMessageRow,
+} from './conversationRows.js';
 
 /**
  * Configuration for the ConversationManager.
@@ -44,45 +57,6 @@ export interface ConversationManagerConfig {
    */
   appendOnlyPersistence?: boolean;
 }
-
-/**
- * SQL schema for conversations table (compatible with SQLite, PostgreSQL, IndexedDB)
- */
-const CONVERSATIONS_SCHEMA = `
-CREATE TABLE IF NOT EXISTS conversations (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  gmi_instance_id TEXT,
-  title TEXT,
-  language TEXT,
-  session_details TEXT DEFAULT '{}',
-  is_archived INTEGER DEFAULT 0,
-  tags TEXT DEFAULT '[]',
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS conversation_messages (
-  id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL,
-  role TEXT NOT NULL,
-  content TEXT NOT NULL,
-  timestamp INTEGER NOT NULL,
-  tool_calls TEXT,
-  tool_call_id TEXT,
-  multimodal_data TEXT,
-  audio_url TEXT,
-  audio_transcript TEXT,
-  voice_settings TEXT,
-  metadata TEXT DEFAULT '{}',
-  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
-CREATE INDEX IF NOT EXISTS idx_conversations_gmi_instance_id ON conversations(gmi_instance_id);
-CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation_id ON conversation_messages(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_conversation_messages_timestamp ON conversation_messages(timestamp);
-`;
 
 /**
  * @class ConversationManager
@@ -189,7 +163,13 @@ export class ConversationManager {
     // Initialize schema if persistence is enabled
     if (this.config.persistenceEnabled && this.storageAdapter) {
       try {
-        await this.storageAdapter.exec(CONVERSATIONS_SCHEMA);
+        const { addedColumns, widenedColumns } = await ensureConversationTables(this.storageAdapter);
+        if (addedColumns.length > 0 || widenedColumns > 0) {
+          createLogger('ConversationManager').info('Brought the conversation tables up to date', {
+            addedColumns: addedColumns.join(','),
+            widenedColumns,
+          });
+        }
         console.log(`ConversationManager (ID: ${this.managerId}): Schema initialized.`);
       } catch (error: any) {
         console.error(`ConversationManager (ID: ${this.managerId}): Failed to initialize schema:`, error);
@@ -379,12 +359,12 @@ export class ConversationManager {
     // Optionally, try loading from DB if not in memory to provide info
     if (this.config.persistenceEnabled && this.storageAdapter) {
       try {
-        const dbConvo = await this.storageAdapter.get<{ id: string; created_at: number }>(
+        const dbConvo = await this.storageAdapter.get<{ id: string; created_at: number | string }>(
           'SELECT id, created_at FROM conversations WHERE id = ?',
           [sessionId]
         );
         if (dbConvo) {
-          return [{ sessionId: dbConvo.id, createdAt: dbConvo.created_at }];
+          return [{ sessionId: dbConvo.id, createdAt: readNumber(dbConvo.created_at) ?? 0 }];
         }
       } catch (error: any) {
         console.error(`ConversationManager (ID: ${this.managerId}): Error fetching conversation info for ${sessionId}:`, error);
@@ -412,24 +392,25 @@ export class ConversationManager {
     if (this.config.persistenceEnabled && this.storageAdapter) {
       try {
         if (this.config.appendOnlyPersistence) {
-          const row = await this.storageAdapter.get<{ last_ts: number | null }>(
+          const row = await this.storageAdapter.get<{ last_ts: number | string | null }>(
             'SELECT MAX(timestamp) AS last_ts FROM conversation_messages WHERE conversation_id = ?',
             [conversationId]
           );
-          if (row?.last_ts != null) {
-            return row.last_ts;
+          const lastMessageAt = readNumber(row?.last_ts);
+          if (lastMessageAt !== undefined) {
+            return lastMessageAt;
           }
-          const convo = await this.storageAdapter.get<{ created_at: number }>(
+          const convo = await this.storageAdapter.get<{ created_at: number | string }>(
             'SELECT created_at FROM conversations WHERE id = ?',
             [conversationId]
           );
-          return convo?.created_at;
+          return readNumber(convo?.created_at);
         }
-        const convo = await this.storageAdapter.get<{ updated_at: number }>(
+        const convo = await this.storageAdapter.get<{ updated_at: number | string }>(
           'SELECT updated_at FROM conversations WHERE id = ?',
           [conversationId]
         );
-        return convo?.updated_at;
+        return readNumber(convo?.updated_at);
       } catch (error: any) {
         console.error(`ConversationManager (ID: ${this.managerId}): Error fetching 'updated_at' for conversation ${conversationId} from DB:`, error);
         return undefined;
@@ -501,7 +482,9 @@ export class ConversationManager {
         const now = Date.now();
         const conversationData = {
           id: context.sessionId,
-          user_id: context.userId,
+          // The column is NOT NULL; a conversation with no user is stored with an
+          // empty one and reads back without one.
+          user_id: context.userId ?? '',
           gmi_instance_id: context.gmiInstanceId || null,
           title: (contextJSON.sessionMetadata?.title as string) || `Conversation from ${new Date(context.createdAt).toLocaleDateString()}`,
           language: context.currentLanguage || null,
@@ -514,11 +497,10 @@ export class ConversationManager {
 
         // Upsert conversation (cross-platform compatible)
         // Check if exists first, then INSERT or UPDATE (unless append-only).
-        const existing = await tx.get<{ created_at: number }>(
-          'SELECT created_at FROM conversations WHERE id = ?',
+        const existing = await tx.get<{ id: string }>(
+          'SELECT id FROM conversations WHERE id = ?',
           [conversationData.id]
         );
-        const finalCreatedAt = existing?.created_at || conversationData.created_at;
 
         if (!existing) {
           await tx.run(
@@ -533,7 +515,7 @@ export class ConversationManager {
               conversationData.session_details,
               conversationData.is_archived,
               conversationData.tags,
-              finalCreatedAt,
+              conversationData.created_at,
               conversationData.updated_at,
             ]
           );
@@ -557,114 +539,25 @@ export class ConversationManager {
           );
         }
 
-        if (contextJSON.messages && contextJSON.messages.length > 0) {
-          for (const msg of contextJSON.messages) {
-            const messageId = (msg as any).id || `msg_${uuidv4()}`;
+        // Append-only persistence inserts each message once and never updates it.
+        // Otherwise a saved message is rewritten: INSERT OR REPLACE on SQLite, and
+        // on PostgreSQL, which has no INSERT OR REPLACE, an INSERT or an UPDATE.
+        const postgres = isPostgresAdapter(tx);
+        for (const [position, msg] of (contextJSON.messages ?? []).entries()) {
+          const values = messageRowValues(msg.id || `msg_${uuidv4()}`, context.sessionId, msg, position);
 
-            // Append-only persistence: insert each message once; never update.
-            if (this.config.appendOnlyPersistence) {
-              const existingMsg = await tx.get<{ id: string }>(
-                'SELECT id FROM conversation_messages WHERE id = ?',
-                [messageId]
-              );
-              if (existingMsg) {
-                continue;
-              }
-              await tx.run(
-                `INSERT INTO conversation_messages (
-                  id, conversation_id, role, content, timestamp, tool_calls, tool_call_id,
-                  multimodal_data, audio_url, audio_transcript, voice_settings, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                  messageId,
-                  context.sessionId,
-                  msg.role.toString(),
-                  typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
-                  msg.timestamp,
-                  msg.tool_calls ? JSON.stringify(msg.tool_calls) : null,
-                  (msg as any).tool_call_id || null,
-                  (msg as any).multimodalData ? JSON.stringify((msg as any).multimodalData) : null,
-                  (msg as any).audioUrl || null,
-                  (msg as any).audioTranscript || null,
-                  (msg as any).voiceSettings ? JSON.stringify((msg as any).voiceSettings) : null,
-                  JSON.stringify((msg as any).metadata || {}),
-                ]
-              );
-              continue;
+          if (this.config.appendOnlyPersistence || postgres) {
+            const existingMsg = await tx.get<{ id: string }>(
+              'SELECT id FROM conversation_messages WHERE id = ?',
+              [values[0]]
+            );
+            if (!existingMsg) {
+              await tx.run(INSERT_MESSAGE_SQL, values);
+            } else if (!this.config.appendOnlyPersistence) {
+              await tx.run(UPDATE_MESSAGE_SQL, updateMessageValues(values));
             }
-
-            // Mutable/revisioned persistence: upsert-like behavior.
-            // Prefer SQLite's INSERT OR REPLACE when available; otherwise fall back to SELECT+UPDATE.
-            if (tx.kind !== 'postgres') {
-              await tx.run(
-                `INSERT OR REPLACE INTO conversation_messages (
-                  id, conversation_id, role, content, timestamp, tool_calls, tool_call_id,
-                  multimodal_data, audio_url, audio_transcript, voice_settings, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                  messageId,
-                  context.sessionId,
-                  msg.role.toString(),
-                  typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
-                  msg.timestamp,
-                  msg.tool_calls ? JSON.stringify(msg.tool_calls) : null,
-                  (msg as any).tool_call_id || null,
-                  (msg as any).multimodalData ? JSON.stringify((msg as any).multimodalData) : null,
-                  (msg as any).audioUrl || null,
-                  (msg as any).audioTranscript || null,
-                  (msg as any).voiceSettings ? JSON.stringify((msg as any).voiceSettings) : null,
-                  JSON.stringify((msg as any).metadata || {}),
-                ]
-              );
-            } else {
-              const existingPgMsg = await tx.get<{ id: string }>(
-                'SELECT id FROM conversation_messages WHERE id = ?',
-                [messageId]
-              );
-              if (!existingPgMsg) {
-                await tx.run(
-                  `INSERT INTO conversation_messages (
-                    id, conversation_id, role, content, timestamp, tool_calls, tool_call_id,
-                    multimodal_data, audio_url, audio_transcript, voice_settings, metadata
-                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                  [
-                    messageId,
-                    context.sessionId,
-                    msg.role.toString(),
-                    typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
-                    msg.timestamp,
-                    msg.tool_calls ? JSON.stringify(msg.tool_calls) : null,
-                    (msg as any).tool_call_id || null,
-                    (msg as any).multimodalData ? JSON.stringify((msg as any).multimodalData) : null,
-                    (msg as any).audioUrl || null,
-                    (msg as any).audioTranscript || null,
-                    (msg as any).voiceSettings ? JSON.stringify((msg as any).voiceSettings) : null,
-                    JSON.stringify((msg as any).metadata || {}),
-                  ]
-                );
-              } else {
-                await tx.run(
-                  `UPDATE conversation_messages SET
-                    conversation_id = ?, role = ?, content = ?, timestamp = ?, tool_calls = ?, tool_call_id = ?,
-                    multimodal_data = ?, audio_url = ?, audio_transcript = ?, voice_settings = ?, metadata = ?
-                   WHERE id = ?`,
-                  [
-                    context.sessionId,
-                    msg.role.toString(),
-                    typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
-                    msg.timestamp,
-                    msg.tool_calls ? JSON.stringify(msg.tool_calls) : null,
-                    (msg as any).tool_call_id || null,
-                    (msg as any).multimodalData ? JSON.stringify((msg as any).multimodalData) : null,
-                    (msg as any).audioUrl || null,
-                    (msg as any).audioTranscript || null,
-                    (msg as any).voiceSettings ? JSON.stringify((msg as any).voiceSettings) : null,
-                    JSON.stringify((msg as any).metadata || {}),
-                    messageId,
-                  ]
-                );
-              }
-            }
+          } else {
+            await tx.run(REPLACE_MESSAGE_SQL, values);
           }
         }
       });
@@ -697,60 +590,14 @@ export class ConversationManager {
         session_details: string;
         is_archived: number;
         tags: string;
-        created_at: number;
-        updated_at: number;
+        created_at: number | string;
+        updated_at: number | string;
       }>('SELECT * FROM conversations WHERE id = ?', [conversationId]);
 
       if (!convoData) return undefined;
 
-      const messages = await this.storageAdapter.all<{
-        id: string;
-        conversation_id: string;
-        role: string;
-        content: string;
-        timestamp: number;
-        tool_calls: string | null;
-        tool_call_id: string | null;
-        multimodal_data: string | null;
-        audio_url: string | null;
-        audio_transcript: string | null;
-        voice_settings: string | null;
-        metadata: string;
-      }>('SELECT * FROM conversation_messages WHERE conversation_id = ? ORDER BY timestamp ASC', [conversationId]);
-
-      const internalMessages: InternalConversationMessage[] = messages.map((dbMsg) => {
-        let parsedContent: InternalConversationMessage['content'];
-        try {
-          if (dbMsg.content && ((dbMsg.content.startsWith('{') && dbMsg.content.endsWith('}')) || (dbMsg.content.startsWith('[') && dbMsg.content.endsWith(']')))) {
-            parsedContent = JSON.parse(dbMsg.content);
-          } else {
-            parsedContent = dbMsg.content;
-          }
-        } catch {
-          console.warn(`ConversationManager (ID: ${this.managerId}): Failed to parse content for message ${dbMsg.id} from DB as JSON, using as string.`);
-          parsedContent = dbMsg.content;
-        }
-
-        const messageOptions: Partial<Omit<InternalConversationMessage, 'id' | 'timestamp' | 'role' | 'content'>> = {
-          tool_calls: dbMsg.tool_calls ? JSON.parse(dbMsg.tool_calls) : undefined,
-          tool_call_id: dbMsg.tool_call_id || undefined,
-          metadata: dbMsg.metadata ? JSON.parse(dbMsg.metadata) : undefined,
-          ...(dbMsg.multimodal_data && { multimodalData: JSON.parse(dbMsg.multimodal_data) }),
-          ...(dbMsg.audio_url && { audioUrl: dbMsg.audio_url }),
-          ...(dbMsg.audio_transcript && { audioTranscript: dbMsg.audio_transcript }),
-          ...(dbMsg.voice_settings && { voiceSettings: JSON.parse(dbMsg.voice_settings) }),
-        };
-
-        return createConversationMessage(
-          dbMsg.role as MessageRole,
-          parsedContent,
-          {
-            ...messageOptions,
-            id: dbMsg.id,
-            timestamp: dbMsg.timestamp,
-          }
-        );
-      });
+      const messages = await this.storageAdapter.all<ConversationMessageRow>(SELECT_MESSAGES_SQL, [conversationId]);
+      const internalMessages: InternalConversationMessage[] = messages.map(messageFromRow);
 
       const sessionMetadataFromDB = JSON.parse(convoData.session_details || '{}') as Record<string, any>;
 
@@ -767,7 +614,7 @@ export class ConversationManager {
       const context = ConversationContext.fromJSON(
         {
           sessionId: convoData.id,
-          createdAt: convoData.created_at,
+          createdAt: readNumber(convoData.created_at),
           messages: internalMessages,
           config: {
             ...finalContextConfig,

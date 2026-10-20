@@ -611,6 +611,32 @@ Token estimation uses ~4 chars per token heuristic.
 
 ---
 
+## Infinite Context Window
+
+With `infiniteContext.enabled` and a `maxContextTokens`, the manager keeps the conversation inside the model's window: `trackMessage()` records each message, and `compactIfNeeded(systemPromptTokens, memoryBudgetTokens)`, called before the prompt is assembled, summarizes the oldest messages once the system prompt, the memory budget and the conversation reach `compactionThreshold` of the window (0.75 by default). It returns the messages to send: one summary message in place of the summarized ones, then the rest as they were.
+
+```typescript
+await memory.initialize({
+  ...deps,
+  maxContextTokens: 128_000,
+  infiniteContext: { enabled: true, strategy: 'sliding', preserveRecentTurns: 20 },
+});
+
+memory.trackMessage('user', text);
+const messages = await memory.compactIfNeeded(systemPromptTokens, memoryBudgetTokens);
+const history = memory.getSummaryContext(); // the summaries, oldest first
+```
+
+- **Turns.** Each user message opens the next turn, and the replies and tool messages after it share its number; messages before the first user message are turn 0.
+- **What is kept.** The newest `preserveRecentTurns` turns (two messages a turn) stay as they are while older messages remain to summarize. A shorter conversation over the threshold gives up its two oldest messages. The newest message, the one the next call answers, is never summarized: when it is all that is left, nothing is compacted and no compaction is logged.
+- **Strategies.** `sliding` (the default) writes one summary of the oldest messages. `hierarchical` keeps a summary per segment and, with a summarizer, merges six of them into a level-1 summary and four level-1 summaries into a level-2 one. `hybrid` also runs the observer, when one is configured, over the segment and the reflector over its notes, and hands the resulting traces to `encode()`; their ids go into the compaction's log entry.
+- **Summarizer.** `infiniteContext.llmInvoker` takes a prompt and answers the summary; without it the manager uses the reflector's, the observer's or the feature-detection invoker, with the system prompt `You are a conversation summarizer.` With none of them, or when a call fails or answers nothing, compaction writes an extractive summary from the conversation itself: the segment's first and last user messages (`sliding`), its user messages cut to 80 characters (`hierarchical`), or the ten most important observation notes, else its first three user messages (`hybrid`). The manager logs one line when it runs without a summarizer.
+- **Transparency.** `getCompactionHistory()`, `searchCompactionHistory(keyword)`, `getContextWindowStats()` and `getContextTransparencyReport()` read the compaction log; `transparencyLevel` `'full'` keeps each entry's dropped fragments and observation notes, `'summary'` (the default) drops them, and `'silent'` keeps no entries. The summaries form a chain (`RollingSummaryChain`) that merges its oldest summaries once it passes `maxSummaryChainTokens` (2,000 by default), with the summarizer or, without one, by joining and cutting them.
+
+Source: [`pipeline/context/`](https://github.com/framerslab/agentos/tree/master/src/cognition/memory/pipeline/context).
+
+---
+
 ## Configuration
 
 ### CognitiveMemoryConfig (Top-Level)
