@@ -174,7 +174,7 @@ OPENROUTER_API_KEY=sk-or-...
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list: a key pool. The LLM providers move a request to the next usable key when one is revoked, unpaid or throttled, probe a failed key before it returns, and persist the keys' standing when given a store; `AGENTOS_KEY_POOL_STRATEGY=ordered` uses the keys in the order given (credited keys first, the paid key last). [API Key Rotation](../KEY_ROTATION.md) has the strategies, the failure kinds, and the providers that need a single key.
+For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list: a key pool. The LLM providers move a request to the next usable key when one is revoked, unpaid or throttled, probe a failed key before it returns, and persist the keys' standing when given a store; `AGENTOS_KEY_POOL_STRATEGY_ANTHROPIC=ordered` uses Anthropic's keys in the order given (credited keys first, the paid key last), and the same variable with another provider's name (`_OPENAI`, `_GEMINI`, `_OPENROUTER`, `_REQUESTY`) orders that provider's; `AGENTOS_KEY_POOL_STRATEGY=ordered` orders every provider's keys, so a list kept for load spreading on another provider becomes ordered too. [API Key Rotation](../KEY_ROTATION.md) has the strategies, the failure kinds, and the providers that need a single key.
 
 ### Per-Agent Override
 

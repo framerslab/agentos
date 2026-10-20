@@ -23,7 +23,8 @@ import {
   ProviderEmbeddingOptions,
   ProviderEmbeddingResponse,
 } from '../IProvider';
-import { OpenAIProvider } from './OpenAIProvider';
+import { OpenAIProvider, type OpenAIProviderConfig } from './OpenAIProvider';
+import { keyPoolStrategyFromEnv } from '../../../providers/ApiKeyPool.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
 // ---------------------------------------------------------------------------
@@ -56,6 +57,12 @@ export interface LiteLLMProviderConfig {
   defaultModelId?: string;
   /** Request timeout in milliseconds. @default 60000 */
   requestTimeout?: number;
+  /**
+   * Pool options for several keys in `apiKey`, passed to the `OpenAIProvider` this provider sends through:
+   * the strategy (else `AGENTOS_KEY_POOL_STRATEGY_LITELLM`, else `AGENTOS_KEY_POOL_STRATEGY`, else round-robin;
+   * never the OpenAI variable), the timings, and the `store` and `id` that persist the keys' standing.
+   */
+  keyPool?: OpenAIProviderConfig['keyPool'];
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +127,9 @@ export class LiteLLMProvider implements IProvider {
       baseURL: this.proxyBaseURL,
       defaultModelId: this.defaultModelId,
       requestTimeout: config.requestTimeout ?? 60000,
+      // The host's pool options reach the delegate's pool, with this provider's own strategy variable: the strategy
+      // is always given, so the delegate never reads AGENTOS_KEY_POOL_STRATEGY_OPENAI, which names OpenAI's keys.
+      keyPool: { ...config.keyPool, strategy: config.keyPool?.strategy ?? keyPoolStrategyFromEnv('litellm').strategy ?? 'round-robin' },
     });
 
     this.isInitialized = true;

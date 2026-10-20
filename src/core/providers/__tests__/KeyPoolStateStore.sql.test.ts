@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
+import { createDatabase, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { KEY_POOL_STATE_DDL, SqlKeyPoolStateStore, keyPoolStateDdl, type KeyState } from '../KeyPoolStateStore.js';
 import { ApiKeyPool } from '../ApiKeyPool.js';
 
@@ -41,6 +41,47 @@ describe('SqlKeyPoolStateStore', () => {
     expect(await store.load('none')).toBeNull();
     await store.save('p', state({ fingerprint: 'aaaaaaaaaaaa', status: 'ok', updatedAt: 30 })); // newer: applied
     expect((await store.load('p'))?.find((r) => r.fingerprint === 'aaaaaaaaaaaa')?.status).toBe('ok');
+  });
+
+  it('skips a row of another version, and one that does not parse, with one warning per load', async () => {
+    const adapter = await db();
+    const lines: Array<{ event: string; meta?: Record<string, unknown> }> = [];
+    const logger = {
+      info: () => undefined,
+      warn: (event: string, meta?: Record<string, unknown>) => {
+        lines.push({ event, meta });
+      },
+      error: () => undefined,
+    };
+    const store = new SqlKeyPoolStateStore({ db: adapter, tablePrefix: 'kpv', logger });
+    await store.save('p', state({ fingerprint: 'aaaaaaaaaaaa', status: 'failed', kind: 'auth', failures: 1, updatedAt: 10 }));
+    // Rows a later version of the library wrote, and one whose state is not JSON.
+    await adapter.run('INSERT INTO kpv_key_pool_state (pool_id, fingerprint, state, version, updated_at) VALUES (?, ?, ?, 2, ?)', [
+      'p',
+      'bbbbbbbbbbbb',
+      JSON.stringify({ ...state({ fingerprint: 'bbbbbbbbbbbb' }), version: 2 }),
+      20,
+    ]);
+    await adapter.run('INSERT INTO kpv_key_pool_state (pool_id, fingerprint, state, version, updated_at) VALUES (?, ?, ?, 1, ?)', ['p', 'cccccccccccc', 'not json', 30]);
+    const rows = await store.load('p');
+    expect(rows?.map((r) => r.fingerprint)).toEqual(['aaaaaaaaaaaa']);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ event: 'key_pool.store_failed', meta: { poolId: 'p', op: 'load', reason: 'version', skipped: 2, version: 2 } });
+    expect(JSON.stringify(lines)).not.toContain('not json');
+    // A load with nothing to skip writes nothing.
+    expect(await store.load('none')).toBeNull();
+    expect(lines).toHaveLength(1);
+  });
+
+  it('works over createDatabase({ file }), the call the docs show', async () => {
+    // createDatabase() takes `file`; `filePath` is the resolver's own option and createDatabase() ignores it, so the
+    // docs' call shape is pinned here against the adapter the package depends on (the type check refuses an unknown
+    // option in this literal), and a row goes through it.
+    const adapter = await createDatabase({ file: ':memory:', priority: ['better-sqlite3', 'sqljs'] });
+    databases.push(adapter);
+    const store = new SqlKeyPoolStateStore({ db: adapter });
+    await store.save('anthropic:ANTHROPIC_API_KEY', state({ fingerprint: 'aaaaaaaaaaaa', status: 'failed', kind: 'billing', failures: 1, updatedAt: 10 }));
+    expect((await store.load('anthropic:ANTHROPIC_API_KEY'))?.map((r) => [r.fingerprint, r.status, r.kind])).toEqual([['aaaaaaaaaaaa', 'failed', 'billing']]);
   });
 
   it('leaves the schema to host migrations when told to', async () => {

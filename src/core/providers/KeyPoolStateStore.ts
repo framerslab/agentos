@@ -11,6 +11,7 @@
  */
 
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import { createLogger, type ILogger } from '../logging/index.js';
 import type { KeyFailureKind } from './quotaErrors.js';
 
 /** One key's standing in a pool. `fingerprint` and `label` identify the key without holding it. */
@@ -101,6 +102,8 @@ export interface SqlKeyPoolStateStoreOptions {
   tablePrefix?: string;
   /** Create the table on first use (default) or leave it to host migrations. */
   ensureSchema?: boolean;
+  /** Where a load that skips rows it cannot use (another version, a state that does not parse) writes its one warning. Default: the library's `key-pool` logger. */
+  logger?: ILogger;
 }
 
 function parseState(raw: unknown): KeyState | null {
@@ -157,10 +160,28 @@ export class SqlKeyPoolStateStore implements KeyPoolStateStore {
     );
     if (rows.length === 0) return null;
     const states: KeyState[] = [];
+    let otherVersion: number | undefined;
+    let skipped = 0;
     for (const row of rows) {
-      if (Number(row.version) !== 1) continue;
-      const state = parseState(row.state);
-      if (state) states.push(state);
+      const version = Number(row.version);
+      const state = version === 1 ? parseState(row.state) : null;
+      if (state) {
+        states.push(state);
+        continue;
+      }
+      skipped += 1;
+      if (version !== 1) otherVersion = version;
+    }
+    // One line per load, never a key: the rows were written by another version of the library or do not parse, so
+    // their keys start from a fresh state.
+    if (skipped > 0) {
+      (this.options.logger ?? createLogger('key-pool')).warn('key_pool.store_failed', {
+        poolId,
+        op: 'load',
+        reason: otherVersion !== undefined ? 'version' : 'unparsed',
+        skipped,
+        ...(otherVersion !== undefined ? { version: otherVersion } : {}),
+      });
     }
     return states;
   }

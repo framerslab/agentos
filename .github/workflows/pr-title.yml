@@ -1,0 +1,49 @@
+name: Pull request title
+
+# Maintainers squash-merge with the pull request title as the commit subject
+# (CONTRIBUTING.md), and the release reads only that subject
+# (release.config.js). A title outside the Conventional Commits form matches
+# none of the release rules, so a fix or a feature merges, release.yml stays
+# green, nothing is published, and nothing says so. This check refuses such a
+# title while the pull request is open.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+# A newer event on a pull request (a push, an edit of its title) cancels the run it
+# supersedes, and the run that survives reads the title from the API as it is now,
+# not from its own event. A re-run keys a group of its own, its run id, so re-running
+# an older run never cancels the newest one.
+concurrency:
+  group: pr-title-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  title:
+    name: Pull request title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse a title the release cannot read
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # The title as it is now, as the breaking change gate reads it.
+          TITLE="$(gh api "repos/$REPO/pulls/$PR" --jq '.title')"
+          # A type the release rules know (feat, fix, perf, refactor and revert release; the rest release
+          # nothing on purpose), an optional scope, an optional `!` for a breaking change, a colon, a space
+          # and a subject.
+          form='^(feat|fix|perf|refactor|revert|docs|chore|test|ci|build|style)(\([^)]+\))?!?: [^[:space:]]'
+          if printf '%s\n' "$TITLE" | grep -Eq "$form"; then
+            echo "The title is in the Conventional Commits form: $TITLE"
+            exit 0
+          fi
+          echo "::error::The pull request title is not in the Conventional Commits form, type(scope): subject, with the type one of feat, fix, perf, refactor, revert, docs, chore, test, ci, build or style. The squash merge makes the title the commit subject and the release reads only that subject, so a title outside the form releases nothing. Retitle the pull request, for example 'fix(providers): a revoked key moves the request to the next key'."
+          exit 1

@@ -21,7 +21,7 @@
 import type { ApiKeyPoolConfig } from '../core/providers/ApiKeyPool.js';
 
 /** What a host may set for every pool the API builds: the persisted-state store, the strategy and the timings. */
-export type KeyPoolDefaults = Pick<ApiKeyPoolConfig, 'strategy' | 'store' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs'>;
+export type KeyPoolDefaults = Pick<ApiKeyPoolConfig, 'strategy' | 'store' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'loadTimeoutMs' | 'storeTimeoutMs'>;
 
 let defaults: KeyPoolDefaults | null = null;
 let version = 0;
