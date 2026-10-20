@@ -21,6 +21,11 @@ permissions:
 jobs:
   consumer:
     name: Installed source foundation
+    # The selected versions come from the repository's variables, which read empty on a
+    # pull request from a fork (run 39415287907, pull request 529), so the version check
+    # below fails there before anything is installed. Such a run is skipped; the push of
+    # the merge to master runs the job with the variables.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
