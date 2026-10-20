@@ -767,6 +767,98 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(closes).not.toHaveBeenCalled();
   });
 
+  it('takes an error the socket reports between replies as part of the close that follows it, and speaks the next reply on a fresh socket', async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const errors = vi.fn();
+    const warnings = vi.fn();
+    const closes = vi.fn();
+    session.on('error', errors);
+    session.on('warning', warnings);
+    session.on('close', closes);
+
+    // A frame the socket cannot read fails it between replies: ws reports the error, then closes the socket.
+    ws.emit('error', new Error('Invalid WebSocket frame: invalid opcode 7'));
+    (ws as unknown as { readyState: number }).readyState = 3;
+    ws.emit('close', 1002, Buffer.from(''));
+    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+
+    session.pushTokens('Again. ');
+    const flushed = session.flush();
+    let fresh!: MockSocket;
+    await vi.waitFor(() => {
+      fresh = socketOf(session);
+      expect(fresh).toBeTruthy();
+      expect(fresh).not.toBe(ws);
+      expect(sent(fresh)).toEqual([{ type: 'Speak', text: 'Again.' }, { type: 'Flush' }]);
+    });
+    control(fresh, { type: 'Flushed', sequence_id: 0 });
+    await flushed;
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+  });
+
+  it('reports an error the socket reports mid-reply once, as the cause of the close that follows it', async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const errors = vi.fn();
+    const closes = vi.fn();
+    session.on('error', errors);
+    session.on('close', closes);
+
+    session.pushTokens('Hello there. ');
+    const flushed = session.flush();
+    ws.emit('error', new Error('Invalid WebSocket frame: invalid opcode 7'));
+    (ws as unknown as { readyState: number }).readyState = 3;
+    ws.emit('close', 1002, Buffer.from(''));
+    await flushed;
+    expect(errors).toHaveBeenCalledOnce();
+    expect((errors.mock.calls[0][0] as Error).message).toBe('deepgram aura ws closed (code 1002: Invalid WebSocket frame: invalid opcode 7)');
+    expect(closes).toHaveBeenCalledOnce();
+  });
+
+  it('sends nothing of a reply cut while its fresh socket opens, and speaks the next reply on that socket', async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const errors = vi.fn();
+    const warnings = vi.fn();
+    session.on('error', errors);
+    session.on('warning', warnings);
+    (ws as unknown as { readyState: number }).readyState = 3;
+    ws.emit('close', 1011, Buffer.from(''));
+
+    // The reply's first sentence opens a fresh socket, and the reply is cut before the socket opens.
+    session.pushTokens('Cut me. ');
+    const fresh = socketOf(session);
+    expect(fresh).toBeTruthy();
+    expect(fresh).not.toBe(ws);
+    session.cancel();
+    // The next reply takes the socket that is opening: nothing of the cut sentence, and no Clear, goes out on it.
+    session.pushTokens('Next. ');
+    const flushed = session.flush();
+    await vi.waitFor(() => expect(sent(fresh)).toEqual([{ type: 'Speak', text: 'Next.' }, { type: 'Flush' }]));
+    expect(socketOf(session)).toBe(fresh);
+    control(fresh, { type: 'Flushed', sequence_id: 0 });
+    await flushed;
+    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).not.toHaveBeenCalled();
+  });
+
+  it('takes a Flushed without a sequence_id as the answer to the Flush of the segment in flight', async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const chunks = recorded(session);
+
+    session.pushTokens('Hello.');
+    const flushed = session.flush();
+    frame(ws, 1);
+    control(ws, { type: 'Flushed' });
+    await flushed;
+    expect(chunks.map((chunk) => chunk.textBoundary?.text)).toEqual(['Hello.']);
+  });
+
   it("sends the transport none of what Deepgram still delivers for a reply typed text cut, as the typed text's reply", async () => {
     // A transport that reports no playout, and an STT session and an endpoint detector the test drives.
     const transport = Object.assign(new EventEmitter(), {
