@@ -123,8 +123,11 @@ jobs:
           age=$(pnpm config get minimumReleaseAge)
           echo "minimumReleaseAge in effect: $age"
           [ "$age" = 1440 ]
-          # Refreshing the lockfile needs no package's install script.
-          pnpm install --no-frozen-lockfile --ignore-scripts
+          # Refreshing the lockfile needs no package's install script. With the lockfile already up to
+          # date with package.json (no pin moved), pnpm skips the resolution step and leaves the
+          # lockfile as it is; --no-prefer-frozen-lockfile runs that step anyway, so on the empty store
+          # it puts back a git-hosted integrity an earlier refresh dropped.
+          pnpm install --no-frozen-lockfile --no-prefer-frozen-lockfile --ignore-scripts
           rm pnpm-workspace.yaml
           # The lockfile has to stand without that file, as every other workflow reads it.
           pnpm install --frozen-lockfile --ignore-scripts
@@ -228,8 +231,11 @@ jobs:
           age=$(pnpm config get minimumReleaseAge)
           echo "minimumReleaseAge in effect: $age"
           [ "$age" = 1440 ]
-          # Refreshing the lockfile needs no package's install script.
-          pnpm install --no-frozen-lockfile --ignore-scripts
+          # Refreshing the lockfile needs no package's install script. With the lockfile already up to
+          # date with package.json (no pin moved), pnpm skips the resolution step and leaves the
+          # lockfile as it is; --no-prefer-frozen-lockfile runs that step anyway, so on the empty store
+          # it puts back a git-hosted integrity an earlier refresh dropped.
+          pnpm install --no-frozen-lockfile --no-prefer-frozen-lockfile --ignore-scripts
           rm pnpm-workspace.yaml
           # The lockfile has to stand without that file, as every other workflow reads it.
           pnpm install --frozen-lockfile --ignore-scripts
