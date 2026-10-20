@@ -352,14 +352,25 @@ describe('session events under a call profile', () => {
     const f = await call({ abortGraceMs: 50 });
     const errors: Error[] = [];
     f.runtime.on('error', (error: Error) => errors.push(error));
-    // An agent whose abort() is a no-op and whose stream, after its first token, yields nothing more.
+    // An agent whose abort() is a no-op and whose stream, after its first token, yields nothing more: the model's
+    // stream has stalled. The call is awaiting that next token when the text arrives; a stream still suspended at its
+    // yield would close at once when the cut reply's loop returns it, and stall nothing.
+    let stalled!: () => void;
+    const stalling = new Promise<void>((resolve) => {
+      stalled = resolve;
+    });
     f.agent.sendText.mockImplementation(async function* () {
       yield 'hello';
+      stalled();
       await new Promise<void>(() => undefined);
     });
 
     f.turn();
     await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    // The first chunk plays, and the call asks the agent for its next token, which never comes.
+    f.ack();
+    await stalling;
+    expect(f.runtime.state).toBe('speaking');
     f.transport.emit('message', { type: 'text_input', text: 'typed' });
     // The interruption waits for the stream at most abortGraceMs; then the call listens again and the text is its turn.
     await vi.waitFor(() => expect(f.agent.sendText).toHaveBeenCalledTimes(2));
