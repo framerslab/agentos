@@ -634,7 +634,7 @@ Direct accuracy comparison (LongMemEval-S, full N=500 except where noted; every 
 | **AgentOS canonical-hybrid + ReaderRouter** | **85.6%** | **$0.0090** | **3,558 ms** | Apache-2.0 | This stack |
 | EmergenceMem Internal | 86.0% | not published | 5,650 ms | closed-source SaaS | Hosted at emergence.ai; cannot install, fork, or self-host |
 | Mastra OM gpt-4o (gemini-flash observer) | 84.23% | not published | not published | Apache-2.0 | Level with AgentOS at a matched gpt-4o reader; cross-provider observer pipeline |
-| AgentOS canonical-hybrid, gpt-4o on every question | 84.2% | see [LEADERBOARD.md](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) | see LEADERBOARD.md | Apache-2.0 | The matched-reader comparison point |
+| AgentOS canonical-hybrid, gpt-4o on every question | 84.2% | not published | not published | Apache-2.0 | The matched-reader comparison point: run 18-41, footnote `canonical-reader-router-pb` in [LEADERBOARD.md](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) |
 | EmergenceMem Simple Fast (rerun in agentos-bench) | 80.6% | $0.0581 | 3,703 ms | no LICENSE file | Apache-2.0 grants no license to redistribute the upstream `main.py`; we measured it for accuracy comparison only |
 | Supermemory gpt-4o | 81.6% | not published | not published | proprietary | -4.0 pp |
 | Zep (self / independent reproduction) | 71.2% / 63.8% | not published | not published | varied | Self-reported number gamed; independent reproduction far below |
