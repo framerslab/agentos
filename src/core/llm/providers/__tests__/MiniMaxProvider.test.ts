@@ -1,4 +1,4 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, type Server, type ServerResponse } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const sdk = vi.hoisted(() => ({ provider: undefined as any }));
@@ -26,14 +26,21 @@ describe('MiniMax Chat Completions transport', () => {
   let server: Server;
   let baseURL: string;
   let requests: { path: string; authorization: string | undefined; body: any }[];
+  // A case that answers every request itself, such as with an error status.
+  let reply: ((res: ServerResponse) => void) | undefined;
 
   beforeEach(async () => {
     requests = [];
+    reply = undefined;
     server = createServer(async (req, res) => {
       let raw = '';
       for await (const chunk of req) raw += chunk;
       const body = raw ? JSON.parse(raw) : {};
       requests.push({ path: req.url!, authorization: req.headers.authorization, body });
+      if (reply) {
+        reply(res);
+        return;
+      }
       if (req.url === '/v1/models') {
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify({ data: [{ id: 'gpt-4o', owned_by: 'openai' }] }));
@@ -201,6 +208,40 @@ describe('MiniMax Chat Completions transport', () => {
     expect(requests[1].body.messages.find((message: ChatMessage) => message.role === 'assistant'))
       .toMatchObject({ reasoning_content: 'Look up the weather.', tool_calls: [call] });
     expect(requests[1].body.messages.find((message: ChatMessage) => message.role === 'tool')).toMatchObject({ tool_call_id: 'call_1' });
+  });
+
+  function answerWith(status: number, body: string, headers: Record<string, string> = {}) {
+    reply = res => {
+      res.statusCode = status;
+      res.setHeader('content-type', 'application/json');
+      for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
+      res.end(body);
+    };
+  }
+
+  it('fails an authentication error at once, without a retry', async () => {
+    answerWith(401, JSON.stringify({ error: { message: 'invalid api key', type: 'authentication_error', code: 'invalid_api_key' } }));
+    const instance = await provider();
+    await expect(instance.generateCompletion(FLASH, [{ role: 'user', content: 'Hi' }], {}))
+      .rejects.toMatchObject({ code: 'API_CLIENT_ERROR', httpStatus: 401 });
+    expect(requests).toHaveLength(1);
+  });
+
+  it('retries a rate limit after its Retry-After and fails with it once the attempts run out', async () => {
+    answerWith(429, JSON.stringify({ error: { message: 'rate limit reached', type: 'rate_limit_error' } }), { 'retry-after': '0' });
+    const instance = new MiniMaxProvider();
+    await instance.initialize({ apiKey: 'test-key', baseURL, maxRetries: 2 });
+    await expect(instance.generateCompletion(FLASH, [{ role: 'user', content: 'Hi' }], {}))
+      .rejects.toMatchObject({ code: 'RATE_LIMIT_EXCEEDED', httpStatus: 429 });
+    expect(requests).toHaveLength(2);
+  });
+
+  it('fails a response that is not JSON instead of returning an empty completion', async () => {
+    answerWith(200, 'not json');
+    const instance = new MiniMaxProvider();
+    await instance.initialize({ apiKey: 'test-key', baseURL, maxRetries: 1 });
+    await expect(instance.generateCompletion(FLASH, [{ role: 'user', content: 'Hi' }], {})).rejects.toThrow();
+    expect(requests).toHaveLength(1);
   });
 
   it('leaves inherited OpenAI behavior unchanged', async () => {
