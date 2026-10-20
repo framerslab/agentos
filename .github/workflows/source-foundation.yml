@@ -53,19 +53,21 @@ jobs:
           mode=$(cat contracts/source-foundation/mode.txt)
           # The released versions are checked in beside the contracts. The repository's variables read empty
           # on a pull request from a fork (run 39415287907, pull request 529), so such a run checks the file's
-          # versions; a run that reads the variables fails when they and the file disagree, so a fork's change
-          # to the contracts is checked against the same versions as the push to master.
+          # versions; a variable that is set and differs from the file fails the run, so a fork's change to
+          # the contracts is checked against the same versions as the push to master.
           released=contracts/source-foundation/released-versions.txt
           pinned() { awk -v name="$1" '$1 == name { print $2 }' "$released"; }
           file_core=$(pinned @framers/agentos)
           file_as=$(pinned @framers/agentos-ext-account-sources)
           file_adapter=$(pinned @framers/sql-storage-adapter)
-          if [[ -n "$SELECTED_CORE_VERSION$SELECTED_AS_VERSION$SELECTED_ADAPTER_VERSION" ]]; then
-            if [[ "$SELECTED_CORE_VERSION" != "$file_core" || "$SELECTED_AS_VERSION" != "$file_as" || "$SELECTED_ADAPTER_VERSION" != "$file_adapter" ]]; then
-              echo "::error::The variables SOURCE_FOUNDATION_CORE_VERSION, SOURCE_FOUNDATION_AS_VERSION and SOURCE_FOUNDATION_ADAPTER_VERSION ($SELECTED_CORE_VERSION, $SELECTED_AS_VERSION, $SELECTED_ADAPTER_VERSION) differ from $released ($file_core, $file_as, $file_adapter). Change both together."
-              exit 1
-            fi
-          fi
+          agrees() {
+            [[ -z "$2" || "$2" == "$3" ]] && return 0
+            echo "::error::The variable $1 ($2) differs from $released ($3). Change both together."
+            return 1
+          }
+          agrees SOURCE_FOUNDATION_CORE_VERSION "$SELECTED_CORE_VERSION" "$file_core"
+          agrees SOURCE_FOUNDATION_AS_VERSION "$SELECTED_AS_VERSION" "$file_as"
+          agrees SOURCE_FOUNDATION_ADAPTER_VERSION "$SELECTED_ADAPTER_VERSION" "$file_adapter"
           case "$mode" in
             baseline) core_version=0.13.49; as_version=0.1.0 ;;
             released) core_version="$file_core"; as_version="$file_as" ;;
