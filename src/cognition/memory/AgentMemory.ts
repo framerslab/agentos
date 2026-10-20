@@ -226,10 +226,10 @@ export class AgentMemory {
       /**
        * Set when encoding a subjective trace produced by `PerspectiveObserver`
        * (`@framers/agentos/memory/pipeline/observation/PerspectiveObserver`).
-       * When this memory wraps a cognitive memory manager, threads the
-       * source-event identifiers into the trace's MechanismMetadata so
-       * Reconsolidation halves drift on perspective traces and audit queries
-       * can back-reference the objective source event. A memory that wraps the
+       * When this memory wraps a cognitive memory manager, the manager writes
+       * the source event's identifier and hash into the trace's
+       * MechanismMetadata and marks the trace perspective-encoded, so
+       * Reconsolidation halves its drift rate. A memory that wraps the
        * standalone `Memory` facade ignores it.
        */
       perspectiveSource?: { eventId: string; eventHash: string };
