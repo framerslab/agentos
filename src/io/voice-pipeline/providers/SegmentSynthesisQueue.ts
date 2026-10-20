@@ -285,7 +285,7 @@ export class SegmentSynthesisQueue {
     this.flight = flight;
     let started: Promise<void>;
     try {
-      started = Promise.resolve(this.hooks.start(segment, flight.abort.signal));
+      started = Promise.resolve(this.hooks.start(flight.segment, flight.abort.signal));
     } catch (error) {
       started = Promise.reject(error);
     }
