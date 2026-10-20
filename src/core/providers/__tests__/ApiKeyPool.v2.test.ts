@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiKeyPool, keyFingerprint, keyPoolStrategyFromEnv, type ProbeResult } from '../ApiKeyPool.js';
-import { InMemoryKeyPoolStateStore } from '../KeyPoolStateStore.js';
+import { InMemoryKeyPoolStateStore, type KeyState } from '../KeyPoolStateStore.js';
 import type { ILogger } from '../../logging/index.js';
 
 function recordingLogger(): { logger: ILogger; lines: Array<{ level: string; event: string; meta?: Record<string, unknown> }> } {
@@ -113,6 +113,32 @@ describe('ApiKeyPool v2', () => {
       expect(pool.snapshot()[0]).toMatchObject({ failures: 3, nextRecheckAt: Date.now() + 3000 });
     });
 
+    it('counts the answers of requests that were in flight together as one failure', () => {
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, maxRecheckMs: 60_000 });
+      const started = Date.now();
+      vi.advanceTimersByTime(500);
+      // Eight requests drew sk_a while it was ok and all started before the first answer marked it: one failure, so
+      // the first recheck is recheckMs away, not the delay's ceiling.
+      for (let i = 0; i < 8; i++) pool.markFailed('sk_a', 'billing', { at: started + i });
+      expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', kind: 'billing', failures: 1, nextRecheckAt: Date.now() + 1000 });
+      // A request that started after that record is new evidence and doubles the delay.
+      vi.advanceTimersByTime(10);
+      pool.markFailed('sk_a', 'billing', { at: Date.now() });
+      expect(pool.snapshot()[0]).toMatchObject({ failures: 2, nextRecheckAt: Date.now() + 2000 });
+    });
+
+    it('counts an answer whose request started in the millisecond the previous failure was recorded with that failure', () => {
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, maxRecheckMs: 60_000 });
+      const t = Date.now();
+      pool.markFailed('sk_a', 'billing', { at: t });
+      // Drew the key before that record marked it, in the same millisecond: no new evidence.
+      pool.markFailed('sk_a', 'billing', { at: t });
+      expect(pool.snapshot()[0]).toMatchObject({ failures: 1, nextRecheckAt: t + 1000 });
+      vi.advanceTimersByTime(1);
+      pool.markFailed('sk_a', 'billing', { at: Date.now() });
+      expect(pool.snapshot()[0]).toMatchObject({ failures: 2, nextRecheckAt: Date.now() + 2000 });
+    });
+
     it('a success clears the failure count and the kind', () => {
       const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000 });
       pool.markFailed('sk_a', 'auth');
@@ -172,6 +198,86 @@ describe('ApiKeyPool v2', () => {
       expect(pool.next()).toBe('sk_b');
     });
 
+    it('nextAfterProbes() waits for the probes a due recheck just started and draws the key that came back', async () => {
+      const answers: Array<(result: ProbeResult) => void> = [];
+      const probe = vi.fn(() => new Promise<ProbeResult>((resolve) => {
+        answers.push(resolve);
+      }));
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, probe });
+      pool.markFailed('sk_a', 'auth');
+      pool.markFailed('sk_b', 'auth');
+      // Not due: nothing to wait for, the pool answers at once.
+      expect(await pool.nextAfterProbes()).toBe('');
+      expect(probe).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1001);
+      let drawn: string | undefined;
+      const drawing = pool.nextAfterProbes().then((key) => {
+        drawn = key;
+      });
+      await Promise.resolve();
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(drawn).toBeUndefined();
+      for (const answer of answers) answer('ok');
+      await drawing;
+      expect(drawn).toBe('sk_a');
+      await pool.recheck();
+      expect(pool.snapshot().map((s) => s.status)).toEqual(['ok', 'ok']);
+    });
+
+    it('nextAfterProbes() draws the first key that comes back, without waiting for the probe of another key that hangs', async () => {
+      const probe = vi.fn((key: string) => (key === 'sk_b' ? Promise.resolve<ProbeResult>('ok') : new Promise<ProbeResult>(() => undefined)));
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, probe, probeTimeoutMs: 10_000 });
+      pool.markFailed('sk_a', 'auth');
+      pool.markFailed('sk_b', 'auth');
+      vi.advanceTimersByTime(1001);
+      let drawn: string | undefined;
+      const drawing = pool.nextAfterProbes().then((key) => {
+        drawn = key;
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(drawn).toBe('sk_b');
+      await drawing;
+      // sk_a's probe is still out; it ends at the probe timeout as unknown and the key stays out.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', failures: 2 });
+    });
+
+    it('nextAfterProbes() stops waiting when the caller aborts', async () => {
+      const probe = vi.fn(() => new Promise<ProbeResult>(() => undefined));
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, probe, probeTimeoutMs: 10_000 });
+      pool.markFailed('sk_a', 'auth');
+      pool.markFailed('sk_b', 'auth');
+      vi.advanceTimersByTime(1001);
+      const controller = new AbortController();
+      let drawn: string | undefined;
+      const drawing = pool.nextAfterProbes(controller.signal).then((key) => {
+        drawn = key;
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(drawn).toBeUndefined();
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(drawn).toBe('');
+      await drawing;
+      // A signal that has already fired: no wait at all, though the probes are still out.
+      expect(await pool.nextAfterProbes(controller.signal)).toBe('');
+      expect(probe).toHaveBeenCalledTimes(2);
+    });
+
+    it('nextAfterProbes() answers \'\' once the probes it waited for fail, and a usable key at once', async () => {
+      const probe = vi.fn(async (): Promise<ProbeResult> => 'auth');
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, probe });
+      expect(await pool.nextAfterProbes()).toBe('sk_a');
+      pool.markFailed('sk_a', 'auth');
+      pool.markFailed('sk_b', 'auth');
+      vi.advanceTimersByTime(1001);
+      expect(await pool.nextAfterProbes()).toBe('');
+      expect(probe).toHaveBeenCalledTimes(2);
+      // Each failed probe pushed its key's next recheck out, so the error the provider throws now names a later return.
+      expect(pool.soonestReturnMs()).toBe(2000);
+    });
+
     it('runs one probe per key at a time', async () => {
       let resolveProbe: (r: ProbeResult) => void = () => undefined;
       const probe = vi.fn(() => new Promise<ProbeResult>((resolve) => { resolveProbe = resolve; }));
@@ -188,7 +294,7 @@ describe('ApiKeyPool v2', () => {
     });
   });
 
-  describe('the recheck interval and close()', () => {
+  describe('the recheck timer and close()', () => {
     it('refuses a zero, negative or non-finite recheck, maximum recheck or probe timeout, and a non-positive interval', () => {
       for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
         expect(() => new ApiKeyPool('sk_a,sk_b', { recheckMs: bad })).toThrow(RangeError);
@@ -202,7 +308,22 @@ describe('ApiKeyPool v2', () => {
       expect(vi.getTimerCount()).toBe(before);
     });
 
-    it('keeps one interval per pool: a second start replaces the first, and either stop ends it', () => {
+    it('refuses a cooldown or Retry-After bound that is not a positive number of milliseconds, and a primary weight that is not a positive whole number', () => {
+      // A cooldown of zero made a throttled key usable at once, so an ordered pool re-sent the request to the key
+      // that had just answered 429 and the other key never served; a primary weight of zero left the first key no
+      // rotation slot, so round-robin never returned it.
+      for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => new ApiKeyPool('sk_a,sk_b', { cooldownMs: bad })).toThrow(RangeError);
+        expect(() => new ApiKeyPool('sk_a,sk_b', { maxRetryAfterMs: bad })).toThrow(RangeError);
+      }
+      for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => new ApiKeyPool('sk_a,sk_b', { primaryWeight: bad })).toThrow(RangeError);
+      }
+      const equal = new ApiKeyPool('sk_a,sk_b', { primaryWeight: 1 });
+      expect([equal.next(), equal.next(), equal.next()]).toEqual(['sk_a', 'sk_b', 'sk_a']);
+    });
+
+    it('keeps one timer per pool: a second start replaces the first, and its stop ends it', () => {
       const pool = new ApiKeyPool('sk_a,sk_b', { recheckMs: 1000 });
       const before = vi.getTimerCount();
       pool.startRechecks();
@@ -215,7 +336,37 @@ describe('ApiKeyPool v2', () => {
       expect(vi.getTimerCount()).toBe(before);
     });
 
-    it('ends its interval on the next tick once nothing else holds the pool', () => {
+    it('probes a failed key when its recheck is due, not at the next tick of an interval fixed at start', async () => {
+      // Started at T=0 with a 30-minute recheck, a key that fails at T=10 is probed at T=40, not at T=60.
+      const probe = vi.fn(async (): Promise<ProbeResult> => 'ok');
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 30 * 60_000, probe });
+      pool.startRechecks();
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      pool.markFailed('sk_a', 'auth');
+      await vi.advanceTimersByTimeAsync(29 * 60_000 + 59_000);
+      expect(probe).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(pool.snapshot()[0].status).toBe('ok');
+      // Nothing is failed now: the timer only sweeps.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(probe).toHaveBeenCalledTimes(1);
+      pool.stopRechecks();
+    });
+
+    it('a stop function of an earlier start leaves a later start running', async () => {
+      const probe = vi.fn(async (): Promise<ProbeResult> => 'ok');
+      const pool = new ApiKeyPool('sk_a,sk_b', { strategy: 'ordered', recheckMs: 1000, probe });
+      const stopFirst = pool.startRechecks();
+      pool.startRechecks();
+      stopFirst();
+      pool.markFailed('sk_a', 'auth');
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(probe).toHaveBeenCalledTimes(1);
+      pool.stopRechecks();
+    });
+
+    it('ends its timer at its next run once nothing else holds the pool', () => {
       let released = false;
       class FakeWeakRef<T> {
         constructor(private readonly value: T) {}
@@ -231,7 +382,7 @@ describe('ApiKeyPool v2', () => {
         const before = vi.getTimerCount();
         pool.startRechecks();
         expect(vi.getTimerCount()).toBe(before + 1);
-        // A collected pool: the interval finds nothing behind its weak reference and clears itself.
+        // A collected pool: the timer finds nothing behind its weak reference and arms no other.
         released = true;
         vi.advanceTimersByTime(1001);
         expect(vi.getTimerCount()).toBe(before);
@@ -241,7 +392,7 @@ describe('ApiKeyPool v2', () => {
       }
     });
 
-    it('close() stops the interval, waits for a probe in flight and saves what it found', async () => {
+    it('close() stops the timer, waits for a probe in flight and saves what it found', async () => {
       const store = new InMemoryKeyPoolStateStore();
       let answer: (result: ProbeResult) => void = () => undefined;
       const probe = vi.fn(() => new Promise<ProbeResult>((resolve) => {
@@ -262,7 +413,7 @@ describe('ApiKeyPool v2', () => {
       answer('ok');
       await closing;
       expect((await store.load('p:close'))?.map((row) => row.status)).toEqual(['ok']);
-      // The interval is gone: time passing starts no further probe.
+      // The timer is gone: time passing starts no further probe.
       pool.markFailed('sk_alpha_0001', 'auth');
       vi.advanceTimersByTime(5000);
       expect(probe).toHaveBeenCalledTimes(1);
@@ -313,6 +464,223 @@ describe('ApiKeyPool v2', () => {
       noId.markFailed('sk_a', 'auth');
       await vi.advanceTimersByTimeAsync(300);
       expect(await store.load('')).toBeNull();
+    });
+
+    it('a load that does not answer within loadTimeoutMs leaves a fresh state and logs once; a late answer changes nothing', async () => {
+      const { logger, lines } = recordingLogger();
+      let answer: (rows: KeyState[] | null) => void = () => undefined;
+      const store = {
+        load: vi.fn(() => new Promise<KeyState[] | null>((resolve) => {
+          answer = resolve;
+        })),
+        save: vi.fn(async () => undefined),
+      };
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:slow', store, logger, loadTimeoutMs: 1000 });
+      let ready = false;
+      const readying = pool.ready().then(() => {
+        ready = true;
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(ready).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      await readying;
+      expect(pool.snapshot().map((s) => s.status)).toEqual(['ok', 'ok']);
+      const failed = lines.filter((l) => l.event === 'key_pool.store_failed');
+      expect(failed).toHaveLength(1);
+      expect(failed[0].meta).toMatchObject({ op: 'load', reason: 'timeout' });
+      answer([{ fingerprint: keyFingerprint('sk_alpha_0001'), label: 'k00001', status: 'failed', kind: 'auth', failures: 1, updatedAt: Date.now() + 5000, version: 1 }]);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(pool.snapshot()[0].status).toBe('ok');
+      expect(lines.filter((l) => l.event === 'key_pool.store_failed')).toHaveLength(1);
+    });
+
+    it('a store whose load throws before it returns a promise leaves a fresh state and logs once', async () => {
+      const { logger, lines } = recordingLogger();
+      const store = {
+        load: vi.fn((): Promise<KeyState[] | null> => {
+          throw new Error('not connected');
+        }),
+        save: vi.fn(async () => undefined),
+      };
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:sync', store, logger });
+      await pool.ready();
+      expect(pool.snapshot().map((s) => s.status)).toEqual(['ok', 'ok']);
+      expect(lines.filter((l) => l.event === 'key_pool.store_failed' && l.meta?.op === 'load')).toHaveLength(1);
+    });
+
+    it('flush() and close() wait at most storeTimeoutMs for the store and log once when it does not answer', async () => {
+      const { logger, lines } = recordingLogger();
+      const store = { load: vi.fn(async () => null), save: vi.fn(() => new Promise<void>(() => undefined)) };
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:hang', store, logger, storeTimeoutMs: 1000 });
+      await pool.ready();
+      pool.markFailed('sk_alpha_0001', 'auth');
+      let closed = false;
+      const closing = pool.close().then(() => {
+        closed = true;
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      await closing;
+      expect(store.save).toHaveBeenCalledTimes(1);
+      expect(lines.filter((l) => l.event === 'key_pool.store_failed' && l.meta?.reason === 'timeout')).toHaveLength(1);
+    });
+
+    it('refuses a load or store deadline that is not a positive number of milliseconds', () => {
+      for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => new ApiKeyPool('sk_a,sk_b', { loadTimeoutMs: bad })).toThrow(RangeError);
+        expect(() => new ApiKeyPool('sk_a,sk_b', { storeTimeoutMs: bad })).toThrow(RangeError);
+      }
+    });
+
+    it('keeps a result recorded before the load lands: an old failed row does not undo a fresh success', async () => {
+      let answer: (rows: KeyState[] | null) => void = () => undefined;
+      const store = {
+        load: vi.fn(() => new Promise<KeyState[] | null>((resolve) => {
+          answer = resolve;
+        })),
+        save: vi.fn(async () => undefined),
+      };
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:late', store });
+      const readying = pool.ready();
+      // A request served while the load is still out (a second initialize on a live provider, a cold database).
+      const key = pool.next();
+      expect(key).toBe('sk_alpha_0001');
+      pool.markSuccess(key);
+      const okAt = pool.snapshot()[0].lastOkAt;
+      expect(typeof okAt).toBe('number');
+      answer([{
+        fingerprint: keyFingerprint('sk_alpha_0001'),
+        label: 'k00001',
+        status: 'failed',
+        kind: 'billing',
+        failures: 1,
+        lastFailAt: Date.now() - 60_000,
+        nextRecheckAt: Date.now() + 60_000,
+        updatedAt: Date.now() - 60_000,
+        version: 1,
+      }]);
+      await readying;
+      expect(pool.snapshot()[0]).toMatchObject({ status: 'ok', failures: 0, lastOkAt: okAt });
+      expect(pool.next()).toBe('sk_alpha_0001');
+    });
+
+    it('takes a row newer than the result recorded before the load', async () => {
+      let answer: (rows: KeyState[] | null) => void = () => undefined;
+      const store = {
+        load: vi.fn(() => new Promise<KeyState[] | null>((resolve) => {
+          answer = resolve;
+        })),
+        save: vi.fn(async () => undefined),
+      };
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:newer', store });
+      const readying = pool.ready();
+      pool.markSuccess('sk_alpha_0001', Date.now() - 10_000);
+      // Another instance recorded a failure on the key after that success.
+      answer([{
+        fingerprint: keyFingerprint('sk_alpha_0001'),
+        label: 'k00001',
+        status: 'failed',
+        kind: 'auth',
+        failures: 1,
+        lastFailAt: Date.now() - 5_000,
+        nextRecheckAt: Date.now() + 60_000,
+        updatedAt: Date.now() - 5_000,
+        version: 1,
+      }]);
+      await readying;
+      expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', kind: 'auth' });
+      expect(pool.next()).toBe('sk_beta_0002');
+    });
+
+    it('orders a row and the result recorded here by their requests\' start times, never a write time against a start', async () => {
+      const deferred = () => {
+        let answer: (rows: KeyState[] | null) => void = () => undefined;
+        const store = {
+          load: vi.fn(() => new Promise<KeyState[] | null>((resolve) => {
+            answer = resolve;
+          })),
+          save: vi.fn(async () => undefined),
+        };
+        return { store, answer: (rows: KeyState[] | null) => answer(rows) };
+      };
+      const okRow = (lastOkAt: number, updatedAt: number): KeyState => ({
+        fingerprint: keyFingerprint('sk_alpha_0001'),
+        label: 'k00001',
+        status: 'ok',
+        failures: 0,
+        lastOkAt,
+        updatedAt,
+        version: 1,
+      });
+
+      // A request on sk_alpha_0001 goes out at `started` while the load is still out.
+      const first = deferred();
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:inflight', store: first.store });
+      const readying = pool.ready();
+      const started = Date.now();
+      vi.advanceTimersByTime(2_000);
+      // While it is out, another instance writes a success about a request that started before it.
+      const writtenAt = Date.now();
+      vi.advanceTimersByTime(2_000);
+      // It answers 401: the key was revoked between the two requests.
+      pool.markFailed('sk_alpha_0001', 'auth', { at: started });
+      first.answer([okRow(started - 1_000, writtenAt)]);
+      await readying;
+      expect(pool.snapshot()[0]).toMatchObject({ status: 'failed', kind: 'auth' });
+      expect(pool.next()).toBe('sk_beta_0002');
+
+      // A row about a request that started after this one's is the later result, and replaces it.
+      const second = deferred();
+      const other = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:inflight-2', store: second.store });
+      const readyingOther = other.ready();
+      const startedHere = Date.now();
+      vi.advanceTimersByTime(2_000);
+      other.markFailed('sk_alpha_0001', 'auth', { at: startedHere });
+      second.answer([okRow(startedHere + 500, startedHere + 1_000)]);
+      await readyingOther;
+      expect(other.snapshot()[0]).toMatchObject({ status: 'ok', lastOkAt: startedHere + 500 });
+    });
+
+    it('keeps the process alive while it waits on the store, so a short-lived host reaches the deadline and its warning', async () => {
+      vi.useRealTimers();
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      const deadlineOf = (ms: number): NodeJS.Timeout => {
+        const index = setTimeoutSpy.mock.calls.findIndex((call) => call[1] === ms);
+        expect(index).toBeGreaterThanOrEqual(0);
+        return setTimeoutSpy.mock.results[index].value as NodeJS.Timeout;
+      };
+      try {
+        const { logger, lines } = recordingLogger();
+        // A store whose calls never settle and that holds no handle of its own.
+        const store = {
+          load: vi.fn(() => new Promise<KeyState[] | null>(() => undefined)),
+          save: vi.fn(() => new Promise<void>(() => undefined)),
+        };
+        const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:alive', store, logger, loadTimeoutMs: 40, storeTimeoutMs: 41 });
+        const readying = pool.ready();
+        expect(deadlineOf(40).hasRef()).toBe(true);
+        await readying;
+        pool.markFailed('sk_alpha_0001', 'auth');
+        const flushing = pool.flush();
+        expect(deadlineOf(41).hasRef()).toBe(true);
+        await flushing;
+        expect(lines.filter((l) => l.event === 'key_pool.store_failed' && l.meta?.reason === 'timeout').map((l) => l.meta?.op)).toEqual(['load', 'flush']);
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    });
+
+    it('skips a row of another version with one warning', async () => {
+      const { logger, lines } = recordingLogger();
+      const store = new InMemoryKeyPoolStateStore();
+      await store.save('p:v', { fingerprint: keyFingerprint('sk_alpha_0001'), label: 'k00001', status: 'failed', kind: 'auth', failures: 1, updatedAt: Date.now(), version: 2 as unknown as 1 });
+      const pool = new ApiKeyPool('sk_alpha_0001,sk_beta_0002', { strategy: 'ordered', id: 'p:v', store, logger });
+      await pool.ready();
+      expect(pool.snapshot()[0].status).toBe('ok');
+      const warned = lines.filter((l) => l.event === 'key_pool.store_failed');
+      expect(warned).toHaveLength(1);
+      expect(warned[0]).toMatchObject({ level: 'warn', meta: { op: 'load', reason: 'version', version: 2 } });
     });
 
     it('a store that throws on load leaves a fresh pool and logs once; a failing save logs at most once a minute', async () => {

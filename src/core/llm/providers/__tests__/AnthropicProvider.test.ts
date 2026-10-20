@@ -1458,20 +1458,30 @@ describe('AnthropicProvider', () => {
       expect(result.choices[0].finishReason).toBe('stop');
     });
 
-    it('keeps the length stop of a forced schema call the output limit stopped: the call leaves the tool calls, and the stop is never read as a clean one', async () => {
-      // {} is what the provider builds for a call cut before its input began;
-      // the length stop is what tells generateObject to raise the budget.
-      const msg = makeAnthropicResponse({
-        content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: {} }],
-        stop_reason: 'max_tokens',
-      });
-      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+    it('keeps the length stop of a forced schema call the output limit stopped, and answers no text for the empty input the single-shot transport gives it: the call leaves the tool calls, and the stop is never read as a clean one', async () => {
+      // The single-shot response gives such a call input {} whatever the model
+      // wrote (live-probed 2026-10-19 on claude-sonnet-4-6 at max_tokens 1, 12
+      // and 40, and on claude-haiku-5-5 at 30). The length stop is what tells
+      // generateObject to raise the budget; {} as the text would pass for an
+      // answer under a schema whose fields are all optional.
+      const single = new AnthropicProvider();
+      await single.initialize({ apiKey: 'test-anthropic-key', streamCompletions: false });
+      fetchMock.mockResolvedValueOnce(
+        mockJsonResponse(
+          makeAnthropicResponse({
+            content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: {} }],
+            stop_reason: 'max_tokens',
+          }),
+        ),
+      );
 
-      const result = await provider.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Hi' }], {
+      const result = await single.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Hi' }], {
         responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit' } } as never,
       });
 
-      expect(result.choices[0].message.content).toBe('{}');
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body).stream).toBe(false);
+      expect(result.schemaRoute).toBe('forced_tool');
+      expect(result.choices[0].message.content).toBeNull();
       expect(result.choices[0].message.tool_calls).toBeUndefined();
       expect(result.choices[0].finishReason).toBe('length');
     });
@@ -1536,6 +1546,63 @@ describe('AnthropicProvider', () => {
       await expect(
         single.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Look up a.' }], {}),
       ).rejects.toMatchObject({ code: 'STREAM_INCOMPLETE' });
+    });
+
+    it('answers a forced schema call the output limit stopped before any of its input arrived with no text and the length stop, never a {} built for it, on the completion and on the stream', async () => {
+      // The API's shape for every forced call the limit stops (live-probed
+      // 2026-10-19 on claude-sonnet-4-6 at max_tokens 1, 12, 40 and 200, and on
+      // claude-haiku-5-5 at 1 and 200): the block starts with input {}, one
+      // input_json_delta carries an empty partial_json, no content_block_stop
+      // follows, and the turn stops at max_tokens. None of the input arrived:
+      // a {} built for the call would pass for an answer under a schema whose
+      // fields are all optional, and generateObject would return it without
+      // raising its budget.
+      const events = () => [
+        d({ type: 'message_start', message: { ...makeAnthropicResponse(), content: [], stop_reason: null } }),
+        d({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_s', name: 'emit', input: {} } }),
+        d({ type: 'ping' }),
+        d({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '' } }),
+        d({ type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: null }, usage: { output_tokens: 1 } }),
+        d({ type: 'message_stop' }),
+      ];
+      const sseOf = (list: string[]) =>
+        ({
+          ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+          json: () => Promise.reject(new Error('SSE body, not JSON')),
+          body: createSseStream(list),
+        }) as unknown as Response;
+      const optionalRecord = {
+        type: 'object',
+        properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+      };
+      const marker = { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: optionalRecord } } as never;
+      fetchMock.mockResolvedValueOnce(sseOf(events())).mockResolvedValueOnce(sseOf(events()));
+
+      const result = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Score a.' }], {
+        maxTokens: 8,
+        responseFormat: marker,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(result.schemaRoute).toBe('forced_tool');
+      expect(result.choices[0].message.content).toBeNull();
+      expect(result.choices[0].message.tool_calls).toBeUndefined();
+      expect(result.choices[0].finishReason).toBe('length');
+
+      // The stream names the call's raw input, which is empty; the completion
+      // gateway removes the call and makes that input the step's text.
+      const chunks: any[] = [];
+      for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', [{ role: 'user', content: 'Score a.' }], {
+        maxTokens: 8,
+        responseFormat: marker,
+      })) {
+        chunks.push(chunk);
+      }
+      const final = chunks.find((chunk) => chunk.isFinal);
+      expect(final?.schemaRoute).toBe('forced_tool');
+      expect(final?.choices[0].finishReason).toBe('length');
+      expect(final?.choices[0].message.tool_calls).toEqual([
+        { id: 'toolu_s', type: 'function', function: { name: 'emit', arguments: '' } },
+      ]);
     });
 
     it('sends the JSON output format with the stamped schema, no tool and no tool_choice on claude-opus-4-8', async () => {
@@ -2435,6 +2502,54 @@ describe('AnthropicProvider', () => {
         expect(any.schemaRoute).toBe('forced_tool');
         expect(any.choices[0].message.content).toBe('{"scores":{"a":1}}');
         expect(any.choices[0].message.tool_calls).toBeUndefined();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('any beside a passthrough tools array that holds the schema tool and another keeps the forced tool: any admits no text answer, and a call to the schema tool is the answer', async () => {
+      // With tool_choice any the model can only call a tool (live-probed
+      // 2026-10-19 with the schema in the system prompt and two tools: Claude
+      // Haiku 5.5 called the schema tool, Claude Sonnet 4.6 the other one,
+      // neither wrote a text block), so the prompt route has no answer to give,
+      // and on it the schema call stayed a tool call.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const recordSchema = {
+          type: 'object',
+          properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+          required: ['scores'],
+        };
+        const emit = { name: 'emit', input_schema: recordSchema };
+        const lookup = {
+          name: 'lookup',
+          description: 'Look a word up.',
+          input_schema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] },
+        };
+        fetchMock.mockResolvedValueOnce(
+          mockSseResponse(
+            makeAnthropicResponse({
+              content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { scores: { a: 1 } } }],
+              stop_reason: 'tool_use',
+            }),
+          ),
+        );
+
+        const result = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Score a.' }], {
+          customModelParams: { tools: [lookup, emit], tool_choice: { type: 'any' } },
+          responseFormat: { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: recordSchema } } as never,
+        });
+
+        const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+        expect(body.tools).toEqual([lookup, emit]);
+        expect(body.tool_choice).toEqual({ type: 'any' });
+        expect(JSON.stringify(body.system ?? '')).not.toContain('Answer with JSON only');
+        expect(result.schemaRoute).toBe('forced_tool');
+        expect(result.schemaInPayload).toBeUndefined();
+        expect(result.choices[0].message.content).toBe('{"scores":{"a":1}}');
+        expect(result.choices[0].message.tool_calls).toBeUndefined();
+        expect(result.choices[0].finishReason).toBe('stop');
+        expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('rides the prompt alone'))).toBe(false);
       } finally {
         warnSpy.mockRestore();
       }

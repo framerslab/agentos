@@ -22,7 +22,8 @@ import {
   ProviderEmbeddingResponse,
 } from '../IProvider';
 import { sha256Hex } from '../../../utils/sha256';
-import { OpenAIProvider } from './OpenAIProvider';
+import { OpenAIProvider, type OpenAIProviderConfig } from './OpenAIProvider';
+import { keyPoolStrategyFromEnv } from '../../../providers/ApiKeyPool.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 
 /** Mistral accepts only tool call ids made of nine letters and digits. */
@@ -84,6 +85,12 @@ export interface MistralProviderConfig {
   defaultModelId?: string;
   /** Request timeout in milliseconds. @default 60000 */
   requestTimeout?: number;
+  /**
+   * Pool options for several keys in `apiKey`, passed to the `OpenAIProvider` this provider sends through:
+   * the strategy (else `AGENTOS_KEY_POOL_STRATEGY_MISTRAL`, else `AGENTOS_KEY_POOL_STRATEGY`, else round-robin;
+   * never the OpenAI variable), the timings, and the `store` and `id` that persist the keys' standing.
+   */
+  keyPool?: OpenAIProviderConfig['keyPool'];
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +195,9 @@ export class MistralProvider implements IProvider {
       baseURL: config.baseURL ?? 'https://api.mistral.ai/v1',
       defaultModelId: this.defaultModelId,
       requestTimeout: config.requestTimeout ?? 60000,
+      // The host's pool options reach the delegate's pool, with this provider's own strategy variable: the strategy
+      // is always given, so the delegate never reads AGENTOS_KEY_POOL_STRATEGY_OPENAI, which names OpenAI's keys.
+      keyPool: { ...config.keyPool, strategy: config.keyPool?.strategy ?? keyPoolStrategyFromEnv('mistral').strategy ?? 'round-robin' },
     });
 
     this.isInitialized = true;

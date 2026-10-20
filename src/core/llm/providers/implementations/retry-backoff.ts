@@ -45,3 +45,24 @@ export function computeRetryBackoffMs(attempt: number, opts: RetryBackoffOptions
   const half = ceiling / 2;
   return Math.round(half + random() * half);
 }
+
+/**
+ * Waits `ms` before a retry, or less when `signal` fires first: the caller's
+ * abort ends the wait at once, so the retry loop's own abort check reports it
+ * instead of sleeping out a long Retry-After. Resolves at once for a signal
+ * that has already fired or a wait of zero or less.
+ */
+export function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted || !(ms > 0)) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}

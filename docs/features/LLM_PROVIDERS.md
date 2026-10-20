@@ -174,7 +174,7 @@ OPENROUTER_API_KEY=sk-or-...
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list: a key pool. The LLM providers move a request to the next usable key when one is revoked, unpaid or throttled, probe a failed key before it returns, and persist the keys' standing when given a store; `AGENTOS_KEY_POOL_STRATEGY=ordered` uses the keys in the order given (credited keys first, the paid key last). [API Key Rotation](../KEY_ROTATION.md) has the strategies, the failure kinds, and the providers that need a single key.
+For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list: a key pool. The LLM providers move a request to the next usable key when one is revoked, unpaid or throttled, probe a failed key before it returns, and persist the keys' standing when given a store; `AGENTOS_KEY_POOL_STRATEGY_ANTHROPIC=ordered` uses Anthropic's keys in the order given (credited keys first, the paid key last), and the same variable with another provider's name (`_OPENAI`, `_GEMINI`, `_OPENROUTER`, `_REQUESTY`) orders that provider's; `AGENTOS_KEY_POOL_STRATEGY=ordered` orders every provider's keys, so a list kept for load spreading on another provider becomes ordered too. [API Key Rotation](../KEY_ROTATION.md) has the strategies, the failure kinds, and the providers that need a single key.
 
 ### Per-Agent Override
 
@@ -724,9 +724,11 @@ JSON text and leaves `tool_calls`, so `generateText()`'s tool loop never runs it
 as a tool. A passthrough `customModelParams.tools` array replaces the schema
 tool, so it must hold a tool of the schema's name for the forced choice to go
 out; without one the schema rides the prompt. A passthrough `tool_choice` keeps
-precedence too: one that does not force the schema tool (`auto`, `none`,
-another tool's name) sends the schema in the prompt, and `any` forces it when it
-is the one tool on the wire. The format and prompt routes send no schema tool,
+precedence too: one under which the model need not call the schema tool
+(`auto`, `none`, another tool's name) sends the schema in the prompt, and `any`
+keeps the forced tool, since under `any` the model calls a tool and writes no
+text: a call to the schema tool is the answer, and a call to another tool stays
+a tool call. The format and prompt routes send no schema tool,
 so a passthrough `tool_choice` they leave with no tool on the wire is dropped.
 When neither route carries the schema (such a schema on Claude Opus 5.5, Sonnet
 5.5, Fable or Mythos 5.1, which refuse a forced tool choice), and when a request
@@ -741,9 +743,13 @@ or for the prompt on a model that refuses a forced choice. Every completion and
 stream chunk of a schema request names the route it took (`schemaRoute`), and
 one whose schema rode the prompt says `schemaInPayload: false`, so a completion
 gateway lifts the answer from where the request put it. A cut-off answer
-(`max_tokens`) keeps `finishReason: 'length'`, even when its JSON parses: the
-provider builds `{}` for a forced call cut before its input began, and answers
-a forced call cut mid-JSON with its raw input as the text, in one request.
+(`max_tokens`) keeps `finishReason: 'length'`, even when its JSON parses. The
+API sends none of the input of a forced call the limit stops (the single-shot
+response gives it `{}`, the stream one empty input delta; probed on 2026-10-19
+on Claude Sonnet 4.6 and Haiku 5.5), so the provider answers that call with no
+text, never a `{}` that would pass for an answer under a schema whose fields
+are all optional, and answers a forced call cut mid-JSON with its raw input as
+the text, in one request.
 `generateObject()` raises its output budget and asks again when the answer does
 not parse or validate, and returns one that does with `finishReason: 'length'`;
 a completion gateway lifts nothing from a cut-off, and a session's `send()` on
@@ -759,7 +765,7 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 | Provider | Structured Output | Tool Choice |
 |----------|-------------------|-------------|
 | OpenAI | `json_schema` with `strict: true` when the schema fits OpenAI's strict rules, otherwise JSON-object mode | Sent as `tool_choice` |
-| Anthropic | The native JSON output format (`output_config.format`) on every model that has it and whose schema fits its limits; a non-strict forced tool call whose input is the schema for a schema the format cannot carry on a model that accepts a forced choice, and for every schema on Claude Opus 4 and Sonnet 4; the provider's own schema block in the system prompt when neither carries the schema, and on the forced-tool route when the request turns thinking on or a passthrough `tools` or `tool_choice` leaves the schema tool unforced (the format route keeps the format with thinking on) | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
+| Anthropic | The native JSON output format (`output_config.format`) on every model that has it and whose schema fits its limits; a non-strict forced tool call whose input is the schema for a schema the format cannot carry on a model that accepts a forced choice, and for every schema on Claude Opus 4 and Sonnet 4; the provider's own schema block in the system prompt when neither carries the schema, and on the forced-tool route when the request turns thinking on, a passthrough `tools` drops the schema tool, or a passthrough `tool_choice` of `auto`, `none` or another tool's name lets the model skip it (the format route keeps the format with thinking on) | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
 | Gemini | `responseSchema` with JSON output | Not sent; the API default applies |
 | OpenRouter | Strict `json_schema` when the schema fits, otherwise JSON-object mode. When OpenRouter finds no endpoint that serves the strict schema (HTTP 404, "No endpoints found"), the request is sent once more in JSON-object mode with the schema written into its system prompt, unless the system prompt states a schema already | Sent as `tool_choice`; the routed model decides |
 | Requesty | None | Sent as `tool_choice`; the routed model decides |

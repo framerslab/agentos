@@ -41,9 +41,9 @@ export type ProbeResult = 'ok' | KeyFailureKind | 'unknown';
 
 /** Configuration for an ApiKeyPool instance. */
 export interface ApiKeyPoolConfig {
-  /** Cooldown before retrying a quota-exhausted key. Default: 15 minutes. */
+  /** Cooldown before retrying a quota-exhausted key, a positive number of milliseconds. Default: 15 minutes. */
   cooldownMs?: number;
-  /** Weight multiplier for the first key under round-robin. Default: 2. Set to 1 for equal weighting. */
+  /** Weight multiplier for the first key under round-robin, a positive whole number. Default: 2. Set to 1 for equal weighting. */
   primaryWeight?: number;
   /** `round-robin` (default, the first version's behaviour) or `ordered` (the earliest usable key in the configured order). */
   strategy?: 'round-robin' | 'ordered';
@@ -51,10 +51,14 @@ export interface ApiKeyPoolConfig {
   recheckMs?: number;
   /** The recheck delay's ceiling. Default: 6 hours. */
   maxRecheckMs?: number;
-  /** The longest rest a Retry-After may ask for. Default: 1 hour. */
+  /** The longest rest a Retry-After may ask for, a positive number of milliseconds. Default: 1 hour. */
   maxRetryAfterMs?: number;
   /** How long a probe may run before it counts as `unknown`. Default: 10 seconds. */
   probeTimeoutMs?: number;
+  /** How long `ready()` waits for the store's load before it carries on with a fresh state. Default: 10 seconds. */
+  loadTimeoutMs?: number;
+  /** How long `flush()` and `close()` wait for the store's writes. Default: 5 seconds. */
+  storeTimeoutMs?: number;
   /** Probes a failed key off the request path, told the kind of its last failure; without one, failed keys return by time. */
   probe?: (key: string, kind: KeyFailureKind | undefined) => Promise<ProbeResult>;
   /** Persists the pool's state; used only with `id`. */
@@ -70,12 +74,17 @@ interface Entry {
   state: KeyState;
 }
 
+/** What a store call came to: its value, its rejection, or the deadline. */
+type StoreOutcome<T> = { outcome: 'ok'; value: T } | { outcome: 'error'; error: unknown } | { outcome: 'timeout' };
+
 const DEFAULT_COOLDOWN_MS = 15 * 60_000;
 const DEFAULT_PRIMARY_WEIGHT = 2;
 const DEFAULT_RECHECK_MS = 30 * 60_000;
 const DEFAULT_MAX_RECHECK_MS = 6 * 60 * 60_000;
 const DEFAULT_MAX_RETRY_AFTER_MS = 60 * 60_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
+const DEFAULT_LOAD_TIMEOUT_MS = 10_000;
+const DEFAULT_STORE_TIMEOUT_MS = 5_000;
 const SAVE_DEBOUNCE_MS = 250;
 const STORE_FAILURE_LOG_INTERVAL_MS = 60_000;
 
@@ -90,19 +99,34 @@ export function keyFingerprint(key: string): string {
   return hash.toString(16).padStart(16, '0').slice(0, 12);
 }
 
+/** The strategy variables already logged as naming no strategy, by name and value, so each writes its warning once. */
+const ignoredStrategyLogged = new Set<string>();
+
 /**
  * The pool strategy the environment asks for when a provider's config names
  * none: `AGENTOS_KEY_POOL_STRATEGY_<PROVIDER>` (ANTHROPIC, OPENAI, GEMINI,
- * OPENROUTER, REQUESTY) for one provider, else `AGENTOS_KEY_POOL_STRATEGY` for
+ * OPENROUTER, REQUESTY, and GROQ, MISTRAL, TOGETHER, XAI and LITELLM, which
+ * send through an OpenAIProvider) for one provider, else `AGENTOS_KEY_POOL_STRATEGY` for
  * every provider; `ordered` prefers the earliest usable key (a cost order:
- * credited keys first, the paid key last), `round-robin` spreads load.
+ * credited keys first, the paid key last), `round-robin` spreads load. A
+ * variable that names neither strategy is skipped, so a typo in a provider's
+ * own variable leaves the shared one in force, and logged once per value as
+ * `key_pool.strategy_ignored`, naming the variable and not what it holds.
  */
 export function keyPoolStrategyFromEnv(providerId?: string): Pick<ApiKeyPoolConfig, 'strategy'> {
   if (typeof process === 'undefined') return {};
-  const own = providerId ? process.env[`AGENTOS_KEY_POOL_STRATEGY_${providerId.replace(/[^a-z0-9]+/gi, '_').toUpperCase()}`] : undefined;
-  const value = own || process.env.AGENTOS_KEY_POOL_STRATEGY;
-  if (value === 'ordered') return { strategy: 'ordered' };
-  if (value === 'round-robin') return { strategy: 'round-robin' };
+  const own = providerId ? `AGENTOS_KEY_POOL_STRATEGY_${providerId.replace(/[^a-z0-9]+/gi, '_').toUpperCase()}` : undefined;
+  for (const variable of [own, 'AGENTOS_KEY_POOL_STRATEGY']) {
+    if (!variable) continue;
+    const value = process.env[variable];
+    if (!value) continue;
+    if (value === 'ordered' || value === 'round-robin') return { strategy: value };
+    const logged = `${variable}=${value}`;
+    if (!ignoredStrategyLogged.has(logged)) {
+      ignoredStrategyLogged.add(logged);
+      createLogger('key-pool').warn('key_pool.strategy_ignored', { variable });
+    }
+  }
   return {};
 }
 
@@ -117,6 +141,12 @@ function positiveMs(name: string, value: number | undefined, fallback: number): 
     throw new RangeError(`ApiKeyPool: ${name} must be a positive number of milliseconds (got ${String(value)})`);
   }
   return value;
+}
+
+/** A timer that never keeps the process alive. */
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  const maybeUnref = timer as unknown as { unref?: () => void };
+  if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
 }
 
 function parseKeys(keys: string | string[]): string[] {
@@ -141,6 +171,8 @@ export class ApiKeyPool {
   private readonly maxRecheckMs: number;
   private readonly maxRetryAfterMs: number;
   private readonly probeTimeoutMs: number;
+  private readonly loadTimeoutMs: number;
+  private readonly storeTimeoutMs: number;
   private readonly probe?: (key: string, kind: KeyFailureKind | undefined) => Promise<ProbeResult>;
   private readonly store?: KeyPoolStateStore;
   private readonly id: string;
@@ -148,25 +180,38 @@ export class ApiKeyPool {
   private readonly configuredLogger?: ILogger;
   private readyPromise?: Promise<void>;
   private readonly inFlightProbes = new Map<string, Promise<void>>();
-  /** The interval `startRechecks()` runs, if any: one per pool. */
-  private recheckTimer: ReturnType<typeof setInterval> | undefined;
+  /** The one-shot timer `startRechecks()` arms, if any: one per pool, re-armed after each run. */
+  private recheckTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The longest wait between two runs of the timer while `startRechecks()` is on; undefined when it is off. */
+  private recheckSweepMs: number | undefined;
+  /** Counts the `startRechecks()` calls, so an earlier call's stop function cannot end a later call's timer. */
+  private recheckGeneration = 0;
   private readonly pendingSaves = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlightSaves = new Set<Promise<void>>();
   private readonly lastLogged = new Map<string, number>();
   private lastStoreFailureLog = 0;
 
   constructor(keys: string | string[], config?: ApiKeyPoolConfig) {
-    this.cooldownMs = config?.cooldownMs ?? DEFAULT_COOLDOWN_MS;
+    // A cooldown of zero makes a throttled key usable at once, so an ordered pool re-sends to the key that has just
+    // answered 429 and the other key never serves; a Retry-After bound of zero does the same for a key the server
+    // asked to rest. Both are refused with the other timings.
+    this.cooldownMs = positiveMs('cooldownMs', config?.cooldownMs, DEFAULT_COOLDOWN_MS);
     this.strategy = config?.strategy ?? 'round-robin';
     this.recheckMs = positiveMs('recheckMs', config?.recheckMs, DEFAULT_RECHECK_MS);
     this.maxRecheckMs = positiveMs('maxRecheckMs', config?.maxRecheckMs, DEFAULT_MAX_RECHECK_MS);
-    this.maxRetryAfterMs = config?.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
+    this.maxRetryAfterMs = positiveMs('maxRetryAfterMs', config?.maxRetryAfterMs, DEFAULT_MAX_RETRY_AFTER_MS);
     this.probeTimeoutMs = positiveMs('probeTimeoutMs', config?.probeTimeoutMs, DEFAULT_PROBE_TIMEOUT_MS);
+    this.loadTimeoutMs = positiveMs('loadTimeoutMs', config?.loadTimeoutMs, DEFAULT_LOAD_TIMEOUT_MS);
+    this.storeTimeoutMs = positiveMs('storeTimeoutMs', config?.storeTimeoutMs, DEFAULT_STORE_TIMEOUT_MS);
     this.probe = config?.probe;
     this.id = config?.id ?? '';
     this.store = config?.id ? config?.store : undefined;
     this.configuredLogger = config?.logger;
     const primaryWeight = config?.primaryWeight ?? DEFAULT_PRIMARY_WEIGHT;
+    // The first key's rotation slots: zero or a fraction leaves it none, so round-robin never returns it.
+    if (!Number.isInteger(primaryWeight) || primaryWeight < 1) {
+      throw new RangeError(`ApiKeyPool: primaryWeight must be a positive whole number (got ${String(primaryWeight)})`);
+    }
 
     const now = Date.now();
     this.entries = parseKeys(keys).map((key, index) => ({
@@ -209,8 +254,9 @@ export class ApiKeyPool {
   /**
    * Loads the persisted state once, when the pool has a store and an id; the
    * providers await it in `initialize()` before the first `next()`. Resolves
-   * at once without a store. A load that throws leaves a fresh state and
-   * logs one warning.
+   * at once without a store. A load that throws, or that does not answer
+   * within `loadTimeoutMs`, leaves a fresh state and logs one warning; rows
+   * that arrive after the deadline are ignored.
    */
   ready(): Promise<void> {
     this.readyPromise ??= this.loadState();
@@ -258,6 +304,47 @@ export class ApiKeyPool {
     return resting[0].key;
   }
 
+  /**
+   * `next()`, and when it finds no key to hand out while a probe of a failed
+   * key is in flight (one this draw just started because its recheck came
+   * due, or the timer's), waits for the next probe to settle and draws again,
+   * for as long as no key can be drawn and a probe is still running, each
+   * probe bounded by `probeTimeoutMs`. So the first request after a recheck
+   * comes due is served by the first key that came back, instead of failing
+   * on a probe that was about to pass and re-opening the provider health
+   * breaker for another window, and without waiting for the probe of another
+   * key that hangs. The caller's `signal` ends the wait at once; the draw
+   * then answers `''`, and the provider reports the abort. The providers
+   * draw their first key of a request through it.
+   */
+  async nextAfterProbes(signal?: AbortSignal): Promise<string> {
+    let key = this.next();
+    // Each round waits for one probe to settle. A settled probe leaves the map and one that failed pushed its key's
+    // recheck out, so the rounds end within one per key; the bound is a guard.
+    for (let round = 0; key === '' && this.inFlightProbes.size > 0 && round <= this.entries.length; round++) {
+      if (signal?.aborted) return '';
+      const oneSettled = Promise.race(Array.from(this.inFlightProbes.values(), (probe) => probe.then(() => undefined, () => undefined)));
+      if (signal) {
+        let resolveAbort: (() => void) | undefined;
+        const aborted = new Promise<void>((resolve) => {
+          resolveAbort = resolve;
+        });
+        const onAbort = (): void => resolveAbort?.();
+        signal.addEventListener('abort', onAbort, { once: true });
+        try {
+          await Promise.race([oneSettled, aborted]);
+        } finally {
+          signal.removeEventListener('abort', onAbort);
+        }
+        if (signal.aborted) return '';
+      } else {
+        await oneSettled;
+      }
+      key = this.next();
+    }
+    return key;
+  }
+
   /** How many keys `next()` may hand out now. */
   usable(): number {
     const now = Date.now();
@@ -274,7 +361,11 @@ export class ApiKeyPool {
    * given, else the cooldown); `auth` and `billing` take it out until a probe
    * passes, or until the recheck delay has run when there is no probe. A
    * result whose `at` is older than the key's last recorded result is
-   * ignored, so an old answer never undoes a newer one.
+   * ignored, so an old answer never undoes a newer one. An auth or billing
+   * failure counts toward the recheck delay only when its request started
+   * after the key's previous failure was recorded, strictly later: the
+   * answers of requests that were in flight together (each drew the key
+   * while it was ok, so each started no later than that record) count once.
    */
   markFailed(key: string, kind: KeyFailureKind, detail?: { retryAfterMs?: number; status?: number; at?: number }): void {
     const entry = this.entries.find((e) => e.key === key);
@@ -298,7 +389,12 @@ export class ApiKeyPool {
       state.until = now + rest;
       state.nextRecheckAt = undefined;
     } else {
-      state.failures += 1;
+      // One failure per piece of evidence: a request that started after the previous record. Eight concurrent
+      // answers from requests that all drew the key while it was ok are one failure, so the first recheck stays at
+      // recheckMs instead of the delay's ceiling. A request that started in the same millisecond as that record drew
+      // the key before it was marked (a pool of several keys does not hand out a failed key before its recheck), so
+      // it counts with the others.
+      if (state.status !== 'failed' || at > state.updatedAt) state.failures += 1;
       state.status = 'failed';
       state.until = undefined;
       state.nextRecheckAt = now + this.recheckDelay(state.failures);
@@ -318,6 +414,7 @@ export class ApiKeyPool {
       this.log('warn', 'key_pool.all_keys_failed', undefined, true, { kinds: this.kindsSeen(), retryAfterMs: this.soonestReturnMs(now) });
     }
     this.scheduleSave(entry);
+    this.armRecheckTimer();
   }
 
   /** Records a success: the key is usable, its failure count cleared, its last-good time kept. */
@@ -339,6 +436,7 @@ export class ApiKeyPool {
       state.updatedAt = now;
       if (previous !== 'ok') this.log('info', 'key_pool.key_recovered', entry, true, { by: 'success' });
       this.scheduleSave(entry);
+      this.armRecheckTimer();
     }
   }
 
@@ -361,47 +459,44 @@ export class ApiKeyPool {
   }
 
   /**
-   * Runs `recheck()` on an interval that never keeps the process alive, one
-   * interval per pool (a second call replaces the first); returns the function
-   * that stops it. The interval holds the pool weakly where the runtime has
+   * Probes failed keys on the pool's own clock: one timer per pool, armed to
+   * the soonest `nextRecheckAt` of a failed key (so the first probe runs
+   * `recheckMs` after the failure, where an interval fixed at start could run
+   * it up to twice that late) and at the latest `intervalMs` ahead, re-armed
+   * after each run, each failure, each success and each probe. A second call
+   * replaces the first; the returned function stops it. The timer never
+   * keeps the process alive and holds the pool weakly where the runtime has
    * `WeakRef`: a pool nothing else holds (a provider dropped without
    * `shutdown()`, a manager evicted from `createProviderManager()`'s cache)
-   * ends its interval on the next tick instead of being kept alive by it.
+   * ends its timer at its next run instead of being kept alive by it.
    */
   startRechecks(intervalMs: number = this.recheckMs): () => void {
     const every = positiveMs('the recheck interval', intervalMs, this.recheckMs);
     this.stopRechecks();
-    const ref = typeof WeakRef === 'function' ? new WeakRef<ApiKeyPool>(this) : undefined;
-    const strong = ref ? undefined : this;
-    const timer: ReturnType<typeof setInterval> = setInterval(() => {
-      const pool = ref ? ref.deref() : strong;
-      if (!pool) {
-        clearInterval(timer);
-        return;
-      }
-      void pool.recheck().catch(() => undefined);
-    }, every);
-    const maybeUnref = timer as unknown as { unref?: () => void };
-    if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
-    this.recheckTimer = timer;
+    this.recheckGeneration += 1;
+    const generation = this.recheckGeneration;
+    this.recheckSweepMs = every;
+    this.armRecheckTimer();
     return () => {
-      if (this.recheckTimer === timer) this.stopRechecks();
-      else clearInterval(timer);
+      if (this.recheckGeneration === generation) this.stopRechecks();
     };
   }
 
-  /** Stops the interval `startRechecks()` started, if any. Probes already running finish. */
+  /** Stops the timer `startRechecks()` armed, if any. Probes already running finish. */
   stopRechecks(): void {
+    this.recheckSweepMs = undefined;
     if (this.recheckTimer === undefined) return;
-    clearInterval(this.recheckTimer);
+    clearTimeout(this.recheckTimer);
     this.recheckTimer = undefined;
   }
 
   /**
    * Ends the pool's work for a host that is shutting down: stops the recheck
-   * interval, waits for the probes in flight (each bounded by the probe
-   * timeout), then writes every pending state change, so what a probe found
-   * during shutdown is kept. The providers' `shutdown()` calls it.
+   * timer, waits for the probes in flight (each bounded by the probe
+   * timeout), then writes every pending state change (bounded by
+   * `storeTimeoutMs`), so what a probe found during shutdown is kept and a
+   * store that does not answer cannot hold the host. The providers'
+   * `shutdown()` calls it.
    */
   async close(): Promise<void> {
     this.stopRechecks();
@@ -416,8 +511,10 @@ export class ApiKeyPool {
 
   /**
    * Writes every pending state change now and waits for the writes in
-   * flight, so a host that is shutting down keeps the keys' standing; the
-   * providers' `shutdown()` calls it. Resolves at once without a store.
+   * flight, at most `storeTimeoutMs`, so a host that is shutting down keeps
+   * the keys' standing without hanging on a store that does not answer (one
+   * warning when the deadline passes); the providers' `shutdown()` calls it.
+   * Resolves at once without a store.
    */
   async flush(): Promise<void> {
     const pending = Array.from(this.pendingSaves.keys());
@@ -427,7 +524,11 @@ export class ApiKeyPool {
       const entry = this.entries.find((e) => e.key === key);
       if (entry) void this.saveNow(entry);
     }
-    await Promise.all(Array.from(this.inFlightSaves));
+    if (this.inFlightSaves.size === 0) return;
+    const settled = await this.withinDeadline(Promise.all(Array.from(this.inFlightSaves)), this.storeTimeoutMs);
+    if (settled.outcome === 'timeout') {
+      this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'flush', reason: 'timeout', timeoutMs: this.storeTimeoutMs, pending: this.inFlightSaves.size });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -463,6 +564,42 @@ export class ApiKeyPool {
       if (soonest === undefined || ms < soonest) soonest = ms;
     }
     return soonest;
+  }
+
+  /**
+   * Arms (or re-arms) the one-shot recheck timer: to the soonest failed key's
+   * recheck when the pool has a probe, and at the latest a sweep ahead.
+   * Nothing while `startRechecks()` is off.
+   */
+  private armRecheckTimer(): void {
+    const sweepMs = this.recheckSweepMs;
+    if (sweepMs === undefined) return;
+    if (this.recheckTimer !== undefined) {
+      clearTimeout(this.recheckTimer);
+      this.recheckTimer = undefined;
+    }
+    const now = Date.now();
+    let due = now + sweepMs;
+    if (this.probe) {
+      for (const entry of this.entries) {
+        if (entry.state.status !== 'failed') continue;
+        const at = entry.state.nextRecheckAt ?? now;
+        if (at < due) due = at;
+      }
+    }
+    const ref = typeof WeakRef === 'function' ? new WeakRef<ApiKeyPool>(this) : undefined;
+    const strong = ref ? undefined : this;
+    const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
+      const pool = ref ? ref.deref() : strong;
+      if (!pool || pool.recheckTimer !== timer) return;
+      pool.recheckTimer = undefined;
+      void pool
+        .recheck()
+        .catch(() => undefined)
+        .finally(() => pool.armRecheckTimer());
+    }, Math.max(0, due - now));
+    unrefTimer(timer);
+    this.recheckTimer = timer;
   }
 
   private scheduleDueRechecks(now: number): void {
@@ -516,6 +653,7 @@ export class ApiKeyPool {
       state.updatedAt = now;
       this.log('info', 'key_pool.key_recovered', entry, true, { by: 'probe' });
       this.scheduleSave(entry);
+      this.armRecheckTimer();
       return;
     }
     if (result === 'quota') {
@@ -526,6 +664,7 @@ export class ApiKeyPool {
       state.updatedAt = now;
       this.log('warn', 'key_pool.probe_failed', entry, true, { result });
       this.scheduleSave(entry);
+      this.armRecheckTimer();
       return;
     }
     // auth, billing or unknown: still out; the next recheck waits longer.
@@ -535,28 +674,92 @@ export class ApiKeyPool {
     state.updatedAt = now;
     this.log('warn', 'key_pool.probe_failed', entry, false, { result, failures: state.failures, nextRecheckAt: state.nextRecheckAt });
     this.scheduleSave(entry);
+    this.armRecheckTimer();
+  }
+
+  /**
+   * A store call raced against a deadline; what settles after the deadline is ignored, a late rejection included.
+   * The deadline's timer keeps the process alive while it runs (it is cleared as soon as the call settles): a host
+   * that awaits `ready()` or `flush()` on a store whose call never settles and holds no handle of its own reaches
+   * the deadline and its warning, instead of exiting with the wait unfinished.
+   */
+  private withinDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<StoreOutcome<T>> {
+    return new Promise<StoreOutcome<T>>((resolve) => {
+      const timer = setTimeout(() => resolve({ outcome: 'timeout' }), timeoutMs);
+      work.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve({ outcome: 'ok', value });
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          resolve({ outcome: 'error', error });
+        },
+      );
+    });
   }
 
   private async loadState(): Promise<void> {
-    if (!this.store || !this.id || this.entries.length === 0) return;
-    let rows: KeyState[] | null = null;
+    const store = this.store;
+    if (!store || !this.id || this.entries.length === 0) return;
+    // The load starts now, as ready() is called; a store whose load throws before it returns a promise is handled
+    // as a rejection, and a load that never settles ends at the deadline, its late rows ignored.
+    let work: Promise<KeyState[] | null>;
     try {
-      rows = await this.store.load(this.id);
+      work = Promise.resolve(store.load(this.id));
     } catch (error) {
+      work = Promise.reject(error);
+    }
+    const loaded = await this.withinDeadline(work, this.loadTimeoutMs);
+    if (loaded.outcome === 'timeout') {
+      this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'load', reason: 'timeout', timeoutMs: this.loadTimeoutMs });
+      return;
+    }
+    if (loaded.outcome === 'error') {
+      const error = loaded.error;
       this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'load', error: error instanceof Error ? error.message : String(error) });
       return;
     }
+    const rows = loaded.value;
     if (!rows) return;
     let applied = 0;
+    let otherVersion: number | undefined;
     for (const row of rows) {
-      if (row.version !== 1) continue;
+      const version: number = row.version;
+      if (version !== 1) {
+        otherVersion = version;
+        continue;
+      }
       const entry = this.entries.find((e) => e.state.fingerprint === row.fingerprint);
       if (!entry) continue;
-      if (row.updatedAt <= entry.state.updatedAt && entry.state.status !== 'ok') continue;
+      if (!ApiKeyPool.rowIsNewer(row, entry.state)) continue;
       entry.state = { ...row, label: entry.state.label };
       applied += 1;
     }
+    if (otherVersion !== undefined) {
+      this.logger().warn('key_pool.store_failed', { poolId: this.id, op: 'load', reason: 'version', version: otherVersion });
+    }
     this.logger().debug?.('key_pool.state_loaded', { poolId: this.id, rows: rows.length, applied });
+    // Loaded failed keys may be due already: the timer, when on, probes them at once.
+    if (applied > 0) this.armRecheckTimer();
+  }
+
+  /**
+   * Whether a stored row replaces the in-memory state: a key with no recorded
+   * result (nothing has succeeded or failed on it in this process) takes its
+   * row; otherwise the row wins only when its latest result (a success or a
+   * failure, by the time its request started) is later than the latest
+   * result recorded here, the order the pool keeps its own results in. Both
+   * sides are compared by their requests' start times, never one side's
+   * write time against the other's start time, so a row written while a
+   * request was in flight, about an older request, cannot undo the result
+   * that request recorded when it answered.
+   */
+  private static rowIsNewer(row: KeyState, state: KeyState): boolean {
+    if (state.lastOkAt === undefined && state.lastFailAt === undefined) return true;
+    const rowLatest = Math.max(row.lastOkAt ?? 0, row.lastFailAt ?? 0);
+    const stateLatest = Math.max(state.lastOkAt ?? 0, state.lastFailAt ?? 0);
+    return rowLatest > stateLatest;
   }
 
   private scheduleSave(entry: Entry): void {
@@ -567,8 +770,7 @@ export class ApiKeyPool {
       this.pendingSaves.delete(entry.key);
       void this.saveNow(entry);
     }, SAVE_DEBOUNCE_MS);
-    const maybeUnref = timer as unknown as { unref?: () => void };
-    if (typeof maybeUnref.unref === 'function') maybeUnref.unref();
+    unrefTimer(timer);
     this.pendingSaves.set(entry.key, timer);
   }
 

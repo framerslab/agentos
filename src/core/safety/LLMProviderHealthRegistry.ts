@@ -81,6 +81,7 @@
  */
 
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../llm/providers/errors/errorCodes.js';
+import { classifyKeyFailure } from '../providers/quotaErrors.js';
 import { contentSafeConsole as console } from '../logging/contentSafeConsole.js';
 
 /** Snapshot of breaker state for a single provider. */
@@ -191,6 +192,18 @@ export function classifyErrorStatus(error: unknown): number | null {
  * invalid_request_error ("credit balance is too low"; some surfaces use
  * a `billing_error` type) — matched here so a client-error transport
  * status cannot smuggle a dead account past the breaker as a caller bug.
+ * Its spend limits are matched the same way: the HTTP 400 "You have
+ * reached your specified (workspace) API usage limits" for a limit the
+ * operator set, and the HTTP 429 "You have reached your API usage limits"
+ * (`error.details.error_code` `enforced_spend_limit_reached`) for the
+ * tier's monthly cap, which the 429 class would flap on every 30 seconds
+ * until the month turns. The message is matched by the documented
+ * opening ("You have reached your [specified [workspace]] API usage
+ * limits"), never by "api usage limits" alone, so a request's own 400
+ * that names such a parameter stays the caller's. A 400 or 429 whose
+ * `details` carry the answer's error envelope is also read by the key
+ * pool's own classifier, so the breaker and the pool cannot name a
+ * billing answer differently.
  *
  * @internal
  */
@@ -214,12 +227,34 @@ export function isQuotaExhaustion(error: unknown): boolean {
     obj.openaiErrorType,
   ];
   if (marks.some((m) => m === 'insufficient_quota' || m === 'billing_error')) return true;
-  return (
+  if (
     typeof obj.message === 'string' &&
-    /insufficient_quota|exceeded your current quota|credit balance is too low/i.test(
+    /insufficient_quota|exceeded your current quota|credit balance is too low|you have reached your (?:specified (?:workspace )?)?api usage limits/i.test(
       obj.message,
     )
-  );
+  ) {
+    return true;
+  }
+  return isBillingEnvelope(error);
+}
+
+/**
+ * Whether a 400 or 429 provider error carries, in `details`, an answer body
+ * the key pool's {@link classifyKeyFailure} reads as `billing`. Every other
+ * status already rides the policy its class needs. A `details` that does not
+ * serialize (a circular transport object) is no evidence.
+ */
+function isBillingEnvelope(error: object): boolean {
+  const { httpStatus, details } = error as { httpStatus?: unknown; details?: unknown };
+  if (typeof httpStatus !== 'number' || (httpStatus !== 400 && httpStatus !== 429)) return false;
+  if (!details || typeof details !== 'object') return false;
+  let body: string;
+  try {
+    body = JSON.stringify(details);
+  } catch {
+    return false;
+  }
+  return classifyKeyFailure(httpStatus, body) === 'billing';
 }
 
 function policyForStatus(status: number | null): ErrorPolicy {
@@ -278,6 +313,22 @@ function isContentPolicyDecline(error: unknown): boolean {
   return [code, type].some(
     (mark) => typeof mark === 'string' && CONTENT_POLICY_MARKS.has(mark.toLowerCase()),
   );
+}
+
+/**
+ * A provider's `ALL_KEYS_FAILED` whose `details.retryAfterMs` is 0: every key
+ * of its pool is out, but a key's recheck is due, so a probe was just started
+ * or is running and may bring the key back at once. That is no verdict on the
+ * provider yet: counted, it would re-open the breaker for another full window
+ * at the very call that half-closed it, while the probe passes a second later.
+ * Once the probe fails, the key's next recheck is later, `retryAfterMs` is
+ * above 0, and the next such error trips the breaker as before.
+ */
+function isRecheckDue(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const { code, details } = error as { code?: unknown; details?: unknown };
+  if (code !== 'ALL_KEYS_FAILED' || !details || typeof details !== 'object') return false;
+  return (details as { retryAfterMs?: unknown }).retryAfterMs === 0;
 }
 
 /**
@@ -348,14 +399,16 @@ export class LLMProviderHealthRegistry {
    * a repeat failure on an open breaker just refreshes the
    * cooldown for the new error class.
    *
-   * A content-policy decline and a context-window rejection are ignored
-   * entirely (see {@link isContentPolicyDecline} and
-   * {@link isRequestTooLarge}): they neither trip the breaker nor count
-   * toward a streak.
+   * A content-policy decline, a context-window rejection and a key pool's
+   * `ALL_KEYS_FAILED` whose `retryAfterMs` is 0 (a key's probe is due or
+   * running) are ignored entirely (see {@link isContentPolicyDecline},
+   * {@link isRequestTooLarge} and {@link isRecheckDue}): they neither trip the
+   * breaker nor count toward a streak.
    */
   recordFailure(providerId: string, error: unknown): void {
     if (isContentPolicyDecline(error)) return;
     if (isRequestTooLarge(error)) return;
+    if (isRecheckDue(error)) return;
     const status = classifyErrorStatus(error);
     // Billing/quota exhaustion is provider health regardless of the
     // transport status it wears: OpenAI reports it as 429, Anthropic as

@@ -500,6 +500,7 @@ export {
   parseModelString,
   resolveProvider,
   resolveModelOption,
+  shutdownProviderManagers,
   ProviderInitializationError,
 } from './api/model.js';
 export { PROVIDER_DEFAULTS, autoDetectProvider } from './api/runtime/provider-defaults.js';
