@@ -103,7 +103,7 @@ describe('MiniMax Chat Completions transport', () => {
       { type: 'image_url' as const, image_url: { url: 'data:image/png;base64,aGVsbG8=' } },
     ];
     const messages: ChatMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'Weather?' }, ...images] }];
-    const first = await instance.generateCompletion(instance.defaultModelId!, messages, { tools, effort: 'high', thinking: true });
+    const first = await instance.generateCompletion(instance.defaultModelId!, messages, { tools, effort: 'high', thinking: { budgetTokens: 1024 } });
     expect(requests[0]).toMatchObject({ path: '/v1/chat/completions', authorization: 'Bearer test-key', body: { model: FLASH, tools, reasoning_effort: 'high', thinking: { type: 'adaptive' } } });
     expect(requests[0].body.messages[0].content).toEqual(messages[0].content);
     expect(first.choices[0].message.reasoningText).toBe('Look up the weather.');
