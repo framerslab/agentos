@@ -336,28 +336,68 @@ describe('DeepgramAuraStreamingTTS', () => {
     await flushed;
   });
 
-  it('starts the next segment once the bounded wait for the late Flushed of a timed-out segment ends', async () => {
+  it('starts the next segment once the bounded wait for the late Flushed of a timed-out segment ends, and that Flushed, later still, completes nothing', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const session = await tts.startSession({ format: 'pcm' });
-    const ws = socketOf(session);
-    const chunks = recorded(session);
-    ws.send.mockClear();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const chunks = recorded(session);
+      ws.send.mockClear();
 
-    session.pushTokens('First one. Second');
-    const flushed = session.flush();
-    frame(ws, 1);
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(chunks).toHaveLength(1);
-    expect(sent(ws)).toHaveLength(2);
-    // No Flushed comes for five more seconds: the next segment goes out anyway.
-    await vi.advanceTimersByTimeAsync(4_999);
-    expect(sent(ws)).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(sent(ws).slice(2)).toEqual([{ type: 'Speak', text: ' Second' }, { type: 'Flush' }]);
-    frame(ws, 2);
-    control(ws, { type: 'Flushed', sequence_id: 0 });
-    expect(chunks[1].textBoundary).toEqual({ segmentId: expect.any(String), start: 10, end: 17, text: ' Second', final: true });
-    await flushed;
+      session.pushTokens('First one. Second');
+      const flushed = session.flush();
+      frame(ws, 1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(chunks).toHaveLength(1);
+      expect(sent(ws)).toHaveLength(2);
+      // No Flushed comes for five more seconds: the next segment goes out anyway.
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(sent(ws)).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sent(ws).slice(2)).toEqual([{ type: 'Speak', text: ' Second' }, { type: 'Flush' }]);
+      // Deepgram answers in order: the first segment's late audio, then its Flushed, eleven seconds after its Flush.
+      // That Flushed answers the first Flush, so it completes nothing, and is logged once.
+      frame(ws, 2);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      expect(chunks).toHaveLength(1);
+      expect(warn).toHaveBeenCalledOnce();
+      // The second segment's audio, then its own Flushed: the boundary lands on its last frame.
+      frame(ws, 3);
+      control(ws, { type: 'Flushed', sequence_id: 1 });
+      expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary])).toEqual([
+        [1, undefined],
+        [2, undefined],
+        [3, { segmentId: expect.any(String), start: 10, end: 17, text: ' Second', final: true }],
+      ]);
+      await flushed;
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('ignores a Flushed that answers no Flush the session sent, with one log line', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const chunks = recorded(session);
+
+      // No Flush has gone out: the Flushed answers nothing.
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      expect(warn).toHaveBeenCalledOnce();
+      // The first segment's own Flushed still completes it.
+      session.pushTokens('Hello.');
+      const flushed = session.flush();
+      frame(ws, 1);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      await flushed;
+      expect(chunks.map((chunk) => chunk.textBoundary?.text)).toEqual(['Hello.']);
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('attaches nothing to a frame after a cancel, and a late terminal response emits nothing', async () => {
@@ -538,6 +578,46 @@ describe('DeepgramAuraStreamingTTS', () => {
     session.pushTokens('Next one. ');
     expect(sent(ws).slice(-2)).toEqual([{ type: 'Speak', text: 'Next one.' }, { type: 'Flush' }]);
     expect(flushCount(ws)).toBe(21);
+  });
+
+  it('completes no segment that waits for its Flush slot with the late Flushed of the segment before it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const chunks = recorded(session);
+      ws.send.mockClear();
+
+      // Nineteen sentences flushed and answered, then a twentieth whose Flushed is late: the minute's budget is spent.
+      const first = Date.now();
+      for (let i = 0; i < 19; i++) {
+        session.pushTokens('Go. ');
+        control(ws, { type: 'Flushed', sequence_id: i });
+        await vi.advanceTimersByTimeAsync(50);
+      }
+      session.pushTokens('Late. Next. ');
+      expect(flushCount(ws)).toBe(20);
+      frame(ws, 1);
+      // The twentieth times out, the wait for its late Flushed ends, and the next segment is spoken and waits for a slot.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sent(ws)[sent(ws).length - 1]).toEqual({ type: 'Speak', text: ' Next.' });
+      expect(flushCount(ws)).toBe(20);
+      // The twentieth's Flushed comes now: it answers the twentieth Flush, not the next segment's, which has none yet.
+      control(ws, { type: 'Flushed', sequence_id: 19 });
+      expect(warn).toHaveBeenCalledOnce();
+      // The window passes: the next segment's Flush goes out, and its own Flushed completes it.
+      await vi.advanceTimersByTimeAsync(first + 61_000 - Date.now());
+      expect(flushCount(ws)).toBe(21);
+      frame(ws, 2);
+      control(ws, { type: 'Flushed', sequence_id: 20 });
+      expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([
+        [1, undefined],
+        [2, ' Next.'],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("reports the socket closing at the server's hand while a segment is in flight, ends it without a boundary, completes the flush, and closes once", async () => {

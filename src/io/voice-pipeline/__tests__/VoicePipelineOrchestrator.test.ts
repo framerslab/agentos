@@ -425,6 +425,60 @@ describe('VoicePipelineOrchestrator', () => {
     expect(transport.close).toHaveBeenCalledWith(1000, 'test teardown');
   });
 
+  it("ends the session as the TTS part's failure when the TTS session closes on its own, so no reply waits on a closed one", async () => {
+    const session = await startSession();
+    const sessionErrors: Array<VoiceSessionEventMap['session_error']> = [];
+    const closes: Array<VoiceSessionEventMap['close']> = [];
+    session.on('session_error', (event) => sessionErrors.push(event));
+    session.on('close', (event) => closes.push(event));
+    orchestrator.on('error', () => undefined);
+
+    // The provider's session closes while the session listens: every later reply would go to a closed session.
+    ttsSession.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(orchestrator.state).toBe('closed');
+    expect(sessionErrors.map((event) => [event.source, event.recoverable])).toEqual([['tts', false]]);
+    expect(closes.map((event) => event.reason)).toEqual(['provider_failure']);
+  });
+
+  it('reports a TTS session that fails and then closes as one failure, and takes the close its own stop makes as none', async () => {
+    // A TTS session that emits close as it is closed, as the providers do.
+    vi.mocked(ttsSession.close).mockImplementation(() => {
+      ttsSession.emit('close');
+    });
+    orchestrator.on('error', () => undefined);
+    const failing = await startSession();
+    const failures: Array<VoiceSessionEventMap['session_error']> = [];
+    failing.on('session_error', (event) => failures.push(event));
+    ttsSession.emit('error', new Error('deepgram aura ws closed'));
+    ttsSession.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('closed');
+    expect(failures.map((event) => event.source)).toEqual(['tts']);
+
+    // A session stopped by its host closes its TTS session, and that close is no failure.
+    const other = new VoicePipelineOrchestrator(makeConfig());
+    const otherTTS = createMockTTSSession();
+    vi.mocked(otherTTS.close).mockImplementation(() => {
+      otherTTS.emit('close');
+    });
+    const stopped = await other.startSession(createMockTransport(), createMockAgentSession(), {
+      streamingSTT: createMockSTT(createMockSTTSession()),
+      streamingTTS: createMockTTS(otherTTS),
+      endpointDetector: createMockEndpoint(),
+      bargeinHandler: createMockBargeinHandler(),
+    });
+    const stopErrors: Array<VoiceSessionEventMap['session_error']> = [];
+    const stopCloses: Array<VoiceSessionEventMap['close']> = [];
+    stopped.on('session_error', (event) => stopErrors.push(event));
+    stopped.on('close', (event) => stopCloses.push(event));
+    await other.stopSession('done');
+    expect(otherTTS.close).toHaveBeenCalledOnce();
+    expect(stopErrors).toEqual([]);
+    expect(stopCloses.map((event) => event.reason)).toEqual(['done']);
+  });
+
   it('should reset endpoint detector after flush_complete to prepare for next turn', async () => {
     await startSession();
     expect(endpoint.reset).toHaveBeenCalledWith('session'); // as the session started
