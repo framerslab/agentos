@@ -615,6 +615,49 @@ export function cachedProviderManagerCount(): number {
 }
 
 /**
+ * The {@link shutdownProviderManagers} call in progress, if any. A manager
+ * {@link createProviderManager} builds while it runs waits for it, so the
+ * new manager's pools load the state the replaced pools are writing instead
+ * of the rows from before it.
+ */
+let shutdownInProgress: Promise<void> | undefined;
+
+/**
+ * Shuts down every provider manager {@link createProviderManager} has cached
+ * and empties the cache. Each provider's `shutdown()` closes its key pool,
+ * which stops the pool's recheck timer and writes the keys' standing at once,
+ * so a short-lived host (a CLI, a job) that calls this before it exits keeps
+ * the last quarter second of key state its pools would otherwise lose to the
+ * save debounce. A manager still initializing is awaited first; one whose
+ * initialization failed is skipped. Calls after this one build new managers
+ * as the first call did, and a manager built before it has finished waits
+ * for it, so its pools start from what the old pools wrote.
+ */
+export async function shutdownProviderManagers(): Promise<void> {
+  const pending = Array.from(managerCache.values());
+  managerCache.clear();
+  const shuttingDown = Promise.all(
+    pending.map(async (initializing) => {
+      let manager: AIModelProviderManager;
+      try {
+        manager = await initializing;
+      } catch {
+        return;
+      }
+      await manager.shutdown().catch(() => undefined);
+    }),
+  ).then(() => undefined);
+  const previous = shutdownInProgress;
+  const all = previous ? Promise.all([previous, shuttingDown]).then(() => undefined) : shuttingDown;
+  shutdownInProgress = all;
+  try {
+    await all;
+  } finally {
+    if (shutdownInProgress === all) shutdownInProgress = undefined;
+  }
+}
+
+/**
  * Thrown by {@link createProviderManager} when the requested provider did not
  * initialize: a rejected or revoked API key (the provider's model listing
  * answers 401), an unreachable endpoint, or a provider id the manager does
@@ -702,6 +745,9 @@ export async function createProviderManager(
   }
 
   const pending = (async () => {
+    // A manager built while shutdownProviderManagers() runs waits for it: the replaced pools write their pending
+    // state first, so this manager's pools load that state rather than the rows from before it.
+    if (shutdownInProgress) await shutdownInProgress;
     const manager = new AIModelProviderManager();
 
     const providerConfig: Record<string, unknown> = {};

@@ -189,6 +189,131 @@ describe('AnthropicProvider key failover', () => {
     expect(keyOf(callsOf()[3])).toBe('sk_a');
   });
 
+  it('serves the first request after the recheck comes due from the key its probe brings back, instead of failing it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const p = await provider('sk_a,sk_b', { keyPool: { strategy: 'ordered', recheckMs: 60_000 } });
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, authError)).mockResolvedValueOnce(jsonResponse(401, authError));
+    await expect(ask(p)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED', httpStatus: 401 });
+    // The keys work again; the clock reaches their recheck before the pool's timer has run, so the request itself
+    // finds both keys due: it starts their probes, waits for them, and goes out with the first key they bring back.
+    vi.setSystemTime(new Date(Date.now() + 60_000));
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { data: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, { data: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, okMessage));
+    const answer = await ask(p);
+    expect(answer.choices[0]?.message?.content).toBe('hello');
+    const after = callsOf().slice(2);
+    expect(after.map((call) => (call.url.includes('/v1/models') ? 'probe' : 'request'))).toEqual(['probe', 'probe', 'request']);
+    expect(after.map(keyOf)).toEqual(['sk_a', 'sk_b', 'sk_a']);
+  });
+
+  it('ends a draw that waits on the probes when the caller aborts, and reports the abort', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const p = await provider('sk_a,sk_b', { keyPool: { strategy: 'ordered', recheckMs: 60_000 } });
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, authError)).mockResolvedValueOnce(jsonResponse(401, authError));
+    await expect(ask(p)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED' });
+    // At the recheck the request starts both probes, which hang; it waits on them until its caller aborts.
+    vi.setSystemTime(new Date(Date.now() + 60_000));
+    fetchMock.mockImplementation(() => new Promise<Response>(() => undefined));
+    const controller = new AbortController();
+    const asking = p
+      .generateCompletion('claude-opus-5-5', [{ role: 'user', content: 'hi' }], { abortSignal: controller.signal })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await asking).toMatchObject({ code: 'REQUEST_ABORTED' });
+    // Only the two probes went out; the request sent nothing.
+    expect(callsOf().slice(2).map((call) => call.url.includes('/v1/models'))).toEqual([true, true]);
+  });
+
+  it('ends a stream whose draw waits on the probes when the caller aborts, with the abort chunk', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const p = await provider('sk_a,sk_b', { keyPool: { strategy: 'ordered', recheckMs: 60_000 } });
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, authError)).mockResolvedValueOnce(jsonResponse(401, authError));
+    await expect(ask(p)).rejects.toMatchObject({ code: 'ALL_KEYS_FAILED' });
+    // At the recheck the stream's draw starts both probes, which hang; it waits on them until its caller aborts.
+    vi.setSystemTime(new Date(Date.now() + 60_000));
+    fetchMock.mockImplementation(() => new Promise<Response>(() => undefined));
+    const controller = new AbortController();
+    const chunks: Array<{ isFinal?: boolean; error?: { type?: string } }> = [];
+    const streaming = (async () => {
+      for await (const chunk of p.generateCompletionStream('claude-opus-5-5', [{ role: 'user', content: 'hi' }], { abortSignal: controller.signal })) {
+        chunks.push(chunk);
+      }
+    })();
+    await vi.advanceTimersByTimeAsync(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1);
+    await streaming;
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
+    // Only the two probes went out; the stream sent no request.
+    expect(callsOf().slice(2).map((call) => call.url.includes('/v1/models'))).toEqual([true, true]);
+  });
+
+  it("ends a stream at once when the caller aborts mid-stream, since the caller's signal rides on the fetch", async () => {
+    const p = await provider('sk_a,sk_b', { streamCompletions: true });
+    const encoder = new TextEncoder();
+    let sent: AbortSignal | undefined;
+    // The body sends its first text, then stalls; it errors only when the request's signal aborts, as a fetch body does.
+    fetchMock.mockImplementationOnce((_url: string, init?: RequestInit) => {
+      sent = init?.signal ?? undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(streamEvents.slice(0, 3).join('\n\n') + '\n\n'));
+          sent?.addEventListener('abort', () => controller.error(sent?.reason), { once: true });
+        },
+      });
+      return Promise.resolve({ ok: true, status: 200, statusText: 'OK', headers: new Headers(), body } as unknown as Response);
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const controller = new AbortController();
+      const chunks: Array<{ responseTextDelta?: string; isFinal?: boolean; error?: { type?: string } }> = [];
+      for await (const chunk of p.generateCompletionStream('claude-opus-5-5', [{ role: 'user', content: 'hi' }], { abortSignal: controller.signal })) {
+        chunks.push(chunk);
+        if (chunk.responseTextDelta) controller.abort();
+      }
+      expect(sent).toBeDefined();
+      expect(chunks).toHaveLength(2);
+      expect(chunks[0]?.responseTextDelta).toBe('hello');
+      expect(chunks[1]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('a re-initialize that is refused leaves the provider as it was, its pool and its recheck timer included', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    const p = await provider('sk_a,sk_b', { keyPool: { strategy: 'ordered', recheckMs: 1000 } });
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, authError)).mockResolvedValueOnce(jsonResponse(200, okMessage));
+    await ask(p);
+    const internals = p as unknown as { keyPool: unknown; config: unknown };
+    const pool = internals.keyPool;
+    const config = internals.config;
+    // A missing key and a timing the pool refuses: both throw before the old pool is closed or the config replaced.
+    await expect(p.initialize({ apiKey: '' })).rejects.toMatchObject({ code: 'INIT_FAILED_MISSING_API_KEY' });
+    await expect(p.initialize({ apiKey: 'sk_a,sk_b', keyPool: { recheckMs: 0 } })).rejects.toBeInstanceOf(RangeError);
+    expect(internals.keyPool).toBe(pool);
+    expect(internals.config).toBe(config);
+    expect(p.isInitialized).toBe(true);
+    // The timer is alive: the failed key is probed at its recheck, and requests go out with the old key list.
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { data: [] }));
+    await vi.advanceTimersByTimeAsync(1001);
+    const probe = callsOf()[2];
+    expect(probe.url).toContain('/v1/models');
+    expect(keyOf(probe)).toBe('sk_a');
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, okMessage));
+    await ask(p);
+    expect(keyOf(callsOf()[3])).toBe('sk_a');
+  });
+
   it('probes a billing failure with a one-token request, never a models list', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));

@@ -30,14 +30,15 @@ describe('OpenRouterProvider — per-call requestTimeout override (CR8)', () => 
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
-  it('passes the per-call override as the makeApiRequest timeout (3rd arg)', async () => {
-    await provider.generateCompletion('anthropic/claude-3', messages, { requestTimeout: 456789 } as never);
-    expect(makeApiRequest).toHaveBeenCalledWith('/chat/completions', 'POST', 456789, expect.anything());
+  it('passes the per-call override as the makeApiRequest timeout (3rd arg), and the caller\'s signal last', async () => {
+    const signal = new AbortController().signal;
+    await provider.generateCompletion('anthropic/claude-3', messages, { requestTimeout: 456789, abortSignal: signal } as never);
+    expect(makeApiRequest).toHaveBeenCalledWith('/chat/completions', 'POST', 456789, expect.anything(), false, signal);
   });
 
   it('falls back to the config default timeout when no override is given', async () => {
     await provider.generateCompletion('anthropic/claude-3', messages, {} as never);
-    expect(makeApiRequest).toHaveBeenCalledWith('/chat/completions', 'POST', 60000, expect.anything());
+    expect(makeApiRequest).toHaveBeenCalledWith('/chat/completions', 'POST', 60000, expect.anything(), false, undefined);
   });
 
   // Streaming uses streamRequestTimeout as its default (not requestTimeout). The
