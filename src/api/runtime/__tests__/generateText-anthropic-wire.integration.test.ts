@@ -84,13 +84,19 @@ function cutToolTurn(model: string, name: string, partialJson: string): Reply {
     ]);
 }
 
-/** A forced tool call to `name` cut off by `max_tokens` before any of its input was written. */
+/**
+ * A forced tool call to `name` cut off by `max_tokens` before any of its input arrived, in the API's shape for every
+ * forced call the limit stops (live-probed 2026-10-19 on claude-sonnet-4-6 at max_tokens 1, 12, 40 and 200, and on
+ * claude-haiku-5-5 at 1 and 200): the block starts with input {}, one input_json_delta carries an empty partial_json,
+ * no content_block_stop follows, and the turn stops at max_tokens.
+ */
 function inputlessCutToolTurn(model: string, name: string): Reply {
   return () =>
     sse([
       messageStart(model, { input_tokens: 10 }),
       { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name, input: {} } },
-      { type: 'content_block_stop', index: 0 },
+      { type: 'ping' },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '' } },
       { type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: null }, usage: { output_tokens: 1 } },
       { type: 'message_stop' },
     ]);
@@ -336,6 +342,32 @@ describe('Anthropic catalog and pricing through the public API', () => {
       schema: z.object({ scores: z.record(z.string(), z.number()) }),
       schemaName: 'scores',
       prompt: 'Score a and b.',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ scores: { a: 1, b: 2 } });
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].max_tokens).toBeGreaterThan(bodies[0].max_tokens);
+    for (const body of bodies) expect(body.tool_choice).toEqual({ type: 'tool', name: 'scores' });
+  });
+
+  it('generateObject with an all-optional record schema on Claude Sonnet 4.6 raises the output budget after max_tokens stops the forced tool call before any of its input arrived, and completes on the second request', async () => {
+    // None of the call's input arrived. A {} built for the cut call would
+    // validate against this schema and come back as the object after one request.
+    route({
+      'claude-sonnet-4-6': [
+        inputlessCutToolTurn('claude-sonnet-4-6', 'scores'),
+        toolTurn('claude-sonnet-4-6', 'scores', { scores: { a: 1, b: 2 } }),
+      ],
+    });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-sonnet-4-6',
+      schema: z.object({ scores: z.record(z.string(), z.number()).optional() }),
+      schemaName: 'scores',
+      prompt: 'Score a and b.',
+      maxTokens: 8,
       fallbackProviders: [],
     });
 
@@ -635,7 +667,7 @@ describe('Structured sends on the GMI runtime through the real provider', () => 
     expect(session.messages()).toEqual([]);
   });
 
-  it('a send whose forced schema tool call on Claude Sonnet 4.6 was cut before its input began rejects naming the cut-off, though the {} the provider builds fits the schema', async () => {
+  it('a send whose forced schema tool call on Claude Sonnet 4.6 was cut before any of its input arrived rejects naming the cut-off: no {} is built to pass for an answer under a schema whose fields are optional', async () => {
     route({ 'claude-sonnet-4-6': [inputlessCutToolTurn('claude-sonnet-4-6', 'scores')] });
     const session = gmiSession('claude-sonnet-4-6', 'forced-cut-empty');
 
@@ -648,8 +680,8 @@ describe('Structured sends on the GMI runtime through the real provider', () => 
     );
 
     expect(error).toBeInstanceOf(ObjectGenerationError);
-    expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (1)');
-    expect((error as ObjectGenerationError).rawText).toBe('{}');
+    expect((error as ObjectGenerationError).message).toContain('cut off at maxTokens (1) before the JSON was complete');
+    expect((error as ObjectGenerationError).rawText).toBe('');
     const bodies = postedBodies();
     expect(bodies).toHaveLength(1);
     expect(bodies[0].tool_choice).toEqual({ type: 'tool', name: 'scores' });

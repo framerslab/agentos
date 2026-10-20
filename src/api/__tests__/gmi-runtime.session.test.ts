@@ -323,7 +323,7 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
-  it('a structured send whose forced schema tool call was cut before its input began ({} from the provider) rejects naming the cut-off, though {} fits a schema whose fields are optional', async () => {
+  it('a structured send whose forced schema tool call stopped at the output limit with the arguments {} rejects naming the cut-off, though {} fits a schema whose fields are optional', async () => {
     const k = key();
     const s = script('anthropic', k, { replies: [reply.cutSchemaTool('scores', '{}')] });
     const events: LlmUsageEvent[] = [];

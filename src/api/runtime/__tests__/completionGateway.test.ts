@@ -560,7 +560,7 @@ describe('CompletionGateway.stream', () => {
     expect(chunks.at(-1)?.choices[0]).toMatchObject({ message: { content: whole }, finishReason: 'length' });
   });
 
-  it('a forced schema tool call on a chunk stopped at the output limit is no answer though its arguments parse ({} for a call cut before its input began): removed, its arguments the text, nothing lifted', async () => {
+  it('a forced schema tool call on a chunk stopped at the output limit is no answer though its arguments parse ({} here): removed, its arguments the text, nothing lifted', async () => {
     const res = resolutionWith(async function* () {
       yield { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'answer', arguments: '{}' } }] }, finishReason: 'length' }] };
     }, { providerId: 'anthropic', modelId: 'claude-sonnet-4-6', toolFormat: 'anthropic_tools' });
