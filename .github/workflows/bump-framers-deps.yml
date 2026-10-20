@@ -31,12 +31,14 @@ on:
   schedule:
     - cron: '0 6 * * 1'  # Monday 06:00 UTC weekly
   workflow_dispatch: {}
-  # A pull request that changes this workflow or its script runs the dry-run job at the end of
-  # this file: the script and the lockfile refresh run for real, and no pull request is opened.
+  # A pull request that changes this workflow or its scripts runs the dry-run job at the end of
+  # this file: the script, the lockfile refresh and its integrity check run for real, and no pull
+  # request is opened.
   pull_request:
     paths:
       - .github/workflows/bump-framers-deps.yml
       - .github/scripts/bump-framers-deps.py
+      - .github/scripts/check-lockfile-integrity.mjs
 
 # A second bump run waits for the first, so two runs never push the branch over
 # each other.
@@ -100,8 +102,12 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 22
-          # pnpm/action-setup runs first; setup-node 6 and later cache pnpm only when asked.
-          cache: pnpm
+          # No pnpm store comes back from the Actions cache, so the refresh below starts on an empty
+          # store. pnpm writes a git-hosted tarball's integrity into the lockfile only when it
+          # downloads the tarball: pull request 559 was refreshed on a restored store and dropped
+          # libsignal's (the integrity check's script names the places in pnpm). setup-node caches
+          # pnpm only when cache names it, and this keeps it from caching anything on its own.
+          package-manager-cache: false
 
       - name: Bump @framers/* deps to latest published versions
         run: python3 .github/scripts/bump-framers-deps.py
@@ -117,11 +123,22 @@ jobs:
           age=$(pnpm config get minimumReleaseAge)
           echo "minimumReleaseAge in effect: $age"
           [ "$age" = 1440 ]
-          # Refreshing the lockfile needs no package's install script.
-          pnpm install --no-frozen-lockfile --ignore-scripts
+          # Refreshing the lockfile needs no package's install script. With the lockfile already up to
+          # date with package.json (no pin moved), pnpm skips the resolution step and leaves the
+          # lockfile as it is; --no-prefer-frozen-lockfile runs that step anyway, so on the empty store
+          # it puts back a git-hosted integrity an earlier refresh dropped.
+          pnpm install --no-frozen-lockfile --no-prefer-frozen-lockfile --ignore-scripts
           rm pnpm-workspace.yaml
           # The lockfile has to stand without that file, as every other workflow reads it.
           pnpm install --frozen-lockfile --ignore-scripts
+
+      # pnpm installs a git-hosted entry whose integrity is gone without a word, so a refresh that
+      # drops one passes every check after it. This fails the run when an entry the refresh kept
+      # lost or changed the integrity the checked-out lockfile pins.
+      - name: The refresh keeps every integrity the lockfile pins
+        run: |
+          git show HEAD:pnpm-lock.yaml > "$RUNNER_TEMP/pnpm-lock.before.yaml"
+          node .github/scripts/check-lockfile-integrity.mjs "$RUNNER_TEMP/pnpm-lock.before.yaml" pnpm-lock.yaml
 
       - name: Pick the pull request title
         id: title
@@ -169,9 +186,9 @@ jobs:
             pnpm-lock.yaml
 
   # The bump, end to end, on a pull request that changes it: the script against this repository's
-  # manifests and the npm registry, then the lockfile refresh. The steps are the bump job's, less the
-  # token check and the master checkout; keep the two in step. Nothing is committed and no pull
-  # request is opened.
+  # manifests and the npm registry, then the lockfile refresh and its integrity check. The steps are
+  # the bump job's, less the token check and the master checkout; keep the two in step. Nothing is
+  # committed and no pull request is opened.
   dry-run:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -197,7 +214,8 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: pnpm
+          # An empty store, as in the bump job.
+          package-manager-cache: false
 
       - name: Bump @framers/* deps to latest published versions
         run: python3 .github/scripts/bump-framers-deps.py
@@ -213,11 +231,22 @@ jobs:
           age=$(pnpm config get minimumReleaseAge)
           echo "minimumReleaseAge in effect: $age"
           [ "$age" = 1440 ]
-          # Refreshing the lockfile needs no package's install script.
-          pnpm install --no-frozen-lockfile --ignore-scripts
+          # Refreshing the lockfile needs no package's install script. With the lockfile already up to
+          # date with package.json (no pin moved), pnpm skips the resolution step and leaves the
+          # lockfile as it is; --no-prefer-frozen-lockfile runs that step anyway, so on the empty store
+          # it puts back a git-hosted integrity an earlier refresh dropped.
+          pnpm install --no-frozen-lockfile --no-prefer-frozen-lockfile --ignore-scripts
           rm pnpm-workspace.yaml
           # The lockfile has to stand without that file, as every other workflow reads it.
           pnpm install --frozen-lockfile --ignore-scripts
+
+      # pnpm installs a git-hosted entry whose integrity is gone without a word, so a refresh that
+      # drops one passes every check after it. This fails the run when an entry the refresh kept
+      # lost or changed the integrity the checked-out lockfile pins.
+      - name: The refresh keeps every integrity the lockfile pins
+        run: |
+          git show HEAD:pnpm-lock.yaml > "$RUNNER_TEMP/pnpm-lock.before.yaml"
+          node .github/scripts/check-lockfile-integrity.mjs "$RUNNER_TEMP/pnpm-lock.before.yaml" pnpm-lock.yaml
 
       - name: Only package.json and pnpm-lock.yaml changed
         run: |
