@@ -17,9 +17,11 @@
  * its audio starts sooner; a mark inside a number, a time, a word or a range
  * (`1,250`, `10:30`, `well-known`, `1990–2000`) has no whitespace after it and
  * ends none. A segment that runs past 120 characters with no mark to end at
- * ends at its last whitespace within them, or, with none there, at the first
- * whitespace after them. The cuts depend on the text alone, never on the
- * pieces it arrives in, and `flush()` cuts whatever remains as the final,
+ * ends after the last word that whitespace follows, so that it holds at most
+ * 120 characters and the whitespace opens the next segment; with no such word
+ * within them (a long link), it ends after the first word past them that
+ * whitespace follows. The cuts depend on the text alone, never on the pieces
+ * it arrives in, and `flush()` cuts whatever remains as the final,
  * unterminated segment. An adapter synthesizes one segment at a time and
  * attaches the segment's boundary to the last audio frame its provider's
  * completion message proves complete.
@@ -68,7 +70,7 @@ const WHITESPACE = /\s/;
 const CLAUSE_MIN_LENGTH = 40;
 /** How many characters a reply's first segment holds before a clause mark may end it: fewer, so the reply's audio starts sooner. */
 const FIRST_CLAUSE_MIN_LENGTH = 20;
-/** With no mark to end at, a segment ends at its last whitespace within this many characters. */
+/** With no mark to end at, a segment ends after its last word that whitespace follows, holding at most this many characters. */
 const MAX_LENGTH = 120;
 
 /**
@@ -125,9 +127,9 @@ export class SentenceSegmenter {
    * ends at a sentence-ending mark, or at a clause mark once it holds 40
    * characters (20 for the reply's first), with the closers right after the
    * mark, once at least one whitespace character has followed; with no mark to
-   * end at within 120 characters, it ends at its last whitespace within them,
-   * once a character past them has arrived. The whitespace opens the next
-   * segment.
+   * end at within 120 characters, it ends after its last word that whitespace
+   * follows within them, once a character past them has arrived. The
+   * whitespace opens the next segment.
    *
    * @param tokens - The text, as the reply submits it.
    */

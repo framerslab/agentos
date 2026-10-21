@@ -101,7 +101,7 @@ describe('SentenceSegmenter', () => {
     expect(segmenter.push('Here are the times I can do\n- two thirty\n- three fifteen\n- four in the afternoon\n- five')).toEqual([]);
   });
 
-  it('ends a segment with no mark to end at at its last whitespace within 120 characters, with the same cuts however the text arrives', () => {
+  it('ends a segment with no mark within 120 characters after its last word there, with the same cuts however the text arrives', () => {
     const list =
       'Here are the slots I have open\nMonday at nine in the morning\nTuesday at ten in the morning\nWednesday at noon\nThursday at two in the afternoon\nFriday at four';
     const expected = [
@@ -120,6 +120,13 @@ describe('SentenceSegmenter', () => {
     const piecewise = new SentenceSegmenter();
     const segments = list.split('').flatMap((character) => piecewise.push(character));
     expect([...segments, piecewise.flush()]).toEqual(expected);
+  });
+
+  it('ends a segment cut at the bound after its last word, so a run of whitespace across the bound opens the next segment', () => {
+    // The last word ends at 119 and three spaces follow it, across the bound: the cut is at the first of them.
+    const segmenter = new SentenceSegmenter();
+    expect(segmenter.push(`${'word '.repeat(23)}last   next`)).toEqual([{ segmentId: 'seg-1', start: 0, end: 119, text: `${'word '.repeat(23)}last` }]);
+    expect(segmenter.remainder).toBe('   next');
   });
 
   it('ends a run of more than 120 characters without whitespace at the first whitespace after it', () => {
