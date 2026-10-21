@@ -292,6 +292,8 @@ Defaults:
 
 With `autoInitializeEngine` (the default), the runtime builds the engine itself on an in-memory vector store: it indexes the runtime's tools, the loaded extension packs, the messaging channels, the curated registry's capability manifests and what `discovery.sources` adds (skills, manifests, extra extensions and channels), and registers the `discover_capabilities` and `load_capability_extension` tools unless `registerMetaTool` is `false`.
 
+A curated manifest describes a pack as the catalog lists it (some packs as not available until set up, with no input schema), so it never replaces what the host holds: a tool the host has loaded keeps its own descriptor (available, with its input schema) and stays among the capabilities `onlyAvailable` discovery returns, a manifest in `discovery.sources.manifests` keeps its id, and a pack the catalog lists under several entries is indexed once per tool. `CapabilityDiscoveryInitializer.indexSourcesWithCurated()` builds these sources, and `curatedDescriptorsBeside()` does the filtering.
+
 ```typescript
 await agentos.initialize({
   // ...
