@@ -1213,7 +1213,7 @@ export interface StreamingTTSConfig {
  * |--------------------|---------------------------|--------------------------------------|
  * | `'audio'`          | {@link EncodedAudioChunk}  | A synthesised chunk ready for playback. |
  * | `'flush_complete'`  | *(none)*                  | All queued tokens have been synthesised. |
- * | `'warning'`        | `Error`                   | A failure the session goes on after, such as a provider socket lost mid-segment and the segment spoken again (`ElevenLabsStreamingTTS`). With nothing listening for it, the provider writes one warning line. |
+ * | `'warning'`        | `Error`                   | A failure the session goes on after, such as a provider socket lost mid-segment and the segment spoken again (`ElevenLabsStreamingTTS`), or a socket that failed to open for a reply, which ends unplayed (`DeepgramAuraStreamingTTS`). With nothing listening for it, the provider writes one warning line; `VoicePipelineOrchestrator` listens, and reports it as a recoverable `session_error` of the TTS part. |
  * | `'error'`          | `Error`                   | Unrecoverable synthesis error.       |
  * | `'close'`          | *(none)*                  | Session terminated.                  |
  *
@@ -2271,8 +2271,9 @@ export type ServerTextMessage =
        */
       type: 'agent_done';
       /**
-       * The reply's text. Empty once a pause discarded audio that a transport playing the audio itself held: the
-       * session then vouches for none of it, and a transport that writes the reply's line ends it with what it proved.
+       * The reply's text. Empty once a pause discarded audio that a transport playing the audio itself held, or once the
+       * TTS session warned while the reply spoke, as one does that dropped some of the reply's text: the session then
+       * vouches for none of it, and a transport that writes the reply's line ends it with what it proved.
        */
       text: string;
       /** Duration of the synthesised audio in milliseconds. */

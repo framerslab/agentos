@@ -27,7 +27,8 @@
  * the TTS session, the transport or the endpoint detector, a TTS session's
  * `close` that the session's own stop did not make, and a turn whose agent
  * stream or synthesis flush fails, end this session and no other, while a
- * transport send that rejects is reported and ends nothing.
+ * transport send that rejects, and a TTS session's `'warning'`, are reported
+ * and end nothing.
  *
  * `overrides.callProfile` selects the call runtime instead: one scoped call
  * whose input is one sequenced 16 kHz mono fan-out to a scoped STT session, a
