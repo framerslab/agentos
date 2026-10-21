@@ -120,9 +120,10 @@
  * contiguous prefix of such segments is the played text, and each time it
  * grows the line is written as an interim holding it. `agent_done` writes the
  * final with the reply's text, or, when the transport's wait for the reply's
- * playout failed (a track that stalled) or a pause held the track during the
- * reply, with the played text alone, as the session's own item of that reply
- * counts none of the rest heard. A `barge_in` `cancel` or a `clearPlayback()`
+ * playout failed (a track that stalled), a pause held the track during the
+ * reply, or the message carries no text, as the session sends it for a reply
+ * some of which may never have played, with the played text alone, as the
+ * session's own item of that reply counts none of the rest heard. A `barge_in` `cancel` or a `clearPlayback()`
  * cuts the reply, and its final holds the played text alone, as LiveKit
  * Agents truncate an interrupted agent's transcription to its spoken output;
  * with none played it is empty, which takes back a line the room was shown. A
@@ -769,8 +770,9 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * Writes what a message the session sends says of the conversation. A `transcript` is a line of the user's, opened by
    * the first one after a final and closed by its final. `agent_speaking` opens the agent's line of the reply, ending
    * one still open as a cut; `agent_done`, which the session sends once the reply played, ends it with the reply's
-   * text, or with the text proven played alone when the wait for the reply's playout failed or a pause held the track
-   * during the reply; a `barge_in` `cancel` cuts it. A pause the track holds forgets every chunk the track had begun to
+   * text, or with the text proven played alone when the wait for the reply's playout failed, a pause held the track
+   * during the reply, or the message carries no text, as the session sends it for a reply it vouches for none of; a
+   * `barge_in` `cancel` cuts it. A pause the track holds forgets every chunk the track had begun to
    * take and every segment one of them belongs to (`forgetCut()`), while a segment the hold keeps whole still counts
    * once it has played.
    *
@@ -787,10 +789,10 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
       this.cutAgentLine();
       this.agentLine = { itemId: `${this.id}:agent-${++this.agentLines}`, tracker: new PlayedTextTracker(), sent: new Map(), segment: [], segmentCut: false, written: '', playoutFailed: false, paused: false };
     } else if (message.type === 'agent_done') {
-      // A reply whose playout wait failed, or that a pause held, is unproven past what was acknowledged: the session
-      // vouches for none of it then, and the line keeps what the track proved played.
+      // A reply whose playout wait failed, or that a pause held, is unproven past what was acknowledged, and one whose
+      // agent_done carries no text is one the session vouches for none of: the line keeps what the track proved played.
       const line = this.agentLine;
-      this.endAgentLine(line && (line.playoutFailed || line.paused) ? line.tracker.playedText : message.text);
+      this.endAgentLine(line && (line.playoutFailed || line.paused || message.text === '') ? line.tracker.playedText : message.text);
     } else if (message.type === 'barge_in') {
       if (message.action.type === 'cancel') this.cutAgentLine();
       else if (whole) this.forgetCut(whole);
