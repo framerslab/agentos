@@ -1,6 +1,5 @@
 import { EventEmitter } from 'node:events';
 import { sameVoiceGeneration, type AudioFrame, type EncodedAudioChunk, type IPlaybackTransport, type PlaybackReceipt, type ServerTextMessage, type VoiceGeneration } from '../voice-pipeline/types.js';
-import { isClientTextInputMessage } from '../voice-pipeline/clientTextInput.js';
 import type { CallEndReason, CallTransport } from './contracts/index.js';
 import type { CallCredentials } from './CallCredentials.js';
 import type { VoiceCallManager } from './VoiceCallManager.js';
@@ -28,9 +27,9 @@ export interface CallAttachment {
 }
 /**
  * Stable logical transport. Only end emits terminal close; a physical close initiates detach. The client's messages
- * are an allowlist: the controls mute and unmute and typed text (`text_input`, which the call takes as a user turn;
- * one `isClientTextInputMessage()` refuses is dropped) go to the call, stop ends the call, and any other client
- * message ends it as a transport failure.
+ * are an allowlist: the controls mute and unmute and typed text (`text_input`, which the call takes as a user turn,
+ * and reports and drops when `isClientTextInputMessage()` refuses it) go to the call, stop ends the call, and any
+ * other client message ends it as a transport failure.
  */
 export class CallTransportBinding extends EventEmitter implements IPlaybackTransport {
   readonly id: string;
@@ -107,8 +106,9 @@ export class CallTransportBinding extends EventEmitter implements IPlaybackTrans
       const gap = (event: unknown): void => { if (this.attached && this.physical === physical && !this.terminal) this.emit('gap', event); };
       const message = (value: { type?: string; action?: { type?: string } }): void => {
         if (!this.attached || this.physical !== physical || this.terminal) return;
-        // Typed text is a user turn the pipeline takes; a text the check refuses is dropped, and the call goes on.
-        if (value?.type === 'text_input') { if (isClientTextInputMessage(value)) this.emit('message', value); return; }
+        // Typed text is a user turn the pipeline takes. The pipeline checks it, as it does without a binding, and reports
+        // and drops a text the check refuses, saying why, and the call goes on.
+        if (value?.type === 'text_input') { this.emit('message', value); return; }
         if (value?.type !== 'control' || !['mute', 'unmute', 'stop'].includes(value.action?.type ?? '')) { void this.end('transport_failure').catch(() => {}); return; }
         if (value.action!.type === 'stop') { void this.end('client_stop').catch(() => {}); return; }
         this.emit('message', value);
