@@ -92,6 +92,8 @@ The propagation diagram at the top of this page shows the five surfaces. Each is
 | **Conscientiousness:** "Be thorough and systematic. Structure responses clearly. Follow through on details. Prefer precision over speed." | **Conscientiousness:** "Be flexible and adaptive. Prioritize the big picture over details. Respond quickly. Tolerate ambiguity and improvise." |
 | **Openness:** "Explore creative angles and unconventional ideas. Draw unexpected connections. Question established approaches." | **Openness:** "Stick to proven approaches and established knowledge. Be practical and concrete. Favor reliability over novelty." |
 
+The table is the default `conversation` register; a host may pass `register: 'writing'` to `renderPersonalitySection` for grounded writing, as [Notetaker traits and writing](../PERSONAS.md#notetaker-traits-and-writing) describes.
+
 Source: [`src/cognition/substrate/personas/personalityPrompt.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/personalityPrompt.ts).
 
 ### 2. Memory encoding strength
@@ -231,7 +233,8 @@ interface AdaptPersonalityInput {
 - The total change per trait per session is capped at `selfImprovement.personality.maxDeltaPerSession` (default 0.15); a larger delta is clamped to what remains.
 - The new value is clamped to [0, 1] and applied with `GMI.setPersonalityTrait()`.
 - A [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts) records the change only when the runtime has a storage adapter and `personality.persistWithDecay` is on (the default); stored mutations are not reloaded into later GMIs.
-- On a host with a learning layer (its `learning` option on), the tool refuses before it changes anything: on a turn in mode `frozen` (`frozen`) or `off` (`off`), on a turn with no learner (`no_learner`), for `honesty` and `emotionality` (`operator_only`), for a `delta` above 0.02 either way (`step_bound`), and after three accepted calls in one session (`call_limit`).
+- On every host, with a learning layer or without one, the tool refuses `honesty` and `emotionality` before it changes anything (`operator_only`): only the persona definition sets them.
+- On a host with a learning layer (its `learning` option on), the tool also refuses before it changes anything: on a turn in mode `frozen` (`frozen`) or `off` (`off`), on a turn with no learner (`no_learner`), for a `delta` above 0.02 either way (`step_bound`), and after three accepted calls in one session (`call_limit`).
 - `AGENTOS_LEARNING_FREEZE=1` refuses every call (`frozen`), with a learning layer or without one.
 - A trait it changes reaches no prompt: the full runtime sends the personality section only with `learning` on, and the section renders the persona's authored traits ([Learning](../GMI.md#learning)).
 

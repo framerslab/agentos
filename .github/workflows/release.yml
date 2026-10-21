@@ -79,6 +79,17 @@ jobs:
         if: steps.guard.outputs.should_release == 'true'
         run: node scripts/update-test-badge.mjs
 
+      # Trusted publishing: @semantic-release/npm 13 exchanges the job's OIDC token with npm and then
+      # publishes with no token in its npmrc, which needs npm 11.5.1 or newer. Node 22 ships npm 10,
+      # whose publish ends in ENEEDAUTH (run 39490192582, 20 October 2026, after the trusted
+      # publisher for @framers/agentos was set); agentos-extensions' release.yml has the same step.
+      # ci.yml's Test & Lint job installs the same npm for the package checks; change both together.
+      - name: Use npm 11 for trusted publishing
+        if: steps.guard.outputs.should_release == 'true'
+        run: |
+          npm install -g npm@11.20.0
+          test "$(npm --version)" = 11.20.0
+
       - name: Semantic Release
         if: steps.guard.outputs.should_release == 'true'
         env:

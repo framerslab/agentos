@@ -10,6 +10,9 @@ import { HEXACO_TRAIT_KEYS, normalizeHexacoTraits, type HexacoTraitKey, type Hex
 /** Where a trait value sits: `high` above 0.65, `low` below 0.35, `moderate` between them. */
 export type TraitBand = 'low' | 'moderate' | 'high';
 
+/** The register the host explicitly selects; conversation remains the default. */
+export type PersonalityRegister = 'conversation' | 'writing';
+
 /** The section's first line. */
 export const PERSONALITY_SECTION_HEADING = '## Personality & Communication Style';
 
@@ -19,8 +22,12 @@ export const PERSONALITY_SECTION_HEADING = '## Personality & Communication Style
  */
 export const PERSONALITY_PROMPT_PRIORITY = 2;
 
-/** The traits only the persona definition sets: no role overlay, tool or rule changes them. */
-export const OPERATOR_ONLY_TRAITS: readonly HexacoTraitKey[] = ['honesty', 'emotionality'];
+/**
+ * The traits only the persona definition sets: no role overlay, tool or rule changes them. Frozen, since `readonly`
+ * binds TypeScript callers only: no code in the process can remove a trait from it and so lift the overlay rule in
+ * `applyTraitOverlay` or the refusal in `AdaptPersonalityTool`, which both read it.
+ */
+export const OPERATOR_ONLY_TRAITS: readonly HexacoTraitKey[] = Object.freeze<HexacoTraitKey[]>(['honesty', 'emotionality']);
 
 const HIGH_ABOVE = 0.65;
 const LOW_BELOW = 0.35;
@@ -57,6 +64,37 @@ const DIRECTIVES: Record<HexacoTraitKey, { high: string; low: string }> = {
   },
 };
 
+/** Writing changes presentation, never the source material. */
+const WRITING_GROUNDING = 'Change only how grounded material is presented: its length, order, tone and stated open points; never change its meaning or introduce content, suggestions or facts absent from the material.';
+
+/** Text directives for non-moderate traits, subject to WRITING_GROUNDING. */
+const WRITING_DIRECTIVES: Record<HexacoTraitKey, { high: string; low: string }> = {
+  honesty: {
+    high: 'State what was said and what is certain; mark what is inferred; no flattery and no softening',
+    low: 'Use diplomatic phrasing for the stated material; keep its qualifications and limits visible',
+  },
+  emotionality: {
+    high: 'Describe feelings expressed in the material with care; keep their attribution and intensity as given',
+    low: 'Write plainly; no exclamation, no reassurance, no alarm',
+  },
+  extraversion: {
+    high: 'Use engaging phrasing; point out the material\'s open questions and action items without an owner; offer no suggestions of your own',
+    low: 'Keep to the material; add nothing the speakers did not say',
+  },
+  agreeableness: {
+    high: 'Use supportive phrasing for the stated perspectives; preserve disagreement and uncertainty',
+    low: 'State disagreements and questioned assumptions directly when they are in the material; prefer accuracy to comfort',
+  },
+  conscientiousness: {
+    high: 'Structure the text; complete lists; exact names, numbers and times as given',
+    low: 'Keep the text brief; put the stated main points first; leave ambiguity explicit and never fill gaps',
+  },
+  openness: {
+    high: 'Show connections supported by the material; label inferences and keep them distinct from what was said',
+    low: 'Use concrete phrasing for established points in the material; preserve the stated evidence and limits',
+  },
+};
+
 /**
  * The band a trait value renders in.
  *
@@ -85,19 +123,33 @@ export function bandOf(value: number, previous?: TraitBand): TraitBand {
  * @param traits - A trait map under any accepted spelling; anything else renders nothing.
  * @param options.bands - The band to render per trait, in place of the one its value gives (the band a learner's
  *   trait rendered last). A trait with no entry takes the band of its value.
- * @returns The section, or `null` when every trait is moderate.
+ * @param options.register - Conversation when left out; writing prepends the grounding directive.
+ * @returns The section, or `null` when every trait is moderate in either register.
+ * @throws {TypeError} When `options.register` is given and is neither `conversation` nor `writing`.
  */
 export function renderPersonalitySection(
   traits: unknown,
-  options: { bands?: Partial<Record<HexacoTraitKey, TraitBand>> } = {},
+  options: { bands?: Partial<Record<HexacoTraitKey, TraitBand>>; register?: PersonalityRegister } = {},
 ): string | null {
+  // The type binds TypeScript callers only: a JavaScript host's misspelled register would otherwise render the
+  // conversation directives and drop the writing register's grounding rule without a word.
+  const register: unknown = options.register;
+  if (register !== undefined && register !== 'conversation' && register !== 'writing') {
+    const shown = typeof register === 'string' ? `'${register}'` : String(register);
+    throw new TypeError(
+      `Unknown personality register ${shown}: pass 'conversation' or 'writing', or leave it out for conversation.`,
+    );
+  }
   const values = normalizeHexacoTraits(traits);
+  const writing = register === 'writing';
+  const directives = writing ? WRITING_DIRECTIVES : DIRECTIVES;
   const lines: string[] = [];
   for (const key of HEXACO_TRAIT_KEYS) {
     const band = options.bands?.[key] ?? bandOf(values[key] ?? 0.5);
-    if (band !== 'moderate') lines.push(DIRECTIVES[key][band]);
+    if (band !== 'moderate') lines.push(directives[key][band]);
   }
   if (lines.length === 0) return null;
+  if (writing) lines.unshift(WRITING_GROUNDING);
   return `${PERSONALITY_SECTION_HEADING}\n\n${lines.join('\n')}`;
 }
 

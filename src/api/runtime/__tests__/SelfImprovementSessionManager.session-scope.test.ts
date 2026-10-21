@@ -149,17 +149,18 @@ describe('self-improvement hooks act on the calling session', () => {
     expect(gmiA.getPersona().personalityTraits?.openness).toBe(0.5);
   });
 
-  it('reads Honesty-Humility authored as honestyHumility as the honesty trait', async () => {
-    const { tool } = await twoSessions();
+  it('reads Honesty-Humility authored as honestyHumility as the honesty trait, which the tool leaves to the persona', async () => {
+    const { tool, deps } = await twoSessions();
+
+    expect(deps.getPersonality(sessionBContext()).honesty).toBe(0.8);
 
     const result = await tool.execute(
       { trait: 'honesty', delta: 0.1, reasoning: 'State uncertainty plainly.' },
       sessionBContext(),
     );
 
-    expect(result.success).toBe(true);
-    expect(result.output?.previousValue).toBe(0.8);
-    expect(result.output?.newValue).toBeCloseTo(0.9);
+    expect(result).toMatchObject({ success: false, details: { status: 'rejected', reason: 'operator_only' } });
+    expect(deps.getPersonality(sessionBContext()).honesty).toBe(0.8);
   });
 
   it('fails without changing anything when no session matches the caller', async () => {

@@ -1,6 +1,6 @@
 # RAG and Memory Configuration
 
-> **Memory benchmarks (N=500, gpt-4o reader):** 85.6% on LongMemEval-S at $0.0090 per correct answer, and 70.2% on LongMemEval-M, the 1.5M-token, 500-session variant. The LongMemEval paper (Wu et al., ICLR 2025) reports 65.7% (round, top-5), 71.4% (session, top-5) and 72.0% (round, top-10) on M. [Benchmarks](https://docs.agentos.sh/benchmarks) · [Run JSONs](https://github.com/framerslab/agentos-bench/tree/master/results/runs) · [Write-up](https://agentos.sh/en/blog/agentos-memory-sota-longmemeval/)
+> **Memory benchmarks (N=500, `gpt-4o` and `gpt-5-mini` readers routed per question type):** 85.6% on LongMemEval-S at $0.0090 per correct answer (84.2% with `gpt-4o` reading every question), and 70.2% on LongMemEval-M, the 1.5M-token, 500-session variant. The LongMemEval paper (Wu et al., ICLR 2025) reports 65.7% (round, top-5), 71.4% (session, top-5) and 72.0% (round, top-10) on M. [Benchmarks](https://docs.agentos.sh/benchmarks) · [Run JSONs](https://github.com/framerslab/agentos-bench/tree/master/results/runs) · [Write-up](https://agentos.sh/en/blog/agentos-memory-sota-longmemeval/)
 
 AgentOS provides three levels of memory API:
 
