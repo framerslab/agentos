@@ -24,19 +24,21 @@
  * followed by one `Flush`, and `Flushed`, which Deepgram sends once it has
  * returned the final audio for the text sent so far, completes it. The
  * segment's boundary ({@link TtsTextBoundary}) rides on the last frame
- * `Flushed` proves complete; every earlier frame carries none. A `Flushed` is
- * matched to the `Flush` it answers by its `sequence_id`, which Deepgram's
- * reference gives as "The sequence ID of the response": the session numbers
- * the `Flush` messages it sends on a socket from 0, the id Deepgram's `Flush`
- * example is answered with, and a `Flushed` completes only the segment whose
- * `Flush` has its number. A segment with no `Flushed`
- * within five seconds ends without a boundary, and the next segment waits for
- * that late `Flushed`, at most five seconds more, before it starts. A
- * `Flushed` whose number names no `Flush` the session waits for (one later
- * than that wait, one of a `Flush` a cancel settled, one that answers no
- * `Flush` of the socket) completes nothing and is written as one console
- * warning line; one without a `sequence_id`, which the reference marks
- * required, answers the `Flush` of the segment in flight. After a `cancel()`
+ * `Flushed` proves complete; every earlier frame carries none. Deepgram
+ * answers its `Flush` messages in order, so a `Flushed` answers the oldest
+ * `Flush` of the socket that none has answered yet, or, when its
+ * `sequence_id` is the number the session gave one of them (counting a
+ * socket's `Flush` messages from 0, the id Deepgram's `Flush` example is
+ * answered with), that one and every one before it. Deepgram's reference
+ * gives the id only as "The sequence ID of the response", and its JavaScript
+ * SDK's wire tests answer a `Flush` with the id it carried, or 0, so an id
+ * that names none of them, or none at all, answers by order. A
+ * segment with no `Flushed` within five seconds ends without a boundary, and
+ * the next segment waits for that late `Flushed`, at most five seconds more,
+ * before it starts. The late `Flushed` of a segment that timed out completes
+ * nothing, however late it comes: one later than that wait is written as one
+ * console warning line, and so is a `Flushed` that answers no `Flush` of the
+ * socket. After a `cancel()`
  * that cut a segment, Deepgram stops sending audio "as soon as possible" and
  * answers the `Clear` with `Cleared`: what arrives before the `Cleared` is the
  * cleared text's, so its audio is dropped and its `Flushed` completes nothing,
@@ -223,12 +225,14 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   private readonly flushes: number[] = [];
   /** Whether the segment in flight waits for a `Flush` slot: a new segment then joins it. */
   private waitingForSlot = false;
-  /** The `sequence_id` Deepgram answers the next `Flush` on the current socket with: a socket's first is answered with 0. */
+  /** The number the next `Flush` on the current socket takes, counting from 0, as Deepgram's example answers a socket's first. */
   private nextFlushId = 0;
-  /** The number of the `Flush` the segment in flight sent, whose `Flushed` completes it; unset until that `Flush` goes out. */
-  private flightFlushId?: number;
-  /** The number of the `Flush` of a segment that timed out, while the next segment waits for its late `Flushed`. */
-  private staleFlushId?: number;
+  /**
+   * The `Flush` messages sent on the current socket that no `Flushed` has answered yet, oldest first: each with its
+   * number and whether the segment in flight waits for it. The `Flush` of a segment that timed out stays until its
+   * late `Flushed` comes, which then completes nothing; a `Clear` settles them all.
+   */
+  private readonly unanswered: Array<{ id: number; flight: boolean }> = [];
   /** Set when a reply's socket failed to open before the reply's `flush()` came: the rest of its text is dropped until then. */
   private failed = false;
   /** How many `flush()` calls wait for the queue. */
@@ -256,8 +260,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
       flushed: () => this.emit('flush_complete'),
       // The segment's Flush is still outstanding: its Flushed may yet come, and must not complete the next segment.
       timedOut: () => {
-        this.staleFlushId = this.flightFlushId;
-        this.flightFlushId = undefined;
+        for (const flush of this.unanswered) flush.flight = false;
         this.holdFor(STALE_FLUSHED_MS);
       },
     });
@@ -299,6 +302,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
       this.ws = ws;
       this.ready = false;
       this.nextFlushId = 0;
+      this.unanswered.length = 0;
       const timer = setTimeout(() => {
         giveUp(new Error(`deepgram aura ws connect timed out after ${CONNECT_TIMEOUT_MS}ms`));
       }, CONNECT_TIMEOUT_MS);
@@ -370,8 +374,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * @param message - The loss, with the close code and the cause when known.
    */
   private socketClosed(message: string): void {
-    this.flightFlushId = undefined;
-    this.staleFlushId = undefined;
+    this.unanswered.length = 0;
     if (!this.segments.busy) {
       this.release();
       return;
@@ -447,12 +450,11 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * nothing: the next reply takes it.
    */
   cancel(): void {
-    const outstanding = this.segments.hasInFlight || this.stale !== undefined;
+    const outstanding = this.segments.hasInFlight || this.stale !== undefined || this.unanswered.length > 0;
     this.segments.cancel();
     this.failed = false;
-    // The Clear settles every Flush sent so far: a Flushed that answers one completes nothing.
-    this.flightFlushId = undefined;
-    this.staleFlushId = undefined;
+    // The Clear settles every Flush sent so far: a Flushed that answers one, before the Cleared, completes nothing.
+    this.unanswered.length = 0;
     if (!this.isOpen()) {
       this.release();
       return;
@@ -560,11 +562,11 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     return this.flushes.length < FLUSH_LIMIT;
   }
 
-  /** Sends `Flush`, counts it against the window, and numbers it: the `Flushed` with its number completes the segment in flight. */
+  /** Sends the segment in flight's `Flush`, counts it against the window, and numbers it; the `Flushed` that answers it completes the segment. */
   private sendFlush(): void {
     this.send({ type: 'Flush' });
     this.flushes.push(Date.now());
-    this.flightFlushId = this.nextFlushId++;
+    this.unanswered.push({ id: this.nextFlushId++, flight: true });
   }
 
   /**
@@ -623,12 +625,11 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   }
 
   /**
-   * The stale response arrived, or its wait ran out: the next segment may start, Deepgram's audio is the session's
-   * again, and a `Flushed` of the timed-out segment is waited for no more.
+   * The stale response arrived, or its wait ran out: the next segment may start, and Deepgram's audio is the session's
+   * again. The `Flush` of a timed-out segment stays unanswered until its `Flushed` comes, which completes nothing.
    */
   private release(): void {
     this.clearing = false;
-    this.staleFlushId = undefined;
     if (this.stale === undefined) return;
     clearTimeout(this.stale);
     this.stale = undefined;
@@ -637,13 +638,15 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
 
   /**
    * A `Flushed`: Deepgram has sent the final audio of the text before the
-   * `Flush` its `sequence_id` names. It completes the segment in flight when it
-   * answers that segment's `Flush`, and ends the next segment's wait when it
-   * answers the `Flush` of the segment that timed out. Any other completes
-   * nothing and is written as one console warning line. Before the `Cleared`
-   * that answers a `Clear`, a `Flushed` is the cleared text's and is dropped.
-   * One without a `sequence_id` answers the `Flush` of the segment in flight,
-   * or of the one that timed out.
+   * `Flush` it answers. Deepgram answers in order, so it answers the `Flush`
+   * its `sequence_id` names when that one is unanswered, with every unanswered
+   * `Flush` before it, and else the oldest unanswered one. It completes the
+   * segment in flight when it answers that segment's `Flush`; the late one of
+   * a segment that timed out completes nothing, and ends the next segment's
+   * wait while that runs, or is written as one console warning line once it
+   * has ended. One that finds no `Flush` unanswered completes nothing and is
+   * written as one console warning line too. Before the `Cleared` that answers
+   * a `Clear`, a `Flushed` is the cleared text's and is dropped.
    *
    * @param sequenceId - The message's `sequence_id`.
    */
@@ -651,17 +654,22 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     // A Flushed before the Cleared answers a Flush of the cleared text: it completes nothing and ends no wait.
     if (this.clearing) return;
     const id = typeof sequenceId === 'number' && Number.isInteger(sequenceId) ? sequenceId : undefined;
-    // The late Flushed the next segment waits for: it completes nothing.
-    if (this.stale !== undefined && (id === undefined || id === this.staleFlushId)) {
-      this.release();
+    const named = id === undefined ? -1 : this.unanswered.findIndex((flush) => flush.id === id);
+    const answered = this.unanswered.splice(0, named >= 0 ? named + 1 : 1);
+    if (answered.length === 0) {
+      console.warn(`[deepgram-aura] a Flushed with sequence_id ${id ?? 'none'} answers no Flush of the socket; it completes nothing`);
       return;
     }
-    if (this.flightFlushId !== undefined && (id === undefined || id === this.flightFlushId)) {
-      this.flightFlushId = undefined;
+    if (answered.some((flush) => flush.flight)) {
       this.segments.completed();
       return;
     }
-    console.warn(`[deepgram-aura] a Flushed with sequence_id ${id ?? 'none'} answers no Flush the session waits for; it completes nothing`);
+    // The late Flushed of a segment that timed out: it completes nothing, and the next segment waits for it no more.
+    if (this.stale !== undefined) {
+      this.release();
+      return;
+    }
+    console.warn(`[deepgram-aura] a Flushed with sequence_id ${id ?? 'none'} answers the Flush of a segment that timed out; it completes nothing`);
   }
 
   private _handleMessage(data: Buffer, isBinary: boolean): void {
