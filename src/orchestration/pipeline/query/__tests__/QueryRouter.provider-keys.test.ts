@@ -18,12 +18,15 @@ vi.mock('../../../../api/generateText.js', () => ({
 
 /** The provider and key each embedding step hands the provider manager, in order. */
 const embeddingProviders = vi.hoisted(() => [] as Array<{ providerId: string; apiKey?: string }>);
+/** The base URL each embedding step hands the provider manager, in order; undefined when it gives none. */
+const embeddingBaseUrls = vi.hoisted(() => [] as Array<string | undefined>);
 
 vi.mock('../../../../core/llm/providers/AIModelProviderManager.js', () => ({
   AIModelProviderManager: class {
-    async initialize(config: { providers: Array<{ providerId: string; config: { apiKey?: string } }> }): Promise<void> {
+    async initialize(config: { providers: Array<{ providerId: string; config: { apiKey?: string; baseUrl?: string } }> }): Promise<void> {
       for (const entry of config.providers) {
         embeddingProviders.push({ providerId: entry.providerId, apiKey: entry.config.apiKey });
+        embeddingBaseUrls.push(entry.config.baseUrl);
       }
       throw new Error('embeddings are not used in these cases');
     }
@@ -149,6 +152,7 @@ describe('QueryRouter credentials per route', () => {
   beforeEach(() => {
     for (const name of PROVIDER_VARIABLES) vi.stubEnv(name, '');
     embeddingProviders.length = 0;
+    embeddingBaseUrls.length = 0;
   });
 
   afterEach(() => {
@@ -272,5 +276,26 @@ describe('QueryRouter credentials per route', () => {
     await routeOnce(QueryRouter, { apiKey: 'test-openai-inline-key' });
 
     expect(embeddingProviders).toEqual([{ providerId: 'openai', apiKey: 'test-openai-inline-key' }]);
+  });
+
+  it("gives an embedding provider other than OpenAI no URL from the router, never OpenRouter's", async () => {
+    vi.stubEnv('GEMINI_API_KEY', 'test-gemini-key');
+    vi.stubEnv('OPENROUTER_API_KEY', 'test-openrouter-key');
+    const { QueryRouter } = await loadRouter();
+
+    await routeOnce(QueryRouter, { embeddingProvider: 'gemini', embeddingModel: 'gemini-embedding-2' });
+
+    expect(embeddingProviders).toEqual([{ providerId: 'gemini', apiKey: 'test-gemini-key' }]);
+    expect(embeddingBaseUrls).toEqual([undefined]);
+  });
+
+  it("keeps OpenRouter's URL for an OpenAI embedding provider on the OpenRouter key", async () => {
+    vi.stubEnv('OPENROUTER_API_KEY', 'test-openrouter-key');
+    const { QueryRouter } = await loadRouter();
+
+    await routeOnce(QueryRouter, { embeddingProvider: 'openai' });
+
+    expect(embeddingProviders).toEqual([{ providerId: 'openai', apiKey: 'test-openrouter-key' }]);
+    expect(embeddingBaseUrls).toEqual(['https://openrouter.ai/api/v1']);
   });
 });
