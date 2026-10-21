@@ -338,6 +338,41 @@ describe('ElevenLabsStreamingTTS', () => {
     expect(sockets()).toHaveLength(1);
   });
 
+  it("starts the next reply at once, and drops what a timed-out context of the reply before still sends, once the next reply's text arrives", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const session = await tts.startSession();
+    const [first] = sockets();
+    const chunks = recorded(session);
+
+    // The reply's one sentence times out: its held frame goes out without a boundary, and its flush completes.
+    session.pushTokens('Hello there.');
+    const flushed = session.flush();
+    const c1 = sent(first)[1].context_id as string;
+    audioIn(first, c1, 1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushed;
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary])).toEqual([[1, undefined]]);
+    // While the reply is still the session's, the context's late audio goes out, so the listener hears it whole.
+    audioIn(first, c1, 2);
+    expect(chunks).toHaveLength(2);
+    // The next reply's text: its context goes out at once, and what the timed-out context still sends belongs to the
+    // reply before, so it never goes out as this reply's audio.
+    session.pushTokens('Next one. ');
+    expect(sent(first).slice(3)).toEqual(context('Next one. '));
+    const c2 = sent(first)[4].context_id as string;
+    audioIn(first, c1, 3);
+    finalIn(first, c1);
+    expect(chunks).toHaveLength(2);
+    audioIn(first, c2, 4);
+    finalIn(first, c2);
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([
+      [1, undefined],
+      [2, undefined],
+      [4, 'Next one.'],
+    ]);
+    expect(sockets()).toHaveLength(1);
+  });
+
   it('attaches nothing to a frame after a cancel, and a late terminal response emits nothing', async () => {
     const session = await tts.startSession();
     const [first] = sockets();

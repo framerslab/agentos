@@ -875,6 +875,41 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(chunks.map((chunk) => chunk.textBoundary?.text)).toEqual(['Hello.']);
   });
 
+  it("drops what a timed-out sentence of the reply before still sends once the next reply's text arrives, and starts that reply at the late Flushed", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const chunks = recorded(session);
+    ws.send.mockClear();
+
+    // The reply's one sentence times out: its held frame goes out without a boundary, and its flush completes.
+    session.pushTokens('Hello there.');
+    const flushed = session.flush();
+    frame(ws, 1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushed;
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary])).toEqual([[1, undefined]]);
+    // While the reply is still the session's, the sentence's late audio goes out, so the listener hears it whole.
+    frame(ws, 2);
+    expect(chunks).toHaveLength(2);
+    // The next reply's text arrives while the late Flushed is still waited for: what the timed-out sentence still sends
+    // belongs to the reply before, and never goes out as this reply's audio.
+    session.pushTokens('Next one. ');
+    frame(ws, 3);
+    expect(chunks).toHaveLength(2);
+    expect(sent(ws)).toHaveLength(2);
+    // The late Flushed ends the wait: the next reply's sentence goes out, and its own audio is the session's.
+    control(ws, { type: 'Flushed', sequence_id: 0 });
+    expect(sent(ws).slice(2)).toEqual([{ type: 'Speak', text: 'Next one.' }, { type: 'Flush' }]);
+    frame(ws, 4);
+    control(ws, { type: 'Flushed', sequence_id: 1 });
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([
+      [1, undefined],
+      [2, undefined],
+      [4, 'Next one.'],
+    ]);
+  });
+
   it('completes each segment on the Flushed that answers its Flush, in order, whatever sequence_id Deepgram gives it', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
