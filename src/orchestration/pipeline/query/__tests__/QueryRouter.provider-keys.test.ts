@@ -255,4 +255,22 @@ describe('QueryRouter credentials per route', () => {
     // MiniMax's own key is unset, so the embedding step has no key and retrieval stays on keywords.
     expect(embeddingProviders).toEqual([]);
   });
+
+  it("keeps the router's apiKey off an embedding provider of another vendor", async () => {
+    vi.stubEnv('MINIMAX_API_KEY', 'test-minimax-key');
+    const { QueryRouter } = await loadRouter();
+
+    // The classifier and the generator default to MiniMax and take this key; embeddings default to OpenAI.
+    await routeOnce(QueryRouter, { apiKey: 'test-minimax-inline-key' });
+
+    expect(embeddingProviders).toEqual([]);
+  });
+
+  it("gives embeddings the router's apiKey when they use the classifier's provider", async () => {
+    const { QueryRouter } = await loadRouter();
+
+    await routeOnce(QueryRouter, { apiKey: 'test-openai-inline-key' });
+
+    expect(embeddingProviders).toEqual([{ providerId: 'openai', apiKey: 'test-openai-inline-key' }]);
+  });
 });
