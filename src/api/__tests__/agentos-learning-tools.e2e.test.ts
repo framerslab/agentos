@@ -3,8 +3,9 @@
  * The self-modification tools on the full runtime, end to end: AgentOS.create() with the self-improvement tools on,
  * a model (the OpenAI provider class stubbed at its module boundary) that calls them, and the tool results the next
  * model call receives. With the learning flag on, a placeholder user's turn has no learner and the tools refuse
- * (`no_learner`); in mode `off` they refuse (`off`). With the flag off adapt_personality acts as before, and the
- * trait it changes reaches no prompt.
+ * (`no_learner`); in mode `off` they refuse (`off`). With the flag off adapt_personality changes an editable trait as
+ * before, and the trait it changes reaches no prompt; honesty and emotionality it refuses on every host
+ * (`operator_only`), since only the persona definition sets them.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -107,6 +108,18 @@ describe('the self-modification tools on the full runtime', () => {
     expect(systemTextOf(first)).not.toContain(HEADING);
     expect(systemTextOf(afterTool)).toBe(systemTextOf(first));
     expect(systemTextOf(nextTurn)).toBe(systemTextOf(first));
+  });
+
+  it.each(['honesty', 'emotionality'] as const)('keep %s to the persona definition with the flag off: adapt_personality refuses it (operator_only)', async (trait) => {
+    booted = await boot();
+    provider.replies.push(toolCall('adapt_personality', { trait, delta: -0.2, reasoning: 'Soften the answers.' }));
+    await send(booted, { userId: 'ana', sessionId: 's-1' });
+    const results = toolMessages(provider.seenMessages[1]);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toContain(
+      `adapt_personality refused (operator_only): only the persona definition sets ${trait}; nothing was changed.`,
+    );
+    expect(results[0]).not.toContain('"newValue"');
   });
 
   it("refuse in mode off on a learner's turn", async () => {
