@@ -385,6 +385,37 @@ describe('session events under a call profile', () => {
     expect(f.runtime.state).toBe('closed');
   });
 
+  it("waits out a cut reply's stalled agent stream once: a close after the interruption gave up on it neither waits for it nor warns of it again", async () => {
+    const f = await call({ abortGraceMs: 50 });
+    const errors: Error[] = [];
+    f.runtime.on('error', (error: Error) => errors.push(error));
+    let stalled!: () => void;
+    const stalling = new Promise<void>((resolve) => {
+      stalled = resolve;
+    });
+    f.agent.sendText.mockImplementation(async function* () {
+      yield 'hello';
+      stalled();
+      await new Promise<void>(() => undefined);
+    });
+
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack();
+    await stalling;
+    // A mute cuts the reply; the interruption waits abortGraceMs for the stream, warns once, and the call listens again.
+    f.transport.emit('message', { type: 'control', action: { type: 'mute' } });
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+    expect(errors.map((error) => error.message)).toEqual(['the agent stream of the cut reply did not end within abortGraceMs of abort(); the call goes on without it']);
+
+    // The close finds the same stream still open: the call gave up on it already, so it is neither waited for nor
+    // reported a second time.
+    await f.runtime.stopSession();
+    expect(f.runtime.state).toBe('closed');
+    expect(errors).toHaveLength(1);
+    expect(f.log.filter((line) => line === 'session_error agent true')).toHaveLength(1);
+  });
+
   it("reports no reply's text when speech interrupts a turn the agent has yet to answer", async () => {
     const f = await call();
     const cut: string[] = [];

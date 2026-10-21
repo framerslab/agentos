@@ -875,6 +875,68 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(chunks.map((chunk) => chunk.textBoundary?.text)).toEqual(['Hello.']);
   });
 
+  it('completes each segment on the Flushed that answers its Flush, in order, whatever sequence_id Deepgram gives it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const chunks = recorded(session);
+      ws.send.mockClear();
+
+      // Deepgram documents a Flushed's sequence_id only by its example, 0, and its own SDK's wire tests answer a Flush
+      // with the id it carried or 0: every Flushed here says 0. Deepgram answers in order, so each completes the
+      // segment whose Flush it follows, at once, never after the five-second timeout.
+      session.pushTokens('One. Two. ');
+      const flushed = session.flush();
+      frame(ws, 1);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      expect(sent(ws)).toEqual([{ type: 'Speak', text: 'One.' }, { type: 'Flush' }, { type: 'Speak', text: ' Two.' }, { type: 'Flush' }]);
+      frame(ws, 2);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([
+        [1, 'One.'],
+        [2, ' Two.'],
+      ]);
+      await flushed;
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("completes nothing with the late Flushed of a timed-out segment, and the next segment's own completes it, whatever sequence_id each carries", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const chunks = recorded(session);
+      ws.send.mockClear();
+
+      session.pushTokens('First one. Second');
+      const flushed = session.flush();
+      frame(ws, 1);
+      // The first segment times out, and the wait for its late Flushed ends: the next segment goes out.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sent(ws).slice(2)).toEqual([{ type: 'Speak', text: ' Second' }, { type: 'Flush' }]);
+      // Deepgram answers in order: the first Flush's late Flushed, then the second's, both with the id 0.
+      frame(ws, 2);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      expect(chunks).toHaveLength(1);
+      frame(ws, 3);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([
+        [1, undefined],
+        [2, undefined],
+        [3, ' Second'],
+      ]);
+      await flushed;
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("sends the transport none of what Deepgram still delivers for a reply typed text cut, as the typed text's reply", async () => {
     // A transport that reports no playout, and an STT session and an endpoint detector the test drives.
     const transport = Object.assign(new EventEmitter(), {
@@ -1016,5 +1078,79 @@ describe('DeepgramAuraStreamingTTS', () => {
     } finally {
       await orchestrator.stopSession('done');
     }
+  });
+
+  it('adds a reply whose fresh socket Deepgram refused as one of which nothing is known heard, sends its agent_done with no text, and reports the warning', async () => {
+    const transport = Object.assign(new EventEmitter(), {
+      id: 'transport-1',
+      state: 'open' as const,
+      sendAudio: vi.fn(async (_chunk: EncodedAudioChunk) => undefined),
+      sendControl: vi.fn(async (_message: unknown) => undefined),
+      close: vi.fn(),
+    });
+    const stt = Object.assign(new EventEmitter(), { pushAudio: vi.fn(), flush: vi.fn(async () => undefined), close: vi.fn() });
+    const endpoint = Object.assign(new EventEmitter(), { mode: 'heuristic' as const, pushVadEvent: vi.fn(), pushTranscript: vi.fn(), reset: vi.fn() });
+    const agent = {
+      sendText: vi.fn((text: string) =>
+        (async function* () {
+          yield text === 'First?' ? 'One.' : 'Two.';
+        })()
+      ),
+      abort: vi.fn(),
+    };
+    let session!: StreamingTTSSession;
+    const orchestrator = new VoicePipelineOrchestrator({ stt: 'fake-stt', tts: tts.providerId, format: 'pcm' });
+    const items: unknown[] = [];
+    const sessionErrors: Array<{ recoverable: boolean; source: string }> = [];
+    const errors: Error[] = [];
+    orchestrator.on('conversation_item_added', (event: { item: { role: string } }) => {
+      if (event.item.role === 'assistant') items.push(event.item);
+    });
+    orchestrator.on('session_error', (event: { recoverable: boolean; source: string }) => sessionErrors.push({ recoverable: event.recoverable, source: event.source }));
+    orchestrator.on('error', (error: Error) => errors.push(error));
+    await orchestrator.startSession(transport as unknown as IStreamTransport, agent, {
+      streamingSTT: { providerId: 'fake-stt', isStreaming: true, startSession: async () => stt as unknown as StreamingSTTSession },
+      streamingTTS: {
+        providerId: tts.providerId,
+        startSession: async (config?: StreamingTTSConfig) => (session = await tts.startSession(config)),
+      },
+      endpointDetector: endpoint as unknown as IEndpointDetector,
+      bargeinHandler: { mode: 'hard-cut', handleBargein: () => ({ type: 'cancel' }) },
+    });
+    const ws = socketOf(session);
+    const ask = (transcript: string): void => {
+      endpoint.emit('turn_complete', { transcript, confidence: 0.9, durationMs: 800, reason: 'silence_timeout' });
+    };
+
+    try {
+      ask('First?');
+      await vi.waitFor(() => expect(sent(ws)).toEqual([{ type: 'Speak', text: 'One.' }, { type: 'Flush' }]));
+      frame(ws, 1);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      await vi.waitFor(() => expect(items).toHaveLength(1));
+      await vi.waitFor(() => expect(orchestrator.state).toBe('listening'));
+
+      // Deepgram closes the idle socket between the replies and refuses the fresh one the next reply opens: the reply
+      // ends unplayed, its flush completing, and the session goes on.
+      (ws as unknown as { readyState: number }).readyState = 3;
+      ws.emit('close', 1011, Buffer.from(''));
+      MockCtl.nextBehavior = 'reject-400';
+      ask('Second?');
+      await vi.waitFor(() => expect(items).toHaveLength(2));
+      await vi.waitFor(() => expect(orchestrator.state).toBe('listening'));
+    } finally {
+      MockCtl.nextBehavior = 'open';
+      await orchestrator.stopSession('done');
+    }
+    // None of the second reply was spoken, so none of it joins as heard, and its agent_done vouches for no text.
+    expect(items).toEqual([
+      { role: 'assistant', text: 'One.', playedText: 'One.', interrupted: false },
+      { role: 'assistant', text: 'Two.', playedText: '', interrupted: true },
+    ]);
+    const done = transport.sendControl.mock.calls.map(([message]) => message as { type: string; text?: string }).filter((message) => message.type === 'agent_done');
+    expect(done.map((message) => message.text)).toEqual(['One.', '']);
+    // The warning reaches the session's listeners, as one the session goes on after.
+    expect(sessionErrors).toEqual([{ recoverable: true, source: 'tts' }]);
+    expect(errors.map((error) => error.message)).toEqual([expect.stringContaining('deepgram aura ws failed to open for a reply')]);
   });
 });

@@ -2102,6 +2102,31 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     await transport.whenClosed();
   });
 
+  it("ends the agent's line with the played prefix when agent_done carries no text, as the session sends it for a reply it vouches for none of", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const { transport, errors } = speakingTo(room, 'user-1');
+    await transport.sendControl({ type: 'agent_speaking', text: '' });
+    await transport.sendAudio(spoken(1, 'seg-1', 0, 'Your order shipped.'));
+    const first = transport.waitForPlayback(firstGeneration, 1, new AbortController().signal);
+    FakeAudioSource.created[0]!.playOut();
+    await first;
+    await settle();
+    // The provider lost the rest of the reply, so the session cannot tell what of it was spoken and sends agent_done
+    // with no text: the final keeps what the track proved played.
+    await transport.sendAudio(toneChunk(2));
+    await transport.sendControl({ type: 'agent_done', text: '', durationMs: 40 });
+    await settle();
+    const line = `${transport.id}:agent-1`;
+    expect(lines(room)).toEqual([
+      ['Your order shipped.', line, 'false', 'TR_AGENT'],
+      ['Your order shipped.', line, 'true', 'TR_AGENT'],
+    ]);
+    expect(errors).toEqual([]);
+    transport.close();
+    await transport.whenClosed();
+  });
+
   it('transcriptionOutput: false writes nothing', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
