@@ -146,4 +146,32 @@ describe('authenticated WebSocket media over HTTP upgrade', () => {
       expect(f.call.stt.pushAudioScoped).not.toHaveBeenCalled();
     } finally { await f.close(); }
   });
+  it('hands a typed text to the call as a user turn and drops one the check refuses, keeping the socket open', async () => {
+    const f = await fixture(); try {
+      const ws = await f.open(); await f.authenticate(ws);
+      const items: unknown[] = []; f.call.runtime.on('conversation_item_added', ({ item }: { item: unknown }) => items.push(item));
+      let closed = false; ws.on('close', () => { closed = true; });
+      // A text of whitespace alone fails the check: it is dropped, and the call takes the next text.
+      ws.send(JSON.stringify({ type: 'text_input', text: '   ' }));
+      ws.send(JSON.stringify({ type: 'text_input', text: 'Book a table.' }));
+      await vi.waitFor(() => expect(f.call.runtime.state).toBe('speaking'));
+      expect(items).toEqual([{ role: 'user', text: 'Book a table.', source: 'text', endpointReason: 'manual' }]);
+      expect(closed).toBe(false); expect(f.call.binding.state).toBe('open');
+    } finally { await f.close(); }
+  });
+  it('reads a text_input frame of up to 24,576 bytes, so a text of 4,000 characters fits as any encoder writes it, and keeps every other text frame to 4,096', async () => {
+    const f = await fixture(); try {
+      const ws = await f.open(); await f.authenticate(ws);
+      const items: unknown[] = []; f.call.runtime.on('conversation_item_added', ({ item }: { item: unknown }) => items.push(item));
+      // An encoder that escapes every character outside ASCII, as Python's json.dumps does by default, writes each of
+      // these 4,000 characters in six bytes.
+      const frame = `{"type":"text_input","text":"${'\\u00e9'.repeat(4_000)}"}`;
+      expect(Buffer.byteLength(frame)).toBe(24_031);
+      ws.send(frame);
+      await vi.waitFor(() => expect(f.call.runtime.state).toBe('speaking'));
+      expect(items).toEqual([{ role: 'user', text: 'é'.repeat(4_000), source: 'text', endpointReason: 'manual' }]);
+      // A control message past 4,096 bytes still closes the socket.
+      const closed = once(ws, 'close'); ws.send(`{"type":"control","action":{"type":"mute"}}${' '.repeat(4_096)}`); await closed;
+    } finally { await f.close(); }
+  });
 });
