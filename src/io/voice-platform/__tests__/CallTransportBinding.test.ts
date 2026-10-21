@@ -57,6 +57,21 @@ describe('logical call transport', () => {
     expect(f.binding.state).toBe('open'); expect(closed).not.toHaveBeenCalled();
     await f.binding.end('client_stop'); await f.runtime.stopSession();
   });
+  it('hands the call a typed text the check refuses, which the call reports and drops, and the call goes on', async () => {
+    const f = await transportFixture(); const a = await f.connect(); const closed = vi.fn(); f.binding.on('close', closed);
+    const errors: string[] = []; f.runtime.on('error', (error: Error) => errors.push(error.message));
+    const reports: unknown[] = []; f.runtime.on('session_error', (event: { source: string; recoverable: boolean }) => reports.push([event.source, event.recoverable]));
+    // A WebSocket client's typed text comes as the client sent it, so the call checks it and says why it drops one.
+    a.physical.emit('message', { type: 'text_input', text: '   ' });
+    a.physical.emit('message', { type: 'text_input', text: 42 });
+    await vi.waitFor(() => expect(reports).toHaveLength(2));
+    expect(errors).toEqual(['a text_input message was dropped: its text is blank', 'a text_input message was dropped: its text is not a string']);
+    expect(reports).toEqual([['session', true], ['session', true]]);
+    a.physical.emit('message', { type: 'text_input', text: 'Book a table.' });
+    await vi.waitFor(() => expect(f.runtime.state).toBe('speaking'));
+    expect(f.binding.state).toBe('open'); expect(closed).not.toHaveBeenCalled();
+    await f.binding.end('client_stop'); await f.runtime.stopSession();
+  });
   it('keeps a generation the pipeline records while the attachment is still completing', async () => {
     const f = await transportFixture(); const connected = f.manager.connected.bind(f.manager);
     vi.spyOn(f.manager, 'connected').mockImplementationOnce(async (...args) => {
