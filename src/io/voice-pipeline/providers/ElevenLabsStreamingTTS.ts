@@ -41,8 +41,11 @@
  * a timeout the next segment waits, at most five seconds more, for that late
  * `isFinal`, and the audio the context still delivers goes out as it comes,
  * without a boundary, so a slow sentence arrives whole and in order; only then
- * does the next segment start. A `cancel()` ends that wait and closes the
- * socket, so nothing of the cut text is heard; the next segment opens a new one.
+ * does the next segment start. The next reply's text ends that wait at once:
+ * the timed-out context belongs to the reply before, so what it still delivers
+ * is dropped, and the next reply's first context goes out. A `cancel()` ends
+ * that wait and closes the socket, so nothing of the cut text is heard; the
+ * next segment opens a new one.
  *
  * ## Failures
  *
@@ -198,6 +201,8 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
   private failed = false;
   /** How many `flush()` calls wait for the queue. */
   private flushes = 0;
+  /** Set by `flush()`: the reply's text has all been given, so the next `pushTokens()` starts the next reply. */
+  private replyEnded = false;
   private closed = false;
   private readonly segments: SegmentSynthesisQueue;
 
@@ -445,10 +450,18 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
 
   /**
    * Feeds the text to the segmenter; each sentence it completes is queued and
-   * synthesized in turn. The rest of a reply a failure ended is dropped.
+   * synthesized in turn. The rest of a reply a failure ended is dropped. The
+   * first text after a `flush()` starts the next reply, which waits for no
+   * timed-out context of the reply before: that context's late audio is
+   * dropped from then on.
    */
   pushTokens(tokens: string): void {
     if (this.closed || this.failed) return;
+    if (this.replyEnded) {
+      this.replyEnded = false;
+      // The reply before has ended: its timed-out context's late audio must not play as this reply's.
+      if (this.staleContext !== undefined) this.release();
+    }
     this.segments.push(tokens);
   }
 
@@ -461,6 +474,7 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
   async flush(): Promise<void> {
     if (this.closed) return;
     this.failed = false;
+    this.replyEnded = true;
     this.flushes++;
     try {
       await this.segments.flush();

@@ -35,7 +35,10 @@
  * that names none of them, or none at all, answers by order. A
  * segment with no `Flushed` within five seconds ends without a boundary, and
  * the next segment waits for that late `Flushed`, at most five seconds more,
- * before it starts. The late `Flushed` of a segment that timed out completes
+ * before it starts. Meanwhile the segment's late audio goes out as it comes,
+ * without a boundary, while its reply is the session's: once the next reply's
+ * text has arrived it is dropped, so no reply plays the tail of the one
+ * before. The late `Flushed` of a segment that timed out completes
  * nothing, however late it comes: one later than that wait is written as one
  * console warning line, and so is a `Flushed` that answers no `Flush` of the
  * socket. After a `cancel()`
@@ -235,6 +238,13 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   private readonly unanswered: Array<{ id: number; flight: boolean }> = [];
   /** Set when a reply's socket failed to open before the reply's `flush()` came: the rest of its text is dropped until then. */
   private failed = false;
+  /** Set by `flush()`: the reply's text has all been given, so the next `pushTokens()` starts the next reply. */
+  private replyEnded = false;
+  /**
+   * Set when the next reply's text arrives while the next segment waits for the late `Flushed` of a timed-out segment
+   * of the reply before: until the wait ends, Deepgram's audio is that segment's, which no reply plays any more.
+   */
+  private dropStale = false;
   /** How many `flush()` calls wait for the queue. */
   private flushCalls = 0;
   private readonly voice: string;
@@ -412,10 +422,16 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   /**
    * Feeds the text to the segmenter; each sentence it completes is queued and
    * synthesized in turn. The rest of a reply whose socket failed to open is
-   * dropped.
+   * dropped. The first text after a `flush()` starts the next reply: from then
+   * on, what a timed-out segment of the reply before still sends is dropped.
    */
   pushTokens(tokens: string): void {
     if (this.closed || this.failed) return;
+    if (this.replyEnded) {
+      this.replyEnded = false;
+      // The reply before has ended: the late audio of its timed-out segment must not play as this reply's.
+      if (this.stale !== undefined && !this.clearing) this.dropStale = true;
+    }
     this.segments.push(tokens);
   }
 
@@ -431,6 +447,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   async flush(): Promise<void> {
     if (this.closed) return;
     this.failed = false;
+    this.replyEnded = true;
     this.flushCalls++;
     try {
       await this.segments.flush();
@@ -630,6 +647,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    */
   private release(): void {
     this.clearing = false;
+    this.dropStale = false;
     if (this.stale === undefined) return;
     clearTimeout(this.stale);
     this.stale = undefined;
@@ -674,8 +692,9 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
 
   private _handleMessage(data: Buffer, isBinary: boolean): void {
     if (isBinary) {
-      // Audio sent before Deepgram read the Clear is the cleared text's: no reply plays it.
-      if (this.clearing) return;
+      // Audio sent before Deepgram read the Clear is the cleared text's, and audio of a timed-out segment of the reply
+      // before, once the next reply has begun, is that reply's: no reply plays it.
+      if (this.clearing || this.dropStale) return;
       const pcmBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
       // The wire is always linear16 (see toDeepgramEncoding): uncompressed
       // 16-bit mono at sampleRate * 2 bytes/sec — duration derives from the
