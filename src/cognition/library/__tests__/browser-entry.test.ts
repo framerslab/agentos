@@ -72,6 +72,11 @@ describe('the library\'s browser entry', () => {
     );
   });
 
+  it('names the readers of an HTML page and a CSV file', async () => {
+    const entry = await import('../browser.js');
+    expect(Object.keys(entry)).toEqual(expect.arrayContaining(['readCsv', 'readHtml']));
+  });
+
   it('names a page\'s storage: the key-value store, the outbox and the comparison of lists', async () => {
     const entry = await import('../browser.js');
     expect(Object.keys(entry).sort()).toEqual(
