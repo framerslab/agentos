@@ -129,6 +129,22 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(sent(ws)).toEqual([{ type: 'Speak', text: 'Hello there.' }, { type: 'Flush' }]);
   });
 
+  it('sends the first clause of a long first sentence while the reply still streams, not once the reply has ended', async () => {
+    const session = await tts.startSession();
+    const ws = socketOf(session);
+    ws.send.mockClear();
+    // A sentence with no sentence-ending mark, streamed a token at a time: its first clause goes to Deepgram once the
+    // token after the comma that ends it arrives, not once the reply ends and flush() cuts the sentence.
+    const tokens = ['Sure', ',', ' here', ' are', ' the', ' three', ' times', ' I', ' have', ' open', ' on', ' Friday', ' afternoon', ','];
+    for (const token of tokens) session.pushTokens(token);
+    expect(ws.send).not.toHaveBeenCalled();
+    session.pushTokens(' two');
+    expect(sent(ws)).toEqual([{ type: 'Speak', text: 'Sure, here are the three times I have open on Friday afternoon,' }, { type: 'Flush' }]);
+    for (const token of [' thirty', ',', ' three', ' fifteen', ' and', ' four']) session.pushTokens(token);
+    // The rest has no clause mark 40 characters into its segment: it goes out at the reply's end.
+    expect(sent(ws)).toHaveLength(2);
+  });
+
   it('always dials the streaming WS with encoding=linear16 (mp3 is REST-only and 400s)', async () => {
     // Default session format is 'mp3'; the WIRE must still be linear16:
     // Deepgram rejects `encoding=mp3` on /v1/speak streaming upgrades with

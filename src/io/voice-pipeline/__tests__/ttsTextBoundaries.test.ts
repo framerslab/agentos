@@ -54,6 +54,81 @@ describe('SentenceSegmenter', () => {
     expect(segmenter.flush()).toEqual({ segmentId: 'seg-2', start: 0, end: 6, text: 'Again.' });
   });
 
+  it('ends the first segment of a reply at a clause mark once it holds 20 characters, while a long sentence still streams', () => {
+    const segmenter = new SentenceSegmenter();
+    // "Sure," holds 5 characters, too few to end the first segment; the comma after "afternoon" ends it once whitespace
+    // has followed, though the sentence has no sentence-ending mark yet.
+    expect(segmenter.push('Sure, here are the three times I have open on Friday afternoon,')).toEqual([]);
+    expect(segmenter.push(' two')).toEqual([
+      { segmentId: 'seg-1', start: 0, end: 63, text: 'Sure, here are the three times I have open on Friday afternoon,' },
+    ]);
+    // A later segment ends at a clause mark only once it holds 40 characters: " two thirty," holds 12.
+    expect(segmenter.push(' thirty, three fifteen and four')).toEqual([]);
+    expect(segmenter.flush()).toEqual({ segmentId: 'seg-2', start: 63, end: 98, text: ' two thirty, three fifteen and four' });
+  });
+
+  it('ends a later segment at a clause mark only once it holds 40 characters, and at a sentence-ending mark at any length', () => {
+    const segmenter = new SentenceSegmenter();
+    expect(segmenter.push('Yes. I can move it to Thursday morning; the room is free then, and nobody else has asked for it. Ok')).toEqual([
+      { segmentId: 'seg-1', start: 0, end: 4, text: 'Yes.' },
+      // The semicolon comes 35 characters into this segment, too few for one after the reply's first.
+      { segmentId: 'seg-2', start: 4, end: 62, text: ' I can move it to Thursday morning; the room is free then,' },
+      { segmentId: 'seg-3', start: 62, end: 96, text: ' and nobody else has asked for it.' },
+    ]);
+    expect(segmenter.remainder).toBe(' Ok');
+  });
+
+  it('ends a segment at a dash with whitespace after it, and keeps a closing quote with the clause it closes', () => {
+    const segmenter = new SentenceSegmenter();
+    expect(segmenter.push('I looked at the calendar for you — Friday is free – and so is the larger room - so I booked both')).toEqual([
+      { segmentId: 'seg-1', start: 0, end: 34, text: 'I looked at the calendar for you —' },
+      // The en dash comes 17 characters into this segment, too few; a hyphen between a word and whitespace is a dash too.
+      { segmentId: 'seg-2', start: 34, end: 79, text: ' Friday is free – and so is the larger room -' },
+    ]);
+    // reset() starts a new reply, whose first segment ends at a clause mark from 20 characters again.
+    segmenter.reset();
+    expect(segmenter.push('He said "fine, go ahead," and then he hung up')).toEqual([
+      { segmentId: 'seg-3', start: 0, end: 25, text: 'He said "fine, go ahead,"' },
+    ]);
+  });
+
+  it('does not end a segment at a comma, colon or dash inside a number, a time, a word or a range, or at a list bullet', () => {
+    const segmenter = new SentenceSegmenter();
+    expect(segmenter.push('Tickets for the well-known 1990–2000 tour cost 1,250 dollars at 10:30, or less later')).toEqual([
+      { segmentId: 'seg-1', start: 0, end: 70, text: 'Tickets for the well-known 1990–2000 tour cost 1,250 dollars at 10:30,' },
+    ]);
+    segmenter.reset();
+    expect(segmenter.push('Here are the times I can do\n- two thirty\n- three fifteen\n- four in the afternoon\n- five')).toEqual([]);
+  });
+
+  it('ends a segment with no mark to end at at its last whitespace within 120 characters, with the same cuts however the text arrives', () => {
+    const list =
+      'Here are the slots I have open\nMonday at nine in the morning\nTuesday at ten in the morning\nWednesday at noon\nThursday at two in the afternoon\nFriday at four';
+    const expected = [
+      {
+        segmentId: 'seg-1',
+        start: 0,
+        end: 120,
+        text: 'Here are the slots I have open\nMonday at nine in the morning\nTuesday at ten in the morning\nWednesday at noon\nThursday at',
+      },
+      { segmentId: 'seg-2', start: 120, end: 156, text: ' two in the afternoon\nFriday at four' },
+    ];
+    const whole = new SentenceSegmenter();
+    expect([...whole.push(list), whole.flush()]).toEqual(expected);
+    // Character by character, the cut waits for the 121st character, which settles whether a mark ends the segment
+    // within 120.
+    const piecewise = new SentenceSegmenter();
+    const segments = list.split('').flatMap((character) => piecewise.push(character));
+    expect([...segments, piecewise.flush()]).toEqual(expected);
+  });
+
+  it('ends a run of more than 120 characters without whitespace at the first whitespace after it', () => {
+    const link = `https://example.com/${'a'.repeat(130)}`;
+    const segmenter = new SentenceSegmenter();
+    expect(segmenter.push(link)).toEqual([]);
+    expect(segmenter.push(' is the link')).toEqual([{ segmentId: 'seg-1', start: 0, end: 150, text: link }]);
+  });
+
   it('marks a boundary final with the segment kept whole', () => {
     expect(boundaryOf({ segmentId: 's', start: 3, end: 8, text: ' five' })).toEqual({ segmentId: 's', start: 3, end: 8, text: ' five', final: true });
   });
