@@ -1564,23 +1564,36 @@ export class QueryRouter {
   }
 
   /**
+   * Whether embeddings go to a provider the classifier or the generator uses,
+   * so the router's `apiKey` and `baseUrl`, which configure those calls,
+   * apply to embeddings too. A key given for one vendor's classifier never
+   * reaches another vendor's embedding endpoint.
+   */
+  private embeddingSharesLlmCredentials(): boolean {
+    const provider = this.config.embeddingProvider;
+    return !provider || provider === this.config.classifierProvider || provider === this.config.generationProvider;
+  }
+
+  /**
    * Resolve API key for embedding calls.
    *
-   * Falls back through the embedding-specific key, then the global one. An
-   * embedding provider other than OpenAI that has a key variable of its own
-   * then takes that key alone, or none when it is unset, so another vendor's
-   * key never reaches it (an OpenAI key sent to Gemini or MiniMax). An OpenAI
-   * embedding provider, and one without a key variable (Ollama), scans the
-   * provider env vars in priority order.
+   * The embedding-specific key comes first, then the global `apiKey` when
+   * embeddings use the classifier's or the generator's provider. An embedding
+   * provider other than OpenAI that has a key variable of its own then takes
+   * that key alone, or none when it is unset, so another vendor's key never
+   * reaches it (an OpenAI key sent to Gemini or MiniMax). An OpenAI embedding
+   * provider, and one without a key variable (Ollama), scans the provider env
+   * vars in priority order.
    */
   private getEmbeddingApiKey(): string {
     if (this.config.embeddingApiKey) return this.config.embeddingApiKey;
+    if (this.config.apiKey && this.embeddingSharesLlmCredentials()) return this.config.apiKey;
     const provider = this.config.embeddingProvider;
-    if (provider && provider !== 'openai' && providerEnvVars(provider).key) {
-      return this.getLlmApiKey(provider) ?? '';
+    if (provider && provider !== 'openai') {
+      const ownKey = providerEnvVars(provider).key;
+      if (ownKey) return process.env[ownKey] || '';
     }
-    // With no provider named, the general resolver scans the env vars and returns a string.
-    return this.getLlmApiKey() ?? '';
+    return this.scanProviderEnvKeys();
   }
 
   private getEmbeddingBaseUrl(): string | undefined {
@@ -1592,12 +1605,17 @@ export class QueryRouter {
       return undefined;
     }
 
-    if (this.config.baseUrl !== undefined) {
-      return this.config.baseUrl as string;
-    }
+    // The router's baseUrl and apiKey configure the classifier and the
+    // generator; they reach embeddings only when embeddings use one of those
+    // providers.
+    if (this.embeddingSharesLlmCredentials()) {
+      if (this.config.baseUrl !== undefined) {
+        return this.config.baseUrl as string;
+      }
 
-    if (this.config.apiKey !== undefined) {
-      return undefined;
+      if (this.config.apiKey !== undefined) {
+        return undefined;
+      }
     }
 
     if (process.env.OPENAI_API_KEY) {
@@ -1632,11 +1650,17 @@ export class QueryRouter {
       const ownKey = providerEnvVars(provider).key;
       return (ownKey && process.env[ownKey]) || undefined;
     }
+    return this.scanProviderEnvKeys();
+  }
 
-    // Check all providers in priority order.
-    // Direct provider keys (OpenAI, Anthropic, etc.) take precedence over
-    // aggregator keys (OpenRouter) so that the native endpoint is used when
-    // both are configured.
+  /**
+   * The first provider key variable that is set, in priority order. Direct
+   * provider keys (OpenAI, Anthropic, etc.) take precedence over aggregator
+   * keys (OpenRouter) so that the native endpoint is used when both are
+   * configured. Returns an empty string when none is set: keyless providers
+   * (CLI) don't need an API key.
+   */
+  private scanProviderEnvKeys(): string {
     const envKeys = [
       'OPENAI_API_KEY',
       'ANTHROPIC_API_KEY',
@@ -1652,7 +1676,6 @@ export class QueryRouter {
       if (process.env[key]) return process.env[key]!;
     }
 
-    // Keyless providers (CLI) don't need an API key — empty string is fine
     return '';
   }
 

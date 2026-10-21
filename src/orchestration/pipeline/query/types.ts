@@ -598,13 +598,14 @@ export interface QueryRouterConfig {
   /**
    * Optional API key override for embeddings only.
    *
-   * When omitted, embeddings fall back to `apiKey`. Without that, an
-   * embedding provider other than OpenAI that has a key variable of its own
-   * takes that key (`GEMINI_API_KEY` for `gemini`, `MINIMAX_API_KEY` for
-   * `minimax`), or none when it is unset, so another vendor's key never
-   * reaches it; an OpenAI one, or one without a key variable such as Ollama,
-   * takes the first provider key set, `OPENAI_API_KEY` first and
-   * `OPENROUTER_API_KEY` last.
+   * When omitted, embeddings fall back to `apiKey` when they use the
+   * classifier's or the generator's provider, and never take it for another
+   * vendor's. Without that, an embedding provider other than OpenAI that has
+   * a key variable of its own takes that key (`GEMINI_API_KEY` for `gemini`,
+   * `MINIMAX_API_KEY` for `minimax`), or none when it is unset, so another
+   * vendor's key never reaches it; an OpenAI one, or one without a key
+   * variable such as Ollama, takes the first provider key set,
+   * `OPENAI_API_KEY` first and `OPENROUTER_API_KEY` last.
    * This is useful when generation uses an OpenAI-compatible endpoint like
    * OpenRouter but embeddings should stay on a direct OpenAI key.
    */
@@ -613,9 +614,9 @@ export interface QueryRouterConfig {
   /**
    * Optional base URL override for embeddings only.
    *
-   * When omitted, embeddings inherit `baseUrl` unless `embeddingApiKey` is
-   * explicitly set, in which case the embedding path assumes the provider's
-   * default endpoint. If neither override is set and QueryRouter falls back to
+   * When omitted, embeddings inherit `baseUrl` when they use the classifier's
+   * or the generator's provider, unless `embeddingApiKey` is explicitly set,
+   * in which case the embedding path assumes the provider's default endpoint. If neither override is set and QueryRouter falls back to
    * `OPENROUTER_API_KEY`, it automatically uses the OpenRouter compatibility
    * URL for embeddings as well.
    */
