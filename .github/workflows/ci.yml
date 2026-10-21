@@ -87,6 +87,12 @@ jobs:
       - name: The curated extensions resolve AgentOS to this checkout
         run: node --test scripts/curated-extensions-peer.test.mjs
 
+      # release.yml publishes with this npm, and npm publish reruns the build and the package checks under it.
+      - name: Use the npm the release publishes with
+        run: |
+          npm install -g npm@11.20.0
+          test "$(npm --version)" = 11.20.0
+
       - name: Build
         run: pnpm run build
 
