@@ -75,6 +75,7 @@ describe('MiniMax Chat Completions transport', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   });
@@ -242,6 +243,18 @@ describe('MiniMax Chat Completions transport', () => {
     await instance.initialize({ apiKey: 'test-key', baseURL, maxRetries: 1 });
     await expect(instance.generateCompletion(FLASH, [{ role: 'user', content: 'Hi' }], {})).rejects.toThrow();
     expect(requests).toHaveLength(1);
+  });
+
+  it("draws its keys in the order AGENTOS_KEY_POOL_STRATEGY_MINIMAX names, never by OpenAI's variable", async () => {
+    vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY', '');
+    vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY_OPENAI', 'round-robin');
+    vi.stubEnv('AGENTOS_KEY_POOL_STRATEGY_MINIMAX', 'ordered');
+    const instance = new MiniMaxProvider();
+    await instance.initialize({ apiKey: 'test-key-a,test-key-b', baseURL });
+    for (let i = 0; i < 3; i++) await instance.generateCompletion(FLASH, [{ role: 'user', content: 'Hi' }], {});
+    // Ordered keeps the first usable key. Round-robin, which OpenAI's variable names, gives the first key two
+    // rotation slots and the second one, so its third request would carry the second key.
+    expect(requests.map(request => request.authorization)).toEqual(['Bearer test-key-a', 'Bearer test-key-a', 'Bearer test-key-a']);
   });
 
   it('refuses an embedding request before it is sent, since MiniMax publishes no embedding model', async () => {
