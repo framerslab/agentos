@@ -62,7 +62,8 @@
  * sent before then waits the same way), and `sendAudio()` takes raw or
  * WAV-wrapped PCM16. How a chunk counts as played is the publisher's playout
  * mode, fixed by `readyForPlayback()` or `sendAudio()` once the participant
- * is in the room; a chunk sent before then plays natively:
+ * is in the room, and again for each participant `setParticipant()` links; a
+ * chunk sent while the linked participant is not in the room plays natively:
  * - Native playout, the default and the only mode for a SIP participant:
  *   every participant subscribed to the track hears it, chunks queue on the
  *   track in order, `waitForPlayback()` resolves once the track has played
@@ -79,7 +80,10 @@
  *   participant's `agentos.playout` attribute is: one chunk at a time,
  *   announced to the participant, and `waitForPlayback()` resolves only after
  *   the native queue has drained and the participant has sent its playback
- *   receipt on the topic.
+ *   receipt on the topic. Once `setParticipant()` links another participant,
+ *   the one before is no longer read: a playback wait pending on its receipt
+ *   resolves once the track has played the chunk out, as in native playout,
+ *   and a clear pending on its answer ends with the queue it emptied.
  *
  * With a publisher the participant's text streams are read with bounds (five
  * seconds, four at once). A `text_input` message, which a page that speaks the
@@ -503,8 +507,11 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   /**
    * Links another participant: the audio source moves to its microphone, its frames carrying its identity as
    * `speakerHint`, the control topic and text input take its streams alone, control messages go to it, and the
-   * departure that closes the transport is its departure. A `'first'` wait ends. A transport that is not open, or the
-   * participant linked already, changes nothing.
+   * departure that closes the transport is its departure. With a publisher, a playout mode already fixed is fixed again
+   * for it, from its kind and its `agentos.playout` attribute, so a phone caller is played natively; the participant
+   * linked before is no longer read, so a playback wait pending on its receipt ends once the track has played the chunk
+   * out, and a clear pending on its answer ends with the queue it emptied. A `'first'` wait ends. A transport that is
+   * not open, or the participant linked already, changes nothing.
    *
    * @param identity - The participant's identity.
    * @throws {Error} When `identity` is empty.
@@ -514,14 +521,15 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     if (this._state === 'open') this.link(identity);
   }
   /**
-   * Links the participant with the identity, ending a `'first'` wait. The first participant linked gets the messages held
-   * while nobody was.
+   * Links the participant with the identity, ending a `'first'` wait. A speaking transport's playout mode is fixed again
+   * for it, and the first participant linked gets the messages held while nobody was.
    */
   private link(identity: string): void {
     this.stopWaitingForFirst();
     if (identity === this.linked) return;
     const first = this.linked === undefined;
     this.linked = identity; this.source.setParticipant(identity);
+    this.publisher?.participantChanged();
     if (first) this.deliverHeld();
   }
   /** The first remote participant in the room, in the room's order, whose kind `'first'` links. */
@@ -543,7 +551,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   get state(): 'connecting' | 'open' | 'closing' | 'closed' { return this._state; }
   /**
    * The publisher's playout mode once `readyForPlayback()` or `sendAudio()` fixed it, which waits for the participant
-   * to be in the room; `undefined` before, and for a listen-only transport.
+   * to be in the room, or `setParticipant()` fixed it again for the participant it linked; `undefined` before, while a
+   * participant linked since is not in the room, and for a listen-only transport.
    */
   get playout(): LiveKitPlayout | undefined { return this.publisher?.playout; }
   /**

@@ -2351,6 +2351,122 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     await transport.whenClosed();
   });
 
+  it("fixes participant playout for a page setParticipant() links after a native one, releasing a pause's hold on the track", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    room.addParticipant('page', new FakePublication(new FakeTrack('TR_PAGE'))).attributes = { 'agentos.playout': 'participant' };
+    const { transport, errors } = speakingTo(room, 'user-1');
+    await transport.readyForPlayback();
+    expect(transport.playout).toBe('native');
+    // A pause holds the track, and a chunk sent meanwhile waits behind it.
+    await transport.sendControl({ type: 'barge_in', action: { type: 'pause', fadeMs: 200 } });
+    const held = transport.sendAudio(toneChunk(1));
+    await settle();
+    expect(capturedTones()).toEqual([]);
+    // The page that asks for participant playout holds the audio it plays: the track's hold is released.
+    transport.setParticipant('page');
+    expect(transport.playout).toBe('participant');
+    await held;
+    expect(capturedTones()).toEqual([1]);
+    // The page's chunks are announced to it.
+    await transport.sendAudio(scopedChunk(2));
+    expect(controlTypes(room).at(-1)).toBe('audio');
+    expect(room.sentOn('agentos.voice').at(-1)!.destinationIdentities).toEqual(['page']);
+    expect(errors).toEqual([]);
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it('counts a chunk announced to the page as played for the phone caller setParticipant() links only once the track has taken it and played it out', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1'))).attributes = { 'agentos.playout': 'participant' };
+    room.addSipCaller('caller', new FakePublication(new FakeTrack('TR_CALLER')));
+    const { transport, errors } = speakingTo(room, 'user-1');
+    await transport.readyForPlayback();
+    const source = FakeAudioSource.created[0]!;
+    // The track's queue is full: the chunk announced to the page waits for room as it is captured.
+    let land!: () => void;
+    source.gate = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    const sent = transport.sendAudio(scopedChunk(1));
+    await settle();
+    expect(controlTypes(room)).toEqual(['audio']);
+    transport.setParticipant('caller');
+    let outcome: unknown;
+    void transport.waitForPlayback(firstGeneration, 1, new AbortController().signal).then(
+      (receipt) => {
+        outcome = receipt;
+      },
+      (error: Error) => {
+        outcome = error.message;
+      }
+    );
+    await settle();
+    // None of the chunk is on the track yet, so none of it has played.
+    expect(outcome).toBeUndefined();
+    source.gate = undefined;
+    land();
+    await sent;
+    await settle();
+    // On the track now, and not played out yet.
+    expect(outcome).toBeUndefined();
+    source.playOut();
+    await settle();
+    expect(outcome).toEqual({ generation: firstGeneration, sequence: 1, playedSamples: 320, sampleRate: 16_000 });
+    expect(errors).toEqual([]);
+    transport.close();
+    await transport.whenClosed();
+  });
+
+  it('waits out the capture in flight of a chunk announced to the page when it clears for the phone caller setParticipant() linked', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1'))).attributes = { 'agentos.playout': 'participant' };
+    room.addSipCaller('caller', new FakePublication(new FakeTrack('TR_CALLER')));
+    const { transport, errors } = speakingTo(room, 'user-1');
+    await transport.readyForPlayback();
+    const source = FakeAudioSource.created[0]!;
+    // What reaches the track and what clears it, in order.
+    const events: string[] = [];
+    const capture = source.captureFrame.bind(source);
+    source.captureFrame = async (frame) => {
+      await capture(frame);
+      events.push('captured');
+    };
+    const clearQueue = source.clearQueue.bind(source);
+    source.clearQueue = () => {
+      events.push('cleared');
+      clearQueue();
+    };
+    let land!: () => void;
+    source.gate = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    // The chunk is announced to the page, and its capture waits for room in the queue.
+    const sent = transport.sendAudio(scopedChunk(1)).then(
+      () => 'sent',
+      (error: Error) => error.message
+    );
+    await settle();
+    transport.setParticipant('caller');
+    // The caller talks over the reply: the clear waits for the frame still on its way to the track.
+    let cleared = false;
+    const clearing = transport.clearPlayback(firstGeneration).then(() => {
+      cleared = true;
+    });
+    await settle();
+    expect(cleared).toBe(false);
+    source.gate = undefined;
+    land();
+    await clearing;
+    expect(await sent).toBe('publisher cancelled');
+    // The frame landed after the clear began, and the queue was cleared again after it.
+    expect(events.slice(events.lastIndexOf('captured'))).toContain('cleared');
+    expect(errors).toEqual([]);
+    transport.close();
+    await transport.whenClosed();
+  });
+
   it('counts the chunks a pause held whole, none of their frames taken, once they have played after the resume', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
