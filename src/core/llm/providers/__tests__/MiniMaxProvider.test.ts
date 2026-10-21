@@ -244,6 +244,18 @@ describe('MiniMax Chat Completions transport', () => {
     expect(requests).toHaveLength(1);
   });
 
+  it('refuses an embedding request before it is sent, since MiniMax publishes no embedding model', async () => {
+    // A server that would answer: the refusal comes from the provider, not from MiniMax.
+    answerWith(200, JSON.stringify({
+      object: 'list', model: 'text-embedding-3-small',
+      data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
+      usage: { prompt_tokens: 1, total_tokens: 1 },
+    }));
+    const instance = await provider();
+    await expect(instance.generateEmbeddings('text-embedding-3-small', ['hello'])).rejects.toThrow(/MiniMax publishes no embedding model/);
+    expect(requests).toEqual([]);
+  });
+
   it('leaves inherited OpenAI behavior unchanged', async () => {
     const instance = new OpenAIProvider();
     await instance.initialize({ apiKey: 'test-key', baseURL, defaultModelId: 'gpt-4o' });

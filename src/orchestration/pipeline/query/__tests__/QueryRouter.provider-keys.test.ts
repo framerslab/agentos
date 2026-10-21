@@ -5,8 +5,9 @@
  * router MiniMax defaults.
  *
  * `generateText` is mocked to record the options of each call. The provider
- * manager the embedding step builds is mocked to fail, so no case reaches
- * the network and retrieval falls back to keywords.
+ * manager the embedding step builds is mocked to record the provider and key
+ * it is given and then to fail, so no case reaches the network and retrieval
+ * falls back to keywords.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,9 +16,15 @@ vi.mock('../../../../api/generateText.js', () => ({
   generateText: vi.fn(),
 }));
 
+/** The provider and key each embedding step hands the provider manager, in order. */
+const embeddingProviders = vi.hoisted(() => [] as Array<{ providerId: string; apiKey?: string }>);
+
 vi.mock('../../../../core/llm/providers/AIModelProviderManager.js', () => ({
   AIModelProviderManager: class {
-    async initialize(): Promise<void> {
+    async initialize(config: { providers: Array<{ providerId: string; config: { apiKey?: string } }> }): Promise<void> {
+      for (const entry of config.providers) {
+        embeddingProviders.push({ providerId: entry.providerId, apiKey: entry.config.apiKey });
+      }
       throw new Error('embeddings are not used in these cases');
     }
   },
@@ -141,6 +148,7 @@ const MINIMAX_ROUTE = {
 describe('QueryRouter credentials per route', () => {
   beforeEach(() => {
     for (const name of PROVIDER_VARIABLES) vi.stubEnv(name, '');
+    embeddingProviders.length = 0;
   });
 
   afterEach(() => {
@@ -216,5 +224,35 @@ describe('QueryRouter credentials per route', () => {
         baseUrl: 'https://openrouter.ai/api/v1',
       });
     }
+  });
+
+  it("keeps a caller's embedding key on OpenAI when MiniMax's key is the only one set", async () => {
+    vi.stubEnv('MINIMAX_API_KEY', 'test-minimax-key');
+    const { QueryRouter } = await loadRouter();
+
+    // The default embedding model is OpenAI's text-embedding-3-small; MiniMax publishes no embedding model.
+    await routeOnce(QueryRouter, { embeddingApiKey: 'test-openai-embedding-key' });
+
+    expect(embeddingProviders).toEqual([{ providerId: 'openai', apiKey: 'test-openai-embedding-key' }]);
+  });
+
+  it("gives an embedding provider its own key, never another vendor's", async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
+    vi.stubEnv('GEMINI_API_KEY', 'test-gemini-key');
+    const { QueryRouter } = await loadRouter();
+
+    await routeOnce(QueryRouter, { embeddingProvider: 'gemini', embeddingModel: 'gemini-embedding-2' });
+
+    expect(embeddingProviders).toEqual([{ providerId: 'gemini', apiKey: 'test-gemini-key' }]);
+  });
+
+  it('builds no MiniMax embedding provider from an OpenAI key', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
+    const { QueryRouter } = await loadRouter();
+
+    await routeOnce(QueryRouter, { embeddingProvider: 'minimax' });
+
+    // MiniMax's own key is unset, so the embedding step has no key and retrieval stays on keywords.
+    expect(embeddingProviders).toEqual([]);
   });
 });
