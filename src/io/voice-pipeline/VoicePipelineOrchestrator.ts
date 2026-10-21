@@ -597,10 +597,11 @@ interface ReplyRecord {
    */
   playoutFailed?: boolean;
   /**
-   * Whether a pause held the reply, after audio was sent, on a transport that plays the audio itself (one with
-   * `waitForPlayout()`): such a transport discards the audio its track held at the pause, as a speaking
-   * `LiveKitStreamTransport` does, so what of the reply was heard is not known from then on, as when its playout wait
-   * fails (`_askBargein`).
+   * Whether some of the reply may never have been played, so that what of it was heard is not known from then on, as
+   * when its playout wait fails: a pause held the reply, after audio was sent, on a transport that plays the audio
+   * itself (one with `waitForPlayout()`), which discards the audio its track held at the pause, as a speaking
+   * `LiveKitStreamTransport` does (`_askBargein`); or the TTS session warned while the reply spoke, as one whose socket
+   * failed to open for the reply, or whose segment failed and was spoken again, does.
    */
   discarded?: boolean;
 }
@@ -1462,12 +1463,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Ends the reply once its audio has played (`_finishReply`): the transport is sent `agent_done`, the reply joins the
-   * conversation as played (`conversation_item_added`), or, when a wait for its playout failed or a pause discarded
-   * audio the transport held (`ReplyRecord.discarded`), as interrupted with no text known heard, the pipeline returns
-   * to `listening`, the endpoint detector is reset and told the user holds the floor, and the watchdog starts.
-   * `agent_done` carries the reply's text, or none after such a pause: the session can then vouch for no word of it,
-   * and a transport that writes the reply's line, as `LiveKitStreamTransport` does, ends it with what it proved played
-   * itself, which after a pause that discarded audio is what its tracker holds, never the whole reply.
+   * conversation as played (`conversation_item_added`), or, when a wait for its playout failed or some of it may never
+   * have been played (`ReplyRecord.discarded`: a pause discarded audio the transport held, or the TTS session warned),
+   * as interrupted with no text known heard, the pipeline returns to `listening`, the endpoint detector is reset and
+   * told the user holds the floor, and the watchdog starts. `agent_done` carries the reply's text, or none when some of
+   * it may never have been played: the session can then vouch for no word of it, and a transport that writes the
+   * reply's line, as `LiveKitStreamTransport` does, ends it with what it proved played itself, what its tracker holds,
+   * never the whole reply.
    *
    * @param parts - The session's parts.
    */
@@ -1705,6 +1707,15 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       const open = this.interruption;
       if (open?.holding) open.audio.push(chunk);
       else this._sendReplyAudio(transport, chunk);
+    });
+    // A failure the TTS session goes on after, such as a socket that failed to open for a reply (Deepgram Aura) or a
+    // segment that failed and was spoken again (ElevenLabs): it is reported as one the session goes on after, and the
+    // reply it came in, some of whose text may never have been spoken, joins as one of which no word is known heard.
+    tts.on('warning', (warning: unknown) => {
+      if (this.current === 'closed') return;
+      if (this.current === 'speaking') this._currentReply.discarded = true;
+      const error = this._reportError(warning, 'a TTS warning');
+      this._sessionError(error, true, 'tts');
     });
     tts.on('flush_complete', () => {
       if (this.current !== 'speaking') return;
