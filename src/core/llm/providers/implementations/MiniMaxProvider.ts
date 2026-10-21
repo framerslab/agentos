@@ -1,4 +1,10 @@
-import type { ChatMessage, ModelCompletionOptions, ModelInfo } from '../IProvider';
+import type {
+  ChatMessage,
+  ModelCompletionOptions,
+  ModelInfo,
+  ProviderEmbeddingOptions,
+  ProviderEmbeddingResponse,
+} from '../IProvider';
 import { OpenAIProvider, OpenAIProviderConfig } from './OpenAIProvider';
 
 /** Configuration for MiniMax's OpenAI-compatible Chat Completions transport. */
@@ -7,7 +13,16 @@ export type MiniMaxProviderConfig = OpenAIProviderConfig;
 const CURRENT_MODELS = ['MiniMax-M3.1-Flash', 'MiniMax-M3'];
 const FLASH_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
-/** MiniMax text provider with a current catalog and lossless reasoning replay. */
+/**
+ * MiniMax's text models over its OpenAI-compatible Chat Completions API.
+ *
+ * It sends to `https://api.minimax.io/v1` unless `baseURL` names another
+ * endpoint (`https://api.minimaxi.com/v1` for China) and defaults to
+ * `MiniMax-M3.1-Flash`. It lists MiniMax's published catalog without calling
+ * a model API, replays separate reasoning content in tool history, and
+ * refuses an embedding request before sending it, since MiniMax publishes no
+ * embedding model.
+ */
 export class MiniMaxProvider extends OpenAIProvider {
   public readonly providerId = 'minimax';
 
@@ -45,6 +60,18 @@ export class MiniMaxProvider extends OpenAIProvider {
   /** Catalog membership does not restrict explicit saved or custom model requests. */
   public override async getModelInfo(modelId: string): Promise<ModelInfo | undefined> {
     return (await this.listAvailableModels()).find(model => model.modelId === modelId);
+  }
+
+  /**
+   * MiniMax publishes no embedding model, so an embedding request is refused
+   * here, before any HTTP request, and no key travels with it.
+   */
+  public override async generateEmbeddings(
+    _modelId: string,
+    _texts: string[],
+    _options?: ProviderEmbeddingOptions,
+  ): Promise<ProviderEmbeddingResponse> {
+    throw new Error('MiniMax publishes no embedding model; use a dedicated embedding provider.');
   }
 
   /** Apply MiniMax controls after the shared transport builds tools and image parts. */

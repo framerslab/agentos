@@ -450,7 +450,14 @@ export interface QueryRouterConfig {
   /** Maximum tier the classifier may assign. @default 3 */
   maxTier?: QueryTier;
 
-  /** Embedding provider name. @default 'openai' */
+  /**
+   * Embedding provider name. Without one, the router takes the provider of
+   * the first provider key set, as for the classifier, except MiniMax: it
+   * publishes no embedding model, so a MiniMax key alone leaves embeddings on
+   * `openai`. A provider other than OpenAI that has a key variable of its own
+   * embeds with that key alone (see `embeddingApiKey`).
+   * @default 'openai'
+   */
   embeddingProvider?: string;
 
   /** Embedding model identifier. @default 'text-embedding-3-small' */
@@ -591,8 +598,13 @@ export interface QueryRouterConfig {
   /**
    * Optional API key override for embeddings only.
    *
-   * When omitted, embeddings fall back to `apiKey`, then `OPENAI_API_KEY`,
-   * then `OPENROUTER_API_KEY`.
+   * When omitted, embeddings fall back to `apiKey`. Without that, an
+   * embedding provider other than OpenAI that has a key variable of its own
+   * takes that key (`GEMINI_API_KEY` for `gemini`, `MINIMAX_API_KEY` for
+   * `minimax`), or none when it is unset, so another vendor's key never
+   * reaches it; an OpenAI one, or one without a key variable such as Ollama,
+   * takes the first provider key set, `OPENAI_API_KEY` first and
+   * `OPENROUTER_API_KEY` last.
    * This is useful when generation uses an OpenAI-compatible endpoint like
    * OpenRouter but embeddings should stay on a direct OpenAI key.
    */
@@ -818,6 +830,19 @@ function resolveDefaultProvider(): string {
   return 'openai';
 }
 
+/**
+ * Resolve the default embedding provider: {@link resolveDefaultProvider}'s
+ * choice, except MiniMax. MiniMax publishes no embedding model and its
+ * provider refuses an embedding request, so a MiniMax key alone leaves
+ * embeddings on `openai`: an `embeddingApiKey` given for the default
+ * `text-embedding-3-small` reaches OpenAI, and without one the router finds
+ * no embedding key and stays on keyword retrieval.
+ */
+function resolveDefaultEmbeddingProvider(): string {
+  const provider = resolveDefaultProvider();
+  return provider === 'minimax' ? 'openai' : provider;
+}
+
 /** Provider → cheap model mapping for classifier/T0-T1 generation. */
 const CHEAP_MODELS: Record<string, string> = {
   openai: 'gpt-4o-mini',
@@ -857,7 +882,7 @@ export const DEFAULT_QUERY_ROUTER_CONFIG = {
   classifierModel: CHEAP_MODELS[resolveDefaultProvider()] ?? 'gpt-4o-mini',
   classifierProvider: resolveDefaultProvider(),
   maxTier: 3 as QueryTier,
-  embeddingProvider: resolveDefaultProvider(),
+  embeddingProvider: resolveDefaultEmbeddingProvider(),
   embeddingModel: 'text-embedding-3-small',
   generationModel: CHEAP_MODELS[resolveDefaultProvider()] ?? 'gpt-4o-mini',
   generationModelDeep: STRONG_MODELS[resolveDefaultProvider()] ?? 'gpt-4o',

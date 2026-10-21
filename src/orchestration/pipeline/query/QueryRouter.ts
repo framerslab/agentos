@@ -1565,11 +1565,21 @@ export class QueryRouter {
 
   /**
    * Resolve API key for embedding calls.
-   * Falls back through embedding-specific → global → env var scan.
+   *
+   * Falls back through the embedding-specific key, then the global one. An
+   * embedding provider other than OpenAI that has a key variable of its own
+   * then takes that key alone, or none when it is unset, so another vendor's
+   * key never reaches it (an OpenAI key sent to Gemini or MiniMax). An OpenAI
+   * embedding provider, and one without a key variable (Ollama), scans the
+   * provider env vars in priority order.
    */
   private getEmbeddingApiKey(): string {
     if (this.config.embeddingApiKey) return this.config.embeddingApiKey;
-    // Fall through to general LLM key resolver; with no provider named it scans the env vars and returns a string.
+    const provider = this.config.embeddingProvider;
+    if (provider && provider !== 'openai' && providerEnvVars(provider).key) {
+      return this.getLlmApiKey(provider) ?? '';
+    }
+    // With no provider named, the general resolver scans the env vars and returns a string.
     return this.getLlmApiKey() ?? '';
   }
 
