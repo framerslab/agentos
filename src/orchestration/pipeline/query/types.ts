@@ -616,7 +616,9 @@ export interface QueryRouterConfig {
    *
    * When omitted, embeddings inherit `baseUrl` when they use the classifier's
    * or the generator's provider, unless `embeddingApiKey` is explicitly set,
-   * in which case the embedding path assumes the provider's default endpoint. If neither override is set and QueryRouter falls back to
+   * in which case the embedding path assumes the provider's default endpoint.
+   * An embedding provider other than OpenAI otherwise gets no URL from the
+   * router and uses its own endpoint. If neither override is set and QueryRouter falls back to
    * `OPENROUTER_API_KEY`, it automatically uses the OpenRouter compatibility
    * URL for embeddings as well.
    */

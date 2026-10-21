@@ -1618,6 +1618,14 @@ export class QueryRouter {
       }
     }
 
+    // OpenRouter's compatibility URL belongs to an OpenAI embedding provider
+    // on the OpenRouter key; any other provider uses its own endpoint, so no
+    // other vendor's URL carries its key.
+    const provider = this.config.embeddingProvider;
+    if (provider && provider !== 'openai') {
+      return undefined;
+    }
+
     if (process.env.OPENAI_API_KEY) {
       return undefined;
     }
