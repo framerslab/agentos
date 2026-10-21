@@ -555,19 +555,23 @@ const cancelAtOnce: IBargeinHandler = { mode: 'hard-cut', handleBargein: () => (
  * A session without a call profile on a speaking transport to `participantIdentity`, whose TTS session the test
  * drives: `reply()` completes a user turn and waits for the agent to speak. The barge-in handler is `cancelAtOnce`
  * unless `bargeinHandler` is given. With `conventions`, the transport links the participant with `participant`, so it
- * follows LiveKit Agents' session conventions.
+ * follows LiveKit Agents' session conventions. `publisher` replaces options of the publisher's.
  */
 async function converse(
   room: FakeRoom,
   participantIdentity: string,
-  { bargeinHandler = cancelAtOnce, conventions = false }: { bargeinHandler?: IBargeinHandler; conventions?: boolean } = {}
+  {
+    bargeinHandler = cancelAtOnce,
+    conventions = false,
+    publisher = {},
+  }: { bargeinHandler?: IBargeinHandler; conventions?: boolean; publisher?: Partial<typeof speaking> } = {}
 ) {
   const transport = new LiveKitStreamTransport({
     room,
     ...(conventions ? { participant: participantIdentity } : { participantIdentity }),
     sampleRate: 16_000,
     rtc: fakeRtc(),
-    publisher: { ...speaking, rtc: fakePublishingRtc() },
+    publisher: { ...speaking, ...publisher, rtc: fakePublishingRtc() },
   });
   const stt: StreamingSTTSession = Object.assign(new EventEmitter(), {
     pushAudio: () => undefined,
@@ -2067,7 +2071,7 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     await transport.whenClosed();
   });
 
-  it('a pause forgets what the track held: a playout wait that ends after it adds nothing to the agent line', async () => {
+  it('a pause forgets what the track had taken: a playout wait that ends after it adds nothing, and agent_done ends the line with the played prefix', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
     const { transport, errors } = speakingTo(room, 'user-1');
@@ -2085,12 +2089,13 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     await playout;
     await settle();
     await transport.sendControl({ type: 'barge_in', action: { type: 'resume' } });
+    // A host that sends the whole reply's text: the pause cleared the second sentence, so the final holds the first.
     await transport.sendControl({ type: 'agent_done', text: 'First. Second.', durationMs: 40 });
     await settle();
     const line = `${transport.id}:agent-1`;
     expect(lines(room)).toEqual([
       ['First.', line, 'false', 'TR_AGENT'],
-      ['First. Second.', line, 'true', 'TR_AGENT'],
+      ['First.', line, 'true', 'TR_AGENT'],
     ]);
     expect(errors).toEqual([]);
     transport.close();
@@ -2536,6 +2541,50 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     expect(errors).toEqual([]);
     transport.close();
     await transport.whenClosed();
+  });
+
+  it("runs under VoicePipelineOrchestrator: a reply whose chunks waited whole behind a false interruption's pause reaches lk.transcription as it plays, and its final keeps it", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    // The track waits for the participant to subscribe to it, so the reply's chunks wait too, none of their frames taken.
+    let subscribe!: () => void;
+    room.subscription = new Promise<void>((resolve) => {
+      subscribe = resolve;
+    });
+    const s = await converse(room, 'user-1', {
+      bargeinHandler: new SoftFadeBargeinHandler(),
+      conventions: true,
+      // The wait for the subscription outlasts the pause the test waits for.
+      publisher: { receiptTimeoutMs: 10_000 },
+    });
+    await s.reply();
+    s.tts.emit('audio', spoken(1, 'seg-1', 0, 'First.'));
+    s.tts.emit('audio', spoken(2, 'seg-2', 6, ' Second.'));
+    await settle();
+    // The user coughs: SoftFadeBargeinHandler pauses the reply at 100 ms of speech, its chunks whole behind the hold.
+    s.stt.emit('speech_start');
+    await vi.waitFor(() => expect(controlTypes(room)).toContain('barge_in'));
+    subscribe();
+    await settle();
+    expect(capturedTones()).toEqual([]);
+    // The speech ends with no words: a false interruption, and the reply resumes and plays whole.
+    s.stt.emit('transcript', { text: '', confidence: 0, words: [], isFinal: true });
+    s.stt.emit('speech_end');
+    await vi.waitFor(() => expect(capturedTones()).toEqual([1, 2]));
+    s.tts.emit('flush_complete');
+    await settle();
+    FakeAudioSource.created[0]!.playOut();
+    await vi.waitFor(() => expect(s.orchestrator.state).toBe('listening'));
+    await settle();
+    // The session vouches for no word of a reply a pause held, so agent_done carries no text; the track proved the
+    // whole reply played, and the line's final keeps it, where an empty one would take back what the room was shown.
+    const agent = `${s.transport.id}:agent-1`;
+    expect(lines(room).filter(([, id]) => id === agent)).toEqual([
+      ['First. Second.', agent, 'false', 'TR_AGENT'],
+      ['First. Second.', agent, 'true', 'TR_AGENT'],
+    ]);
+    expect(s.errors).toEqual([]);
+    await s.orchestrator.stopSession('done');
   });
 
   it("takes a page's text_input on the control topic of a speaking transport as one on lk.chat: checked, forwarded, a refused one a warning", async () => {

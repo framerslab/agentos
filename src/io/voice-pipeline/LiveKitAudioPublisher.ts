@@ -235,6 +235,11 @@ export class LiveKitAudioPublisher {
   private queued: Promise<void> = Promise.resolve();
   /** Native playout: the last chunk admitted, until a playback wait for it settles or a clear discards it. */
   private latest?: NativeChunk;
+  /**
+   * Native playout: the chunks admitted whose capture has not begun, none of their frames taken, which a pause holds
+   * whole ({@link pause}).
+   */
+  private readonly waiting = new Set<NativeChunk>();
   /** Native playout: the sequence the next chunk without one takes. */
   private nextSequence = 1;
   /** Native playout: the hold a barge-in pause put on the track, until a resume, a clear or a close releases it. */
@@ -460,23 +465,28 @@ export class LiveKitAudioPublisher {
     const pcm = this.decode(chunk);
     const entry: NativeChunk = { playout: 'native', generation: chunk.generation ? { ...chunk.generation } : undefined, sequence: chunk.sequence ?? this.nextSequence++, playedSamples: pcm.samples, sampleRate: pcm.sampleRate, cancellation: this.cancellation, captured: Promise.resolve() };
     const previous = this.queued;
+    this.waiting.add(entry);
     entry.captured = (async () => {
-      await previous;
-      if (!this.current(entry.generation, entry.cancellation)) return;
-      try { await this.prepare(); } catch (error) { if (!this.current(entry.generation, entry.cancellation)) return; throw error; }
-      const rtc = this.rtc!;
-      for (const output of this.convert(rtc, pcm).frames) {
-        // A pause holds the track: no frame is captured until it is released.
-        while (this.hold) await this.hold.released;
+      try {
+        await previous;
         if (!this.current(entry.generation, entry.cancellation)) return;
-        const holds = this.holds; const stalls = this.stalls; entry.holds ??= holds;
-        await this.capture(rtc, output);
-        // A pause that began while the frame was captured cleared the queue before the frame reached it, so the frame
-        // is cleared as it lands, even when a resume came first: what the queue held at the pause is not heard. So is a
-        // frame whose capture a playout wait gave up on.
-        if (this.holds !== holds || this.stalls !== stalls) this.source?.clearQueue();
-        this.moved();
-      }
+        try { await this.prepare(); } catch (error) { if (!this.current(entry.generation, entry.cancellation)) return; throw error; }
+        const rtc = this.rtc!;
+        for (const output of this.convert(rtc, pcm).frames) {
+          // A pause holds the track: no frame is captured until it is released.
+          while (this.hold) await this.hold.released;
+          if (!this.current(entry.generation, entry.cancellation)) return;
+          const holds = this.holds; const stalls = this.stalls; entry.holds ??= holds;
+          // The track takes the chunk from here: a pause from now on cuts into it.
+          this.waiting.delete(entry);
+          await this.capture(rtc, output);
+          // A pause that began while the frame was captured cleared the queue before the frame reached it, so the frame
+          // is cleared as it lands, even when a resume came first: what the queue held at the pause is not heard. So is a
+          // frame whose capture a playout wait gave up on.
+          if (this.holds !== holds || this.stalls !== stalls) this.source?.clearQueue();
+          this.moved();
+        }
+      } finally { this.waiting.delete(entry); }
     })();
     this.queued = entry.captured.catch(() => {}); this.latest = entry;
     await entry.captured;
@@ -726,13 +736,22 @@ export class LiveKitAudioPublisher {
    * resume plays them from the first the track had not taken; the audio the queue held when the pause came is not
    * heard, and a chunk the track had begun to take does not count as played ({@link waitForPlayback}). A hold already
    * in place stays as it is, and in participant playout nothing is held: the page holds the audio it plays.
+   *
+   * @returns The sequences of the chunks the hold keeps whole: admitted, none of their frames taken by the track, and
+   *   still to play once the hold is released, so a playback wait counts them once they have played; none in
+   *   participant playout and once closed.
    */
-  pause(): void {
-    if (this.closed || this.mode === 'participant' || this.hold) return;
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => { release = resolve; });
-    this.hold = { released, release }; this.holds++; this.moved();
-    this.source?.clearQueue();
+  pause(): ReadonlySet<number> {
+    if (this.closed || this.mode === 'participant') return new Set();
+    if (!this.hold) {
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      this.hold = { released, release }; this.holds++; this.moved();
+      this.source?.clearQueue();
+    }
+    const whole = new Set<number>();
+    for (const entry of this.waiting) if (this.current(entry.generation, entry.cancellation)) whole.add(entry.sequence);
+    return whole;
   }
   /** Releases the hold of {@link pause}: the chunks it held are captured, in order. Without a hold it does nothing. */
   resume(): void { this.release(); }

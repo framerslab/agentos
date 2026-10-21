@@ -120,13 +120,16 @@
  * contiguous prefix of such segments is the played text, and each time it
  * grows the line is written as an interim holding it. `agent_done` writes the
  * final with the reply's text, or, when the transport's wait for the reply's
- * playout failed (a track that stalled), with the played text alone, as the
- * session's own item of that reply counts none of the rest heard. A
- * `barge_in` `cancel` or a `clearPlayback()`
+ * playout failed (a track that stalled) or a pause held the track during the
+ * reply, with the played text alone, as the session's own item of that reply
+ * counts none of the rest heard. A `barge_in` `cancel` or a `clearPlayback()`
  * cuts the reply, and its final holds the played text alone, as LiveKit
  * Agents truncate an interrupted agent's transcription to its spoken output;
  * with none played it is empty, which takes back a line the room was shown. A
- * pause the track holds forgets what the track held. Under a call profile the
+ * pause the track holds forgets every chunk the track had begun to take, whose
+ * audio its queue held, and every sentence segment one of them belongs to; a
+ * segment whose chunks waited whole behind the hold, none of their frames
+ * taken, counts once it has played after the resume. Under a call profile the
  * session waits for each chunk's playback in turn, so the line grows sentence
  * by sentence as the track plays them; a session without a call profile waits
  * only for the reply's whole playout, once its synthesis has completed, so its
@@ -163,7 +166,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { AudioFrame, IPlaybackTransport, EncodedAudioChunk, ClientTextMessage, ServerTextMessage, PlaybackReceipt, VoiceGeneration, BargeinAction, TranscriptEvent } from './types.js';
+import type { AudioFrame, IPlaybackTransport, EncodedAudioChunk, ClientTextMessage, ServerTextMessage, PlaybackReceipt, VoiceGeneration, TranscriptEvent, TtsTextBoundary } from './types.js';
 import { LiveKitAudioPublisher, isLiveKitSipParticipant, type LiveKitAudioPublisherOptions, type LiveKitPlayout } from './LiveKitAudioPublisher.js';
 import { PlaybackAcknowledgementSchema } from './PlaybackAcknowledgements.js';
 import { isClientTranscriptMessage } from './clientTranscript.js';
@@ -211,16 +214,24 @@ const HELD_MESSAGES = 8;
 const frameMs = (frame: AudioFrame): number => (frame.samples.length / frame.sampleRate) * 1000;
 
 /**
- * The agent's transcription line of one reply: its id, the played text its chunks' acknowledged boundaries prove, the
- * sequences of its chunks that carry a boundary and were not refused, the played text it was last written with, and
- * whether a wait for the reply's playout failed, which leaves the rest of the reply unproven.
+ * The agent's transcription line of one reply: its id, the played text its chunks' acknowledged boundaries prove, its
+ * chunks that carry a boundary, were not refused and are not counted yet, the segment being sent, the played text it
+ * was last written with, and whether a wait for the reply's playout failed or a pause cleared the track, either of
+ * which leaves unproven what the line does not count.
  */
 interface AgentLine {
   readonly itemId: string;
   readonly tracker: PlayedTextTracker;
-  readonly sent: Set<number>;
+  /** By sequence, each chunk that ends a sentence segment: its boundary, and the sequences of its segment's chunks. */
+  readonly sent: Map<number, { boundary: TtsTextBoundary; segment: readonly number[] }>;
+  /** The sequences of the chunks sent since the last that ends a segment: the segment being sent. */
+  segment: number[];
+  /** Whether a pause cut into the segment being sent, which then never counts. */
+  segmentCut: boolean;
   written: string;
   playoutFailed: boolean;
+  /** Whether a pause held the track during the reply, clearing what its queue held. */
+  paused: boolean;
 }
 
 /**
@@ -563,8 +574,9 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   /**
    * Listen-only construction still rejects; speaking delegates to the one native conversion boundary. While the
    * agent's lines are written, a chunk without a sequence takes the next of the transport's own, from 1, and plays
-   * under it, so `waitForPlayback()` names it as it names the publisher's; a chunk that carries a `textBoundary` is
-   * recorded for the agent's line under its sequence, and forgotten when its send fails.
+   * under it, so `waitForPlayback()` names it as it names the publisher's; each chunk joins the sentence segment being
+   * sent on the agent's line, and a chunk that carries a `textBoundary` ends it: it is recorded under its sequence,
+   * unless a pause cut into the segment, and forgotten when its send fails.
    */
   sendAudio(chunk: EncodedAudioChunk): Promise<void> {
     if (!this.publisher) {
@@ -573,7 +585,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     }
     const sent = this.agentOutput && chunk.sequence === undefined ? { ...chunk, sequence: this.nextSequence++ } : chunk;
     const line = this.agentLine; const sequence = sent.sequence; const boundary = sent.textBoundary;
-    if (line && sequence !== undefined && boundary) { line.tracker.sent(sequence, boundary); line.sent.add(sequence); }
+    if (line && sequence !== undefined) this.record(line, sequence, boundary);
     const result = this.publisher.sendAudio(sent);
     // A refused chunk never plays, so a playout wait does not count its text as heard.
     result.catch(() => { if (line && sequence !== undefined) line.sent.delete(sequence); }); return result;
@@ -598,14 +610,15 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * listen-only transport resolves at once. An aborted `signal` rejects the wait at once
    * (`publisher playout wait aborted`), as a session aborts it when a barge-in cuts the reply or the session closes.
    * Outside participant playout, a wait that resolves counts the chunks sent before it began as played on the agent's
-   * line; what a clear or a pause discarded was forgotten first, so it counts as nothing. In participant playout only
-   * the participant's receipts do. A wait that rejects, unless its `signal` ended it, proves the reply did not play
-   * out: `agent_done` then ends the agent's line with the text proven played alone.
+   * line; what a clear discarded, and every segment a pause cut into, was forgotten first, so it counts as nothing,
+   * while a chunk the pause's hold kept whole counts. In participant playout only the participant's receipts do. A
+   * wait that rejects, unless its `signal` ended it, proves the reply did not play out: `agent_done` then ends the
+   * agent's line with the text proven played alone.
    *
    * @param signal - Ends the wait when aborted.
    */
   async waitForPlayout(signal?: AbortSignal): Promise<void> {
-    const line = this.agentLine; const sent = line ? [...line.sent] : [];
+    const line = this.agentLine; const sent = line ? [...line.sent.keys()] : [];
     try { await this.publisher?.waitForPlayout(signal); } catch (error) { if (line && !signal?.aborted) line.playoutFailed = true; throw error; }
     if (line && this.publisher?.playout !== 'participant') this.acknowledge(line, sent);
   }
@@ -665,13 +678,15 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     // A message that would wait is refused, before it acts on the track, once 64 wait already.
     if ((previous || action?.type === 'cancel') && this.waitingControls >= 64) throw new Error('livekit control bound');
     let cleared: Promise<void> | undefined;
+    // The chunks a pause's hold keeps whole, which still count on the agent's line once they have played.
+    let whole: ReadonlySet<number> | undefined;
     if (action?.type === 'cancel') {
       cleared = this.publisher!.clearPlayback();
       // Handled here as well, so a clear that fails while an earlier message is still going out is no unhandled rejection.
       cleared.catch(() => {});
-    } else if (action?.type === 'pause') this.publisher!.pause();
+    } else if (action?.type === 'pause') whole = this.publisher!.pause();
     else if (action?.type === 'resume') this.publisher!.resume();
-    this.transcribe(message, action);
+    this.transcribe(message, whole);
     if (!previous && !cleared) return this.deliver(message);
     this.waitingControls++;
     const sent = (async () => {
@@ -754,11 +769,14 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    * Writes what a message the session sends says of the conversation. A `transcript` is a line of the user's, opened by
    * the first one after a final and closed by its final. `agent_speaking` opens the agent's line of the reply, ending
    * one still open as a cut; `agent_done`, which the session sends once the reply played, ends it with the reply's
-   * text, or with the text proven played alone when the wait for the reply's playout failed; a `barge_in` `cancel`
-   * cuts it. A pause the track holds forgets what the track held, which a playout wait that the pause ended does not
-   * prove played.
+   * text, or with the text proven played alone when the wait for the reply's playout failed or a pause held the track
+   * during the reply; a `barge_in` `cancel` cuts it. A pause the track holds forgets every chunk the track had begun to
+   * take and every segment one of them belongs to (`forgetCut()`), while a segment the hold keeps whole still counts
+   * once it has played.
+   *
+   * @param whole - The sequences of the chunks a `pause` the track took keeps whole; unset for any other message.
    */
-  private transcribe(message: ServerTextMessage, action: BargeinAction | undefined): void {
+  private transcribe(message: ServerTextMessage, whole: ReadonlySet<number> | undefined): void {
     if (message.type === 'transcript') {
       if (!this.userOutput) return;
       const itemId = this.userLine ??= `${this.id}:user-${++this.userLines}`;
@@ -767,14 +785,45 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     } else if (message.type === 'agent_speaking') {
       if (!this.agentOutput) return;
       this.cutAgentLine();
-      this.agentLine = { itemId: `${this.id}:agent-${++this.agentLines}`, tracker: new PlayedTextTracker(), sent: new Set(), written: '', playoutFailed: false };
+      this.agentLine = { itemId: `${this.id}:agent-${++this.agentLines}`, tracker: new PlayedTextTracker(), sent: new Map(), segment: [], segmentCut: false, written: '', playoutFailed: false, paused: false };
     } else if (message.type === 'agent_done') {
-      // A reply whose playout wait failed is unproven past what was acknowledged, as the session's own item says.
+      // A reply whose playout wait failed, or that a pause held, is unproven past what was acknowledged: the session
+      // vouches for none of it then, and the line keeps what the track proved played.
       const line = this.agentLine;
-      this.endAgentLine(line?.playoutFailed ? line.tracker.playedText : message.text);
+      this.endAgentLine(line && (line.playoutFailed || line.paused) ? line.tracker.playedText : message.text);
     } else if (message.type === 'barge_in') {
       if (message.action.type === 'cancel') this.cutAgentLine();
-      else if (action?.type === 'pause') this.agentLine?.tracker.cleared();
+      else if (whole) this.forgetCut(whole);
+    }
+  }
+  /**
+   * Records a chunk of the reply on its line: it joins the segment being sent, and one that carries a boundary ends the
+   * segment, which counts once that chunk is acknowledged, unless a pause cut into the segment.
+   */
+  private record(line: AgentLine, sequence: number, boundary: TtsTextBoundary | undefined): void {
+    line.segment.push(sequence);
+    if (!boundary) return;
+    const segment = line.segment; const cut = line.segmentCut;
+    line.segment = []; line.segmentCut = false;
+    // A segment whose start a pause cleared from the track is not proven heard, however its last chunk plays.
+    if (cut) return;
+    line.tracker.sent(sequence, boundary); line.sent.set(sequence, { boundary, segment });
+  }
+  /**
+   * A pause cleared the track's queue: every chunk of the reply the track had begun to take is unproven, so the line
+   * forgets each segment not yet counted that holds one, the segment being sent included, and keeps each whose chunks
+   * the hold keeps whole, none of their frames taken, so it counts once it has played after the resume.
+   *
+   * @param whole - The sequences of the chunks the hold keeps whole (`LiveKitAudioPublisher.pause()`).
+   */
+  private forgetCut(whole: ReadonlySet<number>): void {
+    const line = this.agentLine; if (!line) return;
+    line.paused = true;
+    if (line.segment.some((sequence) => !whole.has(sequence))) line.segmentCut = true;
+    line.tracker.cleared();
+    for (const [sequence, { boundary, segment }] of line.sent) {
+      if (segment.every((chunk) => whole.has(chunk))) line.tracker.sent(sequence, boundary);
+      else line.sent.delete(sequence);
     }
   }
   /**
@@ -783,7 +832,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
    */
   private acknowledge(line: AgentLine, sequences: readonly number[]): void {
     if (line !== this.agentLine || this._state !== 'open' || !this.agentOutput) return;
-    for (const sequence of sequences) if (line.sent.has(sequence)) line.tracker.acknowledged(sequence);
+    // A chunk counted goes from the line's record, so a pause later never records it again.
+    for (const sequence of sequences) if (line.sent.delete(sequence)) line.tracker.acknowledged(sequence);
     const played = line.tracker.playedText;
     if (played === line.written) return;
     line.written = played;
