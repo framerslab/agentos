@@ -2438,6 +2438,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
   private closing?: Promise<void>;
   private transition: Promise<void> = Promise.resolve();
   private response?: Promise<void>;
+  /** The responses of cut replies the call stopped waiting for at `abortGraceMs` (`unwound`): no later wait waits for them. */
+  private readonly givenUp = new WeakSet<Promise<void>>();
   private vadWork: Promise<void> = Promise.resolve();
   private vadBusy = false;
   private transcriptWork: Promise<void> = Promise.resolve();
@@ -2855,12 +2857,14 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
    * its own, which its stale generation keeps from speaking, and reported as a warning: `'error'` naming the bound and
    * no word of the reply, or a console warning when nothing listens, and a recoverable `session_error` from the agent.
    * The next request then goes to the agent while the stale one may still be open; an agent that refuses it as one
-   * still active, as `AgentSessionVoiceAdapter` does, fails the call as the agent's failure.
+   * still active, as `AgentSessionVoiceAdapter` does, fails the call as the agent's failure. A response the call has
+   * stopped waiting for is waited for no more, and warned of once: a detach, an interruption and a close that follow
+   * one another each find it given up already.
    *
    * @param response - The response to wait for (`response`), or none.
    */
   private async unwound(response: Promise<void> | undefined): Promise<void> {
-    if (!response) return;
+    if (!response || this.givenUp.has(response)) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const ended = await Promise.race([
       response.then(
@@ -2871,7 +2875,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
         timer = setTimeout(() => resolve(false), Math.min(this.abortGraceMs, MAX_TIMER_MS));
       }),
     ]).finally(() => clearTimeout(timer));
-    if (ended) return;
+    if (ended || this.givenUp.has(response)) return;
+    this.givenUp.add(response);
     const error = this.report(new Error('the agent stream of the cut reply did not end within abortGraceMs of abort(); the call goes on without it'), 'a stalled agent stream');
     this.sessionError(error, true, 'agent');
   }
