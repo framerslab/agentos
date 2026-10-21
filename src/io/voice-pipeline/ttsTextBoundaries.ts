@@ -5,14 +5,24 @@
  * streaming TTS adapter attaches to its chunks ({@link TtsTextBoundary}).
  *
  * {@link SentenceSegmenter} cuts the text a reply submits into immutable
- * sentence segments, each with its exact offsets in the submitted text: a
+ * sentence segments, each with its exact offsets in the submitted text. A
  * segment ends at a sentence-ending mark (`.`, `!`, `?` or `…`, with the
  * closing quotes and brackets right after it) once a whitespace character has
  * followed it, so a decimal point or an abbreviation inside a word never ends
- * one, and `flush()` cuts whatever remains as the final, unterminated segment.
- * An adapter synthesizes one segment at a time and attaches the segment's
- * boundary to the last audio frame its provider's completion message proves
- * complete.
+ * one. So that a long sentence reaches the provider while the reply still
+ * streams, a segment also ends at a clause mark (a comma, a semicolon, a
+ * colon, an en or em dash, or a hyphen set off by a space from the word before
+ * it, with the closers right after it, again once whitespace has followed)
+ * when it holds at least 40 characters, or 20 for a reply's first segment, so
+ * its audio starts sooner; a mark inside a number, a time, a word or a range
+ * (`1,250`, `10:30`, `well-known`, `1990–2000`) has no whitespace after it and
+ * ends none. A segment that runs past 120 characters with no mark to end at
+ * ends at its last whitespace within them, or, with none there, at the first
+ * whitespace after them. The cuts depend on the text alone, never on the
+ * pieces it arrives in, and `flush()` cuts whatever remains as the final,
+ * unterminated segment. An adapter synthesizes one segment at a time and
+ * attaches the segment's boundary to the last audio frame its provider's
+ * completion message proves complete.
  *
  * {@link PlayedTextTracker} turns the transport's playback acknowledgements of
  * those frames into the reply's played text: only the contiguous prefix of
@@ -46,21 +56,54 @@ export interface TextSegment {
 
 /** A sentence-ending mark. */
 const SENTENCE_END = /[.!?…]/;
-/** A closing quote or bracket that stays with the sentence it closes. */
+/** A clause mark: a comma, a semicolon, a colon, an en dash or an em dash. A hyphen is one only as a dash (`clauseMarkAt`). */
+const CLAUSE_MARK = /[,;:\u2013\u2014]/;
+/** A character that continues a run of clause marks, such as the second hyphen of `--`. */
+const CLAUSE_RUN = /[,;:\u2013\u2014-]/;
+/** A closing quote or bracket that stays with the sentence or clause it closes. */
 const CLOSER = /["'”’)\]]/;
+/** A whitespace character. */
+const WHITESPACE = /\s/;
+/** How many characters a segment after its reply's first holds before a clause mark may end it. */
+const CLAUSE_MIN_LENGTH = 40;
+/** How many characters a reply's first segment holds before a clause mark may end it: fewer, so the reply's audio starts sooner. */
+const FIRST_CLAUSE_MIN_LENGTH = 20;
+/** With no mark to end at, a segment ends at its last whitespace within this many characters. */
+const MAX_LENGTH = 120;
 
 /**
- * Cuts submitted text into immutable sentence segments with exact offsets.
- * Text is appended with {@link SentenceSegmenter.push}, which returns the
- * segments it completes, in order; {@link SentenceSegmenter.flush} returns the
- * final segment, the text after the last completed one, when it holds a
- * character besides whitespace.
+ * Whether a clause mark starts at `at`: a `CLAUSE_MARK`, or a hyphen used
+ * as a dash, a space or tab between it and the word before it, so that a
+ * hyphenated word, a negative number and a list bullet at a line's start are
+ * none.
+ */
+function clauseMarkAt(text: string, at: number): boolean {
+  if (CLAUSE_MARK.test(text[at])) return true;
+  return text[at] === '-' && at >= 2 && /[ \t]/.test(text[at - 1]) && !WHITESPACE.test(text[at - 2]);
+}
+
+/** Whether a word ends at `at`: a whitespace character there, after a character besides whitespace. */
+function wordEndsAt(text: string, at: number): boolean {
+  return at > 0 && WHITESPACE.test(text[at]) && !WHITESPACE.test(text[at - 1]);
+}
+
+/**
+ * Cuts submitted text into immutable sentence segments with exact offsets: at
+ * a sentence's end, at a clause mark once the segment holds enough characters,
+ * or at a word's end once it runs past 120 characters with no mark to end at,
+ * as the module describes. Text is appended with
+ * {@link SentenceSegmenter.push}, which returns the segments it completes, in
+ * order; {@link SentenceSegmenter.flush} returns the final segment, the text
+ * after the last completed one, when it holds a character besides whitespace;
+ * {@link SentenceSegmenter.reset} starts the next reply.
  */
 export class SentenceSegmenter {
   private pending = '';
   private offset = 0;
   private count = 0;
   private text = '';
+  /** Whether a segment of this reply has been cut: the first one ends at a clause mark sooner. */
+  private cutThisReply = false;
 
   /**
    * @param idPrefix - The prefix of the segment ids, followed by a counter from 1. @defaultValue 'seg-'
@@ -78,9 +121,13 @@ export class SentenceSegmenter {
   }
 
   /**
-   * Appends submitted text and returns the segments it completes: each ends at a
-   * sentence-ending mark, with the closers right after it, once at least one
-   * whitespace character has followed; the whitespace opens the next segment.
+   * Appends submitted text and returns the segments it completes, in order: each
+   * ends at a sentence-ending mark, or at a clause mark once it holds 40
+   * characters (20 for the reply's first), with the closers right after the
+   * mark, once at least one whitespace character has followed; with no mark to
+   * end at within 120 characters, it ends at its last whitespace within them,
+   * once a character past them has arrived. The whitespace opens the next
+   * segment.
    *
    * @param tokens - The text, as the reply submits it.
    */
@@ -105,27 +152,42 @@ export class SentenceSegmenter {
     return this.cut(this.pending.length);
   }
 
-  /** Forgets every character: offsets start again at 0; the ids go on counting. */
+  /** Forgets every character and starts the next reply: offsets start again at 0, and the next segment is the reply's first; the ids go on counting. */
   reset(): void {
     this.pending = '';
     this.offset = 0;
     this.text = '';
+    this.cutThisReply = false;
   }
 
-  /** The end of the first complete sentence in the pending text, or `undefined`. */
+  /**
+   * Where the first segment of the pending text ends, or `undefined` while no cut is settled: at the first mark that
+   * ends a segment within `MAX_LENGTH` characters; else, once the text runs past them, at the last word end
+   * within them, or, with none there, at the first word end after them.
+   */
   private cutPoint(): number | undefined {
     const text = this.pending;
-    for (let i = 0; i < text.length; i++) {
-      if (!SENTENCE_END.test(text[i])) continue;
+    const clauseMinLength = this.cutThisReply ? CLAUSE_MIN_LENGTH : FIRST_CLAUSE_MIN_LENGTH;
+    for (let i = 0; i < text.length && i < MAX_LENGTH; i++) {
+      const sentence = SENTENCE_END.test(text[i]);
+      if (!sentence && !clauseMarkAt(text, i)) continue;
+      const run = sentence ? SENTENCE_END : CLAUSE_RUN;
       let end = i + 1;
-      // A run of marks ("?!", "...") ends together.
-      while (end < text.length && SENTENCE_END.test(text[end])) end++;
+      // A run of marks ("?!", "...", "--") ends together.
+      while (end < text.length && run.test(text[end])) end++;
       while (end < text.length && CLOSER.test(text[end])) end++;
-      // The sentence is complete once whitespace has followed; a mark inside a word, or at the very end of what was
-      // submitted so far, waits for more text.
-      if (end < text.length && /\s/.test(text[end])) return end;
+      if (end > MAX_LENGTH) break;
+      // A mark ends the segment once whitespace has followed, and a clause mark only a segment that holds enough
+      // characters; a mark inside a word, or at the very end of what was submitted so far, waits for more text.
+      if (end < text.length && WHITESPACE.test(text[end]) && (sentence || end >= clauseMinLength)) return end;
       i = end - 1;
     }
+    // With no mark to end at within the bound, the cut waits for a character past it, which settles whether a mark
+    // ends the segment right at the bound, so the cuts are the same however the text arrives.
+    if (text.length <= MAX_LENGTH) return undefined;
+    for (let at = MAX_LENGTH; at > 0; at--) if (wordEndsAt(text, at)) return at;
+    // A run without whitespace past the bound, such as a long link, ends at the first word end after it.
+    for (let at = MAX_LENGTH + 1; at < text.length; at++) if (wordEndsAt(text, at)) return at;
     return undefined;
   }
 
@@ -138,6 +200,7 @@ export class SentenceSegmenter {
     };
     this.pending = this.pending.slice(length);
     this.offset += length;
+    this.cutThisReply = true;
     return segment;
   }
 }

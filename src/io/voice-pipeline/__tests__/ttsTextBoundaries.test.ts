@@ -80,10 +80,10 @@ describe('SentenceSegmenter', () => {
 
   it('ends a segment at a dash with whitespace after it, and keeps a closing quote with the clause it closes', () => {
     const segmenter = new SentenceSegmenter();
-    expect(segmenter.push('I looked at the calendar for you — Friday is free – and so is the larger room - so I booked both')).toEqual([
-      { segmentId: 'seg-1', start: 0, end: 34, text: 'I looked at the calendar for you —' },
+    expect(segmenter.push('I looked at the calendar for you \u2014 Friday is free \u2013 and so is the larger room - so I booked both')).toEqual([
+      { segmentId: 'seg-1', start: 0, end: 34, text: 'I looked at the calendar for you \u2014' },
       // The en dash comes 17 characters into this segment, too few; a hyphen between a word and whitespace is a dash too.
-      { segmentId: 'seg-2', start: 34, end: 79, text: ' Friday is free – and so is the larger room -' },
+      { segmentId: 'seg-2', start: 34, end: 79, text: ' Friday is free \u2013 and so is the larger room -' },
     ]);
     // reset() starts a new reply, whose first segment ends at a clause mark from 20 characters again.
     segmenter.reset();
@@ -94,8 +94,8 @@ describe('SentenceSegmenter', () => {
 
   it('does not end a segment at a comma, colon or dash inside a number, a time, a word or a range, or at a list bullet', () => {
     const segmenter = new SentenceSegmenter();
-    expect(segmenter.push('Tickets for the well-known 1990–2000 tour cost 1,250 dollars at 10:30, or less later')).toEqual([
-      { segmentId: 'seg-1', start: 0, end: 70, text: 'Tickets for the well-known 1990–2000 tour cost 1,250 dollars at 10:30,' },
+    expect(segmenter.push('Tickets for the well-known 1990\u20132000 tour cost 1,250 dollars at 10:30, or less later')).toEqual([
+      { segmentId: 'seg-1', start: 0, end: 70, text: 'Tickets for the well-known 1990\u20132000 tour cost 1,250 dollars at 10:30,' },
     ]);
     segmenter.reset();
     expect(segmenter.push('Here are the times I can do\n- two thirty\n- three fifteen\n- four in the afternoon\n- five')).toEqual([]);
