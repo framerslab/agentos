@@ -68,7 +68,7 @@ type Block =
   | { kind: 'rule' }
   | { kind: 'table'; rows: MarkedRun[][][]; columns: number };
 
-/** A heading, with its words for the title and whether it gave them to the title. */
+/** A heading, with its words, and whether it is the first `h1` and gave the title its words or holds the title's. */
 interface HeadingBlock {
   kind: 'heading';
   level: number;
@@ -95,7 +95,10 @@ interface Item {
 interface Reading {
   images: number;
   cut: boolean;
-  firstH1: HeadingBlock | null;
+  /** The text of `<title>`, read before the body; `null` for a page with none or an empty one. */
+  readonly named: string | null;
+  /** The words of the page's first `h1` with words, once it is read. */
+  firstH1: string | undefined;
   readonly maxTableRows: number;
   readonly maxTableColumns: number;
 }
@@ -348,6 +351,16 @@ function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineH
       addWords(line, textOf(current, reading), at, true);
       return;
     }
+    if (headingLevel(name) === 1 && reading.firstH1 === undefined) {
+      // the page's first h1 read into a line, as a list item's words: noted for the title, and left out with its words
+      // when it gives the title
+      const runs = lineOf(current, at, reading);
+      if (firstH1Leaves(plainOf(runs), reading)) return;
+      addWords(line, ' ', at, false);
+      for (const run of runs) addWords(line, run.text, run, run.code);
+      addWords(line, ' ', at, false);
+      return;
+    }
     const block = BLOCK_LEVEL.has(name);
     if (block) addWords(line, ' ', at, false);
     const inside = marked(at, name);
@@ -407,13 +420,23 @@ class Flow {
   }
 }
 
-/** A heading's block, the first `h1` noted for the title; `null` for a heading with no words. */
+/**
+ * Notes a page's first `h1` with words, and answers whether its words leave the body: they give a page with no
+ * `<title>` its title, and they are the title's own words when `<title>` holds them.
+ */
+function firstH1Leaves(words: string, reading: Reading): boolean {
+  if (reading.firstH1 !== undefined || words === '') return false;
+  reading.firstH1 = words;
+  return reading.named === null || words === reading.named;
+}
+
+/** A heading's block, `null` for a heading with no words; the first `h1` is noted for the title. */
 function headingOf(node: HtmlNodeLike, level: number, marks: Marks, reading: Reading): HeadingBlock | null {
   const runs = lineOf(node, marks, reading);
   if (runs.length === 0) return null;
-  const block: HeadingBlock = { kind: 'heading', level: Math.min(level, 3), runs, words: plainOf(runs), omitted: false };
-  if (level === 1 && reading.firstH1 === null) reading.firstH1 = block;
-  return block;
+  const words = plainOf(runs);
+  const omitted = level === 1 && firstH1Leaves(words, reading);
+  return { kind: 'heading', level: Math.min(level, 3), runs, words, omitted };
 }
 
 /** A list's start: its `start` attribute when that is a number a line can write, else 1. */
@@ -984,29 +1007,24 @@ function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdow
 export function readHtml(document: HtmlDocumentLike, options?: ReadHtmlOptions): HtmlRead {
   const given = options ?? {};
   const maxCharacters = boundOf('readHtml', 'maxCharacters', given.maxCharacters, Number.POSITIVE_INFINITY);
+  const element = titleElement(document);
+  const named = element === null ? '' : (element.textContent ?? '').replace(WHITE, ' ').trim();
   const reading: Reading = {
     images: 0,
     cut: false,
-    firstH1: null,
+    named: named === '' ? null : named,
+    firstH1: undefined,
     maxTableRows: boundOf('readHtml', 'maxTableRows', given.maxTableRows, 500, true),
     maxTableColumns: boundOf('readHtml', 'maxTableColumns', given.maxTableColumns, 30, true),
   };
   const flow = new Flow();
   readInto(document, flow, PLAIN, reading, true);
   flow.flush();
-
-  const element = titleElement(document);
-  const named = element === null ? '' : (element.textContent ?? '').replace(WHITE, ' ').trim();
-  let title: string | null = named === '' ? null : named;
-  const first = reading.firstH1;
-  if (first !== null) {
-    if (title === null) {
-      title = first.words;
-      first.omitted = true;
-    } else if (first.words === title) {
-      first.omitted = true;
-    }
-  }
   const written = writeWithin(flow.blocks, maxCharacters);
-  return { title, markdown: written.markdown, images: reading.images, cut: written.cut || reading.cut };
+  return {
+    title: reading.named ?? reading.firstH1 ?? null,
+    markdown: written.markdown,
+    images: reading.images,
+    cut: written.cut || reading.cut,
+  };
 }
