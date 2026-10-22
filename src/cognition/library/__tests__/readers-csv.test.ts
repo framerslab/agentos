@@ -38,7 +38,7 @@ describe('readCsv', () => {
 
   it('reads tabs, found on the first line or named, and drops a byte order mark', () => {
     const table = lines('| a   | b   |', '| --- | --- |', '| 1   | 2   |');
-    const found = readCsv('﻿a\tb\n1\t2\n');
+    const found = readCsv('\uFEFFa\tb\n1\t2\n');
     expect(found.separator).toBe('\t');
     expect(found.markdown).toBe(table);
     expect(readCsv('a\tb\n1\t2', { separator: '\t' }).markdown).toBe(table);

@@ -26,7 +26,7 @@ const RAW_TEXT = new Set(['script', 'style']);
 const ESCAPABLE_TEXT = new Set(['textarea', 'title']);
 
 /** The named references the tests use. */
-const NAMED: Readonly<Record<string, string>> = { amp: '&', apos: "'", gt: '>', lt: '<', nbsp: ' ', quot: '"' };
+const NAMED: Readonly<Record<string, string>> = { amp: '&', apos: "'", gt: '>', lt: '<', nbsp: '\u00a0', quot: '"' };
 
 /** A start tag at a place in the markup: its name, its attributes and a closing slash. */
 const START_TAG = /<([A-Za-z][A-Za-z0-9-]*)((?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/y;
