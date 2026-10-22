@@ -1213,7 +1213,7 @@ export interface StreamingTTSConfig {
  * |--------------------|---------------------------|--------------------------------------|
  * | `'audio'`          | {@link EncodedAudioChunk}  | A synthesised chunk ready for playback. |
  * | `'flush_complete'`  | *(none)*                  | All queued tokens have been synthesised. |
- * | `'warning'`        | `Error`                   | A failure the session goes on after, such as a provider socket lost mid-segment and the segment spoken again (`ElevenLabsStreamingTTS`), or a socket that failed to open for a reply, which ends unplayed (`DeepgramAuraStreamingTTS`). With nothing listening for it, the provider writes one warning line; `VoicePipelineOrchestrator` listens, and reports it as a recoverable `session_error` of the TTS part. |
+ * | `'warning'`        | `Error`                   | A failure the session goes on after, such as a provider socket lost mid-segment and the segment spoken again (`ElevenLabsStreamingTTS`), or a socket that failed to open for a reply, which ends unplayed (`DeepgramAuraStreamingTTS`). With nothing listening for it, the provider writes one warning line; `StreamingTTSChain`'s failover facade carries the warning of the provider session in use; `VoicePipelineOrchestrator` listens, and reports it as a recoverable `session_error` of the TTS part. |
  * | `'error'`          | `Error`                   | Unrecoverable synthesis error.       |
  * | `'close'`          | *(none)*                  | Session terminated.                  |
  *
