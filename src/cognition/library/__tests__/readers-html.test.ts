@@ -38,6 +38,14 @@ describe('readHtml over a stand-in of the DOM', () => {
     expect(written.at(-1)).toMatch(/^\| 499 \|/);
   });
 
+  it('cuts a paragraph of four million characters to a short bound without writing all of it', () => {
+    const document = standInDocument(`<p>${'word '.repeat(800_000)}</p>`);
+    const started = performance.now();
+    const read = readHtml(document, { maxCharacters: 24 });
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(read).toMatchObject({ markdown: 'word word word word word', cut: true });
+  });
+
   it('refuses a maxCharacters that is no count', () => {
     const document = standInDocument('<p>Words.</p>');
     for (const maxCharacters of [-1, Number.NaN, '5' as unknown as number, null as unknown as number]) {

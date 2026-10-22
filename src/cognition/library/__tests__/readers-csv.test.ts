@@ -29,6 +29,10 @@ describe('readCsv', () => {
     });
   });
 
+  it('names the separator from the first line that holds words, past blank lines', () => {
+    expect(readCsv('\n\nA;B\n1;2\n')).toMatchObject({ separator: ';', columns: 2, rows: 2 });
+  });
+
   it('reads a first line of semicolons and no comma with the semicolon, though a later line holds a comma', () => {
     const read = readCsv('Datum;Betrag\n01.02.2026;12,50\n');
     expect(read.separator).toBe(';');
@@ -89,6 +93,9 @@ describe('readCsv', () => {
   it('escapes the characters of a cell that would read as a mark', () => {
     expect(readCsv('Formula,Note\n2*3,`code`\n').markdown).toBe(
       lines('| Formula | Note     |', '| ------- | -------- |', '| 2\\*3    | \\`code\\` |'),
+    );
+    expect(readCsv('Text\n[a](b) &amp; <i>\n').markdown).toBe(
+      lines(`| ${'Text'.padEnd(19)} |`, `| ${'-'.repeat(19)} |`, '| \\[a](b) \\&amp; \\<i> |'),
     );
     expect(readCsv('Tag\n_draft_\nsnake_case\n').markdown).toBe(
       lines(`| ${'Tag'.padEnd(10)} |`, `| ${'-'.repeat(10)} |`, `| ${'\\_draft\\_'.padEnd(10)} |`, '| snake_case |'),

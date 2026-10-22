@@ -17,6 +17,10 @@ export interface HtmlCase {
 /** Lines joined with line feeds. */
 const lines = (...each: string[]): string => each.join('\n');
 
+/**
+ * The pages the HTML reader is held to, each with the title, Markdown, image count and cut it must answer, whether a
+ * stand-in of plain objects or a browser's DOMParser parsed the page.
+ */
 export const HTML_CASES: readonly HtmlCase[] = [
   {
     name: 'a saved page: its title, three heading levels and a fourth, nested lists, a quote, code, a table, marks, a link, two images, and no script, style, nav, header, aside, footer or hidden words',
@@ -326,6 +330,64 @@ export const HTML_CASES: readonly HtmlCase[] = [
     markdown: '\\_draft\\_ and snake_case and a _ b',
     images: 0,
     cut: false,
+  },
+  {
+    name: 'words that would read as a link, an entity, a tag or the line under a heading are escaped',
+    html: lines(
+      '<p>See [the list](https://example.com) &amp;copy; and &lt;b&gt;bold&lt;/b&gt; and a &lt; b</p>',
+      '<p>Total<br>===</p>',
+    ),
+    title: null,
+    markdown: lines('See \\[the list](https://example.com) \\&copy; and \\<b>bold\\</b> and a < b', '', 'Total', '\\==='),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: 'a cut inside a quote keeps a table whole or leaves it out',
+    html: '<blockquote><p>Intro words here.</p><table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table></blockquote>',
+    options: { maxCharacters: 40 },
+    title: null,
+    markdown: '> Intro words here.',
+    images: 0,
+    cut: true,
+  },
+  {
+    name: 'a cut inside a quote keeps the closing fence of the code it cuts',
+    html: '<blockquote><pre>one\ntwo\nthree</pre></blockquote>',
+    options: { maxCharacters: 20 },
+    title: null,
+    markdown: lines('> ```', '> one', '> ```'),
+    images: 0,
+    cut: true,
+  },
+  {
+    name: 'a checkbox with no words stays a task, an item with no words keeps its number, and a list that opens a list sits under an empty item',
+    html: lines(
+      '<ul><li><input type="checkbox" checked></li><li>Next</li></ul>',
+      '<ol><li>One</li><li><img src="step.png" alt="Step two"></li><li>Three</li></ol>',
+      '<ul><ol start="4"><li>Four</li></ol><li>After</li></ul>',
+    ),
+    title: null,
+    markdown: lines('- [x]', '- Next', '', '1. One', '2.', '3. Three', '', '-', '  4. Four', '- After'),
+    images: 1,
+    cut: false,
+  },
+  {
+    name: 'a cell spanning its rows to the end of the head stops at the body',
+    html: '<table><thead><tr><th rowspan="0">A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>',
+    title: null,
+    markdown: lines('| A   | B   |', '| --- | --- |', '| 1   | 2   |'),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: "images in the rows past a table's bound are counted, every one of them",
+    html: '<table><tr><th>Pic</th></tr><tr><td><img src="a.png"> a</td></tr><tr><td><img src="b.png"> b</td></tr></table>',
+    options: { maxTableRows: 1 },
+    title: null,
+    markdown: lines('| Pic |', '| --- |'),
+    images: 2,
+    cut: true,
   },
   {
     name: 'a table past its bounds keeps its first rows and columns, and pads a column to 40 characters at most',
