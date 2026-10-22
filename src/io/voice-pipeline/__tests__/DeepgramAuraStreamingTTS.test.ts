@@ -60,6 +60,7 @@ vi.mock('ws', () => {
 });
 
 import { DeepgramAuraStreamingTTS } from '../providers/DeepgramAuraStreamingTTS.js';
+import { StreamingTTSChain } from '../providers/StreamingTTSChain.js';
 import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
 import { PlayedTextTracker } from '../ttsTextBoundaries.js';
 // Default import: the 'ws' types only expose WebSocket as the default export
@@ -1185,6 +1186,82 @@ describe('DeepgramAuraStreamingTTS', () => {
     const done = transport.sendControl.mock.calls.map(([message]) => message as { type: string; text?: string }).filter((message) => message.type === 'agent_done');
     expect(done.map((message) => message.text)).toEqual(['One.', '']);
     // The warning reaches the session's listeners, as one the session goes on after.
+    expect(sessionErrors).toEqual([{ recoverable: true, source: 'tts' }]);
+    expect(errors.map((error) => error.message)).toEqual([expect.stringContaining('deepgram aura ws failed to open for a reply')]);
+  });
+
+  it("reports the warning of a reply whose fresh socket Deepgram refused through a StreamingTTSChain's failover facade, as createVoiceProvidersFromEnv() builds it, and adds that reply as unheard", async () => {
+    const transport = Object.assign(new EventEmitter(), {
+      id: 'transport-1',
+      state: 'open' as const,
+      sendAudio: vi.fn(async (_chunk: EncodedAudioChunk) => undefined),
+      sendControl: vi.fn(async (_message: unknown) => undefined),
+      close: vi.fn(),
+    });
+    const stt = Object.assign(new EventEmitter(), { pushAudio: vi.fn(), flush: vi.fn(async () => undefined), close: vi.fn() });
+    const endpoint = Object.assign(new EventEmitter(), { mode: 'heuristic' as const, pushVadEvent: vi.fn(), pushTranscript: vi.fn(), reset: vi.fn() });
+    const agent = {
+      sendText: vi.fn((text: string) =>
+        (async function* () {
+          yield text === 'First?' ? 'One.' : 'Two.';
+        })()
+      ),
+      abort: vi.fn(),
+    };
+    // The provider's own session, which the chain's facade wraps.
+    let session!: StreamingTTSSession;
+    vi.spyOn(tts, 'startSession').mockImplementation(async (config?: StreamingTTSConfig) => {
+      session = await DeepgramAuraStreamingTTS.prototype.startSession.call(tts, config);
+      return session;
+    });
+    const chain = new StreamingTTSChain([tts], { enableMidSynthesisFailover: true });
+    const orchestrator = new VoicePipelineOrchestrator({ stt: 'fake-stt', tts: chain.providerId, format: 'pcm' });
+    const items: unknown[] = [];
+    const sessionErrors: Array<{ recoverable: boolean; source: string }> = [];
+    const errors: Error[] = [];
+    orchestrator.on('conversation_item_added', (event: { item: { role: string } }) => {
+      if (event.item.role === 'assistant') items.push(event.item);
+    });
+    orchestrator.on('session_error', (event: { recoverable: boolean; source: string }) => sessionErrors.push({ recoverable: event.recoverable, source: event.source }));
+    orchestrator.on('error', (error: Error) => errors.push(error));
+    await orchestrator.startSession(transport as unknown as IStreamTransport, agent, {
+      streamingSTT: { providerId: 'fake-stt', isStreaming: true, startSession: async () => stt as unknown as StreamingSTTSession },
+      streamingTTS: chain,
+      endpointDetector: endpoint as unknown as IEndpointDetector,
+      bargeinHandler: { mode: 'hard-cut', handleBargein: () => ({ type: 'cancel' }) },
+    });
+    const ws = socketOf(session);
+    const ask = (transcript: string): void => {
+      endpoint.emit('turn_complete', { transcript, confidence: 0.9, durationMs: 800, reason: 'silence_timeout' });
+    };
+
+    try {
+      ask('First?');
+      await vi.waitFor(() => expect(sent(ws)).toEqual([{ type: 'Speak', text: 'One.' }, { type: 'Flush' }]));
+      frame(ws, 1);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      await vi.waitFor(() => expect(items).toHaveLength(1));
+      await vi.waitFor(() => expect(orchestrator.state).toBe('listening'));
+
+      // Deepgram closes the idle socket between the replies and refuses the fresh one the next reply opens.
+      (ws as unknown as { readyState: number }).readyState = 3;
+      ws.emit('close', 1011, Buffer.from(''));
+      MockCtl.nextBehavior = 'reject-400';
+      ask('Second?');
+      await vi.waitFor(() => expect(items).toHaveLength(2));
+      await vi.waitFor(() => expect(orchestrator.state).toBe('listening'));
+    } finally {
+      MockCtl.nextBehavior = 'open';
+      await orchestrator.stopSession('done');
+    }
+    // Through the facade as without it: none of the second reply was spoken, so none of it joins as heard, its
+    // agent_done vouches for no text, and the warning reaches the session's listeners.
+    expect(items).toEqual([
+      { role: 'assistant', text: 'One.', playedText: 'One.', interrupted: false },
+      { role: 'assistant', text: 'Two.', playedText: '', interrupted: true },
+    ]);
+    const done = transport.sendControl.mock.calls.map(([message]) => message as { type: string; text?: string }).filter((message) => message.type === 'agent_done');
+    expect(done.map((message) => message.text)).toEqual(['One.', '']);
     expect(sessionErrors).toEqual([{ recoverable: true, source: 'tts' }]);
     expect(errors.map((error) => error.message)).toEqual([expect.stringContaining('deepgram aura ws failed to open for a reply')]);
   });
