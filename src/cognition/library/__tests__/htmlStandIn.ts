@@ -3,7 +3,9 @@
  * DOMParser. It parses the well-formed markup the tests write: elements closed as written, void elements, raw text in
  * `script` and `style`, text in `title` and `textarea`, comments, a doctype, the line feed the HTML parser drops after
  * `<pre>`, and the few character references the tests use. Element names are kept in lower case, as an XHTML document
- * gives them, where an HTML document's DOM gives them in upper case, so the reader is held to either.
+ * gives them, where an HTML document's DOM gives them in upper case, so the reader is held to either. An element answers
+ * `null` for its `textContent`, as the reader's contract lets a DOM's nodes do, so the reader is held to reading text
+ * from text nodes alone.
  */
 
 /** A node of the stand-in, with only the properties a reader of a DOM may walk. */
@@ -53,16 +55,13 @@ function commentNode(text: string): StandInNode {
   return { nodeType: 8, nodeName: '#comment', childNodes: [], textContent: text };
 }
 
-/** An element with its attributes, its text read from its children as the DOM's `textContent` reads it. */
+/** An element with its attributes, and no text of its own: its words are in its text nodes. */
 function elementNode(name: string, attributes: ReadonlyMap<string, string>): StandInNode {
-  const childNodes: StandInNode[] = [];
   return {
     nodeType: 1,
     nodeName: name,
-    childNodes,
-    get textContent(): string {
-      return childNodes.map((child) => (child.nodeType === 8 ? '' : (child.textContent ?? ''))).join('');
-    },
+    childNodes: [],
+    textContent: null,
     getAttribute: (attribute: string): string | null => attributes.get(attribute.toLowerCase()) ?? null,
     hasAttribute: (attribute: string): boolean => attributes.has(attribute.toLowerCase()),
   };

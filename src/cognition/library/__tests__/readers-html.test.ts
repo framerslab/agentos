@@ -46,6 +46,14 @@ describe('readHtml over a stand-in of the DOM', () => {
     expect(read).toMatchObject({ markdown: 'word word word word word', cut: true });
   });
 
+  it('cuts words four quotes deep in one pass, not a search at every depth', () => {
+    const document = standInDocument(`${'<blockquote>'.repeat(4)}<p>${'word '.repeat(6_000)}</p>${'</blockquote>'.repeat(4)}`);
+    const started = performance.now();
+    const read = readHtml(document, { maxCharacters: 20_000 });
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(read).toMatchObject({ markdown: `> > > > ${'word '.repeat(3_998).trimEnd()}`, cut: true });
+  });
+
   it('refuses a maxCharacters that is no count', () => {
     const document = standInDocument('<p>Words.</p>');
     for (const maxCharacters of [-1, Number.NaN, '5' as unknown as number, null as unknown as number]) {
