@@ -140,6 +140,14 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: 'a first h1 inside a list item names a page with no <title> and is left out of the item',
+    html: '<ul><li><h1>Overview</h1></li><li>Next</li></ul>',
+    title: 'Overview',
+    markdown: '- Next',
+    images: 0,
+    cut: false,
+  },
+  {
     name: 'a page with no <title> and no h1 has no title',
     html: '<p>Only words.</p>',
     title: null,
