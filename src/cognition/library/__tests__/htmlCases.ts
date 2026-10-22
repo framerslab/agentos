@@ -7,7 +7,7 @@
 export interface HtmlCase {
   readonly name: string;
   readonly html: string;
-  readonly options?: { readonly maxCharacters?: number };
+  readonly options?: { readonly maxCharacters?: number; readonly maxTableRows?: number; readonly maxTableColumns?: number };
   readonly title: string | null;
   readonly markdown: string;
   readonly images: number;
@@ -288,6 +288,45 @@ export const HTML_CASES: readonly HtmlCase[] = [
     options: { maxCharacters: 12 },
     title: null,
     markdown: 'alpha beta',
+    images: 0,
+    cut: true,
+  },
+  {
+    name: 'a drawing in SVG gives no title and no words, and noscript and an element styled not to show are left out',
+    html: lines(
+      '<p><svg viewBox="0 0 10 10"><title>Logo</title><text x="0" y="5">Logo words</text></svg>Words</p>',
+      '<noscript><p>Turn on JavaScript.</p></noscript>',
+      '<div style="color: red; display: none">Styled away</div>',
+    ),
+    title: null,
+    markdown: 'Words',
+    images: 0,
+    cut: false,
+  },
+  {
+    name: 'code written a line to an element keeps its lines',
+    html: '<pre><code><div>first()</div><div>second()</div></code></pre>',
+    title: null,
+    markdown: lines('```', 'first()', 'second()', '```'),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: 'a table past its bounds keeps its first rows and columns, and pads a column to 40 characters at most',
+    html: lines(
+      '<table>',
+      '<tr><th>Name</th><th>Note</th><th>Extra</th></tr>',
+      '<tr><td>Ana</td><td>A note longer than forty characters, which runs past its column</td><td>x</td></tr>',
+      '<tr><td>Bo</td><td>Short</td><td>y</td></tr>',
+      '</table>',
+    ),
+    options: { maxTableRows: 2, maxTableColumns: 2 },
+    title: null,
+    markdown: lines(
+      `| Name | ${'Note'.padEnd(40)} |`,
+      `| ---- | ${'-'.repeat(40)} |`,
+      '| Ana  | A note longer than forty characters, which runs past its column |',
+    ),
     images: 0,
     cut: true,
   },

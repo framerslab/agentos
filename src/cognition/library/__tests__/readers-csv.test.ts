@@ -54,6 +54,15 @@ describe('readCsv', () => {
     expect(written.at(-1)).toBe('| 499 |');
   });
 
+  it('holds the table a note holds unless told otherwise: 500 rows, 30 columns, a column padded to 40 characters at most', () => {
+    const wide = Array.from({ length: 31 }, (_, index) => `c${index + 1}`).join(',');
+    const sheet = [wide, ...Array.from({ length: 500 }, (_, index) => String(index + 1))].join('\n');
+    expect(readCsv(sheet)).toMatchObject({ rows: 500, columns: 30, cut: true });
+    expect(readCsv(`Note\n${'x'.repeat(50)}\ny\n`).markdown).toBe(
+      lines(`| ${'Note'.padEnd(40)} |`, `| ${'-'.repeat(40)} |`, `| ${'x'.repeat(50)} |`, `| ${'y'.padEnd(40)} |`),
+    );
+  });
+
   it('answers empty for a text with no row', () => {
     const none = { markdown: '', rows: 0, columns: 0, separator: ',', cut: false, breaksMadeSpaces: false, empty: true };
     expect(readCsv('')).toEqual(none);

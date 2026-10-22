@@ -26,10 +26,28 @@ describe('readHtml over a stand-in of the DOM', () => {
     expect(section && readHtml(section)).toEqual({ title: null, markdown: '## Inside\n\nKept.', images: 0, cut: false });
   });
 
+  it('keeps a table to 500 rows and 30 columns unless told otherwise', () => {
+    const row = (cells: string[]): string => `<tr>${cells.map((cell) => `<td>${cell}</td>`).join('')}</tr>`;
+    const head = row(Array.from({ length: 31 }, (_, index) => `c${index + 1}`));
+    const body = Array.from({ length: 500 }, (_, index) => row([String(index + 1)])).join('');
+    const read = readHtml(standInDocument(`<table>${head}${body}</table>`));
+    const written = read.markdown.split('\n');
+    expect(read.cut).toBe(true);
+    expect(written).toHaveLength(501);
+    expect(written[0]?.split(' | ')).toHaveLength(30);
+    expect(written.at(-1)).toMatch(/^\| 499 \|/);
+  });
+
   it('refuses a maxCharacters that is no count', () => {
     const document = standInDocument('<p>Words.</p>');
     for (const maxCharacters of [-1, Number.NaN, '5' as unknown as number, null as unknown as number]) {
       expect(() => readHtml(document, { maxCharacters })).toThrow(RangeError);
     }
+  });
+
+  it('refuses a table bound that is no count', () => {
+    const document = standInDocument('<p>Words.</p>');
+    expect(() => readHtml(document, { maxTableRows: -1 })).toThrow(RangeError);
+    expect(() => readHtml(document, { maxTableColumns: Number.NaN })).toThrow(RangeError);
   });
 });
