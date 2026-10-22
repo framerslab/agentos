@@ -51,3 +51,7 @@ export {
   type PlanRules,
   type PlanSkipReason,
 } from './planEntries.js';
+// A saved web page and a sheet read into a note's Markdown: its title and blocks, and one table.
+export { readHtml, type HtmlRead, type ReadHtmlOptions } from './readers/html.js';
+export type { HtmlDocumentLike, HtmlNodeLike } from './readers/dom.js';
+export { readCsv, type CsvRead, type CsvSeparator, type ReadCsvOptions } from './readers/csv.js';
