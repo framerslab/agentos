@@ -54,6 +54,20 @@ describe('readHtml over a stand-in of the DOM', () => {
     expect(read).toMatchObject({ markdown: `> > > > ${'word '.repeat(3_998).trimEnd()}`, cut: true });
   });
 
+  it('writes a quote holding a list of 300,000 items under one, whole and cut', () => {
+    const items = '<li>x</li>'.repeat(300_000);
+    const document = standInDocument(`<blockquote><ul><li>all<ul>${items}</ul></li></ul><p>after words</p></blockquote>`);
+    const whole = readHtml(document);
+    expect(whole.cut).toBe(false);
+    expect(whole.markdown.split('\n')).toHaveLength(300_003);
+    expect(whole.markdown.endsWith('\n>   - x\n>\n> after words')).toBe(true);
+    // the list fits whole and the paragraph after it keeps one word
+    const cut = readHtml(document, { maxCharacters: whole.markdown.length - 3 });
+    expect(cut.cut).toBe(true);
+    expect(cut.markdown.length).toBe(whole.markdown.length - ' words'.length);
+    expect(cut.markdown.endsWith('\n>   - x\n>\n> after')).toBe(true);
+  });
+
   it('refuses a maxCharacters that is no count', () => {
     const document = standInDocument('<p>Words.</p>');
     for (const maxCharacters of [-1, Number.NaN, '5' as unknown as number, null as unknown as number]) {

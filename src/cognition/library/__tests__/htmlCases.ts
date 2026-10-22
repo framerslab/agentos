@@ -148,6 +148,14 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: 'a quote that holds only the h1 naming the page is left out with it',
+    html: '<blockquote><h1>Overview</h1></blockquote><p>After.</p>',
+    title: 'Overview',
+    markdown: 'After.',
+    images: 0,
+    cut: false,
+  },
+  {
     name: 'a page with no <title> and no h1 has no title',
     html: '<p>Only words.</p>',
     title: null,

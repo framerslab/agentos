@@ -29,6 +29,14 @@ describe("readHtml over the page's DOMParser", () => {
     );
     expect(readHtml(document)).toEqual({ title: 'Kept', markdown: '## Plan\n\nGo **now**.', images: 0, cut: false });
   });
+
+  it('writes a quote holding a list of 100,000 items under one', () => {
+    const items = '<li>x</li>'.repeat(100_000);
+    const document = new DOMParser().parseFromString(`<blockquote><ul><li>all<ul>${items}</ul></li></ul></blockquote>`, 'text/html');
+    const read = readHtml(document);
+    expect(read.markdown.split('\n')).toHaveLength(100_001);
+    expect(read.markdown.endsWith('\n>   - x')).toBe(true);
+  });
 });
 
 describe('readCsv in a page', () => {
