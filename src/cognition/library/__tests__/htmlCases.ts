@@ -312,6 +312,22 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: 'a code line of backticks up to three spaces in gets a longer fence, since a fence that far in closes a block',
+    html: '<pre>before\n   ```\nafter</pre>',
+    title: null,
+    markdown: lines('````', 'before', '   ```', 'after', '````'),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: "an underscore at a word's edge is escaped, and one inside a word or between two spaces is not",
+    html: '<p>_draft_ and snake_case and a _ b</p>',
+    title: null,
+    markdown: '\\_draft\\_ and snake_case and a _ b',
+    images: 0,
+    cut: false,
+  },
+  {
     name: 'a table past its bounds keeps its first rows and columns, and pads a column to 40 characters at most',
     html: lines(
       '<table>',

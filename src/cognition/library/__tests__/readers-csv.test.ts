@@ -90,6 +90,9 @@ describe('readCsv', () => {
     expect(readCsv('Formula,Note\n2*3,`code`\n').markdown).toBe(
       lines('| Formula | Note     |', '| ------- | -------- |', '| 2\\*3    | \\`code\\` |'),
     );
+    expect(readCsv('Tag\n_draft_\nsnake_case\n').markdown).toBe(
+      lines(`| ${'Tag'.padEnd(10)} |`, `| ${'-'.repeat(10)} |`, `| ${'\\_draft\\_'.padEnd(10)} |`, '| snake_case |'),
+    );
   });
 
   it('keeps a quote inside an unquoted field and the words after a closing quote, and skips a blank line', () => {
